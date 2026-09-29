@@ -135,7 +135,8 @@ pub use rwlock::{
     RwLockWriteGuard, TryReadError, TryWriteError,
 };
 pub use semaphore::{
-    AcquireError, OwnedSemaphorePermit, Semaphore, SemaphorePermit, TryAcquireError,
+    AcquireError, CheckedAcquireError, OwnedSemaphorePermit, Semaphore, SemaphorePermit,
+    TryAcquireError,
 };
 #[cfg(test)]
 mod barrier_metamorphic;

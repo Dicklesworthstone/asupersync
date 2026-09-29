@@ -262,7 +262,19 @@ impl StateSnapshot {
     /// - resilient: if a task's `CxInner` lock is poisoned, deadline contribution is skipped
     #[must_use]
     pub fn from_runtime_state(state: &crate::runtime::RuntimeState) -> Self {
-        Self::from_runtime_state_with_tasks(state, &state.tasks)
+        Self::from_runtime_state_at(state, state.now)
+    }
+
+    /// Constructs a snapshot at an explicitly sampled runtime time.
+    ///
+    /// Production callers pass their timer driver's current time so deadline
+    /// pressure and obligation age share the clock used to stamp runtime
+    /// effects. Deterministic callers may pass virtual time without reading
+    /// any ambient clock. [`Self::from_runtime_state`] retains its existing
+    /// behavior of sampling the logical `RuntimeState::now` field.
+    #[must_use]
+    pub fn from_runtime_state_at(state: &crate::runtime::RuntimeState, now: Time) -> Self {
+        Self::from_runtime_state_with_tasks_at(state, &state.tasks, now)
     }
 
     /// Builds the snapshot with task counters read from an explicit task
@@ -279,6 +291,20 @@ impl StateSnapshot {
         state: &crate::runtime::RuntimeState,
         tasks: &crate::runtime::TaskTable,
     ) -> Self {
+        Self::from_runtime_state_with_tasks_at(state, tasks, state.now)
+    }
+
+    /// Builds a snapshot from an explicit task table and one sampled time.
+    ///
+    /// The supplied time applies to every time-dependent term. Callers using
+    /// a separate dispatch table retain the same state-before-table lock
+    /// ordering as [`Self::from_runtime_state_with_tasks`].
+    #[must_use]
+    pub fn from_runtime_state_with_tasks_at(
+        state: &crate::runtime::RuntimeState,
+        tasks: &crate::runtime::TaskTable,
+        now: Time,
+    ) -> Self {
         use crate::record::obligation::ObligationKind;
         use crate::record::task::TaskPhase;
 
@@ -286,8 +312,6 @@ impl StateSnapshot {
         // 1s is an intentionally "coarse" knob: pressure reflects tasks that are
         // within ~1s of their deadline (or overdue), not far-future deadlines.
         const DEADLINE_PRESSURE_D0_NS: u64 = 1_000_000_000;
-        let now = state.now;
-
         // -- Task counters (O(1), br-asupersync-xxcss5) --
         let live_tasks = tasks.live_task_count() as u32;
         let cancel_requested_tasks = tasks.count_in_phase(TaskPhase::CancelRequested) as u32;
@@ -1043,6 +1067,40 @@ mod tests {
         );
 
         crate::test_complete!("snapshot_from_runtime_computes_deadline_pressure");
+    }
+
+    #[test]
+    fn snapshot_explicit_time_preserves_logical_clock_callers() {
+        let mut state = RuntimeState::new();
+        state.now = Time::ZERO;
+        let root = state.create_root_region(Budget::unlimited());
+        let (task_id, _handle) = state
+            .create_task(root, Budget::with_deadline_at_ns(3_000_000_000), async {})
+            .expect("create deadline task");
+        let obligation_id = state
+            .create_obligation(ObligationKind::SendPermit, task_id, root, None)
+            .expect("create obligation at logical time zero");
+
+        let sampled = Time::from_nanos(2_500_000_000);
+        let explicit = StateSnapshot::from_runtime_state_at(&state, sampled);
+        let logical = StateSnapshot::from_runtime_state(&state);
+        assert_eq!(explicit.time, sampled);
+        assert!((explicit.deadline_pressure - 0.5).abs() < 1e-9);
+        assert_eq!(explicit.obligation_age_sum_ns, sampled.as_nanos());
+        assert_eq!(logical.time, Time::ZERO);
+        assert_eq!(logical.deadline_pressure, 0.0);
+        assert_eq!(logical.obligation_age_sum_ns, 0);
+        assert_eq!(state.now, Time::ZERO, "sampling never mutates lab time");
+        state
+            .commit_obligation(obligation_id)
+            .expect("resolve obligation");
+        eprintln!(
+            "{{\"bead\":\"asupersync-bi2462.93\",\"scenario\":\"explicit_snapshot_time\",\"logical_ns\":{},\"sampled_ns\":{},\"deadline_pressure\":{},\"obligation_age_ns\":{}}}",
+            logical.time.as_nanos(),
+            explicit.time.as_nanos(),
+            explicit.deadline_pressure,
+            explicit.obligation_age_sum_ns,
+        );
     }
 
     // ---- bd-3rih: extended snapshot fields -----------------------------------

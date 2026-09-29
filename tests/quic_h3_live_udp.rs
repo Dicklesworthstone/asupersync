@@ -2,6 +2,11 @@
 
 #![cfg(all(feature = "http3", feature = "tls"))]
 #![allow(missing_docs)]
+// An integration test is its own crate and does not inherit `src/lib.rs`'s
+// `recursion_limit`. Proving `Send` for its async chains exceeds rustc's default
+// depth, which the future-incompatible `recursion_depth_exceeding_limit` lint
+// (rust-lang #159228) will turn into a hard error.
+#![recursion_limit = "256"]
 
 use std::future::Future;
 use std::io::BufReader;
@@ -3049,7 +3054,19 @@ mod native_h3_listener_live {
                         break;
                     }
                 }
-                assert!(request_cx.any_cause_is(CancelKind::Deadline));
+                if produced {
+                    assert!(request_cx.cancelled_by(CancelKind::ParentCancelled));
+                    assert!(request_cx.any_cause_is(CancelKind::Deadline));
+                } else {
+                    // The shared server hop has always attributed its own
+                    // request-budget timer as Timeout with ASUP-E501. Require
+                    // that exact contract rather than a different timer kind.
+                    assert!(request_cx.cancelled_by(CancelKind::Timeout));
+                    assert_eq!(
+                        request_cx.cancel_reason().unwrap().message.as_deref(),
+                        Some("[ASUP-E501] server request budget deadline exceeded")
+                    );
+                }
                 let mut closed_seen = false;
                 std::future::poll_fn(|task_cx| {
                     if asupersync::runtime::Runtime::current_handle()
@@ -3405,6 +3422,120 @@ mod native_h3_listener_live {
                 );
             }
             assert_eq!(cx.timer_driver().unwrap().pending_count(), 0);
+        });
+        runtime.block_on(runtime.handle().spawn(parent));
+        managed_assert_runtime_cleanup(&runtime);
+        assert_eq!(runtime.draining_region_count(), 0);
+    }
+
+    /// An Initial flood from addresses that never answer must not starve real
+    /// clients (asupersync-bi2462.107 N6, asupersync-lh8acw). The flood is 256
+    /// real ClientHellos with distinct original DCIDs, sent from sockets that
+    /// never read, as off-path spoofers would send them. With the default
+    /// admission capacity (16), RetryPolicy::UnderPressure lets unvalidated
+    /// handshakes hold at most half the slots. Every real client completes
+    /// through a Retry and is served.
+    #[test]
+    fn authenticated_listener_serves_real_clients_through_a_spoofed_initial_flood() {
+        const SPOOFED: u32 = 256;
+        const CLIENTS: u8 = 3;
+        const BODY: &str = "served through the flood";
+        let runtime = managed_runtime();
+        let parent: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async {
+            let cx = Cx::current().unwrap();
+            let router = Router::new()
+                .route(
+                    "/flood",
+                    post(FnHandler::new(|| Response::new(StatusCode::OK, BODY))),
+                )
+                .without_default_trace();
+            let mut listener_config = NativeH3ListenerConfig::default();
+            listener_config.endpoint.connection_config = connection_config();
+            assert_eq!(listener_config.max_pending_handshakes, 16);
+            let listener = NativeH3Listener::bind(
+                &cx,
+                "127.0.0.1:0".parse().unwrap(),
+                router,
+                server_config(
+                    vec![parse_one_cert(LEAF_CERT_PEM)],
+                    leaf_key(),
+                    vec![H3_ALPN.to_vec()],
+                )
+                .unwrap(),
+                transport_parameters(connection_config()),
+                listener_config,
+            )
+            .await
+            .expect("bind the default-capacity public listener");
+            let address = listener.local_addr();
+            let spoofers: Vec<std::net::UdpSocket> = (0..8)
+                .map(|_| std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+                .collect();
+            let hellos: Vec<Vec<u8>> = (0..SPOOFED)
+                .map(|index| {
+                    let mut driver = QuicHandshakeDriver::client(
+                        client_config(vec![parse_one_cert(CA_CERT_PEM)], vec![H3_ALPN.to_vec()])
+                            .unwrap(),
+                        ServerName::try_from("localhost").unwrap(),
+                        transport_parameters(connection_config()),
+                    )
+                    .unwrap();
+                    let mut original = [0x5f; 8];
+                    original[..4].copy_from_slice(&index.to_be_bytes());
+                    let original = ConnectionId::new(&original).unwrap();
+                    driver.install_initial_keys(original.as_bytes()).unwrap();
+                    let segments = driver.pump_outbound().unwrap();
+                    driver
+                        .assemble_handshake_packet(
+                            &segments[0],
+                            original,
+                            ConnectionId::new(&[0x5e; 8]).unwrap(),
+                            0,
+                        )
+                        .unwrap()
+                })
+                .collect();
+            assert!(hellos.iter().all(|hello| hello.len() >= 1200));
+            let (shutdown_tx, mut shutdown_rx) = asupersync::channel::oneshot::channel();
+            let serving = listener.serve_with_shutdown(&cx, async {
+                shutdown_rx.recv(&cx).await.unwrap();
+            });
+            let clients = async {
+                // The whole flood is on the wire before the first real client.
+                for (index, hello) in hellos.iter().enumerate() {
+                    spoofers[index % spoofers.len()]
+                        .send_to(hello, address)
+                        .unwrap();
+                }
+                let head = H3ResponseHead::new(200, Vec::new()).unwrap();
+                let mut served = Vec::new();
+                for peer in 0..CLIENTS {
+                    let started = Instant::now();
+                    let (mut owner, mut session) = connect(&cx, address, 40 + peer).await;
+                    response(&cx, &mut owner, &mut session, "/flood", &head, BODY.as_bytes())
+                        .await;
+                    eprintln!(
+                        "event=h3_initial_flood_client peer={peer} spoofed={SPOOFED} elapsed_ms={}",
+                        started.elapsed().as_millis()
+                    );
+                    served.push((owner, session));
+                }
+                shutdown_tx.send(&cx, ()).unwrap();
+                for (owner, session) in &mut served {
+                    // One request each, on client bidirectional stream 0.
+                    acknowledge_shutdown_goaway(&cx, owner, session, 4, None).await;
+                }
+            };
+            let (report, ()) =
+                asupersync::time::timeout(cx.now(), Duration::from_secs(30), zip(serving, clients))
+                    .await
+                    .expect("real clients must be served while the flood holds admission slots");
+            let report = report.expect("listener closes all request regions on shutdown");
+            assert_eq!(report.accepted_connections, u64::from(CLIENTS));
+            assert_eq!(report.completed_requests, u64::from(CLIENTS));
+            assert_eq!(report.failed_connections, 0);
+            assert_eq!(report.refused_requests, 0);
+            assert!(!report.drain_timed_out);
         });
         runtime.block_on(runtime.handle().spawn(parent));
         managed_assert_runtime_cleanup(&runtime);

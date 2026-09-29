@@ -144,7 +144,7 @@ mod tests {
         let _guard = Cx::set_current(Some(cx));
         let mut buf = [0_u8; 1];
 
-        let result = run(read_exact_from(&mut reader, &mut buf));
+        let result = run(read_exact_from(None, &mut reader, &mut buf));
 
         assert_eq!(
             reader.polls, 1,
@@ -169,7 +169,7 @@ mod tests {
         let cx = cancelled_test_cx(CancelKind::User);
         let _guard = Cx::set_current(Some(cx));
 
-        match eof_or_cancelled() {
+        match eof_or_cancelled(None) {
             MySqlError::Cancelled(reason) => assert_eq!(reason.kind, CancelKind::User),
             other => panic!("expected Cancelled, got: {other:?}"),
         }
@@ -181,7 +181,7 @@ mod tests {
     /// this asymmetry is the whole point of gating the downgrade.
     #[test]
     fn mysql_eof_without_cancel_stays_unexpected_eof() {
-        match eof_or_cancelled() {
+        match eof_or_cancelled(None) {
             MySqlError::Io(err) => assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof),
             other => panic!("expected Io(UnexpectedEof), got: {other:?}"),
         }
@@ -196,7 +196,10 @@ mod tests {
         let cx = cancelled_test_cx(CancelKind::Timeout);
         let _guard = Cx::set_current(Some(cx));
 
-        let err = stream_io_error(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        let err = stream_io_error(
+            None,
+            io::Error::new(io::ErrorKind::Interrupted, "cancelled"),
+        );
         match err {
             MySqlError::Cancelled(reason) => assert_eq!(reason.kind, CancelKind::Timeout),
             other => panic!("expected Cancelled, got: {other:?}"),
@@ -207,7 +210,7 @@ mod tests {
     /// pending stays an I/O error.
     #[test]
     fn mysql_interrupted_without_cancel_stays_io_error() {
-        let err = stream_io_error(io::Error::new(io::ErrorKind::Interrupted, "eintr"));
+        let err = stream_io_error(None, io::Error::new(io::ErrorKind::Interrupted, "eintr"));
         match err {
             MySqlError::Io(err) => assert_eq!(err.kind(), io::ErrorKind::Interrupted),
             other => panic!("expected Io(Interrupted), got: {other:?}"),
@@ -221,7 +224,10 @@ mod tests {
         let cx = cancelled_test_cx(CancelKind::User);
         let _guard = Cx::set_current(Some(cx));
 
-        let err = stream_io_error(io::Error::new(io::ErrorKind::ConnectionReset, "reset"));
+        let err = stream_io_error(
+            None,
+            io::Error::new(io::ErrorKind::ConnectionReset, "reset"),
+        );
         match err {
             MySqlError::Io(err) => assert_eq!(err.kind(), io::ErrorKind::ConnectionReset),
             other => panic!("expected Io(ConnectionReset), got: {other:?}"),
@@ -236,33 +242,87 @@ mod tests {
         let cx = cancelled_test_cx(CancelKind::User);
         let _guard = Cx::set_current(Some(cx));
 
-        let outcome: Outcome<(), MySqlError> = outcome_from_error(eof_or_cancelled());
+        let outcome: Outcome<(), MySqlError> = outcome_from_error(eof_or_cancelled(None));
         assert!(
             matches!(outcome, Outcome::Cancelled(_)),
             "cancelled EOF must aggregate as Cancelled, got: {outcome:?}"
         );
 
-        let outcome: Outcome<(), MySqlError> = outcome_from_error(stream_io_error(io::Error::new(
-            io::ErrorKind::Interrupted,
-            "cancelled",
-        )));
+        let outcome: Outcome<(), MySqlError> = outcome_from_error(stream_io_error(
+            None,
+            io::Error::new(io::ErrorKind::Interrupted, "cancelled"),
+        ));
         assert!(
             matches!(outcome, Outcome::Cancelled(_)),
             "cancelled read/write must aggregate as Cancelled, got: {outcome:?}"
         );
     }
 
-    /// `ambient_cancel_reason` must report `None` when no cancel is pending,
+    /// `io_cancel_reason` must report `None` when no cancel is pending,
     /// including when there is no ambient `Cx` at all.
     #[test]
     fn mysql_ambient_cancel_reason_is_none_without_pending_cancel() {
-        assert!(ambient_cancel_reason().is_none(), "no ambient cx");
+        assert!(io_cancel_reason(None).is_none(), "no ambient cx");
 
         let _guard = Cx::set_current(Some(Cx::for_testing()));
         assert!(
-            ambient_cancel_reason().is_none(),
+            io_cancel_reason(None).is_none(),
             "live ambient cx with no cancel requested"
         );
+    }
+
+    #[test]
+    fn mysql_explicit_caller_cancellation_preserves_cause_and_masking() {
+        let caller = Cx::for_testing();
+        let owner = Cx::for_testing();
+        let _current = Cx::set_current(Some(owner.clone()));
+        let caller_reason = CancelReason::deadline()
+            .with_message("caller deadline")
+            .with_cause(CancelReason::user("upstream request stopped"));
+        caller.cancel_with_reason(caller_reason.clone());
+        assert_eq!(io_cancel_reason(Some(&caller)), Some(caller_reason.clone()));
+        assert!(caller.masked(|| io_cancel_reason(Some(&caller))).is_none());
+        assert!(matches!(
+            stream_io_error(Some(&caller), io::Error::from(io::ErrorKind::Interrupted)),
+            MySqlError::Cancelled(reason) if reason == caller_reason
+        ));
+        assert!(matches!(
+            eof_or_cancelled(Some(&caller)),
+            MySqlError::Cancelled(reason) if reason == caller_reason
+        ));
+
+        let owner_reason = CancelReason::shutdown().with_message("owner shutdown");
+        owner.cancel_with_reason(owner_reason.clone());
+        assert_eq!(
+            caller.masked(|| io_cancel_reason(Some(&caller))),
+            Some(owner_reason)
+        );
+        assert!(
+            caller
+                .masked(|| owner.masked(|| io_cancel_reason(Some(&caller))))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn mysql_explicit_caller_cancel_during_eof_preserves_precedence() {
+        let caller = Cx::for_testing();
+        let owner = Cx::for_testing();
+        let _current = Cx::set_current(Some(owner.clone()));
+        let mut reader = CancelThenEofReader {
+            cx: caller.clone(),
+            polls: 0,
+            was_live_before_cancel: false,
+        };
+        let mut buf = [0_u8; 1];
+        let result = run(read_exact_from(Some(&caller), &mut reader, &mut buf));
+        assert_eq!(reader.polls, 1);
+        assert!(reader.was_live_before_cancel);
+        assert!(owner.checkpoint().is_ok());
+        assert!(matches!(
+            result,
+            Err(MySqlError::Cancelled(reason)) if reason.kind == CancelKind::User
+        ));
     }
 
     fn run<F: std::future::Future>(future: F) -> F::Output {
@@ -408,7 +468,7 @@ mod tests {
         });
         let conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id,
                 capabilities: 0,
                 charset: 0,
@@ -787,7 +847,7 @@ mod tests {
         let stream = crate::net::TcpStream::from_std(std_stream).expect("from_std");
         MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 0,
                 capabilities: 0,
                 charset: 0,
@@ -818,7 +878,7 @@ mod tests {
         (
             MySqlConnection {
                 inner: MySqlConnectionInner {
-                    stream,
+                    stream: stream.into(),
                     connection_id: 0,
                     capabilities: 0,
                     charset: 0,
@@ -885,7 +945,7 @@ mod tests {
 
         let conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 0,
                 capabilities: 0,
                 charset: 0,
@@ -934,7 +994,7 @@ mod tests {
                 .expect("connect client");
             let mut conn = MySqlConnection {
                 inner: MySqlConnectionInner {
-                    stream,
+                    stream: stream.into(),
                     connection_id: 0,
                     capabilities: 0,
                     charset: 0,
@@ -956,7 +1016,7 @@ mod tests {
                 },
                 options: None,
             };
-            conn.read_packet().await.expect("read packet")
+            conn.read_packet(None).await.expect("read packet")
         });
 
         server.join().expect("join server");
@@ -2052,7 +2112,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 0,
                 capabilities: 0,
                 charset: 0,
@@ -2141,7 +2201,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 0,
                 capabilities: 0,
                 charset: 0,
@@ -2193,10 +2253,13 @@ mod tests {
             SslMode::Required,
             0
         ));
-        assert!(MySqlConnection::should_fail_closed_without_tls(
-            SslMode::Required,
-            capability::CLIENT_SSL
-        ));
+        assert_eq!(
+            MySqlConnection::should_fail_closed_without_tls(
+                SslMode::Required,
+                capability::CLIENT_SSL
+            ),
+            !cfg!(feature = "tls")
+        );
     }
 
     #[test]
@@ -2205,10 +2268,13 @@ mod tests {
             SslMode::Preferred,
             0
         ));
-        assert!(MySqlConnection::should_fail_closed_without_tls(
-            SslMode::Preferred,
-            capability::CLIENT_SSL
-        ));
+        assert_eq!(
+            MySqlConnection::should_fail_closed_without_tls(
+                SslMode::Preferred,
+                capability::CLIENT_SSL
+            ),
+            !cfg!(feature = "tls")
+        );
     }
 
     #[test]
@@ -2779,7 +2845,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 41,
                 capabilities: 0,
                 charset: 0,
@@ -2862,7 +2928,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 0,
                 capabilities: capability::CLIENT_DEPRECATE_EOF,
                 charset: 0,
@@ -3073,7 +3139,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 0,
                 capabilities: 0,
                 charset: 0,
@@ -3186,7 +3252,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 // The statement must inherit this id as its owner
                 // (br-asupersync-uvqpga: was 0, contradicting the
                 // owner_connection_id assertion below).
@@ -3267,7 +3333,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 0,
                 capabilities: 0,
                 charset: 0,
@@ -3400,7 +3466,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 55,
                 capabilities: 0,
                 charset: 0,
@@ -3513,7 +3579,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 55,
                 capabilities: 0,
                 charset: 0,
@@ -3617,7 +3683,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 7,
                 capabilities: capability::CLIENT_PROTOCOL_41 | capability::CLIENT_DEPRECATE_EOF,
                 charset: 0,
@@ -3716,7 +3782,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 0,
                 capabilities: 0,
                 charset: 0,
@@ -3836,7 +3902,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 0,
                 capabilities: 0,
                 charset: 0,
@@ -4029,7 +4095,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 0,
                 capabilities: 0,
                 charset: 0,
@@ -4117,7 +4183,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 0,
                 capabilities: 0,
                 charset: 0,
@@ -4648,7 +4714,7 @@ mod tests {
         });
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 0,
                 capabilities: 0,
                 charset: 0,
@@ -4907,7 +4973,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 0,
                 capabilities: 0,
                 charset: 0,
@@ -4991,7 +5057,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 0,
                 capabilities: 0,
                 charset: 0,
@@ -5287,6 +5353,120 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy, Debug)]
+    enum ParkedIoPhase {
+        Read,
+        Write,
+        Flush,
+    }
+
+    /// No socket readiness and no self-wake: only a Cx registration can wake it.
+    struct SilentIo {
+        phase: ParkedIoPhase,
+        parked: Option<mpsc::Sender<()>>,
+    }
+
+    impl SilentIo {
+        fn witness_parked(&mut self) {
+            if let Some(sender) = self.parked.take() {
+                sender.send(()).unwrap();
+            }
+        }
+    }
+
+    impl AsyncRead for SilentIo {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            self.get_mut().witness_parked();
+            Poll::Pending
+        }
+    }
+
+    impl AsyncWrite for SilentIo {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let this = self.get_mut();
+            if matches!(this.phase, ParkedIoPhase::Write) {
+                this.witness_parked();
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(buf.len()))
+            }
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.get_mut().witness_parked();
+            Poll::Pending
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn mysql_distinct_caller_and_owner_wake_reads_writes_and_flushes() {
+        for phase in [
+            ParkedIoPhase::Read,
+            ParkedIoPhase::Write,
+            ParkedIoPhase::Flush,
+        ] {
+            for cancel_caller in [true, false] {
+                let caller = Cx::for_testing();
+                let owner = Cx::for_testing();
+                let task_caller = caller.clone();
+                let task_owner = owner.clone();
+                let (parked_tx, parked_rx) = mpsc::channel();
+                let (done_tx, done_rx) = mpsc::channel();
+                let reader = std::thread::spawn(move || {
+                    let _current = Cx::set_current(Some(task_owner));
+                    let mut stream = SilentIo {
+                        phase,
+                        parked: Some(parked_tx),
+                    };
+                    let mut buf = [0; 8];
+                    let result = run(async {
+                        match phase {
+                            ParkedIoPhase::Read => {
+                                read_exact_from(Some(&task_caller), &mut stream, &mut buf).await
+                            }
+                            ParkedIoPhase::Write | ParkedIoPhase::Flush => {
+                                write_all_to(Some(&task_caller), &mut stream, &buf).await
+                            }
+                        }
+                    });
+                    done_tx.send(result).unwrap();
+                });
+                parked_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+                let reason = CancelReason::deadline()
+                    .with_message("silent MySQL I/O cancellation")
+                    .with_cause(CancelReason::user("external request stopped"));
+                let target = if cancel_caller { &caller } else { &owner };
+                target.cancel_with_reason(reason.clone());
+                let result = done_rx.recv_timeout(Duration::from_secs(3));
+                if result.is_err() {
+                    // Release an old implementation's ambient waiter before
+                    // reporting the failed explicit-caller wake witness.
+                    owner.cancel_with_reason(CancelReason::shutdown());
+                }
+                assert!(
+                    matches!(result, Ok(Err(MySqlError::Cancelled(ref actual))) if actual == &reason),
+                    "phase={phase:?} cancel_caller={cancel_caller} result={result:?}"
+                );
+                reader.join().unwrap();
+                eprintln!(
+                    "event=mysql_io_cancel phase={phase:?} cancel_caller={cancel_caller} parked=true completed=true cause_preserved=true"
+                );
+            }
+        }
+    }
+
     #[test]
     fn mysql_external_cancel_wakes_a_read_parked_on_a_silent_stream() {
         use std::time::Instant;
@@ -5307,7 +5487,7 @@ mod tests {
                 let result = futures_lite::future::block_on(async {
                     let mut stream = NeverReadyStream;
                     let mut buf = [0u8; 8];
-                    read_exact_from(&mut stream, &mut buf).await
+                    read_exact_from(None, &mut stream, &mut buf).await
                 });
                 let _ = done_tx.send((result, started.elapsed()));
             })

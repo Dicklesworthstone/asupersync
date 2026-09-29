@@ -33,6 +33,9 @@ fn ambient_timer_now() -> Option<Time> {
 /// `TimeoutFuture` is cancel-safe in the sense that dropping it is safe.
 /// However, if the inner future has side effects that occur during polling,
 /// those may be partially applied.
+/// An owner's cancellation remains visible to the inner future; it does not
+/// itself expire the timeout. Pending cancellation cleanup may continue until
+/// the actual deadline, which still bounds an unresponsive inner future.
 ///
 /// # Example
 ///
@@ -253,7 +256,7 @@ impl<F: Future + Unpin> TimeoutFuture<F> {
         // wall-clock sleep here makes manual/virtual-time polls observe an
         // unrelated clock and can spuriously expire after long test suites.
         if self.sleep.has_custom_time_getter() || self.sleep.has_timer_driver_for_poll() {
-            match Pin::new(&mut self.sleep).poll(cx) {
+            match Pin::new(&mut self.sleep).poll_deadline(cx) {
                 Poll::Ready(()) => {
                     self.completed = true;
                     self.timed_out = true;
@@ -299,7 +302,7 @@ impl<F: Future> Future for TimeoutFuture<F> {
             Poll::Pending => {}
         }
 
-        match Pin::new(this.sleep).poll(cx) {
+        match Pin::new(this.sleep).poll_deadline(cx) {
             Poll::Ready(()) => {
                 *this.completed = true;
                 *this.timed_out = true;
@@ -468,6 +471,98 @@ mod tests {
     struct ReadyWhenTimerReaches {
         timer: TimerDriverHandle,
         ready_at: Time,
+    }
+
+    #[test]
+    fn owner_cancellation_preserves_pending_cleanup_until_real_deadline() {
+        use crate::channel::oneshot;
+        use crate::types::{CancelKind, Outcome};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        for explicit_time in [false, true] {
+            for release_cleanup in [false, true] {
+                let clock = Arc::new(VirtualClock::new());
+                let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+                let owner = Cx::new_with_drivers(
+                    RegionId::new_for_test(1, 0),
+                    TaskId::new_for_test(1, 0),
+                    Budget::INFINITE,
+                    None,
+                    None,
+                    None,
+                    Some(timer.clone()),
+                    None,
+                );
+                let _guard = Cx::set_current(Some(owner.clone()));
+                let (release, mut cleanup) = oneshot::channel::<()>();
+                let observed = Arc::new(AtomicBool::new(false));
+                let inner_owner = owner.clone();
+                let inner_observed = Arc::clone(&observed);
+                let inner = Box::pin(async move {
+                    inner_owner.cancelled().await;
+                    assert!(
+                        inner_owner.checkpoint().is_err(),
+                        "inner must remain unmasked"
+                    );
+                    inner_observed.store(true, Ordering::Release);
+                    // Real channel wait: cancellation starts cleanup but does
+                    // not complete it. Only the external receipt may do that.
+                    cleanup
+                        .recv_uninterruptible()
+                        .await
+                        .expect("cleanup receipt");
+                    Outcome::<(), ()>::Cancelled(inner_owner.cancel_reason().unwrap())
+                });
+                let deadline = Time::from_millis(5);
+                let mut future = TimeoutFuture::new(inner, deadline);
+                let mut task = Context::from_waker(Waker::noop());
+                let mut poll = |future: &mut TimeoutFuture<_>| {
+                    if explicit_time {
+                        future.poll_with_time(&mut task, timer.now())
+                    } else {
+                        Pin::new(future).poll(&mut task)
+                    }
+                };
+                assert!(poll(&mut future).is_pending());
+                assert_eq!(timer.pending_count(), 1);
+                owner.cancel_with(CancelKind::User, Some("cancel operation, await cleanup"));
+                assert!(
+                    poll(&mut future).is_pending(),
+                    "cancellation is not elapsed time"
+                );
+                assert!(observed.load(Ordering::Acquire));
+                assert_eq!(timer.now(), Time::ZERO);
+                assert_eq!(timer.pending_count(), 1);
+
+                if release_cleanup {
+                    release.send_blocking(()).unwrap();
+                    assert!(matches!(poll(&mut future),
+                        Poll::Ready(Ok(Outcome::Cancelled(reason)))
+                            if reason.kind == CancelKind::User
+                                && reason.message.as_deref() == Some("cancel operation, await cleanup")));
+                } else {
+                    clock.advance_to(deadline);
+                    assert_eq!(timer.process_timers(), 1);
+                    assert!(matches!(poll(&mut future),
+                        Poll::Ready(Err(elapsed)) if elapsed.deadline() == deadline));
+                }
+                drop(future);
+                assert_eq!(timer.pending_count(), 0);
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "bead": "asupersync-bi2462.110",
+                        "scenario": "owner_cancel_does_not_expire_timeout",
+                        "explicit_time": explicit_time,
+                        "cleanup_receipt": release_cleanup,
+                        "inner_observed_cancel": observed.load(Ordering::Acquire),
+                        "now_ns": timer.now().as_nanos(),
+                        "deadline_ns": deadline.as_nanos(),
+                        "pending_after_drop": timer.pending_count(),
+                    })
+                );
+            }
+        }
     }
 
     impl Future for ReadyWhenTimerReaches {

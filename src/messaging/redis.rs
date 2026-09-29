@@ -2548,14 +2548,17 @@ enum Resp3PushHandling {
 /// Registering the task's Waker with the `Cx` makes the cancel wake the parked
 /// poll, after which the checkpoint guard returns `RedisError::Cancelled`. Same
 /// owned-token pattern shipped in `postgres.rs`/`mysql.rs`.
-struct CancelWakerGuard<'a> {
-    cx: &'a Cx,
+struct CancelWakerGuard {
+    cx: Cx,
     token: Option<CancelWakerToken>,
 }
 
-impl<'a> CancelWakerGuard<'a> {
-    fn new(cx: &'a Cx) -> Self {
-        Self { cx, token: None }
+impl CancelWakerGuard {
+    fn new(cx: &Cx) -> Self {
+        Self {
+            cx: cx.clone(),
+            token: None,
+        }
     }
 
     fn refresh(&mut self, waker: &Waker) {
@@ -2563,12 +2566,53 @@ impl<'a> CancelWakerGuard<'a> {
     }
 }
 
-impl Drop for CancelWakerGuard<'_> {
+impl Drop for CancelWakerGuard {
     fn drop(&mut self) {
         if let Some(token) = self.token.take() {
             self.cx.clear_cancel_waker(token);
         }
     }
+}
+
+/// Keep both the explicit operation owner and the task driving its transport
+/// subscribed to cancellation. A caller context can differ from the ambient
+/// context during pooled connection creation, redirects, or Pub/Sub work.
+/// Neither context is installed here: ambient capability restrictions and
+/// cancellation masks continue to govern the underlying socket/TLS future.
+async fn redis_io<T, E>(
+    cx: &Cx,
+    future: impl Future<Output = Result<T, E>>,
+) -> Result<T, RedisError>
+where
+    RedisError: From<E>,
+{
+    let mut owner_cancel = CancelWakerGuard::new(cx);
+    let mut driver_cancel = Cx::current().as_ref().map(CancelWakerGuard::new);
+    let mut future = std::pin::pin!(future);
+    std::future::poll_fn(|task_cx| {
+        // Register before checking. Cancellation may occur while a new Waker
+        // is cloned, before its registration becomes visible to the publisher.
+        owner_cancel.refresh(task_cx.waker());
+        if let Some(driver) = driver_cancel.as_mut() {
+            driver.refresh(task_cx.waker());
+        }
+        let cancelled = || {
+            cx.checkpoint().is_err()
+                || driver_cancel
+                    .as_ref()
+                    .is_some_and(|driver| driver.cx.checkpoint().is_err())
+        };
+        if cancelled() {
+            return std::task::Poll::Ready(Err(RedisError::Cancelled));
+        }
+        match future.as_mut().poll(task_cx) {
+            std::task::Poll::Ready(Err(_)) if cancelled() => {
+                std::task::Poll::Ready(Err(RedisError::Cancelled))
+            }
+            result => result.map_err(Into::into),
+        }
+    })
+    .await
 }
 
 impl RedisConnection {
@@ -2704,9 +2748,15 @@ impl RedisConnection {
 
         let mut buf = Vec::new();
         encode_command_into(&mut buf, args);
-        self.stream.write_all(&buf).await?;
-        self.stream.flush().await?;
-        Ok(())
+        self.write_all(cx, &buf).await
+    }
+
+    async fn write_all(&mut self, cx: &Cx, bytes: &[u8]) -> Result<(), RedisError> {
+        redis_io(cx, async {
+            self.stream.write_all(bytes).await?;
+            self.stream.flush().await
+        })
+        .await
     }
 
     fn record_resp3_push(
@@ -2751,10 +2801,14 @@ impl RedisConnection {
         cx: &Cx,
         push_handling: Resp3PushHandling,
     ) -> Result<RespValue, RedisError> {
-        // br-asupersync-r8n4qx: wake a read parked on a silent socket (a stalled
-        // or slow redis server) when an external cancel fires, instead of only
-        // noticing it on the next self-poll. Spans every read iteration below.
-        let mut cancel_wake = CancelWakerGuard::new(cx);
+        redis_io(cx, self.read_response_inner(cx, push_handling)).await
+    }
+
+    async fn read_response_inner(
+        &mut self,
+        cx: &Cx,
+        push_handling: Resp3PushHandling,
+    ) -> Result<RespValue, RedisError> {
         loop {
             cx.checkpoint().map_err(|_| RedisError::Cancelled)?;
 
@@ -2826,7 +2880,6 @@ impl RedisConnection {
                         "cancelled",
                     )));
                 }
-                cancel_wake.refresh(task_cx.waker());
                 let mut read_buf = ReadBuf::new(&mut tmp);
                 match Pin::new(&mut self.stream).poll_read(task_cx, &mut read_buf) {
                     std::task::Poll::Pending => std::task::Poll::Pending,
@@ -3195,7 +3248,12 @@ impl RedisClient {
 
     async fn acquire(&self, cx: &Cx) -> Result<PooledResource<RedisConnection>, RedisError> {
         cx.checkpoint().map_err(|_| RedisError::Cancelled)?;
-        self.pool.acquire(cx).await.map_err(Self::map_pool_error)
+        // The pool's factory has no Cx parameter. Enclose acquisition so its
+        // TCP/TLS setup and capacity wait are still owned by this caller.
+        redis_io(cx, async {
+            self.pool.acquire(cx).await.map_err(Self::map_pool_error)
+        })
+        .await
     }
 
     fn validate_redirect_target(&self, host: &str, port: u16) -> Result<(), RedisError> {
@@ -3236,9 +3294,11 @@ impl RedisClient {
         redirect_config.host = host.to_string();
         redirect_config.port = port;
 
-        let mut conn =
-            RedisConnection::connect(redirect_config, Some(Arc::clone(&self.resp3_push_backlog)))
-                .await?;
+        let mut conn = redis_io(
+            cx,
+            RedisConnection::connect(redirect_config, Some(Arc::clone(&self.resp3_push_backlog))),
+        )
+        .await?;
         conn.ensure_initialized(cx).await?;
         Ok(conn)
     }
@@ -3531,6 +3591,22 @@ impl RedisClient {
         Transaction::begin(self, cx).await
     }
 
+    /// Reserve one initialized connection for a sequence of commands.
+    ///
+    /// Use this surface for optimistic transactions: WATCH, read the current
+    /// values, then call [`RedisSession::transaction`] on the same connection.
+    /// The lease counts against the client's pool limit until the session is
+    /// closed or dropped. It is never returned to the pool because session
+    /// commands may change connection-local state such as SELECT or AUTH.
+    pub async fn session(&self, cx: &Cx) -> Result<RedisSession, RedisError> {
+        let mut conn = DiscardOnDropGuard::new(self.acquire(cx).await?);
+        conn.ensure_initialized(cx).await?;
+        Ok(RedisSession {
+            conn: Some(conn.defuse()),
+            in_transaction: false,
+        })
+    }
+
     /// Open a dedicated Pub/Sub connection.
     pub async fn pubsub(&self, cx: &Cx) -> Result<RedisPubSub, RedisError> {
         RedisPubSub::connect(cx, self.config.clone()).await
@@ -3588,6 +3664,292 @@ impl Drop for DiscardOnDropGuard {
             // EOF/RST instead of leaving a half-live socket around.
             let _ = conn.stream.shutdown_transport();
             conn.discard();
+        }
+    }
+}
+
+/// A connection reserved for commands that must share server-side state.
+///
+/// WATCH and the reads used to compute a transaction's writes execute on this
+/// connection, as do MULTI, queued commands, and EXEC. Successful EXEC (including
+/// a watch conflict) and DISCARD leave the session available for another
+/// attempt. No command is automatically retried or redirected: reconnecting
+/// would lose WATCH state, and an interrupted EXEC has an unknown outcome.
+///
+/// Cancellation, an I/O/framing error, or dropping an in-flight command future
+/// closes the connection immediately, even while the session remains alive.
+/// Dropping the session also closes it, releasing WATCH and transaction state
+/// when Redis observes the disconnect. Socket closure is not a rollback of an
+/// EXEC that Redis may already have executed.
+pub struct RedisSession {
+    conn: Option<PooledResource<RedisConnection>>,
+    in_transaction: bool,
+}
+
+impl fmt::Debug for RedisSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RedisSession")
+            .field("closed", &self.is_closed())
+            .field("in_transaction", &self.in_transaction)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RedisSession {
+    /// Whether the connection has been closed or an exchange was abandoned.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.conn.is_none()
+    }
+
+    fn require_idle(&self) -> Result<(), RedisError> {
+        if self.is_closed() {
+            return Err(RedisError::Protocol("Redis session is closed".into()));
+        }
+        if self.in_transaction {
+            return Err(RedisError::Protocol(
+                "Redis session has an unfinished transaction".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn invalidate(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            drop(DiscardOnDropGuard::new(conn));
+        }
+        self.in_transaction = false;
+    }
+
+    // Ownership leaves self before the first transport poll. Abandoning any
+    // await point drops the guard, so another borrow cannot consume a stale
+    // reply or inherit a partially transmitted WATCH/MULTI/EXEC exchange.
+    async fn exchange(&mut self, cx: &Cx, args: &[&[u8]]) -> Result<RespValue, RedisError> {
+        let conn = self
+            .conn
+            .take()
+            .ok_or_else(|| RedisError::Protocol("Redis session is closed".into()))?;
+        let mut conn = DiscardOnDropGuard::new(conn);
+        conn.write_command(cx, args).await?;
+        let response = conn.read_response(cx).await?;
+        self.conn = Some(conn.defuse());
+        // Complete server error replies preserve framing. Typed control paths
+        // decide separately whether the corresponding state is reusable.
+        classify_command_response(response)
+    }
+
+    async fn control(&mut self, cx: &Cx, args: &[&[u8]], name: &str) -> Result<(), RedisError> {
+        let result = self
+            .exchange(cx, args)
+            .await
+            .and_then(|response| expect_ok_response(&response, name));
+        if result.is_err() {
+            self.invalidate();
+        }
+        result
+    }
+
+    /// Execute one command on the reserved connection.
+    ///
+    /// Transaction controls and commands that switch to a streaming/replyless
+    /// protocol are refused before transmission. Use the typed WATCH and
+    /// transaction methods, or [`RedisClient::pubsub`] for subscriptions.
+    /// Complete Redis error replies leave this session usable; transport
+    /// errors and cancellation close it. Cluster redirects are returned as
+    /// server errors instead of replaying on a different connection.
+    pub async fn cmd(&mut self, cx: &Cx, args: &[&str]) -> Result<RespValue, RedisError> {
+        let bytes: Vec<&[u8]> = args.iter().map(|arg| arg.as_bytes()).collect();
+        self.cmd_bytes(cx, &bytes).await
+    }
+
+    /// Binary-safe counterpart to [`Self::cmd`].
+    pub async fn cmd_bytes(&mut self, cx: &Cx, args: &[&[u8]]) -> Result<RespValue, RedisError> {
+        self.require_idle()?;
+        validate_session_command(args)?;
+        self.exchange(cx, args).await
+    }
+
+    /// Add keys to the current WATCH set before reading them.
+    pub async fn watch(&mut self, cx: &Cx, keys: &[&str]) -> Result<(), RedisError> {
+        let bytes: Vec<&[u8]> = keys.iter().map(|key| key.as_bytes()).collect();
+        self.watch_bytes(cx, &bytes).await
+    }
+
+    /// Binary-safe counterpart to [`Self::watch`]. Repeated calls add keys.
+    pub async fn watch_bytes(&mut self, cx: &Cx, keys: &[&[u8]]) -> Result<(), RedisError> {
+        self.require_idle()?;
+        if keys.is_empty() {
+            return Err(RedisError::Protocol("WATCH requires at least one key".into()));
+        }
+        let mut args: Vec<&[u8]> = Vec::with_capacity(keys.len() + 1);
+        args.push(b"WATCH");
+        args.extend_from_slice(keys);
+        self.control(cx, &args, "WATCH").await
+    }
+
+    /// Clear the current WATCH set without closing the session.
+    pub async fn unwatch(&mut self, cx: &Cx) -> Result<(), RedisError> {
+        self.require_idle()?;
+        self.control(cx, &[b"UNWATCH"], "UNWATCH").await
+    }
+
+    /// Begin MULTI on this connection, retaining any preceding WATCH set.
+    ///
+    /// The returned transaction exclusively borrows this session. Dropping an
+    /// unfinished transaction closes the session; call DISCARD to reuse it.
+    pub async fn transaction(&mut self, cx: &Cx) -> Result<RedisSessionTransaction<'_>, RedisError> {
+        self.require_idle()?;
+        self.control(cx, &[b"MULTI"], "MULTI").await?;
+        self.in_transaction = true;
+        Ok(RedisSessionTransaction {
+            session: self,
+            queued_commands: 0,
+            queue_failed: false,
+            finished: false,
+        })
+    }
+
+    /// Close the transport and release its pool lease without an async wait.
+    pub fn close(mut self) {
+        self.invalidate();
+    }
+}
+
+impl Drop for RedisSession {
+    fn drop(&mut self) {
+        self.invalidate();
+    }
+}
+
+fn validate_session_command(args: &[&[u8]]) -> Result<(), RedisError> {
+    let Some(command) = args.first().filter(|command| !command.is_empty()) else {
+        return Err(RedisError::Protocol("Redis command must not be empty".into()));
+    };
+    let reserved = [
+        "WATCH", "UNWATCH", "MULTI", "EXEC", "DISCARD", "SUBSCRIBE", "PSUBSCRIBE",
+        "SSUBSCRIBE", "UNSUBSCRIBE", "PUNSUBSCRIBE", "SUNSUBSCRIBE", "MONITOR",
+        "SYNC", "PSYNC", "RESET", "HELLO", "QUIT",
+    ];
+    if reserved.iter().any(|name| command.eq_ignore_ascii_case(name.as_bytes()))
+        || (command.eq_ignore_ascii_case(b"CLIENT")
+            && args.get(1).is_some_and(|subcommand| subcommand.eq_ignore_ascii_case(b"REPLY")))
+    {
+        return Err(RedisError::Protocol(
+            "command changes Redis session protocol; use the typed transaction or Pub/Sub API".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// The observed result of a session transaction's EXEC exchange.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RedisTransactionOutcome {
+    /// Redis executed the queued commands. Replies retain queue order, including
+    /// individual error and nil values. Redis does not roll back other commands
+    /// when one command returns an error during execution.
+    Committed(Vec<RespValue>),
+    /// A watched key changed before EXEC; none of the queued commands executed.
+    WatchConflict,
+}
+
+/// A MULTI transaction borrowing a [`RedisSession`].
+pub struct RedisSessionTransaction<'a> {
+    session: &'a mut RedisSession,
+    queued_commands: usize,
+    queue_failed: bool,
+    finished: bool,
+}
+
+impl fmt::Debug for RedisSessionTransaction<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RedisSessionTransaction")
+            .field("queued_commands", &self.queued_commands)
+            .field("queue_failed", &self.queue_failed)
+            .field("closed", &self.session.is_closed())
+            .finish_non_exhaustive()
+    }
+}
+
+impl RedisSessionTransaction<'_> {
+    /// Number of commands whose QUEUED response was received.
+    #[must_use]
+    pub fn queued_commands(&self) -> usize {
+        self.queued_commands
+    }
+
+    /// Queue a command. A server rejection requires DISCARD or dropping this
+    /// transaction; EXEC is refused locally after such a rejection.
+    pub async fn cmd(&mut self, cx: &Cx, args: &[&str]) -> Result<(), RedisError> {
+        let bytes: Vec<&[u8]> = args.iter().map(|arg| arg.as_bytes()).collect();
+        self.cmd_bytes(cx, &bytes).await
+    }
+
+    /// Binary-safe counterpart to [`Self::cmd`].
+    pub async fn cmd_bytes(&mut self, cx: &Cx, args: &[&[u8]]) -> Result<(), RedisError> {
+        if self.queue_failed {
+            return Err(RedisError::Protocol("transaction requires DISCARD after a queue error".into()));
+        }
+        validate_session_command(args)?;
+        let next_count = self.queued_commands.checked_add(1).ok_or_else(|| {
+            RedisError::Protocol("Redis transaction command count overflow".into())
+        })?;
+        match self.session.exchange(cx, args).await {
+            Ok(RespValue::SimpleString(value)) if value == "QUEUED" => {
+                self.queued_commands = next_count;
+                Ok(())
+            }
+            Ok(other) => {
+                self.session.invalidate();
+                Err(RedisError::Protocol(format!("queued command expected +QUEUED, got {other:?}")))
+            }
+            Err(error) => {
+                self.queue_failed = true;
+                Err(error)
+            }
+        }
+    }
+
+    /// Execute once and distinguish a WATCH conflict from committed replies.
+    ///
+    /// I/O failure or cancellation after transmission does not establish
+    /// whether Redis executed the transaction. The connection is closed and
+    /// no automatic retry is made. A nil reply *inside* the result array is a
+    /// committed command result, not a watch conflict.
+    pub async fn exec(mut self, cx: &Cx) -> Result<RedisTransactionOutcome, RedisError> {
+        if self.queue_failed {
+            return Err(RedisError::Protocol("transaction requires DISCARD after a queue error".into()));
+        }
+        let response = self.session.exchange(cx, &[b"EXEC"]).await?;
+        let result = match response {
+            RespValue::Array(Some(values)) if values.len() == self.queued_commands => {
+                RedisTransactionOutcome::Committed(values)
+            }
+            RespValue::Array(None) | RespValue::Null => RedisTransactionOutcome::WatchConflict,
+            other => {
+                return Err(RedisError::Protocol(format!(
+                    "EXEC expected {} command replies or a watch conflict, got {other:?}",
+                    self.queued_commands
+                )));
+            }
+        };
+        self.session.in_transaction = false;
+        self.finished = true;
+        Ok(result)
+    }
+
+    /// Discard queued commands and clear WATCH while retaining the session.
+    pub async fn discard(mut self, cx: &Cx) -> Result<(), RedisError> {
+        self.session.control(cx, &[b"DISCARD"], "DISCARD").await?;
+        self.session.in_transaction = false;
+        self.finished = true;
+        Ok(())
+    }
+}
+
+impl Drop for RedisSessionTransaction<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.session.invalidate();
         }
     }
 }
@@ -3663,13 +4025,7 @@ impl Pipeline<'_> {
 
         cx.checkpoint().map_err(|_| RedisError::Cancelled)?;
 
-        if let Err(e) = conn.stream.write_all(&combined).await {
-            // Guard drop will discard the connection.
-            return Err(RedisError::Io(e));
-        }
-        if let Err(e) = conn.stream.flush().await {
-            return Err(RedisError::Io(e));
-        }
+        conn.write_all(cx, &combined).await?;
 
         // Drain ALL responses from the wire BEFORE returning. A protocol /
         // IO error from `read_response` truly invalidates the connection
@@ -4055,7 +4411,7 @@ impl Drop for RedisPubSub {
 
 impl RedisPubSub {
     async fn connect(cx: &Cx, config: RedisConfig) -> Result<Self, RedisError> {
-        let mut conn = RedisConnection::connect(config.clone(), None).await?;
+        let mut conn = redis_io(cx, RedisConnection::connect(config.clone(), None)).await?;
         conn.ensure_initialized(cx).await?;
         Ok(Self {
             conn,

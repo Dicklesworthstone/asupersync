@@ -345,6 +345,263 @@ fn nothing_reads_green_without_evidence() {
     );
 }
 
+/// The worker killed rustc (out of memory); `before` is logged ahead of the kill.
+fn compiler_killed(before: &str) -> String {
+    format!(
+        "  INFO rch::hook: Selected worker: vmi1149989 at ubuntu@host\n{before}error: could not compile `asupersync` (lib test)\n\nCaused by:\n  process didn't exit successfully: `/root/.rustup/toolchains/nightly-2026-08-31-x86_64-unknown-linux-gnu/bin/rustc --crate-name asupersync --edition=2024 src/lib.rs --test -C debuginfo=2` (signal: 9, SIGKILL: kill)\n  Remote command finished: exit=101 in 1363895ms\n"
+    )
+}
+
+#[test]
+fn a_dependency_preflight_refusal_is_no_evidence_not_a_retry() {
+    // rch 2.1.0 refuses a base whose own Cargo manifests fail its preflight (RCH-E413),
+    // on every attempt. Deferring it would retry a lane that can never run.
+    let head = sha(9);
+    let refusal = "  WARN rch::hook: Dependency preflight blocked remote execution [RCH-E413]: Clean-overlay requires selected Cargo inputs.\n[RCH] remote required; refusing local fallback (dependency preflight failed: policy_violation selected_cargo_sources)\n";
+    let admission = "[RCH] remote required; refusing local fallback ([RCH-I001] requested worker set refused (selection error: queue_timeout))\n";
+    let lane = |id: &str| json!({"id": id, "kind": "build", "argv": ["cargo"], "expected_targets": []});
+    let scenario = json!({
+        "plan": {
+            "commits": [commit(9, "dev@example.com", "nine")],
+            "lanes": [lane("preflight-refused"), lane("admission-refused")],
+        },
+        "lane_logs": {
+            "preflight-refused": {head.clone(): {"log": refusal, "client_exit": 103}},
+            "admission-refused": {head.clone(): {"log": admission, "client_exit": 103}},
+        },
+    });
+    let result = evaluate(&scenario);
+    let refused = receipt(&result, "preflight-refused");
+    assert_eq!(refused["verdict"], "no-evidence", "{result:#}");
+    assert!(
+        refused["reason"].as_str().expect("reason").contains("RCH-E413"),
+        "{refused:#}"
+    );
+    // An ordinary admission refusal is still deferred for a later run.
+    assert_eq!(receipt(&result, "admission-refused")["verdict"], "deferred", "{result:#}");
+}
+
+#[test]
+fn a_preflight_refused_head_moves_the_next_batch_past_it() {
+    // The refusal repeats on every attempt, so a batch that keeps the same head never
+    // covers anything again (09-27: stuck on 1d9799819 for a day).
+    let head = sha(9);
+    let refusal = "  WARN rch::hook: Dependency preflight blocked remote execution [RCH-E413]: Clean-overlay requires selected Cargo inputs.\n";
+    let lane = json!({"id": "check-default", "kind": "build", "argv": ["cargo"], "expected_targets": []});
+    let refused = evaluate(&json!({
+        "plan": {"commits": [commit(9, "dev@example.com", "nine")], "lanes": [lane.clone()]},
+        "lane_logs": {"check-default": {head.clone(): {"log": refusal, "client_exit": 103}}},
+        "state": {"known_reds": {}, "last_covered": sha(8)},
+    }));
+    assert_eq!(refused["state"]["preflight_refused_head"], head, "{refused:#}");
+    assert_eq!(refused["state"]["last_covered"], sha(8), "nothing was covered: {refused:#}");
+
+    // The next batch runs a full batch past the refused head; without a refusal, or
+    // once the refused head is already covered, it is the ordinary batch.
+    let shas: Vec<String> = (1..=50).map(sha).collect();
+    let refused_state = json!({"preflight_refused_head": sha(20)});
+    let probed = evaluate(&json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {"select_batch": [
+            {"shas": shas, "max_batch": 20, "state": refused_state},
+            {"shas": shas, "max_batch": 20, "state": {}},
+            {"shas": shas[25..].to_vec(), "max_batch": 20, "state": refused_state},
+        ]},
+    }));
+    let batches = probed["probe_results"]["select_batch"].as_array().expect("batches");
+    assert_eq!(batches[0], json!(shas[..40]), "{probed:#}");
+    assert_eq!(batches[1], json!(shas[..20]), "{probed:#}");
+    assert_eq!(batches[2], json!(shas[25..45]), "{probed:#}");
+
+    // A decisive head releases the refusal.
+    let released = evaluate(&json!({
+        "plan": {"commits": [commit(9, "dev@example.com", "nine")], "lanes": [lane]},
+        "lane_logs": {"check-default": {head.clone(): {"log": build_green()}}},
+        "state": {"known_reds": {}, "preflight_refused_head": sha(7)},
+    }));
+    assert!(released["state"].get("preflight_refused_head").is_none(), "{released:#}");
+    assert_eq!(released["state"]["last_covered"], head, "{released:#}");
+}
+
+#[test]
+fn a_compiler_killed_on_the_worker_is_undecided_unless_a_real_failure_sits_beside_it() {
+    let head = sha(9);
+    let one = |id: &str, kind: &str| json!({"id": id, "kind": kind, "argv": ["cargo"], "expected_targets": []});
+    let failed_test = "     Running tests/alpha_native.rs (target/debug/deps/alpha_native-abc)\nrunning 1 test\ntest boom ... FAILED\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n";
+    let scenario = json!({
+        "plan": {
+            "commits": [commit(9, "dev@example.com", "nine")],
+            "lanes": [
+                one("killed-build", "build"),
+                one("killed-test", "test"),
+                one("killed-beside-real-error", "build"),
+                one("killed-beside-failed-test", "test"),
+                one("test-binary-killed", "test"),
+            ],
+        },
+        "lane_logs": {
+            "killed-build": {head.clone(): {"log": compiler_killed("")}},
+            "killed-test": {head.clone(): {"log": compiler_killed("")}},
+            "killed-beside-real-error": {head.clone(): {"log": compiler_killed(
+                "src/lib.rs:10:5: error[E0599]: no method named `frob` found\n"
+            )}},
+            "killed-beside-failed-test": {head.clone(): {"log": compiler_killed(failed_test)}},
+            "test-binary-killed": {head.clone(): {"log": "     Running tests/alpha_native.rs (target/debug/deps/alpha_native-abc)\nrunning 2 tests\nerror: test failed, to rerun pass `--test alpha_native`\n\nCaused by:\n  process didn't exit successfully: `/data/tmp/rch/x/target/debug/deps/alpha_native-abc` (signal: 9, SIGKILL: kill)\n  Remote command finished: exit=101 in 1000ms\n"}},
+        },
+    });
+    let result = evaluate(&scenario);
+    for lane in ["killed-build", "killed-test"] {
+        let outcome = receipt(&result, lane);
+        assert_eq!(outcome["verdict"], "no-evidence", "{lane}: {result:#}");
+        assert!(
+            outcome["reason"]
+                .as_str()
+                .expect("reason")
+                .contains("signal 9"),
+            "{lane}: {outcome:#}"
+        );
+    }
+    // A real diagnostic, a failed test, or a killed test binary (which the code under
+    // test can cause) is still red.
+    for lane in [
+        "killed-beside-real-error",
+        "killed-beside-failed-test",
+        "test-binary-killed",
+    ] {
+        assert_eq!(
+            receipt(&result, lane)["verdict"],
+            "red",
+            "{lane}: {result:#}"
+        );
+    }
+    let filed: Vec<&str> = result["bead_payloads"]
+        .as_array()
+        .expect("array")
+        .iter()
+        .filter_map(|payload| payload["lane"].as_str())
+        .collect();
+    assert!(
+        !filed.contains(&"killed-build") && !filed.contains(&"killed-test"),
+        "a killed compiler must never file a bead: {filed:?}"
+    );
+    assert!(
+        result["state"].get("last_covered").is_none(),
+        "an undecided lane does not cover the batch"
+    );
+}
+
+/// A dependency build that failed because the worker lost its files (hz4, 2026-09-28:
+/// the registry cache was pruned under running builds); `extra` is appended as is.
+fn dependency_fault(extra: &str) -> String {
+    format!(
+        "  INFO rch::hook: Selected worker: hz4 at ubuntu@host\n   Compiling proptest v1.11.0\nerror: could not compile `proptest` (lib)\n\nCaused by:\n  could not execute process `rustc --crate-name proptest --edition=2021 /data/tmp/rch-cargo-cache-hz4/registry/src/index.crates.io-1949cf8c6b5b557f/proptest-1.11.0/src/lib.rs` (never executed)\n\nCaused by:\n  No such file or directory (os error 2)\n{extra}  Remote command finished: exit=101 in 182237ms\n"
+    )
+}
+
+#[test]
+fn a_dependency_the_worker_could_not_build_is_undecided_unless_a_workspace_crate_fails() {
+    let head = sha(9);
+    let one = |id: &str, kind: &str| json!({"id": id, "kind": kind, "argv": ["cargo"], "expected_targets": []});
+    let missing_source = "  INFO rch::hook: Selected worker: hz4 at ubuntu@host\nerror[E0583]: file not found for module `scalar`\nerror: couldn't read `/data/tmp/rch-cargo-cache-hz4/registry/src/index.crates.io-1949cf8c6b5b557f/curve25519-dalek-4.1.3/src/../README.md`: No such file or directory (os error 2)\nerror: could not compile `curve25519-dalek` (lib) due to 10 previous errors\n  Remote command finished: exit=101 in 71717ms\n";
+    // A dependency that fails on its own diagnostics can be caused by a manifest or
+    // lockfile change in the commit under test.
+    let dependency_error = "  INFO rch::hook: Selected worker: hz3 at ubuntu@host\nerror[E0277]: the trait bound `T: Send` is not satisfied\nerror: could not compile `serde` (lib) due to 1 previous error\n  Remote command finished: exit=101 in 1000ms\n";
+    let scenario = json!({
+        "plan": {
+            "commits": [commit(9, "dev@example.com", "nine")],
+            "lanes": [
+                one("fault-build", "build"),
+                one("fault-test", "test"),
+                one("fault-missing-source", "build"),
+                one("fault-beside-workspace-error", "build"),
+                one("dependency-error", "build"),
+            ],
+        },
+        "lane_logs": {
+            "fault-build": {head.clone(): {"log": dependency_fault("")}},
+            "fault-test": {head.clone(): {"log": dependency_fault("")}},
+            "fault-missing-source": {head.clone(): {"log": missing_source}},
+            "fault-beside-workspace-error": {head.clone(): {"log": dependency_fault(
+                "src/lib.rs:10:5: error[E0599]: no method named `frob` found\nerror: could not compile `asupersync` (lib) due to 1 previous error\n"
+            )}},
+            "dependency-error": {head.clone(): {"log": dependency_error}},
+        },
+    });
+    let result = evaluate(&scenario);
+    for lane in ["fault-build", "fault-test", "fault-missing-source"] {
+        let outcome = receipt(&result, lane);
+        assert_eq!(outcome["verdict"], "no-evidence", "{lane}: {result:#}");
+        assert!(
+            outcome["reason"]
+                .as_str()
+                .expect("reason")
+                .contains("third-party dependency"),
+            "{lane}: {outcome:#}"
+        );
+    }
+    for lane in ["fault-beside-workspace-error", "dependency-error"] {
+        assert_eq!(
+            receipt(&result, lane)["verdict"],
+            "red",
+            "{lane}: {result:#}"
+        );
+    }
+    let filed: Vec<&str> = result["bead_payloads"]
+        .as_array()
+        .expect("array")
+        .iter()
+        .filter_map(|payload| payload["lane"].as_str())
+        .collect();
+    for lane in ["fault-build", "fault-test", "fault-missing-source"] {
+        assert!(!filed.contains(&lane), "a worker fault must never file a bead: {filed:?}");
+    }
+    assert!(
+        result["state"].get("last_covered").is_none(),
+        "an undecided lane does not cover the batch"
+    );
+}
+
+fn test_red(target: &str, test: &str) -> String {
+    format!(
+        "     Running tests/{target}.rs (target/debug/deps/{target}-abc)\nrunning 1 test\ntest {test} ... FAILED\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n  Remote command finished: exit=101 in 1000ms\n"
+    )
+}
+
+#[test]
+fn a_probe_where_the_red_test_did_not_compile_names_a_range_not_a_culprit() {
+    // alpha_native's `boom` fails at the head. At commit 3 the target does not
+    // compile, so its tests never ran there; commit 4 is the first where it
+    // compiles (and fails). Reading commit 3 as clear would blame commit 4
+    // exactly, the commit that merely made the test compile.
+    let lane = json!({"id": "targeted-tests[default]", "kind": "test",
+        "argv": ["cargo", "test", "--test", "alpha_native"], "expected_targets": ["alpha_native"]});
+    let commits: Vec<Value> = (1..=5u8)
+        .map(|n| commit(n, "dev@example.com", "change"))
+        .collect();
+    let mut logs = serde_json::Map::new();
+    logs.insert(sha(3), json!({"log": build_red(&["alpha_native"])}));
+    for n in [4u8, 5] {
+        logs.insert(sha(n), json!({"log": test_red("alpha_native", "boom")}));
+    }
+    let result = evaluate(&json!({
+        "plan": {"commits": commits, "lanes": [lane]},
+        "state": {"known_reds": {}},
+        "now": "2026-09-26T12:00:00+00:00",
+        "lane_logs": {"targeted-tests[default]": logs},
+    }));
+    let outcome = receipt(&result, "targeted-tests[default]");
+    assert_eq!(outcome["verdict"], "red", "{result:#}");
+    assert_eq!(
+        outcome["culprit_exact"], false,
+        "an uncompiled probe decides nothing: {outcome:#}"
+    );
+    assert_ne!(outcome["culprit"], sha(4), "{outcome:#}");
+    let probes = outcome["bisect_probes"].as_array().expect("probes");
+    assert_eq!(probes.len(), 1, "the search stops at the undecided probe");
+    assert_eq!(probes[0]["sha"], sha(3));
+}
+
 #[test]
 fn predicates_match_real_phrasings_and_reject_look_alikes() {
     let scenario = json!({
@@ -365,6 +622,7 @@ fn predicates_match_real_phrasings_and_reject_look_alikes() {
                 "Keep handler execution inside the branch",
                 "recompiled cleanly on hz3",
                 "the first version missed \"compilation, runtime tests and rustfmt are NOT RUN\"",
+                "The first plan flagged the watchdog's own commit as declaring it was not compiled.",
             ],
             "known_ids": ["asupersync-bi2462.158", "asupersync-qoir1r"],
             "bead_ids": [
@@ -376,6 +634,9 @@ fn predicates_match_real_phrasings_and_reject_look_alikes() {
                 "#![cfg(all(feature = \"tls\", feature = \"http3\", not(target_arch = \"wasm32\")))]",
                 "#![cfg(not(target_arch = \"wasm32\"))]\n",
                 "#![cfg(any(feature = \"a\", feature = \"b\"))]",
+                // The multi-line form 23 test files use; a line regex saw no features here.
+                "//! doc\n#![cfg(all(\n    feature = \"tls\",\n    feature = \"test-internals\",\n    not(target_arch = \"wasm32\")\n))]\nuse x;",
+                "#![cfg(target_arch = \"wasm32\")]",
             ],
             "lib_filter_for": [
                 "src/distributed/consensus/pbft.rs",
@@ -390,7 +651,7 @@ fn predicates_match_real_phrasings_and_reject_look_alikes() {
     assert_eq!(
         probes["declares_not_compiled"],
         json!([
-            true, true, true, true, true, true, false, false, false, false, false, false
+            true, true, true, true, true, true, false, false, false, false, false, false, false
         ])
     );
     assert_eq!(
@@ -403,6 +664,8 @@ fn predicates_match_real_phrasings_and_reject_look_alikes() {
             [["tls"], true],
             [["http3", "tls"], true],
             [[], true],
+            [["a"], true],
+            [["test-internals", "tls"], true],
             [[], false]
         ])
     );
@@ -415,6 +678,129 @@ fn predicates_match_real_phrasings_and_reject_look_alikes() {
             null,
             null
         ])
+    );
+}
+
+/// A changed `src/` file is checked with the features its module chain needs, under
+/// the module path it really has. Line-based mapping ran feature-gated modules
+/// without their feature, so their tests compiled to nothing and still read green.
+#[test]
+fn feature_gated_modules_map_to_their_features_and_real_module_paths() {
+    let sources = json!({
+        "src/lib.rs": "//! crate\n#![allow(dead_code)]\npub mod plain;\n#[cfg(any(feature = \"mysql\", feature = \"postgres\"))]\npub mod database;\n#[cfg(all(\n    feature = \"tls\",\n    not(target_arch = \"wasm32\")\n))]\n// a comment between the attribute and the item\npub mod tls;\n#[cfg(target_arch = \"wasm32\")]\npub mod wasm_only;\n",
+        "src/plain.rs": "#[cfg(test)]\n#[path = \"plain_tests.rs\"]\nmod tests;\n",
+        "src/plain_tests.rs": "",
+        "src/database/mod.rs": "#[cfg(feature = \"postgres\")]\npub mod postgres;\n",
+        "src/database/postgres.rs": "#[cfg(test)]\ninclude!(\"postgres_tests.rs\");\n",
+        "src/database/postgres_tests.rs": "",
+        "src/tls.rs": "pub mod types;\n",
+        "src/tls/types.rs": "",
+        "src/wasm_only.rs": "",
+        "src/orphan.rs": "",
+    });
+    let scenario = json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {
+            "defaults": ["proc-macros"],
+            "cfg_requirement": [
+                "feature = \"tls\"",
+                "all(feature = \"tls\", not(target_arch = \"wasm32\"))",
+                "feature = \"proc-macros\"",
+                "not(feature = \"proc-macros\")",
+                "any(feature = \"mysql\", feature = \"postgres\")",
+                "target_os = \"windows\"",
+                "all(unix, test)",
+                "panic = \"abort\"",
+                "all(feature = \"a\"",
+            ],
+            "module_tree": {"sources": sources, "roots": ["src/lib.rs"]},
+        },
+    });
+    let probes = &evaluate(&scenario)["probe_results"];
+    assert_eq!(
+        probes["cfg_requirement"],
+        json!([
+            ["tls"],
+            ["tls"],
+            [],
+            "never",
+            ["mysql"],
+            "never",
+            [],
+            null,
+            null
+        ])
+    );
+    assert_eq!(
+        probes["module_tree"],
+        json!({
+            "src/lib.rs": ["", []],
+            "src/plain.rs": ["plain", []],
+            "src/plain_tests.rs": ["plain::tests", []],
+            "src/database/mod.rs": ["database", ["mysql"]],
+            // Not mysql+postgres: the `any` on `database` is resolved against the whole chain.
+            "src/database/postgres.rs": ["database::postgres", ["postgres"]],
+            "src/database/postgres_tests.rs": ["database::postgres", ["postgres"]],
+            "src/tls.rs": ["tls", ["tls"]],
+            "src/tls/types.rs": ["tls::types", ["tls"]],
+            "src/wasm_only.rs": ["wasm_only", "never"],
+        }),
+        "src/orphan.rs is absent: nothing compiles it"
+    );
+}
+
+#[test]
+fn parallel_head_lanes_change_nothing_but_wall_clock() {
+    let serial = evaluate(&planted_red_scenario(
+        json!({"known_reds": {}}),
+        &["alpha_native"],
+    ));
+    let mut scenario = planted_red_scenario(json!({"known_reds": {}}), &["alpha_native"]);
+    scenario["parallel"] = json!(4);
+    let parallel = evaluate(&scenario);
+    for key in ["receipts", "bead_payloads", "state", "notes"] {
+        assert_eq!(serial[key], parallel[key], "{key} differs under --parallel");
+    }
+    assert_eq!(receipt(&parallel, "check-default")["culprit"], sha(3));
+}
+
+#[test]
+fn a_lib_filter_that_ran_no_test_is_reported_not_hidden() {
+    let lane = json!({
+        "id": "targeted-lib", "kind": "test", "argv": ["cargo", "test", "--lib"],
+        "expected_targets": [], "lib_filters": ["database::postgres", "trace::capture"],
+    });
+    let log = "     Running unittests src/lib.rs (target/debug/deps/asupersync-abc)\nrunning 2 tests\ntest trace::capture::tests::records_poll ... ok\ntest trace::capture::tests::records_wake ... ok\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 900 filtered out; finished in 0.01s\n  Remote command finished: exit=0 in 1000ms\n";
+    let scenario = json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": [lane]},
+        "lane_logs": {"targeted-lib": {sha(1): {"log": log}}},
+    });
+    let lib = receipt(&evaluate(&scenario), "targeted-lib").clone();
+    assert_eq!(lib["verdict"], "green", "{lib:#}");
+    assert_eq!(lib["unexercised_filters"], json!(["database::postgres"]));
+}
+
+/// A batch that touches Cargo.toml or a top-level integration test runs the test
+/// registration contract (bi2462.87): a commit that never ran `cargo test` can
+/// still add a feature-gated test without its `[[test]]` required-features.
+#[test]
+fn manifest_or_top_level_test_changes_run_the_registration_contract() {
+    let probed = evaluate(&json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {"touches_test_registration": [
+            ["Cargo.toml"],
+            ["tests/new_native.rs"],
+            ["src/lib.rs", "tests/atp/helper.rs"],
+            ["src/lib.rs", "docs/x.md"],
+            ["fuzz/Cargo.toml", "tests/fixtures/x.rs"],
+        ]},
+    }));
+    assert_eq!(
+        probed["probe_results"]["touches_test_registration"],
+        json!([true, true, false, false, false]),
+        "{probed:#}"
     );
 }
 
@@ -513,6 +899,79 @@ fn a_targeted_green_heals_only_the_targets_it_ran() {
 }
 
 #[test]
+fn a_healed_red_is_reported_on_its_bead_and_closes_it_only_when_nothing_it_tracks_is_red() {
+    let lane = |id: &str, target: &str| json!({"id": id, "kind": "test", "argv": ["cargo", "test", "--test", target], "expected_targets": [target]});
+    let scenario = json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "c")],
+                 "lanes": [lane("a", "alpha_native"), lane("b", "beta_native")]},
+        "state": {
+            "known_reds": {
+                "a": {
+                    "alpha_native::shared": {"bead": "asupersync-shared"},
+                    "alpha_native::solo": {"bead": "asupersync-solo"},
+                    "alpha_native::owned": {"bead": "asupersync-owned"},
+                    "alpha_native::queued": {"bead": null},
+                },
+                // Lane b never runs gamma_native, so this red cannot heal here.
+                "b": {"gamma_native::other": {"bead": "asupersync-shared"}},
+            },
+            "pending_beads": [
+                {"lane": "a", "new_targets": ["alpha_native::queued"], "title": "healed before filing"},
+                {"lane": "b", "new_targets": ["gamma_native::x"], "title": "still red"},
+            ],
+        },
+        "lane_logs": {
+            "a": {sha(1): {"log": test_green("alpha_native", 4)}},
+            "b": {sha(1): {"log": test_green("beta_native", 2)}},
+        },
+        "open_issues": [
+            {"id": "asupersync-shared", "status": "open"},
+            {"id": "asupersync-solo", "status": "open"},
+            {"id": "asupersync-owned", "status": "in_progress", "assignee": "SomeAgent"},
+        ],
+    });
+    let result = evaluate(&scenario);
+    let calls: Vec<Vec<String>> =
+        serde_json::from_value(result["heal_calls"].clone()).expect("recorded br calls");
+    let commented: Vec<&str> = calls
+        .iter()
+        .filter(|call| call[1] == "comments")
+        .map(|call| call[3].as_str())
+        .collect();
+    let closed: Vec<&str> = calls
+        .iter()
+        .filter(|call| call[1] == "close")
+        .map(|call| call[2].as_str())
+        .collect();
+    assert_eq!(
+        commented,
+        ["asupersync-owned", "asupersync-shared", "asupersync-solo"],
+        "every filed bead with a heal gets the receipt: {calls:?}"
+    );
+    assert_eq!(
+        closed,
+        ["asupersync-solo"],
+        "closed only when open, unassigned and nothing it tracks is red: {calls:?}"
+    );
+    let shared_note = calls
+        .iter()
+        .find(|call| call[1] == "comments" && call[3] == "asupersync-shared")
+        .expect("shared comment");
+    assert!(shared_note[5].contains("stays open"), "{shared_note:?}");
+    let pending: Vec<&str> = result["state"]["pending_beads"]
+        .as_array()
+        .expect("pending")
+        .iter()
+        .map(|payload| payload["title"].as_str().expect("title"))
+        .collect();
+    assert_eq!(
+        pending,
+        ["still red"],
+        "a queued filing for a healed red is dropped"
+    );
+}
+
+#[test]
 fn an_already_tracked_red_is_not_filed_again() {
     let hedge = "hedge_factory_native::cancellation_during_backup_delay_stops_primary_and_never_launches_backup";
     let tracked = json!({
@@ -537,6 +996,450 @@ fn an_already_tracked_red_is_not_filed_again() {
         json!(["asupersync-bi2462.165", null, null, null]),
         "whole-word match on every new test; a partial name or an error-keyed red never matches"
     );
+}
+
+#[test]
+fn a_failed_bead_filing_is_queued_and_retried_not_lost() {
+    // A red enters known_reds on first sight, so its payload is never produced
+    // again. On 2026-09-25 the tracker refused every write for hours; a filing
+    // that failed then must survive until a later run can file it.
+    let lane = "targeted-tests[default]";
+    let payload =
+        |title: &str, target: &str| json!({"title": title, "lane": lane, "new_targets": [target]});
+    let tracked = json!({"id": "asupersync-x9", "title": "t2 is broken",
+                         "description": "beta_native::t2 fails"});
+    let scenario = json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {"file_or_queue": [{
+            "state": {"known_reds": {lane: {
+                "alpha_native::t1": {"bead": null}, "beta_native::t2": {"bead": null}}}},
+            "rounds": [
+                {"payloads": [payload("RED t1", "alpha_native::t1")], "fail_titles": ["RED t1"]},
+                {"payloads": [payload("RED t2", "beta_native::t2")],
+                 "fail_titles": ["RED t1", "RED t2"]},
+                {"payloads": [], "open_issues": [tracked]},
+                {"payloads": []},
+            ],
+        }]},
+    });
+    let rounds = &evaluate(&scenario)["probe_results"]["file_or_queue"][0];
+    let pending = |i: usize| rounds[i]["pending"].clone();
+    assert_eq!(pending(0), json!(["RED t1"]), "a failed filing is queued");
+    assert_eq!(
+        pending(1),
+        json!(["RED t1", "RED t2"]),
+        "retried, still failing"
+    );
+    assert_eq!(
+        pending(2),
+        json!([]),
+        "the recovered tracker drains the queue"
+    );
+    assert_eq!(
+        rounds[2]["beads"][lane],
+        json!({"alpha_native::t1": "filed:RED t1", "beta_native::t2": "asupersync-x9"}),
+        "the queued red is filed; one that gained an open bead meanwhile is recorded, not refiled"
+    );
+    assert_eq!(pending(3), json!([]));
+}
+
+/// A commit for the rule-3 ledger (bi2462.147.1): `hh:mm` on 2026-09-24 UTC.
+fn ledger_commit(n: u8, email: &str, at: &str, message: &str, path: &str) -> Value {
+    let mut c = commit(n, email, message);
+    c["committed_at"] = json!(format!("2026-09-24T{at}:00+00:00"));
+    c["paths"] = json!([path]);
+    c["is_merge"] = json!(false);
+    c
+}
+
+fn run_receipt(head: u8, at: &str, verdict: &str, culprit: Option<u8>) -> Value {
+    json!({
+        "sha": sha(head),
+        "recorded_at": format!("2026-09-24T{at}:00+00:00"),
+        "lane": "check-default",
+        "verdict": verdict,
+        "culprit": culprit.map(sha),
+    })
+}
+
+fn ledger_probe(receipts: Vec<Value>) -> Value {
+    ledger_probe_with(receipts, json!({}), json!([]))
+}
+
+/// `filed` maps escalated commits to their beads; `open_issues` is the tracker.
+fn ledger_probe_with(receipts: Vec<Value>, filed: Value, open_issues: Value) -> Value {
+    let commits = vec![
+        ledger_commit(1, WEB_API, "00:00", "one", "src/a.rs"),
+        ledger_commit(2, "dev@example.com", "00:30", "two", "src/a.rs"),
+        ledger_commit(3, WEB_API, "04:00", "three", "src/a.rs"),
+        ledger_commit(4, WEB_API, "04:30", "four", "src/a.rs"),
+        ledger_commit(5, WEB_API, "05:00", "five", "src/a.rs"),
+        ledger_commit(
+            6,
+            "dev@example.com",
+            "07:00",
+            "six: Tests have NOT been compiled or executed",
+            "src/b.rs",
+        ),
+        ledger_commit(7, WEB_API, "11:00", "seven", "src/a.rs"),
+        ledger_commit(8, WEB_API, "11:30", "eight", "docs/x.md"),
+    ];
+    let scenario = json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {"receipt_ledger": [{
+            "commits": commits, "receipts": receipts, "now": "2026-09-24T12:00:00+00:00",
+            "filed": filed, "open_issues": open_issues,
+        }]},
+    });
+    evaluate(&scenario)["probe_results"]["receipt_ledger"][0].clone()
+}
+
+/// Validation Path rule 3: a no-compile-path commit gets a receipt within 2 h, and no
+/// green receipt after 6 h means one P0 naming it. A red elsewhere blocks instead of
+/// multiplying P0s; the red's own bead covers it.
+#[test]
+fn rule3_ledger_lists_overdue_commits_and_escalates_after_six_hours() {
+    let probe = ledger_probe(vec![
+        run_receipt(2, "01:00", "green", None),
+        run_receipt(4, "09:00", "red", Some(4)),
+    ]);
+    let ledger = &probe["ledger"];
+    let statuses: Vec<(String, String)> = ledger["rows"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .map(|r| {
+            (
+                r["sha"].as_str().expect("sha")[..2].to_owned(),
+                r["status"].as_str().expect("status").to_owned(),
+            )
+        })
+        .collect();
+    let expected: Vec<(String, String)> = [
+        ("01", "green"),
+        ("03", "blocked"),
+        ("04", "red"),
+        ("05", "escalate"),
+        ("06", "overdue"),
+        ("07", "pending"),
+    ]
+    .into_iter()
+    .map(|(s, st)| (s.to_owned(), st.to_owned()))
+    .collect();
+    assert_eq!(statuses, expected, "{ledger:#}");
+    assert_eq!(
+        ledger["owed"], 6,
+        "a plain dev commit and a docs-only commit owe nothing"
+    );
+    assert_eq!(ledger["green_within_2h"], 1);
+    assert_eq!(ledger["rows"][0]["latency_h"], 1.0);
+    assert_eq!(ledger["rows"][1]["blocked_by"], json!([sha(4)]));
+    assert_eq!(ledger["overdue"], json!([sha(6)]));
+    assert_eq!(ledger["escalate"], json!([sha(5)]));
+    let payloads = probe["payloads"].as_array().expect("payloads");
+    assert_eq!(payloads.len(), 1);
+    let title = payloads[0]["title"].as_str().expect("title");
+    assert!(
+        title.starts_with(&format!(
+            "[main-watchdog] NO GREEN RECEIPT after 6 h: {}",
+            &sha(5)[..9]
+        )),
+        "{title}"
+    );
+    assert!(title.contains(WEB_API), "{title}");
+    assert_eq!(payloads[0]["priority"], 0);
+    assert_eq!(payloads[0]["parent"], "asupersync-bi2462.147");
+
+    // Negative twin: a later all-green run covers everything, so nothing is owed.
+    let healed = ledger_probe(vec![
+        run_receipt(2, "01:00", "green", None),
+        run_receipt(4, "09:00", "red", Some(4)),
+        run_receipt(8, "11:45", "green", None),
+    ]);
+    assert_eq!(healed["ledger"]["escalate"], json!([]));
+    assert_eq!(healed["ledger"]["overdue"], json!([]));
+    assert_eq!(healed["payloads"], json!([]));
+    assert!(
+        healed["ledger"]["rows"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .all(|r| r["status"] == "green"),
+        "{healed:#}"
+    );
+}
+
+/// One chronic known red must not keep every later commit escalated forever: a run
+/// whose red lanes fail only through known reds (each with its own bead) covers its
+/// commits. A new red or a lane without evidence does not. A covered escalation gets
+/// its receipt once, and only an open, unassigned bead is closed.
+#[test]
+fn a_run_red_only_through_known_reds_covers_and_closes_its_escalations() {
+    let known_red_only = || {
+        let mut lane = run_receipt(8, "11:45", "red", None);
+        lane["lane"] = json!("targeted-lib");
+        lane["still_red"] = json!({"asupersync (lib test)": "asupersync-bi2462.147.4"});
+        lane
+    };
+    // .92 is already closed, so it is not among the open issues.
+    let mut filed = json!({});
+    filed[sha(3)] = json!("asupersync-bi2462.147.91");
+    filed[sha(5)] = json!("asupersync-bi2462.147.90");
+    filed[sha(7)] = json!("asupersync-bi2462.147.92");
+    let open_issues = json!([
+        {"id": "asupersync-bi2462.147.90", "status": "open"},
+        {"id": "asupersync-bi2462.147.91", "status": "in_progress", "assignee": "SomeAgent"},
+    ]);
+    let probe = |extra: Option<Value>| {
+        let mut receipts = vec![
+            run_receipt(2, "01:00", "green", None),
+            run_receipt(4, "09:00", "red", Some(4)),
+            run_receipt(8, "11:45", "green", None),
+            known_red_only(),
+        ];
+        receipts.extend(extra);
+        ledger_probe_with(receipts, filed.clone(), open_issues.clone())
+    };
+    let greens = |probe: &Value| {
+        probe["ledger"]["rows"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .filter(|r| r["status"] == "green")
+            .count()
+    };
+
+    let covered = probe(None);
+    assert_eq!(greens(&covered), 6, "{covered:#}");
+    assert_eq!(covered["ledger"]["rows"][3]["receipt_head"], json!(sha(8)));
+    let closures = &covered["closures"];
+    assert_eq!(
+        closures["reported"],
+        json!([
+            {"bead": "asupersync-bi2462.147.91", "sha": sha(3), "closed": false},
+            {"bead": "asupersync-bi2462.147.90", "sha": sha(5), "closed": true},
+        ]),
+        "{closures:#}"
+    );
+    let commands = closures["commands"].as_array().expect("commands");
+    let verbs: Vec<(&str, &str)> = commands
+        .iter()
+        .map(|c| (c[1].as_str().expect("verb"), c[2].as_str().expect("id")))
+        .collect();
+    assert_eq!(
+        verbs,
+        [
+            ("comments", "add"),
+            ("comments", "add"),
+            ("close", "asupersync-bi2462.147.90"),
+        ],
+        "{closures:#}"
+    );
+    assert_eq!(commands[0][3], "asupersync-bi2462.147.91");
+    assert_eq!(
+        commands[2][4],
+        json!(format!("covered at {} (main watchdog)", &sha(8)[..9]))
+    );
+    assert_eq!(
+        closures["filed"],
+        json!({}),
+        "covered commits are reported once; an already closed bead is only forgotten"
+    );
+
+    let mut new_red = run_receipt(8, "11:45", "red", Some(7));
+    new_red["new_red"] = json!(["asupersync (test \"alpha_native\")"]);
+    let mut no_evidence = run_receipt(8, "11:45", "no-evidence", None);
+    no_evidence["lane"] = json!("clippy-default");
+    for (name, extra) in [("new red", new_red), ("no evidence", no_evidence)] {
+        let uncovered = probe(Some(extra));
+        assert_eq!(greens(&uncovered), 1, "{name}: {uncovered:#}");
+        assert_eq!(uncovered["closures"]["reported"], json!([]), "{name}");
+        assert_eq!(uncovered["closures"]["commands"], json!([]), "{name}");
+        assert_eq!(uncovered["closures"]["filed"], filed, "{name}");
+    }
+}
+
+#[test]
+fn first_run_ledger_names_targets_no_lane_has_executed() {
+    // A target that ran zero tests is not executed; one that ran tests is.
+    let lane = json!({
+        "id": "targeted-tests[default]", "kind": "test", "argv": ["cargo", "test"],
+        "expected_targets": ["alpha_native", "beta_native"],
+    });
+    let log = format!(
+        "{}     Running tests/beta_native.rs (x)\nrunning 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n",
+        test_green("alpha_native", 2).replace("  Remote command finished: exit=0 in 1000ms\n", "")
+    ) + "  Remote command finished: exit=0 in 1000ms\n";
+    let scenario = json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": [lane]},
+        "lane_logs": {"targeted-tests[default]": {sha(1): {"log": log}}},
+        "probes": {"first_run_ledger": [
+            {"added": ["alpha_native", "beta_native"], "receipts": [{"targets_executed": ["alpha_native"]}]},
+            {"added": ["alpha_native"], "receipts": [{"targets_executed": ["alpha_native"]}]},
+        ]},
+    });
+    let result = evaluate(&scenario);
+    assert_eq!(
+        receipt(&result, "targeted-tests[default]")["targets_executed"],
+        json!(["alpha_native"])
+    );
+    assert_eq!(
+        result["probe_results"]["first_run_ledger"],
+        json!([
+            {"added": 2, "never_run": ["beta_native"]},
+            {"added": 1, "never_run": []}
+        ])
+    );
+}
+
+#[test]
+fn stranded_work_and_duplicate_fixes_alert_only_past_their_thresholds() {
+    let now = "2026-09-24T12:00:00+00:00";
+    let scenario = json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {
+            "stranded": [
+                {"now": now, "tree": {"ahead": 2, "oldest_unpushed_at": "2026-09-24T09:00:00+00:00",
+                                      "oldest_unpushed_beads": ["asupersync-x1"], "behind": 0}},
+                {"now": now, "tree": {"ahead": 2, "oldest_unpushed_at": "2026-09-24T11:00:00+00:00",
+                                      "oldest_unpushed_beads": [], "behind": 5}},
+                {"now": now, "tree": {"ahead": 0, "landed_elsewhere": 4, "behind": 6}},
+            ],
+            "duplicate_fixes": [
+                {"origin": [{"id": "o1", "beads": ["asupersync-fix1", "asupersync-bi2462.162"],
+                             "hunks": {"src/a.rs": [[10, 20]]}}],
+                 "local": [
+                     {"id": "same-bead", "beads": ["asupersync-fix1"], "hunks": {}},
+                     {"id": "process-bead-disjoint", "beads": ["asupersync-bi2462.162"],
+                      "hunks": {"src/a.rs": [[30, 40]]}},
+                     {"id": "overlap", "beads": [], "hunks": {"src/a.rs": [[18, 25]]}},
+                 ]},
+            ],
+            "diff_hunks": [
+                "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -10,3 +10,4 @@ fn x\n-a\n@@ -40 +41,2 @@\n+b\n@@ -50,0 +52 @@\n+c\n",
+            ],
+        },
+    });
+    let probes = &evaluate(&scenario)["probe_results"];
+    let stranded = probes["stranded_alerts"].as_array().expect("stranded");
+    let first = stranded[0].as_array().expect("case 0");
+    assert_eq!(first.len(), 1, "{stranded:?}");
+    assert!(
+        first[0]
+            .as_str()
+            .expect("alert")
+            .starts_with("stranded: main is 2 commit(s) ahead")
+            && first[0].as_str().expect("alert").contains("asupersync-x1"),
+        "{first:?}"
+    );
+    assert_eq!(
+        stranded[1],
+        json!([]),
+        "1 h unpushed and 5 behind stay silent"
+    );
+    let third: Vec<&str> = stranded[2]
+        .as_array()
+        .expect("case 2")
+        .iter()
+        .map(|a| a.as_str().expect("alert"))
+        .collect();
+    assert!(
+        third.len() == 2
+            && third[0].starts_with("stale: 4 commit(s)")
+            && third[1].starts_with("behind: main is 6"),
+        "{third:?}"
+    );
+    assert_eq!(
+        probes["duplicate_fixes"],
+        json!([[
+            {"origin": "o1", "local": "same-bead", "beads": ["asupersync-fix1"], "overlapping_files": []},
+            {"origin": "o1", "local": "overlap", "beads": [], "overlapping_files": ["src/a.rs"]}
+        ]]),
+        "a shared process bead and disjoint lines are not a duplicate"
+    );
+    assert_eq!(
+        probes["diff_hunks"],
+        json!([{"src/a.rs": [[10, 12], [40, 40], [50, 50]]}])
+    );
+}
+
+/// A failing lib unit test is keyed `lib::<test>`. The lib target exists wherever
+/// src/lib.rs does; looking for tests/lib.rs made every bisect probe read
+/// target-absent, so run2 blamed its batch head (bi2462.147.4).
+#[test]
+fn lib_unit_test_target_exists_through_src_lib() {
+    let scenario = json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {"target_root_paths": [
+            {"name": "lib"},
+            {"name": "alpha_native"},
+            {"name": "beta", "registry": {"tests/b/main.rs": {"name": "beta", "features": []}}},
+        ]},
+    });
+    assert_eq!(
+        evaluate(&scenario)["probe_results"]["target_root_paths"],
+        json!([
+            ["src/lib.rs"],
+            ["tests/alpha_native.rs"],
+            ["tests/b/main.rs"]
+        ])
+    );
+}
+
+/// bi2462.147.1 item 5: an owner decision recorded in a bead comment with no later commit
+/// citing the bead is listed after 48 h. A passing mention of the phrase is not a decision.
+#[test]
+fn decision_ledger_lists_owner_decisions_nothing_has_implemented() {
+    let decision =
+        |at: &str| json!({"created_at": at, "text": "OWNER DECISION, recorded verbatim: ship it."});
+    let scenario = json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {"decision_ledger": [{
+            "now": "2026-09-24T12:00:00+00:00",
+            "issues": [
+                {"id": "asupersync-done", "status": "open", "comments": [decision("2026-09-20T00:00:00Z")]},
+                {"id": "asupersync-stale", "status": "open", "comments": [decision("2026-09-21T00:00:00Z")]},
+                {"id": "asupersync-young", "status": "open", "comments": [decision("2026-09-24T00:00:00Z")]},
+                {"id": "asupersync-settled", "status": "closed", "comments": [decision("2026-09-20T00:00:00Z")]},
+                {"id": "asupersync-mention", "status": "open", "comments": [
+                    {"created_at": "2026-09-20T00:00:00Z", "text": "this remains the owner decision to make"}
+                ]},
+            ],
+            "commits": [
+                // Before the decision: does not count as implementing it.
+                {"sha": sha(1), "committed_at": "2026-09-19T00:00:00+00:00", "beads": ["asupersync-stale"]},
+                {"sha": sha(2), "committed_at": "2026-09-21T00:00:00+00:00", "beads": ["asupersync-done"]},
+            ],
+        }]},
+    });
+    let rows = evaluate(&scenario)["probe_results"]["decision_ledger"][0].clone();
+    let statuses: Vec<(String, String)> = rows
+        .as_array()
+        .expect("rows")
+        .iter()
+        .map(|r| {
+            (
+                r["bead"].as_str().expect("bead").to_owned(),
+                r["status"].as_str().expect("status").to_owned(),
+            )
+        })
+        .collect();
+    let expected: Vec<(String, String)> = [
+        ("asupersync-done", "implemented"),
+        ("asupersync-settled", "closed"),
+        ("asupersync-stale", "stale"),
+        ("asupersync-young", "pending"),
+    ]
+    .into_iter()
+    .map(|(b, s)| (b.to_owned(), s.to_owned()))
+    .collect();
+    assert_eq!(statuses, expected, "{rows:#}");
+    assert_eq!(rows[0]["implemented_by"], sha(2));
 }
 
 #[test]

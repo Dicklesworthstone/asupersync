@@ -39,7 +39,7 @@
 //! subscription delivery without an explicit `process()` call, reconnect
 //! replay, graceful close, and drop-triggered supervisor cancellation.
 
-use asupersync::cx::Cx;
+use asupersync::cx::{ChildRegionSpec, Cx};
 use asupersync::messaging::nats::{NatsClient, NatsConfig, NatsError};
 use asupersync::runtime::RuntimeBuilder;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -435,4 +435,140 @@ fn nats_supervisor_drop_cancels_task_and_releases_subscription_7207gg() {
     }));
 
     assert_eq!(server.join().expect("server join"), 0);
+}
+
+#[test]
+fn nats_cancelled_request_releases_supervisor_for_next_command() {
+    for workers in [1, 2] {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind caller-cancel peer");
+        let addr = listener.local_addr().expect("caller-cancel address");
+        let (published_tx, published_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept caller-cancel client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set caller-cancel peer timeout");
+            stream
+                .write_all(b"INFO {\"server_id\":\"caller-cancel\",\"max_payload\":1048576}\r\n")
+                .expect("send caller-cancel INFO");
+            let mut reader = BufReader::new(stream);
+            assert!(read_nats_line(&mut reader).starts_with("CONNECT "));
+            assert_eq!(read_nats_line(&mut reader), "SUB events.cancel 1");
+            let inbox = read_nats_line(&mut reader);
+            assert!(inbox.starts_with("SUB _INBOX."), "request inbox: {inbox}");
+            let request = read_nats_line(&mut reader);
+            assert!(request.starts_with("PUB service.silent _INBOX."));
+            assert!(request.ends_with(" 6"));
+            let mut payload = [0_u8; 8];
+            reader.read_exact(&mut payload).expect("read full request");
+            assert_eq!(&payload, b"parked\r\n");
+            published_tx
+                .send(reader.get_ref().try_clone().expect("clone cleanup socket"))
+                .expect("publish wire-state witness");
+
+            // Withhold the reply. A cancelled caller must release the
+            // supervisor so a different live owner can put PING on this same
+            // socket, without waiting for request_timeout or another frame.
+            let next = read_nats_line(&mut reader);
+            assert_eq!(next, "PING", "next command after caller cancellation");
+            reader
+                .get_mut()
+                .write_all(b"PONG\r\nMSG events.cancel 1 5\r\nalive\r\n")
+                .expect("answer next command and publish healthy message");
+            let mut byte = [0_u8; 1];
+            reader.get_mut().read(&mut byte).expect("observe close")
+        });
+
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(workers)
+            .build()
+            .expect("build caller-cancel runtime");
+        let (owner_tx, owner_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let task = runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("native caller context");
+            let mut config =
+                NatsConfig::from_url(&format!("nats://{addr}")).expect("parse caller-cancel URL");
+            config.auto_reconnect = false;
+            config.request_timeout = Duration::from_secs(60);
+            let mut client = NatsClient::connect_with_config(&cx, config)
+                .await
+                .expect("connect caller-cancel client");
+            let mut subscription = client
+                .subscribe(&cx, "events.cancel")
+                .await
+                .expect("subscribe");
+            let owner = cx
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .expect("open independent request owner");
+            owner_tx
+                .send(owner.cx().clone())
+                .expect("publish request owner");
+
+            let cancelled = client
+                .request(owner.cx(), "service.silent", b"parked")
+                .await;
+            assert!(
+                matches!(cancelled, Err(NatsError::Cancelled)),
+                "{cancelled:?}"
+            );
+            assert!(
+                !cx.is_cancel_requested(),
+                "caller cancellation escaped its context"
+            );
+            client
+                .ping(&cx)
+                .await
+                .expect("live next command must progress");
+            let message = subscription
+                .next(&cx)
+                .await
+                .expect("healthy subscription")
+                .expect("message");
+            assert_eq!(message.payload, b"alive");
+            client.close(&cx).await.expect("close caller-cancel client");
+            assert!(
+                subscription
+                    .next(&cx)
+                    .await
+                    .expect("closed subscription")
+                    .is_none()
+            );
+            owner
+                .close()
+                .await
+                .expect("request owner reaches quiescence");
+            let _ = done_tx.send(());
+        });
+
+        let owner = owner_rx.recv_timeout(Duration::from_secs(3));
+        let published = published_rx.recv_timeout(Duration::from_secs(3));
+        if let (Ok(owner), Ok(_)) = (&owner, &published) {
+            owner.cancel_with(
+                asupersync::types::CancelKind::User,
+                Some("cancel NATS request"),
+            );
+        }
+        let completed = done_rx.recv_timeout(Duration::from_secs(2));
+        // This shutdown is only failure cleanup; it occurs after capturing the
+        // next-command result so EOF cannot stand in for cancellation progress.
+        if let Ok(stream) = &published {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
+        let peer_result = server.join();
+        drop(task);
+        let drained = runtime.shutdown_timeout(Duration::from_secs(3));
+        assert!(owner.is_ok(), "request owner was not admitted: {owner:?}");
+        assert!(
+            published.is_ok(),
+            "request never reached peer: {published:?}"
+        );
+        assert!(
+            completed.is_ok(),
+            "NATS_CANCEL_OWNER workers={workers} published=true next_command={completed:?}"
+        );
+        assert_eq!(peer_result.expect("caller-cancel peer joined"), 0);
+        assert!(drained, "caller-cancel runtime did not drain");
+    }
 }

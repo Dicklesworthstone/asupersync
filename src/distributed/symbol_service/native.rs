@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 mod admission;
 use admission::Admission;
+mod chunked;
 
 /// Transport refusal. Untrusted remote diagnostics/payloads are not echoed.
 #[derive(Debug, thiserror::Error)]
@@ -43,6 +44,9 @@ pub enum RemoteSymbolError {
     /// Clone-shared send/fetch capacity is exhausted; no request was dispatched.
     #[error("symbol transport admission limit reached")]
     Admission,
+    /// The owning context's deadline elapsed during a multi-frame transfer.
+    #[error("symbol transfer owner deadline elapsed")]
+    Deadline,
 }
 
 /// Explicit native replica routes plus the owner context and symbol-verification key.
@@ -56,8 +60,10 @@ pub enum RemoteSymbolError {
 /// This adapter deliberately uses protocol V1 one-shot calls: storage is inline,
 /// immutable and independently idempotent. V2/V3 retained lifecycle replies must
 /// not acknowledge a store that has since restarted, so those modes are refused
-/// here rather than silently claiming durable deduplication. Whole batches must
-/// fit BOTH binary batch limits and the clients/listener's JSON frame limits.
+/// here rather than silently claiming durable deduplication. The compatibility
+/// constructors require whole batches to fit both binary and JSON frame limits.
+/// `new_chunked_bounded` uses a separately granted computation to transfer bounded
+/// pieces while retaining the complete batch's authenticated identity.
 ///
 /// Construct with the same owning Cx used by the distributor. Clones share that
 /// context and routes. Local timeout/drop closes the connection, but cannot roll
@@ -71,6 +77,7 @@ pub struct RemoteSymbolTransport {
     auth_key: Arc<AuthKey>,
     limits: SymbolBatchLimits,
     admission: Arc<Admission>,
+    chunk_bytes: Option<usize>,
 }
 
 impl fmt::Debug for RemoteSymbolTransport {
@@ -101,7 +108,7 @@ impl RemoteSymbolTransport {
         }
         if map.is_empty() { return Err(RemoteSymbolError::Configuration); }
         Ok(Self { cx, hello, routes: Arc::new(map), auth_key, limits,
-            admission: Arc::new(Admission::new(usize::MAX)) })
+            admission: Arc::new(Admission::new(usize::MAX)), chunk_bytes: None })
     }
 
     /// Bind routes with one explicit send/fetch ceiling shared by every clone.
@@ -132,12 +139,16 @@ impl RemoteSymbolTransport {
     pub fn max_in_flight(&self) -> usize { self.admission.limit() }
 
     async fn call(&self, replica: &str, input: Vec<u8>) -> Result<Vec<u8>, RemoteSymbolError> {
+        self.call_named(replica, SYMBOL_SERVICE_COMPUTATION, input).await
+    }
+
+    async fn call_named(&self, replica: &str, computation: &str, input: Vec<u8>) -> Result<Vec<u8>, RemoteSymbolError> {
         if self.cx.is_cancel_requested() { return Err(RemoteSymbolError::Cancelled); }
         let client = self.routes.get(replica).ok_or(RemoteSymbolError::UnknownReplica)?;
         let task = RemoteTaskId::next();
         let request = SpawnRequest {
             remote_task_id: task,
-            computation: ComputationName::new(SYMBOL_SERVICE_COMPUTATION),
+            computation: ComputationName::new(computation),
             input: RemoteInput::new(input),
             lease: client.config().attempt_timeout(), // V1 does not establish a renewable lease.
             idempotency_key: IdempotencyKey::from_raw(u128::from(task.raw())),
@@ -163,6 +174,9 @@ impl RemoteSymbolTransport {
         if self.cx.is_cancel_requested() { return Err(RemoteSymbolError::Cancelled); }
         if !self.routes.contains_key(replica) { return Err(RemoteSymbolError::UnknownReplica); }
         self.admission.run(|| async {
+            if let Some(maximum) = self.chunk_bytes {
+                return self.with_owner_deadline(self.fetch_chunked(replica, key, maximum)).await;
+            }
             let bytes = self.call(replica, fetch_request(replica, key)?).await?;
             let symbols = decode_symbol_batch(&bytes, &self.auth_key, self.limits)?;
             let actual = super::batch::key(symbols[0].symbol().id().object_id(), &bytes);
@@ -176,6 +190,9 @@ impl RemoteSymbolTransport {
         if self.cx.is_cancel_requested() { return Err(RemoteSymbolError::Cancelled); }
         if !self.routes.contains_key(replica) { return Err(RemoteSymbolError::UnknownReplica); }
         self.admission.run(|| async move {
+            if let Some(maximum) = self.chunk_bytes {
+                return self.with_owner_deadline(self.send_chunked(replica, symbols, maximum)).await;
+            }
             let encoded = encode_symbol_batch(&symbols, self.limits)?;
             drop(symbols);
             let response = self.call(replica, put_request(replica, encoded.as_ref())?).await?;
@@ -193,6 +210,7 @@ impl DistributorTransport for RemoteSymbolTransport {
                 RemoteSymbolError::Configuration => ErrorKind::ConfigError,
                 RemoteSymbolError::UnknownReplica => ErrorKind::NodeUnavailable,
                 RemoteSymbolError::Cancelled => ErrorKind::Cancelled,
+                RemoteSymbolError::Deadline => ErrorKind::DeadlineExceeded,
                 RemoteSymbolError::Batch(_) => ErrorKind::ProtocolError,
                 RemoteSymbolError::Client(_) => ErrorKind::ConnectionLost,
                 RemoteSymbolError::Refused | RemoteSymbolError::Admission => ErrorKind::AdmissionDenied,

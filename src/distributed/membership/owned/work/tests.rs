@@ -12,9 +12,12 @@ fn statement(incarnation: u64, sequence: u64, kind: MembershipKind) -> Vec<u8> {
         .authenticated_bytes(&NodeId::new("authority"), 7, &AuthKey::from_seed(42)).unwrap()
 }
 fn controller(cx: &Cx) -> OwnedMembershipController {
+    controller_with_timer(cx.timer_driver().unwrap())
+}
+fn controller_with_timer(timer: crate::time::TimerDriverHandle) -> OwnedMembershipController {
     let owner = OwnedMembershipController::new(NodeId::new("authority"), 7, AuthKey::from_seed(42),
         vec![MembershipFloor { node: NodeId::new("worker"), incarnation: 0, sequence: 0 }],
-        MembershipControllerLimits { max_members: 1, max_lease_ids: 32 }, cx.timer_driver().unwrap()).unwrap();
+        MembershipControllerLimits { max_members: 1, max_lease_ids: 32 }, timer).unwrap();
     owner.apply_authenticated(&NodeId::new("authority"), &statement(1, 1, MembershipKind::Alive)).unwrap();
     owner
 }
@@ -129,6 +132,111 @@ fn expiry_stops_a_parked_body_without_an_external_expiry_driver() {
         assert!(matches!(report.trigger, MembershipWorkTrigger::LeaseEnded(OwnedLeaseStatus::Expired)));
         assert!(matches!(report.lease, Ok(OwnedLeaseStatus::Expired))); assert!(report.close.is_ok());
         assert_eq!(owner.live_leases(), 0); assert!(!report.is_success());
+    });
+}
+
+#[test]
+fn unrelated_ambient_cancellation_keeps_scoped_work_parked_until_its_owner_stops_it() {
+    native(|cx| async move {
+        let owner = controller(&cx);
+        let witness = Arc::new(Witness::default());
+        let body = Arc::clone(&witness);
+        let node = NodeId::new("worker");
+        let mut run = Box::pin(owner.run_scoped(
+            &cx, &node, 1, BUDGET, ChildRegionSpec::inherit(),
+            move |child| cancellable(child, body),
+        ));
+        {
+            let mut parked = std::pin::pin!(witness.changed.wait_until(|| witness.parked.load(Ordering::Acquire)));
+            poll_fn(|task| {
+                assert!(run.as_mut().poll(task).is_pending());
+                parked.as_mut().poll(task)
+            }).await;
+        }
+        let timer = cx.timer_driver().unwrap();
+        let pending_timers = timer.pending_count();
+        assert!(pending_timers > 0, "the lease deadline is armed");
+        assert_eq!(owner.live_leases(), 1);
+        let unrelated = Cx::for_testing();
+        unrelated.cancel_with(crate::types::CancelKind::User, Some("unrelated ambient task"));
+        eprintln!("scenario=membership_work_unrelated_ambient_cancel state=parked live_leases=1 pending_timers={pending_timers}");
+        poll_fn(|task| {
+            let _ambient = Cx::set_current(Some(unrelated.clone()));
+            for poll_index in 1..=3 {
+                // Old code completes the Sleep at poll 1, then panics at poll 2.
+                assert!(run.as_mut().poll(task).is_pending(), "poll {poll_index}");
+            }
+            Poll::Ready(())
+        }).await;
+        assert_eq!(timer.pending_count(), pending_timers);
+        assert_eq!(owner.live_leases(), 1);
+        assert!(!cx.is_cancel_requested());
+        assert!(!witness.dropped.load(Ordering::Acquire));
+
+        owner.close();
+        let report = run.await.unwrap();
+        assert!(matches!(report.trigger, MembershipWorkTrigger::LeaseEnded(OwnedLeaseStatus::Closed)));
+        assert_eq!(report.task.unwrap(), 41);
+        assert!(report.close.is_ok());
+        assert!(matches!(report.lease, Ok(OwnedLeaseStatus::Closed)));
+        assert!(witness.dropped.load(Ordering::Acquire));
+        assert_eq!(owner.live_leases(), 0);
+        assert_eq!(timer.pending_count() + 1, pending_timers);
+        assert!(!cx.is_cancel_requested());
+        eprintln!("scenario=membership_work_unrelated_ambient_cancel poll_count=3 terminal=Closed task=41 child_drained=true live_leases=0");
+    });
+}
+
+#[test]
+fn early_lease_timer_fire_rearms_before_repoll_and_still_expires_native_work() {
+    native(|cx| async move {
+        let clock = Arc::new(crate::time::VirtualClock::new());
+        let timer = crate::time::TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let owner = controller_with_timer(timer.clone());
+        let witness = Arc::new(Witness::default());
+        let body = Arc::clone(&witness);
+        let node = NodeId::new("worker");
+        let deadline = Time::from_millis(100);
+        let mut run = Box::pin(owner.run_scoped(
+            &cx, &node, 1, Duration::from_millis(100), ChildRegionSpec::inherit(),
+            move |child| cancellable(child, body),
+        ));
+        {
+            let mut parked = std::pin::pin!(witness.changed.wait_until(|| witness.parked.load(Ordering::Acquire)));
+            poll_fn(|task| {
+                assert!(run.as_mut().poll(task).is_pending());
+                parked.as_mut().poll(task)
+            }).await;
+        }
+        assert_eq!(timer.pending_count(), 1);
+        // Inject a latched timer wake while the owner's next time observation
+        // remains before expiry. This reproduces the early-fire boundary
+        // without requiring the runtime to enable wheel coalescing globally.
+        clock.advance_to(deadline);
+        assert_eq!(timer.process_timers(), 1);
+        clock.set(Time::ZERO);
+        eprintln!("scenario=membership_work_early_timer state=parked clock_ns=0 deadline_ns={} timer_fired=1", deadline.as_nanos());
+        poll_fn(|task| {
+            assert!(run.as_mut().poll(task).is_pending());
+            assert!(run.as_mut().poll(task).is_pending(), "completed Sleep must be reset before reuse");
+            Poll::Ready(())
+        }).await;
+        assert_eq!(timer.pending_count(), 1, "the expiry wake source is rearmed");
+        assert_eq!(owner.live_leases(), 1);
+        assert!(!witness.dropped.load(Ordering::Acquire));
+
+        clock.advance_to(deadline);
+        assert_eq!(timer.process_timers(), 1);
+        let report = run.await.unwrap();
+        assert!(matches!(report.trigger, MembershipWorkTrigger::LeaseEnded(OwnedLeaseStatus::Expired)));
+        assert_eq!(report.task.unwrap(), 41);
+        assert!(report.close.is_ok());
+        assert!(matches!(report.lease, Ok(OwnedLeaseStatus::Expired)));
+        assert!(witness.dropped.load(Ordering::Acquire));
+        assert_eq!(owner.live_leases(), 0);
+        assert_eq!(timer.pending_count(), 0);
+        assert!(!cx.is_cancel_requested());
+        eprintln!("scenario=membership_work_early_timer poll_count=2 terminal=Expired task=41 child_drained=true live_leases=0 pending_timers=0");
     });
 }
 

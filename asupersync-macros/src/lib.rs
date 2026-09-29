@@ -90,6 +90,12 @@ pub fn derive_proto_oneof(input: TokenStream) -> TokenStream {
 
 /// Runs an async `main` function on an asupersync production runtime.
 ///
+/// After either a return or an unwinding panic, the root region receives a
+/// shutdown cancellation and is drained for `drain_ms` milliseconds (default
+/// 2000). The original panic is then resumed. Set `drain_ms = 0` to skip this
+/// drain. `drain_report = true` prints the drain outcome to stderr; reporting
+/// is disabled by default and does not change the function's return type.
+///
 /// Supported signatures:
 ///
 /// ```ignore
@@ -111,6 +117,8 @@ pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// This is distinct from [`#[lab_test]`](macro@lab_test): `#[asupersync::test]`
 /// uses the production runtime, while `#[lab_test]` uses deterministic lab
 /// runtime seed matrices.
+/// The `drain_ms` and `drain_report` options, including panic-path cleanup,
+/// are the same as for [`#[main]`](macro@main).
 #[proc_macro_attribute]
 pub fn test(attr: TokenStream, item: TokenStream) -> TokenStream {
     entry::test_impl(attr, item)
@@ -170,9 +178,15 @@ pub fn scope(input: TokenStream) -> TokenStream {
 /// # Syntax
 ///
 /// ```ignore
+/// spawn!(move |cx| async move { work(&cx).await })  // receives the task's own `Cx`
 /// spawn!(async { /* work */ })
 /// spawn!(async move { /* work with captured values */ })
 /// ```
+///
+/// A bare future cannot receive the spawned task's context. If it awaits a
+/// cancel-aware operation on a captured parent `cx`, cancelling the task (or
+/// its region) does not reach that operation. Use the closure form for such
+/// work, or call `asupersync::Cx::current()` inside the future.
 ///
 /// # Returns
 ///
@@ -282,10 +296,19 @@ pub fn join_all(input: TokenStream) -> TokenStream {
 /// # Syntax
 ///
 /// ```ignore
+/// // Factory form (preferred): each branch receives its own child `Cx`.
+/// race!(cx, { move |child| work_a(child), move |child| work_b(child), ... })
+/// race!(cx, { "name" => move |child| work_a(child), "other" => move |child| work_b(child) })
+/// race!(cx, timeout: Duration::from_secs(5), { move |child| work_a(child), ... })
+///
+/// // Prebuilt-future form
 /// race!(cx, { future1, future2, ... })
 /// race!(cx, { "name" => future1, "other" => future2, ... })
 /// race!(cx, timeout: Duration::from_secs(5), { future1, future2, ... })
 /// ```
+///
+/// Every branch of one `race!` must use the same form. The factory form expands
+/// to `asupersync::Cx::race_drained_with*`.
 ///
 /// # Returns
 ///
@@ -295,16 +318,26 @@ pub fn join_all(input: TokenStream) -> TokenStream {
 ///
 /// All non-winning branches are cancelled and drained: the macro does not
 /// return until each loser task has terminated, so obligations and finalizers
-/// held by a loser are resolved rather than abandoned. (On the `timeout:` path,
-/// an elapsed deadline abandons the whole race by drop, matching
-/// `asupersync::Cx::race_drained_timeout`.)
+/// held by a loser are resolved rather than abandoned.
+///
+/// **A branch must use its own context to observe that cancellation.** Loser
+/// cancellation targets the branch's own task. A prebuilt future that awaits a
+/// cancel-aware operation on the caller's `cx` (for example `rx.recv(&cx)`)
+/// never sees it, so the drain waits until that branch finishes on its own,
+/// possibly forever. Use the factory form and pass `child` to the branch's
+/// operations, or call `asupersync::Cx::current()` inside the branch.
+///
+/// On a `timeout:` expiry, the factory form cancels and drains every branch
+/// and returns `Err(JoinError::Cancelled(_))` with a timeout reason. The
+/// prebuilt form instead abandons the whole race by drop, matching
+/// `asupersync::Cx::race_drained_timeout`.
 ///
 /// # Example
 ///
 /// ```ignore
 /// let result = race!(cx, {
-///     primary_service.fetch().await,
-///     backup_service.fetch().await,
+///     move |child| async move { primary_service.fetch(&child).await },
+///     move |child| async move { backup_service.fetch(&child).await },
 /// });
 /// // One completed; the loser was cancelled AND drained before this returned.
 /// ```
@@ -333,6 +366,14 @@ pub fn race(input: TokenStream) -> TokenStream {
 /// `Result<R, JoinError>`. Branch futures and `R` must be `Send + 'static`, and
 /// `cx` must carry spawn authority (`Cx<cap::All>`).
 ///
+/// A branch may instead be a child-context factory,
+/// `pat = move |child| work(child) => handler`, which routes through
+/// `asupersync::Cx::race_drained_with`. Every branch must then use that form,
+/// and it cannot be combined with `else`. Prefer it: loser cancellation targets
+/// the branch's own task, so a branch future that awaits a cancel-aware
+/// operation on the caller's `cx` (for example `rx.recv(&cx)`) never sees it,
+/// and the drain waits until that branch finishes on its own.
+///
 /// **Non-blocking default** (trailing `else => <handler>` arm): each branch is
 /// polled **exactly once** in source order; the first ready branch wins,
 /// otherwise the `else` handler runs immediately. This is the Go-style
@@ -354,7 +395,13 @@ pub fn race(input: TokenStream) -> TokenStream {
 /// # Syntax
 ///
 /// ```ignore
-/// // blocking, drain-correct
+/// // blocking, drain-correct; each branch receives its own child `Cx`
+/// let r = select!(cx, {
+///     a = move |child| primary.fetch(child) => use_primary(a),
+///     b = move |child| backup.fetch(child)  => use_backup(b),
+/// })?;
+///
+/// // blocking, prebuilt branch futures
 /// let r = select!(cx, {
 ///     a = primary.fetch()  => use_primary(a),
 ///     b = backup.fetch()   => use_backup(b),

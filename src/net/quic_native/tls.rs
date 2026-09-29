@@ -916,6 +916,18 @@ impl RustlsQuicCryptoProvider {
         }
     }
 
+    /// Retry may select a zero-length CID (RFC 9000 §17.2.5). Preserve the
+    /// public initial-derivation input checks while allowing that wire case.
+    pub(crate) fn install_retry_initial_keys(
+        &mut self,
+        dcid: &[u8],
+        transcript: &QuicHandshakeTranscript,
+    ) {
+        self.transcript_hash = transcript.digest();
+        let keys = self.suite.keys(dcid, self.side.into(), self.version);
+        self.insert_keys(PacketProtectionSpace::Initial, false, 0, keys);
+    }
+
     fn insert_keys(
         &mut self,
         space: PacketProtectionSpace,

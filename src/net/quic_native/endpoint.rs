@@ -204,6 +204,9 @@ pub struct QuicUdpEndpoint {
     /// Reusable receive scratch buffers, so batch receives do not pay a
     /// `max_packet_size` allocation + zero fill per batch.
     recv_payload_pool: Vec<Vec<u8>>,
+    /// Errors the next managed sends report as if the socket returned them.
+    #[cfg(test)]
+    injected_send_errors: std::collections::VecDeque<io::Error>,
 }
 
 /// Endpoint metrics for observability.
@@ -345,6 +348,8 @@ impl QuicUdpEndpoint {
             endpoint_id,
             metrics: Arc::new(EndpointMetrics::default()),
             recv_payload_pool: Vec::new(),
+            #[cfg(test)]
+            injected_send_errors: std::collections::VecDeque::new(),
         })
     }
 
@@ -354,10 +359,16 @@ impl QuicUdpEndpoint {
         self.local_addr
     }
 
-    /// Preserve the bound socket's configuration when adopting its owner.
-    #[cfg(feature = "tls")]
+    /// The bound socket's configuration: adopting owners preserve it, and the
+    /// managed loop reads its send size limit.
     pub(crate) fn config(&self) -> &QuicUdpEndpointConfig {
         &self.config
+    }
+
+    /// Make the next managed sends fail with these errors before the socket.
+    #[cfg(test)]
+    pub(crate) fn inject_send_errors(&mut self, errors: impl IntoIterator<Item = io::Error>) {
+        self.injected_send_errors.extend(errors);
     }
 
     /// Get the endpoint ID for logging and tracing.
@@ -388,13 +399,28 @@ impl QuicUdpEndpoint {
     /// Receive a batch of packets with cancellation support.
     ///
     /// Receives up to `max_packets` datagrams, respecting Cx checkpoints.
-    /// Returns empty vec if cancelled or no packets available.
+    /// A receive parked on an empty socket also wakes when `cx` is cancelled
+    /// and returns [`QuicUdpEndpointError::Cancelled`] (unless cancellation
+    /// is masked), instead of waiting for the next datagram.
     pub async fn receive_batch(
         &mut self,
         cx: &Cx,
         max_packets: usize,
     ) -> Result<Vec<ReceivedPacket>, QuicUdpEndpointError> {
-        std::future::poll_fn(|task_cx| self.poll_receive_batch(cx, task_cx, max_packets)).await
+        let mut cancelled = std::pin::pin!(cx.cancelled());
+        std::future::poll_fn(|task_cx| {
+            let polled = self.poll_receive_batch(cx, task_cx, max_packets);
+            // Socket readiness alone never observes cancellation: also
+            // register this parked receive's waker for `cx` cancellation.
+            if polled.is_pending()
+                && std::future::Future::poll(cancelled.as_mut(), task_cx).is_ready()
+                && cx.checkpoint().is_err()
+            {
+                return Poll::Ready(Err(QuicUdpEndpointError::Cancelled));
+            }
+            polled
+        })
+        .await
     }
 
     pub(crate) fn poll_receive_batch(
@@ -587,6 +613,11 @@ impl QuicUdpEndpoint {
                 dst_addr: packet.dst_addr,
                 payload: &packet.data,
             });
+        }
+        #[cfg(test)]
+        if let Some(error) = self.injected_send_errors.pop_front() {
+            self.metrics.send_errors.fetch_add(1, Ordering::Relaxed);
+            return Poll::Ready(Err(error));
         }
         if self.managed_send_socket.is_none() {
             self.managed_send_socket = Some(self.socket.try_clone()?);
@@ -1185,6 +1216,64 @@ mod tests {
             cx.set_cancel_requested(true);
             let result = endpoint.receive_batch(&cx, 1).await;
             assert!(matches!(result, Err(QuicUdpEndpointError::Cancelled)));
+        });
+    }
+
+    // A receive parked on an empty socket waits on socket readiness only.
+    // Cancelling its owner from another thread must wake it: before the fix it
+    // waited for the next datagram, here forever (bounded by the timeout).
+    #[test]
+    fn cancellation_wakes_a_receive_parked_on_an_empty_socket() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .with_reactor(crate::runtime::reactor::create_reactor().unwrap())
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let cx = Cx::current().expect("native root context");
+            let mut endpoint = QuicUdpEndpoint::bind(
+                &cx,
+                "127.0.0.1:0".parse().unwrap(),
+                QuicUdpEndpointConfig::default(),
+            )
+            .await
+            .expect("bind endpoint");
+            let (parked_tx, parked_rx) = std::sync::mpsc::sync_channel(1);
+            let canceller_cx = cx.clone();
+            let canceller = std::thread::spawn(move || {
+                parked_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("receive parked before cancellation");
+                canceller_cx.set_cancel_requested(true);
+            });
+            let started = Instant::now();
+            let mut parked = false;
+            let result = {
+                let mut receive = std::pin::pin!(endpoint.receive_batch(&cx, 1));
+                crate::time::timeout(
+                    cx.now(),
+                    Duration::from_secs(5),
+                    std::future::poll_fn(|task| {
+                        let polled = std::future::Future::poll(receive.as_mut(), task);
+                        if polled.is_pending() && !parked {
+                            parked = true;
+                            parked_tx.send(()).unwrap();
+                        }
+                        polled
+                    }),
+                )
+                .await
+                .expect("cancellation must wake the parked receive")
+            };
+            canceller.join().unwrap();
+            eprintln!(
+                "scenario=parked_receive_cancel parked={parked} elapsed={:?} result={result:?}",
+                started.elapsed()
+            );
+            assert!(parked, "the receive parked before cancellation");
+            assert!(
+                matches!(result, Err(QuicUdpEndpointError::Cancelled)),
+                "{result:?}"
+            );
         });
     }
 

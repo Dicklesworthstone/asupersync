@@ -30,6 +30,326 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Waker;
 use std::thread;
 
+/// A blocking operation whose runtime task retains ownership until the pool
+/// has finished the closure and destroyed its captures.
+///
+/// Created by [`Cx::spawn_blocking_drained`]. Cancellation fences a queued
+/// closure and requests cancellation through the closure's own `Cx`; an
+/// already claimed closure must return cooperatively. Dropping this handle
+/// requests cancellation while its region continues to own the operation.
+/// A completed result belongs to the handle, like an ordinary task result.
+#[must_use = "join to observe the blocking operation's result and retirement"]
+pub struct DrainedBlockingHandle<T> {
+    task: crate::runtime::TaskHandle<()>,
+    state: Arc<DrainedBlockingState<T>>,
+}
+
+impl<T> std::fmt::Debug for DrainedBlockingHandle<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DrainedBlockingHandle")
+            .field("task", &self.task.task_id())
+            .field("finished", &self.is_finished())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T> DrainedBlockingHandle<T> {
+    pub(crate) fn new(
+        task: crate::runtime::TaskHandle<()>,
+        state: Arc<DrainedBlockingState<T>>,
+    ) -> Self {
+        Self { task, state }
+    }
+
+    /// Actual task identity after the runtime admits the operation.
+    #[must_use]
+    pub fn task_id(&self) -> crate::types::TaskId {
+        self.task.task_id()
+    }
+
+    /// True only after the owning runtime task has retired.
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.task.is_finished()
+    }
+
+    /// Request cancellation without discarding a result already produced.
+    pub fn abort(&self) {
+        self.abort_with_reason(crate::types::CancelReason::user("abort"));
+    }
+
+    /// Request attributed cancellation. A queued closure cannot pass the claim
+    /// gate after this call; a running closure observes its own cancelled Cx.
+    pub fn abort_with_reason(&self, reason: crate::types::CancelReason) {
+        self.state.cancel(reason.clone());
+        self.task.abort_with_reason(reason);
+    }
+
+    /// Join actual closure retirement without a cancellation shortcut.
+    ///
+    /// Dropping this borrowing wait preserves the result and may be resumed.
+    /// A running closure's exact returned value survives later cancellation,
+    /// including a domain-level cancellation result. A closure cancelled before
+    /// execution returns `JoinError::Cancelled`; a panic remains `Panicked`.
+    pub async fn join(&mut self) -> Result<T, crate::runtime::JoinError> {
+        let terminal = std::future::poll_fn(|cx| self.task.poll_join(cx)).await;
+        if matches!(terminal, Err(crate::runtime::JoinError::PolledAfterCompletion)) {
+            return Err(crate::runtime::JoinError::PolledAfterCompletion);
+        }
+        if let Some(result) = self.state.inner.lock().result.take() {
+            return result;
+        }
+        match terminal {
+            Err(error) => Err(error),
+            Ok(()) => Err(crate::runtime::JoinError::Panicked(
+                crate::types::PanicPayload::new("drained blocking task omitted its result"),
+            )),
+        }
+    }
+}
+
+impl<T> Drop for DrainedBlockingHandle<T> {
+    fn drop(&mut self) {
+        let completed = {
+            let mut state = self.state.inner.lock();
+            state.abandoned = true;
+            if state.finished { state.result.take() } else { None }
+        };
+        self.abort();
+        // A result already published to this handle is caller-owned. Before
+        // publication, the pool worker destroys abandoned results and only then
+        // releases the runtime task's retirement wait.
+        drop(completed);
+    }
+}
+
+struct DrainedBlockingInner<T> {
+    cancel: Option<crate::types::CancelReason>,
+    finished: bool,
+    abandoned: bool,
+    result: Option<Result<T, crate::runtime::JoinError>>,
+    panic: Option<crate::types::PanicPayload>,
+    waiter: Option<Waker>,
+}
+
+pub(crate) struct DrainedBlockingState<T> {
+    inner: Mutex<DrainedBlockingInner<T>>,
+}
+
+impl<T> DrainedBlockingState<T> {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: Mutex::new(DrainedBlockingInner {
+                cancel: None,
+                finished: false,
+                abandoned: false,
+                result: None,
+                panic: None,
+                waiter: None,
+            }),
+        })
+    }
+
+    fn cancel(&self, reason: crate::types::CancelReason) {
+        let mut state = self.inner.lock();
+        if let Some(current) = state.cancel.as_mut() {
+            current.strengthen(&reason);
+        } else {
+            state.cancel = Some(reason);
+        }
+    }
+
+    fn finish(&self, result: Result<T, crate::runtime::JoinError>) {
+        let mut state = self.inner.lock();
+        debug_assert!(!state.finished, "one pool retirement per operation");
+        let panic = match &result {
+            Err(crate::runtime::JoinError::Panicked(panic)) => Some(panic.clone()),
+            _ => None,
+        };
+        if state.abandoned {
+            drop(state);
+            // T may own a native resource with a blocking or panicking Drop.
+            // The admitted task stays alive across this entire destructor.
+            let retirement = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(result)));
+            let panic = retirement.err().map(drained_panic).or(panic);
+            let wake = {
+                let mut state = self.inner.lock();
+                state.panic = panic;
+                state.finished = true;
+                state.waiter.take()
+            };
+            if let Some(wake) = wake { wake.wake(); }
+        } else {
+            state.panic = panic;
+            state.result = Some(result);
+            state.finished = true;
+            let wake = state.waiter.take();
+            drop(state);
+            if let Some(wake) = wake { wake.wake(); }
+        }
+    }
+
+    fn poll_finished(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+        let incoming = cx.waker().clone();
+        let mut state = self.inner.lock();
+        if state.finished {
+            drop(state);
+            drop(incoming);
+            return std::task::Poll::Ready(());
+        }
+        let old = state.waiter.replace(incoming);
+        drop(state);
+        drop(old);
+        std::task::Poll::Pending
+    }
+}
+
+fn drained_panic(payload: Box<dyn std::any::Any + Send>) -> crate::types::PanicPayload {
+    let message = crate::cx::scope::payload_to_string(&payload);
+    // An arbitrary panic payload may panic again in Drop. The task keeps the
+    // stable diagnostic, matching other runtime panic-isolation boundaries.
+    std::mem::forget(payload);
+    crate::types::PanicPayload::new(message)
+}
+
+/// Owns every closure capture even when the pool skips or rejects the job.
+/// Pool `is_done()` can precede task.work destruction, so it is deliberately
+/// not the retirement signal for this API.
+struct DrainedPoolWork<F, T> {
+    work: Option<F>,
+    cx: Cx,
+    state: Arc<DrainedBlockingState<T>>,
+    result: Option<Result<T, crate::runtime::JoinError>>,
+}
+
+impl<F: FnOnce() -> T, T> DrainedPoolWork<F, T> {
+    fn run(mut self) {
+        if self.cx.checkpoint().is_err() {
+            self.state.cancel(self.cx.cancel_reason().unwrap_or_else(
+                crate::types::CancelReason::shutdown,
+            ));
+        }
+        let claimed = {
+            self.state.inner.lock().cancel.is_none()
+        };
+        if claimed {
+            let work = self.work.take().expect("one claimed blocking closure");
+            self.result = Some(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+                    .map_err(|payload| crate::runtime::JoinError::Panicked(drained_panic(payload))),
+            );
+        }
+        // Drop destroys any uninvoked closure before publishing retirement.
+    }
+}
+
+impl<F, T> Drop for DrainedPoolWork<F, T> {
+    fn drop(&mut self) {
+        let retired = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(self.work.take());
+        }));
+        let result = if let Err(payload) = retired {
+            Err(crate::runtime::JoinError::Panicked(drained_panic(payload)))
+        } else if let Some(result) = self.result.take() {
+            result
+        } else {
+            let requested = self.state.inner.lock().cancel.clone();
+            let observed = self.cx.cancel_reason();
+            let reason = match (requested, observed) {
+                (Some(mut requested), Some(observed)) => {
+                    requested.strengthen(&observed);
+                    requested
+                }
+                (Some(reason), None) | (None, Some(reason)) => reason,
+                (None, None) => crate::types::CancelReason::shutdown(),
+            };
+            Err(crate::runtime::JoinError::Cancelled(reason))
+        };
+        self.state.finish(result);
+    }
+}
+
+struct DrainedBlockingWait<T> {
+    cx: Cx,
+    state: Arc<DrainedBlockingState<T>>,
+    task: BlockingTaskHandle,
+    cancel_waker: Option<crate::cx::CancelWakerToken>,
+    cancellation_observed: bool,
+    done: bool,
+}
+
+impl<T> Drop for DrainedBlockingWait<T> {
+    fn drop(&mut self) {
+        if let Some(token) = self.cancel_waker.take() {
+            self.cx.clear_cancel_waker(token);
+        }
+        let waiter = self.state.inner.lock().waiter.take();
+        drop(waiter);
+        if !self.done {
+            self.state.cancel(self.cx.cancel_reason().unwrap_or_else(
+                crate::types::CancelReason::shutdown,
+            ));
+            self.task.cancel();
+        }
+    }
+}
+
+pub(crate) async fn drive_drained_blocking<Caps, F, T>(
+    cx: Cx<Caps>,
+    pool: BlockingPoolHandle,
+    work: F,
+    state: Arc<DrainedBlockingState<T>>,
+) where
+    Caps: Send + Sync + 'static,
+    F: FnOnce(Cx<Caps>) -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let control = cx.retype::<crate::cx::cap::All>();
+    let envelope = DrainedPoolWork {
+        work: Some(move || work(cx)),
+        cx: control.clone(),
+        state: Arc::clone(&state),
+        result: None,
+    };
+    if control.checkpoint().is_err() {
+        state.cancel(control.cancel_reason().unwrap_or_else(crate::types::CancelReason::shutdown));
+        drop(envelope);
+        return;
+    }
+    let task = pool.spawn(move || envelope.run());
+    let mut wait = DrainedBlockingWait {
+        cx: control,
+        state,
+        task,
+        cancel_waker: None,
+        cancellation_observed: false,
+        done: false,
+    };
+    std::future::poll_fn(|poll_cx| {
+        if !wait.cancellation_observed {
+            wait.cancel_waker = Some(wait.cx.refresh_cancel_waker(wait.cancel_waker, poll_cx.waker()));
+            if wait.cx.checkpoint().is_err() {
+                wait.cancellation_observed = true;
+                wait.state.cancel(wait.cx.cancel_reason().unwrap_or_else(
+                    crate::types::CancelReason::shutdown,
+                ));
+                wait.task.cancel();
+                if let Some(token) = wait.cancel_waker.take() {
+                    wait.cx.clear_cancel_waker(token);
+                }
+            }
+        }
+        wait.state.poll_finished(poll_cx)
+    }).await;
+    wait.done = true;
+    let panic = wait.state.inner.lock().panic.clone();
+    if let Some(panic) = panic {
+        // Keep the pool diagnostic in the public handle while the ordinary
+        // runtime panic boundary records the same failed task outcome.
+        panic!("drained blocking operation panicked: {panic}");
+    }
+}
+
 /// Maximum number of concurrent fallback blocking threads (when no pool exists).
 /// Prevents unbounded thread creation under load.
 const MAX_FALLBACK_THREADS: usize = 256;
@@ -392,6 +712,80 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    #[test]
+    fn drained_cancelled_pool_envelope_retires_capture_before_publication() {
+        struct Capture(Arc<AtomicUsize>);
+        impl Drop for Capture {
+            fn drop(&mut self) { self.0.fetch_add(1, Ordering::SeqCst); }
+        }
+        let drops = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let capture = Capture(Arc::clone(&drops));
+        let called = Arc::clone(&calls);
+        let state = DrainedBlockingState::new();
+        state.cancel(crate::types::CancelReason::user("cancelled before pool claim"));
+        let envelope = DrainedPoolWork {
+            work: Some(move || {
+                called.fetch_add(1, Ordering::SeqCst);
+                drop(capture);
+                7_u8
+            }),
+            cx: Cx::for_testing(),
+            state: Arc::clone(&state),
+            result: None,
+        };
+        envelope.run();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        let mut state = state.inner.lock();
+        assert!(state.finished);
+        assert!(matches!(state.result.take(),
+            Some(Err(crate::runtime::JoinError::Cancelled(reason)))
+                if reason.kind == crate::types::CancelKind::User));
+    }
+
+    #[test]
+    fn drained_skipped_capture_panic_is_a_terminal_panic() {
+        struct Panics;
+        impl Drop for Panics {
+            fn drop(&mut self) { panic!("drained capture retirement sentinel"); }
+        }
+        let state = DrainedBlockingState::<u8>::new();
+        let capture = Panics;
+        let envelope = DrainedPoolWork {
+            work: Some(move || { drop(capture); 1_u8 }),
+            cx: Cx::for_testing(),
+            state: Arc::clone(&state),
+            result: None,
+        };
+        // Mirrors the blocking pool dropping a skipped or rejected job.
+        drop(envelope);
+        let mut state = state.inner.lock();
+        assert!(state.finished);
+        assert!(matches!(state.result.take(),
+            Some(Err(crate::runtime::JoinError::Panicked(payload)))
+                if payload.message() == "drained capture retirement sentinel"));
+    }
+
+    #[test]
+    fn drained_join_cannot_publish_a_late_result_after_observed_task_teardown() {
+        let cx = Cx::for_testing();
+        let (sender, task) = crate::runtime::task_handle::task_handle_channel::<()>(
+            cx.task_id(), Arc::downgrade(&cx.inner),
+        );
+        let state = DrainedBlockingState::new();
+        let mut handle = DrainedBlockingHandle::new(task, Arc::clone(&state));
+        // Teardown closes the actual task's terminal publisher before the pool
+        // finishes. The first observed terminal is final for this handle.
+        drop(sender);
+        assert!(matches!(future::block_on(handle.join()),
+            Err(crate::runtime::JoinError::Cancelled(_))));
+        state.finish(Ok(73_u8));
+        assert!(matches!(future::block_on(handle.join()),
+            Err(crate::runtime::JoinError::PolledAfterCompletion)));
+        assert_eq!(state.inner.lock().result.take().unwrap().unwrap(), 73);
     }
 
     #[test]

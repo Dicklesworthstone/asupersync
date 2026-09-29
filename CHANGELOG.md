@@ -94,11 +94,23 @@ afterwards, and the clock can be captured and replayed within bounded windows.
 **Correction (2026-09-22):** the attribution below is wrong. The
 `#[derive(Debug, ...)]` on `Outcome<T, E>` is byte-identical at v0.4.3 and at
 v0.5.0 (`src/types/outcome.rs` line 217 in both tags), so it cannot be what
-changed in 0.5.0. The real cause of the downstream break observed with 0.5.0 is
-still unidentified and is tracked in `asupersync-bi2462.139`. The
-conditional-`Debug` behaviour described below is accurate. It has held since
-before v0.4.3, so it may explain an `E0277` in new code, but it is not a
-0.5.0 change.
+changed in 0.5.0. The conditional-`Debug` behaviour described below is
+accurate. It has held since before v0.4.3, so it may explain an `E0277` in new
+code, but it is not a 0.5.0 change.
+
+**Root cause (2026-09-24, `asupersync-bi2462.139`):** the downstream break was
+not an asupersync API change. `Cx::for_request`, `Cx::for_request_with_budget`
+and `Cx::for_testing` have been gated behind the `test-internals` feature since
+before v0.4.3, and that is unchanged in 0.5.0. `sqlmodel` 0.4.0 enabled
+`asupersync/test-internals` in its normal (non-dev) dependencies, so every
+build that pulled in `sqlmodel` 0.4 also had the test-only constructors, and
+production code came to rely on them. `sqlmodel` 0.5.0 stopped leaking the
+feature (sqlmodel_rust `580e66e`). Upgrading to it together with asupersync 0.5
+removed the constructors from production builds. `--all-targets` builds still
+compiled because dev-dependencies enable the feature. Production code should
+not call these constructors: take the ambient context with `Cx::current()`, or
+mint one from the runtime with `Runtime::request_cx_with_budget`. Keep
+`test-internals` in `[dev-dependencies]` only.
 
 This is not new in 0.6.0; it landed in **0.5.0** and is documented here because
 it is a silent, source-breaking change for downstream crates that only surfaces
@@ -133,6 +145,49 @@ match outcome {
 
 The derive itself is correct and is not changing. Thanks to the
 `mcp_agent_mail_rust` maintainers for reporting the concrete breakage.
+
+### Breaking CLI change — plaintext ATP-over-TCP is refused off loopback
+
+`atp send`, `atp recv`, `atp serve` and `asupersync atp serve` now refuse
+`--transport tcp` (the default transport) toward or on any non-loopback
+address unless `--allow-plaintext` is given. `asupersync atp send`, which
+always sends plaintext TCP, refuses a non-loopback target the same way. The receivers' default listen
+address, `0.0.0.0`, counts as non-loopback, so a bare `atp recv DIR` or
+`asupersync atp serve` needs the flag or a loopback `--listen`. Loopback
+transfers are unchanged.
+
+Why: that transport is plaintext and its manifest is unauthenticated. The
+SHA-256 and Merkle checks catch corruption, but an on-path attacker can
+substitute the manifest and the bytes together. For transfers between hosts,
+use `--transport quic` (or `auto`), which is authenticated and encrypted, or
+pass `--allow-plaintext` to accept the risk. An SSH-bootstrapped send forwards
+the flag to the remote receiver, so an older remote `atp` rejects the unknown
+flag and has to be upgraded (`asupersync-bi2462.126`).
+
+### Behavior change — the legacy ATP SDK session refuses work it cannot do
+
+`asupersync::atp::sdk::AtpSession` has no transport and no object store.
+Several of its methods used to report work that never happened. They now
+return typed errors (`asupersync-bi2462.127`):
+
+- `send_object`, `stream_large_buffer`, `verify_object` and `path_diagnose`
+  return `AtpError::Policy(PolicyError::FeatureDisabled)`. Before, they
+  returned a transfer handle that moved no bytes, a stream handle reporting
+  a committed stream with zero bytes sent, a verdict that compared the
+  object id's own hash with itself, and a `NoAvailablePaths` diagnosis that
+  never probed a path.
+- `cancel_transfer` on an id the session does not hold returns
+  `ProtocolError::SessionStateMismatch`. Before, it returned `Ok(())`.
+
+Signatures are unchanged. Use `asupersync::net::atp::sdk`, the canonical
+SDK: `AtpSdk::native_transfers` (feature `tls`) moves bytes.
+
+The net SDK's `AtpSession::verify_object` now hashes files in bounded reads,
+and only the expected hash decides `integrity_check_passed`. Before, a tar
+archive (zero padding at a 512-byte multiple) and any empty file whose path
+lacked "empty" failed even when the hash matched. Its methods now report a
+cancelled `Cx` as `Cancelled` rather than as
+`PlatformError::OperatingSystemError`.
 
 ### Durable ATP resume and journaling
 

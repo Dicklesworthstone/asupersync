@@ -1,6 +1,11 @@
 //! Actual disk + mTLS + RaptorQ recovery after termination of the storing process.
 //! This is process-crash coverage, NOT power-loss/filesystem-conformance proof.
 #![cfg(all(unix, not(target_arch = "wasm32"), feature = "tls", feature = "test-internals"))]
+// An integration test is its own crate and does not inherit `src/lib.rs`'s
+// `recursion_limit`. Proving `Send` for its async chains exceeds rustc's default
+// depth, which the future-incompatible `recursion_depth_exceeding_limit` lint
+// (rust-lang #159228) will turn into a hard error.
+#![recursion_limit = "256"]
 
 use asupersync::distributed::distribution::{DistributionConfig, DistributorTransport, SymbolDistributor};
 use asupersync::distributed::symbol_service::{

@@ -470,7 +470,7 @@ mod comprehensive_tests {
 
     #[test]
     fn all_parameters_maximum_values() {
-        // Test all parameters at their maximum allowable values
+        // Every parameter at the largest value RFC 9000 §18.2 allows.
         let params = TransportParameters {
             max_idle_timeout: Some(QUIC_VARINT_MAX),
             max_udp_payload_size: Some(QUIC_VARINT_MAX),
@@ -478,10 +478,10 @@ mod comprehensive_tests {
             initial_max_stream_data_bidi_local: Some(QUIC_VARINT_MAX),
             initial_max_stream_data_bidi_remote: Some(QUIC_VARINT_MAX),
             initial_max_stream_data_uni: Some(QUIC_VARINT_MAX),
-            initial_max_streams_bidi: Some(QUIC_VARINT_MAX),
-            initial_max_streams_uni: Some(QUIC_VARINT_MAX),
-            ack_delay_exponent: Some(20), // Maximum allowed
-            max_ack_delay: Some(QUIC_VARINT_MAX),
+            initial_max_streams_bidi: Some(1 << 60), // §4.6
+            initial_max_streams_uni: Some(1 << 60),
+            ack_delay_exponent: Some(20),
+            max_ack_delay: Some((1 << 14) - 1), // 2^14 ms and above are invalid
             disable_active_migration: true,
             max_datagram_frame_size: Some(QUIC_VARINT_MAX),
             unknown: vec![
@@ -503,6 +503,27 @@ mod comprehensive_tests {
 
         let decoded = TransportParameters::decode(&encoded).expect("decode maximum parameters");
         assert_eq!(decoded, params);
+
+        // One step past each maximum is refused locally, as a peer would refuse it.
+        let past_maximum: [(u64, fn(&mut TransportParameters)); 4] = [
+            (TP_INITIAL_MAX_STREAMS_BIDI, |p| {
+                p.initial_max_streams_bidi = Some((1 << 60) + 1);
+            }),
+            (TP_INITIAL_MAX_STREAMS_UNI, |p| {
+                p.initial_max_streams_uni = Some((1 << 60) + 1);
+            }),
+            (TP_ACK_DELAY_EXPONENT, |p| p.ack_delay_exponent = Some(21)),
+            (TP_MAX_ACK_DELAY, |p| p.max_ack_delay = Some(1 << 14)),
+        ];
+        for (id, step_past) in past_maximum {
+            let mut over = params.clone();
+            step_past(&mut over);
+            assert_eq!(
+                over.encode(&mut Vec::new()),
+                Err(QuicCoreError::InvalidTransportParameter(id)),
+                "parameter 0x{id:x} one past its maximum"
+            );
+        }
     }
 
     #[test]

@@ -2624,6 +2624,8 @@ pub struct RuntimeBuilder {
     /// Set by [`RuntimeBuilder::current_thread`]: `Runtime::block_on` drives
     /// the single worker from the calling thread (GH#58).
     current_thread: bool,
+    /// Optional bounded production poll/wake capture, installed before exposure.
+    capture_schedules: bool,
 }
 
 impl RuntimeBuilder {
@@ -2641,6 +2643,7 @@ impl RuntimeBuilder {
             entropy_source: None,
             host_services: default_runtime_host_services(),
             current_thread: false,
+            capture_schedules: false,
         }
     }
 
@@ -2658,6 +2661,19 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn worker_threads(mut self, n: usize) -> Self {
         self.config.worker_threads = n;
+        self
+    }
+
+    /// Capture native task dispatch, poll, wake, yield and cancellation-ack events.
+    ///
+    /// Disabled by default. Enabled capture shares the bounded trace storage
+    /// selected by [`Self::trace_storage_profile`] and records worker metadata
+    /// separately without changing the canonical trace event schema. Inspect
+    /// [`Runtime::schedule_capture_snapshot`] for explicit truncation and
+    /// projection errors before attempting production-to-Lab replay.
+    #[must_use]
+    pub fn capture_schedules(mut self, enabled: bool) -> Self {
+        self.capture_schedules = enabled;
         self
     }
 
@@ -3285,6 +3301,7 @@ impl RuntimeBuilder {
             entropy_source,
             host_services,
             current_thread,
+            capture_schedules,
         } = self;
         #[cfg(target_arch = "wasm32")]
         let _ = (platform_reactor, io_uring_capability_policy);
@@ -3343,6 +3360,15 @@ impl RuntimeBuilder {
             host_services.as_ref(),
             current_thread,
         )?;
+        if capture_schedules {
+            let trace = runtime
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .trace_handle();
+            runtime.inner.scheduler.enable_schedule_capture(trace);
+        }
         if let Some(limit) = scoped_cpu_worker_limit {
             let gateway = {
                 let guard = runtime
@@ -3843,13 +3869,40 @@ fn scheduler_adaptive_ready_batch_profile(
 /// Result of [`Runtime::drain_root_region`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RootDrainOutcome {
-    /// Every root-region task reached a terminal state and no obligation is
-    /// pending; teardown will find nothing to abort.
+    /// The root and its descendants closed after their tasks, obligations,
+    /// and finalizers completed the close protocol.
     Quiescent,
-    /// The bound elapsed with live work remaining; teardown proceeds with
-    /// abort-by-drop for whatever is still running.
+    /// The bound elapsed before close completed. The borrowed drain call
+    /// retains unfinished work; subsequent teardown is a separate operation.
     TimedOut,
 }
+
+/// Terminal observation from [`Runtime::shutdown_drained`].
+///
+/// A timed-out report retains the runtime and its unfinished work. It does
+/// not certify that a non-cooperative task or pending finalizer was cleaned up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RootDrainReport {
+    /// Whether the root close protocol completed within the requested bound.
+    pub outcome: RootDrainOutcome,
+    /// Wall-clock time spent requesting and observing the drain.
+    pub elapsed: Duration,
+    /// Non-terminal tasks, including running asynchronous finalizers.
+    pub live_tasks: usize,
+    /// Obligations still awaiting commit or abort.
+    pub pending_obligations: usize,
+    /// Regions that have not completed their close protocol.
+    pub live_regions: usize,
+    /// Finalizers not yet dispatched; running finalizers count in `live_tasks`.
+    pub queued_finalizers: usize,
+    /// Reserved task admissions that have not been applied.
+    pub pending_spawns: usize,
+    /// Accepted obligation publications still awaiting application.
+    pub has_pending_obligation_posts: bool,
+}
+
+#[cfg(test)]
+mod root_drain_tests;
 
 /// A configured Asupersync runtime.
 ///
@@ -4075,10 +4128,12 @@ impl Runtime {
     ///   the preset's docs for the nesting rules and the synchronous-blocking
     ///   caveat. After the root completes, already-runnable work is drained
     ///   for a bounded number of dispatch turns before this returns.
-    /// - On every other flavor the future is polled in place on the caller
-    ///   with a request-scoped [`Cx`](crate::cx::Cx) and is not a registered
-    ///   task; spawned tasks run on the worker threads and keep running after
-    ///   this returns.
+    /// - Other flavors poll the future on the caller as a registered root task
+    ///   with checked obligation authority and root cancellation. The record
+    ///   retires after the future's destructor, including on panic. Spawned
+    ///   tasks run on workers and may outlive this call. If root admission fails
+    ///   (closed region or task limit), the compatibility fallback runs without
+    ///   checked holder authority.
     pub fn block_on<F: Future>(&self, future: F) -> F::Output {
         let _guard = ScopedRuntimeHandle::new(self.handle());
         // #41: install an ambient Cx backed by this runtime's drivers
@@ -4101,7 +4156,7 @@ impl Runtime {
         // back untouched when the worker cannot be borrowed (a call from
         // inside a task poll, a concurrent call from another thread while the
         // worker is on loan, the worker thread itself, shutdown), in which
-        // case the caller-polled path below runs exactly as before.
+        // case the caller-polled path below admits its own ownership record.
         let future = match self.inner.current_thread_driver.get() {
             Some(driver) => match driver.drive(&self.inner.scheduler, &request_cx, future) {
                 Ok(output) => return output,
@@ -4109,7 +4164,19 @@ impl Runtime {
             },
             None => future,
         };
-        run_future_with_budget(future, self.inner.config.poll_budget)
+        // Admit synchronously: this fallback also runs when block_on is nested
+        // inside a worker poll. Waiting for a spawned accounting task here could
+        // require the very worker occupied by the caller. The actual future
+        // remains pinned on this thread and need not be Send or 'static.
+        let registration = CallerTaskRegistration::new(&self.inner, &request_cx).ok();
+        let _caller_cx_guard = registration
+            .as_ref()
+            .map(|registration| crate::cx::Cx::set_current(Some(registration.cx.clone())));
+        run_future_with_budget(
+            future,
+            self.inner.config.poll_budget,
+            registration.as_ref().map(|registration| &registration.cx),
+        )
     }
 
     /// Run a future to completion with an ambient [`Cx`](crate::cx::Cx).
@@ -4130,7 +4197,7 @@ impl Runtime {
     ) -> F::Output {
         let _runtime_guard = ScopedRuntimeHandle::new(self.handle());
         let _cx_guard = crate::cx::Cx::set_current(Some(request_cx));
-        run_future_with_budget(future, self.inner.config.poll_budget)
+        run_future_with_budget(future, self.inner.config.poll_budget, None)
     }
 
     /// Run a future to completion using the currently installed runtime handle
@@ -4149,7 +4216,7 @@ impl Runtime {
         let handle = Self::current_handle()?;
         let inner = handle.try_inner().ok()?;
         let _cx_guard = crate::cx::Cx::set_current(Some(request_cx));
-        Some(run_future_with_budget(future, inner.config.poll_budget))
+        Some(run_future_with_budget(future, inner.config.poll_budget, None))
     }
 
     /// Create a request-scoped [`Cx`](crate::cx::Cx) backed by this runtime's
@@ -4434,23 +4501,32 @@ impl Runtime {
     /// terminal state. The entry macros call this after the entry future
     /// returns (`drain_ms = N` to change the bound, `0` to skip).
     ///
-    /// Returns [`RootDrainOutcome::Quiescent`] when no live task or pending
-    /// obligation remains, or [`RootDrainOutcome::TimedOut`] when the bound
-    /// elapsed first; in the latter case teardown proceeds with today's
-    /// abort-by-drop semantics for whatever is still running. Non-cooperative
-    /// work (no checkpoints) is not bounded by this call beyond the wait.
-    ///
-    /// The success predicate is task-and-obligation quiescence, deliberately
-    /// narrower than [`Runtime::is_quiescent`]: that predicate also requires
-    /// every region to have left the close lifecycle and the I/O driver to
-    /// hold no registered wakers, which a shutting-down runtime need not
-    /// satisfy for its work to be drained. The root region is advanced
-    /// through its close lifecycle after the drain so a later
-    /// `is_quiescent` check can succeed when nothing else is registered.
+    /// Returns [`RootDrainOutcome::Quiescent`] only after the root region and
+    /// its descendants have closed, including synchronous and asynchronous
+    /// finalizers. Unrelated I/O registrations are outside this predicate.
+    /// A timeout leaves unfinished work alive; ordinary runtime teardown still
+    /// has its established abort-by-drop semantics. Use
+    /// [`Self::shutdown_drained`] to receive counts and a terminal trace record.
     pub fn drain_root_region(&self, bound: Duration) -> RootDrainOutcome {
-        if self.work_is_drained() {
-            return RootDrainOutcome::Quiescent;
-        }
+        self.shutdown_drained(bound).outcome
+    }
+
+    /// Requests a structured shutdown of the root and reports its actual drain.
+    ///
+    /// Every region-owned task receives shutdown cancellation, and the workers
+    /// keep progressing children, obligations, and finalizers until the root
+    /// closes or `bound` expires. Closing the root rejects new work admitted to
+    /// that region. The report is also recorded as a `root_drain` user trace.
+    ///
+    /// This borrowed API keeps worker threads and runtime ownership alive. A
+    /// timeout neither drops unfinished tasks nor claims they were cleaned up;
+    /// the caller may release a blocked resource and drain again. Call
+    /// [`Self::shutdown_timeout`] separately to request bounded thread teardown.
+    /// Runtime `Drop` behavior is unchanged. The bound limits waiting, not a
+    /// user future that blocks a worker inside one poll.
+    #[must_use = "inspect the drain outcome before treating shutdown as complete"]
+    pub fn shutdown_drained(&self, bound: Duration) -> RootDrainReport {
+        let started = Instant::now();
         let reason = crate::types::CancelReason::new(crate::types::CancelKind::Shutdown);
         let effects = {
             let mut guard = self
@@ -4458,15 +4534,23 @@ impl Runtime {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard.cancel_request(self.inner.root_region, &reason, None)
+            guard
+                .region(self.inner.root_region)
+                .is_some()
+                .then(|| guard.cancel_request(self.inner.root_region, &reason, None))
         };
-        let (tasks_to_schedule, wakes) = effects.into_parts();
-        for (task_id, priority) in tasks_to_schedule {
-            self.inner.scheduler.inject_cancel(task_id, priority);
+        if let Some(effects) = effects {
+            let (tasks_to_schedule, wakes) = effects.into_parts();
+            for (task_id, priority) in tasks_to_schedule {
+                self.inner.scheduler.inject_cancel(task_id, priority);
+            }
+            wakes.dispatch();
         }
-        wakes.dispatch();
+        // An otherwise empty root can own only finalizers. Cancellation puts
+        // it into Finalizing without publishing a task, so wake parked workers
+        // to discover the finalizer queue before observing quiescence.
+        self.inner.scheduler.wake_all();
 
-        let started = Instant::now();
         // GH#58: on a current-thread runtime this thread drives the worker
         // while it waits, so cancelled tasks — including `!Send` tasks whose
         // future lives on this thread — make progress here; the observation
@@ -4487,72 +4571,109 @@ impl Runtime {
                 std::thread::sleep(Duration::from_millis(1));
             }
         });
-        if drained_in_time {
-            let mut guard = self
-                .inner
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard.advance_region_state(self.inner.root_region);
-            return RootDrainOutcome::Quiescent;
+        let mut report = self.root_drain_snapshot(started.elapsed());
+        if !drained_in_time {
+            report.outcome = RootDrainOutcome::TimedOut;
         }
-        crate::tracing_compat::warn!(
-            bound_ms = bound.as_millis() as u64,
-            "root region drain timed out; remaining work is dropped at teardown"
+        let status = match report.outcome {
+            RootDrainOutcome::Quiescent => "drain_completed",
+            RootDrainOutcome::TimedOut => "drain_timed_out",
+        };
+        let message = format!(
+            "root_drain outcome={status} elapsed_ms={} live_tasks={} pending_obligations={} live_regions={} queued_finalizers={} pending_spawns={} pending_obligation_posts={}",
+            report.elapsed.as_millis(),
+            report.live_tasks,
+            report.pending_obligations,
+            report.live_regions,
+            report.queued_finalizers,
+            report.pending_spawns,
+            report.has_pending_obligation_posts,
         );
-        RootDrainOutcome::TimedOut
+        let guard = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.record_trace_event(|seq| {
+            crate::trace::TraceEvent::user_trace(seq, guard.now, message)
+        });
+        report
     }
 
-    /// True when no live task (embedded or dispatch-table resident), no
-    /// pending obligation, and no not-yet-admitted spawn on the root region
-    /// remains.
+    /// True after root close, including all finalizers, with no live task
+    /// (embedded or dispatch-table resident), pending obligation, or reserved
+    /// admission remaining.
     ///
     /// Spawns travel through the admission mailbox, so a task spawned just
     /// before `block_on` returned may not have a record yet; counting only
     /// live records would report an empty runtime while work is still
     /// queued for admission (observed under parallel test load).
     fn work_is_drained(&self) -> bool {
-        let (embedded_live, pending_obligations, pending_spawns) = {
-            let guard = self
-                .inner
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            (
-                guard.live_task_count(),
-                guard.pending_obligation_count(),
-                guard
-                    .region(self.inner.root_region)
-                    .map_or(0, |root| {
-                        // Obligation reservations posted but not yet
-                        // applied count as live work too
-                        // (br-asupersync-bi2462.13).
-                        root.pending_spawn_count()
-                            .saturating_add(root.pending_obligation_post_count())
-                    })
-                    .saturating_add(u32::from(guard.has_pending_obligation_posts())),
-            )
-        };
-        if embedded_live != 0 || pending_obligations != 0 || pending_spawns != 0 {
-            return false;
-        }
-        self.inner
+        self.root_drain_snapshot(Duration::ZERO).outcome == RootDrainOutcome::Quiescent
+    }
+
+    fn root_drain_snapshot(&self, elapsed: Duration) -> RootDrainReport {
+        // Keep B held through the external task-table read (B -> A) so a
+        // finalizer's publication/completion cannot disappear between counts.
+        let guard = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let external_live = self
+            .inner
             .scheduler
             .dispatch_task_table()
-            .is_none_or(|table| {
+            .map_or(0, |table| {
                 table
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .live_task_count()
-                    == 0
-            })
+            });
+        let mut report = RootDrainReport {
+            outcome: RootDrainOutcome::TimedOut,
+            elapsed,
+            live_tasks: guard.live_task_count().saturating_add(external_live),
+            pending_obligations: guard.pending_obligation_count(),
+            live_regions: guard.live_region_count(),
+            queued_finalizers: 0,
+            pending_spawns: self
+                .inner
+                .root_pending_spawns
+                .as_ref()
+                .map_or(0, |pending| pending.count() as usize),
+            has_pending_obligation_posts: guard.has_pending_obligation_posts(),
+        };
+        for (_, region) in guard.regions_iter() {
+            report.queued_finalizers = report
+                .queued_finalizers
+                .saturating_add(region.finalizer_count());
+            if region.id != self.inner.root_region {
+                report.pending_spawns = report
+                    .pending_spawns
+                    .saturating_add(region.pending_spawn_count() as usize);
+            }
+            report.has_pending_obligation_posts |= region.pending_obligation_post_count() != 0;
+        }
+        if guard.region(self.inner.root_region).is_none()
+            && report.live_tasks == 0
+            && report.pending_obligations == 0
+            && report.live_regions == 0
+            && report.queued_finalizers == 0
+            && report.pending_spawns == 0
+            && !report.has_pending_obligation_posts
+        {
+            report.outcome = RootDrainOutcome::Quiescent;
+        }
+        report
     }
 
     /// Snapshot of the runtime's bounded trace buffer.
     ///
-    /// The production runtime records the same canonical event schema the
-    /// lab runtime does (`Spawn`, `Poll`, `Wake`, `Complete`, cancellation and
-    /// region-lifecycle events, timer events, `UserTrace`) into a ring buffer
+    /// The production runtime records canonical lifecycle events (`Spawn`,
+    /// `Complete`, cancellation, regions, timers and `UserTrace`) into a ring buffer.
+    /// [`RuntimeBuilder::capture_schedules`] additionally enables `Schedule`,
+    /// `Poll`, `Wake`, `Yield` and `CancelAck`. The buffer is
     /// sized by the [`RuntimeBuilder::trace_storage_profile`] (default 4096
     /// events; the oldest are overwritten). This returns a copy of what the
     /// buffer currently holds, in sequence order, so a production trace can
@@ -4572,6 +4693,17 @@ impl Runtime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .trace_handle();
         handle.snapshot()
+    }
+
+    /// Snapshot opt-in native scheduling capture and its bounded-storage metadata.
+    ///
+    /// `None` means [`RuntimeBuilder::capture_schedules`] was not enabled.
+    /// The returned immutable receipt reports storage loss and can reject an
+    /// incomplete projection through its `production_schedule` method. This
+    /// snapshot does not stop live workers or certify their terminal outcomes.
+    #[must_use]
+    pub fn schedule_capture_snapshot(&self) -> Option<crate::trace::ScheduleCaptureSnapshot> {
+        self.inner.scheduler.schedule_capture_snapshot()
     }
 
     /// Build a [`TaskInspector`] bound to this runtime's live task state.
@@ -4706,6 +4838,27 @@ impl Runtime {
             .map(|pool| pool.spawn_on_cohort(cohort, f))
     }
 
+    /// Spawn blocking work owned by this runtime's root region.
+    ///
+    /// Unlike [`Self::spawn_blocking`], the returned task participates in
+    /// [`Self::shutdown_drained`]: the root stays live until the closure and its
+    /// captures retire. The closure receives its actual task `Cx`, and a
+    /// started closure's exact result survives cancellation. This requires a
+    /// configured blocking pool and never executes the closure inline.
+    ///
+    /// Cancellation cannot interrupt a running synchronous closure. A bounded
+    /// root drain reports timeout and retains unfinished work until it returns.
+    pub fn spawn_blocking_drained<F, T>(
+        &self,
+        f: F,
+    ) -> Result<crate::runtime::spawn_blocking::DrainedBlockingHandle<T>, SpawnError>
+    where
+        F: FnOnce(crate::cx::Cx) -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        self.request_cx_with_budget(Budget::INFINITE).spawn_blocking_drained(f)
+    }
+
     /// Returns a handle to the blocking pool, if configured.
     #[must_use]
     pub fn blocking_handle(&self) -> Option<crate::runtime::blocking_pool::BlockingPoolHandle> {
@@ -4828,6 +4981,31 @@ impl RuntimeHandle {
         }))
     }
 
+    /// Register a real finalizer on an open native region for lifecycle tests.
+    ///
+    /// This uses the owning runtime's ordinary finalizer admission and returns
+    /// false if the runtime or region is gone, or the region has begun closing.
+    /// It does not synthesize a cleanup result or bypass region ownership.
+    #[cfg(any(test, feature = "test-internals"))]
+    #[doc(hidden)]
+    pub fn register_sync_finalizer_for_testing<F>(
+        &self,
+        region_id: crate::types::RegionId,
+        f: F,
+    ) -> bool
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let Ok(inner) = self.try_inner() else {
+            return false;
+        };
+        inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .register_sync_finalizer(region_id, f)
+    }
+
     fn try_inner(&self) -> Result<Arc<RuntimeInner>, SpawnError> {
         match &self.inner {
             RuntimeHandleRef::Strong(inner) => Ok(Arc::clone(inner)),
@@ -4888,6 +5066,22 @@ impl RuntimeHandle {
         self.try_inner()?.spawn(future)
     }
 
+    /// Requests the same structured root close as [`Runtime::shutdown_drained`].
+    ///
+    /// The call retains the runtime while observing cleanup and leaves worker
+    /// teardown to its owner. Call from outside the root's live tasks so the
+    /// caller itself is not part of the work being awaited.
+    ///
+    /// # Errors
+    /// Returns [`SpawnError::RuntimeUnavailable`] when a weak handle's runtime
+    /// has already been released.
+    pub fn shutdown_drained(&self, bound: Duration) -> Result<RootDrainReport, SpawnError> {
+        let runtime = Runtime {
+            inner: self.try_inner()?,
+        };
+        Ok(runtime.shutdown_drained(bound))
+    }
+
     /// Returns the browser worker pump if the underlying runtime was constructed with [`BrowserHostServices`].
     #[must_use]
     pub fn browser_pump(&self) -> Option<Arc<BrowserWorkerPump>> {
@@ -4924,11 +5118,13 @@ impl RuntimeHandle {
         self.try_inner()?.spawn_local(future)
     }
 
-    /// Spawn a task with a [`Cx`](crate::cx::Cx) from outside async context.
+/// Spawn a task with a [`Cx`](crate::cx::Cx) from outside async context.
     ///
     /// Creates a child Cx in the runtime's root region and passes it to the
-    /// factory closure. The Cx participates in structured cancellation: it
-    /// will observe cancellation when the runtime shuts down.
+    /// factory closure. The Cx observes shutdown cancellation when
+    /// [`Runtime::shutdown_drained`] or [`Runtime::drain_root_region`] runs.
+    /// Dropping a runtime or calling `shutdown_timeout` alone does not run
+    /// cooperative cancellation cleanup.
     ///
     /// Panics if the runtime is no longer available or if the root region
     /// rejects admission. Use [`RuntimeHandle::try_spawn_with_cx`] to handle
@@ -4953,12 +5149,14 @@ impl RuntimeHandle {
             .expect("failed to spawn task with cx");
     }
 
-    /// Spawn a task with a [`Cx`](crate::cx::Cx) from outside async context,
+/// Spawn a task with a [`Cx`](crate::cx::Cx) from outside async context,
     /// returning runtime-availability or admission errors instead of panicking.
     ///
     /// Creates a child Cx in the runtime's root region and passes it to the
-    /// factory closure. The Cx participates in structured cancellation: it
-    /// will observe cancellation when the runtime shuts down.
+    /// factory closure. The Cx observes shutdown cancellation when
+    /// [`Runtime::shutdown_drained`] or [`Runtime::drain_root_region`] runs.
+    /// Dropping a runtime or calling `shutdown_timeout` alone does not run
+    /// cooperative cancellation cleanup.
     ///
     /// # Example
     ///
@@ -5019,6 +5217,20 @@ impl RuntimeHandle {
     #[must_use]
     pub fn blocking_handle(&self) -> Option<crate::runtime::blocking_pool::BlockingPoolHandle> {
         self.try_inner().ok()?.blocking_handle()
+    }
+
+    /// Root-region-owned counterpart of [`Runtime::spawn_blocking_drained`].
+    /// A stale handle or missing blocking pool returns `RuntimeUnavailable`.
+    /// The work remains part of root drain even when this handle is dropped.
+    pub fn spawn_blocking_drained<F, T>(
+        &self,
+        f: F,
+    ) -> Result<crate::runtime::spawn_blocking::DrainedBlockingHandle<T>, SpawnError>
+    where
+        F: FnOnce(crate::cx::Cx) -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        self.try_request_cx_with_budget(Budget::INFINITE)?.spawn_blocking_drained(f)
     }
 }
 
@@ -5303,6 +5515,258 @@ struct RuntimeInner {
     browser_pump: std::sync::OnceLock<Arc<BrowserWorkerPump>>,
 }
 
+/// A real task record for a future polled outside the scheduler. The future
+/// itself stays on the block_on caller's stack; only its ownership record is
+/// shared with workers. No ready entry or stored future is installed, so a
+/// cancellation wake cannot cause a worker to poll the caller's future.
+struct CallerTaskRegistration {
+    inner: Arc<RuntimeInner>,
+    cx: crate::cx::Cx,
+}
+
+impl CallerTaskRegistration {
+    fn new(inner: &Arc<RuntimeInner>, parent: &crate::cx::Cx) -> Result<Self, SpawnError> {
+        let spawn_guard = inner.spawn_liveness_guard()?;
+        let dispatch_table = inner.scheduler.dispatch_task_table();
+        let (cx, handle, result_tx, spawn_effects) = {
+            let mut state = inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut target = dispatch_table.as_ref().map_or(
+                crate::runtime::state::AdmissionTaskTarget::Embedded,
+                |table| {
+                    crate::runtime::state::AdmissionTaskTarget::External(
+                        table
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner),
+                    )
+                },
+            );
+            let (task_id, handle, cx, result_tx, spawn_effects) = state
+                .create_task_infrastructure_in::<()>(
+                    parent,
+                    parent.region_id(),
+                    parent.budget(),
+                    false,
+                    &mut target,
+                    &crate::runtime::state::AdmissionRegionTarget::Embedded,
+                )?;
+            match &mut target {
+                crate::runtime::state::AdmissionTaskTarget::Embedded => {
+                    let _ = state.update_task(task_id, crate::record::TaskRecord::start_running);
+                }
+                crate::runtime::state::AdmissionTaskTarget::External(table) => {
+                    let _ = table.update_task(task_id, crate::record::TaskRecord::start_running);
+                }
+            }
+            (cx, handle, result_tx, spawn_effects)
+        };
+        let registration = Self {
+            inner: Arc::clone(inner),
+            cx,
+        };
+        // These internal channel owners have no consumers. Retire them outside
+        // the state lock, after the task-lifetime guard is established.
+        drop(handle);
+        drop(result_tx);
+        drop(spawn_guard);
+        spawn_effects.dispatch();
+        Ok(registration)
+    }
+
+    fn retire(&self, outcome: crate::record::task::TaskOutcome) {
+        let mut retirement = CallerTaskRetirement {
+            registration: self,
+            record: None,
+            waiters: smallvec::SmallVec::new(),
+            protocol_retired: false,
+            completed: false,
+        };
+        retirement.finish(outcome, std::thread::panicking());
+    }
+}
+
+/// Retains ownership across a configured leak panic in either the mailbox
+/// drain or the completion audit. Its unwind path runs after all state/table
+/// guards have released and finishes the remaining retirement work.
+struct CallerTaskRetirement<'a> {
+    registration: &'a CallerTaskRegistration,
+    record: Option<crate::record::TaskRecord>,
+    waiters: smallvec::SmallVec<[crate::types::TaskId; 4]>,
+    protocol_retired: bool,
+    completed: bool,
+}
+
+impl CallerTaskRetirement<'_> {
+    fn finish(&mut self, outcome: crate::record::task::TaskOutcome, unwinding: bool) {
+        let registration = self.registration;
+        // Fence admission before capturing mailbox ownership. A retained clone
+        // can never publish a new reservation behind the completion sweep.
+        registration.cx.revoke_obligation_admission();
+        let task_id = registration.cx.task_id();
+        let dispatch_table = registration.inner.scheduler.dispatch_task_table();
+        let (observer, retirements, cancel_wakes, finalizers) = {
+            let mut state = registration
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(gateway) = state.obligation_gateway() {
+                // Do not dequeue a whole batch across the deliberate Panic
+                // leak-policy boundary: unwinding would discard the unvisited
+                // posts and their application barriers. One post at a time
+                // leaves the rest available to this guard's unwind cleanup.
+                // Capture once so concurrent producers cannot extend cleanup.
+                let remaining = gateway.mailbox().len();
+                for _ in 0..remaining {
+                    if crate::runtime::obligation_mailbox::apply_obligation_posts_with_task_table(
+                        &mut state,
+                        gateway.mailbox(),
+                        1,
+                        dispatch_table.as_ref(),
+                    ) == 0
+                    {
+                        break;
+                    }
+                }
+            }
+            let (ack, mut cancel_wakes) = if self.record.is_none() {
+                let complete = |tasks: &mut crate::runtime::TaskTable| {
+                    let effects = tasks
+                        .update_task(
+                            task_id,
+                            crate::record::TaskRecord::consume_checkpoint_cancel_ack,
+                        )
+                        .unwrap_or_else(|| {
+                            crate::types::task_context::CancellationEffects::ready(None)
+                        });
+                    let (ack, wakes) = effects.into_parts();
+                    let _ = tasks.update_task(task_id, |record| {
+                        ThreeLaneWorker::complete_polled_record(record, outcome, ack.is_some());
+                    });
+                    (tasks.remove_task(task_id), ack, wakes)
+                };
+                let (record, ack, wakes) = match dispatch_table.as_ref() {
+                    Some(table) => complete(
+                        &mut table
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner),
+                    ),
+                    None => complete(&mut state.tasks),
+                };
+                self.record = record;
+                (ack, wakes)
+            } else {
+                // A completion audit already committed the terminal record
+                // before panicking. Preserve that result during cleanup.
+                (None, crate::types::task_context::CancelWakeEffects::empty())
+            };
+            let Some(record) = self.record.as_mut() else {
+                self.completed = true;
+                return;
+            };
+            if let Some(receipt) = ack.as_ref()
+                && let Some(violation) = state
+                    .external_checkpoint_cancel_materialization_violation(task_id, receipt, true)
+            {
+                cancel_wakes.push_cancel_protocol_violation(
+                    "caller task cancellation materialization",
+                    violation,
+                );
+            }
+            // The record is detached in both layouts. Cross-cutting completion
+            // can now audit obligations and advance the region without holding
+            // the dispatch-table lock or retiring user wakers beneath it.
+            self.waiters.extend(std::mem::take(&mut record.waiters));
+            let effects = state.task_completed_from_external_record_resuming(
+                record,
+                &mut self.protocol_retired,
+            );
+            let (observer, retirements) = if unwinding {
+                let (waiters, retirements) =
+                    effects.into_waiters_and_retirements_without_observers();
+                self.waiters.extend(waiters);
+                (None, Some(retirements))
+            } else {
+                let (waiters, observer) = effects.into_parts();
+                self.waiters.extend(waiters);
+                (Some(observer), None)
+            };
+            let mut target = dispatch_table.as_ref().map_or(
+                crate::runtime::state::AdmissionTaskTarget::Embedded,
+                |table| {
+                    crate::runtime::state::AdmissionTaskTarget::External(
+                        table
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner),
+                    )
+                },
+            );
+            let finalizers = state.drain_ready_async_finalizers_in(
+                &crate::runtime::state::AdmissionRegionTarget::Embedded,
+                &mut target,
+            );
+            (observer, retirements, cancel_wakes, finalizers)
+        };
+        self.completed = true;
+        ThreeLaneWorker::retire_detached_task_record(self.record.take());
+        for waiter in self.waiters.drain(..) {
+            registration
+                .inner
+                .scheduler
+                .wake(waiter, Budget::INFINITE.priority);
+        }
+        for (task, priority, spawn_effects) in finalizers {
+            registration.inner.scheduler.inject_ready(task, priority);
+            spawn_effects.dispatch();
+        }
+        if let Some(observer) = observer {
+            observer.dispatch();
+        }
+        if let Some(retirements) = retirements {
+            retirements.retire();
+        }
+        cancel_wakes.dispatch();
+    }
+}
+
+impl Drop for CallerTaskRetirement<'_> {
+    fn drop(&mut self) {
+        if !self.completed && std::thread::panicking() {
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.finish(
+                    crate::types::Outcome::Panicked(crate::types::PanicPayload::new(
+                        "block_on caller retirement panicked",
+                    )),
+                    true,
+                );
+            })) {
+                std::mem::forget(payload);
+            }
+        }
+        ThreeLaneWorker::retire_detached_task_record(self.record.take());
+    }
+}
+
+impl Drop for CallerTaskRegistration {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            // Preserve the original caller panic even if an observer or leak
+            // policy also panics during ownership retirement.
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.retire(crate::types::Outcome::Panicked(
+                    crate::types::PanicPayload::new("block_on caller panicked"),
+                ));
+            })) {
+                std::mem::forget(payload);
+            }
+        } else {
+            self.retire(crate::types::Outcome::Ok(()));
+        }
+    }
+}
+
 impl RuntimeInner {
     fn spawn_liveness_guard(&self) -> Result<Arc<()>, SpawnError> {
         self.spawn_liveness
@@ -5404,6 +5868,9 @@ impl RuntimeInner {
         }
         runtime_state.set_spawn_authorization_key(config.security.spawn_authorization_key.clone());
         runtime_state.set_read_biased_region_snapshot(config.enable_read_biased_region_snapshot);
+        // Nothing replays a native runtime's oracle histories; unbounded, they
+        // grew with every region close and every drain-correct race.
+        runtime_state.bound_oracle_histories(NATIVE_ORACLE_HISTORY_LIMIT);
         runtime_state
     }
 
@@ -5857,9 +6324,9 @@ impl RuntimeInner {
 
     /// Spawn a task with a [`Cx`](crate::cx::Cx) passed to the factory closure.
     ///
-    /// The Cx is created in the root region and linked to the runtime's
-    /// cancellation tree, so it will observe cancellation when the runtime
-    /// shuts down.
+    /// The Cx is created in the root region and linked to its cancellation
+    /// tree. Explicit root drain publishes shutdown cancellation; ordinary
+    /// runtime drop alone does not perform cooperative cleanup.
     fn spawn_with_cx<F, Fut>(&self, f: F) -> Result<(), SpawnError>
     where
         F: FnOnce(crate::cx::Cx) -> Fut + Send + 'static,
@@ -6070,7 +6537,34 @@ impl Drop for RuntimeInner {
                 });
                 (unified, sharded)
             };
+            // Finalizers admitted into regions that never closed can no longer
+            // run. A retained value that holds this state (a registration, a
+            // Cx) forms a cycle nothing else breaks, so take them out under
+            // the lock and drop them outside it (asupersync-bi2462.147.11).
+            let retired_finalizers = {
+                let state = state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut finalizers: Vec<_> = state
+                    .regions
+                    .iter()
+                    .flat_map(|(_, region)| region.take_finalizers_for_teardown())
+                    .collect();
+                if let Some(sharded) = sharded_state.as_ref() {
+                    let regions = sharded
+                        .regions
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    finalizers.extend(
+                        regions
+                            .iter()
+                            .flat_map(|(_, region)| region.take_finalizers_for_teardown()),
+                    );
+                }
+                finalizers
+            };
             if let Some(mailbox) = gateway_mailbox {
+                mailbox.retire_region_commands();
                 let mut cancelled = Vec::new();
                 while mailbox.dequeue_handle_cancels_into(64, &mut cancelled) > 0 {
                     for request in cancelled.drain(..) {
@@ -6086,6 +6580,15 @@ impl Drop for RuntimeInner {
                 }
             }
             drop(retired_tasks);
+            for finalizer in retired_finalizers {
+                if let Err(payload) =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(finalizer)))
+                {
+                    // Retained values can have arbitrary destructors; one
+                    // failure cannot strand the rest (as for queued commands).
+                    std::mem::forget(payload);
+                }
+            }
             drop(sharded_state);
             drop(state);
         };
@@ -6412,38 +6915,92 @@ fn next_block_on_timer_park_duration(timer: &TimerDriverHandle) -> Option<Durati
 
 const BLOCK_ON_RUNTIME_RECHECK_INTERVAL: Duration = Duration::from_millis(1);
 
+/// Closed regions and completed races a native runtime keeps in its
+/// oracle-hydration histories (see `RuntimeState::bound_oracle_histories`).
+const NATIVE_ORACLE_HISTORY_LIMIT: usize = 1024;
+
 fn current_runtime_has_live_tasks() -> bool {
+    let caller = crate::cx::Cx::current();
+    let has_other_live_tasks = |tasks: &crate::runtime::TaskTable| {
+        let caller_is_live = caller.as_ref().is_some_and(|cx| {
+            tasks.task(cx.task_id()).is_some_and(|record| {
+                !record.state.is_terminal()
+                    && record
+                        .cx_inner
+                        .as_ref()
+                        .is_some_and(|inner| Arc::ptr_eq(inner, &cx.inner))
+            })
+        });
+        // A registered caller cannot create a new timer while it is parked.
+        // Counting its own record would turn every otherwise-idle block_on
+        // into a 1 ms poll loop and hide missing cancellation wakeups.
+        tasks.live_task_count() > usize::from(caller_is_live)
+    };
     Runtime::current_handle()
         .and_then(|handle| handle.try_inner().ok())
         .is_some_and(|inner| {
-            let embedded_live = inner
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .live_task_count();
-            if embedded_live > 0 {
+            let embedded_live = {
+                let state = inner
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                has_other_live_tasks(&state.tasks)
+            };
+            if embedded_live {
                 return true;
             }
             // E1.2 subsystem 3d (E1.1 row B12): a dispatch-table runtime's
             // live tasks reside in the external shard-A table (sequential
             // B then A; the state lock is released above).
             inner.scheduler.dispatch_task_table().is_some_and(|table| {
-                table
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .live_task_count()
-                    > 0
+                has_other_live_tasks(
+                    &table
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                )
             })
         })
 }
 
-fn run_future_with_budget<F: Future>(future: F, poll_budget: u32) -> F::Output {
+/// Cancellation wakeup for a registered `block_on` caller.
+///
+/// A worker installs a cancellation waker for every task it polls; this thread
+/// is the caller's only executor, so it registers its own. Otherwise root
+/// cancellation cannot unpark a caller that waits on a primitive with no
+/// cancellation waker of its own (an mpsc receive, a semaphore acquire), and a
+/// root drain waits out its full timeout (asupersync-h64i97).
+struct CallerCancelWake {
+    cx: crate::cx::Cx,
+    token: crate::cx::CancelWakerToken,
+}
+
+impl CallerCancelWake {
+    fn new(cx: &crate::cx::Cx, waker: &Waker) -> Self {
+        Self {
+            cx: cx.clone(),
+            token: cx.refresh_cancel_waker(None, waker),
+        }
+    }
+}
+
+impl Drop for CallerCancelWake {
+    fn drop(&mut self) {
+        self.cx.clear_cancel_waker(self.token);
+    }
+}
+
+fn run_future_with_budget<F: Future>(
+    future: F,
+    poll_budget: u32,
+    cancel_owner: Option<&crate::cx::Cx>,
+) -> F::Output {
     let thread = std::thread::current();
     let thread_waker = Arc::new(ThreadWaker {
         thread,
         woken: std::sync::atomic::AtomicBool::new(false),
     });
     let waker = Waker::from(Arc::clone(&thread_waker));
+    let _cancel_wake = cancel_owner.map(|cx| CallerCancelWake::new(cx, &waker));
     let mut cx = Context::from_waker(&waker);
     let mut future = std::pin::pin!(future);
     let mut polls = 0u32;
@@ -8361,6 +8918,244 @@ mod tests {
         drop_thread
             .join()
             .expect("runtime drop thread should exit cleanly");
+    }
+
+    /// Region-retained value that holds the runtime state (the cycle only
+    /// teardown can break) and proves it is dropped outside the state lock.
+    struct TeardownRetained {
+        state: Arc<crate::sync::ContendedMutex<RuntimeState>>,
+        dropped: Arc<AtomicUsize>,
+        panic_on_drop: bool,
+    }
+
+    impl Drop for TeardownRetained {
+        fn drop(&mut self) {
+            drop(
+                self.state
+                    .try_lock()
+                    .expect("retained value drops outside runtime lock"),
+            );
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+            assert!(
+                !self.panic_on_drop,
+                "injected retained-value destructor panic"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_drop_releases_unapplied_region_finalizers_outside_state_lock() {
+        struct WakeCounter(AtomicUsize);
+        impl std::task::Wake for WakeCounter {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        let region = runtime.block_on(async {
+            Cx::current()
+                .unwrap()
+                .open_child_region(crate::cx::ChildRegionSpec::inherit())
+                .await
+                .unwrap()
+        });
+        // Between block_on calls the background thread pumps region commands,
+        // so an idle runtime applies them before teardown (the flake behind
+        // asupersync-bi2462.147.11). Pin its only worker in a task until the
+        // runtime starts stopping: the dispatch loop checks shutdown before
+        // it drains region commands, so the requests below stay queued.
+        let stopping = runtime.inner.scheduler.shutdown_signal_for_test();
+        let (pinned_tx, pinned) = std::sync::mpsc::channel();
+        let _pin = runtime.handle().spawn(async move {
+            pinned_tx.send(()).expect("test thread waits for the pin");
+            while !stopping.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+        });
+        pinned
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the background worker runs the pinning task");
+        let state = Arc::clone(&runtime.inner.state);
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let wake_count = Arc::new(WakeCounter(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&wake_count));
+        let mut context = std::task::Context::from_waker(&waker);
+        let mut first = Box::pin(region.retain_until_finalized(TeardownRetained {
+            state: Arc::clone(&state),
+            dropped: Arc::clone(&dropped),
+            panic_on_drop: true,
+        }));
+        let mut second = Box::pin(region.retain_until_finalized(TeardownRetained {
+            state,
+            dropped: Arc::clone(&dropped),
+            panic_on_drop: false,
+        }));
+        assert!(first.as_mut().poll(&mut context).is_pending());
+        assert!(second.as_mut().poll(&mut context).is_pending());
+        assert_eq!(dropped.load(Ordering::SeqCst), 0);
+        assert_eq!(wake_count.0.load(Ordering::SeqCst), 0);
+
+        // Both requests remain queued, and the child region plus retained
+        // state keep the mailbox reachable.
+        drop(runtime);
+        assert_eq!(dropped.load(Ordering::SeqCst), 2);
+        assert!(wake_count.0.load(Ordering::SeqCst) >= 2);
+        assert!(matches!(
+            first.as_mut().poll(&mut context),
+            Poll::Ready(Err(crate::cx::ChildRegionError::RuntimeUnavailable))
+        ));
+        assert!(matches!(
+            second.as_mut().poll(&mut context),
+            Poll::Ready(Err(crate::cx::ChildRegionError::RuntimeUnavailable))
+        ));
+        eprintln!(
+            "REGION_FINALIZER_TEARDOWN backend=native queued=2 retired=2 acknowledgments=closed locks=reentrant"
+        );
+    }
+
+    #[test]
+    fn runtime_drop_releases_applied_region_finalizers_outside_state_lock() {
+        for sharded in [false, true] {
+            let runtime = RuntimeBuilder::current_thread()
+                .with_sharded_state(sharded)
+                .build()
+                .unwrap();
+            let state = Arc::clone(&runtime.inner.state);
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let retained = [true, false].map(|panic_on_drop| TeardownRetained {
+                state: Arc::clone(&state),
+                dropped: Arc::clone(&dropped),
+                panic_on_drop,
+            });
+            drop(state);
+            let region = runtime.block_on(async move {
+                let region = Cx::current()
+                    .unwrap()
+                    .open_child_region(crate::cx::ChildRegionSpec::inherit())
+                    .await
+                    .unwrap();
+                for value in retained {
+                    region
+                        .retain_until_finalized(value)
+                        .await
+                        .expect("an open region admits the finalizer");
+                }
+                region
+            });
+            // Both values are applied to the open region's finalizer stack and
+            // each keeps the runtime state alive: only teardown can drop them.
+            assert_eq!(dropped.load(Ordering::SeqCst), 0);
+            drop(runtime);
+            assert_eq!(
+                dropped.load(Ordering::SeqCst),
+                2,
+                "sharded={sharded}: teardown must release admitted finalizers"
+            );
+            drop(region);
+            eprintln!(
+                "REGION_FINALIZER_TEARDOWN backend=native sharded={sharded} applied=2 released=2 locks=reentrant"
+            );
+        }
+    }
+
+    #[test]
+    fn native_runtime_keeps_admitting_child_regions_after_a_thousand_have_closed() {
+        init_test_logging();
+        // The swarm governor admits Normal-priority regions against its live
+        // envelope count (default cap 1000). Every closed region must release
+        // its envelope, or the 1001st open is refused (asupersync-cgnb7g).
+        let rounds = 1_100_usize;
+        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        let opened = runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("admitted native task");
+            let mut opened = 0_usize;
+            for round in 0..rounds {
+                let region = match cx
+                    .open_child_region(crate::cx::ChildRegionSpec::inherit())
+                    .await
+                {
+                    Ok(region) => region,
+                    Err(error) => panic!("child region {round} refused: {error:?}"),
+                };
+                region.close().await.expect("child region closes");
+                opened += 1;
+            }
+            opened
+        }));
+        eprintln!("native_region_admission rounds={rounds} opened={opened}");
+        assert_eq!(opened, rounds);
+    }
+
+    #[test]
+    fn native_runtime_bounds_region_and_race_oracle_history() {
+        init_test_logging();
+        // Every round closes a child region and completes a drain-correct race.
+        // Unbounded, each round appended to both histories for the life of the
+        // runtime.
+        let rounds = 2 * NATIVE_ORACLE_HISTORY_LIMIT + 64;
+        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("admitted native task");
+            for round in 0..rounds {
+                let region = cx
+                    .open_child_region(crate::cx::ChildRegionSpec::inherit())
+                    .await
+                    .expect("child region opens");
+                region.close().await.expect("child region closes");
+                let branch = move |_child: Cx| -> Pin<Box<dyn Future<Output = usize> + Send>> {
+                    Box::pin(async move { round })
+                };
+                let factories: Vec<crate::cx::RaceFactory<usize>> =
+                    vec![Box::new(branch), Box::new(branch)];
+                let winner = cx
+                    .race_drained_with(factories)
+                    .await
+                    .expect("race completes");
+                assert_eq!(winner, round);
+            }
+        }));
+        let state = runtime
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let races = state
+            .loser_drain_history()
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    crate::runtime::state::LoserDrainHistoryEvent::RaceStarted { .. }
+                )
+            })
+            .count();
+        let closed = state
+            .finalizer_history()
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    crate::runtime::state::FinalizerHistoryEvent::RegionClosed { .. }
+                )
+            })
+            .count();
+        drop(state);
+        eprintln!(
+            "native_oracle_history rounds={rounds} races_kept={races} closed_regions_kept={closed} limit={NATIVE_ORACLE_HISTORY_LIMIT}"
+        );
+        let recent_tail = NATIVE_ORACLE_HISTORY_LIMIT..=2 * NATIVE_ORACLE_HISTORY_LIMIT;
+        assert!(
+            recent_tail.contains(&races),
+            "races kept: {races} of {rounds}"
+        );
+        assert!(
+            recent_tail.contains(&closed),
+            "closed regions kept: {closed} of {rounds}"
+        );
     }
 
     #[test]
@@ -11256,6 +12051,13 @@ worker_threads = 16
             assert!(activation_polls >= 2);
             assert!(activation_polls - 1 < active_poll_limit);
             assert_eq!(*shutdown_budget.read(), Some(activated_budget));
+            // The budget is published before its deadline timer is armed, and
+            // this thread reads both without the runtime lock. Wait for the arm
+            // (bounded) instead of racing it on a loaded worker (asupersync-f5fadj).
+            wait_native_shutdown_condition(
+                || driver.pending_count() == 1,
+                "activation must arm exactly one shutdown-budget deadline timer",
+            );
             assert_eq!(driver.pending_count(), 1);
             assert_eq!(driver.next_deadline(), Some(activated_deadline));
             assert_eq!(drops.load(Ordering::SeqCst), 0);
@@ -11306,6 +12108,10 @@ worker_threads = 16
                 let finalizer_cx = observed_cx.lock().clone().unwrap();
                 assert!(driver.ptr_eq(&finalizer_cx.timer_driver().unwrap()));
                 wait_native_shutdown_parked(&runtime, finalizer_cx.task_id());
+                wait_native_shutdown_condition(
+                    || driver.pending_count() == 1,
+                    "deadline cleanup must arm exactly one shutdown-budget timer",
+                );
                 assert_eq!(driver.pending_count(), 1);
                 assert_eq!(driver.next_deadline(), expected_deadline);
                 assert!(driver.now() < expected_deadline.unwrap());

@@ -585,3 +585,264 @@ fn top_level_source_orphans_never_increase() {
         "census must detect the pinned dormant module; found {orphans:?}"
     );
 }
+
+/// Nested `src/**/*.rs` files (below the top level of `src/`) that nothing compiles.
+/// No crate root reaches them through column-0 `mod NAME;` declarations (honouring
+/// `#[path]`) or `include!`, and no `#[path]`/`include!` in tests/, benches/ or
+/// examples/ names them. The top-level census above cannot see this class:
+/// `src/lab/runtime/production_strict.rs`, a finished module nothing declared, hid in
+/// it until asupersync-bi2462.96. Ratchet: this number may only go down
+/// (asupersync-bi2462.141). When nested orphans are wired in or archived, lower it in
+/// the same commit. Never raise it.
+const MAX_NESTED_SOURCE_ORPHANS: usize = 65;
+
+/// Repository-relative, `/`-separated `.rs` files under `dir`.
+fn rust_files_under(dir: &str) -> Vec<String> {
+    fn walk(root: &std::path::Path, relative: &str, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(root.join(relative)) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let rel = format!("{relative}/{name}");
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                walk(root, &rel, out);
+            } else if std::path::Path::new(&name)
+                .extension()
+                .is_some_and(|ext| ext == "rs")
+            {
+                out.push(rel);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&repo_root(), dir, &mut out);
+    out.sort();
+    out
+}
+
+/// `base/target`, normalized and `/`-separated.
+fn join_relative(base: &str, target: &str) -> String {
+    normalize_relative(&std::path::Path::new(base).join(target))
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+/// The quoted argument following every occurrence of `marker` in `text`.
+fn quoted_after(text: &str, marker: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut cursor = text;
+    while let Some(start) = cursor.find(marker) {
+        let tail = &cursor[start + marker.len()..];
+        if let Some(end) = tail.find('"') {
+            found.push(tail[..end].to_owned());
+        }
+        cursor = tail;
+    }
+    found
+}
+
+fn bracket_balance(line: &str) -> i32 {
+    let opened = line.matches('[').count();
+    let closed = line.matches(']').count();
+    i32::try_from(opened).unwrap_or(i32::MAX) - i32::try_from(closed).unwrap_or(i32::MAX)
+}
+
+/// Files reached from `roots` (path, whether it resolves children like a `mod.rs`), as
+/// rustc resolves them: column-0 `mod NAME;` declarations, a `#[path]` among the
+/// attributes stacked above one, and `include!`. An indented declaration (inside an
+/// inline module) is not followed, so its file counts as unreached: the census then
+/// fails loudly rather than passing blind.
+fn reachable_sources(
+    roots: &[(String, bool)],
+    sources: &BTreeMap<String, String>,
+) -> BTreeSet<String> {
+    let mut reached = BTreeSet::new();
+    let mut stack = roots.to_vec();
+    while let Some((path, mod_rs)) = stack.pop() {
+        let Some(text) = sources.get(&path) else {
+            continue;
+        };
+        if !reached.insert(path.clone()) {
+            continue;
+        }
+        let dir = path.rsplit_once('/').map_or("", |(dir, _)| dir).to_owned();
+        let child_dir = if mod_rs {
+            dir.clone()
+        } else {
+            path.trim_end_matches(".rs").to_owned()
+        };
+        let mut explicit_path: Option<String> = None;
+        let mut attr_depth = 0;
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if attr_depth > 0 {
+                attr_depth += bracket_balance(trimmed);
+                continue;
+            }
+            if trimmed.is_empty() || trimmed.starts_with("//") {
+                continue;
+            }
+            if trimmed.starts_with("#[") {
+                if let Some(value) = quoted_after(trimmed, "#[path = \"").into_iter().next() {
+                    explicit_path = Some(value);
+                }
+                attr_depth = bracket_balance(trimmed);
+                if attr_depth > 0 {
+                    continue;
+                }
+            }
+            let column_zero = !line.starts_with(char::is_whitespace);
+            let declared = if column_zero {
+                declared_file_modules(line)
+            } else {
+                BTreeSet::new()
+            };
+            if let Some(name) = declared.into_iter().next() {
+                let child = explicit_path.take().map_or_else(
+                    || {
+                        let flat = format!("{child_dir}/{name}.rs");
+                        if sources.contains_key(&flat) {
+                            (flat, false)
+                        } else {
+                            (format!("{child_dir}/{name}/mod.rs"), true)
+                        }
+                    },
+                    |target| (join_relative(&dir, &target), true),
+                );
+                stack.push(child);
+            } else if !trimmed.starts_with("#[") {
+                explicit_path = None;
+            }
+        }
+        for target in quoted_after(text, "include!(\"") {
+            stack.push((join_relative(&dir, &target), mod_rs));
+        }
+    }
+    reached
+}
+
+fn nested_source_orphans() -> BTreeSet<String> {
+    let root = repo_root();
+    let sources: BTreeMap<String, String> = rust_files_under("src")
+        .into_iter()
+        .filter_map(|path| {
+            let text = std::fs::read_to_string(root.join(&path)).ok()?;
+            Some((path, text))
+        })
+        .collect();
+    let mut roots = vec![(LIB_PATH.to_owned(), true)];
+    for path in sources.keys() {
+        let bin = path.strip_prefix("src/bin/");
+        let auto_bin = bin.is_some_and(|rest| {
+            !rest.contains('/') || (rest.ends_with("/main.rs") && rest.matches('/').count() == 1)
+        });
+        if path == "src/main.rs" || auto_bin {
+            roots.push((path.clone(), true));
+        }
+    }
+    for target in quoted_after(&read_repo_file("Cargo.toml"), "path = \"src/") {
+        roots.push((format!("src/{target}"), true));
+    }
+    for dir in ["tests", "benches", "examples"] {
+        for file in rust_files_under(dir) {
+            let Ok(text) = std::fs::read_to_string(root.join(&file)) else {
+                continue;
+            };
+            let base = file.rsplit_once('/').map_or("", |(base, _)| base);
+            for target in quoted_after(&text, "#[path = \"")
+                .into_iter()
+                .chain(quoted_after(&text, "include!(\""))
+            {
+                let resolved = join_relative(base, &target);
+                if resolved.starts_with("src/") {
+                    roots.push((resolved, true));
+                }
+            }
+        }
+    }
+    let reached = reachable_sources(&roots, &sources);
+    sources
+        .keys()
+        .filter(|path| path.matches('/').count() > 1 && !reached.contains(*path))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn nested_orphan_walk_follows_path_and_include_on_planted_tree() {
+    let planted: BTreeMap<String, String> = [
+        (
+            "src/lib.rs",
+            "pub mod plain;\n#[cfg(all(\n    unix,\n    feature = \"x\"\n))]\n\
+             #[path = \"io_backend.rs\"]\npub mod backend;\n\
+             #[cfg(test)] #[path = \"lib_tests.rs\"] mod lib_tests;\n\
+             pub mod nested;\n// mod commented;\nmod inline {\n    mod indented;\n}\n",
+        ),
+        (
+            "src/plain.rs",
+            "mod child;\ninclude!(\"plain_tests.rs\");\n",
+        ),
+        ("src/plain/child.rs", ""),
+        ("src/plain_tests.rs", ""),
+        ("src/io_backend.rs", ""),
+        // Shadowed by the #[path] above: nothing compiles it.
+        ("src/backend.rs", ""),
+        ("src/lib_tests.rs", ""),
+        ("src/nested/mod.rs", "pub mod leaf;\n"),
+        ("src/nested/leaf.rs", ""),
+        ("src/nested/stale.rs", ""),
+        ("src/commented.rs", ""),
+        ("src/inline/indented.rs", ""),
+    ]
+    .into_iter()
+    .map(|(path, text)| (path.to_owned(), text.to_owned()))
+    .collect();
+    let reached = reachable_sources(&[("src/lib.rs".to_owned(), true)], &planted);
+    let expected: BTreeSet<String> = [
+        "src/io_backend.rs",
+        "src/lib.rs",
+        "src/lib_tests.rs",
+        "src/nested/leaf.rs",
+        "src/nested/mod.rs",
+        "src/plain.rs",
+        "src/plain/child.rs",
+        "src/plain_tests.rs",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    assert_eq!(reached, expected);
+}
+
+#[test]
+fn nested_source_orphans_never_increase() {
+    let orphans = nested_source_orphans();
+    eprintln!(
+        "nested source orphans: {} (ratchet max {MAX_NESTED_SOURCE_ORPHANS})",
+        orphans.len()
+    );
+    assert!(
+        orphans.len() <= MAX_NESTED_SOURCE_ORPHANS,
+        "{} nested src/**/*.rs files are never compiled (ratchet max {MAX_NESTED_SOURCE_ORPHANS}). \
+         A new source file must be declared by its parent module or reached by #[path]/include!, \
+         or it proves nothing. Orphans: {orphans:?}",
+        orphans.len()
+    );
+    // The census must see a pinned nested orphan (the superseded net::quic tree) and must
+    // not flag files reached only through #[path] or include!.
+    assert!(
+        orphans.contains("src/net/quic/connection.rs"),
+        "census must detect the pinned nested orphan; found {orphans:?}"
+    );
+    for reached in [
+        "src/runtime/reactor/io_uring.rs",
+        "src/database/postgres_tests.rs",
+        "src/lab/runtime/production_strict.rs",
+    ] {
+        assert!(
+            !orphans.contains(reached),
+            "{reached} is compiled (#[path], include! or a plain declaration) but was counted as an orphan"
+        );
+    }
+}

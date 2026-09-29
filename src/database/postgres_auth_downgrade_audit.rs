@@ -32,6 +32,7 @@ fn make_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
             inner: PgConnectionInner {
                 stream: PgStream::Plain(stream),
                 options: test_pg_connect_options(),
+                tls_options: super::PgTlsOptions::default(),
                 process_id: 0,
                 secret_key: 0,
                 cancel_target: super::test_cancel_target(),
@@ -42,6 +43,8 @@ fn make_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
                 needs_rollback: false,
                 needs_discard: false,
                 subscribed_channels: BTreeSet::new(),
+                notifications: super::NotificationBuffer::default(),
+                backend_frame: super::BackendFrame::default(),
                 next_stmt_id: 0,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_cache: PreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),

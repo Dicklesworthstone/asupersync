@@ -715,6 +715,285 @@ mod executing_scope {
         );
     }
 
+    async fn map_failure_attribution_journey(
+        cx: &Cx,
+        snapshot: &TraceSnapshot,
+        mode: &'static str,
+    ) -> serde_json::Value {
+        use asupersync::combinator::{MapReduceExecutionError, MapReduceStopCause};
+        use asupersync::types::CancelKind;
+
+        let trigger = Arc::new(Mutex::new(()));
+        let held_trigger = trigger.try_lock_owned().unwrap();
+        let (keep_sender, receiver) = mpsc::channel::<()>(1);
+        let receiver = Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let (finish_cleanup, cleanup) = asupersync::channel::oneshot::channel::<()>();
+        let cleanup = Arc::new(std::sync::Mutex::new(Some(cleanup)));
+        let (events, mut observations) = mpsc::channel::<usize>(3);
+        let identities = Arc::new(std::sync::Mutex::new([None; 2]));
+        let child_identities = Arc::clone(&identities);
+        let cleanup_finished = Arc::new(AtomicUsize::new(0));
+        let child_finished = Arc::clone(&cleanup_finished);
+        let returned = Arc::new(std::sync::Mutex::new(None));
+        let owner_returned = Arc::clone(&returned);
+        let child_trigger = Arc::clone(&trigger);
+        let mut owner = cx
+            .spawn(move |owner_cx| async move {
+                let report = owner_cx
+                    .scope()
+                    .map_reduce(
+                        &owner_cx,
+                        MapReduceLimits::new(capacity(2), capacity(2)),
+                        0..100,
+                        move |child, index| {
+                            let trigger = Arc::clone(&child_trigger);
+                            let receiver = Arc::clone(&receiver);
+                            let cleanup = Arc::clone(&cleanup);
+                            let events = events.clone();
+                            let identities = Arc::clone(&child_identities);
+                            let finished = Arc::clone(&child_finished);
+                            async move {
+                                identities.lock().unwrap()[index] =
+                                    Some((child.task_id(), child.region_id()));
+                                if index == 1 {
+                                    observed_gate(&child, trigger, &events, 1).await;
+                                    return Outcome::Err("public map triggering error");
+                                }
+                                assert_eq!(index, 0, "failure stops bounded input admission");
+                                let mut receiver = receiver.lock().unwrap().take().unwrap();
+                                let mut receive = std::pin::pin!(receiver.recv(&child));
+                                let mut parked = false;
+                                let result = std::future::poll_fn(|poll_cx| {
+                                    let result = receive.as_mut().poll(poll_cx);
+                                    if result.is_pending() && !parked {
+                                        parked = true;
+                                        events.try_send(0).unwrap();
+                                    }
+                                    result
+                                })
+                                .await;
+                                assert!(parked, "sibling must register a real channel waiter");
+                                assert_eq!(result, Err(mpsc::RecvError::Cancelled));
+                                let drain_reason = child.cancel_reason().unwrap();
+                                assert_eq!(drain_reason.kind(), CancelKind::RaceLost);
+
+                                let mut cleanup = cleanup.lock().unwrap().take().unwrap();
+                                let mut cleanup = std::pin::pin!(cleanup.recv_uninterruptible());
+                                let mut cleanup_parked = false;
+                                std::future::poll_fn(|poll_cx| {
+                                    let result = cleanup.as_mut().poll(poll_cx);
+                                    if result.is_pending() && !cleanup_parked {
+                                        cleanup_parked = true;
+                                        events.try_send(2).unwrap();
+                                    }
+                                    result
+                                })
+                                .await
+                                .unwrap();
+                                assert!(cleanup_parked, "cleanup needs its own external wake");
+                                finished.fetch_add(1, Ordering::SeqCst);
+                                match mode {
+                                    "error" | "caller_cancel" => Outcome::Ok(index),
+                                    "echo_cancel" => Outcome::Cancelled(drain_reason),
+                                    "independent_cancel" => {
+                                        Outcome::Cancelled(CancelReason::race_loser())
+                                    }
+                                    "stronger_cancel" => {
+                                        child.cancel_with(
+                                            CancelKind::Shutdown,
+                                            Some("independent map cleanup shutdown"),
+                                        );
+                                        Outcome::Cancelled(child.cancel_reason().unwrap())
+                                    }
+                                    "cleanup_panic" => panic!("public map cleanup panic"),
+                                    _ => unreachable!(),
+                                }
+                            }
+                        },
+                        |left, right| left + right,
+                    )
+                    .await;
+                assert!(owner_returned.lock().unwrap().replace(report).is_none());
+            })
+            .unwrap();
+
+        let mut entered = vec![
+            observations.recv(cx).await.unwrap(),
+            observations.recv(cx).await.unwrap(),
+        ];
+        entered.sort_unstable();
+        assert_eq!(entered, [0, 1]);
+        assert_eq!(trigger.waiters(), 1);
+        assert_eq!(keep_sender.telemetry_snapshot(3401).recv_waiter_count, 1);
+        assert!(returned.lock().unwrap().is_none());
+        let identities = (*identities.lock().unwrap()).map(Option::unwrap);
+        let owner_identity = (owner.task_id(), cx.region_id());
+        assert_ne!(identities[0].0, identities[1].0);
+        assert!(identities.iter().all(|identity| identity.1 == cx.region_id()));
+
+        let failure_at = Instant::now();
+        drop(held_trigger);
+        assert_eq!(observations.recv(cx).await.unwrap(), 2);
+        assert_eq!(cleanup_finished.load(Ordering::SeqCst), 0);
+        assert_eq!(keep_sender.telemetry_snapshot(3401).recv_waiter_count, 0);
+        assert!(returned.lock().unwrap().is_none());
+        assert!(
+            !owner.is_finished(),
+            "map owner must await asynchronous cleanup"
+        );
+        assert_eq!(
+            worker_event_count(
+                &snapshot(),
+                identities[0],
+                asupersync::trace::TraceEventKind::Complete,
+            ),
+            0,
+            "the cancelled sibling is still an owned live task"
+        );
+
+        let caller_reason = CancelReason::user("public map caller cancellation");
+        if mode == "caller_cancel" {
+            owner.abort_with_reason(caller_reason.clone());
+        }
+        finish_cleanup.send_blocking(()).unwrap();
+        assert_eq!(owner.join(cx).await, Ok(()));
+        let report = returned
+            .lock()
+            .unwrap()
+            .take()
+            .expect("map engine publishes only after child drain");
+        assert_eq!(
+            (report.admitted, report.completed, report.reduced),
+            (2, 2, 0)
+        );
+        assert_eq!(report.stopped_by, Some((1, MapReduceStopCause::Error)));
+        assert_eq!(cleanup_finished.load(Ordering::SeqCst), 1);
+        assert_eq!(trigger.waiters(), 0);
+        assert_eq!(keep_sender.telemetry_snapshot(3401).recv_waiter_count, 0);
+        match mode {
+            "error" | "echo_cancel" => {
+                assert!(matches!(
+                    &report.outcome,
+                    Outcome::Err(MapReduceExecutionError::Map("public map triggering error"))
+                ));
+                assert_eq!(report.failure_index, Some(1));
+                assert!(report.errors.is_empty());
+            }
+            "caller_cancel" => {
+                assert!(matches!(
+                    &report.outcome,
+                    Outcome::Cancelled(reason) if reason == &caller_reason
+                ));
+                assert_eq!(report.failure_index, Some(2));
+            }
+            "independent_cancel" => {
+                assert!(matches!(
+                    &report.outcome,
+                    Outcome::Cancelled(reason) if reason == &CancelReason::race_loser()
+                ));
+                assert_eq!(report.failure_index, Some(0));
+            }
+            "stronger_cancel" => {
+                assert!(matches!(
+                    &report.outcome,
+                    Outcome::Cancelled(reason)
+                        if reason.kind() == CancelKind::Shutdown
+                        && reason.message() == Some("independent map cleanup shutdown")
+                        && reason.origin_task() == Some(identities[0].0)
+                ));
+                assert_eq!(report.failure_index, Some(0));
+            }
+            "cleanup_panic" => {
+                assert!(matches!(
+                    &report.outcome,
+                    Outcome::Panicked(payload) if payload.message() == "public map cleanup panic"
+                ));
+                assert_eq!(report.failure_index, Some(0));
+            }
+            _ => unreachable!(),
+        }
+        if !matches!(mode, "error" | "echo_cancel") {
+            assert!(matches!(
+                report.errors.as_slice(),
+                [(1, MapReduceExecutionError::Map("public map triggering error"))]
+            ));
+        }
+        await_actual_completions(snapshot, &identities).await;
+        await_actual_completions(snapshot, &[owner_identity]).await;
+        serde_json::json!({
+            "bead":"asupersync-04jqgn", "scenario":"map_failure_attribution", "mode":mode,
+            "owner":format!("{:?}",owner_identity.0),
+            "children":identities.map(|identity| format!("{:?}",identity.0)),
+            "parked_receive":true, "cleanup_pending_before_release":true,
+            "cleanup_completed":1, "admitted":2, "completed":2,
+            "failure_index":report.failure_index, "outcome":format!("{:?}",report.outcome),
+            "elapsed_micros":failure_at.elapsed().as_micros()
+        })
+    }
+
+    #[test]
+    fn public_executing_map_native_failure_attribution() {
+        for sharded in [false, true] {
+            let (finished, completion) = std::sync::mpsc::sync_channel(1);
+            let worker = std::thread::spawn(move || {
+                let result = std::panic::catch_unwind(|| {
+                    let runtime = if sharded {
+                        RuntimeBuilder::multi_thread()
+                            .worker_threads(2)
+                            .with_sharded_state(true)
+                    } else {
+                        RuntimeBuilder::current_thread()
+                    }
+                    .build()
+                    .unwrap();
+                    let trace_runtime = runtime.handle();
+                    let parent: Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async move {
+                        let cx = Cx::current().expect("actual native map coordinator");
+                        let snapshot: TraceSnapshot = Box::new(move || {
+                            trace_runtime.trace_snapshot().expect("runtime remains live")
+                        });
+                        for mode in [
+                            "error",
+                            "echo_cancel",
+                            "independent_cancel",
+                            "stronger_cancel",
+                            "caller_cancel",
+                            "cleanup_panic",
+                        ] {
+                            let report = map_failure_attribution_journey(&cx, &snapshot, mode).await;
+                            eprintln!(
+                                "ASUPERSYNC_EXECUTING_MAP_ATTRIBUTION {}",
+                                serde_json::json!({"sharded":sharded,"journey":report})
+                            );
+                        }
+                    });
+                    runtime.block_on(runtime.handle().spawn(parent));
+                    let started = Instant::now();
+                    while !runtime.is_quiescent() {
+                        assert!(started.elapsed() < Duration::from_secs(5));
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    assert!(
+                        runtime
+                            .task_inspector(Default::default())
+                            .list_tasks()
+                            .is_empty()
+                    );
+                    assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+                    assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
+                });
+                let _ = finished.send(result);
+            });
+            let result = completion
+                .recv_timeout(Duration::from_secs(45))
+                .expect("native map attribution exceeded the whole-run bound");
+            worker.join().expect("map attribution supervisor terminated");
+            if let Err(payload) = result {
+                std::panic::resume_unwind(payload);
+            }
+        }
+    }
+
     // These are user callback gates, not simulated runtime tasks. The initial
     // wait uses the public cancel-aware mutex; cleanup deliberately needs a
     // separate external wake after that wait acknowledges cancellation.

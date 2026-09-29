@@ -279,6 +279,12 @@ drop-the-losers select (e.g. `tokio::select!`).
 **Syntax**
 
 ```rust
+// Factory form (preferred): each branch receives its own child `Cx`.
+race!(cx, { move |child| fetch(&child, a), move |child| fetch(&child, b) })
+race!(cx, { "fast" => move |child| f1(child), "slow" => move |child| f2(child) })
+race!(cx, timeout: Duration::from_secs(5), { move |child| f1(child), move |child| f2(child) })
+
+// Prebuilt-future form
 race!(cx, { f1, f2 })
 race!(cx, { "fast" => f1, "slow" => f2 })
 race!(cx, timeout: Duration::from_secs(5), { f1, f2 })
@@ -286,12 +292,25 @@ race!(cx, timeout: Duration::from_secs(5), { f1, f2 })
 
 **Notes**
 
-- Expands to the drain-correct `Cx::race_drained*` methods: each branch is
-  spawned as a region task and resolved through `Scope::race_all`.
+- Expands to the drain-correct `Cx::race_drained*` methods (`race_drained_with*`
+  for the factory form): each branch is spawned as a region task and resolved
+  through `Scope::race_all`. Every branch must use the same form.
 - Branches and their outputs must be `Send + 'static`, and `cx` must carry spawn
   authority (a runtime-wired context).
 - Semantics: the winner returns first; every loser is cancelled and drained.
-  On the `timeout:` path an elapsed deadline abandons the whole race by drop.
+- **A branch must use its own context to observe loser cancellation.** Loser
+  cancellation targets the branch's task. A prebuilt future that awaits a
+  cancel-aware operation on the caller's `cx` (for example `rx.recv(&cx)`) never
+  sees it, so the drain waits until that branch finishes on its own. Use the
+  factory form and pass `child` to the branch's operations, or call
+  `Cx::current()` inside the branch.
+- Owner cancellation: if the task awaiting `race!` is cancelled while every
+  branch is still pending, that cancellation is forwarded to all branches, they
+  are drained, and the race returns `Err(JoinError::Cancelled(_))` with the
+  owner's reason. A branch panic still takes precedence.
+- `timeout:` with the factory form cancels and drains every branch when the
+  deadline passes and returns `Err(JoinError::Cancelled(_))` with a timeout
+  reason. With prebuilt futures an elapsed deadline abandons the race by drop.
 - For a lower-level drop-on-cancel select over non-`'static` inline futures,
   call `Cx::race*` directly.
 
@@ -331,7 +350,11 @@ let r = select!(cx, {
   list routes through `Cx::race_drained`. The first branch to win resolves the
   macro; every loser is protocol-cancelled **and drained** before it returns.
   Resolves to `Result<R, JoinError>`. Branch futures and `R` must be
-  `Send + 'static`, and `cx` must carry spawn authority.
+  `Send + 'static`, and `cx` must carry spawn authority. As with `race!`, a
+  branch may be a child-context factory (`pat = move |child| work(child) =>
+  handler`), and every branch must then use that form. Use it whenever a branch
+  awaits a cancel-aware operation, so the operation observes loser and owner
+  cancellation on its own context.
 - **Non-blocking default** (trailing `else => handler`): each branch is polled
   **exactly once** in source order; the first ready branch wins, otherwise the
   `else` handler runs immediately. This never waits, so it does **not** drain —

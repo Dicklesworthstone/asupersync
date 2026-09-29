@@ -24,6 +24,7 @@
 use super::{CancelWakerToken, Cx, DynamicChildCompletion, DynamicChildId,
     DynamicChildResult, DynamicSupervisor, DynamicSupervisorConfig, DynamicSupervisorError,
     DynamicSupervisorReport, DynamicWorkerConfig};
+use super::dynamic_supervisor::{SharedRestartConfig, SharedRestartDomain, SharedRestartStatus};
 use crate::channel::{mpsc, oneshot};
 use crate::runtime::{JoinError, SpawnError, TaskHandle};
 use crate::supervision::{ChildName, ManagedChildFactory, ManagedSupervisor};
@@ -85,11 +86,13 @@ struct Command<E> {
 pub struct DynamicSupervisorClient<E> {
     sender: mpsc::Sender<Command<E>>,
     control: Arc<Control>,
+    shared_restarts: Option<Arc<SharedRestartDomain>>,
 }
 
 impl<E> Clone for DynamicSupervisorClient<E> {
     fn clone(&self) -> Self {
-        Self { sender: self.sender.clone(), control: Arc::clone(&self.control) }
+        Self { sender: self.sender.clone(), control: Arc::clone(&self.control),
+            shared_restarts: self.shared_restarts.clone() }
     }
 }
 
@@ -177,10 +180,19 @@ impl<E> Drop for DynamicServiceChild<E> {
 }
 
 impl<E: Send + 'static> DynamicSupervisorClient<E> {
+    /// Retained shared-window status, including after the service has closed.
+    #[must_use]
+    pub fn shared_restart_status(&self) -> Option<SharedRestartStatus> {
+        self.shared_restarts.as_ref().map(|domain| domain.status())
+    }
+
     fn submit(&self, cx: &Cx, name: ChildName, start: Start<E>)
         -> Result<DynamicAdmission<E>, DynamicServiceError>
     {
         if cx.checkpoint().is_err() { return Err(cancellation(cx)); }
+        if let Some(refusal) = self.shared_restart_status().and_then(|status| status.refusal) {
+            return Err(DynamicSupervisorError::SharedRestartLimit(refusal).into());
+        }
         if self.control.mode.load(Ordering::Acquire) != RUNNING {
             return Err(DynamicServiceError::Closed);
         }
@@ -236,6 +248,7 @@ pub struct DynamicSupervisorService<E> {
     task: TaskHandle<()>,
     report: ReportSlot<E>,
     control: Arc<Control>,
+    shared_restarts: Option<Arc<SharedRestartDomain>>,
 }
 
 impl<E> fmt::Debug for DynamicSupervisorService<E> {
@@ -246,6 +259,12 @@ impl<E> fmt::Debug for DynamicSupervisorService<E> {
 }
 
 impl<E> DynamicSupervisorService<E> {
+    /// Retained shared refusal/accounting; inspect alongside the shutdown report.
+    #[must_use]
+    pub fn shared_restart_status(&self) -> Option<SharedRestartStatus> {
+        self.shared_restarts.as_ref().map(|domain| domain.status())
+    }
+
     /// Request service cancellation, sealing admission and stopping all children.
     /// This does not wait for quiescence or consume the final report.
     pub fn abort(&self) {
@@ -292,6 +311,32 @@ impl Cx {
     pub fn spawn_dynamic_supervisor_mailbox<E: Send + 'static>(
         &self, config: DynamicSupervisorConfig, mailbox_capacity: usize,
     ) -> Result<(DynamicSupervisorClient<E>, DynamicSupervisorService<E>), DynamicServiceError> {
+        self.spawn_dynamic_supervisor_mailbox_inner(config, mailbox_capacity, None)
+    }
+
+    /// Spawn a dynamic service whose trees share one automatic-restart window.
+    ///
+    /// The shared policy applies to every static child in a submitted tree and
+    /// every worker, without resetting on name reuse. Local policies still apply.
+    /// Shared batch reservations are charged before drain/backoff and never
+    /// refunded; a shared refusal seals admission and stops/drains the whole
+    /// service root. Parent task cancellation and cleanup remain distinct facts.
+    /// Inspect `shared_restart_status` on the client/service as well as child and
+    /// service completion receipts. The original mailbox API retains independent
+    /// per-tree restart windows.
+    pub fn spawn_dynamic_supervisor_mailbox_with_shared_restarts<E: Send + 'static>(
+        &self, config: DynamicSupervisorConfig, mailbox_capacity: usize,
+        restarts: SharedRestartConfig,
+    ) -> Result<(DynamicSupervisorClient<E>, DynamicSupervisorService<E>), DynamicServiceError> {
+        self.spawn_dynamic_supervisor_mailbox_inner(
+            config, mailbox_capacity, Some(Arc::new(SharedRestartDomain::new(restarts))),
+        )
+    }
+
+    fn spawn_dynamic_supervisor_mailbox_inner<E: Send + 'static>(
+        &self, config: DynamicSupervisorConfig, mailbox_capacity: usize,
+        shared_restarts: Option<Arc<SharedRestartDomain>>,
+    ) -> Result<(DynamicSupervisorClient<E>, DynamicSupervisorService<E>), DynamicServiceError> {
         if mailbox_capacity == 0 { return Err(DynamicServiceError::InvalidCapacity); }
         if self.checkpoint().is_err() { return Err(cancellation(self)); }
         let (sender, receiver) = mpsc::channel(mailbox_capacity);
@@ -300,12 +345,14 @@ impl Cx {
         let driver_control = Arc::clone(&control);
         let report = Arc::new(Mutex::new(None));
         let publication = Arc::clone(&report);
+        let driver_restarts = shared_restarts.clone();
         let task = self.spawn(move |cx| async move {
-            let result = drive(cx, config, receiver, driver_control, control_rx).await;
+            let result = drive(cx, config, receiver, driver_control, control_rx, driver_restarts).await;
             *publication.lock() = Some(result);
         }).map_err(DynamicServiceError::Spawn)?;
-        Ok((DynamicSupervisorClient { sender, control: Arc::clone(&control) },
-            DynamicSupervisorService { task, report, control }))
+        Ok((DynamicSupervisorClient { sender, control: Arc::clone(&control),
+                shared_restarts: shared_restarts.clone() },
+            DynamicSupervisorService { task, report, control, shared_restarts }))
     }
 }
 
@@ -389,14 +436,16 @@ fn poll_children<E: Send + 'static>(
 async fn drive<E: Send + 'static>(
     cx: Cx, config: DynamicSupervisorConfig, receiver: mpsc::Receiver<Command<E>>,
     control: Arc<Control>, mut control_rx: mpsc::Receiver<()>,
+    shared_restarts: Option<Arc<SharedRestartDomain>>,
 ) -> Result<DynamicSupervisorReport<E>, DynamicSupervisorError> {
-    let mut owner = cx.open_dynamic_supervisor::<E>(config).await?;
+    let mut owner = cx.open_dynamic_supervisor_with_domain::<E>(config, shared_restarts).await?;
     let mut cancellation = Cancellation { cx: cx.clone(), token: None, observed: false };
     let mut receiver = Some(receiver);
     let mut tickets = BTreeMap::new();
     loop {
         let command = poll_fn(|task_cx| {
-            if cancellation.requested(task_cx) || owner.is_closing() {
+            if cancellation.requested(task_cx) || owner.is_closing()
+                || owner.shared_restart_status().is_some_and(|status| status.refusal.is_some()) {
                 control.mode.fetch_max(STOPPING, Ordering::AcqRel);
             }
             // Drain one coalesced notification, then register for the next.
@@ -423,6 +472,14 @@ async fn drive<E: Send + 'static>(
                 if mode == STOPPING { owner.begin_shutdown(); }
             }
             poll_children(&mut owner, &mut tickets, task_cx);
+            // A child's completion can seal the shared owner during this sweep.
+            // Recheck before parking on an otherwise idle admission mailbox.
+            if owner.is_closing()
+                || owner.shared_restart_status().is_some_and(|status| status.refusal.is_some()) {
+                control.mode.fetch_max(STOPPING, Ordering::AcqRel);
+                owner.begin_shutdown();
+                drop(receiver.take());
+            }
             let Some(incoming) = &mut receiver else {
                 return if tickets.is_empty() { Poll::Ready(None) } else { Poll::Pending };
             };

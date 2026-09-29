@@ -1,2 +1,2 @@
 [workspace]
-members = ["alpha", "beta", "missing_member"]
+members = ["alpha", "beta"]

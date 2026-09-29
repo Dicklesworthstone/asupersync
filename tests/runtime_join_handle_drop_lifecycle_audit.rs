@@ -384,14 +384,16 @@ fn task_handle_is_finished_predicate_for_drop_safety_check() {
          would detach'.",
     );
 
+    // Since the retirement barrier (929295c1f, yhueis) a buffered terminal
+    // only counts once the barrier is open, so a caller cannot act on a
+    // task whose record has not retired (asupersync-bi2462.169).
     assert!(
         source.contains(
-            "self.terminal_consumed || self.receiver.is_ready() || self.receiver.is_closed()"
+            "self.terminal_consumed\n            || (self.barrier.is_open() && (self.receiver.is_ready() || self.receiver.is_closed()))"
         ),
-        "REGRESSION: is_finished body changed. The three \
-         conditions (terminal_consumed, receiver ready, \
-         receiver closed) collectively detect any \
-         termination state.",
+        "REGRESSION: is_finished body changed. A consumed terminal, \
+         or a ready or closed receiver behind an open retirement \
+         barrier, must together detect every termination state.",
     );
 }
 

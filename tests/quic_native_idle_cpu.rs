@@ -54,6 +54,10 @@ const MAX_IDLE_CPU_PERCENT: u64 = 15;
 /// fixes at 100 for the procfs ABI independent of the kernel's `CONFIG_HZ`.
 const USER_HZ: u64 = 100;
 
+// The CPU sample is process-wide. Native handshakes in sibling tests must not
+// overlap that sample; the CPU threshold and idle-window oracle stay intact.
+static NATIVE_IDLE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 // Canonical test CA + leaf chain shared with `tests/quic_h3_live_udp.rs`. The
 // leaf has SAN DNS:localhost and the serverAuth EKU; the client trusts only
 // this CA, so the handshake crosses WebPKI's real verifier.
@@ -115,8 +119,9 @@ fn connection_config() -> NativeQuicConnectionConfig {
     }
 }
 
-fn transport_parameters(config: NativeQuicConnectionConfig) -> Vec<u8> {
+fn transport_parameters(config: NativeQuicConnectionConfig, idle_millis: Option<u64>) -> Vec<u8> {
     let parameters = TransportParameters {
+        max_idle_timeout: idle_millis,
         max_udp_payload_size: Some(1_200),
         initial_max_data: Some(config.connection_recv_limit),
         initial_max_stream_data_bidi_local: Some(config.recv_window),
@@ -139,6 +144,17 @@ fn transport_parameters(config: NativeQuicConnectionConfig) -> Vec<u8> {
 /// exactly the way the in-tree live-UDP tests drive them.
 async fn live_pair(
     cx: &Cx,
+) -> (
+    Result<NativeQuicUdpConnection, NativeQuicUdpConnectionError>,
+    Result<NativeQuicUdpConnection, NativeQuicUdpConnectionError>,
+) {
+    live_pair_with_idle(cx, None, None).await
+}
+
+async fn live_pair_with_idle(
+    cx: &Cx,
+    client_idle_millis: Option<u64>,
+    server_idle_millis: Option<u64>,
 ) -> (
     Result<NativeQuicUdpConnection, NativeQuicUdpConnectionError>,
     Result<NativeQuicUdpConnection, NativeQuicUdpConnectionError>,
@@ -173,12 +189,14 @@ async fn live_pair(
     let client_driver = QuicHandshakeDriver::client(
         client_tls,
         ServerName::try_from("localhost").expect("server name"),
-        transport_parameters(client_connection_config),
+        transport_parameters(client_connection_config, client_idle_millis),
     )
     .expect("client handshake driver");
-    let server_driver =
-        QuicHandshakeDriver::server(server_tls, transport_parameters(server_connection_config))
-            .expect("server handshake driver");
+    let server_driver = QuicHandshakeDriver::server(
+        server_tls,
+        transport_parameters(server_connection_config, server_idle_millis),
+    )
+    .expect("server handshake driver");
 
     let initial_dcid =
         ConnectionId::new(b"idle-in1").expect("valid initial destination connection ID");
@@ -303,10 +321,11 @@ async fn measure_idle_window(
     }
 }
 
-/// This file intentionally holds a single test so the process-wide CPU
-/// accounting is not polluted by sibling tests running on other threads.
+/// Serialize sibling tests so their native handshakes cannot pollute the
+/// process-wide CPU accounting.
 #[test]
 fn idle_connection_with_silent_peer_parks_instead_of_spinning() {
+    let _serial = NATIVE_IDLE_TEST_LOCK.lock().unwrap();
     block_on(async {
         let cx = Cx::for_testing();
         let (client, server) = live_pair(&cx).await;
@@ -372,4 +391,150 @@ fn idle_connection_with_silent_peer_parks_instead_of_spinning() {
         );
         drop(server);
     });
+}
+
+#[test]
+fn negotiated_idle_expiry_wakes_the_native_udp_owner_and_stops_output() {
+    use asupersync::net::quic_native::QuicConnectionState;
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+
+    let _serial = NATIVE_IDLE_TEST_LOCK.lock().unwrap();
+    for workers in [1, 2] {
+        let builder = if workers == 1 {
+            asupersync::runtime::RuntimeBuilder::current_thread()
+        } else {
+            asupersync::runtime::RuntimeBuilder::multi_thread().worker_threads(workers)
+        };
+        let runtime = builder
+            .with_reactor(asupersync::runtime::reactor::create_reactor().unwrap())
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let cx = Cx::current().expect("native root context");
+            let (client, server) = live_pair_with_idle(&cx, Some(9_000), Some(2_000)).await;
+            let mut client = client.expect("authenticated idle client");
+            let mut server = server.expect("authenticated idle peer");
+            settle(&cx, &mut client, &mut server).await;
+            assert_eq!(client.connection().state(), QuicConnectionState::Established);
+            assert_eq!(server.connection().state(), QuicConnectionState::Established);
+            let started = Instant::now();
+            let mut parked_polls = 0;
+            let mut turns = 0;
+            asupersync::time::timeout(cx.now(), Duration::from_secs(8), async {
+                // The real peer keeps its bound socket but stops driving I/O.
+                // A 60-second caller wait must wake at the shorter negotiated
+                // deadline. The old driver never consulted that deadline.
+                while client.connection().state() == QuicConnectionState::Established {
+                    turns += 1;
+                    assert!(turns < 64, "idle owner must not spin through drive turns");
+                    let mut drive = Box::pin(client.drive_io_once(&cx, Duration::from_secs(60)));
+                    let progress = poll_fn(|task| {
+                        let result = drive.as_mut().poll(task);
+                        if matches!(result, Poll::Pending) {
+                            parked_polls += 1;
+                        }
+                        result
+                    })
+                    .await
+                    .expect("native idle drive");
+                    assert_eq!(progress.packets_received, 0, "peer remains silent");
+                }
+            })
+            .await
+            .expect("negotiated idle expiry must beat the caller's receive bound");
+            assert!(parked_polls > 0, "real parked UDP receive witness");
+            assert_eq!(client.connection().state(), QuicConnectionState::Closed);
+            assert!(!client.connection().can_send_app_data());
+            assert_eq!(client.connection().inner().transport().close_code(), Some(0));
+            assert!(!client.connection().close_was_peer_initiated());
+            assert_eq!(client.flush(&cx).await.unwrap(), 0);
+            assert!(client.connection_mut().open_bidi_stream(&cx).is_err());
+            assert_eq!(server.connection().state(), QuicConnectionState::Established);
+            eprintln!("bead=asupersync-bi2462.108 scenario=standalone_idle_expiry workers={workers} parked_polls={parked_polls} turns={turns} elapsed_ms={} terminal=Closed close_code=0", started.elapsed().as_millis());
+            drop(client);
+            drop(server);
+            assert_eq!(cx.timer_driver().unwrap().pending_count(), 0);
+        });
+        assert!(
+            runtime.is_quiescent(),
+            "native idle test leaves no tasks or obligations"
+        );
+    }
+}
+
+#[test]
+fn cancelling_a_native_idle_wait_preserves_the_owner_for_explicit_cleanup() {
+    use asupersync::net::quic_native::QuicConnectionState;
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+
+    let _serial = NATIVE_IDLE_TEST_LOCK.lock().unwrap();
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .with_reactor(asupersync::runtime::reactor::create_reactor().unwrap())
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let cx = Cx::current().expect("native root context");
+        let region = cx
+            .open_child_region(asupersync::cx::ChildRegionSpec::inherit())
+            .await
+            .unwrap();
+        let owner = region.cx().clone();
+        let (client, server) = live_pair_with_idle(&owner, Some(30_000), None).await;
+        let mut client = client.unwrap();
+        let mut server = server.unwrap();
+        settle(&owner, &mut client, &mut server).await;
+        let (parked_tx, parked_rx) = std::sync::mpsc::sync_channel(1);
+        let cancel_owner = owner.clone();
+        let canceller = std::thread::spawn(move || {
+            parked_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("parked native receive");
+            cancel_owner.set_cancel_requested(true);
+        });
+        let mut notified = false;
+        let result = {
+            let mut drive = Box::pin(client.drive_io_once(&owner, Duration::from_secs(60)));
+            asupersync::time::timeout(
+                cx.now(),
+                Duration::from_secs(5),
+                poll_fn(|task| {
+                    let result = drive.as_mut().poll(task);
+                    if matches!(result, Poll::Pending) && !notified {
+                        parked_tx.send(()).unwrap();
+                        notified = true;
+                    }
+                    result
+                }),
+            )
+            .await
+            .expect("cancellation must wake the parked native receive")
+        };
+        canceller.join().unwrap();
+        assert!(notified, "parked receive precedes cancellation");
+        assert!(
+            matches!(result, Err(NativeQuicUdpConnectionError::Cancelled)),
+            "exact cancellation result: {result:?}"
+        );
+        assert_eq!(client.connection().state(), QuicConnectionState::Established);
+        assert!(client.close(&cx, 7).await.unwrap() > 0);
+        let observed = server
+            .drive_io_once(&cx, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert!(observed.packets_received > 0);
+        assert_eq!(server.connection().state(), QuicConnectionState::Draining);
+        assert_eq!(server.connection().inner().transport().close_code(), Some(7));
+        assert!(server.connection().close_was_peer_initiated());
+        drop(client);
+        drop(server);
+        region.close().await.unwrap();
+        assert_eq!(cx.timer_driver().unwrap().pending_count(), 0);
+        eprintln!("bead=asupersync-bi2462.108 scenario=standalone_idle_cancel parked=true result=Cancelled cleanup=region_closed");
+    });
+    assert!(
+        runtime.is_quiescent(),
+        "native cancellation leaves no tasks or obligations"
+    );
 }

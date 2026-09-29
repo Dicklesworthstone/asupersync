@@ -156,6 +156,56 @@ fn expiry_driver_rearms_earlier_deadlines_and_retires_all_timers_on_drop() {
 }
 
 #[test]
+fn expiry_driver_ignores_unrelated_ambient_cancel_without_spinning() {
+    #[derive(Debug)]
+    struct PollBudgetClock(AtomicUsize);
+    impl crate::time::TimeSource for PollBudgetClock {
+        fn now(&self) -> Time {
+            // Fail deterministically if one poll loops without time or owner
+            // progress; the old implementation otherwise never returns.
+            assert!(self.0.fetch_sub(1, Ordering::SeqCst) > 0, "expiry driver spun within one poll");
+            Time::ZERO
+        }
+    }
+
+    let mut f = Fixture::new(8, 8);
+    let clock = Arc::new(PollBudgetClock(AtomicUsize::new(64)));
+    let driver = Arc::new(TimerDriver::with_clock(Arc::clone(&clock)));
+    let timer = TimerDriverHandle::new(driver);
+    Arc::get_mut(&mut f.controller.shared).unwrap().clock = timer.clone();
+    let lease = f.grant(100);
+    f.drain();
+    let owner = f.controller.clone();
+    let driver_cx = f.cx.clone();
+    let mut run = Box::pin(owner.run(&driver_cx));
+    assert!(poll(run.as_mut(), Waker::noop()).is_pending());
+    assert_eq!(timer.pending_count(), 1);
+    let unrelated = Cx::for_testing();
+    unrelated.cancel_with(crate::types::CancelKind::User, Some("unrelated ambient task"));
+    clock.0.store(64, Ordering::SeqCst);
+    eprintln!("scenario=membership_expiry_unrelated_ambient_cancel state=parked clock_ns=0 deadline_ns=100000000");
+    {
+        let _ambient = Cx::set_current(Some(unrelated));
+        assert!(poll(run.as_mut(), Waker::noop()).is_pending());
+        assert!(poll(run.as_mut(), Waker::noop()).is_pending());
+    }
+    assert_eq!(lease.status(), OwnedLeaseStatus::Active);
+    assert_eq!(timer.pending_count(), 1);
+    assert!(!driver_cx.is_cancel_requested());
+
+    driver_cx.cancel_with(crate::types::CancelKind::User, Some("actual lease owner"));
+    assert!(matches!(poll(run.as_mut(), Waker::noop()), Poll::Ready(Err(OwnedMembershipError::Cancelled))));
+    drop(run);
+    assert_eq!(lease.status(), OwnedLeaseStatus::Closed);
+    assert_eq!(timer.pending_count(), 0);
+    drop(lease);
+    f.drain();
+    assert_eq!(f.mailbox.stats().aborted, 1);
+    assert_eq!(f.mailbox.stats().leaked, 0);
+    eprintln!("scenario=membership_expiry_unrelated_ambient_cancel poll_count=2 terminal=Cancelled lease=Closed aborted=1 leaked=0 pending_timers=0");
+}
+
+#[test]
 fn deadline_ties_cannot_renew_or_cleanly_release_expired_leases() {
     let mut f = Fixture::new(8, 8); let a = f.grant(10); let b = f.grant(10); f.drain();
     f.advance(10);
@@ -224,4 +274,45 @@ fn invalidation_publishes_checked_terminal_before_holder_can_finish() {
     finish(&f.controller.shared, vec![retired]);
     drop(lease); f.drain();
     assert_eq!(f.mailbox.stats().aborted, 1); assert_eq!(f.mailbox.stats().leaked, 0);
+}
+
+/// A release waiting for the lock must not lose to a later reading taken by the
+/// holder (asupersync-5o8bqh). A clock read before the lock failed `observe` with
+/// Clock and aborted a lease whose work had committed; in the expiry driver the
+/// same race closed the whole controller.
+#[test]
+fn a_release_waiting_for_the_lock_observes_time_in_lock_order() {
+    let mut f = Fixture::new(8, 8); let lease = f.grant(1_000); f.drain();
+    let shared = Arc::clone(&f.controller.shared);
+    let released = std::thread::scope(|scope| {
+        let mut state = shared.state.lock();
+        let release = scope.spawn(move || lease.release());
+        // The releasing thread is now blocked on the lock.
+        std::thread::sleep(Duration::from_millis(100));
+        f.clock.advance(5_000_000);
+        observe(&mut state, shared.clock.now()).expect("a later reading");
+        drop(state);
+        release.join().expect("release thread")
+    });
+    assert!(released.is_ok(), "{released:?}");
+    f.drain(); assert_eq!(f.mailbox.stats().committed, 1); assert_eq!(f.controller.live_leases(), 0);
+}
+
+/// A revocation waits for a busy lock instead of being refused as Busy, which
+/// left a dead member's leases live (asupersync-5o8bqh).
+#[test]
+fn authority_revocation_waits_for_a_busy_lock() {
+    let mut f = Fixture::new(8, 8); let lease = f.grant(1_000); f.drain();
+    let controller = &f.controller;
+    let applied = std::thread::scope(|scope| {
+        let state = controller.shared.state.lock();
+        let revoke = scope.spawn(|| controller.apply_authenticated(&NodeId::new("authority"),
+            &update(1, 2, MembershipKind::Dead)));
+        std::thread::sleep(Duration::from_millis(50));
+        drop(state);
+        revoke.join().expect("revocation thread")
+    });
+    assert_eq!(applied.expect("the revocation is applied"), MembershipApplied::Applied { revoked: 1 });
+    assert!(matches!(lease.release(), Err(OwnedMembershipError::Ended(OwnedLeaseStatus::Revoked))));
+    f.drain(); assert_eq!(f.mailbox.stats().aborted, 1); assert_eq!(f.controller.live_leases(), 0);
 }

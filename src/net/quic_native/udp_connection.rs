@@ -178,6 +178,10 @@ pub struct NativeQuicUdpConnection {
     early_one_rtt_packets: Vec<ReceivedPacket>,
     last_final_flight_retransmit: Option<Instant>,
     clock_origin: Instant,
+    last_activity: Instant,
+    // RFC 9000 section 10.1: only the first ack-eliciting send after
+    // authenticated input may restart the negotiated idle timeout.
+    sent_since_receive: bool,
     // Already protected/accounted packets remain owned across a dropped flush.
     pending_outgoing: Vec<RoutedOutgoingPacket>,
     local_close: Option<LocalClosePacket>,
@@ -209,6 +213,8 @@ pub(crate) struct NativeQuicUdpHandoffParts {
     pub(crate) early_one_rtt_packets: Vec<ReceivedPacket>,
     pub(crate) last_final_flight_retransmit: Option<Instant>,
     pub(crate) clock_origin: Instant,
+    pub(crate) last_activity: Instant,
+    pub(crate) sent_since_receive: bool,
     pub(crate) pending_outgoing: Vec<RoutedOutgoingPacket>,
 }
 
@@ -302,7 +308,8 @@ impl NativeQuicUdpConnection {
     /// The handoff preserves the whole application handle, verified TLS state,
     /// packet-protection provider, negotiated transport parameters and ALPN,
     /// distinct local/peer connection IDs, original recovery clock, retained
-    /// final handshake flight, and early application packets in their order.
+    /// final handshake flight, negotiated idle activity, and early application
+    /// packets in their order.
     /// It performs no network I/O and starts no background task. Drive the
     /// returned endpoint from the caller's structured-concurrency scope.
     ///
@@ -343,6 +350,8 @@ impl NativeQuicUdpConnection {
             early_one_rtt_packets,
             last_final_flight_retransmit,
             clock_origin,
+            last_activity,
+            sent_since_receive,
             pending_outgoing,
             local_close: _,
         } = self;
@@ -358,6 +367,8 @@ impl NativeQuicUdpConnection {
             early_one_rtt_packets,
             last_final_flight_retransmit,
             clock_origin,
+            last_activity,
+            sent_since_receive,
             pending_outgoing,
         }
     }
@@ -375,6 +386,8 @@ impl NativeQuicUdpConnection {
             early_one_rtt_packets,
             last_final_flight_retransmit,
             clock_origin,
+            last_activity,
+            sent_since_receive,
             pending_outgoing,
         } = parts;
         Self {
@@ -389,6 +402,8 @@ impl NativeQuicUdpConnection {
             early_one_rtt_packets,
             last_final_flight_retransmit,
             clock_origin,
+            last_activity,
+            sent_since_receive,
             pending_outgoing,
             local_close: None,
         }
@@ -510,6 +525,7 @@ impl NativeQuicUdpConnection {
             required_alpn,
             role,
         )?;
+        let now = Instant::now();
         Ok(Self {
             connection: parts.connection,
             endpoint,
@@ -521,7 +537,9 @@ impl NativeQuicUdpConnection {
             final_handshake_flight: parts.final_handshake_flight,
             early_one_rtt_packets,
             last_final_flight_retransmit: None,
-            clock_origin: Instant::now(),
+            clock_origin: now,
+            last_activity: now,
+            sent_since_receive: false,
             pending_outgoing: Vec::new(),
             local_close: None,
         })
@@ -587,11 +605,21 @@ impl NativeQuicUdpConnection {
         };
         connection
             .inner_mut()
+            .apply_peer_transport_parameters_with_datagram_cap(
+                cx,
+                &peer_parameters,
+                connection_config.max_datagram_frame_size,
+            )?;
+        connection
+            .inner_mut()
             .set_negotiated_idle_timeout(&local_parameters, &peer_parameters);
         connection.inner_mut().set_remote_stream_limits(
             local_parameters.initial_max_streams_bidi.unwrap_or(0),
             local_parameters.initial_max_streams_uni.unwrap_or(0),
         );
+        connection
+            .inner_mut()
+            .set_local_max_datagram_frame_size(local_parameters.max_datagram_frame_size);
         connection
             .inner_mut()
             .set_initial_stream_windows(bound.send_windows, bound.recv_windows);
@@ -685,6 +713,9 @@ impl NativeQuicUdpConnection {
                 "application close code must fit a QUIC varint",
             )
             .into());
+        }
+        if self.expire_idle_at(cx, Instant::now())? {
+            return Ok(0);
         }
         if self.connection.inner().state() != QuicConnectionState::Closed {
             let now_micros = self.instant_micros(Instant::now());
@@ -814,6 +845,9 @@ impl NativeQuicUdpConnection {
             return Err(NativeQuicUdpConnectionError::Cancelled);
         }
         let now = Instant::now();
+        if self.expire_idle_at(cx, now)? {
+            return Ok(0);
+        }
         let now_micros = self.instant_micros(now);
         let state = self.connection.inner().state();
         if matches!(
@@ -833,25 +867,8 @@ impl NativeQuicUdpConnection {
         self.connection
             .inner_mut()
             .set_one_rtt_frame_budget(max_frame_bytes);
-        if self.connection.inner().can_send_1rtt()
-            && self
-                .protection
-                .confidentiality_key_update_due(PacketProtectionSpace::OneRtt)
-            && self.connection.inner().tls().local_key_phase()
-                == self.connection.inner().tls().remote_key_phase()
-        {
-            let next_phase = !self.connection.inner().tls().local_key_phase();
-            if self
-                .protection
-                .ensure_next_gen_keys(cx, PacketProtectionSpace::OneRtt, next_phase)
-                .is_ok()
-            {
-                self.connection.inner_mut().request_local_key_update(cx)?;
-                self.connection.inner_mut().commit_local_key_update(cx)?;
-                self.protection
-                    .note_local_key_update(PacketProtectionSpace::OneRtt);
-            }
-        }
+        // The shared packet assembler checks key-update eligibility and the
+        // AEAD limit for every new packet, including PTO and close packets.
         // Retry retained output before admitting more application work.
         let packet_budget = if self.pending_outgoing.is_empty() {
             MAX_PACKETS_PER_FLUSH
@@ -929,14 +946,23 @@ impl NativeQuicUdpConnection {
             .into());
         }
         let mut sent = 0;
+        let mut idle_wake: Option<(Instant, crate::time::Sleep)> = None;
         std::future::poll_fn(|task_cx| {
             while !self.pending_outgoing.is_empty() {
+                match self.expire_idle_at(cx, Instant::now()) {
+                    Ok(true) => return std::task::Poll::Ready(Ok(sent)),
+                    Ok(false) => {}
+                    Err(error) => return std::task::Poll::Ready(Err(error)),
+                }
                 let report = match self.endpoint.poll_send_batch(
                     cx,
                     task_cx,
                     self.pending_outgoing.iter().map(|packet| &packet.packet),
                 ) {
-                    std::task::Poll::Pending => return std::task::Poll::Pending,
+                    std::task::Poll::Pending => {
+                        self.poll_idle_wake(cx, task_cx, &mut idle_wake);
+                        return std::task::Poll::Pending;
+                    }
                     std::task::Poll::Ready(Ok(report)) => report,
                     std::task::Poll::Ready(Err(error)) => {
                         return std::task::Poll::Ready(Err(
@@ -950,6 +976,14 @@ impl NativeQuicUdpConnection {
                 };
                 // Publish every acknowledged prefix before returning Pending
                 // or an error. The future owns no unsent wire bytes.
+                if !self.sent_since_receive
+                    && self.pending_outgoing[..report.packets_processed]
+                        .iter()
+                        .any(|packet| packet.ack_eliciting)
+                {
+                    self.last_activity = self.last_activity.max(Instant::now());
+                    self.sent_since_receive = true;
+                }
                 drop(self.pending_outgoing.drain(..report.packets_processed));
                 sent += report.packets_processed;
                 if let Some(error) = report.error {
@@ -972,6 +1006,9 @@ impl NativeQuicUdpConnection {
     /// payloads, service a due loss timer, and flush resulting ACK/application
     /// frames. A quiet timeout is reported as progress rather than an error so
     /// callers can compose their own explicit drive loop and cancellation scope.
+    /// The receive wait also observes the negotiated idle deadline, with the
+    /// required three-PTO minimum. Idle expiry closes locally without sending
+    /// CONNECTION_CLOSE; `connection().state()` then reports `Closed`.
     pub async fn drive_io_once(
         &mut self,
         cx: &Cx,
@@ -981,6 +1018,10 @@ impl NativeQuicUdpConnection {
             return Err(NativeQuicUdpConnectionError::Cancelled);
         }
         let mut progress = NativeQuicUdpIoProgress::default();
+        if self.expire_idle_at(cx, Instant::now())? {
+            progress.receive_timed_out = true;
+            return Ok(progress);
+        }
         let received = if self.early_one_rtt_packets.is_empty() {
             let bounded_wait = self.receive_wait_duration(cx, receive_timeout)?;
             if bounded_wait.is_zero() {
@@ -1012,6 +1053,14 @@ impl NativeQuicUdpConnection {
         };
 
         for packet in received {
+            // A ready socket can win the generic timeout race after its
+            // deadline, especially without an ambient runtime timer. Admit
+            // input against the owner's monotonic clock before any packet
+            // can refresh idle activity or restart an expired connection.
+            if self.expire_idle_at(cx, Instant::now())? {
+                progress.receive_timed_out = true;
+                return Ok(progress);
+            }
             if packet.src_addr != self.peer_addr {
                 progress.packets_dropped = progress.packets_dropped.saturating_add(1);
                 continue;
@@ -1054,6 +1103,8 @@ impl NativeQuicUdpConnection {
                     &mut self.protection,
                     &packet.data,
                 ) {
+                    self.last_activity = self.last_activity.max(packet.receive_time);
+                    self.sent_since_receive = false;
                     continue;
                 }
                 if !self.final_handshake_flight.is_empty()
@@ -1062,19 +1113,9 @@ impl NativeQuicUdpConnection {
                             >= FINAL_HANDSHAKE_FLIGHT_RESEND_INTERVAL
                     })
                 {
-                    let report = self
-                        .endpoint
-                        .send_batch(cx, &self.final_handshake_flight)
-                        .await?;
-                    if report.packets_processed != self.final_handshake_flight.len()
-                        || report.error.is_some()
-                    {
-                        return Err(NativeQuicUdpConnectionError::BatchSend(
-                            report.error.unwrap_or_else(|| {
-                                "final handshake flight was only partially retransmitted"
-                                    .to_string()
-                            }),
-                        ));
+                    if !self.retransmit_final_flight(cx).await? {
+                        progress.receive_timed_out = true;
+                        return Ok(progress);
                     }
                     progress.handshake_flights_retransmitted =
                         progress.handshake_flights_retransmitted.saturating_add(1);
@@ -1151,6 +1192,8 @@ impl NativeQuicUdpConnection {
                 }
                 return Err(error.into());
             }
+            self.last_activity = self.last_activity.max(packet.receive_time);
+            self.sent_since_receive = false;
             progress.packets_received = progress.packets_received.saturating_add(1);
         }
 
@@ -1165,6 +1208,138 @@ impl NativeQuicUdpConnection {
             .unwrap_or(Duration::ZERO)
             .as_micros()
             .min(u128::from(u64::MAX)) as u64
+    }
+
+    async fn retransmit_final_flight(
+        &mut self,
+        cx: &Cx,
+    ) -> Result<bool, NativeQuicUdpConnectionError> {
+        let packet_limit = self.endpoint.config().max_packet_size;
+        if let Some(packet) = self
+            .final_handshake_flight
+            .iter()
+            .find(|packet| packet.data.len() > packet_limit)
+        {
+            return Err(QuicUdpEndpointError::PacketTooLarge {
+                size: packet.data.len(),
+                limit: packet_limit,
+            }
+            .into());
+        }
+        let mut sent = 0;
+        let mut idle_wake = None;
+        std::future::poll_fn(|task_cx| {
+            loop {
+                match self.expire_idle_at(cx, Instant::now()) {
+                    Ok(true) => return std::task::Poll::Ready(Ok(false)),
+                    Ok(false) => {}
+                    Err(error) => return std::task::Poll::Ready(Err(error)),
+                }
+                if sent == self.final_handshake_flight.len() {
+                    return std::task::Poll::Ready(Ok(true));
+                }
+                let report = match self.endpoint.poll_send_batch(
+                    cx,
+                    task_cx,
+                    self.final_handshake_flight[sent..].iter(),
+                ) {
+                    std::task::Poll::Pending => {
+                        self.poll_idle_wake(cx, task_cx, &mut idle_wake);
+                        return std::task::Poll::Pending;
+                    }
+                    std::task::Poll::Ready(Ok(report)) => report,
+                    std::task::Poll::Ready(Err(error)) => {
+                        return std::task::Poll::Ready(Err(
+                            if error.kind() == std::io::ErrorKind::Interrupted {
+                                NativeQuicUdpConnectionError::Cancelled
+                            } else {
+                                NativeQuicUdpConnectionError::Endpoint(error.into())
+                            },
+                        ));
+                    }
+                };
+                sent += report.packets_processed;
+                // Retained handshake ciphertext has no trusted per-packet
+                // ack-eliciting metadata. Match the managed router: replaying
+                // this cache cannot initiate an idle-timer refresh.
+                if let Some(error) = report.error {
+                    return std::task::Poll::Ready(Err(NativeQuicUdpConnectionError::BatchSend(
+                        error,
+                    )));
+                }
+                if report.packets_processed == 0 {
+                    return std::task::Poll::Ready(Err(NativeQuicUdpConnectionError::BatchSend(
+                        "final handshake flight retransmission made no progress".to_owned(),
+                    )));
+                }
+            }
+        })
+        .await
+    }
+
+    fn poll_idle_wake(
+        &self,
+        cx: &Cx,
+        task_cx: &mut std::task::Context<'_>,
+        idle_wake: &mut Option<(Instant, crate::time::Sleep)>,
+    ) {
+        let Some(deadline) = self.idle_deadline() else {
+            return;
+        };
+        if idle_wake.as_ref().is_none_or(|(at, _)| *at != deadline) {
+            *idle_wake = Some((
+                deadline,
+                crate::time::sleep(cx.now(), deadline.saturating_duration_since(Instant::now())),
+            ));
+        }
+        if let Some((_, sleep)) = idle_wake
+            && std::pin::Pin::new(sleep).poll_deadline(task_cx).is_ready()
+        {
+            // Retire a completed Sleep even if the timer fired before
+            // the monotonic owner clock reached its exact deadline.
+            *idle_wake = None;
+            task_cx.waker().wake_by_ref();
+        }
+    }
+
+    fn idle_deadline(&self) -> Option<Instant> {
+        if matches!(
+            self.connection.inner().state(),
+            QuicConnectionState::Closed | QuicConnectionState::Draining
+        ) {
+            return None;
+        }
+        let timeout = self
+            .connection
+            .inner()
+            .negotiated_idle_timeout_micros()?
+            .max(
+                self.connection
+                    .inner()
+                    .transport()
+                    .idle_timeout_floor_micros(),
+            );
+        self.last_activity
+            .checked_add(Duration::from_micros(timeout))
+    }
+
+    fn expire_idle_at(
+        &mut self,
+        cx: &Cx,
+        now: Instant,
+    ) -> Result<bool, NativeQuicUdpConnectionError> {
+        if self.idle_deadline().is_none_or(|deadline| deadline > now) {
+            return Ok(false);
+        }
+        // RFC 9000 section 10.1: idle expiry discards connection state without
+        // a wire close. In particular, no retained datagram, final handshake
+        // flight or recovery probe may escape after the owner expires.
+        self.connection.inner_mut().close_immediately(cx, 0)?;
+        self.pending_outgoing.clear();
+        self.final_handshake_flight.clear();
+        self.early_one_rtt_packets.clear();
+        self.local_close = None;
+        Ok(true)
     }
 
     fn receive_wait_duration(
@@ -1186,16 +1361,25 @@ impl NativeQuicUdpConnection {
                 .inner_mut()
                 .pto_deadline_micros(cx, now_micros)?,
         };
-        let Some(deadline_micros) = deadline else {
-            return Ok(requested);
-        };
-        Ok(requested.min(Duration::from_micros(
-            deadline_micros.saturating_sub(now_micros),
-        )))
+        let recovery_wait = deadline.map(|deadline_micros| {
+            Duration::from_micros(deadline_micros.saturating_sub(now_micros))
+        });
+        let idle_wait = self
+            .idle_deadline()
+            .map(|deadline| deadline.saturating_duration_since(now));
+        Ok([Some(requested), recovery_wait, idle_wait]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(requested))
     }
 
     fn service_due_loss_timer(&mut self, cx: &Cx) -> Result<(), NativeQuicUdpConnectionError> {
-        let now_micros = self.instant_micros(Instant::now());
+        let now = Instant::now();
+        if self.expire_idle_at(cx, now)? {
+            return Ok(());
+        }
+        let now_micros = self.instant_micros(now);
         if matches!(
             self.connection.inner().state(),
             QuicConnectionState::Draining | QuicConnectionState::Closed
@@ -1275,11 +1459,6 @@ fn bind_transport_parameters(
         remote_bidi: recv_cap.min(local.initial_max_stream_data_bidi_remote.unwrap_or(0)),
         uni: recv_cap.min(local.initial_max_stream_data_uni.unwrap_or(0)),
     };
-    config.max_datagram_frame_size = config.max_datagram_frame_size.min(
-        peer.max_datagram_frame_size
-            .and_then(|value| usize::try_from(value).ok())
-            .unwrap_or(0),
-    );
     BoundTransportParameters {
         config,
         send_windows,
@@ -1365,15 +1544,37 @@ mod tests {
         assert_eq!(bound.config.max_local_bidi, 2);
         assert_eq!(bound.config.connection_send_limit, 1 << 19);
         assert_eq!(bound.config.connection_recv_limit, 1 << 20);
-        assert_eq!(bound.config.max_datagram_frame_size, 0);
+        // The authenticated handoff applies DATAGRAM, ACK timing and migration
+        // together after this flow-control-only binding.
+        assert_eq!(
+            bound.config.max_datagram_frame_size,
+            config.max_datagram_frame_size
+        );
 
         // The windows reach the stream table: a client opening stream 0 gets
         // the peer's `bidi_remote` credit, not zero.
         let mut connection = QuicConnection::client(bound.config);
+        let cx = Cx::for_testing();
+        connection
+            .inner_mut()
+            .apply_peer_transport_parameters_with_datagram_cap(
+                &cx,
+                &peer,
+                config.max_datagram_frame_size,
+            )
+            .unwrap();
+        assert!(matches!(
+            connection
+                .inner_mut()
+                .send_datagram(&cx, Bytes::from_static(b"no peer support")),
+            Err(NativeQuicConnectionError::DatagramTooLarge {
+                max_frame_size: 0,
+                ..
+            })
+        ));
         connection
             .inner_mut()
             .set_initial_stream_windows(bound.send_windows, bound.recv_windows);
-        let cx = Cx::for_testing();
         connection.begin_handshake(&cx).unwrap();
         connection.mark_handshake_keys_available(&cx).unwrap();
         connection.mark_app_keys_available(&cx).unwrap();
@@ -1426,7 +1627,6 @@ mod tests {
     }
 
     async fn authenticated_udp_pair() -> (NativeQuicUdpConnection, NativeQuicUdpConnection) {
-        let cx = Cx::for_testing();
         let config = NativeQuicConnectionConfig::default();
         let parameters = TransportParameters {
             initial_max_data: Some(config.connection_recv_limit),
@@ -1435,8 +1635,20 @@ mod tests {
             initial_max_streams_bidi: Some(config.max_local_bidi),
             ..TransportParameters::default()
         };
-        let mut encoded = Vec::new();
-        parameters.encode(&mut encoded).unwrap();
+        authenticated_udp_pair_with_parameters(config, config, &parameters, &parameters).await
+    }
+
+    async fn authenticated_udp_pair_with_parameters(
+        client_connection_config: NativeQuicConnectionConfig,
+        server_connection_config: NativeQuicConnectionConfig,
+        client_parameters: &TransportParameters,
+        server_parameters: &TransportParameters,
+    ) -> (NativeQuicUdpConnection, NativeQuicUdpConnection) {
+        let cx = Cx::current().unwrap_or_else(Cx::for_testing);
+        let mut client_encoded = Vec::new();
+        client_parameters.encode(&mut client_encoded).unwrap();
+        let mut server_encoded = Vec::new();
+        server_parameters.encode(&mut server_encoded).unwrap();
         let client_socket = QuicUdpEndpoint::bind(
             &cx,
             "127.0.0.1:0".parse().unwrap(),
@@ -1470,26 +1682,486 @@ mod tests {
                 QuicHandshakeDriver::client(
                     client_tls,
                     ServerName::try_from("localhost").unwrap(),
-                    encoded.clone(),
+                    client_encoded,
                 )
                 .unwrap(),
                 initial_cid,
                 ConnectionId::new(b"client").unwrap(),
-                config,
+                client_connection_config,
                 alpn,
             ),
             NativeQuicUdpConnection::accept(
                 &cx,
                 server_socket,
-                QuicHandshakeDriver::server(server_tls, encoded).unwrap(),
+                QuicHandshakeDriver::server(server_tls, server_encoded).unwrap(),
                 initial_cid,
                 ConnectionId::new(b"server").unwrap(),
-                config,
+                server_connection_config,
                 alpn,
             ),
         )
         .await;
         (client.unwrap(), server.unwrap())
+    }
+
+    async fn deliver_peer_ack(
+        sender: &mut NativeQuicUdpConnection,
+        receiver: &mut NativeQuicUdpConnection,
+        acked: u64,
+        raw_delay: u64,
+        now_micros: u64,
+    ) {
+        let cx = Cx::current().expect("native ACK test runtime");
+        let frames = [QuicFrame::Ack {
+            largest_acknowledged: VarInt(acked),
+            ack_delay: VarInt(raw_delay),
+            ack_range_count: VarInt(0),
+            first_ack_range: VarInt(0),
+            ack_ranges: Vec::new(),
+            ecn_counts: None,
+        }];
+        let mut payload = BytesMut::new();
+        NativeQuicConnection::encode_frames(&frames, &mut payload).unwrap();
+        let packet = assemble_protected_1rtt_packet(
+            &cx,
+            receiver.local_cid,
+            sender.connection.inner_mut(),
+            &mut sender.protection,
+            &frames,
+            &payload,
+            now_micros,
+            false,
+        )
+        .await
+        .unwrap();
+        let sent = sender
+            .endpoint
+            .send_batch(
+                &cx,
+                &[OutgoingPacket {
+                    dst_addr: receiver.local_addr(),
+                    data: packet,
+                    send_time: None,
+                }],
+            )
+            .await
+            .unwrap();
+        assert_eq!(sent.packets_processed, 1);
+        assert!(sent.error.is_none());
+        // Receive on the real socket and authenticate with the negotiated TLS
+        // keys. Only the recovery clock is deterministic, so RTT expectations
+        // do not depend on machine load or loopback scheduling.
+        timeout(cx.now(), Duration::from_secs(5), async {
+            loop {
+                for packet in receiver.endpoint.receive_batch(&cx, 8).await.unwrap() {
+                    if !matches!(
+                        ProtectedHeaderPrefix::decode(&packet.data, receiver.local_cid.len()),
+                        Ok(ProtectedHeaderPrefix::Short { .. })
+                    ) {
+                        continue;
+                    }
+                    let decoded = unprotect_1rtt_packet(
+                        &cx,
+                        receiver.local_cid,
+                        &mut receiver.protection,
+                        &packet.data,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(
+                        NativeQuicConnection::decode_frames(&decoded.plaintext).unwrap(),
+                        frames
+                    );
+                    receiver
+                        .connection
+                        .inner_mut()
+                        .process_packet_payload(
+                            &cx,
+                            PacketNumberSpace::ApplicationData,
+                            decoded.header.packet_number,
+                            &decoded.plaintext,
+                            now_micros,
+                        )
+                        .unwrap();
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("authenticated ACK must arrive");
+    }
+
+    #[test]
+    fn authenticated_udp_handshake_applies_peer_ack_timing_and_migration_policy() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .with_reactor(crate::runtime::reactor::create_reactor().unwrap())
+            .build()
+            .unwrap();
+        runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("native transport-parameter test runtime");
+            let config = NativeQuicConnectionConfig::default();
+            for (peer_parameters, delay, expected_adjusted, expected_max_delay) in [
+                (
+                    TransportParameters {
+                        ack_delay_exponent: Some(10),
+                        max_ack_delay: Some(5),
+                        disable_active_migration: true,
+                        ..TransportParameters::default()
+                    },
+                    2,
+                    17_952,
+                    5_000,
+                ),
+                (TransportParameters::default(), 2, 19_984, 25_000),
+            ] {
+                let (mut client, mut server) = authenticated_udp_pair_with_parameters(
+                    config,
+                    config,
+                    &peer_parameters,
+                    &TransportParameters::default(),
+                )
+                .await;
+                assert!(server.connection.inner().tls().handshake_confirmed());
+                let migration = server.connection.inner_mut().request_path_migration(&cx, 7);
+                if peer_parameters.disable_active_migration {
+                    assert!(matches!(migration, Err(NativeQuicConnectionError::InvalidState(
+                        "active migration disabled by transport parameters"
+                    ))));
+                    assert_eq!(server.connection.inner().active_path_id(), 0);
+                } else {
+                    assert_eq!(migration.unwrap(), 1);
+                }
+                // The client's peer omitted the migration restriction; do not
+                // accidentally apply our local advertised restriction to self.
+                assert_eq!(client.connection.inner_mut().request_path_migration(&cx, 8).unwrap(), 1);
+                for (sent_at, received_at, raw_delay, expected) in [
+                    (10_000, 11_000, 0, 1_000),
+                    (20_000, 40_000, delay, expected_adjusted),
+                    (50_000, 90_000, 100_000, 40_000 - expected_max_delay),
+                ] {
+                    let pn = server.connection.inner_mut().on_packet_sent(
+                        &cx, PacketNumberSpace::ApplicationData, 64, true, true, sent_at,
+                    ).unwrap();
+                    deliver_peer_ack(&mut client, &mut server, pn, raw_delay, received_at).await;
+                    assert_eq!(server.connection.inner().transport().rtt().latest_rtt_micros(), Some(expected));
+                }
+                let rtt = server.connection.inner().transport().rtt();
+                let base_pto = rtt.smoothed_rtt_micros().unwrap()
+                    + (4 * rtt.rttvar_micros().unwrap()).max(1_000);
+                server.connection.inner_mut().on_packet_sent(
+                    &cx, PacketNumberSpace::ApplicationData, 64, true, true, 100_000,
+                ).unwrap();
+                assert_eq!(server.connection.inner().pto_deadline_micros(&cx, 100_000).unwrap(),
+                    Some(100_000 + base_pto + expected_max_delay));
+            }
+        }));
+    }
+
+    #[test]
+    fn authenticated_udp_handshake_keeps_datagram_support_directional_and_locally_capped() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .with_reactor(crate::runtime::reactor::create_reactor().unwrap())
+            .build()
+            .unwrap();
+        runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("native transport-parameter test runtime");
+            let config = NativeQuicConnectionConfig {
+                max_datagram_frame_size: 32,
+                ..NativeQuicConnectionConfig::default()
+            };
+            let parameters = TransportParameters {
+                max_datagram_frame_size: Some(1_200),
+                ..TransportParameters::default()
+            };
+            for client_support in [false, true] {
+                let client_parameters = if client_support {
+                    parameters.clone()
+                } else {
+                    TransportParameters::default()
+                };
+                let (mut client, mut server) = authenticated_udp_pair_with_parameters(
+                    config, config, &client_parameters, &parameters,
+                ).await;
+                for (owner, cap) in [(&mut client, 32), (&mut server, if client_support { 32 } else { 0 })] {
+                    if cap != 0 {
+                        owner.connection.inner_mut().send_datagram(&cx, Bytes::from_static(b"fits")).unwrap();
+                    }
+                    assert!(matches!(
+                        owner.connection.inner_mut().send_datagram(&cx, Bytes::from(vec![0; 32])),
+                        Err(NativeQuicConnectionError::DatagramTooLarge { max_frame_size, .. }) if max_frame_size == cap
+                    ));
+                }
+            }
+        }));
+    }
+
+    #[test]
+    fn udp_idle_expiry_discards_retained_output_and_respects_disabled_timeout() {
+        block_on(async {
+            let cx = Cx::for_testing();
+            let (mut client, server) = authenticated_udp_pair().await;
+            let old_activity = Instant::now().checked_sub(Duration::from_secs(60)).unwrap();
+            client.last_activity = old_activity;
+            assert!(client.idle_deadline().is_none());
+            assert!(!client.expire_idle_at(&cx, Instant::now()).unwrap());
+            assert_eq!(client.connection.state(), QuicConnectionState::Established);
+
+            let parameters = TransportParameters {
+                max_idle_timeout: Some(1),
+                ..TransportParameters::default()
+            };
+            client
+                .connection
+                .inner_mut()
+                .set_negotiated_idle_timeout(&parameters, &TransportParameters::default());
+            let floor = client
+                .connection
+                .inner()
+                .transport()
+                .idle_timeout_floor_micros();
+            assert_eq!(
+                client.idle_deadline().unwrap(),
+                old_activity + Duration::from_micros(floor.max(1_000))
+            );
+            client.pending_outgoing.push(RoutedOutgoingPacket {
+                connection_id: client.local_cid,
+                packet: OutgoingPacket {
+                    dst_addr: client.peer_addr,
+                    data: b"retained unsent output must not escape idle expiry".to_vec(),
+                    send_time: None,
+                },
+                final_handshake_flight: false,
+                ack_eliciting: true,
+            });
+            assert_eq!(client.pending_outgoing.len(), 1, "retained-output witness");
+            let cancelled = Cx::for_testing();
+            cancelled.set_cancel_requested(true);
+            assert!(matches!(
+                client.flush(&cancelled).await,
+                Err(NativeQuicUdpConnectionError::Cancelled)
+            ));
+            assert_eq!(client.pending_outgoing.len(), 1);
+            assert_eq!(client.connection.state(), QuicConnectionState::Established);
+
+            assert_eq!(client.flush(&cx).await.unwrap(), 0);
+            assert_eq!(client.connection.state(), QuicConnectionState::Closed);
+            assert_eq!(client.connection.inner().transport().close_code(), Some(0));
+            assert!(!client.connection.close_was_peer_initiated());
+            assert!(client.pending_outgoing.is_empty());
+            assert!(client.final_handshake_flight.is_empty());
+            assert!(client.early_one_rtt_packets.is_empty());
+            assert!(client.local_close.is_none());
+            client.service_due_loss_timer(&cx).unwrap();
+            assert_eq!(client.flush(&cx).await.unwrap(), 0);
+            assert_eq!(client.close(&cx, 7).await.unwrap(), 0);
+            assert_eq!(client.connection.inner().transport().close_code(), Some(0));
+            assert_eq!(
+                client
+                    .receive_wait_duration(&cx, Duration::from_millis(25))
+                    .unwrap(),
+                Duration::from_millis(25),
+                "closed owners retain caller-driven pacing"
+            );
+            drop(server);
+        });
+    }
+
+    #[test]
+    fn udp_idle_activity_uses_authenticated_input_and_one_ack_eliciting_send() {
+        block_on(async {
+            let cx = Cx::for_testing();
+            let (mut client, mut server) = authenticated_udp_pair().await;
+            let mut quiet_rounds = 0;
+            for turn in 0..60 {
+                let a = client
+                    .drive_io_once(&cx, Duration::from_millis(25))
+                    .await
+                    .unwrap();
+                let b = server
+                    .drive_io_once(&cx, Duration::from_millis(25))
+                    .await
+                    .unwrap();
+                let quiet = |p: NativeQuicUdpIoProgress| {
+                    p.receive_timed_out
+                        && p.packets_received == 0
+                        && p.packets_sent == 0
+                        && p.early_packets_replayed == 0
+                        && p.handshake_flights_retransmitted == 0
+                };
+                quiet_rounds = if quiet(a) && quiet(b) {
+                    quiet_rounds + 1
+                } else {
+                    0
+                };
+                if quiet_rounds == 2 {
+                    break;
+                }
+                assert!(turn < 59, "handshake settle: client={a:?} server={b:?}");
+            }
+            let parameters = TransportParameters {
+                max_idle_timeout: Some(30_000),
+                ..TransportParameters::default()
+            };
+            client
+                .connection
+                .inner_mut()
+                .set_negotiated_idle_timeout(&parameters, &TransportParameters::default());
+            client.last_activity = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+            client.sent_since_receive = false;
+            let before_send = client.last_activity;
+            client.connection.inner_mut().queue_ping(&cx).unwrap();
+            assert!(client.flush(&cx).await.unwrap() > 0);
+            assert!(client.last_activity > before_send);
+            assert!(client.sent_since_receive);
+            let after_first_send = client.last_activity;
+            client.connection.inner_mut().queue_ping(&cx).unwrap();
+            assert!(client.flush(&cx).await.unwrap() > 0);
+            assert_eq!(
+                client.last_activity, after_first_send,
+                "repeated sends/probes cannot keep a silent peer alive"
+            );
+
+            let mut forged = vec![0x40];
+            forged.extend_from_slice(client.local_cid.as_bytes());
+            forged.extend_from_slice(&[0; 64]);
+            server
+                .endpoint
+                .send_batch(
+                    &cx,
+                    &[OutgoingPacket {
+                        dst_addr: client.endpoint.local_addr(),
+                        data: forged,
+                        send_time: None,
+                    }],
+                )
+                .await
+                .unwrap();
+            let rejected = client
+                .drive_io_once(&cx, Duration::from_millis(100))
+                .await
+                .unwrap();
+            assert!(rejected.packets_dropped > 0);
+            assert_eq!(rejected.packets_received, 0);
+            assert_eq!(client.last_activity, after_first_send);
+
+            let accepted = server
+                .drive_io_once(&cx, Duration::from_millis(100))
+                .await
+                .unwrap();
+            assert!(
+                accepted.packets_received > 0,
+                "peer processed the live PINGs"
+            );
+            server.connection.inner_mut().queue_ping(&cx).unwrap();
+            assert!(server.flush(&cx).await.unwrap() > 0);
+            let accepted = client
+                .drive_io_once(&cx, Duration::from_millis(100))
+                .await
+                .unwrap();
+            assert!(accepted.packets_received > 0);
+            assert!(client.last_activity > after_first_send);
+            // ACK-only output is not a new liveness-initiating send.
+            assert!(!client.sent_since_receive);
+
+            // Exercise the off-Cx timeout path's ready-I/O preference: park
+            // the real UDP read first, let the deadline pass without polling
+            // it, then deliver a valid encrypted packet before repolling.
+            // Authentication must not resurrect this expired owner.
+            let parameters = TransportParameters {
+                max_idle_timeout: Some(1_000),
+                ..TransportParameters::default()
+            };
+            client
+                .connection
+                .inner_mut()
+                .set_negotiated_idle_timeout(&parameters, &TransportParameters::default());
+            let idle = Duration::from_micros(
+                client
+                    .connection
+                    .inner()
+                    .transport()
+                    .idle_timeout_floor_micros()
+                    .max(1_000_000),
+            );
+            let grace = (idle / 4).min(Duration::from_millis(250));
+            client.last_activity = Instant::now().checked_sub(idle).unwrap() + grace;
+            let expired_activity = client.last_activity;
+            let result = {
+                let _ambient = Cx::set_current(None);
+                let mut drive = Box::pin(client.drive_io_once(&cx, Duration::from_secs(60)));
+                assert!(
+                    futures_lite::future::poll_once(drive.as_mut()).await.is_none(),
+                    "late-input regression must first park the UDP receive"
+                );
+                std::thread::sleep(grace + Duration::from_millis(50));
+                server.connection.inner_mut().queue_ping(&cx).unwrap();
+                assert!(
+                    server.flush(&cx).await.unwrap() > 0,
+                    "authenticated peer packet reaches the socket after idle expiry"
+                );
+                drive.await.unwrap()
+            };
+            assert!(result.receive_timed_out);
+            assert_eq!(result.packets_received, 0);
+            assert_eq!(result.packets_sent, 0);
+            assert_eq!(client.connection.state(), QuicConnectionState::Closed);
+            assert_eq!(client.last_activity, expired_activity);
+        });
+    }
+
+    #[test]
+    fn udp_idle_handoff_preserves_deadline_and_send_refresh_budget() {
+        block_on(async {
+            let (mut client, _server) = authenticated_udp_pair().await;
+            let parameters = TransportParameters {
+                max_idle_timeout: Some(30_000),
+                ..TransportParameters::default()
+            };
+            client
+                .connection
+                .inner_mut()
+                .set_negotiated_idle_timeout(&parameters, &TransportParameters::default());
+            client.last_activity = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+            client.sent_since_receive = true;
+            let original_activity = client.last_activity;
+            let deadline = client.idle_deadline().unwrap();
+            let cid = client.local_cid;
+            let peer = client.peer_addr;
+            let parts = client.into_managed_parts();
+            let client = NativeQuicUdpConnection::from_managed_parts(parts);
+            assert_eq!(client.last_activity, original_activity);
+            assert!(client.sent_since_receive);
+            let (mut router, _endpoint, _incoming) = ConnectionRouter::from_authenticated_parts(
+                client.into_managed_parts(),
+                NativeQuicConnectionConfig::default(),
+                1,
+                None,
+                Instant::now(),
+            );
+            assert!(
+                router
+                    .expired_connections(deadline.checked_sub(Duration::from_micros(1)).unwrap())
+                    .is_empty()
+            );
+            router.packet_sent(
+                &RoutedOutgoingPacket {
+                    connection_id: cid,
+                    packet: OutgoingPacket {
+                        dst_addr: peer,
+                        data: Vec::new(),
+                        send_time: None,
+                    },
+                    final_handshake_flight: false,
+                    ack_eliciting: true,
+                },
+                Some(deadline.checked_sub(Duration::from_millis(1)).unwrap()),
+            );
+            assert_eq!(
+                router.expired_connections(deadline),
+                vec![cid],
+                "handoff must not reset idle or restore the consumed send refresh"
+            );
+        });
     }
 
     #[test]

@@ -65,6 +65,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+#[cfg(not(target_arch = "wasm32"))]
+mod queued;
+#[cfg(not(target_arch = "wasm32"))]
+pub use queued::{
+    OTLP_EXPORT_QUEUE_MAX_BATCHES, OTLP_EXPORT_QUEUE_MAX_BYTES, OtlpExportQueueStats,
+};
+
 // =============================================================================
 // Cardinality Management
 // =============================================================================
@@ -5388,14 +5395,29 @@ impl OtlpLogsHttpExporter {
 }
 
 impl LogsExporter for OtlpLogsHttpExporter {
-    fn export(&self, _logs: &LogsSnapshot) -> Result<(), ExportError> {
-        Err(ExportError::new(
-            "OTLP HTTP logs export requires async context - use export_async()",
-        ))
+    fn export(&self, logs: &LogsSnapshot) -> Result<(), ExportError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.http.enqueue_logs(logs)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = logs;
+            Err(ExportError::new(
+                "OTLP HTTP logs export requires async context - use export_async()",
+            ))
+        }
     }
 
     fn flush(&self) -> Result<(), ExportError> {
-        Ok(())
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.http.export_queue.check_flushed()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Ok(())
+        }
     }
 }
 
@@ -6555,6 +6577,8 @@ pub struct OtlpHttpExporter {
     auth_headers: Vec<OtlpAuthHeader>,
     resource_attributes: Vec<(String, String)>,
     legacy_retry_compatibility: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    export_queue: Arc<queued::ExportQueue>,
 }
 
 impl std::fmt::Debug for OtlpHttpExporter {
@@ -6601,6 +6625,8 @@ impl OtlpHttpExporter {
             auth_headers: Vec::new(),
             resource_attributes: default_otlp_resource_attributes().into_iter().collect(),
             legacy_retry_compatibility: true,
+            #[cfg(not(target_arch = "wasm32"))]
+            export_queue: Arc::new(queued::ExportQueue::default()),
         }
     }
 
@@ -6625,6 +6651,8 @@ impl OtlpHttpExporter {
             auth_headers: config.auth_headers,
             resource_attributes: config.resource_attributes,
             legacy_retry_compatibility: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            export_queue: Arc::new(queued::ExportQueue::default()),
         }
     }
 
@@ -7326,15 +7354,29 @@ fn classify_otlp_http_response(status: u16, headers: &[(String, String)]) -> Res
 }
 
 impl MetricsExporter for OtlpHttpExporter {
-    fn export(&self, _metrics: &MetricsSnapshot) -> Result<(), ExportError> {
-        Err(ExportError::new(
-            "OTLP HTTP export requires async context - use send_otlp_protobuf() directly",
-        ))
+    fn export(&self, metrics: &MetricsSnapshot) -> Result<(), ExportError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.enqueue_metrics(metrics)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = metrics;
+            Err(ExportError::new(
+                "OTLP HTTP export requires async context - use send_otlp_protobuf() directly",
+            ))
+        }
     }
 
     fn flush(&self) -> Result<(), ExportError> {
-        // OTLP is stateless - nothing to flush
-        Ok(())
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.export_queue.check_flushed()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Ok(())
+        }
     }
 }
 
@@ -10811,8 +10853,23 @@ mod exporter_tests {
         assert_eq!(exporter.endpoint(), "http://collector:4318/v1/logs");
 
         let logs = LogsSnapshot::new("checkout");
-        let sync_error = exporter.export(&logs).expect_err("sync export rejected");
-        assert!(sync_error.to_string().contains("requires async context"));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            exporter.export(&logs).expect("sync export admitted");
+            assert_eq!(exporter.queue_stats().queued_batches, 1);
+            assert!(
+                exporter
+                    .flush()
+                    .expect_err("delivery is pending")
+                    .message
+                    .contains("otlp.queue.pending")
+            );
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let sync_error = exporter.export(&logs).expect_err("sync export rejected");
+            assert!(sync_error.to_string().contains("requires async context"));
+        }
     }
 
     #[test]

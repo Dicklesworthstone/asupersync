@@ -224,3 +224,121 @@ fn production_runtime_diagnostics_explains_a_cancelled_task() {
         // The task is left parked on purpose; runtime teardown aborts it.
     });
 }
+
+/// asupersync-bi2462.116: the production dispatch path never advanced a task's
+/// poll count, so the inspector reported 0 for a task that had provably run and
+/// its stuck heuristic flagged healthy parked tasks. Every poll that returns
+/// Pending now counts.
+#[test]
+fn production_runtime_inspector_counts_a_parked_task_s_polls() {
+    const YIELDS: u64 = 5;
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build current-thread runtime");
+    let inspector = runtime.task_inspector(TaskInspectorConfig::default());
+    let (tx, mut rx) = mpsc::channel::<u8>(1);
+    let parked = Arc::new(AtomicBool::new(false));
+
+    let received = runtime.block_on(async {
+        let cx = Cx::current().expect("block_on installs a root Cx");
+        let parked_flag = Arc::clone(&parked);
+        let mut handle = cx
+            .spawn(move |task_cx| async move {
+                for _ in 0..YIELDS {
+                    yield_now().await;
+                }
+                parked_flag.store(true, Ordering::SeqCst);
+                rx.recv(&task_cx).await.ok()
+            })
+            .expect("spawn counting task");
+
+        // YIELDS Pending polls, then the Pending poll that parks on recv.
+        let counted = yield_until(|| {
+            parked.load(Ordering::SeqCst)
+                && inspector
+                    .inspect_task(handle.task_id())
+                    .is_some_and(|task| task.poll_count > YIELDS)
+        })
+        .await;
+        let polls = inspector
+            .inspect_task(handle.task_id())
+            .map(|task| task.poll_count);
+        assert!(
+            counted,
+            "the parked task's polls must be counted; parked = {}, poll_count = {polls:?}",
+            parked.load(Ordering::SeqCst)
+        );
+        assert_eq!(polls, Some(YIELDS + 1), "one count per Pending poll");
+        eprintln!("scenario=inspector-poll-count yields={YIELDS} poll_count={polls:?}");
+
+        let permit = tx.reserve(&cx).await.expect("reserve channel capacity");
+        let _ = permit.send(9);
+        handle.join(&cx).await.expect("join released task")
+    });
+    assert_eq!(received, Some(9));
+}
+
+/// The confirmed leak signal must distinguish a healthy live reservation from
+/// the same obligation after the runtime records an unresolved-token drop.
+#[test]
+fn production_runtime_diagnostics_distinguishes_live_and_confirmed_obligation_leaks() {
+    use asupersync::record::ObligationKind;
+    use asupersync::runtime::config::ObligationLeakResponse;
+
+    for (flavor, builder) in [
+        ("current-thread", RuntimeBuilder::current_thread()),
+        (
+            "two-workers",
+            RuntimeBuilder::multi_thread().worker_threads(2),
+        ),
+    ] {
+        let runtime = builder
+            .obligation_leak_response(ObligationLeakResponse::Log)
+            .build()
+            .expect("build diagnostics runtime");
+        let diagnostics = runtime.diagnostics();
+        runtime.block_on(async {
+            let cx = Cx::current().expect("registered root context");
+            let holder = cx.task_id();
+            let token = cx
+                .try_register_obligation_checked(ObligationKind::Ack, holder)
+                .expect("admit checked obligation")
+                .expect("native context tracks the obligation");
+            let reserved = yield_until(|| {
+                diagnostics
+                    .find_leaked_obligations()
+                    .iter()
+                    .any(|obligation| obligation.holder_task == Some(holder))
+            })
+            .await;
+            assert!(reserved, "{flavor}: reservation must reach the runtime table");
+            let legacy = diagnostics.find_leaked_obligations();
+            assert_eq!(legacy.len(), 1, "{flavor}: exactly one held obligation");
+            let obligation_id = legacy[0].obligation_id;
+            assert!(diagnostics.find_confirmed_obligation_leaks().is_empty());
+            assert!(!diagnostics.has_confirmed_obligation_leaks());
+
+            // This is a deliberate leak, with an explicit non-panicking
+            // runtime policy. The previously observed reservation is the
+            // state witness; no sleep or guessed task ordering is involved.
+            drop(token);
+            assert!(
+                yield_until(|| diagnostics.has_confirmed_obligation_leaks()).await,
+                "{flavor}: unresolved-token drop must become a recorded leak"
+            );
+            let confirmed = diagnostics.find_confirmed_obligation_leaks();
+            assert_eq!(confirmed.len(), 1, "{flavor}: one confirmed leak");
+            assert_eq!(confirmed[0].obligation_id, obligation_id);
+            assert_eq!(confirmed[0].holder_task, Some(holder));
+            assert_eq!(confirmed[0].region_id, cx.region_id());
+            assert!(
+                diagnostics.find_leaked_obligations().is_empty(),
+                "{flavor}: legacy reserved-only behavior remains unchanged"
+            );
+            eprintln!(
+                "scenario=confirmed-obligation-leak flavor={flavor} holder={holder:?} \
+                 obligation={obligation_id:?} live_confirmed=0 leaked_confirmed=1"
+            );
+        });
+    }
+}

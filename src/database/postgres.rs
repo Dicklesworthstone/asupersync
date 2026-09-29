@@ -46,7 +46,7 @@ use crate::net::TcpStream;
 use crate::obligation::graded::{ObligationToken, TransactionKind};
 use crate::security::SecretString;
 #[cfg(feature = "tls")]
-use crate::tls::{Certificate, TlsConnector, TlsConnectorBuilder, TlsStream};
+use crate::tls::{TlsConnector, TlsStream};
 use crate::types::{CancelReason, Outcome};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
@@ -54,6 +54,10 @@ use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
+
+#[path = "postgres_tls.rs"]
+mod tls_options;
+pub use tls_options::{PgTlsOptions, PgTlsVerification};
 
 // ============================================================================
 // Error Types
@@ -1182,16 +1186,17 @@ impl PgRowStream<'_> {
         }
 
         if cx.checkpoint().is_err() {
-            return Outcome::Cancelled(
-                cx.cancel_reason()
-                    .unwrap_or_else(|| CancelReason::user("cancelled")),
-            );
+            self.finished = true;
+            return self.connection.cancel_in_flight(cx).await;
         }
 
         loop {
             let (msg_type, data) = match self.connection.read_message(cx).await {
                 Ok(m) => m,
-                Err(e) => return Outcome::Err(e),
+                Err(e) => {
+                    self.finished = true;
+                    return self.connection.fail_in_flight(e);
+                }
             };
 
             match msg_type {
@@ -1245,7 +1250,12 @@ impl PgRowStream<'_> {
                     }
                 }
                 _ => {
-                    // Ignore other message types (notices, etc.)
+                    if let Err(err) = self
+                        .connection
+                        .handle_async_backend_message(msg_type, &data)
+                    {
+                        return self.connection.fail_in_flight(err);
+                    }
                 }
             }
         }
@@ -2425,7 +2435,22 @@ impl PgConnectOptions {
     /// Parse a connection URL.
     ///
     /// Format: `postgres://user:password@host:port/database?options`
+    /// Use [`Self::parse_with_tls`] for `verify-ca`, `verify-full`, or
+    /// `sslrootcert`, which cannot be represented by this legacy struct alone.
     pub fn parse(url: &str) -> Result<Self, PgError> {
+        Self::parse_url(url, false).map(|(options, _)| options)
+    }
+
+    /// Parse a URL without discarding explicit TLS trust policy.
+    ///
+    /// The returned pair is accepted by [`PgConnection::connect_with_tls_options`].
+    /// `verify-ca` and `verify-full` both require TLS; `sslrootcert` is a
+    /// percent-decoded PEM file path. Other existing URL options are preserved.
+    pub fn parse_with_tls(url: &str) -> Result<(Self, PgTlsOptions), PgError> {
+        Self::parse_url(url, true)
+    }
+
+    fn parse_url(url: &str, extended_tls: bool) -> Result<(Self, PgTlsOptions), PgError> {
         let url = url
             .strip_prefix("postgres://")
             .or_else(|| url.strip_prefix("postgresql://"))
@@ -2495,20 +2520,43 @@ impl PgConnectOptions {
         let mut ssl_mode = SslMode::Prefer;
         let mut application_name = None;
         let mut connect_timeout = None;
+        let mut tls = PgTlsOptions::default();
+        let mut verification = None;
         for kv in params.split('&').filter(|s| !s.is_empty()) {
             if let Some((key, value)) = kv.split_once('=') {
                 match key {
                     "sslmode" => {
+                        verification = None;
                         ssl_mode = match value {
                             "disable" => SslMode::Disable,
                             "prefer" => SslMode::Prefer,
                             "require" => SslMode::Require,
+                            "verify-ca" | "verify-full" if extended_tls => {
+                                verification = Some(if value == "verify-ca" {
+                                    PgTlsVerification::VerifyCa
+                                } else {
+                                    PgTlsVerification::VerifyFull
+                                });
+                                SslMode::Require
+                            }
                             _ => {
                                 return Err(PgError::InvalidUrl(format!(
                                     "unknown sslmode: {value}"
                                 )));
                             }
                         };
+                    }
+                    "sslrootcert" => {
+                        if !extended_tls {
+                            return Err(PgError::InvalidUrl(
+                                "sslrootcert requires PgConnectOptions::parse_with_tls".into(),
+                            ));
+                        }
+                        let path = percent_decode(value);
+                        if path.is_empty() {
+                            return Err(PgError::InvalidUrl("sslrootcert path is empty".into()));
+                        }
+                        tls = tls.root_certificate_file(path);
                     }
                     "application_name" => {
                         application_name = Some(percent_decode(value));
@@ -2524,22 +2572,28 @@ impl PgConnectOptions {
             }
         }
 
-        Ok(Self {
-            host: percent_decode(host),
-            port,
-            database: percent_decode(database),
-            user,
-            // br-asupersync-r2l1ze: wrap the parsed password (whose
-            // owned `String` allocation came from `percent_decode`)
-            // into a `SecretString` so its bytes are zeroized on drop.
-            // `from_string` reuses the existing allocation — the bytes
-            // wiped at drop are the same bytes that were in memory
-            // during connection setup.
-            password: password.map(SecretString::from_string),
-            application_name,
-            connect_timeout,
-            ssl_mode,
-        })
+        if let Some(verification) = verification {
+            tls = tls.verification(verification);
+        }
+        Ok((
+            Self {
+                host: percent_decode(host),
+                port,
+                database: percent_decode(database),
+                user,
+                // br-asupersync-r2l1ze: wrap the parsed password (whose
+                // owned `String` allocation came from `percent_decode`)
+                // into a `SecretString` so its bytes are zeroized on drop.
+                // `from_string` reuses the existing allocation — the bytes
+                // wiped at drop are the same bytes that were in memory
+                // during connection setup.
+                password: password.map(SecretString::from_string),
+                application_name,
+                connect_timeout,
+                ssl_mode,
+            },
+            tls,
+        ))
     }
 }
 
@@ -2562,7 +2616,7 @@ impl PgStream {
         match self {
             Self::Plain(s) => s.shutdown(how),
             #[cfg(feature = "tls")]
-            Self::Tls(_) => Ok(()), // TLS stream dropped on connection close
+            Self::Tls(s) => s.get_ref().shutdown(how),
         }
     }
 
@@ -2584,10 +2638,9 @@ impl PgStream {
     ///
     /// TLS is intentionally skipped — encrypting the frame would
     /// require driving an async TLS handshake from sync Drop. The
-    /// existing TLS shutdown (drop-on-close) is preserved; the server
-    /// still reclaims state via idle_session_timeout (slower but
-    /// unavoidable from sync Drop). Future work could route TLS
-    /// connection close through an async helper.
+    /// subsequent underlying TCP shutdown still releases the transport even
+    /// when the closed connection object remains alive. An orderly TLS close
+    /// with a Terminate frame uses the explicit async close path.
     fn try_send_terminate_frame(&self) {
         const TERMINATE_FRAME: [u8; 5] = [b'X', 0, 0, 0, 4];
         match self {
@@ -2913,6 +2966,8 @@ struct PgConnectionInner {
     stream: PgStream,
     /// Original connection options retained for safe idle reconnect.
     options: PgConnectOptions,
+    /// The full trust policy must survive reconnect without widening its roots.
+    tls_options: PgTlsOptions,
     /// Server process ID.
     process_id: i32,
     /// Secret key for cancel requests.
@@ -2984,6 +3039,8 @@ struct PgConnectionInner {
     /// replayed after an idle reconnect so notification consumers do not lose
     /// subscriptions across server-side idle timeouts.
     subscribed_channels: BTreeSet<String>,
+    notifications: NotificationBuffer,
+    backend_frame: BackendFrame,
     /// br-asupersync-server-stack-hardening-eeexl1.1.2: per-connection
     /// statement-timeout override. The effective per-query timeout is
     /// `min(remaining Cx budget, this override)`; see
@@ -3002,15 +3059,15 @@ struct PgConnectionInner {
 struct CancelTarget {
     host: String,
     port: u16,
-    /// Hard upper bound on the cancel-request connect — see
-    /// `PgConnection::fire_cancel_request` for why this is clamped to a
-    /// short value rather than inheriting the original `connect_timeout`.
+    /// Hard upper bound on the whole cancel exchange, including name
+    /// resolution, connect, and frame write. Kept short so cleanup does not
+    /// inherit an arbitrarily long original connection timeout.
     connect_timeout: std::time::Duration,
 }
 
 impl CancelTarget {
     fn from_options(options: &PgConnectOptions) -> Self {
-        // CancelRequest is best-effort signaling — bound the connect attempt
+        // CancelRequest is best-effort signaling — bound the entire exchange
         // to 500ms (or the user's configured connect_timeout, whichever is
         // smaller) so a cancelling caller can't be stalled by an
         // unreachable host on the cancel path.
@@ -3162,6 +3219,103 @@ pub struct PgCopyIn<'a> {
     finished: bool,
 }
 
+/// Default maximum backend message body retained by a COPY OUT stream.
+///
+/// This is a per-message bound, not a limit on the complete export. Use
+/// [`PgConnection::copy_out_with_buffer_limit`] for exports with larger rows.
+pub const DEFAULT_MAX_COPY_OUT_MESSAGE_BYTES: usize = 1024 * 1024;
+
+/// Format metadata for a PostgreSQL `COPY ... TO STDOUT` stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PgCopyOutResponse {
+    overall_format: Format,
+    column_formats: Vec<Format>,
+}
+
+impl PgCopyOutResponse {
+    /// Overall format announced by the backend.
+    #[must_use]
+    pub const fn overall_format(&self) -> Format {
+        self.overall_format
+    }
+
+    /// Per-column formats announced by the backend.
+    #[must_use]
+    pub fn column_formats(&self) -> &[Format] {
+        &self.column_formats
+    }
+}
+
+/// Summary of a COPY OUT exchange that reached `ReadyForQuery` successfully.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PgCopyOutComplete {
+    affected_rows: u64,
+    chunks_received: u64,
+    bytes_received: u64,
+    response: PgCopyOutResponse,
+}
+
+impl PgCopyOutComplete {
+    /// Row count in the backend's `COPY n` command tag.
+    #[must_use]
+    pub const fn affected_rows(&self) -> u64 {
+        self.affected_rows
+    }
+
+    /// Number of received `CopyData` messages, including empty messages.
+    #[must_use]
+    pub const fn chunks_received(&self) -> u64 {
+        self.chunks_received
+    }
+
+    /// Total payload bytes received, including chunks drained by `finish`.
+    #[must_use]
+    pub const fn bytes_received(&self) -> u64 {
+        self.bytes_received
+    }
+
+    /// COPY OUT format metadata announced by the backend.
+    #[must_use]
+    pub const fn response(&self) -> &PgCopyOutResponse {
+        &self.response
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PgCopyOutState {
+    Data,
+    CommandComplete,
+    ReadyForQuery,
+    ErrorDrain,
+    Completed,
+    Failed,
+}
+
+/// A bounded, caller-driven PostgreSQL `COPY ... TO STDOUT` stream.
+///
+/// The connection is exclusively borrowed while the export is active. Each
+/// [`Self::next_chunk`] reads one `CopyData` payload; there is no background
+/// reader or accumulated export buffer. Payloads are opaque bytes, including
+/// binary COPY headers and trailers, rather than decoded query rows.
+///
+/// EOF is reported only after `CopyDone`, `CommandComplete`, and
+/// `ReadyForQuery`. Dropping an unfinished stream closes the connection. A
+/// server error preserves the connection only after its `ReadyForQuery` has
+/// been read. Explicit cancellation sends the bounded PostgreSQL CancelRequest
+/// and closes the connection, using the ordinary query cleanup path.
+#[derive(Debug)]
+pub struct PgCopyOut<'a> {
+    connection: &'a mut PgConnection,
+    response: PgCopyOutResponse,
+    max_message_bytes: usize,
+    chunks_received: u64,
+    bytes_received: u64,
+    affected_rows: Option<u64>,
+    state: PgCopyOutState,
+    pending_error: Option<PgError>,
+    synchronized: bool,
+}
+
 impl fmt::Debug for PgConnection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PgConnection")
@@ -3223,6 +3377,17 @@ fn eof_or_cancelled(cx: &Cx) -> PgError {
     ))
 }
 
+fn io_or_cancelled(cx: &Cx, err: io::Error) -> PgError {
+    // The ambient socket checkpoint can observe cancellation after our
+    // explicit checkpoint passed. Preserve that signal as cancellation so
+    // the connection still performs its server-side cancellation drain.
+    if err.kind() == io::ErrorKind::Interrupted && cx.checkpoint().is_err() {
+        cancelled_error(cx)
+    } else {
+        PgError::Io(err)
+    }
+}
+
 /// Owns exactly one cancellation-Waker registration on a `Cx` for the
 /// lifetime of a socket poll loop.
 ///
@@ -3233,8 +3398,8 @@ fn eof_or_cancelled(cx: &Cx) -> PgError {
 /// the server finally answered: the real-server suite measured `pg_sleep(30)`
 /// running its full 30 s before `Outcome::Cancelled` surfaced. Registering the
 /// task's Waker with the `Cx` makes the cancel wake the parked poll, after
-/// which the checkpoint guard returns `PgError::Cancelled` and the caller's
-/// `cancel_in_flight` fires the `CancelRequest`. Same owned-token pattern as
+/// which the checkpoint guard returns `PgError::Cancelled` and the connection's
+/// I/O completion path sends `CancelRequest`. Same owned-token pattern as
 /// the oneshot `RecvFuture`; a stale token from an earlier poll is refreshed
 /// without allocation when the Waker is unchanged.
 struct CancelWakerGuard<'a> {
@@ -3265,6 +3430,7 @@ impl Drop for CancelWakerGuard<'_> {
 /// Keeping the loop generic over the stream gives deterministic tests a narrow
 /// seam for injecting cancellation from inside `poll_read`, after the guard has
 /// run but before the empty-read classification below.
+#[cfg(test)]
 async fn read_exact_from<R>(cx: &Cx, stream: &mut R, buf: &mut [u8]) -> Result<(), PgError>
 where
     R: AsyncRead + Unpin,
@@ -3280,7 +3446,7 @@ where
             cancel_wake.refresh(task_cx.waker());
             match Pin::new(&mut *stream).poll_read(task_cx, &mut read_buf) {
                 Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
-                Poll::Ready(Err(err)) => Poll::Ready(Err(PgError::Io(err))),
+                Poll::Ready(Err(err)) => Poll::Ready(Err(io_or_cancelled(cx, err))),
                 Poll::Pending => Poll::Pending,
             }
         })
@@ -3319,11 +3485,163 @@ const MAX_NOTIFICATION_CHANNEL_NAME_BYTES: usize = 63;
 const MAX_NOTIFICATION_PAYLOAD_BYTES: usize = 8_000;
 const COPY_TERMINAL_MASKED_POLLS: u32 = 64;
 
+/// A PostgreSQL LISTEN/NOTIFY event, in server delivery order.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct NotificationResponseFields {
-    process_id: i32,
-    channel: String,
-    payload: String,
+pub struct PgNotification {
+    /// Process ID of the backend that sent the notification.
+    pub process_id: i32,
+    /// Channel on which the notification was sent.
+    pub channel: String,
+    /// Payload supplied to NOTIFY or `pg_notify`.
+    pub payload: String,
+}
+
+type NotificationResponseFields = PgNotification;
+
+/// An error from receiving PostgreSQL notifications.
+#[derive(Debug)]
+pub enum PgNotificationError {
+    /// A connection or protocol failure. The connection is closed on failure.
+    Database(PgError),
+    /// Notifications were dropped after the retained FIFO prefix.
+    ///
+    /// The count saturates at `u64::MAX`. Calling `next` again resumes delivery.
+    Overflow {
+        /// Number of notifications dropped in this overflow episode.
+        dropped: u64,
+    },
+}
+
+impl fmt::Display for PgNotificationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Database(err) => err.fmt(f),
+            Self::Overflow { dropped } => write!(
+                f,
+                "PostgreSQL notification buffer overflow: {dropped} notifications dropped"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PgNotificationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Database(err) => Some(err),
+            Self::Overflow { .. } => None,
+        }
+    }
+}
+
+/// Default maximum number of retained PostgreSQL notifications per connection.
+pub const DEFAULT_NOTIFICATION_CAPACITY: usize = 256;
+
+struct NotificationBuffer {
+    queue: VecDeque<PgNotification>,
+    capacity: usize,
+    dropped: u64,
+}
+
+impl Default for NotificationBuffer {
+    fn default() -> Self {
+        Self {
+            queue: VecDeque::new(),
+            capacity: DEFAULT_NOTIFICATION_CAPACITY,
+            dropped: 0,
+        }
+    }
+}
+
+impl NotificationBuffer {
+    fn push(&mut self, notification: PgNotification) {
+        // Keep a contiguous prefix. Once a gap starts, do not append later
+        // events until the consumer has observed that gap explicitly.
+        if self.dropped != 0 || self.queue.len() >= self.capacity {
+            self.dropped = self.dropped.saturating_add(1);
+        } else {
+            self.queue.push_back(notification);
+        }
+    }
+}
+
+/// Header and body progress belongs to the connection, never to a receive
+/// future. Cancellation or dropping an idle receiver cannot lose frame bytes.
+#[derive(Default)]
+struct BackendFrame {
+    header: [u8; 5],
+    header_read: usize,
+    body: Vec<u8>,
+    body_read: usize,
+    #[cfg(test)]
+    pending_progress: Option<Arc<std::sync::atomic::AtomicUsize>>,
+}
+
+/// A borrowing notification receiver that drives an idle connection's socket.
+///
+/// Dropping this receiver leaves LISTEN subscriptions and buffered events in
+/// place. Queries may run between borrows and retain interleaved notifications.
+/// Finish any open transaction before waiting for delivery. Notifications are
+/// not durable across disconnects, including a reconnect triggered by a query.
+pub struct PgNotifications<'a> {
+    connection: &'a mut PgConnection,
+}
+
+impl PgNotifications<'_> {
+    /// Receive the next notification, waiting on the socket when necessary.
+    ///
+    /// Buffered events are returned in order, followed by an explicit overflow
+    /// error if the bounded buffer dropped events. Cancellation takes precedence
+    /// over dequeuing and preserves buffered events and partial frame progress.
+    /// It neither sends CancelRequest nor closes an otherwise idle connection.
+    /// A disconnected connection returns a database error; no automatic reconnect
+    /// hides notifications lost while disconnected.
+    pub async fn next(&mut self, cx: &Cx) -> Outcome<PgNotification, PgNotificationError> {
+        loop {
+            if cx.checkpoint().is_err() {
+                return Outcome::Cancelled(cancelled_reason(cx));
+            }
+            if let Some(notification) = self.connection.inner.notifications.queue.pop_front() {
+                return Outcome::Ok(notification);
+            }
+            let dropped = std::mem::take(&mut self.connection.inner.notifications.dropped);
+            if dropped != 0 {
+                return Outcome::Err(PgNotificationError::Overflow { dropped });
+            }
+            if self.connection.inner.closed {
+                return Outcome::Err(PgNotificationError::Database(PgError::ConnectionClosed));
+            }
+            let message = self
+                .connection
+                .read_message_buffered(cx, MAX_BACKEND_MESSAGE_LEN as usize - 4, "notification")
+                .await;
+            let (msg_type, data) = match message {
+                Ok(message) => message,
+                Err(PgError::Cancelled(reason)) => return Outcome::Cancelled(reason),
+                Err(err) => {
+                    self.connection.abort_in_flight_exchange();
+                    return Outcome::Err(PgNotificationError::Database(err));
+                }
+            };
+            let result = if msg_type == b'E' {
+                match self.connection.parse_error_response(&data) {
+                    Ok(err) | Err(err) => Err(err),
+                }
+            } else {
+                match self
+                    .connection
+                    .handle_async_backend_message(msg_type, &data)
+                {
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err(unexpected_backend_message("notification receive", msg_type)),
+                    Err(err) => Err(err),
+                }
+            };
+            if let Err(err) = result {
+                self.connection.abort_in_flight_exchange();
+                return Outcome::Err(PgNotificationError::Database(err));
+            }
+        }
+    }
 }
 
 /// Structured `NotificationResponse` fields exposed only for fuzz/test seams.
@@ -3568,17 +3886,36 @@ impl PgConnection {
     /// notices the closed socket on its next write attempt.
     ///
     /// Returns the failure stage plus error so the drain path can log the
-    /// connection-close fallback distinctly. The connect attempt is bounded
-    /// by [`CancelTarget::connect_timeout`] (clamped to 500ms at capture
-    /// time); the frame itself is a single 16-byte write into a fresh socket
-    /// buffer. TLS is intentionally not negotiated: the CancelRequest
+    /// connection-close fallback distinctly. The entire exchange, including
+    /// name resolution and writing the frame, is bounded by
+    /// [`CancelTarget::connect_timeout`] (clamped to 500ms at capture time).
+    /// TLS is intentionally not negotiated: the CancelRequest
     /// exchange is defined pre-TLS in the protocol and carries only the
     /// `(process_id, secret_key)` pair issued by BackendKeyData.
     ///
-    /// This future performs no `Cx` checkpoints, so it runs to completion
-    /// even when the calling task's `Cx` is already cancelled — exactly the
-    /// drain-phase situation it exists for.
+    /// This future has no explicit `Cx` checkpoints. Its caller masks the
+    /// ambient socket checkpoints during the bounded drain, allowing the
+    /// side connection to make progress after the query was cancelled.
     async fn send_cancel_request(
+        target: CancelTarget,
+        process_id: i32,
+        secret_key: i32,
+    ) -> Result<(), (&'static str, std::io::Error)> {
+        crate::time::timeout(
+            crate::time::wall_now(),
+            target.connect_timeout,
+            Self::send_cancel_request_payload(target, process_id, secret_key),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err((
+                "timeout",
+                io::Error::new(io::ErrorKind::TimedOut, "cancel-request exchange timed out"),
+            ))
+        })
+    }
+
+    async fn send_cancel_request_payload(
         target: CancelTarget,
         process_id: i32,
         secret_key: i32,
@@ -3627,6 +3964,8 @@ impl PgConnection {
     /// logged distinctly so operators can tell "server told to abort" from
     /// "only the client socket was torn down".
     async fn wire_cancel_in_drain(&mut self, cx: &Cx) {
+        const MASKED_WIRE_CANCEL_POLLS: u32 = 4096;
+
         // No backend identity yet (e.g. cancel during pre-startup
         // exchange) → nothing the server can match this cancel against.
         if self.inner.process_id == 0 && self.inner.secret_key == 0 {
@@ -3639,7 +3978,18 @@ impl PgConnection {
         let target = self.inner.cancel_target.clone();
         let process_id = self.inner.process_id;
         let secret_key = self.inner.secret_key;
-        match Self::send_cancel_request(target, process_id, secret_key).await {
+        // TcpStream checks the ambient context even when no Cx is passed to
+        // its methods. Mask that context only while polling the bounded
+        // cleanup, otherwise it rejects the CancelRequest's own connect/write.
+        let ambient = Cx::current();
+        let drain_cx = ambient.as_ref().unwrap_or(cx);
+        let result = crate::combinator::commit_section(
+            drain_cx,
+            MASKED_WIRE_CANCEL_POLLS,
+            Self::send_cancel_request(target, process_id, secret_key),
+        )
+        .await;
+        match result {
             Ok(()) => cx.trace(&format!(
                 "client.wire_cancel proto=postgres outcome=sent process_id={process_id}"
             )),
@@ -3654,6 +4004,22 @@ impl PgConnection {
     fn fail_in_flight<T>(&mut self, err: PgError) -> Outcome<T, PgError> {
         self.abort_in_flight_exchange();
         outcome_from_error(err)
+    }
+
+    /// Cancellation can be observed inside a parked read/write/flush rather
+    /// than by the enclosing response loop. Deliver the server-side cancel
+    /// before returning that error, so every protocol path shares the same
+    /// cleanup ordering (br-asupersync-bi2462.110).
+    async fn finish_io_result<T>(
+        &mut self,
+        cx: &Cx,
+        result: Result<T, PgError>,
+    ) -> Result<T, PgError> {
+        if matches!(&result, Err(PgError::Cancelled(_))) {
+            self.wire_cancel_in_drain(cx).await;
+            self.abort_in_flight_exchange();
+        }
+        result
     }
 
     async fn ensure_open_for_request(&mut self, cx: &Cx) -> Outcome<PgOpenState, PgError> {
@@ -3677,10 +4043,11 @@ impl PgConnection {
         }
 
         let options = self.inner.options.clone();
+        let tls_options = self.inner.tls_options.clone();
         let max_result_rows = self.inner.max_result_rows;
         let subscribed_channels = self.inner.subscribed_channels.clone();
 
-        let mut fresh = match Self::connect_with_options(cx, options).await {
+        let mut fresh = match Self::connect_with_tls_options(cx, options, tls_options).await {
             Outcome::Ok(conn) => conn,
             Outcome::Err(err) => return Outcome::Err(err),
             Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
@@ -3703,6 +4070,16 @@ impl PgConnection {
         }
 
         let PgConnection { inner } = fresh;
+        let mut inner = inner;
+        let fresh_notifications = std::mem::take(&mut inner.notifications);
+        inner.notifications = std::mem::take(&mut self.inner.notifications);
+        for notification in fresh_notifications.queue {
+            inner.notifications.push(notification);
+        }
+        inner.notifications.dropped = inner
+            .notifications
+            .dropped
+            .saturating_add(fresh_notifications.dropped);
         self.inner = inner;
         Outcome::Ok(PgOpenState::Reconnected)
     }
@@ -3741,7 +4118,8 @@ impl PgConnection {
     }
 
     fn handle_notification_response(&mut self, data: &[u8]) -> Result<(), PgError> {
-        let _fields = Self::parse_notification_response_fields(data)?;
+        let fields = Self::parse_notification_response_fields(data)?;
+        self.inner.notifications.push(fields);
         Ok(())
     }
 
@@ -3810,18 +4188,21 @@ impl PgConnection {
     ///
     /// # Cancellation
     ///
-    /// This operation checks for cancellation before starting.
+    /// Cancellation wakes DNS, TCP, TLS, and authentication waits and drops
+    /// incomplete transports. `connect_timeout` bounds the entire connection
+    /// setup once; its default is thirty seconds. TLS additionally has a
+    /// ten-second bound, configurable through [`Self::connect_with_tls_options`].
     pub async fn connect(cx: &Cx, url: &str) -> Outcome<Self, PgError> {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(cancelled_reason(cx));
         }
 
-        let options = match PgConnectOptions::parse(url) {
+        let (options, tls) = match PgConnectOptions::parse_with_tls(url) {
             Ok(opts) => opts,
             Err(e) => return Outcome::Err(e),
         };
 
-        Self::connect_with_options(cx, options).await
+        Self::connect_with_tls_options(cx, options, tls).await
     }
 
     /// Connect with explicit options.
@@ -3829,13 +4210,84 @@ impl PgConnection {
         cx: &Cx,
         options: PgConnectOptions,
     ) -> Outcome<Self, PgError> {
+        Self::connect_with_tls_options(cx, options, PgTlsOptions::default()).await
+    }
+
+    /// Connect with explicit CA trust, certificate verification, and TLS bounds.
+    ///
+    /// Selecting a verification mode with [`PgTlsOptions::verification`] requires
+    /// TLS even if the legacy options specify `Prefer` or `Disable`. Cancellation
+    /// and expiry drop the incomplete transport before returning. The TLS bound
+    /// covers SSLRequest through the completed handshake. A separate whole-connect
+    /// deadline covers DNS through ReadyForQuery and does not restart between
+    /// stages. Synchronous CA-file loading cannot be preempted within a poll.
+    pub async fn connect_with_tls_options(
+        cx: &Cx,
+        options: PgConnectOptions,
+        tls: PgTlsOptions,
+    ) -> Outcome<Self, PgError> {
+        use std::future::Future;
+
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(cancelled_reason(cx));
+        }
+        let duration = options
+            .connect_timeout
+            .unwrap_or(tls.connect_timeout_duration());
+        let now = crate::time::wall_now();
+        let mut deadline = std::pin::pin!(crate::time::Sleep::after(now, duration));
+        let mut connect = std::pin::pin!(Self::connect_with_tls_options_inner(cx, options, tls));
+        let mut cancel_wake = CancelWakerGuard::new(cx);
+        std::future::poll_fn(|task_cx| {
+            cancel_wake.refresh(task_cx.waker());
+            if cx.checkpoint().is_err() {
+                return Poll::Ready(Outcome::Cancelled(cancelled_reason(cx)));
+            }
+            if deadline.as_mut().poll_deadline(task_cx).is_ready() {
+                return Poll::Ready(Outcome::Err(PgError::Io(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "PostgreSQL connection setup timed out",
+                ))));
+            }
+            let result = connect.as_mut().poll(task_cx);
+            if cx.checkpoint().is_err() {
+                Poll::Ready(Outcome::Cancelled(cancelled_reason(cx)))
+            } else {
+                result
+            }
+        })
+        .await
+    }
+
+    async fn connect_with_tls_options_inner(
+        cx: &Cx,
+        mut options: PgConnectOptions,
+        tls: PgTlsOptions,
+    ) -> Outcome<Self, PgError> {
+        if tls.requires_tls() {
+            options.ssl_mode = SslMode::Require;
+        }
+
+        #[cfg(feature = "tls")]
+        let connector = if options.ssl_mode == SslMode::Disable {
+            None
+        } else {
+            // Prepare trust before the TLS deadline. Defer any trust error
+            // until the server accepts TLS so legacy Prefer still permits a
+            // plaintext server to decline TLS when no roots are installed.
+            Some(Self::build_postgres_tls_connector(&tls))
+        };
+        #[cfg(not(feature = "tls"))]
+        if options.ssl_mode == SslMode::Require {
+            return Outcome::Err(PgError::Tls(
+                "TLS required but the `tls` feature is not enabled".into(),
+            ));
         }
 
         let tcp_stream = match Self::connect_tcp(&options).await {
             Ok(stream) => stream,
-            Err(e) => return Outcome::Err(e),
+            Err(PgError::Io(error)) => return outcome_from_error(io_or_cancelled(cx, error)),
+            Err(error) => return Outcome::Err(error),
         };
 
         // TLS negotiation based on ssl_mode
@@ -3843,7 +4295,15 @@ impl PgConnection {
             SslMode::Disable => PgStream::Plain(tcp_stream),
             #[cfg(feature = "tls")]
             SslMode::Prefer | SslMode::Require => {
-                match Self::negotiate_tls(cx, tcp_stream, &options).await {
+                match Self::negotiate_tls(
+                    cx,
+                    tcp_stream,
+                    &options,
+                    &tls,
+                    connector.expect("TLS connector was configured"),
+                )
+                .await
+                {
                     Ok(s) => s,
                     Err(PgError::Cancelled(reason)) => return Outcome::Cancelled(reason),
                     Err(e) => return outcome_from_error(e),
@@ -3864,6 +4324,7 @@ impl PgConnection {
             inner: PgConnectionInner {
                 stream,
                 options: options.clone(),
+                tls_options: tls,
                 process_id: 0,
                 secret_key: 0,
                 cancel_target,
@@ -3880,6 +4341,8 @@ impl PgConnection {
                 consecutive_deallocate_failures: 0,
                 unhealthy: false,
                 subscribed_channels: BTreeSet::new(),
+                notifications: NotificationBuffer::default(),
+                backend_frame: BackendFrame::default(),
                 statement_timeout_override: None,
                 applied_statement_timeout_ms: None,
             },
@@ -3943,8 +4406,57 @@ impl PgConnection {
     #[cfg(feature = "tls")]
     async fn negotiate_tls(
         cx: &Cx,
+        tcp: TcpStream,
+        options: &PgConnectOptions,
+        tls: &PgTlsOptions,
+        connector: Result<TlsConnector, PgError>,
+    ) -> Result<PgStream, PgError> {
+        use std::future::Future;
+
+        let duration = options
+            .connect_timeout
+            .map_or(tls.handshake_timeout_duration(), |timeout| {
+                timeout.min(tls.handshake_timeout_duration())
+            });
+        // Sleep uses the polling runtime's clock. The explicit owner Cx may be
+        // a separately cancelled context and supplies cancellation independently.
+        let now = Cx::current()
+            .and_then(|current| current.timer_driver())
+            .map_or_else(crate::time::wall_now, |driver| driver.now());
+        let mut deadline = std::pin::pin!(crate::time::Sleep::after(now, duration));
+        let mut exchange =
+            std::pin::pin!(Self::negotiate_tls_exchange(cx, tcp, options, connector));
+        let mut cancel_wake = CancelWakerGuard::new(cx);
+        std::future::poll_fn(|task_cx| {
+            cancel_wake.refresh(task_cx.waker());
+            if cx.checkpoint().is_err() {
+                return Poll::Ready(Err(cancelled_error(cx)));
+            }
+            if deadline.as_mut().poll_deadline(task_cx).is_ready() {
+                return Poll::Ready(Err(PgError::Io(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "PostgreSQL TLS negotiation timed out",
+                ))));
+            }
+            let result = exchange.as_mut().poll(task_cx);
+            // An ambient socket can observe cancellation inside this poll.
+            // Keep owner cancellation attributed as Cancelled, including when
+            // rustls wraps an Interrupted error in its TLS error type.
+            if cx.checkpoint().is_err() {
+                Poll::Ready(Err(cancelled_error(cx)))
+            } else {
+                result
+            }
+        })
+        .await
+    }
+
+    #[cfg(feature = "tls")]
+    async fn negotiate_tls_exchange(
+        cx: &Cx,
         mut tcp: TcpStream,
         options: &PgConnectOptions,
+        connector: Result<TlsConnector, PgError>,
     ) -> Result<PgStream, PgError> {
         // SSLRequest message: 8 bytes total
         //   4 bytes: message length (8, including self)
@@ -4012,7 +4524,7 @@ impl PgConnection {
         match response[0] {
             b'S' => {
                 // Server accepts TLS — perform handshake.
-                let connector = Self::build_postgres_tls_connector()?;
+                let connector = connector?;
                 let tls_stream = connector
                     .connect(&options.host, tcp)
                     .await
@@ -4197,23 +4709,8 @@ impl PgConnection {
     }
 
     #[cfg(feature = "tls")]
-    fn build_postgres_tls_connector() -> Result<TlsConnector, PgError> {
-        let mut tls_builder = TlsConnectorBuilder::new()
-            .with_webpki_roots()
-            .with_strict_ca_validation();
-
-        // Match libpq-style deployments that provide an extra private
-        // CA bundle through SSL_CERT_FILE, while keeping certificate
-        // verification enabled.
-        if let Ok(ca_path) = std::env::var("SSL_CERT_FILE") {
-            let certs = Certificate::from_pem_file(&ca_path)
-                .map_err(|err| PgError::Tls(format!("loading SSL_CERT_FILE {ca_path}: {err}")))?;
-            tls_builder = tls_builder.add_root_certificates(certs);
-        }
-
-        tls_builder
-            .build()
-            .map_err(|err| PgError::Tls(err.to_string()))
+    fn build_postgres_tls_connector(options: &PgTlsOptions) -> Result<TlsConnector, PgError> {
+        options.build_connector()
     }
 
     /// Choose a `ScramChannelBinding` based on advertised mechanisms, whether
@@ -5062,6 +5559,180 @@ impl PgConnection {
         Outcome::Ok(affected_rows)
     }
 
+    /// Start a PostgreSQL `COPY ... TO STDOUT` export.
+    ///
+    /// `sql` must be one trusted COPY statement. It is sent without SQL
+    /// parameterization. Both text and binary exports preserve their exact
+    /// payload bytes. The stream reads only when its caller requests the next
+    /// chunk and bounds every backend message by
+    /// [`DEFAULT_MAX_COPY_OUT_MESSAGE_BYTES`].
+    pub async fn copy_out<'a>(&'a mut self, cx: &Cx, sql: &str) -> Outcome<PgCopyOut<'a>, PgError> {
+        self.copy_out_with_buffer_limit(cx, sql, DEFAULT_MAX_COPY_OUT_MESSAGE_BYTES)
+            .await
+    }
+
+    /// Start COPY OUT with an explicit maximum backend message body size.
+    ///
+    /// The bound is checked from each frame header before allocating its body.
+    /// It applies to data and control messages, including format metadata and
+    /// errors. It must be nonzero and no greater than the connection's protocol
+    /// maximum of 64 MiB minus the four-byte length field. Applications remain
+    /// responsible for bounding chunks they retain after receiving them.
+    pub async fn copy_out_with_buffer_limit<'a>(
+        &'a mut self,
+        cx: &Cx,
+        sql: &str,
+        max_message_bytes: usize,
+    ) -> Outcome<PgCopyOut<'a>, PgError> {
+        if cx.checkpoint().is_err() {
+            return Outcome::Cancelled(cancelled_reason(cx));
+        }
+        if max_message_bytes == 0 || max_message_bytes > MAX_BACKEND_MESSAGE_LEN as usize - 4 {
+            return Outcome::Err(PgError::Protocol(format!(
+                "COPY OUT message limit must be between 1 and {} bytes",
+                MAX_BACKEND_MESSAGE_LEN as usize - 4
+            )));
+        }
+        match self.ensure_open_for_request(cx).await {
+            Outcome::Ok(_) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+        match self.flush_pending_deallocates_before_request(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+        match self.ensure_no_orphaned_transaction(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+        match self.apply_statement_timeout(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+
+        let mut buffer = MessageBuffer::new();
+        buffer.write_cstring(sql);
+        let message = match buffer.build_message(FrontendMessage::Query as u8) {
+            Ok(message) => message,
+            Err(error) => return Outcome::Err(error),
+        };
+        self.inner.closed = true;
+        if let Err(error) = self.write_all(cx, &message).await {
+            return self.fail_in_flight(error);
+        }
+
+        loop {
+            if cx.checkpoint().is_err() {
+                return self.cancel_in_flight(cx).await;
+            }
+            let (message_type, data) = match self
+                .read_message_with_body_limit(cx, max_message_bytes, "COPY OUT")
+                .await
+            {
+                Ok(message) => message,
+                Err(error) => return self.fail_in_flight(error),
+            };
+            match message_type {
+                b'H' => {
+                    let (overall_format, column_formats) =
+                        match Self::parse_copy_response("CopyOutResponse", &data) {
+                            Ok(formats) => formats,
+                            Err(error) => return self.fail_in_flight(error),
+                        };
+                    if overall_format == Format::Text && column_formats.contains(&Format::Binary) {
+                        return self.fail_in_flight(PgError::Protocol(
+                            "text CopyOutResponse contains a binary column format".to_string(),
+                        ));
+                    }
+                    return Outcome::Ok(PgCopyOut {
+                        connection: self,
+                        response: PgCopyOutResponse {
+                            overall_format,
+                            column_formats,
+                        },
+                        max_message_bytes,
+                        chunks_received: 0,
+                        bytes_received: 0,
+                        affected_rows: None,
+                        state: PgCopyOutState::Data,
+                        pending_error: None,
+                        synchronized: false,
+                    });
+                }
+                b'E' => {
+                    let error = match self.parse_error_response(&data) {
+                        Ok(error) => error,
+                        Err(error) => return self.fail_in_flight(error),
+                    };
+                    return outcome_from_error(
+                        self.drain_copy_out_startup_error(cx, max_message_bytes, error)
+                            .await,
+                    );
+                }
+                _ => {
+                    match self.handle_async_backend_message(message_type, &data) {
+                        Ok(true) => continue,
+                        Ok(false) => {}
+                        Err(error) => return self.fail_in_flight(error),
+                    }
+                    return self.fail_in_flight(unexpected_backend_message(
+                        "COPY OUT startup",
+                        message_type,
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Keep the COPY OUT allocation bound in force even when the backend
+    /// rejects the statement before entering COPY mode.
+    async fn drain_copy_out_startup_error(
+        &mut self,
+        cx: &Cx,
+        max_message_bytes: usize,
+        server_error: PgError,
+    ) -> PgError {
+        loop {
+            let (message_type, data) = match self
+                .read_message_with_body_limit(cx, max_message_bytes, "COPY OUT error drain")
+                .await
+            {
+                Ok(message) => message,
+                Err(error) => {
+                    self.abort_in_flight_exchange();
+                    return error;
+                }
+            };
+            if message_type == b'Z' {
+                if let Err(error) = self.handle_ready_for_query(&data) {
+                    self.abort_in_flight_exchange();
+                    return error;
+                }
+                self.inner.closed = false;
+                return server_error;
+            }
+            match self.handle_async_backend_message(message_type, &data) {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.abort_in_flight_exchange();
+                    return unexpected_backend_message("COPY OUT error drain", message_type);
+                }
+                Err(error) => {
+                    self.abort_in_flight_exchange();
+                    return error;
+                }
+            }
+        }
+    }
+
     /// Start a PostgreSQL `COPY ... FROM STDIN` operation.
     ///
     /// The SQL must be a trusted COPY statement that causes the backend to
@@ -5221,6 +5892,35 @@ impl PgConnection {
         }
 
         copy.finish(cx).await
+    }
+
+    /// Borrow a notification receiver. No background task is started.
+    ///
+    /// Call [`Self::listen`] first. The receiver drives socket reads while it is
+    /// awaited; notifications encountered during queries remain queued as well.
+    #[must_use]
+    pub fn notifications(&mut self) -> PgNotifications<'_> {
+        PgNotifications { connection: self }
+    }
+
+    /// Set the maximum number of retained notifications (default: 256).
+    ///
+    /// When full, retain the oldest events and count dropped newer events until
+    /// the receiver reports [`PgNotificationError::Overflow`]. Shrinking below
+    /// the current queue length drops its newest suffix under the same policy.
+    pub fn set_notification_capacity(&mut self, capacity: std::num::NonZeroUsize) {
+        let buffer = &mut self.inner.notifications;
+        buffer.capacity = capacity.get();
+        while buffer.queue.len() > buffer.capacity {
+            buffer.queue.pop_back();
+            buffer.dropped = buffer.dropped.saturating_add(1);
+        }
+    }
+
+    /// Maximum number of retained notifications.
+    #[must_use]
+    pub fn notification_capacity(&self) -> usize {
+        self.inner.notifications.capacity
     }
 
     /// Register a PostgreSQL LISTEN channel with identifier quoting and
@@ -6543,6 +7243,11 @@ impl PgConnection {
     /// Write data to the stream using async I/O and flush with explicit
     /// cancellation checks from the caller-provided capability context.
     async fn write_all(&mut self, cx: &Cx, data: &[u8]) -> Result<(), PgError> {
+        let result = self.write_all_cancellable(cx, data).await;
+        self.finish_io_result(cx, result).await
+    }
+
+    async fn write_all_cancellable(&mut self, cx: &Cx, data: &[u8]) -> Result<(), PgError> {
         let mut pos = 0;
         let mut cancel_wake = CancelWakerGuard::new(cx);
         while pos < data.len() {
@@ -6553,7 +7258,7 @@ impl PgConnection {
                 cancel_wake.refresh(task_cx.waker());
                 match Pin::new(&mut self.inner.stream).poll_write(task_cx, &data[pos..]) {
                     Poll::Ready(Ok(written)) => Poll::Ready(Ok(written)),
-                    Poll::Ready(Err(err)) => Poll::Ready(Err(PgError::Io(err))),
+                    Poll::Ready(Err(err)) => Poll::Ready(Err(io_or_cancelled(cx, err))),
                     Poll::Pending => Poll::Pending,
                 }
             })
@@ -6574,7 +7279,7 @@ impl PgConnection {
             cancel_wake.refresh(task_cx.waker());
             match Pin::new(&mut self.inner.stream).poll_flush(task_cx) {
                 Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
-                Poll::Ready(Err(err)) => Poll::Ready(Err(PgError::Io(err))),
+                Poll::Ready(Err(err)) => Poll::Ready(Err(io_or_cancelled(cx, err))),
                 Poll::Pending => Poll::Pending,
             }
         })
@@ -6583,8 +7288,10 @@ impl PgConnection {
     }
 
     /// Read exactly `len` bytes from the stream.
+    #[cfg(test)]
     async fn read_exact(&mut self, cx: &Cx, buf: &mut [u8]) -> Result<(), PgError> {
-        read_exact_from(cx, &mut self.inner.stream, buf).await
+        let result = read_exact_from(cx, &mut self.inner.stream, buf).await;
+        self.finish_io_result(cx, result).await
     }
 
     /// Read a complete message from the stream.
@@ -6602,30 +7309,83 @@ impl PgConnection {
         max_body_len: usize,
         context: &str,
     ) -> Result<(u8, Vec<u8>), PgError> {
-        // Read message type (1 byte)
-        let mut type_buf = [0u8; 1];
-        self.read_exact(cx, &mut type_buf).await?;
-        let msg_type = type_buf[0];
+        let result = self.read_message_buffered(cx, max_body_len, context).await;
+        self.finish_io_result(cx, result).await
+    }
 
-        // Read length (4 bytes, includes itself)
-        let mut len_buf = [0u8; 4];
-        self.read_exact(cx, &mut len_buf).await?;
-        let len_i32 = i32::from_be_bytes(len_buf);
-
-        let body_len = backend_message_body_len(len_i32)?;
-        if body_len > max_body_len {
-            return Err(PgError::Protocol(format!(
-                "{context} message body is {body_len} bytes; maximum is {max_body_len}"
-            )));
-        }
-
-        // Read message body
-        let mut body = vec![0u8; body_len];
-        if body_len > 0 {
-            self.read_exact(cx, &mut body).await?;
-        }
-
-        Ok((msg_type, body))
+    /// Frame progress is shared with idle receivers. Only the active-query
+    /// wrapper above sends CancelRequest and closes on cancellation.
+    async fn read_message_buffered(
+        &mut self,
+        cx: &Cx,
+        max_body_len: usize,
+        context: &str,
+    ) -> Result<(u8, Vec<u8>), PgError> {
+        let mut cancel_wake = CancelWakerGuard::new(cx);
+        std::future::poll_fn(|task_cx| {
+            let inner = &mut self.inner;
+            loop {
+                if cx.checkpoint().is_err() {
+                    return Poll::Ready(Err(cancelled_error(cx)));
+                }
+                cancel_wake.refresh(task_cx.waker());
+                let frame = &mut inner.backend_frame;
+                let reading_header = frame.header_read < frame.header.len();
+                let target = if reading_header {
+                    &mut frame.header[frame.header_read..]
+                } else {
+                    let body_len = match backend_message_body_len(i32::from_be_bytes([
+                        frame.header[1],
+                        frame.header[2],
+                        frame.header[3],
+                        frame.header[4],
+                    ])) {
+                        Ok(len) => len,
+                        Err(err) => return Poll::Ready(Err(err)),
+                    };
+                    if body_len > max_body_len {
+                        return Poll::Ready(Err(PgError::Protocol(format!(
+                            "{context} message body is {body_len} bytes; maximum is {max_body_len}"
+                        ))));
+                    }
+                    frame.body.resize(body_len, 0);
+                    if frame.body_read == body_len {
+                        let msg_type = frame.header[0];
+                        let body = std::mem::take(&mut frame.body);
+                        frame.header_read = 0;
+                        frame.body_read = 0;
+                        return Poll::Ready(Ok((msg_type, body)));
+                    }
+                    &mut frame.body[frame.body_read..]
+                };
+                let mut read_buf = ReadBuf::new(target);
+                match Pin::new(&mut inner.stream).poll_read(task_cx, &mut read_buf) {
+                    Poll::Pending => {
+                        #[cfg(test)]
+                        if let Some(progress) = &frame.pending_progress {
+                            progress.store(
+                                frame.header_read + frame.body_read,
+                                std::sync::atomic::Ordering::Release,
+                            );
+                        }
+                        return Poll::Pending;
+                    }
+                    Poll::Ready(Err(err)) => return Poll::Ready(Err(io_or_cancelled(cx, err))),
+                    Poll::Ready(Ok(())) => {
+                        let read = read_buf.filled().len();
+                        if read == 0 {
+                            return Poll::Ready(Err(eof_or_cancelled(cx)));
+                        }
+                        if reading_header {
+                            frame.header_read += read;
+                        } else {
+                            frame.body_read += read;
+                        }
+                    }
+                }
+            }
+        })
+        .await
     }
 
     /// Parse RowDescription message.
@@ -7203,7 +7963,7 @@ impl PgConnection {
     async fn drain_to_ready(&mut self, cx: &Cx) -> Result<(), PgError> {
         loop {
             if cx.checkpoint().is_err() {
-                return Err(PgError::Cancelled(cancelled_reason(cx)));
+                return self.finish_io_result(cx, Err(cancelled_error(cx))).await;
             }
             let (msg_type, data) = self.read_message(cx).await?;
             if msg_type == b'Z' {
@@ -7211,6 +7971,201 @@ impl PgConnection {
                 self.handle_ready_for_query(&data)?;
                 return Ok(());
             }
+        }
+    }
+}
+
+impl PgCopyOut<'_> {
+    /// COPY OUT format metadata announced by the backend.
+    #[must_use]
+    pub const fn response(&self) -> &PgCopyOutResponse {
+        &self.response
+    }
+
+    /// Number of `CopyData` messages received so far, including empty messages.
+    #[must_use]
+    pub const fn chunks_received(&self) -> u64 {
+        self.chunks_received
+    }
+
+    /// Total payload bytes received so far.
+    #[must_use]
+    pub const fn bytes_received(&self) -> u64 {
+        self.bytes_received
+    }
+
+    /// Completion metadata, available only after successful end of stream.
+    #[must_use]
+    pub fn completion(&self) -> Option<PgCopyOutComplete> {
+        if self.state != PgCopyOutState::Completed {
+            return None;
+        }
+        Some(PgCopyOutComplete {
+            affected_rows: self.affected_rows?,
+            chunks_received: self.chunks_received,
+            bytes_received: self.bytes_received,
+            response: self.response.clone(),
+        })
+    }
+
+    /// Receive one opaque COPY payload without reading ahead to the next one.
+    ///
+    /// An empty payload is returned as `Some(Vec::new())`; `None` means the
+    /// backend has completed the export and the connection is synchronized.
+    /// The method remains at `None` after successful completion.
+    ///
+    /// Dropping this method's future is safe to retry while retaining the
+    /// stream: partial frame reads and terminal protocol progress are held by
+    /// the stream and its connection. Explicit `Cx` cancellation instead sends
+    /// a bounded CancelRequest and closes the connection. After any error,
+    /// later calls return an error instead of reporting successful EOF.
+    pub async fn next_chunk(&mut self, cx: &Cx) -> Outcome<Option<Vec<u8>>, PgError> {
+        match self.state {
+            PgCopyOutState::Completed => return Outcome::Ok(None),
+            PgCopyOutState::Failed => {
+                return Outcome::Err(PgError::Protocol(
+                    "COPY OUT stream has failed".to_string(),
+                ));
+            }
+            _ => {}
+        }
+
+        loop {
+            if cx.checkpoint().is_err() {
+                self.state = PgCopyOutState::Failed;
+                return self.connection.cancel_in_flight(cx).await;
+            }
+            let (message_type, data) = match self
+                .connection
+                .read_message_with_body_limit(cx, self.max_message_bytes, "COPY OUT")
+                .await
+            {
+                Ok(message) => message,
+                Err(error) => return self.fail(error),
+            };
+
+            match message_type {
+                b'd' if self.state == PgCopyOutState::Data => {
+                    self.chunks_received = self.chunks_received.saturating_add(1);
+                    self.bytes_received = self.bytes_received.saturating_add(data.len() as u64);
+                    return Outcome::Ok(Some(data));
+                }
+                b'c' if self.state == PgCopyOutState::Data => {
+                    if !data.is_empty() {
+                        return self.fail(PgError::Protocol(
+                            "CopyDone must have an empty body".to_string(),
+                        ));
+                    }
+                    self.state = PgCopyOutState::CommandComplete;
+                }
+                b'C' if self.state == PgCopyOutState::CommandComplete => {
+                    self.affected_rows = match Self::parse_affected_rows(&data) {
+                        Ok(rows) => Some(rows),
+                        Err(error) => return self.fail(error),
+                    };
+                    self.state = PgCopyOutState::ReadyForQuery;
+                }
+                b'Z' if self.state == PgCopyOutState::ReadyForQuery => {
+                    if let Err(error) = self.connection.handle_ready_for_query(&data) {
+                        return self.fail(error);
+                    }
+                    self.connection.inner.closed = false;
+                    self.synchronized = true;
+                    self.state = PgCopyOutState::Completed;
+                    return Outcome::Ok(None);
+                }
+                b'E' if self.state != PgCopyOutState::ErrorDrain => {
+                    self.pending_error = match self.connection.parse_error_response(&data) {
+                        Ok(error) => Some(error),
+                        Err(error) => return self.fail(error),
+                    };
+                    // Persist the original diagnostic before the next await:
+                    // a dropped next_chunk future must be able to resume the
+                    // drain without losing the server's error.
+                    self.state = PgCopyOutState::ErrorDrain;
+                }
+                b'Z' if self.state == PgCopyOutState::ErrorDrain => {
+                    if let Err(error) = self.connection.handle_ready_for_query(&data) {
+                        return self.fail(error);
+                    }
+                    self.connection.inner.closed = false;
+                    self.synchronized = true;
+                    self.state = PgCopyOutState::Failed;
+                    return match self.pending_error.take() {
+                        Some(error) => outcome_from_error(error),
+                        None => self.fail(PgError::Protocol(
+                            "COPY OUT error drain lost its server error".to_string(),
+                        )),
+                    };
+                }
+                _ => {
+                    match self
+                        .connection
+                        .handle_async_backend_message(message_type, &data)
+                    {
+                        Ok(true) => continue,
+                        Ok(false) => {}
+                        Err(error) => return self.fail(error),
+                    }
+                    return self.fail(unexpected_backend_message("COPY OUT", message_type));
+                }
+            }
+        }
+    }
+
+    /// Drain any unread chunks and return the server's final row count.
+    ///
+    /// This preserves the same per-message bound as `next_chunk`; it never
+    /// collects the unread export in memory. A successful return releases a
+    /// connection that has consumed `ReadyForQuery` and can serve new work.
+    pub async fn finish(mut self, cx: &Cx) -> Outcome<PgCopyOutComplete, PgError> {
+        loop {
+            match self.next_chunk(cx).await {
+                Outcome::Ok(Some(_)) => {}
+                Outcome::Ok(None) => {
+                    return match self.completion() {
+                        Some(completion) => Outcome::Ok(completion),
+                        None => self.fail(PgError::Protocol(
+                            "COPY OUT completed without a command tag".to_string(),
+                        )),
+                    };
+                }
+                Outcome::Err(error) => return Outcome::Err(error),
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+            }
+        }
+    }
+
+    fn parse_affected_rows(data: &[u8]) -> Result<u64, PgError> {
+        let mut reader = MessageReader::new(data);
+        let tag = reader.read_cstring()?;
+        reader.ensure_consumed("COPY OUT CommandComplete")?;
+        let Some(rows) = tag.strip_prefix("COPY ") else {
+            return Err(PgError::Protocol(
+                "COPY OUT requires a COPY row-count command tag".to_string(),
+            ));
+        };
+        if rows.is_empty() || !rows.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(PgError::Protocol(
+                "COPY OUT command tag has an invalid row count".to_string(),
+            ));
+        }
+        rows.parse::<u64>().map_err(|_| {
+            PgError::Protocol("COPY OUT command tag row count overflows u64".to_string())
+        })
+    }
+
+    fn fail<T>(&mut self, error: PgError) -> Outcome<T, PgError> {
+        self.state = PgCopyOutState::Failed;
+        self.connection.fail_in_flight(error)
+    }
+}
+
+impl Drop for PgCopyOut<'_> {
+    fn drop(&mut self) {
+        if !self.synchronized {
+            self.connection.abort_in_flight_exchange();
         }
     }
 }
@@ -8478,12 +9433,14 @@ mod hex {
 pub struct PgConnectionManager {
     /// Options used to mint each new connection.
     options: PgConnectOptions,
+    tls_options: PgTlsOptions,
 }
 
 impl fmt::Debug for PgConnectionManager {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PgConnectionManager")
             .field("options", &self.options)
+            .field("tls_options", &self.tls_options)
             .finish()
     }
 }
@@ -8492,7 +9449,26 @@ impl PgConnectionManager {
     /// Create a new manager that mints connections using `options`.
     #[must_use]
     pub fn new(options: PgConnectOptions) -> Self {
-        Self { options }
+        Self {
+            options,
+            tls_options: PgTlsOptions::default(),
+        }
+    }
+
+    /// Configure the trust policy retained by every pooled connection and reconnect.
+    #[must_use]
+    pub fn with_tls_options(mut self, tls_options: PgTlsOptions) -> Self {
+        if tls_options.requires_tls() {
+            self.options.ssl_mode = SslMode::Require;
+        }
+        self.tls_options = tls_options;
+        self
+    }
+
+    /// Create a manager from a URL including `sslrootcert` and verified SSL modes.
+    pub fn from_url(url: &str) -> Result<Self, PgError> {
+        let (options, tls_options) = PgConnectOptions::parse_with_tls(url)?;
+        Ok(Self::new(options).with_tls_options(tls_options))
     }
 
     /// Returns the options the manager uses to mint connections.
@@ -8510,7 +9486,8 @@ impl crate::database::pool::AsyncConnectionManager for PgConnectionManager {
         // Pass through verbatim — the underlying constructor already
         // returns Outcome<PgConnection, PgError>; the explicit match
         // would only round-trip the data through itself.
-        PgConnection::connect_with_options(cx, self.options.clone()).await
+        PgConnection::connect_with_tls_options(cx, self.options.clone(), self.tls_options.clone())
+            .await
     }
 
     async fn is_valid(&self, _cx: &Cx, conn: &mut Self::Connection) -> bool {
@@ -8598,6 +9575,7 @@ fn fuzz_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
             inner: PgConnectionInner {
                 stream: PgStream::Plain(stream),
                 options: test_pg_connect_options(),
+                tls_options: PgTlsOptions::default(),
                 process_id: 0,
                 secret_key: 0,
                 cancel_target: test_cancel_target(),
@@ -8614,6 +9592,8 @@ fn fuzz_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
                 consecutive_deallocate_failures: 0,
                 unhealthy: false,
                 subscribed_channels: BTreeSet::new(),
+                notifications: NotificationBuffer::default(),
+                backend_frame: BackendFrame::default(),
                 statement_timeout_override: None,
                 applied_statement_timeout_ms: None,
             },

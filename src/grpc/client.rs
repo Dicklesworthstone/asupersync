@@ -16,7 +16,7 @@ use crate::bytes::{Bytes, BytesMut};
 #[cfg(not(target_arch = "wasm32"))]
 use std::io;
 #[cfg(not(target_arch = "wasm32"))]
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{IpAddr, SocketAddr};
 
 #[cfg(not(target_arch = "wasm32"))]
 use base64::Engine as _;
@@ -36,6 +36,11 @@ use crate::tls::TlsConnector;
 use crate::tls::TlsStream;
 
 use super::codec::{Codec, FramedCodec, IdentityCodec};
+#[cfg(not(target_arch = "wasm32"))]
+use super::native_stream::{
+    CallDeadline, NativeDuplexStream, NativeServerStream, NativeStreamConfig, NativeStreamEndpoint,
+    NativeStreamKeepalive, NativeStreamWindows,
+};
 use super::status::{Code, GrpcError, Status, TransportErrorKind};
 use super::streaming::{
     MAX_STREAM_BUFFERED, Metadata, MetadataValue, Request, Response, Streaming,
@@ -200,7 +205,8 @@ impl ChannelBuilder {
     /// Create a new channel builder for the given URI.
     ///
     /// The client accepts deterministic in-memory `loopback` targets and
-    /// native HTTP/2 `localhost` / `127.0.0.1` targets. Network I/O is lazy:
+    /// native HTTP/2 DNS names, IPv4 literals and bracketed IPv6 literals.
+    /// Network I/O, including hostname resolution, is lazy:
     /// [`ChannelBuilder::connect`] validates and stores the target, while an
     /// RPC method establishes its transport.
     #[must_use]
@@ -323,8 +329,8 @@ impl ChannelBuilder {
     /// Override the DNS name authenticated by TLS.
     ///
     /// This changes only certificate authentication. It never changes the URI
-    /// `:authority` or the native socket selected by the localhost default or
-    /// `Self::dial_addr`.
+    /// `:authority` or the native socket selected by resolving the URI host or
+    /// [`Self::dial_addr`].
     #[must_use]
     pub fn tls_server_name(mut self, server_name: impl Into<String>) -> Self {
         self.config.use_tls = true;
@@ -334,9 +340,9 @@ impl ChannelBuilder {
 
     /// Dial one explicit native TCP address while retaining the URI authority.
     ///
-    /// This is the capability-safe alternative to ambient DNS. An explicit
-    /// address is accepted only for an HTTPS channel with a caller-supplied
-    /// [`TlsConnector`]. The URI still supplies HTTP/2 `:authority` and, unless
+    /// This bypasses hostname resolution. An explicit address is accepted only
+    /// for an HTTPS channel with a caller-supplied [`TlsConnector`]. The URI
+    /// still supplies HTTP/2 `:authority` and, unless
     /// [`Self::tls_server_name`] overrides it, the certificate identity.
     /// Deterministic `loopback` channels cannot use this native transport.
     #[cfg(not(target_arch = "wasm32"))]
@@ -362,12 +368,15 @@ impl ChannelBuilder {
 
 /// A gRPC channel representing an explicit client transport capability.
 ///
-/// `loopback` selects deterministic in-memory behavior. `localhost` and
-/// `127.0.0.1` select native HTTP/2 over TCP, optionally protected by a
-/// caller-supplied TLS connector. `ChannelBuilder::dial_addr` can instead
+/// `loopback` selects deterministic in-memory behavior. DNS names, IPv4 and
+/// bracketed IPv6 literals select native HTTP/2 over TCP, optionally protected
+/// by a caller-supplied TLS connector. `ChannelBuilder::dial_addr` can instead
 /// select one explicit native socket for an authenticated HTTPS authority.
 /// The channel is intentionally lazy: constructing it performs validation but
-/// does not open a socket.
+/// does not resolve a hostname or open a socket. Each native unary call owns
+/// its connection. Hostname resolution uses the runtime's offloaded system
+/// resolver under the caller's I/O capability and connection deadline. Resolved
+/// addresses are tried in order; this channel does not race connection attempts.
 #[derive(Debug, Clone)]
 pub struct Channel {
     /// The target URI.
@@ -394,18 +403,18 @@ impl Channel {
 
     /// Connect to a gRPC client transport at the given URI.
     ///
-    /// Supports both in-memory loopback transport (host: `loopback`) and real
-    /// HTTP/2 connections to localhost (host: `localhost` or `127.0.0.1`).
-    /// The first network-backed RPC performs the TCP connection.
+    /// Supports in-memory loopback transport (host: `loopback`) and native
+    /// HTTP/2 connections to DNS names, IPv4 and bracketed IPv6 literals.
+    /// Network-backed RPCs perform hostname resolution and TCP connection.
     pub async fn connect(uri: impl Into<String>) -> Result<Self, GrpcError> {
         Self::connect_with_config(&uri.into(), ChannelConfig::default()).await
     }
 
     /// Connect with custom configuration.
     ///
-    /// Supports both in-memory loopback transport (host: `loopback`) and real
-    /// HTTP/2 connections to localhost (host: `localhost` or `127.0.0.1`).
-    /// The first network-backed RPC performs the TCP connection.
+    /// Supports in-memory loopback transport (host: `loopback`) and native
+    /// HTTP/2 connections to DNS names, IPv4 and bracketed IPv6 literals.
+    /// Network-backed RPCs perform hostname resolution and TCP connection.
     #[allow(clippy::unused_async)]
     pub async fn connect_with_config(uri: &str, config: ChannelConfig) -> Result<Self, GrpcError> {
         Self::connect_with_transport(
@@ -431,28 +440,15 @@ impl Channel {
         let has_explicit_dial_addr = dial_addr.is_some();
         #[cfg(target_arch = "wasm32")]
         let has_explicit_dial_addr = false;
-        validate_channel_uri(uri, has_explicit_dial_addr)?;
+        let target = parse_channel_uri(uri)?;
         validate_channel_security(
             uri,
             &config,
             tls_connector.is_some(),
             has_explicit_dial_addr,
         )?;
-        if has_explicit_dial_addr {
-            let uri_server_name = channel_uri_host(uri).ok_or_else(|| {
-                GrpcError::transport_kind(
-                    TransportErrorKind::ProtocolViolation,
-                    "explicit gRPC dial URI is missing a TLS server identity",
-                )
-            })?;
-            TlsConnector::validate_domain(uri_server_name).map_err(|error| {
-                GrpcError::transport_kind(
-                    TransportErrorKind::ProtocolViolation,
-                    format!("invalid gRPC URI host for explicit TLS dial: {error}"),
-                )
-            })?;
-        }
-        if let Some(server_name) = tls_server_name.as_deref() {
+        if target.use_tls || config.use_tls {
+            let server_name = tls_server_name.as_deref().unwrap_or(target.host);
             TlsConnector::validate_domain(server_name).map_err(|error| {
                 GrpcError::transport_kind(
                     TransportErrorKind::ProtocolViolation,
@@ -720,6 +716,262 @@ impl<C: Codec> GrpcClient<C> {
         Ok(())
     }
 
+    /// Transfer this client and its codec into a native server-streaming call.
+    ///
+    /// The channel selects DNS/IP dialing, TLS identity and trust, message
+    /// limits, compression, receive windows, and setup/call timeouts. Client
+    /// interceptors run once under the supplied `cx` before network I/O.
+    /// Initial and trailing metadata remain separate on the returned owner.
+    /// Consume `message()` through `Ok(None)` to verify terminal gRPC status.
+    ///
+    /// Consuming the client transfers even a non-Clone codec into the stream;
+    /// another call can use a new client built from a cloned [`Channel`].
+    /// The stream owns one connection and has no background task. Dropping it
+    /// closes that connection. Dropping a borrowing `message()` wait preserves
+    /// progress. Cancellation and deadlines use the explicit context.
+    ///
+    /// Configured keepalive is driven by polling the returned owner, without a
+    /// background task. An interval enables HTTP/2 PINGs; an omitted timeout
+    /// defaults to twenty seconds. A timeout without an interval is invalid.
+    /// Neither probes nor reads progress while the owner is unpolled. Setup
+    /// remains covered by its existing deadline before keepalive is enabled.
+    /// Metadata is bounded to 16 KiB per header block.
+    /// Deterministic loopback is supported by [`Self::server_streaming`], not
+    /// this native method. Missing I/O/timer authority, invalid configuration,
+    /// unavailable compression and transport metadata overrides refuse before
+    /// dialing. Setup includes DNS, TCP, TLS, encoding and response headers.
+    ///
+    /// ```no_run
+    /// use asupersync::{Cx, bytes::Bytes};
+    /// use asupersync::grpc::{Channel, GrpcClient, Request, Status};
+    ///
+    /// async fn watch(cx: &Cx) -> Result<(), Status> {
+    ///     let channel = Channel::connect("http://localhost:50051")
+    ///         .await.map_err(|error| error.into_status())?;
+    ///     let mut responses = GrpcClient::new(channel)
+    ///         .into_native_server_streaming(
+    ///             cx, "/example.Service/Watch", Request::new(Bytes::new()),
+    ///         ).await?;
+    ///     while let Some(message) = responses.message().await? {
+    ///         cx.trace(&format!("received {} bytes", message.len()));
+    ///     }
+    ///     Ok(())
+    /// }
+    /// ```
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn into_native_server_streaming(
+        self,
+        cx: &crate::cx::Cx,
+        path: &str,
+        request: Request<C::Encode>,
+    ) -> Result<NativeServerStream<impl AsyncRead + AsyncWrite + Unpin + Send + 'static, C>, Status>
+    {
+        let setup = self.prepare_native_stream(cx, path, &request)?;
+        let connector = self.channel.tls_connector().cloned();
+        let request = Request::with_metadata(request.into_inner(), setup.metadata);
+        let stream = setup.endpoint.connect_with_transport(
+            cx,
+            path,
+            request,
+            self.codec.into_inner(),
+            setup.config,
+            setup.windows,
+            Some(setup.deadline),
+            |tcp| native_h2_transport(tcp, &setup.target, connector),
+        ).await?;
+        match setup.keepalive {
+            Some(keepalive) => stream.with_keepalive(keepalive),
+            None => Ok(stream),
+        }
+    }
+
+    /// Transfer this client into a native client-streaming or bidirectional RPC.
+    ///
+    /// The unit request carries metadata; messages are supplied with the
+    /// returned owner's `queue_message()`. `next_event()` drives both network
+    /// directions and yields either a response or `RequestFlushed`, which
+    /// releases the single bounded request slot. Always consume responses
+    /// while uploading: a peer may reply before granting more upload credit.
+    /// After the last request is flushed, call `close_requests()` and consume
+    /// events through terminal `Ok(None)` (or its exact error status).
+    ///
+    /// For client-streaming RPCs the peer normally sends one response after
+    /// half-close; bidirectional RPCs can reply before upload finishes. The
+    /// owner exposes both forms without collecting an unbounded response list.
+    /// It does not infer an RPC's cardinality from its path.
+    ///
+    /// Channel configuration, interceptors, explicit capabilities, ownership
+    /// and demand-driven keepalive match [`Self::into_native_server_streaming`].
+    /// Setup flushes the initial request headers without waiting for response
+    /// headers, so a server waiting for the upload cannot deadlock setup.
+    /// Dropping `next_event()` preserves progress; do not requeue a message
+    /// already accepted by `queue_message()`. Dropping the owner closes its
+    /// connection without spawning cleanup work or cancelling the parent.
+    ///
+    /// ```no_run
+    /// use asupersync::{Cx, bytes::Bytes};
+    /// use asupersync::grpc::{Channel, GrpcClient, NativeDuplexEvent, Request, Status};
+    ///
+    /// async fn upload(cx: &Cx, messages: Vec<Bytes>) -> Result<(), Status> {
+    ///     let channel = Channel::connect("http://localhost:50051")
+    ///         .await.map_err(|error| error.into_status())?;
+    ///     let mut call = GrpcClient::new(channel)
+    ///         .into_native_duplex(cx, "/example.Service/Upload", Request::new(()))
+    ///         .await?;
+    ///     let mut messages = messages.into_iter();
+    ///     let mut closed = false;
+    ///     while let Some(event) = call.next_event().await? {
+    ///         match event {
+    ///             NativeDuplexEvent::RequestFlushed if !closed => {
+    ///                 if let Some(message) = messages.next() {
+    ///                     call.queue_message(&message)?;
+    ///                 } else {
+    ///                     call.close_requests()?;
+    ///                     closed = true;
+    ///                 }
+    ///             }
+    ///             NativeDuplexEvent::Message(response) => {
+    ///                 cx.trace(&format!("received {} bytes", response.len()));
+    ///             }
+    ///             NativeDuplexEvent::RequestFlushed => {}
+    ///         }
+    ///     }
+    ///     Ok(())
+    /// }
+    /// ```
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn into_native_duplex(
+        self,
+        cx: &crate::cx::Cx,
+        path: &str,
+        request: Request<()>,
+    ) -> Result<NativeDuplexStream<impl AsyncRead + AsyncWrite + Unpin + Send + 'static, C>, Status>
+    {
+        let setup = self.prepare_native_stream(cx, path, &request)?;
+        let connector = self.channel.tls_connector().cloned();
+        let request = Request::with_metadata((), setup.metadata);
+        let stream = setup.endpoint.connect_duplex_with_transport(
+            cx,
+            path,
+            request,
+            self.codec.into_inner(),
+            setup.config,
+            setup.windows,
+            Some(setup.deadline),
+            |tcp| native_h2_transport(tcp, &setup.target, connector),
+        ).await?;
+        match setup.keepalive {
+            Some(keepalive) => stream.with_keepalive(keepalive),
+            None => Ok(stream),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn prepare_native_stream<T>(
+        &self,
+        cx: &crate::cx::Cx,
+        path: &str,
+        request: &Request<T>,
+    ) -> Result<NativeClientSetup, Status> {
+        // Metadata defaults and application interceptors use the same context
+        // that the native owner installs for every subsequent I/O poll.
+        let _ambient = crate::cx::Cx::set_current(Some(cx.clone()));
+        super::native_stream::check_cancellation(cx)?;
+        validate_rpc_path(path)?;
+        enforce_deadline_budget(self.channel.config.timeout)?;
+        if channel_target_is_loopback(self.channel.uri()) {
+            return Err(Status::failed_precondition(
+                "native streaming requires a network channel, not deterministic loopback",
+            ));
+        }
+        let config = self.channel.config();
+        let deadline = CallDeadline::capture(cx, request.metadata(), config.timeout)?;
+        let keepalive = match (config.keepalive_interval, config.keepalive_timeout) {
+            (Some(interval), timeout) => {
+                let policy = NativeStreamKeepalive::new(
+                    interval, timeout.unwrap_or(Duration::from_secs(20)),
+                )?;
+                if cx.timer_driver().is_none() {
+                    return Err(Status::failed_precondition(
+                        "native gRPC keepalive requires an explicit timer",
+                    ));
+                }
+                Some(policy)
+            }
+            (None, Some(_)) => return Err(Status::invalid_argument(
+                "native gRPC keepalive timeout requires an interval",
+            )),
+            (None, None) => None,
+        };
+        let target = NativeH2Target::parse(
+            self.channel.uri(), config.use_tls, self.channel.tls_server_name(),
+            self.channel.dial_addr(),
+        )?;
+        #[cfg(not(feature = "tls"))]
+        if target.use_tls {
+            return Err(Status::unavailable(
+                "gRPC TLS support is disabled; rebuild with --features tls",
+            ));
+        }
+        let endpoint = match &target.destination {
+            NativeH2Destination::Address(address) => {
+                NativeStreamEndpoint::new(*address, target.authority.clone(), config.connect_timeout)?
+            }
+            NativeH2Destination::Host(host, port) => NativeStreamEndpoint::from_host(
+                host.clone(), *port, target.authority.clone(), config.connect_timeout,
+            )?,
+        };
+        let stream_config = NativeStreamConfig {
+            max_send_message_size: config.max_send_message_size,
+            max_recv_message_size: config.max_recv_message_size,
+            timeout: config.timeout,
+            scheme: target.scheme,
+            send_compression: config.send_compression.unwrap_or(CompressionEncoding::Identity),
+            accept_gzip: config.accept_compression.contains(&CompressionEncoding::Gzip),
+            ..NativeStreamConfig::default()
+        };
+        let mut metadata = self.build_outbound_metadata(request, path)?;
+        // The native owner generates compression fields from its codec policy.
+        // Admit the channel's exact defaults, then remove only those fields so
+        // they are emitted once. A request/interceptor may not select a codec
+        // policy different from the one used to encode/decode message bytes.
+        let send_encoding = effective_send_compression(config)
+            .map(CompressionEncoding::as_header_value);
+        let accept_encoding = effective_accept_compressions(config)
+            .into_iter()
+            .map(CompressionEncoding::as_header_value)
+            .collect::<Vec<_>>()
+            .join(",");
+        for (key, expected) in [
+            ("grpc-encoding", send_encoding),
+            ("grpc-accept-encoding", Some(accept_encoding.as_str())),
+        ] {
+            if metadata.iter().any(|(name, value)| {
+                name == key
+                    && !matches!(value, MetadataValue::Ascii(value) if Some(value.as_str()) == expected)
+            }) {
+                return Err(Status::invalid_argument(
+                    "native streaming metadata cannot override channel compression",
+                ));
+            }
+            metadata.remove(key);
+        }
+        super::native_stream::check_cancellation(cx)?;
+        deadline.check()?;
+        Ok(NativeClientSetup {
+            target,
+            endpoint,
+            config: stream_config,
+            windows: NativeStreamWindows {
+                connection: Some(config.initial_connection_window_size),
+                stream: Some(config.initial_stream_window_size),
+            },
+            metadata,
+            deadline,
+            keepalive,
+        })
+    }
+
     /// Make a unary RPC call.
     pub async fn unary<Req, Resp>(
         &mut self,
@@ -907,27 +1159,35 @@ impl<C: Codec> GrpcClient<C> {
 }
 
 fn channel_target_is_loopback(uri: &str) -> bool {
-    let Some((_, remainder)) = uri.split_once("://") else {
-        return false;
-    };
-    let authority = remainder.split(['/', '?', '#']).next().unwrap_or_default();
-    let host_port = authority
-        .rsplit_once('@')
-        .map_or(authority, |(_, value)| value);
-    let host = host_port
-        .split_once(':')
-        .map_or(host_port, |(value, _)| value);
-    host.eq_ignore_ascii_case("loopback")
+    parse_channel_uri(uri).is_ok_and(|target| target.host.eq_ignore_ascii_case("loopback"))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
 struct NativeH2Target {
     authority: String,
-    address: SocketAddr,
+    destination: NativeH2Destination,
     server_name: String,
     scheme: &'static str,
     use_tls: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct NativeClientSetup {
+    target: NativeH2Target,
+    endpoint: NativeStreamEndpoint,
+    config: NativeStreamConfig,
+    windows: NativeStreamWindows,
+    metadata: Metadata,
+    deadline: CallDeadline,
+    keepalive: Option<NativeStreamKeepalive>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, PartialEq, Eq)]
+enum NativeH2Destination {
+    Address(SocketAddr),
+    Host(String, u16),
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -938,29 +1198,12 @@ impl NativeH2Target {
         tls_server_name: Option<&str>,
         dial_addr: Option<SocketAddr>,
     ) -> Result<Self, Status> {
-        let (uri_scheme, remainder) = uri
-            .split_once("://")
-            .ok_or_else(|| Status::unavailable("channel URI is missing a scheme separator"))?;
-        let use_tls = use_tls || uri_scheme.eq_ignore_ascii_case("https");
-        let authority = remainder
-            .split(['/', '?', '#'])
-            .next()
-            .ok_or_else(|| Status::unavailable("channel URI is missing an authority"))?;
-        if authority.contains('@') {
-            return Err(Status::unavailable(
-                "userinfo is not supported by the native HTTP/2 gRPC client",
-            ));
-        }
-        let (host, port) = match authority.rsplit_once(':') {
-            Some((host, port)) => {
-                let port = port.parse::<u16>().map_err(|_| {
-                    Status::unavailable("channel URI port must be an unsigned 16-bit integer")
-                })?;
-                (host, port)
-            }
-            None => (authority, if use_tls { 443 } else { 80 }),
-        };
-        let address = if let Some(address) = dial_addr {
+        let target = parse_channel_uri(uri)
+            .map_err(|error| Status::unavailable(format!("invalid gRPC channel target: {error}")))?;
+        let use_tls = use_tls || target.use_tls;
+        let host = target.host;
+        let port = target.port.unwrap_or(if use_tls { 443 } else { 80 });
+        let destination = if let Some(address) = dial_addr {
             if host.eq_ignore_ascii_case("loopback") {
                 return Err(Status::failed_precondition(
                     "deterministic loopback channels cannot use an explicit native dial address",
@@ -971,17 +1214,15 @@ impl NativeH2Target {
                     "an explicit gRPC dial address requires authenticated HTTPS",
                 ));
             }
-            address
-        } else if host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" {
-            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
+            NativeH2Destination::Address(address)
+        } else if let Ok(address) = host.parse::<IpAddr>() {
+            NativeH2Destination::Address(SocketAddr::new(address, port))
         } else {
-            return Err(Status::unavailable(
-                "native HTTP/2 gRPC transport is restricted to localhost",
-            ));
+            NativeH2Destination::Host(host.to_ascii_lowercase(), port)
         };
         Ok(Self {
-            authority: authority.to_ascii_lowercase(),
-            address,
+            authority: target.authority.to_ascii_lowercase(),
+            destination,
             server_name: tls_server_name.map_or_else(
                 || host.to_ascii_lowercase(),
                 |name| name.to_ascii_lowercase(),
@@ -989,6 +1230,21 @@ impl NativeH2Target {
             scheme: if use_tls { "https" } else { "http" },
             use_tls,
         })
+    }
+
+    async fn connect(&self, timeout: Duration) -> Result<TcpStream, Status> {
+        // Share the same offloaded, cancellation-aware system resolver used by
+        // NativeStreamEndpoint. The caller's outer setup timeout also covers
+        // resolution and TLS, so neither can restart the connection budget.
+        match &self.destination {
+            NativeH2Destination::Address(address) => {
+                TcpStream::connect_timeout(*address, timeout).await
+            }
+            NativeH2Destination::Host(host, port) => {
+                TcpStream::connect_timeout((host.clone(), *port), timeout).await
+            }
+        }
+        .map_err(|error| transport_status("connect", error))
     }
 }
 
@@ -1066,6 +1322,14 @@ async fn native_h2_unary(
             "native HTTP/2 gRPC calls require an ambient runtime Cx capability",
         )
     })?;
+    // A native driver is not the optional virtual IoCap, and its raw accessor
+    // does not enforce capability attenuation. Refuse before hostname lookup
+    // or socket creation when the current task has no native I/O authority.
+    if !cx.runtime_mask.has(crate::cx::cap::CapMask::IO) || cx.io_driver_handle().is_none() {
+        return Err(Status::failed_precondition(
+            "native HTTP/2 gRPC calls require runtime I/O authority",
+        ));
+    }
     let target = NativeH2Target::parse(
         channel.uri(),
         channel.config().use_tls,
@@ -1114,9 +1378,7 @@ async fn native_h2_unary_io(
     })
     .unwrap_or_else(crate::time::wall_now);
     let mut stream = match crate::time::timeout(now, connect_timeout, async {
-        let stream = TcpStream::connect_timeout(target.address, connect_timeout)
-            .await
-            .map_err(|error| transport_status("connect", error))?;
+        let stream = target.connect(connect_timeout).await?;
         native_h2_transport(stream, &target, tls_connector).await
     })
     .await
@@ -1516,7 +1778,16 @@ impl NativeUnaryAccumulator {
     }
 }
 
-fn validate_channel_uri(uri: &str, has_explicit_dial_addr: bool) -> Result<(), GrpcError> {
+#[derive(Debug)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+struct ChannelUri<'a> {
+    authority: &'a str,
+    host: &'a str,
+    port: Option<u16>,
+    use_tls: bool,
+}
+
+fn parse_channel_uri(uri: &str) -> Result<ChannelUri<'_>, GrpcError> {
     if uri.is_empty() {
         return Err(GrpcError::transport("channel URI cannot be empty"));
     }
@@ -1540,56 +1811,105 @@ fn validate_channel_uri(uri: &str, has_explicit_dial_addr: bool) -> Result<(), G
             "channel URI authority cannot contain whitespace or control characters",
         ));
     }
-    if has_explicit_dial_addr && authority.contains('@') {
-        return Err(GrpcError::transport_kind(
-            TransportErrorKind::ProtocolViolation,
-            "userinfo is not supported with an explicit gRPC dial address",
-        ));
-    }
-    // Strip userinfo (RFC 3986 §3.2: authority = [userinfo "@"] host [":" port])
-    // before extracting the host, so "loopback:pw@evil.com" doesn't pass.
-    let host_port = authority.rsplit_once('@').map_or(authority, |(_, hp)| hp);
-    let (host, port) = host_port
-        .rsplit_once(':')
-        .map_or((host_port, None), |(host, port)| (host, Some(port)));
+    // Legacy deterministic loopback URIs accept userinfo. Parse the actual
+    // host first so credentials cannot disguise a native network destination.
+    let host_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host_port)| host_port);
+    let (host, port) = if let Some(bracketed) = host_port.strip_prefix('[') {
+        let (host, suffix) = bracketed.split_once(']').ok_or_else(|| {
+            GrpcError::transport_kind(
+                TransportErrorKind::ProtocolViolation,
+                "channel URI IPv6 host must have matching brackets",
+            )
+        })?;
+        if host.parse::<std::net::Ipv6Addr>().is_err() {
+            return Err(GrpcError::transport_kind(
+                TransportErrorKind::ProtocolViolation,
+                "channel URI brackets must contain an IPv6 address",
+            ));
+        }
+        let port = if suffix.is_empty() {
+            None
+        } else {
+            Some(suffix.strip_prefix(':').ok_or_else(|| {
+                GrpcError::transport_kind(
+                    TransportErrorKind::ProtocolViolation,
+                    "channel URI IPv6 brackets may only be followed by a port",
+                )
+            })?)
+        };
+        (host, port)
+    } else {
+        let (host, port) = host_port
+            .rsplit_once(':')
+            .map_or((host_port, None), |(host, port)| (host, Some(port)));
+        if host.contains([':', '[', ']']) {
+            return Err(GrpcError::transport_kind(
+                TransportErrorKind::ProtocolViolation,
+                "channel URI must contain one host and at most one port; bracket IPv6 addresses",
+            ));
+        }
+        (host, port)
+    };
     if host.is_empty() {
         return Err(GrpcError::transport("channel URI is missing a host"));
     }
-    if has_explicit_dial_addr && (host.contains(':') || host.contains('[') || host.contains(']')) {
+    let is_loopback = host.eq_ignore_ascii_case("loopback");
+    if authority.contains('@') && !is_loopback {
         return Err(GrpcError::transport_kind(
             TransportErrorKind::ProtocolViolation,
-            "explicit gRPC dial authority must contain one DNS or IPv4 host and at most one port",
+            "userinfo is not supported by native gRPC channel URIs",
         ));
     }
-    if !has_explicit_dial_addr
-        && !host.eq_ignore_ascii_case("loopback")
-        && !host.eq_ignore_ascii_case("localhost")
-        && host != "127.0.0.1"
-    {
-        return Err(GrpcError::transport(
-            "gRPC client transport supports loopback and localhost only; use a URI with host `loopback`, `localhost`, or `127.0.0.1`",
-        ));
-    }
-    if let Some(port) = port
-        && port.parse::<u16>().is_err()
+    // Match NativeStreamEndpoint's DNS contract. ASCII/IDNA names preserve
+    // system resolver hosts-file and search-domain behavior; URI delimiters,
+    // percent escapes and empty labels must never become resolver input.
+    let dns = host.strip_suffix('.').unwrap_or(host);
+    if host.parse::<std::net::IpAddr>().is_err()
+        && (dns.is_empty()
+            || dns.len() > 253
+            || !dns.split('.').all(|label| {
+                !label.is_empty()
+                    && label.len() <= 63
+                    && !label.starts_with('-')
+                    && !label.ends_with('-')
+                    && label
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            }))
     {
         return Err(GrpcError::transport_kind(
-            TransportErrorKind::ConnectFailed,
-            "channel URI port must be an unsigned 16-bit integer",
+            TransportErrorKind::ProtocolViolation,
+            "channel URI host must be an ASCII DNS name or IP address",
         ));
     }
-    Ok(())
-}
-
-fn channel_uri_host(uri: &str) -> Option<&str> {
-    let (_, remainder) = uri.split_once("://")?;
-    let authority = remainder.split(['/', '?', '#']).next()?;
-    let host_port = authority.rsplit_once('@').map_or(authority, |(_, hp)| hp);
-    Some(
-        host_port
-            .rsplit_once(':')
-            .map_or(host_port, |(host, _)| host),
-    )
+    let port = port
+        .map(|port| {
+            // Retain the legacy integer syntax for deterministic loopback;
+            // native authorities must use the HTTP port grammar on the wire.
+            if !is_loopback
+                && (port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()))
+            {
+                return Err(GrpcError::transport_kind(
+                    TransportErrorKind::ConnectFailed,
+                    "channel URI port must be an unsigned 16-bit integer written in ASCII digits",
+                ));
+            }
+            port.parse::<u16>().map_err(|_| {
+                GrpcError::transport_kind(
+                    TransportErrorKind::ConnectFailed,
+                    "channel URI port must be an unsigned 16-bit integer",
+                )
+            })
+        })
+        .transpose()?;
+    Ok(ChannelUri {
+        authority,
+        host,
+        port,
+        use_tls: scheme.eq_ignore_ascii_case("https"),
+    })
 }
 
 fn validate_channel_security(
@@ -1617,7 +1937,7 @@ fn validate_channel_security(
     if tls_requested && channel_target_is_loopback(uri) {
         return Err(GrpcError::transport_kind(
             TransportErrorKind::ProtocolViolation,
-            "gRPC TLS is available only on the native localhost transport; \
+            "gRPC TLS is available only on the native transport; \
              deterministic loopback channels do not negotiate TLS",
         ));
     }
@@ -3565,6 +3885,37 @@ mod tests {
     }
 
     #[test]
+    fn channel_connect_preserves_loopback_userinfo_and_port_compatibility() {
+        for uri in [
+            "http://user:pw@loopback",
+            "http://user:pw@LOOPBACK:50051",
+            "http://loopback:+80",
+            "http://user:pw@loopback:+80",
+        ] {
+            futures_lite::future::block_on(async {
+                let channel = Channel::connect(uri)
+                    .await
+                    .expect("legacy loopback URI remains accepted without I/O");
+                assert_eq!(channel.uri(), uri);
+                let mut client = GrpcClient::new(channel);
+                let response = client
+                    .unary::<Bytes, Bytes>(
+                        "/pkg.Service/Method",
+                        Request::new(Bytes::from_static(b"loopback-compatibility")),
+                    )
+                    .await
+                    .expect("legacy URI stays on the deterministic transport");
+                assert_eq!(response.get_ref().as_ref(), b"loopback-compatibility");
+                assert!(matches!(
+                    response.metadata().get("x-asupersync-grpc-transport"),
+                    Some(MetadataValue::Ascii(value)) if value == "loopback"
+                ));
+                assert!(response.metadata().get("authorization").is_none());
+            });
+        }
+    }
+
+    #[test]
     fn channel_connect_requires_explicit_tls_connector() {
         for uri in [
             "https://LOCALHOST:50051/service",
@@ -3618,21 +3969,165 @@ mod tests {
     }
 
     #[test]
-    fn channel_connect_rejects_non_localhost_host() {
-        let error = futures_lite::future::block_on(Channel::connect("http://example.com:50051"))
-            .expect_err("non-localhost target should fail closed");
-        match error {
-            GrpcError::Transport(_kind, message) => {
-                assert!(message.contains("loopback and localhost only"));
-            }
-            other => panic!("expected transport error, got: {other:?}"),
+    fn channel_connect_accepts_dns_and_ip_targets_without_resolution() {
+        for uri in [
+            "http://grpc.service.invalid:50051",
+            "http://SERVICE.invalid./base?ignored=yes#fragment",
+            "http://xn--bcher-kva.invalid",
+            "http://10.20.30.40:50051",
+            "http://127.0.0.2",
+            "http://[::1]:50051",
+            "http://[2001:db8::1234]",
+        ] {
+            // No runtime context and deliberately unresolvable DNS names: a
+            // successfully constructed channel cannot have dialed anything.
+            let channel = futures_lite::future::block_on(Channel::connect(uri))
+                .expect("native target should be configured lazily");
+            assert_eq!(channel.uri(), uri);
+            assert!(!channel_target_is_loopback(uri));
+        }
+    }
+
+    #[test]
+    fn channel_connect_rejects_malformed_native_authorities() {
+        for uri in [
+            "http://",
+            "http://:50051",
+            "http://::1",
+            "http://[::1",
+            "http://[::1]suffix:50051",
+            "http://[localhost]:50051",
+            "http://[127.0.0.1]:50051",
+            "http://[::1]:50051:50052",
+            "http://[fe80::1%25eth0]:50051",
+            "http://localhost:50051:50052",
+            "http://localhost:",
+            "http://localhost:+80",
+            "http://[::1]:+80",
+            "http://localhost:65536",
+            "http://bad..invalid:50051",
+            "http://-bad.invalid:50051",
+            "http://bad-.invalid:50051",
+            "http://bad_name.invalid:50051",
+            "http://bad%2einvalid:50051",
+            "http://bücher.invalid:50051",
+            "http://localhost\\evil.invalid:50051",
+        ] {
+            assert!(
+                futures_lite::future::block_on(Channel::connect(uri)).is_err(),
+                "malformed authority must be refused before DNS: {uri}"
+            );
         }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
+    fn native_h2_targets_preserve_authority_and_tls_identity() {
+        let host = NativeH2Target::parse("http://GRPC.Service.invalid", false, None, None)
+            .expect("DNS target");
+        assert_eq!(host.authority, "grpc.service.invalid");
+        assert_eq!(
+            host.destination,
+            NativeH2Destination::Host("grpc.service.invalid".to_owned(), 80)
+        );
+        assert_eq!(host.server_name, "grpc.service.invalid");
+        assert_eq!(host.scheme, "http");
+        assert!(!host.use_tls);
+
+        let tls = NativeH2Target::parse("https://SERVICE.invalid", false, None, None)
+            .expect("TLS DNS target");
+        assert_eq!(
+            tls.destination,
+            NativeH2Destination::Host("service.invalid".to_owned(), 443)
+        );
+        assert_eq!(tls.server_name, "service.invalid");
+        assert_eq!(tls.scheme, "https");
+        assert!(tls.use_tls);
+
+        let ipv6 = NativeH2Target::parse("https://[2001:DB8::1]:8443", false, None, None)
+            .expect("IPv6 TLS target");
+        assert_eq!(ipv6.authority, "[2001:db8::1]:8443");
+        assert_eq!(ipv6.server_name, "2001:db8::1");
+        assert_eq!(
+            ipv6.destination,
+            NativeH2Destination::Address("[2001:db8::1]:8443".parse().unwrap())
+        );
+
+        let override_addr = "[::1]:50051".parse().unwrap();
+        let explicit = NativeH2Target::parse(
+            "https://grpc.service.invalid:443",
+            false,
+            Some("AUTH.Service.invalid"),
+            Some(override_addr),
+        )
+        .expect("independent destination, HTTP authority and TLS identity");
+        assert_eq!(explicit.authority, "grpc.service.invalid:443");
+        assert_eq!(explicit.server_name, "auth.service.invalid");
+        assert_eq!(
+            explicit.destination,
+            NativeH2Destination::Address(override_addr)
+        );
+
+        let config_tls = NativeH2Target::parse("http://localhost", true, None, None)
+            .expect("TLS configuration determines default port");
+        assert_eq!(
+            config_tls.destination,
+            NativeH2Destination::Host("localhost".to_owned(), 443)
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_h2_hostname_dial_requires_io_authority_before_resolution() {
+        let cx = crate::cx::Cx::for_testing();
+        let _guard = crate::cx::Cx::set_current(Some(cx));
+        let channel = make_channel("http://grpc.service.invalid:50051");
+        let mut client = GrpcClient::new(channel);
+        let status = futures_lite::future::block_on(client.unary::<Bytes, Bytes>(
+            "/pkg.Service/Method",
+            Request::new(Bytes::new()),
+        ))
+        .expect_err("a Cx without a native driver must not resolve or dial");
+        assert_eq!(status.code(), Code::FailedPrecondition);
+        assert_eq!(
+            status.message(),
+            "native HTTP/2 gRPC calls require runtime I/O authority"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_h2_hostname_dial_respects_attenuated_io_with_a_live_driver() {
+        let runtime = crate::runtime::RuntimeBuilder::new()
+            .worker_threads(2)
+            .build()
+            .expect("native runtime");
+        runtime.block_on(async {
+            let mut cx = crate::cx::Cx::current().expect("native runtime context");
+            assert!(cx.io_driver_handle().is_some(), "native driver installed");
+            cx.runtime_mask = crate::cx::cap::CapMask::none();
+            assert!(cx.io_driver_handle().is_some(), "attenuation retains driver");
+            let _guard = crate::cx::Cx::set_current(Some(cx));
+            let channel = Channel::connect("http://grpc.service.invalid:50051")
+                .await
+                .expect("channel construction needs no I/O authority");
+            let mut client = GrpcClient::new(channel);
+            let status = client
+                .unary::<Bytes, Bytes>("/pkg.Service/Method", Request::new(Bytes::new()))
+                .await
+                .expect_err("a retained native driver must not bypass attenuation");
+            assert_eq!(status.code(), Code::FailedPrecondition);
+            assert_eq!(
+                status.message(),
+                "native HTTP/2 gRPC calls require runtime I/O authority"
+            );
+        });
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
     fn explicit_dial_addr_requires_authenticated_native_https() {
-        let address = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 50051));
+        let address = SocketAddr::from(([127, 0, 0, 1], 50051));
 
         let cleartext = futures_lite::future::block_on(
             Channel::builder("http://grpc.service.invalid:50051")
@@ -3680,7 +4175,8 @@ mod tests {
                     .expect_err("ambiguous explicit-dial authority must fail closed");
             assert!(
                 malformed.to_string().contains("at most one port")
-                    || malformed.to_string().contains("unsigned 16-bit integer"),
+                    || malformed.to_string().contains("unsigned 16-bit integer")
+                    || malformed.to_string().contains("matching brackets"),
                 "unexpected explicit-dial authority error for {uri}: {malformed}"
             );
         }
@@ -3700,8 +4196,8 @@ mod tests {
             match error {
                 GrpcError::Transport(_kind, msg) => {
                     assert!(
-                        msg.contains("loopback and localhost only"),
-                        "expected loopback/localhost-only error for {uri}, got: {msg}"
+                        msg.contains("userinfo is not supported"),
+                        "expected userinfo rejection for {uri}, got: {msg}"
                     );
                 }
                 other => panic!("expected transport error for {uri}, got: {other:?}"),
@@ -3731,6 +4227,143 @@ mod tests {
                 }
                 other => panic!("expected transport error for {uri:?}, got: {other:?}"),
             }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    mod native_owned_calls {
+        use super::*;
+        use crate::cx::Cx;
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, RegionId, TaskId, Time};
+
+        fn context() -> (Cx, Arc<VirtualClock>) {
+            let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(10)));
+            let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+            let cx = Cx::new_with_drivers(
+                RegionId::new_for_test(81, 0), TaskId::new_for_test(82, 0),
+                Budget::INFINITE, None, None, None, Some(timer), None,
+            );
+            (cx, clock)
+        }
+
+        #[test]
+        fn native_stream_preparation_preserves_channel_policy_and_explicit_context() {
+            struct ObserveContext(TaskId, Arc<AtomicUsize>);
+            impl ClientInterceptor for ObserveContext {
+                fn intercept(&self, request: &mut Request<Bytes>) -> Result<(), Status> {
+                    assert_eq!(Cx::current().unwrap().task_id(), self.0);
+                    assert!(request.metadata_mut().insert("x-interceptor", "explicit-context"));
+                    self.1.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            }
+            let (cx, _) = context();
+            let unrelated = Cx::for_testing();
+            let _ambient = Cx::set_current(Some(unrelated.clone()));
+            let calls = Arc::new(AtomicUsize::new(0));
+            let channel = futures_lite::future::block_on(
+                Channel::builder("http://service.invalid:50051")
+                    .timeout(Duration::from_secs(20))
+                    .max_send_message_size(1024)
+                    .max_recv_message_size(2048)
+                    .initial_connection_window_size(131_072)
+                    .initial_stream_window_size(32_768)
+                    .send_compression(CompressionEncoding::Identity)
+                    .connect(),
+            ).unwrap();
+            let client = GrpcClient::new(channel)
+                .with_interceptor(ObserveContext(cx.task_id(), Arc::clone(&calls)));
+            let mut request = Request::new(());
+            assert!(request.metadata_mut().insert("x-request", "kept"));
+            let setup = client.prepare_native_stream(&cx, "/svc/Upload", &request).unwrap();
+            assert_eq!(setup.config.max_send_message_size, 1024);
+            assert_eq!(setup.config.max_recv_message_size, 2048);
+            assert_eq!(setup.config.timeout, Some(Duration::from_secs(20)));
+            assert_eq!(setup.config.scheme, "http");
+            assert_eq!(setup.windows.connection, Some(131_072));
+            assert_eq!(setup.windows.stream, Some(32_768));
+            assert!(setup.metadata.get("grpc-encoding").is_none());
+            assert!(setup.metadata.get("grpc-accept-encoding").is_none());
+            assert!(matches!(setup.metadata.get("x-request"), Some(MetadataValue::Ascii(value)) if value == "kept"));
+            assert!(matches!(setup.metadata.get("x-interceptor"), Some(MetadataValue::Ascii(value)) if value == "explicit-context"));
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(Cx::current().unwrap().task_id(), unrelated.task_id());
+        }
+
+        #[test]
+        fn native_stream_preparation_admits_bounded_keepalive_and_rejects_conflicting_compression() {
+            let (cx, _) = context();
+            let keepalive = futures_lite::future::block_on(
+                Channel::builder("http://service.invalid")
+                    .keepalive_interval(Duration::from_secs(30)).connect(),
+            ).unwrap();
+            let setup = GrpcClient::new(keepalive)
+                .prepare_native_stream(&cx, "/svc/Upload", &Request::new(()))
+                .expect("keepalive is explicitly driven by the native owner");
+            assert_eq!(setup.keepalive, Some(NativeStreamKeepalive::new(
+                Duration::from_secs(30), Duration::from_secs(20),
+            ).unwrap()));
+
+            let channel = futures_lite::future::block_on(
+                Channel::builder("http://service.invalid")
+                    .send_compression(CompressionEncoding::Identity).connect(),
+            ).unwrap();
+            let client = GrpcClient::new(channel);
+            let mut request = Request::new(());
+            assert!(request.metadata_mut().insert("grpc-encoding", "gzip"));
+            assert!(request.metadata_mut().insert("grpc-encoding", "identity"));
+            let status = client.prepare_native_stream(&cx, "/svc/Upload", &request)
+                .err().expect("last matching value must not hide a conflicting duplicate");
+            assert_eq!(status.code(), Code::InvalidArgument);
+            assert_eq!(status.message(), "native streaming metadata cannot override channel compression");
+        }
+
+        #[test]
+        fn native_stream_keepalive_defaults_and_invalid_configuration_refuse_before_dial() {
+            let (cx, _) = context();
+            let channel = futures_lite::future::block_on(Channel::connect("http://service.invalid")).unwrap();
+            let setup = GrpcClient::new(channel)
+                .prepare_native_stream(&cx, "/svc/Upload", &Request::new(())).unwrap();
+            assert!(setup.keepalive.is_none());
+
+            for (interval, timeout) in [
+                (None, Some(Duration::from_secs(2))),
+                (Some(Duration::ZERO), None),
+                (Some(Duration::from_secs(2)), Some(Duration::ZERO)),
+            ] {
+                let mut builder = Channel::builder("http://service.invalid");
+                if let Some(interval) = interval { builder = builder.keepalive_interval(interval); }
+                if let Some(timeout) = timeout { builder = builder.keepalive_timeout(timeout); }
+                let channel = futures_lite::future::block_on(builder.connect()).unwrap();
+                let status = GrpcClient::new(channel)
+                    .prepare_native_stream(&cx, "/svc/Upload", &Request::new(()))
+                    .err().expect("invalid heartbeat policy must refuse before network effects");
+                assert_eq!(status.code(), Code::InvalidArgument);
+                assert!(status.message().contains("keepalive"));
+            }
+        }
+
+        #[test]
+        fn native_stream_interceptor_cannot_restart_the_call_deadline() {
+            struct ExpireAndExtend(Arc<VirtualClock>);
+            impl ClientInterceptor for ExpireAndExtend {
+                fn intercept(&self, request: &mut Request<Bytes>) -> Result<(), Status> {
+                    self.0.advance_to(Time::from_secs(16));
+                    assert!(request.metadata_mut().insert_or_replace("grpc-timeout", "50S"));
+                    Ok(())
+                }
+            }
+            let (cx, clock) = context();
+            let channel = futures_lite::future::block_on(
+                Channel::builder("http://service.invalid")
+                    .timeout(Duration::from_secs(5)).connect(),
+            ).unwrap();
+            let client = GrpcClient::new(channel).with_interceptor(ExpireAndExtend(clock));
+            let status = client.prepare_native_stream(&cx, "/svc/Upload", &Request::new(()))
+                .err().expect("interceptor time must consume the original deadline");
+            assert_eq!(status.code(), Code::DeadlineExceeded);
+            assert!(!cx.is_cancel_requested());
         }
     }
 

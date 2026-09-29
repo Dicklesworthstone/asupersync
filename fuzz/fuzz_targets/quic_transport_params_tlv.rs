@@ -186,16 +186,40 @@ fn push_present(ids: &mut Vec<u64>, value: Option<u64>, id: u64) {
     }
 }
 
+/// The first parameter, in encode order, whose value RFC 9000 §18.2 forbids.
+fn first_invalid_parameter(params: &TransportParameters) -> Option<u64> {
+    [
+        (
+            TP_MAX_UDP_PAYLOAD_SIZE,
+            params.max_udp_payload_size.is_some_and(|v| v < 1200),
+        ),
+        (
+            TP_INITIAL_MAX_STREAMS_BIDI,
+            params.initial_max_streams_bidi.is_some_and(|v| v > 1 << 60),
+        ),
+        (
+            TP_INITIAL_MAX_STREAMS_UNI,
+            params.initial_max_streams_uni.is_some_and(|v| v > 1 << 60),
+        ),
+        (
+            TP_ACK_DELAY_EXPONENT,
+            params.ack_delay_exponent.is_some_and(|v| v > 20),
+        ),
+        (
+            TP_MAX_ACK_DELAY,
+            params.max_ack_delay.is_some_and(|v| v >= 1 << 14),
+        ),
+    ]
+    .into_iter()
+    .find_map(|(id, invalid)| invalid.then_some(id))
+}
+
 fn assert_valid_decoded_params(params: &TransportParameters) {
-    if let Some(udp_size) = params.max_udp_payload_size {
-        assert!(
-            udp_size >= 1200,
-            "UDP payload size should be >= 1200 if set"
-        );
-    }
-    if let Some(ack_exp) = params.ack_delay_exponent {
-        assert!(ack_exp <= 20, "ACK delay exponent should be <= 20");
-    }
+    assert_eq!(
+        first_invalid_parameter(params),
+        None,
+        "decode accepted a value RFC 9000 §18.2 forbids: {params:?}"
+    );
 }
 
 fn observe_transport_parameters_decode(bytes: &[u8]) -> Result<TransportParameters, QuicCoreError> {
@@ -290,13 +314,25 @@ fn observe_transport_parameters_encode(
     result
 }
 
-fn assert_expected_encode_result(context: &str, result: Result<(), QuicCoreError>) {
-    if let Err(err) = result {
+fn assert_expected_encode_result(
+    context: &str,
+    params: &TransportParameters,
+    result: Result<(), QuicCoreError>,
+) {
+    if let Some(id) = first_invalid_parameter(params) {
+        assert_eq!(
+            result,
+            Err(QuicCoreError::InvalidTransportParameter(id)),
+            "{context}: encode must refuse a value the decoder rejects"
+        );
+    } else if let Err(err) = &result {
         assert!(
             matches!(err, QuicCoreError::VarIntOutOfRange(_)),
             "{context}: unexpected transport parameter encode error: {err:?}"
         );
-        assert_quic_error_display(&err);
+    }
+    if let Err(err) = &result {
+        assert_quic_error_display(err);
     }
 }
 
@@ -469,6 +505,7 @@ fn test_round_trip_consistency(input: &TransportParamsFuzzInput) {
             let mut encoded = Vec::new();
             match tp.encode(&mut encoded) {
                 Ok(()) => {
+                    assert_expected_encode_result("round-trip consistency encode", &tp, Ok(()));
                     // Decode back
                     match TransportParameters::decode(&encoded) {
                         Ok(decoded) => {
@@ -492,11 +529,7 @@ fn test_round_trip_consistency(input: &TransportParamsFuzzInput) {
                     }
                 }
                 Err(err) => {
-                    assert!(
-                        matches!(err, QuicCoreError::VarIntOutOfRange(_)),
-                        "unexpected round-trip encode error: {err:?}"
-                    );
-                    assert_quic_error_display(&err);
+                    assert_expected_encode_result("round-trip consistency encode", &tp, Err(err));
                 }
             }
         }
@@ -688,7 +721,7 @@ fn process_tlv_operation(operation: &TlvOperation) {
             let tp: TransportParameters = params.clone().into();
             let mut encoded = Vec::new();
             let result = observe_transport_parameters_encode(&tp, &mut encoded);
-            assert_expected_encode_result("operation encode", result);
+            assert_expected_encode_result("operation encode", &tp, result);
         }
         TlvOperation::Decode { bytes } => {
             let result = observe_transport_parameters_decode(bytes);
@@ -702,7 +735,7 @@ fn process_tlv_operation(operation: &TlvOperation) {
                 let decode_result = observe_transport_parameters_decode(&encoded);
                 assert_round_trip_decode_result("operation round-trip", &tp, decode_result);
             }
-            assert_expected_encode_result("operation round-trip encode", encode_result);
+            assert_expected_encode_result("operation round-trip encode", &tp, encode_result);
         }
     }
 }
@@ -725,7 +758,7 @@ fn process_attack_scenario(scenario: &AttackScenario) {
                 let decode_result = observe_transport_parameters_decode(&encoded);
                 assert_round_trip_decode_result("normal attack scenario", &params, decode_result);
             }
-            assert_expected_encode_result("normal attack scenario encode", encode_result);
+            assert_expected_encode_result("normal attack scenario encode", &params, encode_result);
         }
         AttackScenario::TruncatedData { truncate_bytes } => {
             // Create valid TLV then truncate it
@@ -751,7 +784,11 @@ fn process_attack_scenario(scenario: &AttackScenario) {
                         assert_expected_decode_result("truncated attack scenario", decode_result);
                 }
             }
-            assert_expected_encode_result("truncated attack scenario encode", encode_result);
+            assert_expected_encode_result(
+                "truncated attack scenario encode",
+                &params,
+                encode_result,
+            );
         }
         _ => {
             // Other scenarios handled in their respective test functions

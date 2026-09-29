@@ -16,12 +16,30 @@ Modes:
   evaluate  Run the same engine against a JSON scenario of commits and raw lane
             logs. Nothing is executed and no bead is filed; bead payloads are
             printed. This is the dry-run the planted-red acceptance check uses.
-  summary   Daily summary and exit metrics from receipts, git, and the tracker.
+  summary   Daily summary and exit metrics from receipts, git, and the tracker, with
+            the ledgers of asupersync-bi2462.147.1: rule-3 receipt latency per
+            no-compile-path commit (overdue after 2 h, escalated after 6 h), test
+            targets added in the window that no lane has executed, stranded or
+            stale work in the shared checkout, and duplicate-fix leads (same bead,
+            or overlapping lines from different bases: a lead, not proof). `run`
+            files the 6 h escalations (one P0 per commit, once) for commits after
+            `--ledger-since`. It also lists owner decisions recorded in bead
+            comments (explicit markers only) that no later commit cites after 48 h.
 
 A lane is green only when the remote exit is 0, cargo reached `Finished`, nothing
 failed to compile, and (for test lanes) every expected target ran at least one
 test and none failed. Admission refusals, RCH false greens (E412/E504), missing
 remote exits, and zero-test runs are never green.
+
+Changed `src/` files are mapped through the module tree (`mod` declarations,
+`#[path]`, `include!`) to their lib module path and the `cfg` features on their
+chain. Touched feature-gated modules add a `check-features` all-targets check and
+run the lib lane with those features, as one union: a break that shows only under
+a subset of them is not detected (`--with-all-features` checks the full set). A
+changed file no crate root reaches is reported as unmapped: nothing compiles it.
+A touched workspace member crate (for example asupersync-macros) gets its own
+`cargo test -p <crate>` lane; its clippy is not run. Head lanes run `--parallel`
+at a time; bisection is serial.
 """
 
 from __future__ import annotations
@@ -31,11 +49,13 @@ import datetime as dt
 import hashlib
 import json
 import os
+import posixpath
 import re
 import subprocess
 import sys
 import tempfile
 import tomllib
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
@@ -64,7 +84,6 @@ NOT_COMPILED_PATTERNS = [
         r"\b(?:compilation|tests?)\b[^.\n]{0,80}\b(?:have|has)\s+not\s+(?:been\s+)?run\b",
         r"\b(?:compilation|tests?|rustfmt)\b[^.\n]{0,80}\b(?:are|is|were|was)\s+not\s+run\b",
         r"\bremains?\s+not\s+run\b",
-        r"\b(?:was|were|is|are|been)\s+not\s+(?:yet\s+)?(?:compiled|executed)\b",
         r"\b(?:rust|cargo|rustc|rch)\b[^.\n]{0,40}\b(?:are|is)\s+(?:absent|unavailable)\b",
         r"\brch\s+not\s+found\b",
         r"\bnot\s+(?:rust\s+)?execution(?:\s+evidence)?\b",
@@ -82,11 +101,26 @@ WORKSPACE_CRATES = {
     "asupersync-wasm",
 }
 UNSAFE_BLOCK_RE = re.compile(r"\bunsafe\s*\{")
-FILE_CFG_RE = re.compile(r"^\s*#!\[cfg\((.*)\)\]\s*$")
-FEATURE_RE = re.compile(r'feature\s*=\s*"([^"]+)"')
+INNER_CFG_RE = re.compile(r"#!\[cfg\(")
+CFG_TOKEN_RE = re.compile(r'\s*(?:([A-Za-z_][A-Za-z0-9_]*)|("[^"]*")|([(),=]))')
+# A `mod x;` at column 0 (the tree has no indented or macro-wrapped file modules).
+MOD_DECL_RE = re.compile(r"^(?:pub(?:\([^)\n]*\))?[ \t]+)?mod[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*;", re.MULTILINE)
+INCLUDE_RE = re.compile(r'\binclude!\(\s*"([^"]+)"\s*\)')
+ENV_GATE_RE = re.compile(r'"REAL_[A-Z0-9_]+"')
+PATH_ATTR_RE = re.compile(r'^path\s*=\s*"([^"]+)"$')
+# A cfg requirement lists the alternative feature sets that make a predicate hold in a
+# watchdog build (Linux RCH worker, default features on). TRUE holds as is; NEVER has no
+# alternative (nothing the watchdog runs compiles it); None is not understood.
+TRUE: frozenset[frozenset[str]] = frozenset({frozenset()})
+NEVER: frozenset[frozenset[str]] = frozenset()
 REMOTE_EXIT_RE = re.compile(r"Remote command finished: exit=(\d+)")
+# rch refuses the base commit's own Cargo manifests (for example a nested workspace
+# fixture with a missing member). That is a property of the commit, so it is
+# refused again on every retry: nothing ran, and nothing will.
+DEPENDENCY_PREFLIGHT_RE = re.compile(r"\bRCH-E413\b")
+DEPENDENCY_PREFLIGHT_REASON = "rch dependency preflight refused this commit's tree (RCH-E413): nothing ran"
 WORKER_RE = re.compile(r"Selected worker: (\S+)")
-NATIVE_ONLY_GUARD_RE = re.compile(r'not\(\s*target_arch\s*=\s*"wasm32"\s*\)|\bunix\b')
+EXECUTED_TEST_RE = re.compile(r"^test (\S+) \.\.\. (?:ok|FAILED)$")
 TEST_RESULT_RE = re.compile(
     r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out"
 )
@@ -96,6 +130,16 @@ COULD_NOT_COMPILE_RE = re.compile(r"error: could not compile `([^`]+)`(?: \(([^)
 FIRST_ERROR_RE = re.compile(r"^(?:\S+\.rs:\d+:\d+: error(?:\[E\d+\])?:.*|error(?:\[E\d+\])?: (?!could not compile|aborting).*)$")
 FAILED_TEST_RE = re.compile(r"^test (\S+) \.\.\. FAILED$")
 NO_TARGET_RE = re.compile(r"error: no (?:test|bin|example|bench) target named `([^`]+)`")
+# rustc itself was killed (the worker ran out of memory): it never reached a verdict.
+COMPILER_KILLED_RE = re.compile(r"process didn't exit successfully: `(?:[^`\s]*/)?rustc [^`]*` \(signal: 9, SIGKILL: kill\)")
+# The worker lost files a dependency build needed (a registry cache pruned mid-build,
+# a rustc it could not start, a failed download). No commit here can cause these.
+WORKER_FAULT_RE = re.compile(
+    r"could not execute process `[^`]*rustc"
+    r"|could not parse/generate dep info"
+    r"|failed to download `"
+    r"|couldn't read `[^`]*/registry/src/[^`]*`: No such file or directory"
+)
 COMPILE_TARGET_RE = re.compile(r'\((?:test|bin|example|bench) "([^"]+)"\)')
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -161,29 +205,285 @@ def is_web_api_identity(email: str) -> bool:
     return email.lower().endswith(WEB_API_IDENTITY_SUFFIX)
 
 
-def file_cfg_features(source: str) -> tuple[list[str], bool]:
-    """Features a test file's crate-level `#![cfg(...)]` requires.
+Requirement = Any  # frozenset[frozenset[str]] (TRUE, NEVER, alternatives) or None
 
-    Returns (features, understood). Only `feature = "x"` and `all(...)` of those
-    are understood; anything else (not/any/target) is reported as not understood
-    so the caller can mark the mapping instead of guessing.
-    """
-    features: list[str] = []
-    understood = True
-    for line in source.splitlines()[:40]:
-        match = FILE_CFG_RE.match(line)
+
+def _cfg_tokens(expr: str) -> list[str] | None:
+    tokens: list[str] = []
+    pos = 0
+    while expr[pos:].strip():
+        match = CFG_TOKEN_RE.match(expr, pos)
         if not match:
+            return None
+        tokens.append(next(group for group in match.groups() if group is not None))
+        pos = match.end()
+    return tokens
+
+
+def _cfg_parse(tokens: list[str], i: int) -> tuple[tuple[Any, ...], int]:
+    head = tokens[i]
+    if head in ("all", "any", "not") and tokens[i + 1] == "(":
+        args = []
+        i += 2
+        while tokens[i] != ")":
+            node, i = _cfg_parse(tokens, i)
+            args.append(node)
+            if tokens[i] == ",":
+                i += 1
+        return (head, args), i + 1
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", head):
+        raise ValueError(head)
+    if i + 1 < len(tokens) and tokens[i + 1] == "=":
+        if not tokens[i + 2].startswith('"'):
+            raise ValueError(tokens[i + 2])
+        return ("kv", head, tokens[i + 2].strip('"')), i + 3
+    return ("flag", head), i + 1
+
+
+def _alternatives(sets: Any) -> frozenset[frozenset[str]]:
+    """Minimal alternatives only (a superset of another alternative adds nothing)."""
+    pool = set(sets)
+    minimal = sorted((s for s in pool if not any(o < s for o in pool)), key=lambda s: (len(s), sorted(s)))
+    return frozenset(minimal[:64])
+
+
+def _cfg_eval(node: tuple[Any, ...], defaults: frozenset[str]) -> Requirement:
+    kind = node[0]
+    if kind == "kv":
+        key, value = node[1], node[2]
+        if key == "feature":
+            return TRUE if value in defaults else frozenset({frozenset({value})})
+        if key == "target_os":
+            return TRUE if value == "linux" else NEVER
+        if key == "target_family":
+            return TRUE if value == "unix" else NEVER
+        if key == "target_arch" and value.startswith("wasm"):
+            return NEVER
+        return None
+    if kind == "flag":
+        if node[1] in ("unix", "test", "debug_assertions"):
+            return TRUE
+        if node[1] in ("windows", "miri"):
+            return NEVER
+        return None
+    args = [_cfg_eval(arg, defaults) for arg in node[1]]
+    if kind == "all":
+        return combine_requirements(args)
+    if kind == "any":
+        alternatives = [s for arg in args if arg is not None for s in arg]
+        if alternatives:
+            return _alternatives(alternatives)
+        return None if None in args else NEVER
+    # not(...) holds without extra features exactly when its operand needs some (or never
+    # holds), and never holds when its operand already holds in every watchdog build.
+    if len(args) != 1 or args[0] is None:
+        return None
+    return NEVER if frozenset() in args[0] else TRUE
+
+
+def cfg_requirement(expr: str, defaults: frozenset[str] = frozenset()) -> Requirement:
+    """What the predicate of `cfg(<expr>)` needs to hold on a Linux RCH worker."""
+    tokens = _cfg_tokens(expr)
+    if not tokens:
+        return None
+    try:
+        node, end = _cfg_parse(tokens, 0)
+    except (IndexError, ValueError):
+        return None
+    return _cfg_eval(node, defaults) if end == len(tokens) else None
+
+
+def combine_requirements(reqs: list[Requirement]) -> Requirement:
+    """Conjunction: NEVER dominates, then not-understood, else pairwise unions of alternatives."""
+    if any(req is not None and not req for req in reqs):
+        return NEVER
+    if None in reqs:
+        return None
+    result = TRUE
+    for req in reqs:
+        result = _alternatives(a | b for a in result for b in req)
+    return result
+
+
+def chosen_features(req: Requirement) -> frozenset[str] | None:
+    """The smallest feature set that satisfies `req`; None when none is known to."""
+    if not req:
+        return None
+    return min(req, key=lambda s: (len(s), sorted(s)))
+
+
+def requirement_json(req: Requirement) -> Any:
+    if req is None:
+        return None
+    return sorted(chosen_features(req)) if req else "never"
+
+
+def _balanced_end(text: str, start: int) -> int:
+    """Index just past the bracket closing the one at `start` (strings skipped), or -1."""
+    depth, i, in_string = 0, start, False
+    while i < len(text):
+        c = text[i]
+        if in_string:
+            if c == "\\":
+                i += 1
+            elif c == '"':
+                in_string = False
+        elif c == '"':
+            in_string = True
+        elif c in "([":
+            depth += 1
+        elif c in ")]":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return -1
+
+
+def inner_cfg_requirement(source: str, defaults: frozenset[str] = frozenset()) -> Requirement:
+    """Conjunction of a file's leading inner `#![cfg(...)]` attributes (single- or multi-line)."""
+    reqs: list[Requirement] = []
+    for match in INNER_CFG_RE.finditer(source):
+        if source.count("\n", 0, match.start()) > 80:
+            break
+        line_start = source.rfind("\n", 0, match.start()) + 1
+        if source[line_start : match.start()].strip():
             continue
-        # Native-only guards hold on the Linux fleet; what remains must be a
-        # conjunction of `feature = "..."` terms to be understood.
-        expr = NATIVE_ONLY_GUARD_RE.sub("", match.group(1))
-        residue = FEATURE_RE.sub("", expr)
-        residue = re.sub(r"\ball\(|[(),\s]", "", residue)
-        if residue:
-            understood = False
+        end = _balanced_end(source, match.end() - 1)
+        if end < 0:
+            return None
+        reqs.append(cfg_requirement(source[match.end() : end - 1], defaults))
+    return combine_requirements(reqs)
+
+
+def file_cfg_features(source: str, defaults: frozenset[str] = frozenset()) -> tuple[list[str], bool]:
+    """Features a test file's crate-level `#![cfg(...)]` requires, as (features, understood).
+
+    A cfg that never holds on the Linux fleet (wasm-only, windows-only) or that is not
+    understood is reported as not understood, so the caller marks the mapping instead of
+    running a target that compiles to nothing.
+    """
+    chosen = chosen_features(inner_cfg_requirement(source, defaults))
+    return (sorted(chosen), True) if chosen is not None else ([], False)
+
+
+def test_registration_census(root: Path) -> dict[str, Any]:
+    """Top-level integration tests gated on non-default features, checked against Cargo.toml.
+
+    A gated file with no `[[test]]` entry compiles to an empty crate under default features,
+    and `cargo test` reports it as passing (bi2462.87). `required-features` makes cargo skip
+    it explicitly and refuse `--test <name>` without them. An entry must list every feature
+    the gate needs; a missing one builds the empty crate again. An `any(...)` gate cannot be
+    written as `required-features`, so it is reported as exempt, as is a cfg that never holds
+    on the Linux fleet or is not understood.
+    """
+    manifest = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
+    defaults = frozenset(manifest.get("features", {}).get("default", []))
+    registered = {
+        entry.get("path", f"tests/{entry['name']}.rs"): set(entry.get("required-features", []))
+        for entry in manifest.get("test", [])
+    }
+    unregistered: list[dict[str, Any]] = []
+    missing: list[dict[str, Any]] = []
+    exempt: list[dict[str, str]] = []
+    for file in sorted((root / "tests").glob("*.rs")):
+        path = f"tests/{file.name}"
+        req = inner_cfg_requirement(file.read_text(encoding="utf-8", errors="replace"), defaults)
+        if req == TRUE:
             continue
-        features.extend(FEATURE_RE.findall(expr))
-    return sorted(set(features)), understood
+        if req is None:
+            exempt.append({"path": path, "reason": "crate cfg not understood"})
+            continue
+        if not req:
+            exempt.append({"path": path, "reason": "cfg never holds on the Linux fleet"})
+            continue
+        if len(req) != 1:
+            exempt.append({"path": path, "reason": "alternative feature sets (any): not expressible"})
+            continue
+        needed = set(next(iter(req)))
+        if not needed:
+            continue
+        if path not in registered:
+            unregistered.append({"path": path, "features": sorted(needed)})
+        elif not needed <= registered[path]:
+            missing.append({"path": path, "features": sorted(needed - registered[path])})
+    return {"unregistered": unregistered, "missing_features": missing, "exempt": exempt}
+
+
+def _attrs_before(text: str, pos: int) -> list[str]:
+    """Bodies of the outer attributes stacked directly above `pos` (comments skipped)."""
+    attrs: list[str] = []
+    end = pos
+    while True:
+        j = end
+        while j > 0 and text[j - 1].isspace():
+            j -= 1
+        line_start = text.rfind("\n", 0, j) + 1
+        if j > line_start and text[line_start:j].lstrip().startswith("//"):
+            end = line_start
+            continue
+        if j == 0 or text[j - 1] != "]":
+            return attrs
+        depth, k = 0, j - 1
+        while k >= 0:
+            if text[k] == "]":
+                depth += 1
+            elif text[k] == "[":
+                depth -= 1
+                if depth == 0:
+                    break
+            k -= 1
+        if k < 1 or text[k - 1] != "#":
+            return attrs
+        attrs.append(text[k + 1 : j - 1].strip())
+        end = k - 1
+
+
+def module_tree(
+    sources: dict[str, str], roots: dict[str, Requirement], defaults: frozenset[str] = frozenset()
+) -> dict[str, tuple[str | None, Requirement]]:
+    """Map every source file a crate root reaches to (lib module path, cfg requirement).
+
+    Follows column-0 `mod x;` declarations (with `#[path]`) and `include!`, conjoining
+    every `cfg` on the way. `src/lib.rs` yields lib module paths; other roots (binaries)
+    yield None. A file missing from the result is compiled by nothing.
+    """
+    tree: dict[str, tuple[str | None, Requirement]] = {}
+
+    def rank(modpath: str | None, req: Requirement) -> tuple[bool, bool, int]:
+        chosen = chosen_features(req)
+        return (modpath is None, chosen is None, len(chosen) if chosen is not None else 0)
+
+    def walk(path: str, modpath: str | None, req: Requirement, mod_rs: bool) -> None:
+        text = sources.get(path)
+        if text is None:
+            return
+        req = combine_requirements([req, inner_cfg_requirement(text, defaults)])
+        if path in tree and rank(*tree[path]) <= rank(modpath, req):
+            return
+        tree[path] = (modpath, req)
+        directory = posixpath.dirname(path)
+        child_dir = directory if mod_rs else posixpath.join(directory, posixpath.basename(path)[: -len(".rs")])
+        for match in MOD_DECL_RE.finditer(text):
+            name = match.group(1)
+            attrs = _attrs_before(text, match.start())
+            cfgs = [cfg_requirement(a[len("cfg(") : -1], defaults) for a in attrs if a.startswith("cfg(") and a.endswith(")")]
+            child_req = combine_requirements([req, *cfgs])
+            child_mod = None if modpath is None else (f"{modpath}::{name}" if modpath else name)
+            explicit = next((m.group(1) for a in attrs if (m := PATH_ATTR_RE.match(a))), None)
+            if explicit:
+                walk(posixpath.normpath(posixpath.join(directory, explicit)), child_mod, child_req, True)
+                continue
+            for candidate, child_mod_rs in ((f"{child_dir}/{name}.rs", False), (f"{child_dir}/{name}/mod.rs", True)):
+                if candidate in sources:
+                    walk(candidate, child_mod, child_req, child_mod_rs)
+                    break
+        for match in INCLUDE_RE.finditer(text):
+            walk(posixpath.normpath(posixpath.join(directory, match.group(1))), modpath, req, mod_rs)
+
+    for root, req in sorted(roots.items()):
+        walk(root, "" if root == "src/lib.rs" else None, req, True)
+    return tree
 
 
 def lib_filter_for(path: str) -> str | None:
@@ -231,7 +531,13 @@ def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> d
         "first_error": "",
         "counts": {"passed": 0, "failed": 0, "ignored": 0, "filtered": 0, "results": 0},
         "targets_seen": [],
+        "unexercised_filters": [],
+        "targets_executed": [],
+        "env_gated_targets": list(lane.get("env_gated_targets", [])),
     }
+    if remote_exit is None and DEPENDENCY_PREFLIGHT_RE.search(clean):
+        result["reason"] = DEPENDENCY_PREFLIGHT_REASON
+        return result
     if remote_exit is None and client_exit == 103:
         result.update(verdict=VERDICT_DEFERRED, reason="admission refused (exit 103)")
         return result
@@ -253,8 +559,29 @@ def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> d
         failing.append(f"{match.group(1)} ({match.group(2)})" if match.group(2) else match.group(1))
     first_error = next((line.strip() for line in lines if FIRST_ERROR_RE.match(line.strip())), "")
     finished = any(line.strip().startswith("Finished `") for line in lines)
+    # A compiler killed on the worker proves nothing about the code. With no real
+    # diagnostic beside it the lane is undecided, not red: such a red was once bisected
+    # to an innocent commit (lib test, vmi workers, 2026-09-25).
+    compiler_killed = bool(COMPILER_KILLED_RE.search(clean)) and not first_error
+    killed_reason = "rustc was killed on the worker (signal 9, out of memory): nothing was compiled or tested"
+    # Likewise a worker fault while only third-party crates failed: such reds were
+    # bisected across innocent commits on hz4 (2026-09-28). A workspace crate that
+    # failed beside it is still red.
+    failing_crates = [match.group(1) for match in COULD_NOT_COMPILE_RE.finditer(clean)]
+    worker_fault = (
+        bool(WORKER_FAULT_RE.search(clean))
+        and bool(failing_crates)
+        and not any(name.startswith("asupersync") for name in failing_crates)
+    )
+    fault_reason = (
+        "the worker could not build a third-party dependency (missing registry files, "
+        "an unexecutable rustc, or a failed download): nothing of this repository was compiled or tested"
+    )
 
     if lane["kind"] == "build":
+        if compiler_killed or worker_fault:
+            result["reason"] = killed_reason if compiler_killed else fault_reason
+            return result
         if failing or remote_exit != 0:
             result.update(
                 verdict=VERDICT_RED,
@@ -272,6 +599,8 @@ def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> d
     # healed only by a run that actually executed its target.
     seen: list[str] = []
     failed_tests: list[str] = []
+    lib_tests: list[str] = []
+    executed_targets: set[str] = set()
     current = "?"
     for line in lines:
         running = RUNNING_TARGET_RE.match(line)
@@ -283,6 +612,11 @@ def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> d
             seen.append("lib")
         elif failed := FAILED_TEST_RE.match(line.strip()):
             failed_tests.append(f"{current}::{failed.group(1)}")
+        if current == "lib" and (executed := EXECUTED_TEST_RE.match(line.strip())):
+            lib_tests.append(executed.group(1))
+        if (tr := TEST_RESULT_RE.match(line.strip())) and int(tr.group(2)) + int(tr.group(3)) > 0:
+            executed_targets.add(current)
+    result["targets_executed"] = sorted(executed_targets - {"?"})
     counts = result["counts"]
     for line in lines:
         tr = TEST_RESULT_RE.match(line.strip())
@@ -293,6 +627,12 @@ def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> d
             counts["ignored"] += int(tr.group(4))
             counts["filtered"] += int(tr.group(6))
     result["targets_seen"] = sorted(set(seen))
+    # Informational: a changed module whose filter selected no executed test has no unit
+    # test here; the lane still vouches only for what it ran.
+    result["unexercised_filters"] = [f for f in lane.get("lib_filters", []) if not any(f in name for name in lib_tests)]
+    if (compiler_killed or worker_fault) and not failed_tests and not counts["failed"]:
+        result["reason"] = killed_reason if compiler_killed else fault_reason
+        return result
     if failing or counts["failed"] or failed_tests or remote_exit != 0:
         result.update(
             verdict=VERDICT_RED,
@@ -433,9 +773,30 @@ def probe(
     outcome = classify_lane_output(text, exit_code, probe_lane)
     if outcome["verdict"] == VERDICT_RED and red_targets(outcome) & new_targets:
         return "red", outcome
+    if outcome["verdict"] == VERDICT_RED and uncompiled_owners(outcome) & owners_of(new_targets):
+        # The red test's own binary did not compile here, so its tests never ran.
+        # Reading that as clear would blame whichever commit made it compile
+        # (asupersync-bi2462.147.15).
+        return "undecided", outcome
     if outcome["verdict"] in (VERDICT_GREEN, VERDICT_RED):
         return "clear", outcome  # green, or red only for other targets
     return "undecided", outcome
+
+
+def owners_of(targets: set[str]) -> set[str]:
+    """Test targets owning red keys; lib unit tests (`lib::...`) belong to `lib`."""
+    return {owner for owner in (target_of(key) for key in targets) if owner is not None}
+
+
+def uncompiled_owners(outcome: dict[str, Any]) -> set[str]:
+    """Test targets whose binary failed to compile in this outcome."""
+    owners: set[str] = set()
+    for key in red_targets(outcome):
+        if "(lib test)" in key:
+            owners.add("lib")
+        elif compiled := COMPILE_TARGET_RE.search(key):
+            owners.add(compiled.group(1))
+    return owners
 
 
 def bisect_first_red(
@@ -465,6 +826,74 @@ def bisect_first_red(
     return hi, exact and lo == hi, probes
 
 
+def record_heals(
+    lane: dict[str, Any],
+    lane_known: dict[str, Any],
+    healed: list[str],
+    head: str,
+    outcome: dict[str, Any],
+    receipt: dict[str, Any],
+    notes: list[str],
+    heals: list[dict[str, Any]],
+) -> None:
+    """Forget healed known reds; remember which bead (if already filed) each belonged to."""
+    for target in healed:
+        entry = lane_known.pop(target)
+        heals.append(
+            {"bead": entry.get("bead"), "lane": lane["id"], "target": target, "sha": head, "worker": outcome.get("worker")}
+        )
+    if healed:
+        receipt["healed"] = healed
+        notes.append(f"{lane['id']}: healed at {head[:9]}: {', '.join(healed)}")
+
+
+def report_heals(
+    heals: list[dict[str, Any]],
+    open_issues: list[dict[str, Any]],
+    run: Callable[..., Any] = subprocess.run,
+) -> None:
+    """Post each heal on its bead, and close a bead once nothing it tracks is red.
+
+    Only an open, unassigned bead is closed: an owner working a bead keeps that
+    decision and just gets the receipt. Beads already closed are left alone.
+    """
+    by_id = {issue.get("id"): issue for issue in open_issues}
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for heal in heals:
+        if heal["bead"]:
+            grouped.setdefault(heal["bead"], []).append(heal)
+    for bead, group in grouped.items():
+        issue = by_id.get(bead)
+        if issue is None:
+            continue
+        lines = [
+            f"main-watchdog: healed at `{heal['sha']}` in lane `{heal['lane']}` "
+            f"(worker {heal.get('worker') or 'unknown'}): `{heal['target']}` ran and passed."
+            for heal in group
+        ]
+        closable = all(heal["close"] for heal in group)
+        if not closable:
+            lines.append("Other targets this bead tracks are still red; it stays open.")
+        run(["br", "comments", "add", bead, "-m", "\n".join(lines), "--author", "main-watchdog"], capture_output=True, check=False)
+        if closable and issue.get("status") == "open" and not issue.get("assignee"):
+            run(
+                ["br", "close", bead, "--reason", f"healed at {group[0]['sha'][:9]} (main watchdog)", "--actor", "main-watchdog"],
+                capture_output=True,
+                check=False,
+            )
+
+
+def forget_healed_pending(state: dict[str, Any], heals: list[dict[str, Any]]) -> None:
+    """Drop queued filings whose every target has healed: a P0 for a gone red is noise."""
+    healed = {(heal["lane"], heal["target"]) for heal in heals}
+    state["pending_beads"] = [
+        payload
+        for payload in state.get("pending_beads", [])
+        if not all((payload.get("lane"), target) in healed for target in payload.get("new_targets", []))
+        or not payload.get("new_targets")
+    ]
+
+
 def heal_candidates(lane: dict[str, Any], lane_known: dict[str, Any], failing: set[str], outcome: dict[str, Any]) -> list[str]:
     """Known reds this outcome proves healed.
 
@@ -479,7 +908,12 @@ def heal_candidates(lane: dict[str, Any], lane_known: dict[str, Any], failing: s
 
 
 def run_engine(
-    plan: dict[str, Any], runner: Runner, state: dict[str, Any], now: str, target_exists: TargetExists | None = None
+    plan: dict[str, Any],
+    runner: Runner,
+    state: dict[str, Any],
+    now: str,
+    target_exists: TargetExists | None = None,
+    parallel: int = 1,
 ) -> dict[str, Any]:
     commits = {c["sha"]: c for c in plan["commits"]}
     batch = [c["sha"] for c in plan["commits"]]
@@ -487,10 +921,16 @@ def run_engine(
     known = state.setdefault("known_reds", {})
     receipts: list[dict[str, Any]] = []
     payloads: list[dict[str, Any]] = []
+    heals: list[dict[str, Any]] = []
     notes: list[str] = []
     all_green = True
-    for lane in plan["lanes"]:
-        text, exit_code = runner(lane, head)
+    head_runs: list[tuple[str, int]] | None = None
+    if parallel > 1 and len(plan["lanes"]) > 1:
+        # Head lanes are independent; only wall clock changes. Bisection stays serial below.
+        with ThreadPoolExecutor(max_workers=parallel) as pool:
+            head_runs = list(pool.map(lambda lane: runner(lane, head), plan["lanes"]))
+    for index, lane in enumerate(plan["lanes"]):
+        text, exit_code = head_runs[index] if head_runs is not None else runner(lane, head)
         outcome = classify_lane_output(text, exit_code, lane)
         receipt = {
             "schema": SCHEMA_VERSION,
@@ -502,7 +942,10 @@ def run_engine(
             "batch_size": len(batch),
             **{
                 k: outcome[k]
-                for k in ("verdict", "reason", "remote_exit", "client_exit", "worker", "failing_targets", "first_error", "counts", "targets_seen")
+                for k in (
+                    "verdict", "reason", "remote_exit", "client_exit", "worker", "failing_targets", "first_error", "counts",
+                    "targets_seen", "unexercised_filters", "targets_executed", "env_gated_targets",
+                )
             },
         }
         if outcome["verdict"] != VERDICT_GREEN:
@@ -511,11 +954,7 @@ def run_engine(
         if outcome["verdict"] == VERDICT_RED:
             failing = red_targets(outcome)
             healed = heal_candidates(lane, lane_known, failing, outcome)
-            for target in healed:
-                lane_known.pop(target)
-            if healed:
-                receipt["healed"] = healed
-                notes.append(f"{lane['id']}: healed at {head[:9]}: {', '.join(healed)}")
+            record_heals(lane, lane_known, healed, head, outcome, receipt, notes, heals)
             still = sorted(failing & set(lane_known))
             if still:
                 receipt["still_red"] = {t: lane_known[t].get("bead") for t in still}
@@ -565,19 +1004,26 @@ def run_engine(
                     }
         elif outcome["verdict"] == VERDICT_GREEN and lane_known:
             healed = heal_candidates(lane, lane_known, set(), outcome)
-            for target in healed:
-                lane_known.pop(target)
-            if healed:
-                receipt["healed"] = healed
-                notes.append(f"{lane['id']}: healed at {head[:9]}: {', '.join(healed)}")
+            record_heals(lane, lane_known, healed, head, outcome, receipt, notes, heals)
         if not lane_known:
             known.pop(lane["id"], None)
         receipts.append(receipt)
+    # A bead may track several targets, even across lanes: it is closable only
+    # once none of them is still red.
+    still_tracked = {entry.get("bead") for reds in known.values() for entry in reds.values()}
+    for heal in heals:
+        heal["close"] = heal["bead"] is not None and heal["bead"] not in still_tracked
     if all_green:
         state["last_green"] = head
     if all(r["verdict"] in (VERDICT_GREEN, VERDICT_RED) for r in receipts):
         state["last_covered"] = head  # decisive for every lane (green or attributed red)
-    return {"receipts": receipts, "bead_payloads": payloads, "notes": notes, "state": state}
+    # A preflight refusal is a property of this head's tree, so the next plan must
+    # move the head (select_batch); any other outcome releases that.
+    if any(r.get("reason") == DEPENDENCY_PREFLIGHT_REASON for r in receipts):
+        state["preflight_refused_head"] = head
+    else:
+        state.pop("preflight_refused_head", None)
+    return {"receipts": receipts, "bead_payloads": payloads, "bead_heals": heals, "notes": notes, "state": state}
 
 
 # ---------------------------------------------------------------------------
@@ -649,11 +1095,23 @@ def phase6_report(commit: dict[str, Any]) -> list[dict[str, Any]]:
 _TARGET_EXISTS_CACHE: dict[tuple[str, str], bool] = {}
 
 
+def target_root_paths(name: str, registry: dict[str, dict[str, Any]]) -> list[str]:
+    """Files whose presence means test target `name` exists.
+
+    Failing tests are keyed `<target>::<test>`, where the lib unit-test target is `lib`:
+    it exists wherever src/lib.rs does. Treating it like an integration target
+    (tests/lib.rs) made every bisect probe read `target-absent` and blamed the head.
+    """
+    if name == "lib":
+        return ["src/lib.rs"]
+    return [path for path, entry in registry.items() if entry["name"] == name] or [f"tests/{name}.rs"]
+
+
 def git_target_exists(sha: str, name: str) -> bool:
-    """Whether integration test target `name` exists at `sha` (registered path or tests/<name>.rs)."""
+    """Whether test target `name` exists at `sha` (see `target_root_paths`)."""
     key = (sha, name)
     if key not in _TARGET_EXISTS_CACHE:
-        paths = [path for path, entry in cargo_test_registry(sha).items() if entry["name"] == name] or [f"tests/{name}.rs"]
+        paths = target_root_paths(name, cargo_test_registry(sha))
         _TARGET_EXISTS_CACHE[key] = any(
             subprocess.run(["git", "cat-file", "-e", f"{sha}:{path}"], capture_output=True, check=False).returncode == 0
             for path in paths
@@ -661,36 +1119,122 @@ def git_target_exists(sha: str, name: str) -> bool:
     return _TARGET_EXISTS_CACHE[key]
 
 
+def manifest_at(sha: str) -> dict[str, Any]:
+    return tomllib.loads(git("show", f"{sha}:Cargo.toml"))
+
+
 def cargo_test_registry(sha: str) -> dict[str, dict[str, Any]]:
-    manifest = tomllib.loads(git("show", f"{sha}:Cargo.toml"))
     registry = {}
-    for entry in manifest.get("test", []):
+    for entry in manifest_at(sha).get("test", []):
         path = entry.get("path", f"tests/{entry['name']}.rs")
         registry[path] = {"name": entry["name"], "features": sorted(entry.get("required-features", []))}
     return registry
 
 
-def targeted_tests(head: str, paths: list[str]) -> tuple[dict[str, list[str]], list[str], list[str]]:
-    """Map changed paths to integration targets grouped by feature set, lib filters, and unmapped paths."""
+def tree_sources(sha: str, prefix: str = "src/") -> dict[str, str]:
+    """Every `.rs` blob under `prefix` at `sha`, read through one `git cat-file --batch`."""
+    entries = []
+    for line in git("ls-tree", "-r", sha, "--", prefix).splitlines():
+        meta, path = line.split("\t", 1)
+        _mode, kind, blob = meta.split()
+        if kind == "blob" and path.endswith(".rs"):
+            entries.append((path, blob))
+    stdin = "".join(f"{blob}\n" for _, blob in entries).encode()
+    out = subprocess.run(["git", "cat-file", "--batch"], input=stdin, capture_output=True, check=True).stdout
+    sources, pos = {}, 0
+    for path, _blob in entries:
+        header_end = out.index(b"\n", pos)
+        size = int(out[pos:header_end].split()[2])
+        sources[path] = out[header_end + 1 : header_end + 1 + size].decode("utf-8", "replace")
+        pos = header_end + 1 + size + 1
+    return sources
+
+
+def crate_roots(sources: dict[str, str], manifest: dict[str, Any], defaults: frozenset[str]) -> dict[str, Requirement]:
+    """The library root plus every binary root, each with the features its target requires."""
+    roots: dict[str, Requirement] = {"src/lib.rs": TRUE}
+    for entry in manifest.get("bin", []):
+        required = frozenset(entry.get("required-features", [])) - defaults
+        roots[entry.get("path", f"src/bin/{entry['name']}.rs")] = frozenset({required})
+    for path in sources:
+        if path == "src/main.rs" or re.fullmatch(r"src/bin/[^/]+\.rs|src/bin/[^/]+/main\.rs", path):
+            roots.setdefault(path, TRUE)
+    return roots
+
+
+def workspace_members(head: str, manifest: dict[str, Any]) -> dict[str, str]:
+    """Member directory -> package name, for every workspace member except the root package."""
+    members = {}
+    for directory in manifest.get("workspace", {}).get("members", []):
+        if directory in (".", ""):
+            continue
+        member = tomllib.loads(git("show", f"{head}:{directory}/Cargo.toml", check=False) or "")
+        if name := member.get("package", {}).get("name"):
+            members[directory.rstrip("/")] = name
+    return members
+
+
+REGISTRATION_CONTRACT = "test_target_registration_contract"
+
+
+def touches_test_registration(paths: list[str]) -> bool:
+    """A change to Cargo.toml or a top-level integration test can leave a feature-gated
+    test without its `[[test]]` required-features entry (bi2462.87). Commits that never
+    ran `cargo test` must still get the registration contract, so the batch runs it."""
+    return any(path == "Cargo.toml" or re.fullmatch(r"tests/[^/]+\.rs", path) for path in paths)
+
+
+def targeted_tests(head: str, paths: list[str]) -> dict[str, Any]:
+    """Map changed paths to integration targets grouped by feature set, lib filters, unmapped
+    paths, the features gating the touched `src/` modules, and touched workspace member crates."""
+    manifest = manifest_at(head)
+    defaults = frozenset(manifest.get("features", {}).get("default", []))
     registry = cargo_test_registry(head)
+    members = workspace_members(head, manifest)
     groups: dict[str, set[str]] = {}
     lib_filters: list[str] = []
     unmapped: list[str] = []
+    src_features: set[str] = set()
+    crates: set[str] = set()
+    env_gated: set[str] = set()
     existing = set(git("ls-tree", "-r", "--name-only", head, "--", "tests").split())
+    sources: dict[str, str] = {}
+    tree: dict[str, tuple[str | None, Requirement]] = {}
+    if any(p.startswith("src/") and p.endswith(".rs") for p in paths):
+        sources = tree_sources(head)
+        tree = module_tree(sources, crate_roots(sources, manifest, defaults), defaults)
     for path in sorted(set(paths)):
+        member = next((d for d in members if path.startswith(d + "/")), None)
+        if member:
+            # A root `cargo check --all-targets` builds a member only as a dependency,
+            # never its own tests (for the macros crate: its trybuild compile-fail suite).
+            crates.add(members[member])
+            continue
         if path.startswith("src/"):
-            f = lib_filter_for(path)
-            if f:
-                lib_filters.append(f)
+            if path not in sources:
+                continue  # not Rust, or removed at head: check-default covers the crate
+            entry = tree.get(path)
+            if entry is None:
+                unmapped.append(f"{path} (no crate root reaches it: nothing compiles it)")
+            elif entry[1] is None:
+                unmapped.append(f"{path} (cfg not understood)")
+            elif not entry[1]:
+                unmapped.append(f"{path} (its cfg never holds on a Linux worker)")
+            else:
+                src_features |= chosen_features(entry[1]) or frozenset()
+                if entry[0]:
+                    lib_filters.append(entry[0])
             continue
         if not path.startswith("tests/") or not path.endswith(".rs") or path not in existing:
             continue
         targets: list[tuple[str, list[str]]] = []
         if path in registry:
-            targets.append((registry[path]["name"], registry[path]["features"]))
+            features, understood = file_cfg_features(git("show", f"{head}:{path}", check=False), defaults)
+            required = set(registry[path]["features"]) | (set(features) if understood else set())
+            targets.append((registry[path]["name"], sorted(required)))
         elif path.count("/") == 1:
             source = git("show", f"{head}:{path}", check=False)
-            features, understood = file_cfg_features(source)
+            features, understood = file_cfg_features(source, defaults)
             if not understood:
                 unmapped.append(f"{path} (crate cfg not understood)")
                 continue
@@ -699,20 +1243,40 @@ def targeted_tests(head: str, paths: list[str]) -> tuple[dict[str, list[str]], l
             top = path.split("/")[1]
             owners = [p for p in registry if p.startswith(f"tests/{top}/")]
             for owner in owners:
-                targets.append((registry[owner]["name"], registry[owner]["features"]))
+                features, understood = file_cfg_features(git("show", f"{head}:{owner}", check=False), defaults)
+                required = set(registry[owner]["features"]) | (set(features) if understood else set())
+                targets.append((registry[owner]["name"], sorted(required)))
             if not owners:
                 hits = git("grep", "-lE", rf"^\s*(pub\s+)?mod\s+{re.escape(top)}\s*;", head, "--", "tests/*.rs", check=False)
                 for hit in hits.split():
                     file = hit.split(":", 1)[1]
                     if file.count("/") == 1:
-                        features, understood = file_cfg_features(git("show", f"{head}:{file}", check=False))
+                        features, understood = file_cfg_features(git("show", f"{head}:{file}", check=False), defaults)
                         if understood:
                             targets.append((Path(file).stem, features))
             if not targets:
                 unmapped.append(f"{path} (no owning test target found)")
         for name, features in targets:
             groups.setdefault(",".join(features), set()).add(name)
-    return {k: sorted(v) for k, v in groups.items()}, compress_lib_filters(lib_filters), unmapped
+            root = next((p for p, e in registry.items() if e["name"] == name), f"tests/{name}.rs")
+            if ENV_GATE_RE.search(git("show", f"{head}:{root}", check=False)):
+                env_gated.add(name)
+    if touches_test_registration(paths) and f"tests/{REGISTRATION_CONTRACT}.rs" in existing:
+        groups.setdefault("", set()).add(REGISTRATION_CONTRACT)
+    return {
+        "groups": {k: sorted(v) for k, v in groups.items()},
+        "lib_filters": compress_lib_filters(lib_filters),
+        "unmapped": unmapped,
+        "src_features": sorted(src_features),
+        "crates": sorted(crates),
+        "env_gated": sorted(env_gated),
+    }
+
+
+# Test lanes build without debuginfo or incremental state. With full debuginfo the lib
+# test's rustc was OOM-killed on the smaller workers (2026-09-25), and linking every
+# test binary with it costs time on each bisect probe. What is tested does not change.
+LEAN_TEST_ENV = ["env", "CARGO_INCREMENTAL=0", "CARGO_PROFILE_TEST_DEBUG=0"]
 
 
 def build_lanes(head: str, paths: list[str], jobs: int, with_all_features: bool) -> tuple[list[dict[str, Any]], list[str]]:
@@ -736,28 +1300,68 @@ def build_lanes(head: str, paths: list[str], jobs: int, with_all_features: bool)
     ]
     if with_all_features:
         lanes.insert(1, {"id": "check-all-features", "kind": "build", "argv": ["cargo", "check", "-j", str(jobs), "--all-targets", "--all-features", "--keep-going", "--message-format=short"]})
-    groups, lib_filters, unmapped = targeted_tests(head, paths)
+    mapped = targeted_tests(head, paths)
+    groups, lib_filters, unmapped, src_features = mapped["groups"], mapped["lib_filters"], mapped["unmapped"], mapped["src_features"]
+    feature_args = ["--features", ",".join(src_features)] if src_features else []
+    if src_features:
+        # Touched feature-gated modules are invisible to check-default: check every target
+        # with the union of their features (a subset-only break needs --with-all-features).
+        lanes.insert(
+            1,
+            {
+                "id": "check-features",
+                "kind": "build",
+                "argv": ["cargo", "check", "-j", str(jobs), "--all-targets", *feature_args, "--keep-going", "--message-format=short"],
+            },
+        )
     for features, names in sorted(groups.items()):
-        argv = ["cargo", "test", "-j", str(jobs), "-p", "asupersync", "--no-fail-fast"]
+        argv = [*LEAN_TEST_ENV, "cargo", "test", "-j", str(jobs), "-p", "asupersync", "--no-fail-fast"]
         if features:
             argv += ["--features", features]
         for name in names:
             argv += ["--test", name]
         suffix = features.replace(",", "+") or "default"
-        lanes.append({"id": f"targeted-tests[{suffix}]", "kind": "test", "argv": argv, "expected_targets": names})
+        lane = {"id": f"targeted-tests[{suffix}]", "kind": "test", "argv": argv, "expected_targets": names}
+        if gated := sorted(set(names) & set(mapped["env_gated"])):
+            # These skip their live bodies unless a REAL_* switch is set: green here is not
+            # a live-service receipt.
+            lane["env_gated_targets"] = gated
+        lanes.append(lane)
     if lib_filters:
         lanes.append(
             {
                 "id": "targeted-lib",
                 "kind": "test",
-                "argv": ["cargo", "test", "-j", str(jobs), "-p", "asupersync", "--lib", "--", *lib_filters],
+                "argv": [*LEAN_TEST_ENV, "cargo", "test", "-j", str(jobs), "-p", "asupersync", *feature_args, "--lib", "--", *lib_filters],
                 "expected_targets": [],
                 "lib_filters": lib_filters,
+            }
+        )
+    for crate in mapped["crates"]:
+        lanes.append(
+            {
+                "id": f"targeted-crate[{crate}]",
+                "kind": "test",
+                "argv": [*LEAN_TEST_ENV, "cargo", "test", "-j", str(jobs), "-p", crate, "--no-fail-fast"],
+                "expected_targets": [],
             }
         )
     for lane in lanes:
         lane["display_command"] = " ".join(lane["argv"])
     return lanes, unmapped
+
+
+def select_batch(shas: list[str], max_batch: int, state: dict[str, Any]) -> list[str]:
+    """The next batch of uncovered commits, oldest first.
+
+    RCH refuses a head whose own tree fails its dependency preflight (RCH-E413)
+    before running anything, on every attempt, so that head can never be covered
+    and `last_covered` would stay put forever. After such a refusal the head moves a
+    full batch further, and a later tree carries the refused commits.
+    """
+    refused = state.get("preflight_refused_head")
+    end = shas.index(refused) + 1 + max_batch if refused in shas else max_batch
+    return shas[:end]
 
 
 def make_plan(since: str | None, until: str, max_batch: int, jobs: int, with_all_features: bool, state: dict[str, Any]) -> dict[str, Any]:
@@ -767,7 +1371,7 @@ def make_plan(since: str | None, until: str, max_batch: int, jobs: int, with_all
     shas = git("rev-list", "--reverse", "--first-parent", f"{start}..{until}").split()
     if not shas:
         return {"schema": SCHEMA_VERSION, "commits": [], "lanes": [], "since": start, "until": until}
-    batch = shas[:max_batch]
+    batch = select_batch(shas, max_batch, state)
     commits = [commit_record(s) for s in batch]
     paths = sorted({p for c in commits for p in c["paths"]})
     lanes, unmapped = build_lanes(batch[-1], paths, jobs, with_all_features)
@@ -805,9 +1409,11 @@ def rch_runner(target_dir: str, admission_attempts: int, admission_sleep: int, l
         env = dict(os.environ)
         env.update(
             RCH_REQUIRE_REMOTE="1",
-            RCH_BUILD_TIMEOUT_SEC=env.get("RCH_BUILD_TIMEOUT_SEC", "5400"),
+            # A loaded all-targets check at -j 2..4 exceeded 5400 s (RCH-E104) on 2026-09-24.
+            RCH_BUILD_TIMEOUT_SEC=env.get("RCH_BUILD_TIMEOUT_SEC", "10800"),
             RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=env.get("RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS", "3000"),
-            CARGO_TARGET_DIR=f"{target_dir}_{lane['id'].split('[')[0]}",
+            # One target directory per lane: parallel lanes must not share a cargo build lock.
+            CARGO_TARGET_DIR=f"{target_dir}_{re.sub(r'[^A-Za-z0-9_.+-]', '_', lane['id'])}",
         )
         if lane.get("needs_clippy_component") and os.environ.get("WATCHDOG_CLIPPY_WORKERS"):
             env["RCH_WORKER"] = os.environ["WATCHDOG_CLIPPY_WORKERS"]
@@ -816,7 +1422,7 @@ def rch_runner(target_dir: str, admission_attempts: int, admission_sleep: int, l
         for _ in range(admission_attempts):
             proc = subprocess.run(argv, capture_output=True, text=True, env=env, check=False)
             text, code = proc.stdout + proc.stderr, proc.returncode
-            if not (code == 103 and not REMOTE_EXIT_RE.search(text)):
+            if not (code == 103 and not REMOTE_EXIT_RE.search(text)) or DEPENDENCY_PREFLIGHT_RE.search(text):
                 break
             subprocess.run(["sleep", str(admission_sleep)], check=False)
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -911,6 +1517,75 @@ def file_bead(payload: dict[str, Any]) -> str | None:
         return None
 
 
+def file_or_queue(
+    payloads: list[dict[str, Any]],
+    state: dict[str, Any],
+    open_issues: list[dict[str, Any]],
+    filer: Callable[[dict[str, Any]], str | None],
+) -> None:
+    """File each red payload once. A failed filing is queued, never lost.
+
+    A red target enters `known_reds` in the run that sees it, so no later run
+    produces its payload again. A `br create` that fails (for example while the
+    tracker refuses writes) therefore used to drop the P0 for good. Failed
+    payloads now wait in `state["pending_beads"]`, and every run retries them
+    first. A payload that meanwhile gained an open bead is recorded, not filed.
+    """
+    pending = state.get("pending_beads", [])
+    titles = {p["title"] for p in pending}
+    still_pending = []
+    for payload in pending + [p for p in payloads if p["title"] not in titles]:
+        existing = existing_bead_for(payload["new_targets"], open_issues)
+        bead = existing or filer(payload)
+        if not bead:
+            still_pending.append(payload)
+            continue
+        payload["existing_bead" if existing else "filed_bead"] = bead
+        for target in payload["new_targets"]:
+            entry = state["known_reds"].get(payload["lane"], {}).get(target)
+            if entry is not None:
+                entry["bead"] = bead
+    state["pending_beads"] = still_pending
+
+
+def receipt_closure_probe(case: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Evaluate helper: `close_covered_escalations` with its `br` commands recorded."""
+    commands: list[list[str]] = []
+    filed = dict(case.get("filed", {}))
+    reported = close_covered_escalations(
+        filed, rows, case.get("open_issues", []), run=lambda command, **_: commands.append(command)
+    )
+    return {"reported": reported, "commands": commands, "filed": filed}
+
+
+def file_or_queue_rounds(case: dict[str, Any]) -> list[dict[str, Any]]:
+    """Evaluate helper: successive `file_or_queue` runs sharing one state.
+
+    Each round lists the payload titles whose `br create` fails. Any other
+    title is filed as `filed:<title>`.
+    """
+    state = case["state"]
+    rounds = []
+    for round_ in case["rounds"]:
+        fail = set(round_.get("fail_titles", []))
+        file_or_queue(
+            round_.get("payloads", []),
+            state,
+            round_.get("open_issues", []),
+            lambda payload, fail=fail: None if payload["title"] in fail else f"filed:{payload['title']}",
+        )
+        rounds.append(
+            {
+                "pending": [p["title"] for p in state["pending_beads"]],
+                "beads": {
+                    lane: {target: entry.get("bead") for target, entry in targets.items()}
+                    for lane, targets in state["known_reds"].items()
+                },
+            }
+        )
+    return rounds
+
+
 # ---------------------------------------------------------------------------
 # Summary / exit metrics
 # ---------------------------------------------------------------------------
@@ -965,6 +1640,409 @@ def tracker_counts(issues_path: Path, now: dt.datetime) -> dict[str, int]:
     return counts
 
 
+# ---------------------------------------------------------------------------
+# Ledgers (asupersync-bi2462.147.1): receipt latency, first runs, stranded work,
+# duplicate fixes. Pure functions; `evaluate` drives them from scenarios.
+# ---------------------------------------------------------------------------
+
+RECEIPT_DUE = dt.timedelta(hours=2)
+RECEIPT_ESCALATE = dt.timedelta(hours=6)
+STRANDED_AFTER = dt.timedelta(hours=2)
+MAX_BEHIND = 5
+# Beads that commits cite for process rather than for the change itself.
+PROCESS_BEADS = {WATCHDOG_BEAD, "asupersync-bi2462.162"}
+HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@")
+
+
+def _hours(delta: dt.timedelta) -> float:
+    return round(delta.total_seconds() / 3600, 1)
+
+
+def owes_receipt(commit: dict[str, Any]) -> bool:
+    """Validation Path rule 3: a commit landed without a compile path that touches code."""
+    no_compile_path = is_web_api_identity(commit["author_email"]) or declares_not_compiled(commit["message"])
+    return no_compile_path and not commit.get("is_merge") and any(is_code_path(p) for p in commit["paths"])
+
+
+def receipt_covers(receipt: dict[str, Any]) -> bool:
+    """A lane that proves its head: green, or red only through known reds.
+
+    Known reds (`still_red`) already have their own beads. Without this, one chronic
+    red keeps every later commit from ever getting a receipt. A new red, a red already
+    present at the batch base and a lane without evidence prove nothing.
+    """
+    if receipt["verdict"] == VERDICT_GREEN:
+        return True
+    return receipt["verdict"] == VERDICT_RED and not receipt.get("new_red") and bool(receipt.get("still_red"))
+
+
+def watchdog_runs(receipts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Lane receipts grouped into runs (one head checked at one time), oldest first.
+
+    A run is `green` when every lane covers its head (see `receipt_covers`).
+    """
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for receipt in receipts:
+        grouped.setdefault((receipt["recorded_at"], receipt["sha"]), []).append(receipt)
+    return [
+        {
+            "head": head,
+            "recorded_at": recorded,
+            "green": all(receipt_covers(r) for r in rs),
+            "red": any(r["verdict"] == VERDICT_RED for r in rs),
+            "culprits": sorted({r["culprit"] for r in rs if r.get("culprit")}),
+        }
+        for (recorded, head), rs in sorted(grouped.items())
+    ]
+
+
+def receipt_ledger(commits: list[dict[str, Any]], receipts: list[dict[str, Any]], now: dt.datetime) -> dict[str, Any]:
+    """Heal latency for every commit that owes a rule-3 receipt; `commits` oldest first.
+
+    A run covers a commit when its head is that commit or a later one. A commit is green
+    at the first green covering run (red lanes only through known reds count), and red
+    when a run names it as the culprit. It
+    is blocked while its latest covering run is red for another commit, because that red
+    has its own P0. Otherwise it is pending until 2 h, overdue until 6 h, and escalated
+    after that.
+    """
+    order = {c["sha"]: i for i, c in enumerate(commits)}
+    runs = [run for run in watchdog_runs(receipts) if run["head"] in order]
+    rows = []
+    for index, commit in enumerate(commits):
+        if not owes_receipt(commit):
+            continue
+        landed = dt.datetime.fromisoformat(commit["committed_at"])
+        covering = [run for run in runs if order[run["head"]] >= index]
+        green = next((run for run in covering if run["green"]), None)
+        row: dict[str, Any] = {
+            "sha": commit["sha"],
+            "subject": commit["subject"],
+            "author_email": commit["author_email"],
+            "beads": commit["beads"],
+            "landed_at": commit["committed_at"],
+            "age_h": _hours(now - landed),
+        }
+        if green:
+            row.update(status="green", receipt_at=green["recorded_at"], receipt_head=green["head"],
+                       latency_h=_hours(dt.datetime.fromisoformat(green["recorded_at"]) - landed))
+        elif any(commit["sha"] in run["culprits"] for run in covering):
+            row["status"] = "red"
+        elif covering and covering[-1]["red"]:
+            row.update(status="blocked", blocked_by=covering[-1]["culprits"])
+        else:
+            age = now - landed
+            row["status"] = "pending" if age < RECEIPT_DUE else "overdue" if age < RECEIPT_ESCALATE else "escalate"
+        rows.append(row)
+    return {
+        "owed": len(rows),
+        "green_within_2h": sum(1 for r in rows if r["status"] == "green" and r["latency_h"] <= _hours(RECEIPT_DUE)),
+        "overdue": [r["sha"] for r in rows if r["status"] == "overdue"],
+        "escalate": [r["sha"] for r in rows if r["status"] == "escalate"],
+        "rows": rows,
+    }
+
+
+def receipt_escalation_payload(row: dict[str, Any]) -> dict[str, Any]:
+    sha9 = row["sha"][:9]
+    cited = ", ".join(row["beads"]) or "none"
+    description = (
+        f"**Validation Path rule 3 (AGENTS.md):** `{row['sha']}` landed at {row['landed_at']} without a compile path "
+        f"and has no green main-watchdog receipt after {row['age_h']} h.\n\n"
+        f"- Subject: {row['subject']}\n"
+        f"- Author identity: {row['author_email']}\n"
+        f"- Cited beads: {cited}\n\n"
+        "Heal owner: the cited bead's assignee, else the watchdog operator. Repair forward and cite the new receipt. "
+        "The watchdog does not revert or edit anyone's code; reverting someone else's commit needs the owner.\n"
+    )
+    return {
+        "title": f"[main-watchdog] NO GREEN RECEIPT after 6 h: {sha9} ({row['author_email']}) {row['subject'][:80]}"[:240],
+        "type": "bug",
+        "priority": 0,
+        "labels": ["main-watchdog", "rule-3"],
+        "parent": WATCHDOG_BEAD,
+        "description": description,
+        "sha": row["sha"],
+    }
+
+
+def first_run_ledger(added_targets: list[str], receipts: list[dict[str, Any]]) -> dict[str, Any]:
+    """Test targets added since a baseline that no watchdog lane has executed (>0 tests)."""
+    executed = {t for r in receipts for t in r.get("targets_executed", [])}
+    never = sorted(t for t in set(added_targets) if t not in executed)
+    return {"added": len(set(added_targets)), "never_run": never}
+
+
+def stranded_alerts(tree: dict[str, Any], now: dt.datetime) -> list[str]:
+    """Alerts for work stuck in the shared tree: unpushed past 2 h, or far behind origin."""
+    alerts = []
+    oldest = tree.get("oldest_unpushed_at")
+    if tree.get("ahead") and oldest and now - dt.datetime.fromisoformat(oldest) > STRANDED_AFTER:
+        beads = ", ".join(tree.get("oldest_unpushed_beads") or []) or "none cited"
+        alerts.append(
+            f"stranded: main is {tree['ahead']} commit(s) ahead of origin/main; the oldest unpushed commit is "
+            f"{_hours(now - dt.datetime.fromisoformat(oldest))} h old (beads: {beads})"
+        )
+    if tree.get("landed_elsewhere"):
+        alerts.append(
+            f"stale: {tree['landed_elsewhere']} commit(s) on the shared main are already on origin under other SHAs; "
+            "the shared checkout is not tracking origin"
+        )
+    if tree.get("behind", 0) > MAX_BEHIND:
+        alerts.append(f"behind: main is {tree['behind']} commits behind origin/main")
+    return alerts
+
+
+def diff_hunks(diff_text: str) -> dict[str, list[tuple[int, int]]]:
+    """Old-side line ranges per file from a `git diff -U0` / `git show -U0` text."""
+    hunks: dict[str, list[tuple[int, int]]] = {}
+    path = None
+    for line in diff_text.splitlines():
+        if line.startswith("diff --git "):
+            path = line.rsplit(" b/", 1)[-1]
+        elif path and (match := HUNK_RE.match(line)):
+            start, count = int(match.group(1)), int(match.group(2) or 1)
+            hunks.setdefault(path, []).append((start, start + max(count, 1) - 1))
+    return hunks
+
+
+def duplicate_fixes(origin_items: list[dict[str, Any]], local_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Pairs of (origin commit, local commit or uncommitted diff) citing the same change bead or
+    changing overlapping old-side lines of one file. Line numbers come from different bases,
+    so an overlap is a lead to check, not proof."""
+    flags = []
+    for origin in origin_items:
+        for local in local_items:
+            beads = sorted((set(origin["beads"]) & set(local["beads"])) - PROCESS_BEADS)
+            overlapping = sorted(
+                path
+                for path, ranges in local["hunks"].items()
+                if any(a0 <= b1 and b0 <= a1 for a0, a1 in ranges for b0, b1 in origin["hunks"].get(path, []))
+            )
+            if beads or overlapping:
+                flags.append({"origin": origin["id"], "local": local["id"], "beads": beads, "overlapping_files": overlapping})
+    return flags
+
+
+def shared_tree_state() -> dict[str, Any]:
+    """The shared checkout's `main` against origin, and its dirty paths by last-modified time.
+
+    A local commit whose patch (`git cherry`) or subject is already on origin under another
+    SHA is counted as landed elsewhere, not as stranded work.
+    """
+    ahead = git("log", "--reverse", "--format=%H%x09%cI%x09%s", "origin/main..main", check=False).splitlines()
+    upstream_subjects = set(git("log", "--format=%s", "main..origin/main", check=False).splitlines())
+    equivalent = {line[2:] for line in git("cherry", "origin/main", "main", check=False).splitlines() if line.startswith("- ")}
+    unpushed = []
+    landed_elsewhere = 0
+    for line in ahead:
+        sha, committed, subject = (line.split("\t", 2) + ["", ""])[:3]
+        if sha in equivalent or subject in upstream_subjects:
+            landed_elsewhere += 1
+        else:
+            unpushed.append((sha, committed))
+    oldest = unpushed[0] if unpushed else None
+    dirty = []
+    for line in git("status", "--porcelain", check=False).splitlines():
+        path = line[3:].split(" -> ")[-1]
+        try:
+            modified = dt.datetime.fromtimestamp(os.path.getmtime(path), dt.timezone.utc).isoformat(timespec="seconds")
+        except OSError:
+            modified = None
+        dirty.append({"path": path, "modified_at": modified})
+    return {
+        "ahead": len(unpushed),
+        "landed_elsewhere": landed_elsewhere,
+        "behind": int(git("rev-list", "--count", "main..origin/main", check=False).strip() or 0),
+        "oldest_unpushed_at": oldest[1] if oldest else None,
+        "oldest_unpushed_beads": bead_ids(git("log", "-1", "--format=%B", oldest[0], check=False)) if oldest else [],
+        "dirty": sorted(dirty, key=lambda d: d["modified_at"] or ""),
+    }
+
+
+def _rust_hunks(diff_text: str) -> dict[str, list[tuple[int, int]]]:
+    return {path: ranges for path, ranges in diff_hunks(diff_text).items() if path.endswith(".rs")}
+
+
+def duplicate_fix_items(window: str = "72.hours") -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Origin commits of the last `window` that the shared tree lacks, and the shared tree's
+    unpushed commits plus its diff. An origin commit the tree already contains cannot be
+    duplicated by work built on top of it."""
+    def item(label: str, sha: str) -> dict[str, Any]:
+        return {
+            "id": label,
+            "beads": bead_ids(git("log", "-1", "--format=%B", sha, check=False)),
+            "hunks": _rust_hunks(git("show", "-U0", "--format=", sha, check=False)),
+        }
+
+    origin = [item(sha[:9], sha) for sha in git("rev-list", "--first-parent", f"--since={window}", "main..origin/main", check=False).split()]
+    local = [item(f"local {sha[:9]}", sha) for sha in git("rev-list", "origin/main..main", check=False).split()]
+    working = _rust_hunks(git("diff", "-U0", "HEAD", check=False))
+    for path in list(working):
+        # A dirty file already byte-identical to origin is landed work in a stale checkout,
+        # not a second fix.
+        blob = git("rev-parse", "-q", "--verify", f"origin/main:{path}", check=False).strip()
+        if blob and git("hash-object", "--", path, check=False).strip() == blob:
+            del working[path]
+    if working:
+        local.append({"id": "working tree", "beads": [], "hunks": working})
+    return origin, local
+
+
+DECISION_RE = re.compile(r"\bOWNER DECISION\b|\brecorded verbatim\b|^Release owner decision:", re.MULTILINE)
+DECISION_DUE = dt.timedelta(hours=48)
+
+
+def decision_ledger(issues: list[dict[str, Any]], commits: list[dict[str, Any]], now: dt.datetime) -> list[dict[str, Any]]:
+    """Owner decisions recorded in bead comments, and the first commit citing that bead after them.
+
+    A decision is a comment carrying an explicit marker ("OWNER DECISION", "recorded
+    verbatim", "Release owner decision:"); a passing mention of the phrase is not one.
+    Status: implemented (a later commit cites the bead), closed (settled in the tracker
+    without one), pending (under 48 h), or stale.
+    """
+    rows = []
+    for issue in issues:
+        for comment in issue.get("comments") or []:
+            text = comment.get("text") or comment.get("body") or ""
+            if not DECISION_RE.search(text):
+                continue
+            decided = dt.datetime.fromisoformat(str(comment.get("created_at")).replace("Z", "+00:00"))
+            later = sorted(
+                (dt.datetime.fromisoformat(c["committed_at"]), c["sha"])
+                for c in commits
+                if issue["id"] in c["beads"] and dt.datetime.fromisoformat(c["committed_at"]) > decided
+            )
+            row = {"bead": issue["id"], "decided_at": decided.isoformat(), "age_h": _hours(now - decided)}
+            if later:
+                row.update(status="implemented", implemented_by=later[0][1])
+            elif issue.get("status") in ("closed", "tombstone"):
+                row["status"] = "closed"  # settled in the tracker; no citing commit required
+            else:
+                row["status"] = "pending" if now - decided < DECISION_DUE else "stale"
+            rows.append(row)
+    return sorted(rows, key=lambda r: r["decided_at"])
+
+
+def recent_commits(days: int = 30) -> list[dict[str, Any]]:
+    """Origin commits of the last `days`, with committer time and cited beads."""
+    out = git("log", "--first-parent", f"--since={days}.days", "--format=%H%x1f%cI%x1f%B%x1e", "origin/main", check=False)
+    commits = []
+    for record in out.split("\x1e"):
+        parts = record.strip("\n").split("\x1f")
+        if len(parts) == 3:
+            commits.append({"sha": parts[0], "committed_at": parts[1], "beads": bead_ids(parts[2])})
+    return commits
+
+
+def recent_issues(issues_path: Path, days: int = 30, now: dt.datetime | None = None) -> list[dict[str, Any]]:
+    """Tracker rows (open or closed) updated within `days`."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    rows = []
+    try:
+        lines = issues_path.read_text().splitlines()
+    except FileNotFoundError:
+        return rows
+    for line in lines:
+        try:
+            issue = json.loads(line)
+            updated = dt.datetime.fromisoformat(str(issue.get("updated_at")).replace("Z", "+00:00"))
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(issue, dict) and now - updated <= dt.timedelta(days=days):
+            rows.append(issue)
+    return rows
+
+
+def added_test_targets(since: str, until: str) -> list[str]:
+    """Integration test targets whose root file was added in since..until."""
+    registry = cargo_test_registry(until)
+    added = git("diff", "--diff-filter=A", "--name-only", f"{since}..{until}", "--", "tests", check=False).split()
+    names = []
+    for path in added:
+        if path in registry:
+            names.append(registry[path]["name"])
+        elif path.count("/") == 1 and path.endswith(".rs"):
+            names.append(Path(path).stem)
+    return sorted(set(names))
+
+
+def ledger_commits(since: str, until: str) -> list[dict[str, Any]]:
+    return [commit_record(s, scan_unsafe=False) for s in git("rev-list", "--reverse", "--first-parent", f"{since}..{until}").split()]
+
+
+def escalate_overdue_receipts(state: dict[str, Any], receipts_path: Path, now: dt.datetime, file_beads: bool) -> list[dict[str, Any]]:
+    """File one P0 per commit with no green receipt 6 h after landing (rule 3).
+
+    Only commits after `state["ledger_since"]` count, so work that landed before the
+    watchdog covered main is not flooded with beads; with no `ledger_since`, nothing
+    escalates. A commit is escalated once (`state["receipt_escalations"]`) and never when
+    an open bead already names it.
+    """
+    since = state.get("ledger_since")
+    if not since:
+        return []
+    receipts = [json.loads(line) for line in receipts_path.read_text().splitlines() if line.strip()] if receipts_path.exists() else []
+    ledger = receipt_ledger(ledger_commits(since, "origin/main"), receipts, now)
+    filed = state.setdefault("receipt_escalations", {})
+    open_issues = open_tracker_issues()
+    if file_beads:
+        close_covered_escalations(filed, ledger["rows"], open_issues)
+    payloads = []
+    for row in ledger["rows"]:
+        if row["status"] != "escalate" or row["sha"] in filed:
+            continue
+        payload = receipt_escalation_payload(row)
+        existing = next(
+            (i.get("id") for i in open_issues if "NO GREEN RECEIPT" in i.get("title", "") and row["sha"][:9] in i.get("title", "")),
+            None,
+        )
+        if existing:
+            payload["existing_bead"] = filed[row["sha"]] = existing
+        elif file_beads and (bead := file_bead(payload)):
+            payload["filed_bead"] = filed[row["sha"]] = bead
+        payloads.append(payload)
+    return payloads
+
+
+def close_covered_escalations(
+    filed: dict[str, str],
+    rows: list[dict[str, Any]],
+    open_issues: list[dict[str, Any]],
+    run: Callable[..., Any] = subprocess.run,
+) -> list[dict[str, Any]]:
+    """Report the receipt on each escalated commit that a later run now covers.
+
+    As with heals, only an open, unassigned bead is closed; an owner keeps that
+    decision and just gets the receipt. Each commit is reported once: it leaves
+    `filed`, and a covered commit never escalates again.
+    """
+    by_id = {issue.get("id"): issue for issue in open_issues}
+    reported = []
+    for row in rows:
+        bead = filed.get(row["sha"])
+        if row["status"] != "green" or bead is None:
+            continue
+        del filed[row["sha"]]
+        issue = by_id.get(bead)
+        if issue is None:
+            continue
+        note = (
+            f"main-watchdog: `{row['sha'][:9]}` is covered by the run at `{row['receipt_head'][:9]}` recorded "
+            f"{row['receipt_at']}: every lane was green or red only through known reds that have their own beads."
+        )
+        run(["br", "comments", "add", bead, "-m", note, "--author", "main-watchdog"], capture_output=True, check=False)
+        closed = issue.get("status") == "open" and not issue.get("assignee")
+        if closed:
+            run(
+                ["br", "close", bead, "--reason", f"covered at {row['receipt_head'][:9]} (main watchdog)", "--actor", "main-watchdog"],
+                capture_output=True,
+                check=False,
+            )
+        reported.append({"bead": bead, "sha": row["sha"], "closed": closed})
+    return reported
+
+
 def summary(receipts_path: Path, since: str, until: str, issues_path: Path, now: dt.datetime) -> dict[str, Any]:
     shas = git("rev-list", "--reverse", "--first-parent", f"{since}..{until}").split()
     receipts = []
@@ -1009,6 +2087,15 @@ def summary(receipts_path: Path, since: str, until: str, issues_path: Path, now:
         "orphan_top_level_sources": orphan_count(until),
         **tracker_counts(issues_path, now),
         "reds_in_window": sorted({f"{r['lane']}@{r.get('culprit', r['sha'])[:9]}" for r in receipts if r["verdict"] == VERDICT_RED and r["sha"] in order}),
+        "receipt_ledger": receipt_ledger(ledger_commits(since, until), receipts, now),
+        "first_run_ledger": first_run_ledger(added_test_targets(since, until), receipts),
+        "stranded_alerts": stranded_alerts(shared_tree_state(), now),
+        "duplicate_fixes": duplicate_fixes(*duplicate_fix_items()),
+        "owner_decisions": [
+            row
+            for row in decision_ledger(recent_issues(issues_path, now=now), recent_commits(), now)
+            if row["status"] in ("pending", "stale")
+        ],
     }
 
 
@@ -1034,6 +2121,11 @@ def main(argv: list[str]) -> int:
             p.add_argument("--post-receipts", action="store_true", help="comment the batch receipt on cited beads")
             p.add_argument("--admission-attempts", type=int, default=40)
             p.add_argument("--admission-sleep", type=int, default=90)
+            p.add_argument("--parallel", type=int, default=2, help="head lanes run concurrently (RCH admits ~2-3 per project)")
+            p.add_argument(
+                "--ledger-since",
+                help="record in state: rule-3 receipt escalation counts commits after this SHA (unset: no escalation)",
+            )
     e = sub.add_parser("evaluate")
     e.add_argument("--scenario", type=Path, required=True)
     s = sub.add_parser("summary")
@@ -1041,6 +2133,8 @@ def main(argv: list[str]) -> int:
     s.add_argument("--until", default="origin/main")
     s.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
     s.add_argument("--issues", type=Path, default=Path(".beads/issues.jsonl"))
+    r = sub.add_parser("registration", help="feature-gated test files without matching [[test]] required-features")
+    r.add_argument("--root", type=Path, default=Path("."))
     args = parser.parse_args(argv)
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
 
@@ -1073,15 +2167,57 @@ def main(argv: list[str]) -> int:
             scenario.get("state", {"known_reds": {}}),
             scenario.get("now", "2026-01-01T00:00:00+00:00"),
             None if scenario.get("disable_target_filter") else fake_target_exists,
+            scenario.get("parallel", 1),
         )
+        # As in run mode: drop healed queued filings, then report heals (the br
+        # calls are recorded, not executed).
+        forget_healed_pending(result["state"], result["bead_heals"])
+        heal_calls: list[list[str]] = []
+        report_heals(result["bead_heals"], scenario.get("open_issues", []), lambda argv, **_: heal_calls.append(argv))
+        result["heal_calls"] = heal_calls
         probes = scenario.get("probes", {})
         result["probe_results"] = {
             "declares_not_compiled": [declares_not_compiled(m) for m in probes.get("declares_not_compiled", [])],
             "bead_ids": [bead_ids(m, set(probes["known_ids"]) if "known_ids" in probes else None) for m in probes.get("bead_ids", [])],
             "file_cfg_features": [list(file_cfg_features(s)) for s in probes.get("file_cfg_features", [])],
+            "cfg_requirement": [requirement_json(cfg_requirement(e, frozenset(probes.get("defaults", [])))) for e in probes.get("cfg_requirement", [])],
+            "module_tree": {
+                path: [modpath, requirement_json(req)]
+                for path, (modpath, req) in module_tree(
+                    probes.get("module_tree", {}).get("sources", {}),
+                    {root: TRUE for root in probes.get("module_tree", {}).get("roots", [])},
+                    frozenset(probes.get("defaults", [])),
+                ).items()
+            },
             "lib_filter_for": [lib_filter_for(p) for p in probes.get("lib_filter_for", [])],
+            "touches_test_registration": [
+                touches_test_registration(paths) for paths in probes.get("touches_test_registration", [])
+            ],
+            "receipt_ledger": [
+                {
+                    "ledger": (ledger := receipt_ledger(case["commits"], case["receipts"], dt.datetime.fromisoformat(case["now"]))),
+                    "payloads": [receipt_escalation_payload(row) for row in ledger["rows"] if row["status"] == "escalate"],
+                    "closures": receipt_closure_probe(case, ledger["rows"]),
+                }
+                for case in probes.get("receipt_ledger", [])
+            ],
+            "first_run_ledger": [first_run_ledger(case["added"], case["receipts"]) for case in probes.get("first_run_ledger", [])],
+            "stranded_alerts": [stranded_alerts(case["tree"], dt.datetime.fromisoformat(case["now"])) for case in probes.get("stranded", [])],
+            "duplicate_fixes": [duplicate_fixes(case["origin"], case["local"]) for case in probes.get("duplicate_fixes", [])],
+            "diff_hunks": [diff_hunks(text) for text in probes.get("diff_hunks", [])],
+            "target_root_paths": [
+                target_root_paths(case["name"], case.get("registry", {})) for case in probes.get("target_root_paths", [])
+            ],
+            "decision_ledger": [
+                decision_ledger(case["issues"], case["commits"], dt.datetime.fromisoformat(case["now"]))
+                for case in probes.get("decision_ledger", [])
+            ],
             "existing_bead_for": [
                 existing_bead_for(case["new_targets"], case["open_issues"]) for case in probes.get("existing_bead_for", [])
+            ],
+            "file_or_queue": [file_or_queue_rounds(case) for case in probes.get("file_or_queue", [])],
+            "select_batch": [
+                select_batch(case["shas"], case["max_batch"], case["state"]) for case in probes.get("select_batch", [])
             ],
         }
         json.dump(result, sys.stdout, indent=2, sort_keys=True)
@@ -1094,6 +2230,11 @@ def main(argv: list[str]) -> int:
         sys.stdout.write("\n")
         return 0
 
+    if args.mode == "registration":
+        json.dump(test_registration_census(args.root), sys.stdout, indent=2, sort_keys=True)
+        sys.stdout.write("\n")
+        return 0
+
     state_path = args.state_dir / "state.json"
     state = load_state(state_path)
     if not args.no_fetch:
@@ -1103,31 +2244,28 @@ def main(argv: list[str]) -> int:
         json.dump(plan, sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")
         return 0
-    if not plan["commits"]:
-        print(json.dumps({"schema": SCHEMA_VERSION, "status": "no new commits", "since": plan["since"]}))
-        return 0
     args.state_dir.mkdir(parents=True, exist_ok=True)
+    if args.ledger_since:
+        state["ledger_since"] = args.ledger_since
+    if not plan["commits"]:
+        if args.file_beads and state.get("pending_beads"):
+            file_or_queue([], state, open_tracker_issues(), file_bead)
+        escalations = escalate_overdue_receipts(state, args.state_dir / "receipts.jsonl", now, args.file_beads)
+        state_path.write_text(json.dumps(state, indent=2, sort_keys=True))
+        print(json.dumps({"schema": SCHEMA_VERSION, "status": "no new commits", "since": plan["since"], "receipt_escalations": escalations}))
+        return 0
     runner = rch_runner(str(args.state_dir / "target"), args.admission_attempts, args.admission_sleep, args.state_dir / "logs")
-    result = run_engine(plan, runner, state, now.isoformat(), git_target_exists)
-    open_issues = open_tracker_issues()
-    for payload in result["bead_payloads"]:
-        if args.file_beads:
-            existing = existing_bead_for(payload["new_targets"], open_issues)
-            if existing:
-                payload["existing_bead"] = existing  # already tracked: record it, file nothing
-                bead = existing
-            else:
-                bead = file_bead(payload)
-                payload["filed_bead"] = bead
-            for target in payload["new_targets"]:
-                entry = state["known_reds"].get(payload["lane"], {}).get(target)
-                if entry is not None:
-                    entry["bead"] = bead
+    result = run_engine(plan, runner, state, now.isoformat(), git_target_exists, args.parallel)
+    forget_healed_pending(state, result["bead_heals"])
+    if args.file_beads:
+        file_or_queue(result["bead_payloads"], state, open_tracker_issues(), file_bead)
+        report_heals(result["bead_heals"], open_tracker_issues())
     if args.post_receipts:
         post_receipts(plan, result["receipts"])
     with open(args.state_dir / "receipts.jsonl", "a", encoding="utf-8") as handle:
         for receipt in result["receipts"]:
             handle.write(json.dumps(receipt, sort_keys=True) + "\n")
+    result["receipt_escalations"] = escalate_overdue_receipts(state, args.state_dir / "receipts.jsonl", now, args.file_beads)
     state_path.write_text(json.dumps(state, indent=2, sort_keys=True))
     json.dump({"plan_flags": plan["flags"], "unmapped_paths": plan["unmapped_paths"], **result}, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")

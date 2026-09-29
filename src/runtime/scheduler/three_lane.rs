@@ -144,18 +144,20 @@ use crate::runtime::stored_task::AnyStoredTask;
 use crate::runtime::{RuntimeState, TaskTable};
 use crate::sync::ContendedMutex;
 use crate::time::TimerDriverHandle;
+use crate::trace::capture::ScheduleCaptureRecorder;
+use crate::trace::{TraceBufferHandle, TraceData, TraceEvent, TraceEventKind};
 use crate::tracing_compat::{error, trace};
 use crate::types::task_context::CxCancellationState;
-use crate::types::{CxInner, TaskId, Time};
+use crate::types::{CxInner, RegionId, TaskId, Time};
 use crate::util::{CachePadded, DetHashMap, DetHasher, DetRng};
 use parking_lot::Mutex;
 use parking_lot::RwLock;
 use smallvec::SmallVec;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Weak};
-use std::task::{Context, Poll, Waker};
+use std::sync::{Arc, OnceLock, Weak};
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
 /// Identifier for a scheduler worker.
@@ -1069,6 +1071,40 @@ thread_local! {
         const { RefCell::new(None) };
     /// Thread-local worker id for routing local tasks.
     static CURRENT_WORKER_ID: RefCell<Option<WorkerId>> = const { RefCell::new(None) };
+    /// Set while a scheduler that is not a runtime worker (the deterministic
+    /// lab) polls a task on this thread.
+    static SCHEDULER_DRIVEN: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Marks the current thread as driven by a scheduler for the guard's lifetime.
+///
+/// The lab sets this around each task poll so that drain-correct combinators
+/// await their losers exactly as they do on a runtime worker
+/// (asupersync-bi2462.101).
+pub(crate) struct ScopedSchedulerDriven {
+    prev: bool,
+}
+
+impl ScopedSchedulerDriven {
+    pub(crate) fn enter() -> Self {
+        let prev = SCHEDULER_DRIVEN.with(|cell| cell.replace(true));
+        Self { prev }
+    }
+}
+
+impl Drop for ScopedSchedulerDriven {
+    fn drop(&mut self) {
+        let prev = self.prev;
+        let _ = SCHEDULER_DRIVEN.try_with(|cell| cell.set(prev));
+    }
+}
+
+/// Whether the current task is polled by a scheduler that keeps driving other
+/// tasks while it waits: a runtime worker or the lab. Without one (a stored
+/// task polled directly under `block_on`), awaiting another task can deadlock.
+#[inline]
+pub(crate) fn scheduler_drives_current_task() -> bool {
+    current_worker_id().is_some() || SCHEDULER_DRIVEN.with(Cell::get)
 }
 
 /// Scoped setter for the thread-local scheduler pointer.
@@ -1524,6 +1560,9 @@ pub(crate) fn schedule_cancel_on_current_local(task: TaskId, priority: u8) -> bo
 /// deduplication, preventing the same task from being scheduled in multiple queues.
 #[derive(Debug)]
 pub struct ThreeLaneScheduler {
+    /// Shared before workers are moved to their execution threads; publication
+    /// is one-time and occurs before RuntimeBuilder exposes the runtime.
+    schedule_capture: Arc<OnceLock<Arc<ScheduleCaptureRecorder>>>,
     /// Global injection queue for cross-thread wakeups.
     global: Arc<GlobalInjector>,
     /// Per-worker local schedulers for routing pinned local tasks.
@@ -1709,6 +1748,23 @@ impl SchedulerConstructionHandles {
 }
 
 impl ThreeLaneScheduler {
+    pub(crate) fn enable_schedule_capture(&self, trace: TraceBufferHandle) {
+        let _ = self
+            .schedule_capture
+            .set(Arc::new(ScheduleCaptureRecorder::new(
+                trace,
+                self.parkers.len(),
+            )));
+    }
+
+    pub(crate) fn schedule_capture_snapshot(
+        &self,
+    ) -> Option<crate::trace::ScheduleCaptureSnapshot> {
+        self.schedule_capture
+            .get()
+            .map(|capture| capture.snapshot())
+    }
+
     /// Process-unique key of this runtime's per-thread local-task stores
     /// (GH#58, asupersync-1fyc8f); every worker and the current-thread driver
     /// use this same key.
@@ -1961,6 +2017,7 @@ impl ThreeLaneScheduler {
         let enable_parking = DEFAULT_ENABLE_PARKING;
         let global = Arc::new(GlobalInjector::new());
         let scheduler_evidence = None;
+        let schedule_capture = Arc::new(OnceLock::new());
         let shutdown = Arc::new(AtomicBool::new(false));
         let mut workers = SmallVec::<[ThreeLaneWorker; 16]>::with_capacity(worker_count);
         let mut preemption_fairness_snapshots = SmallVec::<
@@ -2055,6 +2112,7 @@ impl ThreeLaneScheduler {
 
             workers.push(ThreeLaneWorker {
                 id,
+                schedule_capture: Arc::clone(&schedule_capture),
                 local_store_key,
                 local: Arc::clone(&local_schedulers[id]),
                 stealers,
@@ -2149,6 +2207,7 @@ impl ThreeLaneScheduler {
 
         Self {
             global,
+            schedule_capture,
             local_schedulers,
             local_ready,
             parkers,
@@ -3103,6 +3162,13 @@ impl ThreeLaneScheduler {
     pub fn is_shutdown(&self) -> bool {
         self.shutdown.load(Ordering::Acquire)
     }
+
+    /// Shared shutdown flag, so a test task can hold a worker until the
+    /// runtime begins stopping without retaining the runtime itself.
+    #[cfg(test)]
+    pub(crate) fn shutdown_signal_for_test(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.shutdown)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3132,6 +3198,8 @@ impl StealerLocality {
 pub struct ThreeLaneWorker {
     /// Unique worker ID.
     pub id: WorkerId,
+    /// Empty in the default configuration; no recorder or Waker adapter exists.
+    schedule_capture: Arc<OnceLock<Arc<ScheduleCaptureRecorder>>>,
     /// Process-unique key of this runtime's per-thread local-task stores
     /// (GH#58, asupersync-1fyc8f); see [`ThreeLaneScheduler::local_store_key`].
     local_store_key: usize,
@@ -4407,6 +4475,46 @@ impl UnwindCompletionArtifacts {
 }
 
 impl ThreeLaneWorker {
+    fn capture_waker(&self, waker: Waker, task: TaskId, region: Option<RegionId>) -> Waker {
+        match (self.schedule_capture.get(), region) {
+            (Some(capture), Some(region)) => Waker::from(Arc::new(CaptureWake {
+                inner: waker,
+                capture: Arc::clone(capture),
+                task,
+                region,
+            })),
+            _ => waker,
+        }
+    }
+
+    fn capture_now(&self) -> Time {
+        self.timer_driver
+            .as_ref()
+            .map_or_else(crate::time::wall_now, TimerDriverHandle::now)
+    }
+
+    fn capture_cancel_ack(
+        &self,
+        task: TaskId,
+        receipt: &crate::record::task::CheckpointCancelAck,
+        now: Time,
+    ) {
+        if let Some(capture) = self.schedule_capture.get() {
+            capture.record(Some(self.id), |seq| {
+                TraceEvent::new(
+                    seq,
+                    now,
+                    TraceEventKind::CancelAck,
+                    TraceData::Cancel {
+                        task,
+                        region: receipt.region_id,
+                        reason: receipt.effective_reason.clone(),
+                    },
+                )
+            });
+        }
+    }
+
     /// Returns the current time in nanoseconds for fairness monitoring.
     ///
     /// br-asupersync-9nn568: when the worker has a TimerDriverHandle
@@ -4801,12 +4909,19 @@ impl ThreeLaneWorker {
     /// when this worker runs against an external shard, otherwise from the
     /// embedded table.
     fn lyapunov_snapshot_locked(&self, state: &RuntimeState) -> StateSnapshot {
+        // Production effects are timestamped by the runtime timer driver;
+        // state.now is advanced only by logical/lab callers. Use one sample
+        // for all pressure and age terms, preserving logical time when no
+        // driver is installed.
+        let now = state
+            .timer_driver()
+            .map_or(state.now, TimerDriverHandle::now);
         match &self.task_table {
             Some(tt) => {
                 let table = tt.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                StateSnapshot::from_runtime_state_with_tasks(state, &table)
+                StateSnapshot::from_runtime_state_with_tasks_at(state, &table, now)
             }
-            None => StateSnapshot::from_runtime_state(state),
+            None => StateSnapshot::from_runtime_state_at(state, now),
         }
     }
 
@@ -6206,6 +6321,7 @@ impl ThreeLaneWorker {
                 crate::runtime::region_table::RegionCreateError,
             >,
         )> = Vec::with_capacity(commands.len());
+        let mut finalizer_publications = Vec::new();
         {
             let mut state = self
                 .state
@@ -6216,6 +6332,9 @@ impl ThreeLaneWorker {
                     crate::runtime::spawn_mailbox::RegionCommand::Create(request) => {
                         let (slot, outcome) = state.open_child_region_command(request);
                         publications.push((slot, outcome));
+                    }
+                    crate::runtime::spawn_mailbox::RegionCommand::RegisterFinalizer(request) => {
+                        finalizer_publications.push(request.apply(&mut state));
                     }
                     crate::runtime::spawn_mailbox::RegionCommand::Cancel { region_id, reason } => {
                         state.close_region_command_in_task_table(
@@ -6254,6 +6373,9 @@ impl ThreeLaneWorker {
         // lock is released so a woken opener never contends mid-transition.
         for (slot, outcome) in publications {
             slot.publish(outcome);
+        }
+        for publication in finalizer_publications {
+            publication.publish();
         }
         count
     }
@@ -6761,9 +6883,12 @@ impl ThreeLaneWorker {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = state
+            .timer_driver()
+            .map_or(state.now, TimerDriverHandle::now);
         let (snapshot, wait_graph_snapshot) = if let Some(tt) = &self.task_table {
             let table = tt.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            let snapshot = StateSnapshot::from_runtime_state_with_tasks(&state, &table);
+            let snapshot = StateSnapshot::from_runtime_state_with_tasks_at(&state, &table, now);
             let wait_graph_snapshot = if self.spectral_monitor.is_some() {
                 Some(wait_graph_snapshot_from_tasks(&table))
             } else {
@@ -6771,7 +6896,7 @@ impl ThreeLaneWorker {
             };
             (snapshot, wait_graph_snapshot)
         } else {
-            let snapshot = StateSnapshot::from_runtime_state(&state);
+            let snapshot = StateSnapshot::from_runtime_state_at(&state, now);
             let wait_graph_snapshot = if self.spectral_monitor.is_some() {
                 Some(wait_graph_snapshot_from_state(&state))
             } else {
@@ -7837,6 +7962,11 @@ impl ThreeLaneWorker {
         };
 
         let is_local = stored.is_local();
+        let capture_region = self.schedule_capture.get().and_then(|_| {
+            task_cx.as_ref().map(crate::cx::Cx::region_id).or_else(|| {
+                self.with_task_table_ref(|table| table.task(task_id).map(|record| record.owner))
+            })
+        });
 
         // Reuse cached waker (wakers are now dynamic, so priority check is not needed for correctness,
         // but we still store it in the record).
@@ -7846,7 +7976,7 @@ impl ThreeLaneWorker {
             let inner = cx_inner.as_ref().expect("cx_inner missing");
             let cancellation = inner.read().cancellation_state();
             let weak_inner = Arc::downgrade(inner);
-            if is_local {
+            let waker = if is_local {
                 Waker::from(Arc::new(ThreeLaneLocalWaker {
                     task_id,
                     priority,
@@ -7870,7 +8000,8 @@ impl ThreeLaneWorker {
                     cx_inner: weak_inner,
                     scheduler_evidence: self.scheduler_evidence.clone(),
                 }))
-            }
+            };
+            self.capture_waker(waker, task_id, capture_region)
         };
         // Create/reuse cancel waker.
         // Fast path: when cached with matching priority, skip cx_inner entirely
@@ -7907,6 +8038,7 @@ impl ThreeLaneWorker {
                         scheduler_evidence: self.scheduler_evidence.clone(),
                     }))
                 };
+                let w = self.capture_waker(w, task_id, capture_region);
                 // New waker: prepare and retire ownership outside CxInner's
                 // lock because custom Waker callbacks may reenter this task.
                 let mut incoming_waker = Some(Arc::new(
@@ -7949,6 +8081,15 @@ impl ThreeLaneWorker {
         // timed, and ready lanes re-evaluate their fairness gates.
         let poll_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut cx = Context::from_waker(&waker);
+            if let (Some(capture), Some(region)) = (self.schedule_capture.get(), capture_region) {
+                let now = self.capture_now();
+                capture.record(Some(self.id), |seq| {
+                    TraceEvent::schedule(seq, now, task_id, region)
+                });
+                capture.record(Some(self.id), |seq| {
+                    TraceEvent::poll(seq, now, task_id, region)
+                });
+            }
             guard
                 .stored
                 .as_mut()
@@ -7982,6 +8123,12 @@ impl ThreeLaneWorker {
                 artifacts.dispatch_post_lock(self);
             }
             Ok(Poll::Pending) => {
+                if let (Some(capture), Some(region)) = (self.schedule_capture.get(), capture_region) {
+                    let now = self.capture_now();
+                    capture.record(Some(self.id), |seq| {
+                        TraceEvent::yield_task(seq, now, task_id, region)
+                    });
+                }
                 // Store task back: use task table for hot-path when sharded.
                 // Move waker into cache (not clone) since it is not needed after this point.
                 // Store task, cache wakers, and reconcile the checkpoint ack in
@@ -7990,6 +8137,8 @@ impl ThreeLaneWorker {
                     AnyStoredTask::Global(t) => self.with_task_table(move |tt| {
                         tt.store_spawned_task(task_id, t);
                         tt.update_task(task_id, |record| {
+                            // Inspector poll counts (asupersync-bi2462.116).
+                            record.increment_polls();
                             record.cached_waker = Some((waker, priority));
                             record.cached_cancel_waker = cancel_waker_for_cache;
                             record.consume_checkpoint_cancel_ack()
@@ -8004,6 +8153,7 @@ impl ThreeLaneWorker {
                         // (since record is global).
                         self.with_task_table(move |tt| {
                             tt.update_task(task_id, |record| {
+                                record.increment_polls();
                                 record.cached_waker = Some((waker, priority));
                                 record.cached_cancel_waker = cancel_waker_for_cache;
                                 record.consume_checkpoint_cancel_ack()
@@ -8016,6 +8166,9 @@ impl ThreeLaneWorker {
                 };
                 let (cancel_ack, mut cancel_wakes) = cancel_effects.into_parts();
                 if let Some(receipt) = cancel_ack.as_ref() {
+                    if self.schedule_capture.get().is_some() {
+                        self.capture_cancel_ack(task_id, receipt, self.capture_now());
+                    }
                     let state = self
                         .state
                         .lock()
@@ -8211,6 +8364,8 @@ impl ThreeLaneWorker {
         task_id: TaskId,
         completion: PolledCompletion,
     ) -> PolledCompletionArtifacts {
+        // Sample an injected clock before any task/state lock is acquired.
+        let capture_time = self.schedule_capture.get().map(|_| self.capture_now());
         // The holder must still be in its dispatch table when Reserve posts
         // are admitted. Release B before the existing detach phase takes A;
         // the drainer acquires A/C in the ordinary minting order itself.
@@ -8231,6 +8386,10 @@ impl ThreeLaneWorker {
                 let detached_record = tt.remove_task(task_id);
                 (cancel_ack, cancel_wakes, detached_record)
             });
+
+            if let (Some(receipt), Some(now)) = (cancel_ack.as_ref(), capture_time) {
+                self.capture_cancel_ack(task_id, receipt, now);
+            }
 
             let mut state = self
                 .state
@@ -8274,6 +8433,9 @@ impl ThreeLaneWorker {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (cancel_ack, cancel_wakes) =
                 Self::consume_cancel_ack_locked(&mut state, task_id).into_parts();
+            if let (Some(receipt), Some(now)) = (cancel_ack.as_ref(), capture_time) {
+                self.capture_cancel_ack(task_id, receipt, now);
+            }
             let ack_materialized = cancel_ack.is_some();
             let _ = state.update_task(task_id, |record| {
                 Self::apply_polled_completion(record, completion, ack_materialized);
@@ -8441,7 +8603,7 @@ impl ThreeLaneWorker {
         }
     }
 
-    fn retire_detached_task_record(record: Option<crate::record::task::TaskRecord>) {
+    pub(crate) fn retire_detached_task_record(record: Option<crate::record::task::TaskRecord>) {
         let Some(record) = record else {
             return;
         };
@@ -8540,7 +8702,7 @@ impl ThreeLaneWorker {
         .unwrap_or_else(|| crate::types::task_context::CancellationEffects::ready(None))
     }
 
-    fn complete_polled_record(
+    pub(crate) fn complete_polled_record(
         record: &mut crate::record::task::TaskRecord,
         task_outcome: crate::types::Outcome<(), crate::error::Error>,
         cancel_ack: bool,
@@ -8587,6 +8749,36 @@ impl ThreeLaneWorker {
         if !completed_via_cancel {
             record.complete(task_outcome);
         }
+    }
+}
+
+struct CaptureWake {
+    inner: Waker,
+    capture: Arc<ScheduleCaptureRecorder>,
+    task: TaskId,
+    region: RegionId,
+}
+
+impl CaptureWake {
+    fn record(&self) {
+        // A Waker can be invoked from any thread, including a different
+        // runtime's worker. Do not attribute its TLS worker id to this runtime.
+        let now = crate::time::wall_now();
+        self.capture.record(None, |seq| {
+            TraceEvent::wake(seq, now, self.task, self.region)
+        });
+    }
+}
+
+impl Wake for CaptureWake {
+    fn wake(self: Arc<Self>) {
+        self.record();
+        self.inner.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.record();
+        self.inner.wake_by_ref();
     }
 }
 
@@ -8639,7 +8831,6 @@ impl ThreeLaneWaker {
     }
 }
 
-use std::task::Wake;
 impl Wake for ThreeLaneWaker {
     #[inline]
     fn wake(self: Arc<Self>) {

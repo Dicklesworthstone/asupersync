@@ -184,22 +184,48 @@ impl RecoveredSymbols {
     ) -> Result<RegionSnapshot, RemoteRecoveryError> {
         validate_decode(params, limits)?;
         if params.object_id != self.object_id { return Err(RemoteRecoveryError::SnapshotIdentity); }
-        let mut decoder = StateDecoder::new(RecoveryDecodingConfig {
-            verify_integrity: true,
-            auth_context: Some(SecurityContext::new(symbol_key.clone())),
-            snapshot_auth_key: Some(snapshot_key.clone()),
-            max_decode_attempts: 1,
-            allow_partial_decode: false,
-        });
-        for symbol in &self.symbols {
-            decoder.add_symbol(symbol).map_err(|_| RemoteRecoveryError::Decode)?;
-        }
-        let snapshot = decoder.decode_snapshot(&params).map_err(|_| RemoteRecoveryError::Decode)?;
-        if (snapshot.region_id, snapshot.origin_id, snapshot.epoch, snapshot.sequence)
-            != (expected.region_id, expected.origin_id, expected.epoch, expected.sequence)
-        { return Err(RemoteRecoveryError::SnapshotIdentity); }
-        Ok(snapshot)
+        decode_symbols(self.symbols.iter(), params, expected, symbol_key, snapshot_key)
     }
+}
+
+fn decode_symbols<'a>(
+    symbols: impl IntoIterator<Item = &'a AuthenticatedSymbol>, params: ObjectParams,
+    expected: SnapshotIdentity, symbol_key: &AuthKey, snapshot_key: &AuthKey,
+) -> Result<RegionSnapshot, RemoteRecoveryError> {
+    let mut decoder = StateDecoder::new(RecoveryDecodingConfig {
+        verify_integrity: true,
+        auth_context: Some(SecurityContext::new(symbol_key.clone())),
+        snapshot_auth_key: Some(snapshot_key.clone()),
+        max_decode_attempts: 1,
+        allow_partial_decode: false,
+    });
+    for symbol in symbols {
+        decoder.add_symbol(symbol).map_err(|_| RemoteRecoveryError::Decode)?;
+    }
+    let snapshot = decoder.decode_snapshot(&params).map_err(|_| RemoteRecoveryError::Decode)?;
+    if (snapshot.region_id, snapshot.origin_id, snapshot.epoch, snapshot.sequence)
+        != (expected.region_id, expected.origin_id, expected.epoch, expected.sequence)
+    { return Err(RemoteRecoveryError::SnapshotIdentity); }
+    Ok(snapshot)
+}
+
+// A necessary condition only: enough equations in each source block does not
+// establish rank, integrity or snapshot identity. Those require an actual decode.
+fn has_block_coverage(
+    symbols: &BTreeMap<(u8, u32), AuthenticatedSymbol>, params: ObjectParams,
+) -> bool {
+    let mut received = [0usize; 256];
+    for symbol in symbols.values() {
+        let block = usize::from(symbol.symbol().sbn());
+        if block < usize::from(params.source_blocks)
+            && symbol.symbol().data().len() == usize::from(params.symbol_size)
+        { received[block] += 1; }
+    }
+    let block_bytes = u64::from(params.symbol_size) * u64::from(params.symbols_per_block);
+    (0..params.source_blocks).all(|block| {
+        let bytes = (params.object_size - u64::from(block) * block_bytes).min(block_bytes);
+        received[usize::from(block)] as u64 >= bytes.div_ceil(u64::from(params.symbol_size))
+    })
 }
 
 fn validate_decode(params: ObjectParams, limits: SnapshotDecodeLimits) -> Result<(), RemoteRecoveryError> {
@@ -260,6 +286,72 @@ impl RemoteSymbolTransport {
         if timer.now() >= deadline { return Err(RemoteRecoveryError::Deadline); }
         result
     }
+
+    /// Recover as soon as a fixed replica quorum supplies an authenticated snapshot.
+    ///
+    /// Unlike [`Self::recover_snapshot`], this opt-in path need not wait for every
+    /// planned donor. The original `required_replicas` floor must be met AND the
+    /// collected union must actually decode, authenticate with the independent
+    /// snapshot key, and match the exact expected provenance. A replica count or
+    /// a source-symbol count alone never authorizes success. An insufficient
+    /// union keeps collecting; a signed snapshot with wrong provenance refuses.
+    ///
+    /// Decode first runs once the replica floor and per-block minimum counts are
+    /// present. Further attempts require a successful batch to add unique symbols.
+    /// Attempts are bounded by successful batches, not symbols or polls.
+    /// Each attempt is synchronous and bounded by `decode_limits`; cancellation
+    /// and the overall deadline are rechecked after it, not enforced inside it.
+    ///
+    /// On success, error, timeout, cancellation or external drop, all locally
+    /// owned fetches and timers are destroyed. This releases their transport
+    /// credits and closes pending local connections before a result is returned.
+    /// Other users of transport clones may still own credits. Socket closure is
+    /// not a receipt that the remote process has finished work. Unobserved later
+    /// donor replies are not reconciled with the already authenticated result.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn recover_snapshot_on_quorum(
+        &self, requests: &[ReplicaFetch], mut config: RemoteRecoveryConfig,
+        params: ObjectParams, expected: SnapshotIdentity, decode_limits: SnapshotDecodeLimits,
+        snapshot_key: &AuthKey,
+    ) -> Result<RegionSnapshot, RemoteRecoveryError> {
+        if self.cx.is_cancel_requested() { return Err(RemoteRecoveryError::Cancelled); }
+        validate_decode(params, decode_limits)?;
+        validate_plan(requests, config)?;
+        if requests.iter().any(|request| request.key.object_id != params.object_id) {
+            return Err(RemoteRecoveryError::SnapshotIdentity);
+        }
+        if requests.iter().any(|request| !self.routes.contains_key(&request.replica_id)) {
+            return Err(RemoteRecoveryError::Configuration);
+        }
+        config.max_concurrent_requests = config.max_concurrent_requests.min(self.max_in_flight());
+        if config.max_concurrent_requests == 0 { return Err(RemoteRecoveryError::Limit("transport admission")); }
+        let timer = self.cx.timer_driver().ok_or(RemoteRecoveryError::NoTimer)?;
+        recover_on_quorum(&self.cx, requests, config, timer, params, expected,
+            &self.auth_key, snapshot_key, |replica, key| Box::pin(self.fetch_symbols(replica, key))).await
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn recover_on_quorum<'a, F>(
+    cx: &Cx, requests: &'a [ReplicaFetch], config: RemoteRecoveryConfig, driver: TimerDriverHandle,
+    params: ObjectParams, expected: SnapshotIdentity, symbol_key: &AuthKey, snapshot_key: &AuthKey,
+    fetch: F,
+) -> Result<RegionSnapshot, RemoteRecoveryError>
+where F: Fn(&'a str, SymbolBatchKey) -> FetchFuture<'a>,
+{
+    let mut attempted_symbols = 0;
+    let (_, snapshot) = collect_with_completion(cx, requests, config, driver, fetch, |symbols| {
+        if symbols.len() == attempted_symbols || !has_block_coverage(symbols, params) { return Ok(None); }
+        attempted_symbols = symbols.len();
+        match decode_symbols(symbols.values(), params, expected, symbol_key, snapshot_key) {
+            Ok(snapshot) => Ok(Some(snapshot)),
+            // A rank-deficient union can become decodable with another donor.
+            // Never expose partially decoded or unauthenticated state.
+            Err(RemoteRecoveryError::Decode) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }).await?;
+    snapshot.ok_or(RemoteRecoveryError::Decode)
 }
 
 fn validate_plan(requests: &[ReplicaFetch], config: RemoteRecoveryConfig) -> Result<(), RemoteRecoveryError> {
@@ -287,6 +379,7 @@ fn failure_kind(error: &RemoteSymbolError) -> ReplicaFetchFailureKind {
         RemoteSymbolError::Refused => ReplicaFetchFailureKind::Refused,
         RemoteSymbolError::Cancelled => ReplicaFetchFailureKind::Cancelled,
         RemoteSymbolError::Client(_) => ReplicaFetchFailureKind::Transport,
+        RemoteSymbolError::Deadline => ReplicaFetchFailureKind::Deadline,
         RemoteSymbolError::Configuration | RemoteSymbolError::UnknownReplica => ReplicaFetchFailureKind::Configuration,
     }
 }
@@ -295,6 +388,18 @@ async fn collect<'a, F>(
     cx: &Cx, requests: &'a [ReplicaFetch], config: RemoteRecoveryConfig, driver: TimerDriverHandle, fetch: F,
 ) -> Result<RecoveredSymbols, RemoteRecoveryError>
 where F: Fn(&'a str, SymbolBatchKey) -> FetchFuture<'a>,
+{
+    collect_with_completion(cx, requests, config, driver, fetch, |_| Ok(None::<()>))
+        .await.map(|(symbols, _)| symbols)
+}
+
+async fn collect_with_completion<'a, F, C, T>(
+    cx: &Cx, requests: &'a [ReplicaFetch], config: RemoteRecoveryConfig, driver: TimerDriverHandle,
+    fetch: F, mut complete: C,
+) -> Result<(RecoveredSymbols, Option<T>), RemoteRecoveryError>
+where
+    F: Fn(&'a str, SymbolBatchKey) -> FetchFuture<'a>,
+    C: FnMut(&BTreeMap<(u8, u32), AuthenticatedSymbol>) -> Result<Option<T>, RemoteRecoveryError>,
 {
     validate_plan(requests, config)?;
     let start = driver.now();
@@ -310,10 +415,11 @@ where F: Fn(&'a str, SymbolBatchKey) -> FetchFuture<'a>,
     states.try_reserve_exact(count).map_err(|_| RemoteRecoveryError::Allocation)?;
     states.resize_with(count, || None);
     let mut unique = BTreeMap::<(u8, u32), AuthenticatedSymbol>::new();
-    let (mut next, mut finished, mut received, mut payload) = (0usize, 0usize, 0usize, 0usize);
+    let (mut next, mut finished, mut received, mut payload, mut responses) = (0usize, 0usize, 0usize, 0usize, 0usize);
     let result = poll_fn(|task| {
         if cancelled.as_mut().poll(task).is_ready() { return Poll::Ready(Err(RemoteRecoveryError::Cancelled)); }
         if driver.now() >= deadline { return Poll::Ready(Err(RemoteRecoveryError::Deadline)); }
+        let mut batch_received = false;
         for slot in &mut slots {
             if slot.is_some() || next == count { continue; }
             if cx.is_cancel_requested() { break; }
@@ -366,34 +472,49 @@ where F: Fn(&'a str, SymbolBatchKey) -> FetchFuture<'a>,
                             } else { unique.insert(id, symbol); }
                         }
                         states[index] = Some(Ok(()));
+                        responses += 1;
+                        batch_received = true;
                     }
                 }
             }
         }
         if cx.is_cancel_requested() { return Poll::Ready(Err(RemoteRecoveryError::Cancelled)); }
         if driver.now() >= deadline { return Poll::Ready(Err(RemoteRecoveryError::Deadline)); }
-        if finished == count { return Poll::Ready(Ok(())); }
+        if batch_received && responses >= config.required_replicas {
+            let completed = complete(&unique);
+            // Synchronous decoding may cross either boundary; cancellation and
+            // elapsed time take precedence over a newly reconstructed value.
+            if cx.is_cancel_requested() { return Poll::Ready(Err(RemoteRecoveryError::Cancelled)); }
+            if driver.now() >= deadline { return Poll::Ready(Err(RemoteRecoveryError::Deadline)); }
+            match completed {
+                Ok(Some(value)) => return Poll::Ready(Ok(Some(value))),
+                Ok(None) => {}
+                Err(error) => return Poll::Ready(Err(error)),
+            }
+        }
+        if finished == count { return Poll::Ready(Ok(None)); }
         if next < count && slots.iter().any(Option::is_none) { task.waker().wake_by_ref(); }
         if overall.as_mut().poll(task).is_ready() { Poll::Ready(Err(RemoteRecoveryError::Deadline)) }
         else { Poll::Pending }
     }).await;
     drop(slots); // Also on terminal refusal; external drop owns the same slots.
-    result?;
+    let completed = result?;
     let mut responding_replicas = Vec::new();
     let mut failures = Vec::new();
     for (request, state) in requests.iter().zip(states) {
-        match state.expect("all planned replicas completed") {
-            Ok(()) => responding_replicas.push(request.replica_id.clone()),
-            Err(kind) => failures.push(ReplicaFetchFailure { replica_id: request.replica_id.clone(), kind }),
+        match state {
+            Some(Ok(())) => responding_replicas.push(request.replica_id.clone()),
+            Some(Err(kind)) => failures.push(ReplicaFetchFailure { replica_id: request.replica_id.clone(), kind }),
+            None => debug_assert!(completed.is_some(), "unfinished collection without authenticated completion"),
         }
     }
     if responding_replicas.len() < config.required_replicas {
         return Err(RemoteRecoveryError::Quorum { required: config.required_replicas, received: responding_replicas.len(), failures });
     }
-    Ok(RecoveredSymbols {
+    Ok((RecoveredSymbols {
         object_id: requests[0].key.object_id, symbols: unique.into_values().collect(), responding_replicas, failures,
         duration: Duration::from_nanos(driver.now().duration_since(start)),
-    })
+    }, completed))
 }
 
 #[cfg(test)]

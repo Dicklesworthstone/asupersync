@@ -6,8 +6,10 @@
 //! commutativity. Completed values waiting for an earlier input retain credit.
 //! A failing execution stops admission, cancels and joins its owned children,
 //! including asynchronous cleanup, before returning the severity join
-//! `Ok < Err < Cancelled < Panicked`. Dropping the execution requests abort;
-//! the region remains responsible for children that have not yet terminated.
+//! `Ok < Err < Cancelled < Panicked`. Cancellation issued solely to drain a
+//! sibling does not replace the initiating failure. Dropping the execution
+//! requests abort; the region remains responsible for children that have not
+//! yet terminated.
 //!
 //! The unchanged [`MapReduce`] marker and helpers such as
 //! [`map_reduce_outcomes`] and [`make_map_reduce_result`] operate on outcomes
@@ -559,10 +561,12 @@ pub enum MapReduceStopCause {
 ///
 /// Every admitted child has been joined when this report is returned. Empty
 /// input produces `Ok(None)`. Equal-severity failures select the lowest input
-/// index. Cancellation requested while draining also participates in the
-/// `Err < Cancelled < Panicked` join; `stopped_by` and `errors` retain the cause
-/// when a later, more severe cleanup outcome wins. A selected error is owned by
-/// `outcome`; the other indexed errors remain in `errors` (at most one stopped
+/// index. Independent child cancellation outcomes and caller requests during
+/// drain also participate in the `Err < Cancelled < Panicked` join. Cancellation
+/// issued by this execution solely to drain a sibling is cleanup, not another
+/// failure; `stopped_by` and `errors` retain the cause when a later, more severe
+/// cleanup outcome wins. A selected error is owned by `outcome`; the other
+/// indexed errors remain in `errors` (at most one stopped
 /// admission window). Successful values are consumed by the reducer, never
 /// cloned into an additional results collection.
 #[derive(Debug)]
@@ -594,6 +598,7 @@ struct ExecutingMapSlot<T, E> {
     handle: Option<TaskHandle<()>>,
     returned: Arc<parking_lot::Mutex<Option<Outcome<T, E>>>>,
     value: Option<T>,
+    drain_reason: Option<CancelReason>,
 }
 
 struct ExecutingMapOwner<T, E> {
@@ -606,11 +611,27 @@ struct ExecutingMapOwner<T, E> {
 }
 
 impl<T, E> ExecutingMapOwner<T, E> {
-    fn abort(&self, reason: &CancelReason) {
-        for slot in &self.slots {
+    fn abort(&mut self) {
+        let caller_reason = self.cx.cancel_reason();
+        let induced = caller_reason.is_none();
+        let reason = caller_reason.unwrap_or_else(|| {
+            CancelReason::race_loser()
+                .with_region(self.cx.region_id())
+                .with_task(self.cx.task_id())
+                .with_timestamp(self.cx.now_for_observability())
+                .with_message("map-reduce sibling drain")
+        });
+        for slot in &mut self.slots {
             if let Some(handle) = &slot.handle
                 && !handle.is_finished()
             {
+                // Keep exact per-child provenance. Comparing only RaceLost
+                // would erase an independently returned cancellation of the
+                // same kind, and comparing only the input index would erase
+                // a stronger cancellation arriving during asynchronous drain.
+                if induced {
+                    slot.drain_reason = Some(reason.clone());
+                }
                 handle.abort_with_reason(reason.clone());
             }
         }
@@ -906,7 +927,11 @@ where
                 Some(Outcome::Err(error)) => {
                     failures.error(slot.index, MapReduceExecutionError::Map(error))
                 }
-                Some(Outcome::Cancelled(reason)) => failures.cancel(slot.index, reason),
+                Some(Outcome::Cancelled(reason)) => {
+                    if slot.drain_reason.as_ref() != Some(&reason) {
+                        failures.cancel(slot.index, reason);
+                    }
+                }
                 Some(Outcome::Panicked(payload)) => {
                     failures.panic(slot.index, MapReduceStopCause::MapPanicked, payload)
                 }
@@ -919,7 +944,11 @@ where
             }
             match joined {
                 Ok(()) => {}
-                Err(JoinError::Cancelled(reason)) => failures.cancel(slot.index, reason),
+                Err(JoinError::Cancelled(reason)) => {
+                    if slot.drain_reason.as_ref() != Some(&reason) {
+                        failures.cancel(slot.index, reason);
+                    }
+                }
                 Err(JoinError::Panicked(payload)) => {
                     failures.panic(slot.index, MapReduceStopCause::MapPanicked, payload)
                 }
@@ -979,8 +1008,7 @@ where
         let scan_pending = owner.next_scan < owner.scan_end || owner.scan_end < admitted;
         if failures.stopped_by.is_some() {
             if !abort_requested {
-                let reason = cx.cancel_reason().unwrap_or_else(CancelReason::race_loser);
-                owner.abort(&reason);
+                owner.abort();
                 abort_requested = true;
             }
             let values_pending = owner.discard_completed_values(&mut failures, reduced);
@@ -1052,6 +1080,7 @@ where
                         handle: Some(handle),
                         returned,
                         value: None,
+                        drain_reason: None,
                     });
                     admitted = next_admitted;
                     in_flight += 1;
@@ -1069,7 +1098,7 @@ where
         // also the success-publication boundary when no admission was needed.
         executing_map_caller_cancel(cx, &mut caller_cancel_observed, &mut failures, admitted);
         if failures.stopped_by.is_some() {
-            owner.abort(&cx.cancel_reason().unwrap_or_else(CancelReason::race_loser));
+            owner.abort();
             abort_requested = true;
         }
         let values_pending =
@@ -2168,16 +2197,17 @@ mod tests {
             assert_eq!(cleanup_finished.load(Ordering::SeqCst), 1);
             assert_eq!(report.stopped_by.as_ref().unwrap().0, 0);
             if mode == "error" {
-                assert!(
-                    report.outcome.is_cancelled(),
-                    "induced drain cancellation joins severity"
-                );
                 assert!(matches!(
-                    report.errors.as_slice(),
-                    [(0, MapReduceExecutionError::Map("triggering map failure"))]
+                    report.outcome,
+                    Outcome::Err(MapReduceExecutionError::Map("triggering map failure"))
                 ));
+                assert_eq!(report.failure_index, Some(0));
+                assert!(report.errors.is_empty());
             } else if mode == "cancel" {
-                assert!(report.outcome.is_cancelled());
+                assert!(matches!(
+                    report.outcome,
+                    Outcome::Cancelled(reason) if reason == CancelReason::timeout()
+                ));
                 assert_eq!(report.failure_index, Some(0));
             } else {
                 assert!(report.outcome.is_panicked());

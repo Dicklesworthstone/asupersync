@@ -158,6 +158,11 @@ pub(super) fn validate_receipt(
 #[cfg(test)]
 mod tests;
 
+// The frame helpers are crate-internal by intent (the native symbol service
+// uses them); this module's own visibility already caps them.
+#[allow(clippy::redundant_pub_crate)]
+pub(super) mod chunked;
+
 #[cfg(not(target_arch = "wasm32"))]
 mod durable;
 #[cfg(not(target_arch = "wasm32"))]

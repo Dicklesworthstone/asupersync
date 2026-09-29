@@ -63,6 +63,14 @@ impl Fixture {
         super::super::run(config, &self.cx, &self.encoded, assignments, probe, &self.auth,
             Some(TimerDriverHandle::new(Arc::clone(&self.driver))))
     }
+    fn run_with_completion<'a>(
+        &'a self, config: &'a DistributionConfig, probe: &'a Probe,
+        complete: &'a mut (dyn FnMut(&super::super::ReplicaAck) -> bool + Send),
+    ) -> impl Future<Output = FanoutResult> + Send + 'a {
+        let assignments = SymbolDistributor::compute_assignments_with_auth(&self.encoded, &self.replicas, &self.auth, None);
+        super::super::run_with_completion(config, &self.cx, &self.encoded, assignments, probe, &self.auth,
+            Some(TimerDriverHandle::new(Arc::clone(&self.driver))), Some(complete))
+    }
     // Use whole milliseconds: the production timer wheel has 1ms slots.
     fn advance(&self, millis: u64) {
         self.clock.advance(millis.checked_mul(1_000_000).unwrap());
@@ -339,4 +347,55 @@ fn transport_panic_propagates_and_drops_other_admitted_futures() {
         let mut run = Box::pin(f.run(&c, &p)); let _ = poll(run.as_mut(), &w);
     }));
     assert!(result.is_err()); assert_eq!(p.active(), 0); assert_eq!(p.calls(), [0, 1]);
+}
+
+#[test]
+fn insufficient_receipt_quorum_admits_required_coverage_without_waiting_for_hedge() {
+    let f = Fixture::new(5); let p = Probe::new(&[1, 1, 1, 1, 0]);
+    let c = config(ConsistencyLevel::Quorum, 3); let (_, w) = waker();
+    let mut replies = Vec::new();
+    let mut complete = |ack: &super::super::ReplicaAck| {
+        replies.push(ack.replica_id.clone()); ack.replica_id == "r3"
+    };
+    let mut run = Box::pin(f.run_with_completion(&c, &p, &mut complete));
+    assert!(poll(run.as_mut(), &w).is_pending());
+    assert_eq!(p.calls(), [0, 1, 2]); assert_eq!(p.active(), 0);
+    let result = done(run.as_mut(), &w); // No virtual-clock advancement.
+    assert_eq!(p.calls(), [0, 1, 2, 3]); assert_eq!(successes(&result), 4);
+    assert_eq!(result.eligible_replicas, 5); assert_eq!(p.active(), 0);
+    assert!(p.peak.load(Ordering::SeqCst) <= 3);
+    drop(run);
+    assert_eq!(replies, ["r0", "r1", "r2", "r3"]);
+}
+
+#[test]
+fn coverage_callback_runs_only_on_valid_new_receipts_and_exhaustion_is_terminal() {
+    let f = Fixture::new(5); let p = Probe::new(&[3, 1, 4, 1, 2]);
+    let c = config(ConsistencyLevel::One, 2); let (_, w) = waker();
+    let mut replies = Vec::new();
+    let mut complete = |ack: &super::super::ReplicaAck| { replies.push(ack.replica_id.clone()); false };
+    let mut run = Box::pin(f.run_with_completion(&c, &p, &mut complete));
+    let mut result = None;
+    for _ in 0..6 {
+        if let Poll::Ready(value) = poll(run.as_mut(), &w) { result = Some(value); break; }
+    }
+    let result = result.expect("exhausted coverage must not park forever");
+    assert_eq!(p.calls(), [0, 1, 2, 3, 4]); assert_eq!(successes(&result), 2);
+    assert_eq!(kind(&result, 0), ErrorKind::ProtocolError);
+    assert_eq!(kind(&result, 2), ErrorKind::ProtocolError); assert_eq!(p.active(), 0);
+    drop(run);
+    assert_eq!(replies, ["r1", "r3"]);
+}
+
+#[test]
+fn nonhedged_coverage_completion_retires_a_parked_sender_and_its_timer() {
+    let f = Fixture::new(4); let p = Probe::new(&[0, 1, 1, 1]);
+    let mut c = config(ConsistencyLevel::One, 4); c.hedge_enabled = false;
+    let (counter, w) = waker(); let mut complete = |ack: &super::super::ReplicaAck| ack.replica_id == "r2";
+    let mut run = Box::pin(f.run_with_completion(&c, &p, &mut complete));
+    let result = done(run.as_mut(), &w);
+    assert_eq!(p.calls(), [0, 1, 2]); assert_eq!(successes(&result), 2);
+    assert_eq!(kind(&result, 0), ErrorKind::Cancelled); assert_eq!(p.active(), 0);
+    let before = counter.0.load(Ordering::SeqCst); f.advance(1000);
+    assert_eq!(counter.0.load(Ordering::SeqCst), before);
 }

@@ -1255,7 +1255,7 @@ mod progress_tests {
                             } else {
                                 commits += 1;
                             }
-                            let expected = if prepares == 2 && commits == 2 { 1 } else { 0 };
+                            let expected = u64::from(prepares == 2 && commits == 2);
                             assert_eq!(node.last_executed(), SequenceNumber::new(expected));
                         }
                         permutations += 1;

@@ -60,7 +60,7 @@ fn classify(result: InitializedRunResult<&'static str>) -> Outcome<(), Fault> {
                 && close.cleanup_outcome.as_ref().is_none_or(|outcome| outcome.is_ok())
         });
         let clean_cancel = matches!(&report.work,
-            None | Some(Ok(Outcome::Cancelled(_))) | Some(Err(JoinError::Cancelled(_))));
+            None | Some(Ok(Outcome::Cancelled(_)) | Err(JoinError::Cancelled(_))));
         if clean_close && clean_cancel && report.spawn_error.is_none()
             && report.cancellation_error.is_none()
             && matches!(&report.stop, Some(DependencyStop::Cancelled(_)))

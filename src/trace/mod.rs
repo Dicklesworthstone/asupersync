@@ -43,6 +43,7 @@
 pub mod boundary;
 pub mod buffer;
 pub mod canonicalize;
+pub mod capture;
 pub mod causality;
 pub mod certificate;
 pub mod compat;
@@ -88,6 +89,7 @@ pub use buffer::{TraceBuffer, TraceBufferHandle};
 pub use canonicalize::{
     FoataTrace, TraceEventKey, TraceMonoid, canonicalize, trace_event_key, trace_fingerprint,
 };
+pub use capture::{ScheduleCaptureError, ScheduleCaptureSnapshot, SchedulerEventContext};
 pub use causality::{CausalOrderVerifier, CausalityViolation, CausalityViolationKind};
 pub use certificate::{
     CertificateVerifier, TraceCertificate, VerificationResult as CertificateVerificationResult,

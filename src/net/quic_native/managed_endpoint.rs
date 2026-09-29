@@ -44,6 +44,103 @@ const ACCEPT_MAX_BYTES: usize = 2 * 1024 * 1024;
 const ACCEPT_MIN_INITIAL_BYTES: usize = 1200;
 #[cfg(feature = "tls")]
 const ACCEPT_CID_ATTEMPTS: usize = 16;
+/// A Retry token is echoed within one round trip by a real client.
+#[cfg(feature = "tls")]
+const RETRY_TOKEN_LIFETIME: std::time::Duration = std::time::Duration::from_secs(10);
+#[cfg(feature = "tls")]
+const RETRY_TOKEN_VERSION: u8 = 1;
+#[cfg(feature = "tls")]
+const RETRY_TOKEN_MAC_LEN: usize = 16;
+/// Retry is stateless, so one that finds the send batch full is lost until
+/// the client's PTO (1.5 s). Retries get this many queue slots beyond the
+/// batch. Each is smaller than the Initial that caused it.
+#[cfg(feature = "tls")]
+const RETRY_QUEUE_SLACK: usize = 64;
+
+/// When automatic admission answers a client Initial with a stateless Retry
+/// (RFC 9000 section 8.1.2) instead of creating handshake state.
+///
+/// A Retry makes the client prove it receives datagrams at its source address
+/// before the server keeps anything for it. Spoofed Initials never return the
+/// token, so they cannot hold admission slots that validated clients need.
+#[cfg(feature = "tls")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RetryPolicy {
+    /// Retry once pending handshakes fill half of the admission capacity. When
+    /// capacity is full, an address-validated client displaces the oldest
+    /// handshake whose address is not yet validated.
+    #[default]
+    UnderPressure,
+    /// Retry every Initial that does not carry a valid token.
+    Always,
+    /// Never Retry. Spoofed Initials can then hold every admission slot until
+    /// their handshake deadline.
+    Never,
+}
+
+/// Retry token key, never printed.
+#[cfg(feature = "tls")]
+struct RetrySecret([u8; 32]);
+
+#[cfg(feature = "tls")]
+impl std::fmt::Debug for RetrySecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RetrySecret(..)")
+    }
+}
+
+// A send-side resource shortage parks sends for the HTTP and remote
+// listeners' 2ms base delay, doubling per consecutive failure to a 64ms cap.
+const SEND_BACKOFF_BASE: std::time::Duration = std::time::Duration::from_millis(2);
+const SEND_BACKOFF_MAX_SHIFT: u32 = 5;
+
+/// Kernel resource shortages that recover while the socket stays open.
+///
+/// Inspect native codes because ENOBUFS has no stable `ErrorKind`. The loop
+/// delays the retry, so a persistent shortage cannot busy-spin.
+fn send_error_is_resource_shortage(error: &std::io::Error) -> bool {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::OutOfMemory
+    ) {
+        return true;
+    }
+
+    #[cfg(unix)]
+    {
+        matches!(
+            error.raw_os_error(),
+            Some(libc::ENOBUFS | libc::ENOMEM | libc::EMFILE | libc::ENFILE)
+        )
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Networking::WinSock::{WSAEMFILE, WSAENOBUFS};
+        matches!(error.raw_os_error(), Some(WSAEMFILE | WSAENOBUFS))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        false
+    }
+}
+
+/// Only an error the OS reported for a send can blame its destination.
+/// Errors the endpoint synthesizes from local validation never retire a peer.
+fn send_error_blames_destination(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    error.raw_os_error().is_some()
+        && matches!(
+            error.kind(),
+            ErrorKind::ConnectionRefused
+                | ErrorKind::ConnectionReset
+                | ErrorKind::AddrNotAvailable
+                | ErrorKind::InvalidInput
+                | ErrorKind::HostUnreachable
+                | ErrorKind::NetworkUnreachable
+                | ErrorKind::PermissionDenied
+        )
+}
 
 #[cfg(feature = "tls")]
 fn accept_error(reason: impl std::fmt::Display) -> ManagedEndpointError {
@@ -79,6 +176,10 @@ struct PendingAuthenticatedAccept {
     next_pto: Instant,
     expires: Instant,
     last_flight: Vec<OutgoingPacket>,
+    /// What each `last_flight` packet carries, so a PTO rebuilds it under a
+    /// new packet number instead of resending the protected bytes.
+    last_flight_plan: Vec<AdmissionFlightPacket>,
+    last_flight_dst_cid: ConnectionId,
     outbound: VecDeque<OutgoingPacket>,
     outstanding_packets: usize,
     outstanding_bytes: usize,
@@ -89,6 +190,18 @@ struct PendingAuthenticatedAccept {
     peer_max_udp_payload_size: Option<u64>,
     early: Vec<ReceivedPacket>,
     early_bytes: usize,
+    final_ack_queued: bool,
+    /// Created by automatic admission, so no owner awaits its receipt.
+    automatic: bool,
+}
+
+#[cfg(feature = "tls")]
+enum AdmissionFlightPacket {
+    Crypto {
+        segment: super::handshake_driver::HandshakeSegment,
+        offset: u64,
+    },
+    FinalAck,
 }
 
 #[cfg(feature = "tls")]
@@ -177,11 +290,44 @@ impl PendingAuthenticatedAccept {
         Ok(())
     }
 
+    /// Resend the flight's CRYPTO offsets and bytes in new packets. RFC 9000
+    /// section 12.3 forbids reusing a packet number, and a peer that already
+    /// processed the first copy suppresses an exact duplicate.
     fn retransmit(&mut self) -> Result<(), ManagedEndpointError> {
-        let bytes = self.check_flight(&self.last_flight)?;
-        self.outstanding_packets += self.last_flight.len();
+        let mut packets = Vec::with_capacity(self.last_flight_plan.len());
+        for planned in &self.last_flight_plan {
+            let data = match planned {
+                AdmissionFlightPacket::Crypto { segment, offset } => {
+                    self.driver.assemble_handshake_packet_at(
+                        segment,
+                        *offset,
+                        self.last_flight_dst_cid,
+                        self.local_cid,
+                        self.packet_number,
+                    )
+                }
+                AdmissionFlightPacket::FinalAck => self.driver.assemble_final_handshake_ack(
+                    self.last_flight_dst_cid,
+                    self.local_cid,
+                    self.packet_number,
+                ),
+            }
+            .map_err(accept_error)?;
+            self.packet_number = self
+                .packet_number
+                .checked_add(1)
+                .ok_or_else(|| accept_error("packet number exhausted"))?;
+            packets.push(OutgoingPacket {
+                dst_addr: self.peer,
+                data,
+                send_time: None,
+            });
+        }
+        let bytes = self.check_flight(&packets)?;
+        self.outstanding_packets += packets.len();
         self.outstanding_bytes += bytes;
-        self.outbound.extend(self.last_flight.iter().cloned());
+        self.outbound.extend(packets.iter().cloned());
+        self.last_flight = packets;
         Ok(())
     }
 
@@ -199,6 +345,17 @@ impl PendingAuthenticatedAccept {
         self.outstanding_bytes -= bytes;
         self.socket_pending_bytes -= bytes;
         self.sent_bytes = self.sent_bytes.saturating_add(bytes as u64);
+    }
+
+    fn retain_early_packet(&mut self, packet: ReceivedPacket) -> Result<(), ManagedEndpointError> {
+        if self.early.len() == ACCEPT_MAX_PACKETS
+            || packet.data.len() > ACCEPT_MAX_BYTES.saturating_sub(self.early_bytes)
+        {
+            return Err(accept_error("early application packet bound exhausted"));
+        }
+        self.early_bytes += packet.data.len();
+        self.early.push(packet);
+        Ok(())
     }
 
     fn receive(
@@ -235,14 +392,8 @@ impl PendingAuthenticatedAccept {
             if self.driver.peer_connection_id().is_none() {
                 return Ok(());
             }
-            if self.early.len() == ACCEPT_MAX_PACKETS
-                || packet.data.len() > ACCEPT_MAX_BYTES.saturating_sub(self.early_bytes)
-            {
-                return Err(accept_error("early application packet bound exhausted"));
-            }
+            self.retain_early_packet(packet)?;
             self.received_packets += 1;
-            self.early_bytes += packet.data.len();
-            self.early.push(packet);
             return Ok(());
         }
         let ProtectedHeaderPrefix::Long(header) = header else {
@@ -257,8 +408,8 @@ impl PendingAuthenticatedAccept {
         {
             return Ok(());
         }
-        let peer_cid = match self.driver.recv_handshake_packet(&packet.data) {
-            Ok(cid) => cid,
+        let (peer_cid, consumed) = match self.driver.recv_handshake_packet_with_consumed(&packet.data) {
+            Ok(accepted) => accepted,
             Err(error)
                 if super::handshake_driver::is_stale_handshake_packet_error(&error)
                     || super::handshake_driver::is_unauthenticated_handshake_packet_error(
@@ -278,6 +429,29 @@ impl PendingAuthenticatedAccept {
             .authenticated_received_bytes
             .saturating_add(packet.data.len() as u64);
         self.address_validated |= header.packet_type == LongPacketType::Handshake;
+        // A short-header packet can follow the client's Finished in the same
+        // UDP datagram (RFC 9000 section 12.2). TLS consumes only the long-
+        // header prefix. Preserve the exact remaining ciphertext for the
+        // authenticated router instead of losing the first application data.
+        // Padding, malformed trailers and packets for another CID are not
+        // admitted. The router still performs AEAD/replay checks after handoff.
+        let tail = &packet.data[consumed..];
+        if matches!(
+            ProtectedHeaderPrefix::decode(tail, self.local_cid.len()),
+            Ok(ProtectedHeaderPrefix::Short { dst_cid, .. }) if dst_cid == self.local_cid
+        ) {
+            if self.early.len() == ACCEPT_MAX_PACKETS
+                || tail.len() > ACCEPT_MAX_BYTES.saturating_sub(self.early_bytes)
+            {
+                return Err(accept_error("early application packet bound exhausted"));
+            }
+            self.retain_early_packet(ReceivedPacket {
+                src_addr: packet.src_addr,
+                data: tail.to_vec(),
+                receive_time: packet.receive_time,
+                transmit_time: packet.transmit_time,
+            })?;
+        }
         // The peer's receive ceiling constrains our output, not our local
         // receive buffer. Until ClientHello parameters are available, retain
         // QUIC's minimum supported datagram size as the conservative send cap.
@@ -318,6 +492,7 @@ impl PendingAuthenticatedAccept {
             .filter(|size| *size != 0)
             .ok_or_else(|| accept_error("datagram bound cannot encode a TLS flight"))?;
         let mut packets = Vec::new();
+        let mut plan = Vec::new();
         let mut bytes = 0usize;
         for segment in segments {
             if segment.level == HandshakeLevel::OneRtt {
@@ -331,6 +506,7 @@ impl PendingAuthenticatedAccept {
                     level: segment.level,
                     data: chunk.to_vec(),
                 };
+                let offset = self.driver.next_crypto_offset(segment.level);
                 let data = self
                     .driver
                     .assemble_handshake_packet(
@@ -355,7 +531,34 @@ impl PendingAuthenticatedAccept {
                     data,
                     send_time: None,
                 });
+                plan.push(AdmissionFlightPacket::Crypto { segment, offset });
             }
+        }
+        let final_ack = self.driver.is_complete() && !self.final_ack_queued;
+        if final_ack {
+            let data = self
+                .driver
+                .assemble_final_handshake_ack(peer_cid, self.local_cid, self.packet_number)
+                .map_err(accept_error)?;
+            self.packet_number = self
+                .packet_number
+                .checked_add(1)
+                .ok_or_else(|| accept_error("packet number exhausted"))?;
+            bytes = bytes
+                .checked_add(data.len())
+                .ok_or_else(|| accept_error("flight byte overflow"))?;
+            if packets.len() == ACCEPT_MAX_PACKETS
+                || data.len() > send_packet_size
+                || bytes > ACCEPT_MAX_BYTES
+            {
+                return Err(accept_error("TLS final ACK bound exhausted"));
+            }
+            packets.push(OutgoingPacket {
+                dst_addr: self.peer,
+                data,
+                send_time: None,
+            });
+            plan.push(AdmissionFlightPacket::FinalAck);
         }
         if !packets.is_empty() {
             self.flights += 1;
@@ -363,7 +566,10 @@ impl PendingAuthenticatedAccept {
                 return Err(accept_error("handshake flight bound exhausted"));
             }
             self.queue_flight(&packets)?;
+            self.final_ack_queued |= final_ack;
             self.last_flight = packets;
+            self.last_flight_plan = plan;
+            self.last_flight_dst_cid = peer_cid;
             self.next_pto = now
                 .checked_add(ACCEPT_PTO)
                 .ok_or_else(|| accept_error("PTO overflow"))?;
@@ -411,8 +617,22 @@ pub struct ManagedQuicEndpoint {
     authenticated_initial_routes: Vec<(ConnectionId, ConnectionId)>,
     #[cfg(feature = "tls")]
     prefer_accept_output: bool,
+    #[cfg(feature = "tls")]
+    retry_policy: RetryPolicy,
+    /// Keys Retry tokens; drawn when automatic admission is configured.
+    #[cfg(feature = "tls")]
+    retry_secret: RetrySecret,
+    /// Origin of the coarse token clock: the first admission decision after
+    /// `retry_secret` was drawn.
+    #[cfg(feature = "tls")]
+    retry_epoch: Option<Instant>,
     /// Alternate ready read/write batches; timers and cancellation always get a turn.
     prefer_send: bool,
+    /// A send-side resource shortage parks sends until this deadline, while
+    /// receives, timers and the application keep running.
+    send_backoff_until: Option<Instant>,
+    /// Consecutive resource-shortage send failures, for the capped delay.
+    send_backoff_streak: u32,
 }
 
 enum EndpointEvent<T> {
@@ -729,7 +949,15 @@ impl ManagedQuicEndpoint {
             authenticated_initial_routes: Vec::new(),
             #[cfg(feature = "tls")]
             prefer_accept_output: true,
+            #[cfg(feature = "tls")]
+            retry_policy: RetryPolicy::default(),
+            #[cfg(feature = "tls")]
+            retry_secret: RetrySecret([0; 32]),
+            #[cfg(feature = "tls")]
+            retry_epoch: None,
             prefer_send: true,
+            send_backoff_until: None,
+            send_backoff_streak: 0,
         })
     }
 
@@ -814,15 +1042,17 @@ impl ManagedQuicEndpoint {
     /// required only if its certificate verifier requires it. The supplied
     /// transport-parameter template is validated before changing the endpoint;
     /// original-destination and initial-source CID fields are replaced for each
-    /// admission. Retry, shared stateless-reset tokens and preferred-address
-    /// parameters are unsupported and refused. Server IDs use the driving Cx's
-    /// explicit entropy source with bounded collision retries, never a peer ID.
+    /// admission. Template Retry-source, shared stateless-reset token and
+    /// preferred-address parameters are refused; the endpoint sets the Retry
+    /// source CID itself after a Retry (see [`Self::set_retry_policy`]). Server
+    /// IDs and the Retry token key use the driving Cx's explicit entropy source,
+    /// with bounded collision retries for IDs, never a peer ID.
     ///
     /// Configuration requires no pending admission or unread receipt. An active
     /// endpoint may be reconfigured only if it already has authenticated-only
     /// routing; existing connections retain their negotiated configuration.
     /// Automatic admission does not enable the legacy unauthenticated path,
-    /// Retry, address migration, or acceptance of 0-RTT application data.
+    /// address migration, or acceptance of 0-RTT application data.
     #[cfg(feature = "tls")]
     pub fn configure_authenticated_server(
         &mut self,
@@ -887,8 +1117,13 @@ impl ManagedQuicEndpoint {
         // Validate rustls QUIC/version/cipher configuration now. No peer input
         // or certificate resolver is invoked by creating this fresh driver.
         QuicHandshakeDriver::server(Arc::clone(&tls), encoded).map_err(accept_error)?;
+        let mut secret = [0; 32];
+        cx.random_bytes(&mut secret);
         cx.checkpoint()
             .map_err(|_| ManagedEndpointError::Cancelled)?;
+        // A new key starts a new token clock at the next admission decision.
+        self.retry_secret = RetrySecret(secret);
+        self.retry_epoch = None;
         self.authenticated_server = Some(AuthenticatedServerPolicy {
             tls,
             transport_parameters: parameters,
@@ -896,6 +1131,182 @@ impl ManagedQuicEndpoint {
         });
         self.authenticated_only = true;
         Ok(())
+    }
+
+    /// Choose when automatic admission answers an Initial with a stateless
+    /// Retry. The default, [`RetryPolicy::UnderPressure`], leaves an idle
+    /// server at one round trip and keeps spoofed Initials from holding the
+    /// admission slots that validated clients need.
+    #[cfg(feature = "tls")]
+    pub fn set_retry_policy(&mut self, policy: RetryPolicy) {
+        self.retry_policy = policy;
+    }
+
+    #[cfg(feature = "tls")]
+    fn retry_token_mac(
+        &self,
+        peer: SocketAddr,
+        original_dcid: ConnectionId,
+        retry_scid: ConnectionId,
+        issued: u64,
+    ) -> hmac::Hmac<sha2::Sha256> {
+        use hmac::{KeyInit, Mac};
+        let mut mac = <hmac::Hmac<sha2::Sha256> as KeyInit>::new_from_slice(&self.retry_secret.0)
+            .expect("HMAC accepts any key length");
+        mac.update(&[RETRY_TOKEN_VERSION]);
+        match peer.ip() {
+            std::net::IpAddr::V4(ip) => {
+                mac.update(&[4]);
+                mac.update(&ip.octets());
+            }
+            std::net::IpAddr::V6(ip) => {
+                mac.update(&[6]);
+                mac.update(&ip.octets());
+            }
+        }
+        mac.update(&peer.port().to_be_bytes());
+        for cid in [original_dcid, retry_scid] {
+            mac.update(&[cid.len() as u8]);
+            mac.update(cid.as_bytes());
+        }
+        mac.update(&issued.to_be_bytes());
+        mac
+    }
+
+    /// A token bound to the client address, the client's original DCID and the
+    /// Retry source CID the client must use next: version, issue time (seconds
+    /// on the endpoint's token clock), original DCID, truncated HMAC-SHA256.
+    #[cfg(feature = "tls")]
+    fn mint_retry_token(
+        &self,
+        peer: SocketAddr,
+        original_dcid: ConnectionId,
+        retry_scid: ConnectionId,
+        now: Instant,
+    ) -> Option<Vec<u8>> {
+        use hmac::Mac;
+        let issued = now.checked_duration_since(self.retry_epoch?)?.as_secs();
+        let mac = self
+            .retry_token_mac(peer, original_dcid, retry_scid, issued)
+            .finalize()
+            .into_bytes();
+        let mut token = Vec::with_capacity(10 + original_dcid.len() + RETRY_TOKEN_MAC_LEN);
+        token.push(RETRY_TOKEN_VERSION);
+        token.extend_from_slice(&issued.to_be_bytes());
+        token.push(original_dcid.len() as u8);
+        token.extend_from_slice(original_dcid.as_bytes());
+        token.extend_from_slice(&mac[..RETRY_TOKEN_MAC_LEN]);
+        Some(token)
+    }
+
+    /// The client's original DCID when `token` is a live Retry token this
+    /// endpoint issued to `peer` for an Initial now addressed to `retry_scid`.
+    #[cfg(feature = "tls")]
+    fn validate_retry_token(
+        &self,
+        token: &[u8],
+        peer: SocketAddr,
+        retry_scid: ConnectionId,
+        now: Instant,
+    ) -> Option<ConnectionId> {
+        use hmac::Mac;
+        let (&version, rest) = token.split_first()?;
+        if version != RETRY_TOKEN_VERSION || rest.len() < 9 {
+            return None;
+        }
+        let issued = u64::from_be_bytes(rest[..8].try_into().ok()?);
+        let dcid_len = usize::from(rest[8]);
+        let rest = &rest[9..];
+        if rest.len() != dcid_len + RETRY_TOKEN_MAC_LEN {
+            return None;
+        }
+        let original_dcid = ConnectionId::new(&rest[..dcid_len]).ok()?;
+        let age = now
+            .checked_duration_since(self.retry_epoch?)?
+            .as_secs()
+            .checked_sub(issued)?;
+        if age > RETRY_TOKEN_LIFETIME.as_secs() {
+            return None;
+        }
+        // Constant-time comparison of the truncated tag.
+        self.retry_token_mac(peer, original_dcid, retry_scid, issued)
+            .verify_truncated_left(&rest[dcid_len..])
+            .ok()?;
+        Some(original_dcid)
+    }
+
+    /// A stateless Retry (RFC 9000 section 17.2.5) with its RFC 9001 section 5.8
+    /// integrity tag, addressed to the client's source CID.
+    #[cfg(feature = "tls")]
+    fn retry_packet(
+        client_scid: ConnectionId,
+        original_dcid: ConnectionId,
+        retry_scid: ConnectionId,
+        token: Vec<u8>,
+    ) -> Option<Vec<u8>> {
+        let mut bytes = Vec::new();
+        crate::net::quic_core::PacketHeader::Retry(crate::net::quic_core::RetryHeader {
+            version: 1,
+            dst_cid: client_scid,
+            src_cid: retry_scid,
+            token,
+            integrity_tag: [0; 16],
+        })
+        .encode(&mut bytes)
+        .ok()?;
+        let tag_at = bytes.len().checked_sub(16)?;
+        let tag = super::handshake_driver::retry_integrity_tag(original_dcid, &bytes[..tag_at])?;
+        bytes[tag_at..].copy_from_slice(&tag);
+        Some(bytes)
+    }
+
+    /// Answer a tokenless Initial with a Retry, keeping no state for it.
+    ///
+    /// Admission output waits in its pending handshake for queue space, but a
+    /// Retry has nowhere to wait. It may therefore exceed a full send batch by
+    /// [`RETRY_QUEUE_SLACK`]. Past that bound, as under an Initial flood, the
+    /// Initial is dropped and a real client's PTO resends it.
+    #[cfg(feature = "tls")]
+    fn queue_retry(
+        &mut self,
+        cx: &Cx,
+        client_scid: ConnectionId,
+        original_dcid: ConnectionId,
+        peer: SocketAddr,
+        now: Instant,
+    ) {
+        if self.pending_outgoing.len()
+            >= self
+                .config
+                .packet_batch_size
+                .saturating_add(RETRY_QUEUE_SLACK)
+        {
+            return;
+        }
+        let mut bytes = [0; ConnectionId::MAX_LEN];
+        cx.random_bytes(&mut bytes);
+        let Ok(retry_scid) = ConnectionId::new(&bytes) else {
+            return;
+        };
+        if retry_scid == original_dcid {
+            return;
+        }
+        let Some(data) = self
+            .mint_retry_token(peer, original_dcid, retry_scid, now)
+            .and_then(|token| Self::retry_packet(client_scid, original_dcid, retry_scid, token))
+        else {
+            return;
+        };
+        self.pending_outgoing.push_back(RoutedOutgoingPacket {
+            connection_id: retry_scid,
+            packet: OutgoingPacket {
+                dst_addr: peer,
+                data,
+                send_time: None,
+            },
+            final_handshake_flight: false,
+            ack_eliciting: false,
+        });
     }
 
     /// Permanently stop authenticated admission while established peers drain.
@@ -1023,9 +1434,16 @@ impl ManagedQuicEndpoint {
         let parameters =
             crate::net::quic_core::TransportParameters::decode(driver.local_transport_parameters())
                 .map_err(accept_error)?;
+        // After a Retry (RFC 9000 section 7.3) the admitted route is the Retry
+        // source CID, and the original DCID came from a validated token.
+        let retried = parameters
+            .unknown
+            .iter()
+            .any(|parameter| parameter.id == 0x10);
         for parameter in &parameters.unknown {
             let expected = match parameter.id {
-                0x00 => Some(initial_dcid),
+                0x00 if retried => None,
+                0x00 | 0x10 => Some(initial_dcid),
                 0x0f => Some(local_cid),
                 _ => None,
             };
@@ -1057,6 +1475,8 @@ impl ManagedQuicEndpoint {
             next_pto,
             expires,
             last_flight: Vec::new(),
+            last_flight_plan: Vec::new(),
+            last_flight_dst_cid: ConnectionId::default(),
             outbound: VecDeque::new(),
             outstanding_packets: 0,
             outstanding_bytes: 0,
@@ -1067,6 +1487,8 @@ impl ManagedQuicEndpoint {
             peer_max_udp_payload_size: None,
             early: Vec::new(),
             early_bytes: 0,
+            final_ack_queued: false,
+            automatic: false,
         })
     }
 
@@ -1143,15 +1565,67 @@ impl ManagedQuicEndpoint {
                 .authenticated_initial_routes
                 .iter()
                 .any(|(initial, _)| *initial == header.dst_cid)
-            || self.pending_authenticated_accept.len()
-                >= self
-                    .authenticated_accept_limit
-                    .saturating_sub(self.authenticated_accept_result.len())
-            || self.connection_stats().active_connections
-                >= self
-                    .config
-                    .max_connections
-                    .saturating_sub(self.pending_authenticated_accept.len())
+        {
+            return Ok(true);
+        }
+        let now = self.timer_scheduler.now(cx)?;
+        // Tokens use the same clock as every admission decision.
+        self.retry_epoch.get_or_insert(now);
+        // A Retry token proves the client receives at its source address. An
+        // invalid one is discarded, as RFC 9000 section 8.1.2 permits.
+        let original_dcid = if header.token.is_empty() {
+            None
+        } else {
+            let Some(original_dcid) =
+                self.validate_retry_token(&header.token, packet.src_addr, header.dst_cid, now)
+            else {
+                return Ok(true);
+            };
+            Some(original_dcid)
+        };
+        let capacity = self
+            .authenticated_accept_limit
+            .saturating_sub(self.authenticated_accept_result.len());
+        if original_dcid.is_none() {
+            let retry = match self.retry_policy {
+                RetryPolicy::Always => true,
+                RetryPolicy::Never => false,
+                RetryPolicy::UnderPressure => {
+                    self.pending_authenticated_accept.len().saturating_mul(2) >= capacity
+                }
+            };
+            if retry {
+                self.queue_retry(cx, header.src_cid, header.dst_cid, packet.src_addr, now);
+                return Ok(true);
+            }
+        }
+        if self.pending_authenticated_accept.len() >= capacity {
+            // A validated client displaces the oldest automatic handshake whose
+            // address is still unvalidated; nothing was ever published for it.
+            let displaced = original_dcid.and_then(|_| {
+                self.pending_authenticated_accept
+                    .iter()
+                    .position(|pending| pending.automatic && !pending.address_validated)
+            });
+            let Some(index) = displaced else {
+                return Ok(true);
+            };
+            if let Some(pending) = self.pending_authenticated_accept.remove(index) {
+                self.pending_outgoing
+                    .retain(|queued| queued.connection_id != pending.local_cid);
+                self.pending_incoming
+                    .retain(|queued| !pending.owns_packet(&queued.packet));
+                cx.trace(&format!(
+                    "QUIC admission of {} displaced by an address-validated client",
+                    pending.peer
+                ));
+            }
+        }
+        if self.connection_stats().active_connections
+            >= self
+                .config
+                .max_connections
+                .saturating_sub(self.pending_authenticated_accept.len())
         {
             return Ok(true);
         }
@@ -1182,7 +1656,17 @@ impl ManagedQuicEndpoint {
             .as_ref()
             .expect("configured automatic admission");
         let mut parameters = policy.transport_parameters.clone();
-        for (id, cid) in [(0x00, header.dst_cid), (0x0f, local_cid)] {
+        // RFC 9000 section 7.3: after a Retry, original_destination_connection_id
+        // is the client's first DCID and retry_source_connection_id is the CID
+        // the Retry chose, which the client now addresses.
+        let retry_source = original_dcid.map(|_| (0x10, header.dst_cid));
+        for (id, cid) in [
+            (0x00, original_dcid.unwrap_or(header.dst_cid)),
+            (0x0f, local_cid),
+        ]
+        .into_iter()
+        .chain(retry_source)
+        {
             parameters
                 .unknown
                 .push(crate::net::quic_core::UnknownTransportParameter {
@@ -1203,7 +1687,8 @@ impl ManagedQuicEndpoint {
             local_cid,
             &required_alpn,
         )?;
-        let now = self.timer_scheduler.now(cx)?;
+        pending.automatic = true;
+        pending.address_validated = original_dcid.is_some();
         let result = pending.receive(packet.clone(), self.config.udp_config.max_packet_size, now);
         // Certificate resolution and other TLS hooks can cancel the owner. Do
         // not publish even a successfully authenticated first packet afterward.
@@ -1550,7 +2035,15 @@ impl ManagedQuicEndpoint {
             authenticated_initial_routes: Vec::new(),
             #[cfg(feature = "tls")]
             prefer_accept_output: true,
+            #[cfg(feature = "tls")]
+            retry_policy: RetryPolicy::default(),
+            #[cfg(feature = "tls")]
+            retry_secret: RetrySecret([0; 32]),
+            #[cfg(feature = "tls")]
+            retry_epoch: None,
             prefer_send: true,
+            send_backoff_until: None,
+            send_backoff_streak: 0,
         })
     }
 
@@ -1852,6 +2345,7 @@ impl ManagedQuicEndpoint {
             }
             #[cfg(feature = "tls")]
             self.queue_accept_output();
+            self.drop_oversized_outgoing(cx)?;
             self.refresh_timer(cx).await?;
             let event = poll_fn(|task_cx| {
                 let _current = Cx::set_current(Some(cx.clone()));
@@ -1873,7 +2367,7 @@ impl ManagedQuicEndpoint {
                 }
                 for send in [self.prefer_send, !self.prefer_send] {
                     if send {
-                        if !self.pending_outgoing.is_empty() {
+                        if !self.pending_outgoing.is_empty() && self.send_backoff_until.is_none() {
                             let pending = self
                                 .pending_outgoing
                                 .iter()
@@ -1934,22 +2428,31 @@ impl ManagedQuicEndpoint {
                 EndpointEvent::ApplicationTurn => {}
                 EndpointEvent::Packets(packets) => self.process_packet_batch(cx, packets).await?,
                 EndpointEvent::RetainedPackets => self.process_packet_batch(cx, Vec::new()).await?,
-                EndpointEvent::Timer(deadline) => self.process_timer_events(cx, deadline).await?,
+                EndpointEvent::Timer(deadline) => {
+                    if self
+                        .send_backoff_until
+                        .is_some_and(|retry_at| retry_at <= deadline)
+                    {
+                        self.send_backoff_until = None;
+                    }
+                    self.process_timer_events(cx, deadline).await?;
+                }
                 EndpointEvent::Sent(Err(error)) => {
-                    use std::io::ErrorKind;
-                    if error.kind() == ErrorKind::Interrupted {
+                    if error.kind() == std::io::ErrorKind::Interrupted {
                         return Err(ManagedEndpointError::Cancelled);
                     }
-                    if matches!(
-                        error.kind(),
-                        ErrorKind::ConnectionRefused
-                            | ErrorKind::ConnectionReset
-                            | ErrorKind::AddrNotAvailable
-                            | ErrorKind::InvalidInput
-                            | ErrorKind::HostUnreachable
-                            | ErrorKind::NetworkUnreachable
-                            | ErrorKind::PermissionDenied
-                    ) {
+                    if send_error_is_resource_shortage(&error) {
+                        // The queue stays intact and receives keep running;
+                        // the bound timer wakes the loop for the retry.
+                        let shift = self.send_backoff_streak.min(SEND_BACKOFF_MAX_SHIFT);
+                        let delay = SEND_BACKOFF_BASE * (1_u32 << shift);
+                        self.send_backoff_streak = self.send_backoff_streak.saturating_add(1);
+                        self.send_backoff_until = Some(self.timer_scheduler.now(cx)? + delay);
+                        cx.trace(&format!(
+                            "QUIC send resource shortage ({error}); retrying {} queued packets in {delay:?}",
+                            self.pending_outgoing.len()
+                        ));
+                    } else if send_error_blames_destination(&error) {
                         if let Some(packet) = self.pending_outgoing.front() {
                             let peer = packet.packet.dst_addr;
                             #[cfg(feature = "tls")]
@@ -1985,6 +2488,7 @@ impl ManagedQuicEndpoint {
                             "UDP send made invalid progress".to_string(),
                         ));
                     }
+                    self.send_backoff_streak = 0;
                     let sent_at = self.timer_scheduler.now(cx);
                     for packet in self.pending_outgoing.drain(..result.packets_processed) {
                         #[cfg(feature = "tls")]
@@ -2002,8 +2506,13 @@ impl ManagedQuicEndpoint {
                     }
                     sent_at?;
                     if let Some(error) = result.error {
-                        // The unsent suffix remains available if the owner retries this loop.
-                        return Err(ManagedEndpointError::UdpEndpoint(error));
+                        // Only a committed prefix reports a stringified error.
+                        // Retrying the unchanged tail surfaces the concrete
+                        // error kind, which the classification above handles.
+                        cx.trace(&format!(
+                            "QUIC send stopped after {} packets ({error}); retrying the unsent tail",
+                            result.packets_processed
+                        ));
                     }
                 }
             }
@@ -2259,9 +2768,51 @@ impl ManagedQuicEndpoint {
             }));
     }
 
+    /// A datagram above the socket limit is a local packetization fault. It
+    /// fails only the connection that built it; its peer address stays usable.
+    fn drop_oversized_outgoing(&mut self, cx: &Cx) -> Result<(), ManagedEndpointError> {
+        let limit = self.udp_endpoint.config().max_packet_size;
+        while let Some(index) = self
+            .pending_outgoing
+            .iter()
+            .position(|packet| packet.packet.data.len() > limit)
+        {
+            let Some(packet) = self.pending_outgoing.remove(index) else {
+                break;
+            };
+            let connection_id = packet.connection_id;
+            let reason = format!(
+                "connection {connection_id:?} built a {} byte datagram above the {limit} byte endpoint limit",
+                packet.packet.data.len()
+            );
+            cx.trace(&format!(
+                "QUIC {reason}; dropped it and failed only that connection"
+            ));
+            #[cfg(feature = "tls")]
+            if let Some(index) = self
+                .pending_authenticated_accept
+                .iter()
+                .position(|pending| pending.local_cid == connection_id)
+            {
+                self.fail_authenticated_accept_at(index, ManagedEndpointError::UdpEndpoint(reason));
+                continue;
+            }
+            match self.remove_connection(cx, connection_id) {
+                Ok(())
+                | Err(ManagedEndpointError::ConnectionRouter(
+                    ConnectionRouterError::ConnectionNotFound(_),
+                )) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
     /// Process timer events for all connections.
     async fn refresh_timer(&mut self, cx: &Cx) -> Result<(), ManagedEndpointError> {
         let next = self.connection_router.next_timer_deadline();
+        // A send backoff wakes the loop through the same bound timer.
+        let next = next.into_iter().chain(self.send_backoff_until).min();
         #[cfg(feature = "tls")]
         let next = self
             .pending_authenticated_accept
@@ -3236,6 +3787,217 @@ mod tests {
     }
 
     #[test]
+    fn send_errors_blame_a_destination_only_when_the_os_reported_them() {
+        use std::io::{Error, ErrorKind};
+        // The endpoint's own size check shares the kind of the OS's EINVAL for
+        // sending to port 0, but only the latter is the destination's fault.
+        #[cfg(unix)]
+        assert!(send_error_blames_destination(&Error::from_raw_os_error(
+            libc::EINVAL
+        )));
+        assert!(!send_error_blames_destination(&Error::new(
+            ErrorKind::InvalidInput,
+            "packet size 5 exceeds endpoint limit 4"
+        )));
+        assert!(send_error_is_resource_shortage(&Error::from(
+            ErrorKind::OutOfMemory
+        )));
+        #[cfg(unix)]
+        {
+            let shortage = Error::from_raw_os_error(libc::ENOBUFS);
+            assert!(send_error_is_resource_shortage(&shortage));
+            assert!(!send_error_blames_destination(&shortage));
+            let fatal = Error::from_raw_os_error(libc::EBADF);
+            assert!(!send_error_is_resource_shortage(&fatal));
+            assert!(!send_error_blames_destination(&fatal));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_loop_backs_off_from_send_buffer_shortage_and_delivers_every_packet() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(runtime.handle().spawn(async {
+            let cx = Cx::current().expect("native worker context");
+            let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            peer.set_nonblocking(true).unwrap();
+            let peer_addr = peer.local_addr().unwrap();
+            let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+            let started = Instant::now();
+            let mut child = cx
+                .spawn(move |child_cx| async move {
+                    let mut endpoint = ManagedQuicEndpoint::bind(
+                        &child_cx,
+                        "127.0.0.1:0".parse().unwrap(),
+                        ManagedEndpointConfig::default(),
+                    )
+                    .await
+                    .unwrap();
+                    for index in 0..8u8 {
+                        endpoint.queue_connection_packets(
+                            ConnectionId::default(),
+                            [OutgoingPacket {
+                                dst_addr: peer_addr,
+                                data: vec![index],
+                                send_time: None,
+                            }],
+                        );
+                    }
+                    // Five consecutive shortages wait 2 + 4 + 8 + 16 + 32 ms.
+                    endpoint.udp_endpoint.inject_send_errors([
+                        std::io::Error::from_raw_os_error(libc::ENOBUFS),
+                        std::io::Error::from_raw_os_error(libc::ENOBUFS),
+                        std::io::Error::from(std::io::ErrorKind::OutOfMemory),
+                        std::io::Error::from_raw_os_error(libc::ENOBUFS),
+                        std::io::Error::from_raw_os_error(libc::ENOBUFS),
+                    ]);
+                    ready_tx.send(endpoint.udp_endpoint.metrics()).unwrap();
+                    let mut polls = 0_usize;
+                    let result = {
+                        let mut run = std::pin::pin!(endpoint.run_event_loop(&child_cx));
+                        poll_fn(|task_cx| {
+                            polls += 1;
+                            run.as_mut().poll(task_cx)
+                        })
+                        .await
+                    };
+                    assert!(endpoint.pending_outgoing.is_empty());
+                    assert_eq!(endpoint.send_backoff_until, None);
+                    assert_eq!(endpoint.send_backoff_streak, 0);
+                    (result, polls)
+                })
+                .unwrap();
+            let mut metrics = None;
+            for _ in 0..512 {
+                if let Ok(value) = ready_rx.try_recv() {
+                    metrics = Some(value);
+                    break;
+                }
+                crate::runtime::yield_now().await;
+            }
+            let metrics = metrics.expect("endpoint started on native worker");
+            let mut observed = Vec::new();
+            let mut buffer = [0u8; 16];
+            for _ in 0..5_000 {
+                loop {
+                    match peer.recv_from(&mut buffer) {
+                        Ok((length, _)) => {
+                            assert_eq!(length, 1);
+                            observed.push(buffer[0]);
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                        Err(error) => panic!("native receive failed: {error}"),
+                    }
+                }
+                if observed.len() == 8 {
+                    break;
+                }
+                crate::time::sleep(cx.now(), Duration::from_millis(1)).await;
+            }
+            let elapsed = started.elapsed();
+            assert_eq!(observed, (0..8u8).collect::<Vec<_>>());
+            assert_eq!(metrics.send_errors.load(Ordering::Relaxed), 5);
+            assert_eq!(metrics.packets_sent.load(Ordering::Relaxed), 8);
+            assert!(
+                elapsed >= Duration::from_millis(40),
+                "five shortages must wait out a capped backoff, not retry at once: {elapsed:?}"
+            );
+            child.abort();
+            let joined = crate::time::timeout(cx.now(), Duration::from_secs(5), child.join(&cx))
+                .await
+                .unwrap();
+            let (result, polls) = joined.unwrap();
+            assert_eq!(result, Err(ManagedEndpointError::Cancelled));
+            assert!(
+                polls <= 64,
+                "a backoff must park the loop, not spin: {polls} polls"
+            );
+        }));
+    }
+
+    #[test]
+    fn native_loop_drops_only_an_oversized_datagram_and_keeps_its_peer() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(runtime.handle().spawn(async {
+            let cx = Cx::current().expect("native worker context");
+            let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            peer.set_nonblocking(true).unwrap();
+            let peer_addr = peer.local_addr().unwrap();
+            let mut endpoint = ManagedQuicEndpoint::bind(
+                &cx,
+                "127.0.0.1:0".parse().unwrap(),
+                ManagedEndpointConfig {
+                    udp_config: QuicUdpEndpointConfig {
+                        max_packet_size: 4,
+                        ..QuicUdpEndpointConfig::default()
+                    },
+                    ..ManagedEndpointConfig::default()
+                },
+            )
+            .await
+            .unwrap();
+            let ids = [
+                ConnectionId::new(&[1]).unwrap(),
+                ConnectionId::new(&[2]).unwrap(),
+            ];
+            for id in ids {
+                endpoint
+                    .create_connection_for_testing(&cx, id, peer_addr)
+                    .await
+                    .unwrap();
+            }
+            // Both connections share one peer address. Only the first built a
+            // datagram above the socket limit.
+            endpoint.queue_connection_packets(
+                ids[0],
+                [OutgoingPacket {
+                    dst_addr: peer_addr,
+                    data: vec![0; 5],
+                    send_time: None,
+                }],
+            );
+            endpoint.queue_connection_packets(
+                ids[1],
+                [OutgoingPacket {
+                    dst_addr: peer_addr,
+                    data: vec![7],
+                    send_time: None,
+                }],
+            );
+            {
+                let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+                let mut drive = std::pin::pin!(endpoint.run_event_loop(&cx));
+                assert!(drive.as_mut().poll(&mut task_cx).is_pending());
+            }
+            assert!(endpoint.pending_outgoing.is_empty());
+            let mut buffer = [0u8; 16];
+            let (length, source) = peer.recv_from(&mut buffer).unwrap();
+            assert_eq!(source, endpoint.local_addr());
+            assert_eq!(&buffer[..length], &[7]);
+            assert_eq!(
+                peer.recv_from(&mut buffer).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            assert_eq!(endpoint.connection_stats().active_connections, 1);
+            assert!(matches!(
+                endpoint.take_connection(&cx, ids[0]),
+                Err(ManagedEndpointError::ConnectionRouter(
+                    ConnectionRouterError::ConnectionNotFound(id)
+                )) if id == ids[0]
+            ));
+            assert_eq!(
+                endpoint.take_connection(&cx, ids[1]).unwrap().connection_id,
+                ids[1]
+            );
+            endpoint.shutdown(&cx).await.unwrap();
+        }));
+    }
+
+    #[test]
     fn handoff_after_dropped_loop_retires_only_that_connections_unsent_packets() {
         let runtime = crate::runtime::RuntimeBuilder::current_thread()
             .build()
@@ -3917,6 +4679,424 @@ mod tests {
         use super::*;
         use crate::net::quic_core::PacketHeader;
 
+        /// Encode a STREAM packet independently of the connection assembler.
+        /// Packet protection still uses the real TLS-negotiated client keys.
+        fn first_application_packet(
+            driver: &mut QuicHandshakeDriver,
+            destination: ConnectionId,
+        ) -> Vec<u8> {
+            use crate::net::quic_native::{
+                PacketProtectionRequest, PacketProtectionSpace, QuicPacketProtectionProvider,
+            };
+
+            const REQUEST: &[u8] = b"coalesced first request";
+            // STREAM + LEN + FIN, stream 0, one-byte length, payload. No shared
+            // frame encoder can manufacture the receive oracle for this test.
+            let mut plaintext = vec![0x0b, 0, u8::try_from(REQUEST.len()).unwrap()];
+            plaintext.extend_from_slice(REQUEST);
+            let mut packet = vec![0x43]; // fixed bit, four-byte packet number
+            packet.extend_from_slice(destination.as_bytes());
+            let number_offset = packet.len();
+            packet.extend_from_slice(&0u32.to_be_bytes());
+            let protected = driver
+                .provider_mut()
+                .protect_packet(PacketProtectionRequest {
+                    space: PacketProtectionSpace::OneRtt,
+                    key_phase: false,
+                    packet_number: 0,
+                    associated_data: &packet,
+                    payload: &plaintext,
+                })
+                .unwrap();
+            packet.extend_from_slice(&protected.ciphertext);
+            packet.extend_from_slice(&protected.tag);
+            let sample: [u8; 16] = packet[number_offset + 4..number_offset + 20]
+                .try_into()
+                .unwrap();
+            let mask = driver
+                .provider()
+                .header_protection_mask(PacketProtectionSpace::OneRtt, &sample)
+                .unwrap();
+            packet[0] ^= mask.bytes[0] & 0x1f;
+            for index in 0..4 {
+                packet[number_offset + index] ^= mask.bytes[index + 1];
+            }
+            packet
+        }
+
+        #[test]
+        fn managed_accept_delivers_coalesced_request_and_sends_final_ack_over_native_udp() {
+            use super::super::super::handshake_driver::{
+                client_config, server_config,
+                tests::{CA_CERT_PEM, LEAF_CERT_PEM, leaf_key, parse_one_cert},
+            };
+            use crate::net::quic_core::TransportParameters;
+            use crate::net::quic_native::StreamId;
+
+            for case in ["valid", "bad_tag", "wrong_cid", "cancel"] {
+                let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                    .with_reactor(crate::runtime::reactor::create_reactor().unwrap())
+                    .build()
+                    .unwrap();
+                runtime.block_on(runtime.handle().spawn(async move {
+                    let cx = Cx::current().unwrap();
+                    let timer = cx.timer_driver().unwrap().clone();
+                    let parameters = TransportParameters {
+                        initial_max_streams_bidi: Some(4),
+                        initial_max_data: Some(4096),
+                        initial_max_stream_data_bidi_remote: Some(4096),
+                        initial_max_stream_data_bidi_local: Some(4096),
+                        ..TransportParameters::default()
+                    };
+                    let mut encoded = Vec::new();
+                    parameters.encode(&mut encoded).unwrap();
+                    let mut endpoint = ManagedQuicEndpoint::bind(
+                        &cx,
+                        "127.0.0.1:0".parse().unwrap(),
+                        ManagedEndpointConfig {
+                            is_server: true,
+                            packet_batch_size: 1,
+                            ..ManagedEndpointConfig::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    endpoint
+                        .configure_authenticated_server(
+                            &cx,
+                            server_config(
+                                vec![parse_one_cert(LEAF_CERT_PEM)],
+                                leaf_key(),
+                                vec![b"atp/1".to_vec()],
+                            )
+                            .unwrap(),
+                            encoded.clone(),
+                            b"atp/1",
+                        )
+                        .unwrap();
+                    let server_addr = endpoint.local_addr();
+                    let client_cid = ConnectionId::new(&[0xd4; 8]).unwrap();
+                    let initial_cid = ConnectionId::new(&[0xd5; 8]).unwrap();
+                    let mut client = QuicHandshakeDriver::client(
+                        client_config(vec![parse_one_cert(CA_CERT_PEM)], vec![b"atp/1".to_vec()])
+                            .unwrap(),
+                        rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+                        encoded,
+                    )
+                    .unwrap();
+                    client.install_initial_keys(initial_cid.as_bytes()).unwrap();
+                    let mut peer = QuicUdpEndpoint::bind(
+                        &cx,
+                        "127.0.0.1:0".parse().unwrap(),
+                        QuicUdpEndpointConfig::default(),
+                    )
+                    .await
+                    .unwrap();
+                    let client_exchange = async {
+                        let segments = client.pump_outbound().unwrap();
+                        assert_eq!(segments.len(), 1, "actual ClientHello flight");
+                        let hello = client
+                            .assemble_handshake_packet(&segments[0], initial_cid, client_cid, 0)
+                            .unwrap();
+                        let sent = peer
+                            .send_batch(
+                                &cx,
+                                &[OutgoingPacket {
+                                    dst_addr: server_addr,
+                                    data: hello,
+                                    send_time: None,
+                                }],
+                            )
+                            .await
+                            .unwrap();
+                        assert_eq!(sent.packets_processed, 1);
+                        assert!(sent.error.is_none());
+                        let mut finished = Vec::new();
+                        while !client.is_complete() {
+                            for packet in peer.receive_batch(&cx, 8).await.unwrap() {
+                                assert_eq!(packet.src_addr, server_addr);
+                                client.recv_handshake_packet(&packet.data).unwrap();
+                                finished.extend(client.pump_outbound().unwrap());
+                            }
+                        }
+                        let finished: Vec<_> = finished
+                            .into_iter()
+                            .filter(|segment| segment.level == HandshakeLevel::Handshake)
+                            .collect();
+                        assert_eq!(finished.len(), 1, "actual client Finished flight");
+                        let server_cid = client.peer_connection_id().unwrap();
+                        // Deliberately leave a packet-number gap; the final ACK
+                        // must acknowledge 7 only, never fabricate receipt of 0..6.
+                        let mut datagram = client
+                            .assemble_handshake_packet(&finished[0], server_cid, client_cid, 7)
+                            .unwrap();
+                        let destination = if case == "wrong_cid" {
+                            initial_cid
+                        } else {
+                            server_cid
+                        };
+                        let mut application = first_application_packet(&mut client, destination);
+                        if case == "bad_tag" {
+                            *application.last_mut().unwrap() ^= 1;
+                        }
+                        datagram.extend_from_slice(&application);
+                        assert!(
+                            datagram.len() <= 1200,
+                            "Finished and request share one UDP datagram"
+                        );
+                        let sent = peer
+                            .send_batch(
+                                &cx,
+                                &[OutgoingPacket {
+                                    dst_addr: server_addr,
+                                    data: datagram,
+                                    send_time: None,
+                                }],
+                            )
+                            .await
+                            .unwrap();
+                        assert_eq!(sent.packets_processed, 1);
+                        assert!(sent.error.is_none());
+                        application
+                    };
+                    let server_exchange =
+                        endpoint.run_event_loop_with_application(&cx, |_, endpoint, _| {
+                            if endpoint
+                                .pending_authenticated_accept
+                                .iter()
+                                .any(|pending| pending.driver.is_complete())
+                                || !endpoint.authenticated_accept_result.is_empty()
+                            {
+                                Poll::Ready(Ok(()))
+                            } else {
+                                Poll::Pending
+                            }
+                        });
+                    let (application, server_result) = crate::time::timeout(
+                        cx.now(),
+                        Duration::from_secs(8),
+                        futures_lite::future::zip(client_exchange, server_exchange),
+                    )
+                    .await
+                    .expect("native TLS admission reached client Finished");
+                    server_result.unwrap();
+
+                    let pending = endpoint
+                        .pending_authenticated_accept
+                        .front()
+                        .expect("final ACK remains owned before send");
+                    assert!(pending.driver.is_complete());
+                    assert!(pending.final_ack_queued);
+                    assert_eq!(pending.outstanding_packets, 1);
+                    assert!(
+                        endpoint.authenticated_accept_result.is_empty(),
+                        "accept receipt must follow real ACK transmission"
+                    );
+                    assert_eq!(endpoint.connection_stats().active_connections, 0);
+                    let server_cid = pending.local_cid;
+                    let retained = pending.early.first().map(|packet| {
+                        (packet.data.clone(), packet.receive_time, packet.transmit_time)
+                    });
+                    if case == "wrong_cid" {
+                        assert!(retained.is_none());
+                        assert_eq!(pending.early_bytes, 0);
+                    } else {
+                        assert_eq!(retained.as_ref().unwrap().0, application);
+                        assert_eq!(pending.early_bytes, application.len());
+                    }
+                    let final_ack = endpoint
+                        .pending_outgoing
+                        .front()
+                        .expect("protected final ACK queued for socket")
+                        .packet
+                        .data
+                        .clone();
+                    assert_eq!(pending.outstanding_bytes, final_ack.len());
+
+                    // Drop a real managed driver at its cooperative Pending
+                    // boundary before the socket gets another send turn. This
+                    // is owner-retention proof, not claimed UDP backpressure.
+                    let mut callback_calls = 0;
+                    {
+                        let mut run = std::pin::pin!(endpoint.run_event_loop_with_application(
+                            &cx,
+                            |_, _, _| {
+                                callback_calls += 1;
+                                Poll::<Result<(), ManagedEndpointError>>::Pending
+                            }
+                        ));
+                        assert!(
+                            run.as_mut()
+                                .poll(&mut Context::from_waker(Waker::noop()))
+                                .is_pending()
+                        );
+                    }
+                    assert_eq!(callback_calls, 1);
+                    let pending = endpoint.pending_authenticated_accept.front().unwrap();
+                    assert_eq!(pending.outstanding_packets, 1);
+                    assert_eq!(
+                        endpoint.pending_outgoing.front().unwrap().packet.data,
+                        final_ack
+                    );
+                    assert_eq!(
+                        pending.early.first().map(|packet| (
+                            packet.data.clone(),
+                            packet.receive_time,
+                            packet.transmit_time
+                        )),
+                        retained
+                    );
+
+                    if case == "cancel" {
+                        let cancel = Cx::for_testing();
+                        cancel.set_cancel_requested(true);
+                        assert_eq!(
+                            endpoint.run_event_loop(&cancel).await,
+                            Err(ManagedEndpointError::Cancelled)
+                        );
+                        assert!(endpoint.pending_authenticated_accept.is_empty());
+                        assert!(endpoint.pending_outgoing.is_empty());
+                        assert!(endpoint.pending_incoming.is_empty());
+                        assert_eq!(endpoint.connection_stats().active_connections, 0);
+                        assert!(matches!(
+                            endpoint.take_authenticated_accept_result_with_id(),
+                            Some((id, Err(ManagedEndpointError::Cancelled))) if id == server_cid
+                        ));
+                    } else {
+                        let mut accepted = None;
+                        crate::time::timeout(
+                            cx.now(),
+                            Duration::from_secs(8),
+                            endpoint.run_event_loop_with_application(&cx, |cx, endpoint, _| {
+                                if let Some(result) = endpoint.take_authenticated_accept_result() {
+                                    accepted = Some(result.unwrap());
+                                }
+                                if let Some(cid) = accepted
+                                    && endpoint.pending_incoming.is_empty()
+                                {
+                                    assert_eq!(cid, server_cid);
+                                    endpoint.with_connection_mut(cx, cid, |connection| {
+                                        let received = connection.read_stream(cx, StreamId(0), 4096);
+                                        if case == "valid" {
+                                            assert_eq!(received.unwrap().as_ref(), b"coalesced first request");
+                                            assert!(connection.is_stream_eof(StreamId(0)).unwrap());
+                                            assert!(connection.read_stream(cx, StreamId(0), 4096).unwrap().is_empty());
+                                        } else {
+                                            assert!(matches!(received, Err(super::super::super::NativeQuicConnectionError::StreamTable(
+                                                super::super::super::StreamTableError::UnknownStream(StreamId(0))
+                                            ))));
+                                        }
+                                    }).unwrap();
+                                    Poll::Ready(Ok(()))
+                                } else {
+                                    Poll::Pending
+                                }
+                            }),
+                        )
+                        .await
+                        .expect("native route consumes the retained coalesced packet")
+                        .unwrap();
+                        let received = crate::time::timeout(
+                            cx.now(),
+                            Duration::from_secs(2),
+                            peer.receive_batch(&cx, 1),
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap();
+                        assert_eq!(received.len(), 1);
+                        assert_eq!(
+                            received[0].data, final_ack,
+                            "socket transmits the retained protected ACK exactly"
+                        );
+                        let ProtectedHeaderPrefix::Long(prefix) =
+                            ProtectedHeaderPrefix::decode(&received[0].data, 0).unwrap()
+                        else {
+                            panic!("final ACK must use Handshake keys");
+                        };
+                        let (header, plaintext) = client
+                            .unprotect_long_header_packet(&prefix, &received[0].data)
+                            .unwrap();
+                        assert_eq!(header.packet_type, LongPacketType::Handshake);
+                        assert_eq!(header.dst_cid, client_cid);
+                        assert_eq!(header.src_cid, server_cid);
+                        assert_eq!(
+                            plaintext,
+                            vec![0x02, 7, 0, 0, 0],
+                            "independent ACK(7), delay=0, zero gaps, first range=0 wire oracle"
+                        );
+                    }
+                    endpoint.shutdown(&cx).await.unwrap();
+                    peer.shutdown(&cx).await.unwrap();
+                    assert_eq!(endpoint.connection_stats().active_connections, 0);
+                    assert!(endpoint.pending_outgoing.is_empty());
+                    assert!(endpoint.pending_incoming.is_empty());
+                    assert_eq!(timer.pending_count(), 0);
+                }));
+            }
+        }
+
+        #[test]
+        fn managed_accept_early_ciphertext_budget_refuses_before_changing_retained_packets() {
+            // Preparing an authenticated accept schedules QUIC timers, which
+            // need a runtime Cx with a timer driver (the siblings' pattern).
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .build()
+                .unwrap();
+            runtime.block_on(runtime.handle().spawn(async {
+                let cx = Cx::current().unwrap();
+                let mut endpoint = ManagedQuicEndpoint::bind(
+                    &cx,
+                    "127.0.0.1:0".parse().unwrap(),
+                    ManagedEndpointConfig {
+                        is_server: true,
+                        ..ManagedEndpointConfig::default()
+                    },
+                )
+                .await
+                .unwrap();
+                endpoint.authenticated_only = true;
+                let peer = "127.0.0.1:9191".parse().unwrap();
+                for (packet_bytes, packet_count) in [(32, ACCEPT_MAX_PACKETS), (4096, 512)] {
+                    let mut pending = endpoint
+                        .prepare_authenticated_accept(
+                            &cx,
+                            server_driver(None),
+                            peer,
+                            ConnectionId::new(&[0x21; 8]).unwrap(),
+                            ConnectionId::new(&[0x22; 8]).unwrap(),
+                            b"atp/1",
+                        )
+                        .unwrap();
+                    let mut data = vec![0xa5; packet_bytes];
+                    data[0] = 0x43;
+                    data[1..9].copy_from_slice(pending.local_cid.as_bytes());
+                    let packet = ReceivedPacket {
+                        src_addr: peer,
+                        data,
+                        receive_time: Instant::now(),
+                        transmit_time: None,
+                    };
+                    // This is supplemental queue-admission coverage. The
+                    // preceding native test proves production TLS/UDP routing.
+                    for _ in 0..packet_count {
+                        pending.retain_early_packet(packet.clone()).unwrap();
+                    }
+                    let byte_count: usize = pending.early.iter().map(|packet| packet.data.len()).sum();
+                    assert_eq!(pending.early_bytes, byte_count);
+                    assert_eq!(byte_count, packet_count * packet_bytes);
+                    assert_eq!(
+                        pending.retain_early_packet(packet.clone()),
+                        Err(accept_error("early application packet bound exhausted"))
+                    );
+                    assert_eq!(pending.early.len(), packet_count);
+                    assert_eq!(pending.early_bytes, byte_count);
+                    assert!(pending.early.iter().all(|retained| retained == &packet));
+                }
+                endpoint.shutdown(&cx).await.unwrap();
+            }));
+        }
+
         // The established route comes from selection_fixture's documented
         // recovery-state fixture. These tests prove pending-owner mechanics,
         // not a completed authenticated two-peer exchange or client identity.
@@ -4349,6 +5529,385 @@ mod tests {
                 );
                 endpoint.shutdown(&cx).await.unwrap();
                 assert_eq!(timer.pending_count(), 0);
+            }));
+        }
+
+        #[test]
+        fn managed_accept_pto_resends_the_flight_under_new_packet_numbers() {
+            use super::super::super::handshake_driver::{
+                client_config, server_config,
+                tests::{CA_CERT_PEM, LEAF_CERT_PEM, leaf_key, parse_one_cert},
+            };
+
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .build()
+                .unwrap();
+            runtime.block_on(runtime.handle().spawn(async {
+                let (cx, _, timer, mut endpoint, peer, existing) =
+                    selection_fixture(&Cx::current().unwrap()).await;
+                endpoint.remove_connection(&cx, existing).unwrap();
+                endpoint.config.is_server = true;
+                endpoint.config.udp_config.max_packet_size = 1500;
+                endpoint.config.packet_batch_size = 1024;
+                let mut parameters = Vec::new();
+                crate::net::quic_core::TransportParameters::default()
+                    .encode(&mut parameters)
+                    .unwrap();
+                let tls = server_config(
+                    vec![parse_one_cert(LEAF_CERT_PEM)],
+                    leaf_key(),
+                    vec![b"atp/1".to_vec()],
+                )
+                .unwrap();
+                endpoint
+                    .configure_authenticated_server(&cx, tls, parameters, b"atp/1")
+                    .unwrap();
+                let now = endpoint.timer_scheduler.now(&cx).unwrap();
+                let mut client = QuicHandshakeDriver::client(
+                    client_config(vec![parse_one_cert(CA_CERT_PEM)], vec![b"atp/1".to_vec()])
+                        .unwrap(),
+                    rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+                    Vec::new(),
+                )
+                .unwrap();
+                let initial_cid = ConnectionId::new(&[0xd6; 8]).unwrap();
+                let client_cid = ConnectionId::new(&[0xd7; 8]).unwrap();
+                client.install_initial_keys(initial_cid.as_bytes()).unwrap();
+                let segments = client.pump_outbound().unwrap();
+                let packet = ReceivedPacket {
+                    src_addr: peer.local_addr().unwrap(),
+                    data: client
+                        .assemble_handshake_packet(&segments[0], initial_cid, client_cid, 0)
+                        .unwrap(),
+                    receive_time: now,
+                    transmit_time: None,
+                };
+                assert!(
+                    endpoint
+                        .try_automatic_authenticated_accept(&cx, &packet)
+                        .unwrap()
+                );
+                let first: Vec<Vec<u8>> = endpoint
+                    .pending_authenticated_accept
+                    .front()
+                    .unwrap()
+                    .last_flight
+                    .iter()
+                    .map(|packet| packet.data.clone())
+                    .collect();
+                assert!(!first.is_empty(), "actual TLS server flight");
+                // The client processes the whole first flight, so only its
+                // acknowledgment is missing when the server's PTO fires.
+                for data in &first {
+                    client.recv_handshake_packet(data).unwrap();
+                    let _ = client.pump_outbound().unwrap();
+                }
+                assert!(client.is_complete());
+                let levels = [HandshakeLevel::Initial, HandshakeLevel::Handshake];
+                let seen = levels.map(|level| client.received_handshake_packet_numbers(level));
+                // Byte credit is not under test: a validated address lets the
+                // whole first flight reach the socket queue before the PTO.
+                endpoint
+                    .pending_authenticated_accept
+                    .front_mut()
+                    .unwrap()
+                    .address_validated = true;
+                for _ in 0..first.len() {
+                    endpoint.queue_accept_output();
+                    for packet in endpoint.pending_outgoing.drain(..) {
+                        endpoint
+                            .pending_authenticated_accept
+                            .front_mut()
+                            .unwrap()
+                            .sent(packet.packet.data.len());
+                    }
+                }
+                let pending = endpoint.pending_authenticated_accept.front().unwrap();
+                assert!(pending.outbound.is_empty());
+                assert_eq!(pending.outstanding_packets, 0);
+                let due = pending.next_pto;
+                assert!(!endpoint.advance_authenticated_accept(&cx, due));
+                let pending = endpoint.pending_authenticated_accept.front().unwrap();
+                assert_eq!(pending.flights, 2);
+                let second: Vec<Vec<u8>> = pending
+                    .outbound
+                    .iter()
+                    .map(|packet| packet.data.clone())
+                    .collect();
+                assert_eq!(second.len(), first.len());
+                for (old, new) in first.iter().zip(&second) {
+                    assert_eq!(old.len(), new.len(), "the same CRYPTO bytes");
+                    assert_ne!(old, new, "a retransmission never reuses a packet number");
+                }
+                for data in &second {
+                    client.recv_handshake_packet(data).unwrap();
+                }
+                for (level, before) in levels.into_iter().zip(seen) {
+                    let after = client.received_handshake_packet_numbers(level);
+                    let fresh: Vec<u64> = after
+                        .iter()
+                        .copied()
+                        .filter(|number| !before.contains(number))
+                        .collect();
+                    assert_eq!(
+                        fresh.len(),
+                        before.len(),
+                        "{level:?}: every resent packet is new to the peer"
+                    );
+                    assert!(
+                        fresh
+                            .iter()
+                            .all(|number| before.iter().all(|old| number > old)),
+                        "{level:?}: resent packet numbers only grow"
+                    );
+                }
+                endpoint.shutdown(&cx).await.unwrap();
+                assert_eq!(timer.pending_count(), 0);
+            }));
+        }
+
+        #[test]
+        fn retry_tokens_bind_the_peer_the_cids_the_key_and_a_lifetime() {
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .build()
+                .unwrap();
+            runtime.block_on(runtime.handle().spawn(async {
+                let cx = Cx::current().unwrap();
+                let mut endpoint = ManagedQuicEndpoint::bind(
+                    &cx,
+                    "127.0.0.1:0".parse().unwrap(),
+                    ManagedEndpointConfig {
+                        is_server: true,
+                        ..ManagedEndpointConfig::default()
+                    },
+                )
+                .await
+                .unwrap();
+                let now = endpoint.timer_scheduler.now(&cx).unwrap();
+                endpoint.retry_secret = RetrySecret([7; 32]);
+                endpoint.retry_epoch = Some(now);
+                let peer: SocketAddr = "192.0.2.7:4433".parse().unwrap();
+                let original = ConnectionId::new(&[1; 8]).unwrap();
+                let retry = ConnectionId::new(&[2; 20]).unwrap();
+                let token = endpoint
+                    .mint_retry_token(peer, original, retry, now)
+                    .unwrap();
+                let check = |endpoint: &ManagedQuicEndpoint, token: &[u8], peer, retry, at| {
+                    endpoint.validate_retry_token(token, peer, retry, at)
+                };
+                assert_eq!(check(&endpoint, &token, peer, retry, now), Some(original));
+                let last = now + RETRY_TOKEN_LIFETIME;
+                assert_eq!(check(&endpoint, &token, peer, retry, last), Some(original));
+                let late = last + Duration::from_secs(1);
+                assert_eq!(check(&endpoint, &token, peer, retry, late), None, "expired");
+                for other in ["192.0.2.7:4434", "192.0.2.8:4433", "[2001:db8::7]:4433"] {
+                    let other: SocketAddr = other.parse().unwrap();
+                    assert_eq!(check(&endpoint, &token, other, retry, now), None, "{other}");
+                }
+                assert_eq!(
+                    check(&endpoint, &token, peer, original, now),
+                    None,
+                    "another CID"
+                );
+                for index in 0..token.len() {
+                    let mut forged = token.clone();
+                    forged[index] ^= 1;
+                    assert_eq!(
+                        check(&endpoint, &forged, peer, retry, now),
+                        None,
+                        "byte {index}"
+                    );
+                }
+                let short = &token[..token.len() - 1];
+                assert_eq!(check(&endpoint, short, peer, retry, now), None, "truncated");
+                endpoint.retry_secret = RetrySecret([8; 32]);
+                assert_eq!(
+                    check(&endpoint, &token, peer, retry, now),
+                    None,
+                    "another key"
+                );
+            }));
+        }
+
+        /// With `packet_batch_size: 1`, one admission packet fills the batch. A
+        /// Retry dropped there left the client waiting for its PTO. On a
+        /// virtual clock that never advances, the handshake hung. Retries use
+        /// a bounded slack beyond the batch instead.
+        #[test]
+        fn a_full_send_batch_does_not_drop_a_stateless_retry() {
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .build()
+                .unwrap();
+            runtime.block_on(runtime.handle().spawn(async {
+                let cx = Cx::current().unwrap();
+                let mut endpoint = ManagedQuicEndpoint::bind(
+                    &cx,
+                    "127.0.0.1:0".parse().unwrap(),
+                    ManagedEndpointConfig {
+                        is_server: true,
+                        packet_batch_size: 1,
+                        ..ManagedEndpointConfig::default()
+                    },
+                )
+                .await
+                .unwrap();
+                let now = endpoint.timer_scheduler.now(&cx).unwrap();
+                endpoint.retry_secret = RetrySecret([7; 32]);
+                endpoint.retry_epoch = Some(now);
+                let peer: SocketAddr = "192.0.2.7:4433".parse().unwrap();
+                let client = ConnectionId::new(&[3; 8]).unwrap();
+                let original = ConnectionId::new(&[4; 8]).unwrap();
+                endpoint.pending_outgoing.push_back(RoutedOutgoingPacket {
+                    connection_id: ConnectionId::new(&[5; 8]).unwrap(),
+                    packet: OutgoingPacket {
+                        dst_addr: "192.0.2.9:4433".parse().unwrap(),
+                        data: vec![0; 1200],
+                        send_time: None,
+                    },
+                    final_handshake_flight: false,
+                    ack_eliciting: true,
+                });
+                endpoint.queue_retry(&cx, client, original, peer, now);
+                assert_eq!(endpoint.pending_outgoing.len(), 2, "the Retry is queued");
+                let retry = &endpoint.pending_outgoing[1].packet;
+                assert_eq!(retry.dst_addr, peer);
+                assert!(matches!(
+                    ProtectedHeaderPrefix::decode(&retry.data, 0),
+                    Ok(ProtectedHeaderPrefix::Retry(_))
+                ));
+                for _ in 0..2 * RETRY_QUEUE_SLACK {
+                    endpoint.queue_retry(&cx, client, original, peer, now);
+                }
+                assert_eq!(
+                    endpoint.pending_outgoing.len(),
+                    1 + RETRY_QUEUE_SLACK,
+                    "a flood fills only the bounded Retry slack"
+                );
+            }));
+        }
+
+        #[test]
+        fn managed_retry_lets_a_validated_client_displace_a_silent_spoofed_admission() {
+            use super::super::super::handshake_driver::{
+                client_config, client_handshake_over_udp, server_config,
+                tests::{CA_CERT_PEM, LEAF_CERT_PEM, leaf_key, parse_one_cert},
+            };
+
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .build()
+                .unwrap();
+            runtime.block_on(runtime.handle().spawn(async {
+                let cx = Cx::current().unwrap();
+                // One admission slot, the default, and the default Retry policy.
+                let mut server = ManagedQuicEndpoint::bind(
+                    &cx,
+                    "127.0.0.1:0".parse().unwrap(),
+                    ManagedEndpointConfig {
+                        is_server: true,
+                        ..ManagedEndpointConfig::default()
+                    },
+                )
+                .await
+                .unwrap();
+                let mut parameters = Vec::new();
+                crate::net::quic_core::TransportParameters::default()
+                    .encode(&mut parameters)
+                    .unwrap();
+                let tls = server_config(
+                    vec![parse_one_cert(LEAF_CERT_PEM)],
+                    leaf_key(),
+                    vec![b"atp/1".to_vec()],
+                )
+                .unwrap();
+                server
+                    .configure_authenticated_server(&cx, tls, parameters, b"atp/1")
+                    .unwrap();
+                let server_addr = server.local_addr();
+                let client_driver = || {
+                    QuicHandshakeDriver::client(
+                        client_config(vec![parse_one_cert(CA_CERT_PEM)], vec![b"atp/1".to_vec()])
+                            .unwrap(),
+                        rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+                        Vec::new(),
+                    )
+                    .unwrap()
+                };
+                // A real ClientHello from an address that never answers takes the
+                // only slot first, as a spoofed Initial would.
+                let spoofer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+                let spoofed_initial = ConnectionId::new(&[0x51; 8]).unwrap();
+                let mut spoofed = client_driver();
+                spoofed
+                    .install_initial_keys(spoofed_initial.as_bytes())
+                    .unwrap();
+                let segments = spoofed.pump_outbound().unwrap();
+                let hello = spoofed
+                    .assemble_handshake_packet(
+                        &segments[0],
+                        spoofed_initial,
+                        ConnectionId::new(&[0x52; 8]).unwrap(),
+                        0,
+                    )
+                    .unwrap();
+                spoofer.send_to(&hello, server_addr).unwrap();
+
+                let mut client_endpoint = QuicUdpEndpoint::bind(
+                    &cx,
+                    "127.0.0.1:0".parse().unwrap(),
+                    QuicUdpEndpointConfig::default(),
+                )
+                .await
+                .unwrap();
+                let mut client = client_driver();
+                let (outcome, client_done, receipt) = {
+                    let mut handshake = std::pin::pin!(client_handshake_over_udp(
+                        &cx,
+                        &mut client_endpoint,
+                        server_addr,
+                        &mut client,
+                        ConnectionId::new(&[0x61; 8]).unwrap(),
+                        ConnectionId::new(&[0x62; 8]).unwrap(),
+                    ));
+                    let mut client_done = None;
+                    let mut receipt = None;
+                    let outcome = crate::time::timeout(
+                        cx.now(),
+                        Duration::from_secs(10),
+                        server.run_event_loop_with_application(&cx, |_, endpoint, task_cx| {
+                            if client_done.is_none() {
+                                if let Poll::Ready(result) = handshake.as_mut().poll(task_cx) {
+                                    client_done = Some(result);
+                                }
+                            }
+                            if receipt.is_none() {
+                                receipt = endpoint.take_authenticated_accept_result();
+                            }
+                            if client_done.is_some() && receipt.is_some() {
+                                Poll::Ready(Ok(()))
+                            } else {
+                                Poll::Pending
+                            }
+                        }),
+                    )
+                    .await;
+                    (outcome, client_done, receipt)
+                };
+                assert!(
+                    matches!(outcome, Ok(Ok(()))),
+                    "the validated client must be admitted while the spoofed one holds the slot: {outcome:?}"
+                );
+                assert!(matches!(client_done, Some(Ok(_))), "{client_done:?}");
+                assert!(matches!(receipt, Some(Ok(_))), "{receipt:?}");
+                // The client completed only after checking both Retry parameters
+                // (verify_completed_retry). The server advertised a Retry source.
+                let server_parameters = crate::net::quic_core::TransportParameters::decode(
+                    client.peer_transport_parameters().unwrap(),
+                )
+                .unwrap();
+                assert!(server_parameters.unknown.iter().any(|parameter| parameter.id == 0x10));
+                assert!(server.pending_authenticated_accept.is_empty(), "the spoofed admission was displaced");
+                assert!(server.take_authenticated_accept_result().is_none(), "displacement publishes nothing");
+                server.shutdown(&cx).await.unwrap();
             }));
         }
 

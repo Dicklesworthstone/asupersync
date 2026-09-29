@@ -7,7 +7,7 @@ use asupersync::net::atp::sdk::native::upload::NativeUploadWriterTerminal;
 use asupersync::net::atp::sdk::native::{
     NativeTransferError, NativeUploadError, NativeUploadOptions,
 };
-use asupersync::net::atp::transport_quic::QuicReceiveOptions;
+use asupersync::net::atp::transport_quic::{QuicReceiveOptions, QuicTransportError};
 use asupersync::runtime::JoinError;
 use asupersync::types::CancelReason;
 use futures_lite::future::zip;
@@ -361,15 +361,34 @@ fn native_writer_shutdown_does_not_succeed_when_a_peer_never_answers() {
             .await
             .unwrap();
         writer.flush().await.unwrap();
-        let result = asupersync::time::timeout(cx.now(), Duration::from_secs(5), writer.shutdown())
-            .await
-            .expect("configured transport timeout must terminate");
+        // A hang bound, not a latency budget. EOF runs the spool's sync_data and
+        // cleanup through spawn_blocking_io, and this current-thread runtime has
+        // no blocking pool, so they run inline on the only runtime thread. On an
+        // I/O-saturated RCH worker one small-file fdatasync measured p99 4.9 s,
+        // max 9.6 s, which made a 5 s bound fail (asupersync-a1nscz). The exact
+        // error below proves the configured handshake timeout ended the upload.
+        let result =
+            asupersync::time::timeout(cx.now(), Duration::from_secs(60), writer.shutdown())
+                .await
+                .expect("configured transport timeout must terminate");
         assert!(
             result.is_err(),
             "EOF/local flush cannot fabricate a peer receipt"
         );
         let report = writer.finish().await.as_ref().unwrap();
-        assert!(matches!(&report.outcome, Err(NativeUploadError::Native(_))));
+        assert!(
+            matches!(
+                &report.outcome,
+                Err(NativeUploadError::Native(NativeTransferError::Transport(
+                    QuicTransportError::Timeout {
+                        operation: "quic client handshake",
+                        timeout,
+                    }
+                ))) if *timeout == Duration::from_millis(100)
+            ),
+            "the configured handshake timeout must end the upload: {:?}",
+            report.outcome
+        );
         assert!(report.cleanup_error.is_none());
         assert_eq!(sender.active_transfers(), 0);
     });

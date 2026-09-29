@@ -845,6 +845,7 @@ pub struct ProductionSchedule {
     trace: ReplayTrace,
     spawn_order: Vec<CompactTaskId>,
     summary: ProjectionSummary,
+    source_sequence_disorder: Option<(u64, u64)>,
 }
 
 impl ProductionSchedule {
@@ -1019,7 +1020,21 @@ impl ProductionSchedule {
             trace,
             spawn_order,
             summary,
+            source_sequence_disorder: events
+                .windows(2)
+                .find(|pair| pair[1].seq <= pair[0].seq)
+                .map(|pair| (pair[0].seq, pair[1].seq)),
         })
+    }
+
+    /// The first duplicate or reversed source sequence, if any.
+    ///
+    /// Sequence numbers are ordering keys, not dense indices: abandoned
+    /// event reservations may leave legitimate gaps. This detects disorder,
+    /// not arbitrary missing observations or capture completeness.
+    #[must_use]
+    pub const fn source_sequence_disorder(&self) -> Option<(u64, u64)> {
+        self.source_sequence_disorder
     }
 
     /// The projected replay trace (spawns, steps, yields, completions, time

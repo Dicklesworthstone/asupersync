@@ -1054,6 +1054,78 @@ mod tests {
         crate::test_complete!("connect_uses_per_address_ports");
     }
 
+    /// asupersync-bi2462.119: a first address that never answers must not
+    /// keep a working second address from connecting within the overall
+    /// budget. `TcpStream::connect_timeout` tries addresses one after another,
+    /// so this is the documented multi-address path.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn black_holed_first_address_does_not_block_a_working_second_address() {
+        init_test("black_holed_first_address_does_not_block_a_working_second_address");
+
+        // Linux drops SYNs aimed at a listener whose accept queue is full, so
+        // after filling a backlog-0 queue, connects to it hang unanswered.
+        let blackhole = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)
+            .expect("blackhole socket");
+        blackhole
+            .bind(&"127.0.0.1:0".parse::<SocketAddr>().unwrap().into())
+            .expect("bind blackhole");
+        blackhole.listen(0).expect("listen with backlog 0");
+        let blackhole_addr = blackhole
+            .local_addr()
+            .expect("blackhole addr")
+            .as_socket()
+            .expect("inet addr");
+        let _queued: Vec<_> = (0..4)
+            .filter_map(|_| {
+                std::net::TcpStream::connect_timeout(&blackhole_addr, Duration::from_millis(100))
+                    .ok()
+            })
+            .collect();
+        // Witness: the address really black-holes (a direct connect times
+        // out rather than being refused), or this test proves nothing.
+        let probe_started = std::time::Instant::now();
+        let probe =
+            std::net::TcpStream::connect_timeout(&blackhole_addr, Duration::from_millis(300));
+        assert!(
+            matches!(&probe, Err(error) if matches!(error.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock)),
+            "the full-backlog listener must drop SYNs, got {probe:?} after {:?}",
+            probe_started.elapsed()
+        );
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let open_addr = listener.local_addr().unwrap();
+        let accept_thread = std::thread::spawn(move || {
+            let _ = listener.accept();
+        });
+
+        let config = HappyEyeballsConfig {
+            first_family_delay: Duration::from_millis(20),
+            attempt_delay: Duration::from_millis(50),
+            connect_timeout: Duration::from_secs(5),
+            overall_timeout: Duration::from_secs(3),
+        };
+        let addrs = vec![blackhole_addr, open_addr];
+        let runtime = crate::runtime::RuntimeBuilder::new().build().unwrap();
+        let started = std::time::Instant::now();
+        let handle = runtime
+            .handle()
+            .spawn(async move { connect(&addrs, &config).await });
+        let result = runtime.block_on(handle);
+        let elapsed = started.elapsed();
+        let stream = result.expect("the working second address connects");
+        assert_eq!(stream.peer_addr().unwrap(), open_addr);
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the second address wins well inside the budget: {elapsed:?}"
+        );
+        let _ = accept_thread.join();
+        crate::test_complete!(
+            "black_holed_first_address_does_not_block_a_working_second_address",
+            elapsed_ms = elapsed.as_millis() as u64
+        );
+    }
+
     // =======================================================================
     // RaceConnections structural tests
     // =======================================================================

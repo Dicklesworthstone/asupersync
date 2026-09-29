@@ -3676,6 +3676,33 @@ impl<Caps> Cx<Caps> {
         let _ = (region, task);
     }
 
+    /// Requests local cancellation while preserving an explicit cause chain.
+    ///
+    /// The supplied attribution is published atomically with the cancellation
+    /// flag and strengthens any existing reason using [`CancelReason::strengthen`].
+    /// A weaker request cannot overwrite a concurrent shutdown or another
+    /// stronger cancellation. Registered waiters are woken after the context
+    /// lock is released.
+    ///
+    /// Unlike [`Self::cancel_with`], this preserves the supplied origin and
+    /// timestamp. Like that method, it cancels this context locally; region-tree
+    /// propagation remains the responsibility of the runtime or region owner.
+    pub fn cancel_with_reason(&self, reason: CancelReason) {
+        let wakers = {
+            let mut inner = self.inner.write();
+            inner.set_cancel_requested(true);
+            if let Some(existing) = inner.cancel_reason.as_mut() {
+                existing.strengthen(&reason);
+            } else {
+                inner.cancel_reason = Some(reason);
+            }
+            let wakers = inner.cancel_waker_snapshot();
+            inner.cancel_wakers_pending = false;
+            wakers
+        };
+        crate::types::task_context::CancelWakeEffects::new(wakers).dispatch();
+    }
+
     /// Cancels without building a full attribution chain (performance-critical path).
     ///
     /// Use this when attribution isn't needed and minimizing allocations is important.
@@ -4083,10 +4110,36 @@ impl<Caps> Cx<Caps> {
     /// invent ambient authority. A runtime mask without spawning authority
     /// returns [`ChildRegionError::RuntimeUnavailable`] before enqueueing.
     /// The derived context preserves this context's runtime capability mask.
+    /// Scheduler and capability budgets meet both this context's limits and
+    /// the owning region's limits, even when the request supplies an override.
+    ///
+    /// The child's principal context also keeps this context's compile-time
+    /// capability set, so a restricted context cannot regain gated APIs
+    /// through a child region (asupersync-cwxavr):
+    ///
+    /// ```compile_fail
+    /// use asupersync::{Cx, cx::{cap, ChildRegionSpec}};
+    ///
+    /// async fn escalate(cx: &Cx<cap::None>) {
+    ///     let child = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+    ///     let _ = child.cx().blocking_pool_handle();
+    /// }
+    /// ```
+    ///
+    /// The same code compiles for a context that holds the capability:
+    ///
+    /// ```no_run
+    /// use asupersync::{Cx, cx::{cap, ChildRegionSpec}};
+    ///
+    /// async fn inherit(cx: &Cx<cap::All>) {
+    ///     let child = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+    ///     let _ = child.cx().blocking_pool_handle();
+    /// }
+    /// ```
     pub fn open_child_region(
         &self,
         spec: crate::cx::child_region::ChildRegionSpec,
-    ) -> crate::cx::child_region::ChildRegionOpening {
+    ) -> crate::cx::child_region::ChildRegionOpening<Caps> {
         use crate::cx::child_region::{ChildRegionError, ChildRegionOpening};
         let Some(gateway) = self.handles.spawn_gateway.clone() else {
             return ChildRegionOpening::failed(ChildRegionError::NoRuntimeGateway);
@@ -4098,10 +4151,15 @@ impl<Caps> Cx<Caps> {
         let slot = std::sync::Arc::new(crate::runtime::spawn_mailbox::AdmittedRegionSlot::new());
         let request = crate::runtime::spawn_mailbox::CreateRegionRequest {
             parent: self.region_id(),
-            budget: spec.budget.unwrap_or_else(|| self.budget()),
-            capability_budget: spec
-                .capability_budget
-                .unwrap_or(CapabilityBudget::UNSPECIFIED),
+            // The caller can be narrower than its owning region (for example
+            // a scoped task or an AppSpec worker). The authoritative mint
+            // meets these values with the region record, but cannot recover
+            // constraints held only by this Cx. Carry them in the request so
+            // opening a child cannot restore authority the caller gave up.
+            budget: self.budget().meet(spec.budget.unwrap_or(Budget::INFINITE)),
+            capability_budget: self
+                .capability_budget()
+                .meet(spec.capability_budget.unwrap_or(CapabilityBudget::UNSPECIFIED)),
             requirements: spec.requirements,
             priority: spec.priority,
             principal_task_id,
@@ -4243,6 +4301,13 @@ impl Cx<cap::All> {
     /// fails the race closed with [`JoinError::Cancelled`]; already-spawned
     /// siblings are cancelled as the race future unwinds.
     ///
+    /// **A branch must use its own context to observe loser cancellation.**
+    /// Cancellation targets the branch's spawned task. A prebuilt future that
+    /// awaits a cancel-aware operation on this caller context (for example
+    /// `rx.recv(&cx)`) never sees it, so the drain waits until that branch
+    /// finishes on its own. Prefer [`Cx::race_drained_with`], whose factories
+    /// receive their child context, or call [`Cx::current`] inside the branch.
+    ///
     /// On an empty branch list this is pending until the context is cancelled,
     /// mirroring [`Cx::race`].
     pub async fn race_drained<T>(
@@ -4294,7 +4359,8 @@ impl Cx<cap::All> {
     ///
     /// Names are accepted for source-level symmetry with [`Cx::race_named`];
     /// the drain machinery itself is name-agnostic. See [`Cx::race_drained`]
-    /// for the full guarantee.
+    /// for the full guarantee and the caller-context hazard; the child-context
+    /// counterpart is [`Cx::race_drained_with_named`].
     pub async fn race_drained_named<T>(&self, futures: NamedFutures<T>) -> Result<T, JoinError>
     where
         T: Send + 'static,
@@ -4309,6 +4375,9 @@ impl Cx<cap::All> {
     /// is abandoned: every branch is cancelled by drop. The loser-*drain*
     /// guarantee applies to the ordinary win path; the timeout path mirrors
     /// [`Cx::race_timeout`] (cancel-on-drop, no post-timeout drain).
+    /// [`Cx::race_drained_with_timeout`] instead cancels and drains every
+    /// branch at the deadline, and its factories receive their child context
+    /// (see [`Cx::race_drained`] for the caller-context hazard).
     pub async fn race_drained_timeout<T>(
         &self,
         duration: Duration,
@@ -4718,6 +4787,76 @@ where
                 None => f(child),
             }
         })
+    }
+
+    /// Spawn a blocking closure with a region-owned retirement wait.
+    ///
+    /// The admitted runtime task stays alive until the blocking pool has
+    /// completed the closure and destroyed its captures. Cancellation before
+    /// the pool claims the closure prevents invocation; cancellation after
+    /// claim is cooperative through the closure's own inherited `Cx`. A
+    /// running closure's returned value is preserved, including a typed
+    /// cancellation result. The returned handle's `join` waits for actual
+    /// retirement even when its caller is cancelled.
+    ///
+    /// Dropping the handle requests cancellation without detaching ownership.
+    /// If it is dropped before result publication, destruction of an unclaimed
+    /// return value also runs on the pool and precedes retirement. Once a result
+    /// is published to a live handle, it belongs to that handle's caller.
+    ///
+    /// This requires an explicitly configured blocking pool. A queued cancelled
+    /// closure stays owned until a worker destroys its captures; if every pool
+    /// worker is blocked, region shutdown can time out while retaining the
+    /// unfinished task. Hard runtime teardown retains its existing semantics.
+    /// The existing [`Self::spawn_blocking`] soft-cancellation API is unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SpawnError::RuntimeUnavailable` without a blocking pool or
+    /// runtime spawn authority. Later admission refusal is observed by joining
+    /// the returned handle. No closure is executed inline as a fallback.
+    pub fn spawn_blocking_drained<F, R>(
+        &self,
+        f: F,
+    ) -> Result<crate::runtime::spawn_blocking::DrainedBlockingHandle<R>, crate::runtime::SpawnError>
+    where
+        F: FnOnce(Cx<Caps>) -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let pool = self.blocking_pool_handle()
+            .ok_or(crate::runtime::SpawnError::RuntimeUnavailable)?;
+        let state = crate::runtime::spawn_blocking::DrainedBlockingState::new();
+        let publication = Arc::clone(&state);
+        let task = self.spawn(move |child| {
+            crate::runtime::spawn_blocking::drive_drained_blocking(child, pool, f, publication)
+        })?;
+        Ok(crate::runtime::spawn_blocking::DrainedBlockingHandle::new(task, state))
+    }
+
+    /// Scope-targeting counterpart of [`Self::spawn_blocking_drained`].
+    ///
+    /// Region ownership and budgets come from `scope`; capability inheritance,
+    /// pool selection, cancellation and retirement have the same semantics as
+    /// the own-region method. Closing this scope waits for the actual blocking
+    /// closure and any unclaimed-result destruction.
+    pub fn spawn_blocking_drained_in<F, R, P>(
+        &self,
+        scope: &crate::cx::Scope<'_, P>,
+        f: F,
+    ) -> Result<crate::runtime::spawn_blocking::DrainedBlockingHandle<R>, crate::runtime::SpawnError>
+    where
+        P: crate::types::Policy,
+        F: FnOnce(Cx<Caps>) -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let pool = self.blocking_pool_handle()
+            .ok_or(crate::runtime::SpawnError::RuntimeUnavailable)?;
+        let state = crate::runtime::spawn_blocking::DrainedBlockingState::new();
+        let publication = Arc::clone(&state);
+        let task = self.spawn_in(scope, move |child| {
+            crate::runtime::spawn_blocking::drive_drained_blocking(child, pool, f, publication)
+        })?;
+        Ok(crate::runtime::spawn_blocking::DrainedBlockingHandle::new(task, state))
     }
 
     /// Spawns a `!Send` task into **this Cx's own region**, pinned to the
@@ -6483,6 +6622,28 @@ mod tests {
     }
 
     #[test]
+    fn cancel_with_reason_preserves_causes_and_stronger_cancellation() {
+        let cx = test_cx();
+        let deadline =
+            CancelReason::with_origin(CancelKind::Deadline, cx.region_id(), Time::from_secs(7))
+                .with_task(cx.task_id());
+        let reason = CancelReason::parent_cancelled()
+            .with_message("request response cancelled")
+            .with_cause(deadline.clone());
+        cx.cancel_with_reason(reason);
+        assert!(cx.is_cancel_requested());
+        assert_eq!(cx.root_cancel_cause(), Some(deadline));
+
+        cx.cancel_with_reason(CancelReason::shutdown());
+        let shutdown = cx.cancel_reason();
+        cx.cancel_with_reason(
+            CancelReason::parent_cancelled().with_cause(CancelReason::deadline()),
+        );
+        assert_eq!(cx.cancel_reason(), shutdown);
+        assert!(cx.cancelled_by(CancelKind::Shutdown));
+    }
+
+    #[test]
     fn local_cancel_apis_never_weaken_existing_reason() {
         let cx = test_cx();
         cx.cancel_fast(CancelKind::Shutdown);
@@ -7050,6 +7211,15 @@ mod tests {
             1,
             "clearing cancellation must not spuriously wake the cancel waker"
         );
+        cx.cancel_with_reason(
+            CancelReason::parent_cancelled().with_cause(CancelReason::deadline()),
+        );
+        assert_eq!(
+            wakes.load(Ordering::SeqCst),
+            2,
+            "a complete cancellation reason must also wake registered waiters"
+        );
+        assert!(cx.any_cause_is(CancelKind::Deadline));
     }
 
     #[test]

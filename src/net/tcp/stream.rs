@@ -438,6 +438,15 @@ impl TcpStream {
     }
 
     /// Connect with timeout.
+    ///
+    /// Resolves `addr` first; resolution observes cancellation but is not
+    /// counted against `timeout_duration`. The resolved addresses are then
+    /// tried one after another, and they share one `timeout_duration` budget.
+    /// An address that never answers, such as a black-holed route, can use the
+    /// whole budget before a later working address is tried. For hosts with
+    /// several addresses prefer [`crate::net::happy_eyeballs_connect`], which
+    /// races attempts with a per-attempt timeout and an overall deadline
+    /// (RFC 8305).
     pub async fn connect_timeout<A: ToSocketAddrs + Send + 'static>(
         addr: A,
         timeout_duration: Duration,

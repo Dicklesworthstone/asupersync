@@ -299,6 +299,10 @@ pub struct NativeQuicConnection {
     transport: QuicTransportMachine,
     streams: StreamTable,
     next_packet_numbers: [u64; 3],
+    /// First packet number eligible to use the current updated send key.
+    /// A subsequent locally initiated update needs a real ACK at this floor
+    /// or above; the peer's key-phase bit alone is not confirmation.
+    local_key_update_floor: Option<u64>,
     received_ack_trackers: [ReceivedPacketTracker; 3],
     migration_disabled: bool,
     /// Peer-advertised `ack_delay_exponent` (RFC 9000 §18.2; default 3). Scales
@@ -357,6 +361,11 @@ pub struct NativeQuicConnection {
     datagrams_dropped_on_send: u64,
     /// Peer-advertised maximum DATAGRAM frame size.
     max_datagram_frame_size: usize,
+    /// This endpoint's own advertised `max_datagram_frame_size` once a bind
+    /// path records it (`Some(0)` when DATAGRAM support was not offered).
+    /// `None` keeps accepting every DATAGRAM, for construction paths that do
+    /// not record their offer.
+    local_max_datagram_frame_size: Option<usize>,
     /// Largest frame payload that fits one protected 1-RTT packet on this
     /// connection (GH#66). Admission bounds DATAGRAM frames by the smaller of
     /// this and `max_datagram_frame_size`, so an admitted payload can never
@@ -481,6 +490,7 @@ impl NativeQuicConnection {
             transport: QuicTransportMachine::new(),
             streams,
             next_packet_numbers: [0, 0, 0],
+            local_key_update_floor: None,
             received_ack_trackers: [
                 ReceivedPacketTracker::default(),
                 ReceivedPacketTracker::default(),
@@ -510,8 +520,19 @@ impl NativeQuicConnection {
             datagrams_sent: 0,
             datagrams_dropped_on_send: 0,
             max_datagram_frame_size: config.max_datagram_frame_size,
+            local_max_datagram_frame_size: None,
             one_rtt_frame_budget: CONSERVATIVE_ONE_RTT_FRAME_BUDGET,
         }
+    }
+
+    /// Record the `max_datagram_frame_size` this endpoint advertised. From then
+    /// on a DATAGRAM frame the peer was never invited to send, or one larger
+    /// than the offer, is a protocol violation and is never queued (RFC 9221
+    /// §3). The TLS bind path in `udp_connection` is the production caller.
+    #[cfg(any(test, feature = "tls"))]
+    pub(crate) fn set_local_max_datagram_frame_size(&mut self, advertised: Option<u64>) {
+        self.local_max_datagram_frame_size =
+            Some(advertised.map_or(0, |max| usize::try_from(max).unwrap_or(usize::MAX)));
     }
 
     /// Bound outbound DATAGRAM admission by this connection's protected 1-RTT
@@ -1608,6 +1629,18 @@ impl NativeQuicConnection {
         cx: &Cx,
         params: &TransportParameters,
     ) -> Result<(), NativeQuicConnectionError> {
+        self.apply_peer_transport_parameters_with_datagram_cap(cx, params, usize::MAX)
+    }
+
+    /// Apply authenticated peer settings while retaining the UDP owner's local
+    /// DATAGRAM admission policy. Keep all validation and field assignment in
+    /// this shared path so live handshakes cannot omit ACK or migration state.
+    pub(crate) fn apply_peer_transport_parameters_with_datagram_cap(
+        &mut self,
+        cx: &Cx,
+        params: &TransportParameters,
+        local_datagram_cap: usize,
+    ) -> Result<(), NativeQuicConnectionError> {
         checkpoint(cx)?;
         // TransportParameters is publicly constructible, so callers can bypass
         // the wire parser. Reject invalid exponents before changing any state
@@ -1624,8 +1657,7 @@ impl NativeQuicConnection {
                 "peer max_ack_delay must be below 16384 milliseconds",
             ));
         }
-        self.migration_disabled = params.disable_active_migration;
-        self.max_datagram_frame_size = match params.max_datagram_frame_size {
+        let peer_datagram_cap = match params.max_datagram_frame_size {
             Some(max) => usize::try_from(max).map_err(|_| {
                 NativeQuicConnectionError::InvalidState(
                     "peer max_datagram_frame_size exceeds platform usize",
@@ -1633,6 +1665,9 @@ impl NativeQuicConnection {
             })?,
             None => 0,
         };
+        // Preflight every fallible conversion before committing any state.
+        self.migration_disabled = params.disable_active_migration;
+        self.max_datagram_frame_size = peer_datagram_cap.min(local_datagram_cap);
         // The validated exponent scales the ACK Delay field of 1-RTT ACKs.
         self.peer_ack_delay_exponent =
             u32::try_from(ack_delay_exponent).expect("validated QUIC ACK delay exponent");
@@ -2140,6 +2175,19 @@ impl NativeQuicConnection {
         Ok(evt)
     }
 
+    /// RFC 9001 section 6.1 eligibility for automatic local initiation.
+    /// Peer-triggered updates use the existing request/commit path directly:
+    /// they must update the send key before acknowledging the peer's packet.
+    pub(crate) fn can_initiate_local_key_update(&self) -> bool {
+        self.can_send_1rtt()
+            && self.tls.handshake_confirmed()
+            && self.local_key_update_floor.is_none_or(|floor| {
+                self.transport
+                    .largest_acked_packet_number(PacketNumberSpace::ApplicationData)
+                    .is_some_and(|acked| acked >= floor)
+            })
+    }
+
     /// Commit local key update once keys are installed.
     pub fn commit_local_key_update(
         &mut self,
@@ -2147,6 +2195,11 @@ impl NativeQuicConnection {
     ) -> Result<KeyUpdateEvent, NativeQuicConnectionError> {
         checkpoint(cx)?;
         let evt = self.tls.commit_local_key_update()?;
+        if matches!(evt, KeyUpdateEvent::LocalUpdateScheduled { .. }) {
+            self.local_key_update_floor = Some(
+                self.next_packet_numbers[packet_number_space_idx(PacketNumberSpace::ApplicationData)],
+            );
+        }
         Ok(evt)
     }
 
@@ -2522,13 +2575,49 @@ impl NativeQuicConnection {
                     .map_err(map_stream_table_error)?;
                 Ok(())
             }
+            QuicFrame::MaxStreams {
+                maximum_streams,
+                bidirectional,
+            } => {
+                if space != PacketNumberSpace::ApplicationData {
+                    return Err(NativeQuicConnectionError::InvalidState(
+                        "MAX_STREAMS requires application data packet space",
+                    ));
+                }
+                // Stream IDs have two type bits inside the 62-bit QUIC
+                // integer. A grant of 2^60 streams is valid, but any larger
+                // value would authorize an unencodable ID (RFC 9000 19.11).
+                // Validate before changing either direction's credit.
+                let maximum_streams = maximum_streams.value();
+                if maximum_streams > (1u64 << 60) {
+                    return Err(QuicFrameError::InvalidFormat(
+                        "MAX_STREAMS exceeds the 2^60 stream limit".to_owned(),
+                    )
+                    .into());
+                }
+                let direction = if *bidirectional {
+                    StreamDirection::Bidirectional
+                } else {
+                    StreamDirection::Unidirectional
+                };
+                self.streams
+                    .increase_local_stream_limit(direction, maximum_streams);
+                Ok(())
+            }
             QuicFrame::PathChallenge { data } => {
+                // Answer the newest challenge only: a peer that streams
+                // challenges faster than we send must not grow the control
+                // queue without bound (asupersync-bi2462.107).
+                self.pending_control_frames
+                    .retain(|pending| !matches!(pending, QuicFrame::PathResponse { .. }));
                 self.pending_control_frames
                     .push_back(QuicFrame::PathResponse { data: *data });
                 Ok(())
             }
             QuicFrame::PathResponse { .. } => {
-                self.peer_address_validated = true;
+                // This endpoint never sends PATH_CHALLENGE, so no response can
+                // match one; it must not validate the peer's address
+                // (RFC 9000 §8.2.3). The handshake validates it instead.
                 Ok(())
             }
             QuicFrame::ConnectionClose { error_code, .. } => {
@@ -2585,7 +2674,6 @@ impl NativeQuicConnection {
             QuicFrame::NewToken { .. }
             | QuicFrame::NewConnectionId { .. }
             | QuicFrame::RetireConnectionId { .. }
-            | QuicFrame::MaxStreams { .. }
             | QuicFrame::DataBlocked { .. }
             | QuicFrame::StreamsBlocked { .. } => Ok(()),
         }
@@ -2600,6 +2688,25 @@ impl NativeQuicConnection {
         checkpoint(cx)?;
         if frames.is_empty() {
             return Ok(());
+        }
+        if let Some(local_max) = self.local_max_datagram_frame_size {
+            if local_max == 0 {
+                return Err(NativeQuicConnectionError::InvalidState(
+                    "DATAGRAM frame received without an advertised max_datagram_frame_size",
+                ));
+            }
+            for frame in frames {
+                let QuicFrame::Datagram { data } = frame else {
+                    unreachable!("datagram frame run contained non-datagram frame");
+                };
+                // The limit covers the whole frame; one type byte is its
+                // smallest possible overhead.
+                if data.len().saturating_add(1) > local_max {
+                    return Err(NativeQuicConnectionError::InvalidState(
+                        "DATAGRAM frame exceeds the advertised max_datagram_frame_size",
+                    ));
+                }
+            }
         }
 
         let available = MAX_INBOUND_DATAGRAMS.saturating_sub(self.inbound_datagrams.len());
@@ -3766,6 +3873,53 @@ mod tests {
             conn.decode_ack_delay(PacketNumberSpace::ApplicationData, 0),
             0
         );
+    }
+
+    #[test]
+    fn peer_transport_parameter_refusal_preserves_all_negotiated_settings() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        let valid = TransportParameters {
+            ack_delay_exponent: Some(10),
+            max_ack_delay: Some(5),
+            max_datagram_frame_size: Some(1200),
+            disable_active_migration: true,
+            ..TransportParameters::default()
+        };
+        conn.apply_peer_transport_parameters_with_datagram_cap(&cx, &valid, 32)
+            .unwrap();
+        for invalid in [
+            TransportParameters {
+                ack_delay_exponent: Some(21),
+                ..TransportParameters::default()
+            },
+            TransportParameters {
+                max_ack_delay: Some(1 << 14),
+                ..TransportParameters::default()
+            },
+        ] {
+            assert!(conn.apply_peer_transport_parameters(&cx, &invalid).is_err());
+            assert!(conn.migration_disabled);
+            assert_eq!(conn.max_datagram_frame_size, 32);
+            assert_eq!(conn.peer_ack_delay_exponent, 10);
+            assert_eq!(conn.peer_max_ack_delay_micros, 5_000);
+        }
+        #[cfg(target_pointer_width = "32")]
+        {
+            let invalid = TransportParameters {
+                max_datagram_frame_size: Some(u64::from(u32::MAX) + 1),
+                ..TransportParameters::default()
+            };
+            assert!(conn.apply_peer_transport_parameters(&cx, &invalid).is_err());
+            assert!(conn.migration_disabled);
+            assert_eq!(conn.max_datagram_frame_size, 32);
+            assert_eq!(conn.peer_ack_delay_exponent, 10);
+            assert_eq!(conn.peer_max_ack_delay_micros, 5_000);
+        }
+        // The existing public API still replaces the peer cap without a UDP
+        // owner's optional local admission policy.
+        conn.apply_peer_transport_parameters(&cx, &valid).unwrap();
+        assert_eq!(conn.max_datagram_frame_size, 1200);
     }
 
     #[test]
@@ -5430,6 +5584,54 @@ mod tests {
         assert!(conn.validate_local_close_packet(&cx, 64, &frames).is_err());
     }
 
+    /// asupersync-bi2462.107 (N10): a PATH_CHALLENGE flood keeps one pending
+    /// PATH_RESPONSE (for the newest challenge), and a PATH_RESPONSE this
+    /// endpoint never solicited does not validate the peer's address.
+    #[test]
+    fn path_challenge_flood_is_bounded_and_unsolicited_response_does_not_validate() {
+        let cx = test_cx();
+        let space = PacketNumberSpace::ApplicationData;
+        let mut conn = established_server_conn();
+        for pn in 0..1_000_u64 {
+            let frames = [QuicFrame::PathChallenge {
+                data: pn.to_be_bytes(),
+            }];
+            let mut payload = BytesMut::new();
+            NativeQuicConnection::encode_frames(&frames, &mut payload).expect("encode");
+            conn.process_packet_payload(&cx, space, 10 + pn, &payload, 100 + pn)
+                .expect("challenge");
+        }
+        let responses: Vec<_> = conn
+            .pending_control_frames
+            .iter()
+            .filter(|frame| matches!(frame, QuicFrame::PathResponse { .. }))
+            .collect();
+        assert_eq!(
+            responses.len(),
+            1,
+            "one pending PATH_RESPONSE after 1000 challenges"
+        );
+        assert!(
+            matches!(responses[0], QuicFrame::PathResponse { data } if *data == 999_u64.to_be_bytes()),
+            "the pending response answers the newest challenge"
+        );
+        assert!(
+            conn.pending_control_frames.len() < 16,
+            "control queue stays bounded"
+        );
+
+        conn.peer_address_validated = false;
+        let frames = [QuicFrame::PathResponse { data: [9; 8] }];
+        let mut payload = BytesMut::new();
+        NativeQuicConnection::encode_frames(&frames, &mut payload).expect("encode");
+        conn.process_packet_payload(&cx, space, 2_000, &payload, 5_000)
+            .expect("unsolicited response is ignored");
+        assert!(
+            !conn.peer_address_validated,
+            "an unsolicited PATH_RESPONSE must not validate the peer"
+        );
+    }
+
     #[test]
     fn packet_peer_close_preserves_prefix_and_ignores_tail_without_ack() {
         let cx = test_cx();
@@ -6243,6 +6445,135 @@ mod tests {
     }
 
     #[test]
+    fn received_max_streams_extends_exhausted_connections_in_each_direction() {
+        let cx = test_cx();
+        for mut conn in [established_conn(), established_server_conn()] {
+            let role = conn.role;
+            for seq in 0..128 {
+                assert_eq!(
+                    conn.open_local_bidi(&cx).expect("initial bidi grant"),
+                    StreamId::local(role, StreamDirection::Bidirectional, seq)
+                );
+                conn.open_local_uni(&cx).expect("initial uni grant");
+            }
+            assert!(conn.open_local_bidi(&cx).is_err());
+            assert!(conn.open_local_uni(&cx).is_err());
+            let remote_limits = conn.streams().remote_stream_limits();
+            // Independent wire bytes: MAX_STREAMS_BIDI(256), followed by
+            // duplicate/reordered grants. These must not reduce the new limit.
+            conn.process_packet_payload(
+                &cx,
+                PacketNumberSpace::ApplicationData,
+                1,
+                &[0x12, 0x41, 0x00, 0x12, 0x41, 0x00, 0x12, 0x00],
+                100,
+            )
+            .expect("process peer bidi credit");
+            assert_eq!(conn.streams().len(), 256, "grant must allocate nothing");
+            assert!(
+                conn.open_local_uni(&cx).is_err(),
+                "uni is still exhausted"
+            );
+            for seq in 128..256 {
+                assert_eq!(
+                    conn.open_local_bidi(&cx).expect("renewed bidi credit"),
+                    StreamId::local(role, StreamDirection::Bidirectional, seq)
+                );
+            }
+            assert!(conn.open_local_bidi(&cx).is_err());
+
+            // A separate unidirectional grant authorizes exactly one new ID.
+            conn.process_packet_payload(
+                &cx,
+                PacketNumberSpace::ApplicationData,
+                2,
+                &[0x13, 0x40, 0x81],
+                200,
+            )
+            .expect("process peer uni credit");
+            assert_eq!(
+                conn.open_local_uni(&cx).expect("renewed uni credit"),
+                StreamId::local(role, StreamDirection::Unidirectional, 128)
+            );
+            assert!(conn.open_local_uni(&cx).is_err());
+            assert!(conn.open_local_bidi(&cx).is_err());
+            assert_eq!(conn.streams().remote_stream_limits(), remote_limits);
+        }
+    }
+
+    #[test]
+    fn received_max_streams_rejects_unencodable_grants_before_mutation() {
+        let cx = test_cx();
+        for frame_type in [0x12, 0x13] {
+            let mut conn = established_conn();
+            let error = conn
+                .process_packet_payload(
+                    &cx,
+                    PacketNumberSpace::ApplicationData,
+                    1,
+                    &[frame_type, 0xd0, 0, 0, 0, 0, 0, 0, 1], // 2^60 + 1
+                    100,
+                )
+                .expect_err("MAX_STREAMS above 2^60 is a frame error");
+            assert_eq!(
+                error,
+                NativeQuicConnectionError::Frame(QuicFrameError::InvalidFormat(
+                    "MAX_STREAMS exceeds the 2^60 stream limit".to_owned()
+                ))
+            );
+            assert!(
+                !conn.has_pending_control_frames(),
+                "rejected packet is not ACKed"
+            );
+            for _ in 0..128 {
+                conn.open_local_bidi(&cx)
+                    .expect("original bidi credit unchanged");
+                conn.open_local_uni(&cx)
+                    .expect("original uni credit unchanged");
+            }
+            assert!(conn.open_local_bidi(&cx).is_err());
+            assert!(conn.open_local_uni(&cx).is_err());
+
+            conn.process_packet_payload(
+                &cx,
+                PacketNumberSpace::ApplicationData,
+                2,
+                &[frame_type, 0xd0, 0, 0, 0, 0, 0, 0, 0], // 2^60 exactly
+                200,
+            )
+            .expect("largest encodable grant is valid");
+            let (renewed, unchanged) = if frame_type == 0x12 {
+                (conn.open_local_bidi(&cx), conn.open_local_uni(&cx))
+            } else {
+                (conn.open_local_uni(&cx), conn.open_local_bidi(&cx))
+            };
+            assert!(renewed.is_ok());
+            assert!(unchanged.is_err());
+        }
+    }
+
+    #[test]
+    fn received_max_streams_requires_application_packet_space() {
+        let cx = test_cx();
+        for space in [PacketNumberSpace::Initial, PacketNumberSpace::Handshake] {
+            let mut conn = established_conn();
+            let error = conn
+                .process_packet_payload(&cx, space, 1, &[0x12, 0x41, 0x00], 100)
+                .expect_err("MAX_STREAMS is not permitted in handshake packets");
+            assert_eq!(
+                error,
+                NativeQuicConnectionError::InvalidState(
+                    "MAX_STREAMS requires application data packet space"
+                )
+            );
+            for _ in 0..128 {
+                conn.open_local_bidi(&cx).expect("initial credit unchanged");
+            }
+            assert!(conn.open_local_bidi(&cx).is_err());
+        }
+    }
+
+    #[test]
     fn application_datagram_generation_coalesces_many_payloads_when_budget_allows() {
         let cx = test_cx();
         let mut conn = established_conn();
@@ -6475,6 +6806,55 @@ mod tests {
             conn.inbound_datagram_remaining_capacity(),
             MAX_INBOUND_DATAGRAMS
         );
+    }
+
+    #[test]
+    fn datagrams_beyond_the_local_offer_are_protocol_violations_and_never_queued() {
+        let cx = test_cx();
+        let space = PacketNumberSpace::ApplicationData;
+        let datagram = |len: usize| QuicFrame::Datagram {
+            data: Bytes::from(vec![7; len]),
+        };
+
+        // A construction path that records no offer keeps the old behaviour.
+        let mut unrecorded = established_conn();
+        unrecorded
+            .process_frame(&cx, &datagram(1), space)
+            .expect("an unrecorded offer keeps accepting DATAGRAM frames");
+        assert_eq!(unrecorded.pending_datagram_count(), 1);
+
+        // RFC 9221 §3: DATAGRAM support was never advertised.
+        let mut unadvertised = established_conn();
+        unadvertised.set_local_max_datagram_frame_size(None);
+        for _ in 0..1_000 {
+            let error = unadvertised
+                .process_frame(&cx, &datagram(1_000), space)
+                .expect_err("an unadvertised DATAGRAM is a protocol violation");
+            assert!(
+                matches!(&error, NativeQuicConnectionError::InvalidState(message)
+                    if message.contains("without an advertised")),
+                "{error:?}"
+            );
+        }
+        assert_eq!(unadvertised.pending_datagram_count(), 0);
+        assert_eq!(unadvertised.datagrams_received(), 0);
+
+        // An offer of 100 bytes covers the whole frame, type byte included.
+        let mut bounded = established_conn();
+        bounded.set_local_max_datagram_frame_size(Some(100));
+        bounded
+            .process_frame(&cx, &datagram(99), space)
+            .expect("a 100-byte frame fits a 100-byte offer");
+        let error = bounded
+            .process_frame(&cx, &datagram(100), space)
+            .expect_err("a frame larger than the offer is a protocol violation");
+        assert!(
+            matches!(&error, NativeQuicConnectionError::InvalidState(message)
+                if message.contains("exceeds the advertised")),
+            "{error:?}"
+        );
+        assert_eq!(bounded.pending_datagram_count(), 1);
+        assert_eq!(bounded.datagrams_received(), 1);
     }
 
     #[test]

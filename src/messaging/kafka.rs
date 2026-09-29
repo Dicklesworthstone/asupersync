@@ -26,6 +26,9 @@
 //! - Uncommitted transactions abort on cancellation
 
 use crate::cx::Cx;
+use crate::messaging::kafka_consumer::{
+    ConsumerGroupMetadata, PreparedTransactionOffsets, TopicPartitionOffset,
+};
 use crate::sync::Notify;
 use parking_lot::Mutex;
 #[cfg(feature = "kafka")]
@@ -96,6 +99,58 @@ pub enum KafkaError {
     FeatureDisabled,
 }
 
+/// Native failure from transactional consumer-offset enrollment or its commit.
+///
+/// This is carried inside the existing [`KafkaError::Io`] variant to preserve
+/// exhaustive matches on `KafkaError`. Use [`KafkaError::transaction_failure`]
+/// to inspect it. The standard error source chain retains the native error.
+/// Flags describe librdkafka's verdict; the transaction owner still requires
+/// abort recovery after any failed enrollment, including a retriable failure.
+#[derive(Debug)]
+pub struct KafkaTransactionFailure {
+    retriable: bool,
+    abort_required: bool,
+    fatal: bool,
+    source: Box<dyn std::error::Error + Send + Sync>,
+}
+
+impl KafkaTransactionFailure {
+    /// Whether the native operation was classified as retriable. This does not
+    /// authorize retrying a transaction already fenced for abort recovery.
+    #[must_use]
+    pub const fn is_retriable(&self) -> bool {
+        self.retriable
+    }
+
+    /// Whether librdkafka explicitly requires aborting the transaction.
+    #[must_use]
+    pub const fn requires_abort(&self) -> bool {
+        self.abort_required
+    }
+
+    /// Whether the producer instance is unusable and must be recreated.
+    #[must_use]
+    pub const fn is_fatal(&self) -> bool {
+        self.fatal
+    }
+}
+
+impl fmt::Display for KafkaTransactionFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "transactional offset operation failed (retriable={}, abort_required={}, fatal={}): {}",
+            self.retriable, self.abort_required, self.fatal, self.source
+        )
+    }
+}
+
+impl std::error::Error for KafkaTransactionFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
 impl fmt::Display for KafkaError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -138,9 +193,22 @@ impl From<io::Error> for KafkaError {
 }
 
 impl KafkaError {
+    /// Inspect a native transactional-offset failure without parsing its text.
+    /// Ordinary I/O errors and the legacy producer APIs return `None`.
+    #[must_use]
+    pub fn transaction_failure(&self) -> Option<&KafkaTransactionFailure> {
+        match self {
+            Self::Io(error) => error.get_ref()?.downcast_ref(),
+            _ => None,
+        }
+    }
+
     /// Whether this error is transient and may succeed on retry.
     #[must_use]
     pub fn is_transient(&self) -> bool {
+        if let Some(error) = self.transaction_failure() {
+            return error.is_retriable() && !error.requires_abort() && !error.is_fatal();
+        }
         matches!(
             self,
             Self::Io(_) | Self::Broker(_) | Self::QueueFull | Self::Transaction(_)
@@ -152,6 +220,9 @@ impl KafkaError {
     /// Whether this error indicates a connection-level failure.
     #[must_use]
     pub fn is_connection_error(&self) -> bool {
+        if self.transaction_failure().is_some() {
+            return false;
+        }
         matches!(self, Self::Io(_) | Self::Broker(_))
     }
 
@@ -170,6 +241,11 @@ impl KafkaError {
     /// Whether the operation should be retried.
     #[must_use]
     pub fn is_retryable(&self) -> bool {
+        // The native flag alone is insufficient: this owner conservatively
+        // fences every failed enrollment/commit until abort recovery completes.
+        if self.transaction_failure().is_some() {
+            return false;
+        }
         matches!(self, Self::Io(_) | Self::Broker(_) | Self::QueueFull)
         // Note: Authentication errors are intentionally NOT retryable.
         // Malformed SASL responses should fail fast, not retry with credentials.
@@ -376,6 +452,24 @@ fn map_rdkafka_error(err: &RdKafkaError, message: Option<&BorrowedMessage<'_>>) 
 }
 
 #[cfg(feature = "kafka")]
+fn map_transaction_failure(error: RdKafkaError) -> KafkaError {
+    let (retriable, abort_required, fatal) = match &error {
+        RdKafkaError::Transaction(native) => (
+            native.is_retriable(),
+            native.txn_requires_abort(),
+            native.is_fatal(),
+        ),
+        _ => (false, false, false),
+    };
+    KafkaError::Io(io::Error::other(KafkaTransactionFailure {
+        retriable,
+        abort_required,
+        fatal,
+        source: Box::new(error),
+    }))
+}
+
+#[cfg(feature = "kafka")]
 pub(super) fn redacted_config_message(result: rdkafka::types::RDKafkaConfRes, key: &str) -> String {
     // Both the raw value and librdkafka's free-form description can contain
     // credentials. Keep only the typed result and the diagnostic property name.
@@ -474,7 +568,7 @@ fn build_producer(
 }
 
 #[cfg(any(feature = "kafka", test))]
-async fn run_kafka_blocking<F, T>(cx: &Cx, f: F) -> T
+pub(crate) async fn run_kafka_blocking<F, T>(cx: &Cx, f: F) -> T
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
@@ -1606,6 +1700,7 @@ struct TransactionalProducerState {
     generation: u64,
     operation_in_flight: bool,
     abandoned: bool,
+    pending_offsets: Option<PreparedTransactionOffsets>,
     #[cfg(feature = "kafka")]
     initialized: bool,
     #[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
@@ -2090,6 +2185,7 @@ impl TransactionalProducer {
                 })?;
                 state.phase = TransactionPhase::Active;
                 state.abandoned = false;
+                state.pending_offsets = None;
                 #[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
                 state.staged_records.clear();
                 Ok(state.generation)
@@ -2134,6 +2230,7 @@ impl TransactionalProducer {
             return;
         }
         state.phase = TransactionPhase::Idle;
+        state.pending_offsets = None;
         #[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
         state.staged_records.clear();
     }
@@ -2152,6 +2249,7 @@ impl TransactionalProducer {
             TransactionPhase::Active | TransactionPhase::Finalizing
         ) {
             state.phase = TransactionPhase::NeedsAbortRecovery;
+            state.pending_offsets = None;
             #[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
             state.staged_records.clear();
         }
@@ -2175,6 +2273,7 @@ impl TransactionalProducer {
                 state: Arc::clone(&self.state),
                 generation: state.generation,
                 operation: TransactionOperation::Initialize,
+                offsets: None,
                 started: false,
                 completed: false,
             }
@@ -2208,6 +2307,7 @@ impl TransactionalProducer {
             state: Arc::clone(&self.state),
             generation: state.generation,
             operation: TransactionOperation::Recover,
+            offsets: None,
             #[cfg(any(feature = "kafka", test))]
             started: false,
             completed: false,
@@ -2248,6 +2348,10 @@ enum TransactionOperation {
     Begin,
     #[cfg(any(feature = "kafka", test))]
     Finalize,
+    #[cfg(any(feature = "kafka", test))]
+    SendOffsets,
+    #[cfg(any(feature = "kafka", test))]
+    Commit,
     Recover,
 }
 
@@ -2257,6 +2361,8 @@ struct TransactionOperationGuard {
     state: Arc<Mutex<TransactionalProducerState>>,
     generation: u64,
     operation: TransactionOperation,
+    #[cfg_attr(not(any(feature = "kafka", test)), allow(dead_code))]
+    offsets: Option<PreparedTransactionOffsets>,
     #[cfg(any(feature = "kafka", test))]
     started: bool,
     completed: bool,
@@ -2274,7 +2380,10 @@ impl TransactionOperationGuard {
             TransactionOperation::Recover => TransactionPhase::NeedsAbortRecovery,
             #[cfg(feature = "kafka")]
             TransactionOperation::Initialize => TransactionPhase::Idle,
-            TransactionOperation::Begin | TransactionOperation::Finalize => {
+            TransactionOperation::Begin
+            | TransactionOperation::Finalize
+            | TransactionOperation::SendOffsets
+            | TransactionOperation::Commit => {
                 TransactionPhase::Active
             }
         };
@@ -2289,12 +2398,47 @@ impl TransactionOperationGuard {
             state: Arc::clone(owner),
             generation,
             operation,
+            offsets: None,
+            started: false,
+            completed: false,
+        })
+    }
+
+    #[cfg(any(feature = "kafka", test))]
+    fn claim_offsets(
+        owner: &Arc<Mutex<TransactionalProducerState>>,
+        generation: u64,
+        offsets: PreparedTransactionOffsets,
+    ) -> Result<Self, KafkaError> {
+        let mut state = owner.lock();
+        if state.generation != generation
+            || state.operation_in_flight
+            || state.phase != TransactionPhase::Active
+        {
+            return Err(KafkaError::Transaction("transaction is not active".into()));
+        }
+        // Validate the whole new enrollment before claiming any native effect.
+        // A bad second batch leaves the already-enrolled transaction intact.
+        let offsets = if let Some(previous) = &state.pending_offsets {
+            previous.merge(&offsets)?
+        } else {
+            offsets
+        };
+        state.operation_in_flight = true;
+        state.phase = TransactionPhase::Finalizing;
+        Ok(Self {
+            state: Arc::clone(owner),
+            generation,
+            operation: TransactionOperation::SendOffsets,
+            offsets: Some(offsets),
             started: false,
             completed: false,
         })
     }
 
     fn complete(mut self, result: Result<(), KafkaError>) -> Result<(), KafkaError> {
+        #[allow(unused_mut)]
+        let mut committed_offsets: Option<PreparedTransactionOffsets> = None;
         {
             let mut state = self.state.lock();
             if state.generation == self.generation && state.operation_in_flight {
@@ -2305,7 +2449,9 @@ impl TransactionOperationGuard {
                         TransactionPhase::Idle
                     }
                     #[cfg(any(feature = "kafka", test))]
-                    TransactionOperation::Begin if result.is_ok() => {
+                    TransactionOperation::Begin | TransactionOperation::SendOffsets
+                        if result.is_ok() =>
+                    {
                         if state.abandoned {
                             TransactionPhase::NeedsAbortRecovery
                         } else {
@@ -2317,11 +2463,41 @@ impl TransactionOperationGuard {
                     _ if result.is_ok() => TransactionPhase::Idle,
                     _ => TransactionPhase::NeedsAbortRecovery,
                 };
-                state.operation_in_flight = false;
+                #[cfg(any(feature = "kafka", test))]
+                if matches!(self.operation, TransactionOperation::SendOffsets)
+                    && state.phase == TransactionPhase::Active
+                {
+                    state.pending_offsets = self.offsets.take();
+                }
+                #[cfg(any(feature = "kafka", test))]
+                if matches!(self.operation, TransactionOperation::Commit) && result.is_ok() {
+                    committed_offsets = state.pending_offsets.take();
+                }
+                if state.phase != TransactionPhase::Active {
+                    state.pending_offsets = None;
+                }
+                if committed_offsets.is_some() {
+                    // Keep admission fenced until the matching consumer cache
+                    // has caught up with the acknowledged broker commit.
+                    state.phase = TransactionPhase::Finalizing;
+                } else {
+                    state.operation_in_flight = false;
+                }
                 #[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
                 if state.phase != TransactionPhase::Active {
                     state.staged_records.clear();
                 }
+            }
+        }
+        // Never acquire consumer state while holding producer state: metadata
+        // validation and transaction admission take these locks independently.
+        // Publication runs on the native worker even if its async waiter left.
+        if let Some(offsets) = committed_offsets {
+            offsets.publish_committed();
+            let mut state = self.state.lock();
+            if state.generation == self.generation && state.operation_in_flight {
+                state.phase = TransactionPhase::Idle;
+                state.operation_in_flight = false;
             }
         }
         self.completed = true;
@@ -2346,6 +2522,7 @@ impl Drop for TransactionOperationGuard {
             TransactionOperation::Begin if !self.started => TransactionPhase::Idle,
             _ => TransactionPhase::NeedsAbortRecovery,
         };
+        state.pending_offsets = None;
     }
 }
 
@@ -2477,9 +2654,105 @@ impl Transaction<'_> {
         }
     }
 
+    /// Enroll consumed offsets in this producer transaction.
+    ///
+    /// Each offset is the next record to consume, usually the last processed
+    /// offset plus one. Capture `metadata` with
+    /// [`super::kafka_consumer::KafkaConsumer::group_metadata`] after polling.
+    /// Automatic consumer commits must be disabled, and the application must
+    /// not separately commit these offsets. Output records and enrolled offsets
+    /// become committed only when [`Self::commit`] succeeds at the broker.
+    /// Aborting discards both. Read downstream output with `read_committed`.
+    ///
+    /// Repeated calls may advance offsets or add assigned partitions using the
+    /// same metadata snapshot (or a clone). They cannot regress an enrolled
+    /// offset, switch groups, or replace the membership snapshot mid-transaction.
+    /// Capture a new snapshot after a rebalance and begin a new transaction.
+    ///
+    /// The bounded native call runs on the existing blocking executor. A dropped
+    /// waiter does not stop librdkafka: the producer remains occupied until the
+    /// actual native completion, then requires abort recovery before reuse.
+    /// An enrollment error also requires abort recovery. Drop this transaction
+    /// and use [`TransactionalProducer::begin_transaction`] to perform that
+    /// recovery; a fatal/fenced producer must be recreated if recovery fails.
+    /// Input validation errors before enrollment (an empty, duplicate,
+    /// regressing or unassigned offset) leave the transaction usable. A
+    /// snapshot whose consumer was closed, dropped or rebalanced requires abort
+    /// recovery, because this transaction can never enroll its offsets.
+    ///
+    /// Without the `kafka` feature this operation always returns
+    /// [`KafkaError::FeatureDisabled`], including deterministic broker harnesses.
+    #[allow(unused_variables, clippy::unused_async)]
+    pub async fn send_offsets_to_transaction(
+        &self,
+        cx: &Cx,
+        offsets: &[TopicPartitionOffset],
+        metadata: &ConsumerGroupMetadata,
+    ) -> Result<(), KafkaError> {
+        cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+        self.producer.ensure_active_transaction(self.generation)?;
+
+        #[cfg(feature = "kafka")]
+        {
+            metadata.native()?;
+            let offsets = match metadata.prepare_offsets(offsets) {
+                Ok(offsets) => offsets,
+                Err(error) => {
+                    // A stale, closed or dropped consumer can never enroll
+                    // offsets in this transaction. Committing it without them
+                    // would publish the output while the input is re-read
+                    // after a restart, so it now requires abort recovery, as
+                    // the in-worker membership check already does
+                    // (br-asupersync-csyp1h). Input-shape errors stay local.
+                    if metadata.check_membership().is_err() {
+                        self.producer.mark_transaction_dropped(self.generation);
+                    }
+                    return Err(error);
+                }
+            };
+            let operation = TransactionOperationGuard::claim_offsets(
+                &self.producer.state,
+                self.generation,
+                offsets,
+            )?;
+            let offsets = operation.offsets.as_ref().expect("claimed offset enrollment").clone();
+            let producer = self.producer.producer.clone();
+            let timeout = self.producer.config.transaction_timeout;
+            // This also covers native success before a completed waiter is
+            // dropped without observing its result. A stale guard cannot poison
+            // a later transaction generation.
+            let mut enrollment = TransactionActivationGuard::armed(self.producer);
+            let result = run_owned_transaction_op(cx, operation, move || {
+                offsets.validate_current()?;
+                let mut partitions = rdkafka::topic_partition_list::TopicPartitionList::new();
+                for ((topic, partition), offset) in &offsets.offsets {
+                    partitions
+                        .add_partition_offset(
+                            topic,
+                            *partition,
+                            rdkafka::topic_partition_list::Offset::Offset(*offset),
+                        )
+                        .map_err(|error| map_rdkafka_error(&error, None))?;
+                }
+                producer
+                    .send_offsets_to_transaction(&partitions, offsets.metadata.native()?, timeout)
+                    .map_err(map_transaction_failure)
+            })
+            .await;
+            enrollment.disarm();
+            result
+        }
+        #[cfg(not(feature = "kafka"))]
+        {
+            Err(KafkaError::FeatureDisabled)
+        }
+    }
+
     /// Commit the transaction.
     ///
-    /// Atomically publishes all messages sent within this transaction.
+    /// Atomically publishes all messages and consumer offsets enrolled in this
+    /// transaction. The consumer's local offset cache changes only after native
+    /// success, and only if its captured assignment is still current.
     /// Once the broker operation starts, dropping this future does not undo it.
     /// The producer remains occupied until background completion; cancellation
     /// is not evidence that the transaction was aborted.
@@ -2490,10 +2763,11 @@ impl Transaction<'_> {
 
         #[cfg(feature = "kafka")]
         {
+            let enrolled_offsets = self.producer.state.lock().pending_offsets.is_some();
             let operation = TransactionOperationGuard::claim(
                 &self.producer.state,
                 self.generation,
-                TransactionOperation::Finalize,
+                TransactionOperation::Commit,
             )?;
             self.finished = true; // The operation guard now owns cleanup.
             run_owned_transaction_op(cx, operation, {
@@ -2502,7 +2776,13 @@ impl Transaction<'_> {
                 move || {
                     producer
                         .commit_transaction(timeout)
-                        .map_err(|err| map_rdkafka_error(&err, None))
+                        .map_err(|error| {
+                            if enrolled_offsets {
+                                map_transaction_failure(error)
+                            } else {
+                                map_rdkafka_error(&error, None)
+                            }
+                        })
                 }
             })
             .await?;
@@ -3728,6 +4008,331 @@ mod tests {
     }
 
     #[test]
+    fn transaction_offset_failure_flags_preserve_source_and_safe_retry_classification() {
+        use std::error::Error;
+        for (retriable, abort_required, fatal) in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+            (true, true, true),
+            (false, false, false),
+        ] {
+            let error = KafkaError::Io(io::Error::other(KafkaTransactionFailure {
+                retriable,
+                abort_required,
+                fatal,
+                source: Box::new(io::Error::other("native offset error sentinel")),
+            }));
+            let failure = error.transaction_failure().unwrap();
+            assert_eq!(failure.is_retriable(), retriable);
+            assert_eq!(failure.requires_abort(), abort_required);
+            assert_eq!(failure.is_fatal(), fatal);
+            assert_eq!(error.is_transient(), retriable && !abort_required && !fatal);
+            assert!(!error.is_retryable(), "owner needs abort recovery before reuse");
+            assert!(!error.is_connection_error(), "Io is only the compatible carrier");
+            assert_eq!(failure.source().unwrap().to_string(), "native offset error sentinel");
+            assert!(error.source().is_some());
+        }
+        let legacy = KafkaError::Io(io::Error::other("legacy socket error"));
+        assert!(legacy.transaction_failure().is_none());
+        assert!(legacy.is_transient() && legacy.is_retryable() && legacy.is_connection_error());
+    }
+
+    #[test]
+    fn transaction_offset_enrollment_commit_abort_and_error_publish_exactly_once() {
+        use crate::messaging::kafka_consumer::{ConsumerConfig, KafkaConsumer};
+        crate::test_utils::run_test_with_cx(|cx| async move {
+            let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
+            consumer.subscribe(&cx, &["offset-input", "offset-other"]).await.unwrap();
+            let metadata = consumer.group_metadata_for_state_test();
+            for finish in ["commit", "abort", "enrollment-error", "commit-error", "drop"] {
+                let producer = transaction_test_producer();
+                let generation = producer.activate_transaction().unwrap();
+                let prior = consumer.committed_offset("offset-input", 0);
+                let next = prior.unwrap_or(0) + 1;
+                let first = metadata.prepare_offsets(&[
+                    TopicPartitionOffset::new("offset-input", 0, next),
+                ]).unwrap();
+                let mut enrollment = TransactionOperationGuard::claim_offsets(
+                    &producer.state, generation, first,
+                ).unwrap();
+                assert_eq!(producer.state.lock().phase, TransactionPhase::Finalizing);
+                assert_eq!(consumer.committed_offset("offset-input", 0), prior);
+                enrollment.started = true;
+                if finish == "enrollment-error" {
+                    assert!(enrollment.complete(Err(KafkaError::Broker("enrollment failed".into()))).is_err());
+                    assert_eq!(producer.state.lock().phase, TransactionPhase::NeedsAbortRecovery);
+                    assert!(producer.state.lock().pending_offsets.is_none());
+                } else {
+                    enrollment.complete(Ok(())).unwrap();
+                    assert_eq!(producer.state.lock().phase, TransactionPhase::Active);
+                    let second = metadata.clone().prepare_offsets(&[
+                        TopicPartitionOffset::new("offset-input", 0, next + 1),
+                        TopicPartitionOffset::new("offset-other", 0, 1),
+                    ]).unwrap();
+                    TransactionOperationGuard::claim_offsets(&producer.state, generation, second)
+                        .unwrap().complete(Ok(())).unwrap();
+                    let regression = metadata.prepare_offsets(&[
+                        TopicPartitionOffset::new("offset-input", 0, next),
+                    ]).unwrap();
+                    assert!(TransactionOperationGuard::claim_offsets(
+                        &producer.state, generation, regression,
+                    ).is_err());
+                    assert_eq!(producer.state.lock().phase, TransactionPhase::Active,
+                        "local validation must not poison successful enrollment");
+                    assert_eq!(consumer.committed_offset("offset-input", 0), prior);
+                    if finish == "drop" {
+                        producer.mark_transaction_dropped(generation);
+                    } else {
+                        let kind = if finish == "abort" {
+                            TransactionOperation::Finalize
+                        } else {
+                            TransactionOperation::Commit
+                        };
+                        let operation = TransactionOperationGuard::claim(&producer.state, generation, kind).unwrap();
+                        let outcome = if finish == "commit-error" {
+                            Err(KafkaError::Broker("commit failed".into()))
+                        } else {
+                            Ok(())
+                        };
+                        let result = operation.complete(outcome);
+                        assert_eq!(result.is_ok(), finish != "commit-error");
+                    }
+                }
+                assert!(producer.state.lock().pending_offsets.is_none(), "terminal {finish}");
+                if finish == "commit" {
+                    assert_eq!(consumer.committed_offset("offset-input", 0), Some(next + 1));
+                    assert_eq!(consumer.committed_offset("offset-other", 0), Some(1));
+                } else {
+                    assert_eq!(consumer.committed_offset("offset-input", 0), prior, "terminal {finish}");
+                }
+            }
+            consumer.close(&cx).await.unwrap();
+        });
+    }
+
+    #[cfg(not(feature = "kafka"))]
+    #[test]
+    fn transaction_offsets_refuse_deterministic_broker_atomicity() {
+        use crate::messaging::kafka_consumer::{ConsumerConfig, KafkaConsumer};
+        crate::test_utils::run_test_with_cx(|cx| async move {
+            let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
+            consumer.subscribe(&cx, &["offset-input"]).await.unwrap();
+            let metadata = consumer.group_metadata_for_state_test();
+            let producer = transaction_test_producer();
+            let transaction = producer.begin_transaction(&cx).await.unwrap();
+            assert!(matches!(transaction.send_offsets_to_transaction(
+                &cx, &[TopicPartitionOffset::new("offset-input", 0, 1)], &metadata,
+            ).await, Err(KafkaError::FeatureDisabled)));
+            assert!(producer.state.lock().pending_offsets.is_none());
+            transaction.abort(&cx).await.unwrap();
+            assert_eq!(consumer.committed_offset("offset-input", 0), None);
+            consumer.close(&cx).await.unwrap();
+        });
+    }
+
+    #[test]
+    fn transaction_offsets_native_waiter_drop_keeps_worker_owned_until_retirement() {
+        use crate::messaging::kafka_consumer::{ConsumerConfig, KafkaConsumer};
+        use std::future::Future;
+        for multithread in [false, true] {
+            for finish_before_drop in [false, true] {
+                let builder = if multithread {
+                    crate::runtime::RuntimeBuilder::new().worker_threads(2)
+                } else {
+                    crate::runtime::RuntimeBuilder::current_thread()
+                };
+                let runtime = builder.blocking_threads(1, 2).build().unwrap();
+                let owner = runtime.request_cx_with_budget(Budget::INFINITE);
+                runtime.block_on_with_cx(owner.clone(), async move {
+                    let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
+                    consumer.subscribe(&owner, &["offset-input"]).await.unwrap();
+                    let metadata = consumer.group_metadata_for_state_test();
+                    let producer = transaction_test_producer();
+                    let generation = producer.activate_transaction().unwrap();
+                    let offsets = metadata.prepare_offsets(&[
+                        TopicPartitionOffset::new("offset-input", 0, 5),
+                    ]).unwrap();
+                    let operation = TransactionOperationGuard::claim_offsets(&producer.state, generation, offsets).unwrap();
+                    let (entered, mut wait_entered) = crate::channel::oneshot::channel();
+                    let (release, wait_release) = std::sync::mpsc::channel();
+                    let mut enrollment = Box::pin(async {
+                        let mut waiter = TransactionActivationGuard::armed(&producer);
+                        let result = run_owned_transaction_op(&owner, operation, move || {
+                            entered.send_blocking(std::thread::current().id()).unwrap();
+                            wait_release.recv_timeout(Duration::from_secs(10))
+                                .map_err(|error| KafkaError::Transaction(error.to_string()))?;
+                            Ok(())
+                        }).await;
+                        waiter.disarm();
+                        result
+                    });
+                    std::future::poll_fn(|task_cx| {
+                        assert!(enrollment.as_mut().poll(task_cx).is_pending());
+                        std::task::Poll::Ready(())
+                    }).await;
+                    let worker = wait_entered.recv(&owner).await.unwrap();
+                    assert_ne!(worker, std::thread::current().id());
+                    assert_eq!(producer.state.lock().phase, TransactionPhase::Finalizing);
+                    assert!(producer.state.lock().operation_in_flight);
+                    let mut sibling = owner.spawn(|_| async { 73 }).unwrap();
+                    assert_eq!(sibling.join(&owner).await.unwrap(), 73, "native call must not pin executor");
+                    if finish_before_drop {
+                        release.send(()).unwrap();
+                        let start = std::time::Instant::now();
+                        while producer.state.lock().operation_in_flight {
+                            assert!(start.elapsed() < Duration::from_secs(5));
+                            crate::runtime::yield_now::yield_now().await;
+                        }
+                        assert_eq!(producer.state.lock().phase, TransactionPhase::Active);
+                    }
+                    drop(enrollment);
+                    if !finish_before_drop {
+                        assert_eq!(producer.state.lock().phase, TransactionPhase::Finalizing);
+                        assert!(producer.claim_recovery().is_none());
+                        assert!(producer.activate_transaction().is_err());
+                        release.send(()).unwrap();
+                    }
+                    let start = std::time::Instant::now();
+                    while producer.state.lock().operation_in_flight {
+                        assert!(start.elapsed() < Duration::from_secs(5));
+                        crate::runtime::yield_now::yield_now().await;
+                    }
+                    assert_eq!(producer.state.lock().phase, TransactionPhase::NeedsAbortRecovery);
+                    assert!(producer.state.lock().pending_offsets.is_none());
+                    assert_eq!(consumer.committed_offset("offset-input", 0), None);
+                    producer.claim_recovery().unwrap().complete(Ok(())).unwrap();
+                    assert_eq!(producer.activate_transaction().unwrap(), generation + 1);
+                    consumer.close(&owner).await.unwrap();
+                    eprintln!("KAFKA_OFFSET_RETIRE multithread={multithread} completed_before_drop={finish_before_drop} committed=false retired=true");
+                });
+                assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+            }
+        }
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn transaction_offsets_incumbent_protocol_enrollment_and_failures() {
+        use crate::messaging::kafka_consumer::{AutoOffsetReset, ConsumerConfig, KafkaConsumer};
+        use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
+
+        // This is an incumbent protocol fixture, not broker atomicity proof:
+        // librdkafka 2.12.1's mock handlers acknowledge TxnOffsetCommit/EndTxn
+        // but do not persist transactional offsets or implement read_committed.
+        // The opt-in real-broker test verifies restart and output visibility.
+        let cluster = rdkafka::mocking::MockCluster::new(1).unwrap();
+        let input = "transaction-offset-input";
+        let output = "transaction-offset-output";
+        cluster.create_topic(input, 1, 1).unwrap();
+        cluster.create_topic(output, 1, 1).unwrap();
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .blocking_threads(1, 2)
+            .build()
+            .unwrap();
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        runtime.block_on_with_cx(cx.clone(), async {
+            let brokers = vec![cluster.bootstrap_servers()];
+            let seed = KafkaProducer::new(ProducerConfig::new(brokers.clone())).unwrap();
+            for payload in [b"one", b"two", b"end"] {
+                seed.send(&cx, input, None, payload, Some(0)).await.unwrap();
+            }
+            let consumer = KafkaConsumer::new(
+                ConsumerConfig::new(brokers.clone(), "transaction-offset-group")
+                    .force_real_kafka(true)
+                    .enable_auto_commit(false)
+                    .auto_offset_reset(AutoOffsetReset::Earliest)
+                    .with_property("group.protocol", "classic"),
+            ).unwrap();
+            consumer.subscribe(&cx, &[input]).await.unwrap();
+            let started = std::time::Instant::now();
+            let mut consumed = Vec::new();
+            while consumed.len() < 3 && started.elapsed() < Duration::from_secs(30) {
+                if let Some(record) = consumer.poll(&cx, Duration::from_millis(100)).await.unwrap() {
+                    consumed.push(record.offset);
+                }
+            }
+            assert_eq!(consumed, vec![0, 1, 2], "native input consumption witness");
+            let metadata = consumer.group_metadata(&cx).await.unwrap();
+            assert_eq!(metadata.group_id(), "transaction-offset-group");
+            let producer = TransactionalProducer::new(
+                TransactionalConfig::new(ProducerConfig::new(brokers.clone()), "offset-protocol-test".into())
+                    .transaction_timeout(Duration::from_secs(10)),
+            ).unwrap();
+            let offsets = |next| [TopicPartitionOffset::new(input, 0, next)];
+
+            let transaction = producer.begin_transaction(&cx).await.unwrap();
+            transaction.send(&cx, output, Some(b"same-partition"), b"committed").await.unwrap();
+            // The incumbent retries this coordinator error within the owned
+            // native call; admission remains occupied until its terminal return.
+            cluster.request_errors(RDKafkaApiKey::TxnOffsetCommit, &[
+                RDKafkaRespErr::RD_KAFKA_RESP_ERR_NOT_COORDINATOR,
+            ]);
+            transaction.send_offsets_to_transaction(&cx, &offsets(1), &metadata).await.unwrap();
+            transaction.send_offsets_to_transaction(&cx, &offsets(2), &metadata.clone()).await.unwrap();
+            assert_eq!(producer.state.lock().phase, TransactionPhase::Active);
+            assert_eq!(consumer.committed_offset(input, 0), None);
+            transaction.commit(&cx).await.unwrap();
+            assert_eq!(consumer.committed_offset(input, 0), Some(2));
+
+            let transaction = producer.begin_transaction(&cx).await.unwrap();
+            transaction.send(&cx, output, Some(b"same-partition"), b"aborted").await.unwrap();
+            transaction.send_offsets_to_transaction(&cx, &offsets(3), &metadata).await.unwrap();
+            transaction.abort(&cx).await.unwrap();
+            assert_eq!(consumer.committed_offset(input, 0), Some(2));
+
+            let transaction = producer.begin_transaction(&cx).await.unwrap();
+            cluster.request_errors(RDKafkaApiKey::TxnOffsetCommit, &[
+                RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN_MEMBER_ID,
+            ]);
+            let error = transaction.send_offsets_to_transaction(&cx, &offsets(3), &metadata)
+                .await.unwrap_err();
+            let failure = error.transaction_failure().expect("native error source retained");
+            assert!(failure.requires_abort());
+            assert!(!failure.is_fatal());
+            assert!(!error.is_retryable());
+            assert_eq!(producer.state.lock().phase, TransactionPhase::NeedsAbortRecovery);
+            assert!(producer.state.lock().pending_offsets.is_none());
+            assert_eq!(consumer.committed_offset(input, 0), Some(2));
+            drop(transaction);
+
+            // Beginning again must complete a native abort recovery first.
+            let transaction = producer.begin_transaction(&cx).await.unwrap();
+            transaction.send(&cx, output, Some(b"same-partition"), b"fenced").await.unwrap();
+            transaction.send_offsets_to_transaction(&cx, &offsets(3), &metadata).await.unwrap();
+            cluster.request_errors(RDKafkaApiKey::EndTxn, &[
+                RDKafkaRespErr::RD_KAFKA_RESP_ERR_PRODUCER_FENCED,
+            ]);
+            let error = transaction.commit(&cx).await.unwrap_err();
+            assert!(error.transaction_failure().unwrap().is_fatal());
+            assert!(!error.is_retryable() && !error.is_connection_error());
+            assert_eq!(producer.state.lock().phase, TransactionPhase::NeedsAbortRecovery);
+            assert_eq!(consumer.committed_offset(input, 0), Some(2));
+            assert!(producer.begin_transaction(&cx).await.is_err(), "fatal producer must remain fenced");
+            consumer.close(&cx).await.unwrap();
+
+            // A snapshot whose consumer has closed can never enroll offsets.
+            // The transaction must not stay committable without them, or its
+            // output commits while the input is re-read (br-asupersync-csyp1h).
+            let producer = TransactionalProducer::new(
+                TransactionalConfig::new(ProducerConfig::new(brokers), "offset-stale-snapshot-test".into())
+                    .transaction_timeout(Duration::from_secs(10)),
+            ).unwrap();
+            let transaction = producer.begin_transaction(&cx).await.unwrap();
+            transaction.send(&cx, output, Some(b"same-partition"), b"orphaned").await.unwrap();
+            let error = transaction.send_offsets_to_transaction(&cx, &offsets(3), &metadata)
+                .await.unwrap_err();
+            assert!(error.to_string().contains("closed"), "{error}");
+            assert_eq!(producer.state.lock().phase, TransactionPhase::NeedsAbortRecovery);
+            assert!(producer.state.lock().pending_offsets.is_none());
+            assert!(transaction.commit(&cx).await.is_err(), "output must not commit without its offsets");
+            seed.close(&cx, Duration::from_secs(5)).await.unwrap();
+            eprintln!("KAFKA_OFFSET_PROTOCOL source=incumbent-mock committed_next=2 abort_next=3 cache_after_abort=2 abort_required=true fatal=true broker_atomicity=unproven");
+        });
+        assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+    }
+
+    #[test]
     fn transaction_owned_running_finalization_blocks_recovery_after_waiter_drop() {
         let producer = transaction_test_producer();
         let generation = producer.activate_transaction().unwrap();
@@ -3969,6 +4574,8 @@ mod tests {
         for kind in [
             TransactionOperation::Begin,
             TransactionOperation::Finalize,
+            TransactionOperation::SendOffsets,
+            TransactionOperation::Commit,
             TransactionOperation::Recover,
             #[cfg(feature = "kafka")]
             TransactionOperation::Initialize,

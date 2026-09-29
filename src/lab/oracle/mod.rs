@@ -1595,6 +1595,73 @@ mod tests {
     }
 
     #[test]
+    fn hydrate_temporal_from_state_replays_owner_cancelled_race_history() {
+        init_test("hydrate_temporal_from_state_replays_owner_cancelled_race_history");
+        let region = crate::types::RegionId::new_for_test(4, 0);
+        let owner = crate::types::TaskId::new_for_test(9, 0);
+        let first = crate::types::TaskId::new_for_test(10, 0);
+        let second = crate::types::TaskId::new_for_test(11, 0);
+
+        for first_drained in [false, true] {
+            let state = crate::runtime::RuntimeState::new();
+            let history = state.loser_drain_history_handle();
+            let race_id =
+                history.record_race_start(region, vec![first, second], Time::from_nanos(10));
+            if first_drained {
+                history.record_task_complete(first, Time::from_nanos(50));
+            }
+            history.record_task_complete(second, Time::from_nanos(60));
+            history.record_race_cancelled(race_id, owner, Time::from_nanos(100));
+
+            let mut suite = OracleSuite::new();
+            suite.hydrate_temporal_from_state(&state, Time::from_nanos(150));
+            let result = suite.loser_drain.check();
+            if first_drained {
+                crate::assert_with_log!(result.is_ok(), "cancelled race drained", "Ok", result);
+                crate::assert_with_log!(
+                    suite.loser_drain.completed_race_count() == 1,
+                    "completed races",
+                    1,
+                    suite.loser_drain.completed_race_count()
+                );
+            } else {
+                match result {
+                    Err(LoserDrainViolation::UndrainedLosers {
+                        race_id: actual_race,
+                        winner,
+                        undrained_losers,
+                        race_complete_time,
+                    }) => {
+                        crate::assert_with_log!(
+                            actual_race == race_id,
+                            "race",
+                            race_id,
+                            actual_race
+                        );
+                        crate::assert_with_log!(winner == owner, "owner", owner, winner);
+                        crate::assert_with_log!(
+                            undrained_losers == vec![first],
+                            "undrained first participant",
+                            vec![first],
+                            undrained_losers
+                        );
+                        crate::assert_with_log!(
+                            race_complete_time == Time::from_nanos(100),
+                            "completion boundary",
+                            Time::from_nanos(100),
+                            race_complete_time
+                        );
+                    }
+                    other => panic!(
+                        "missing first participant must survive cancellation history replay: {other:?}"
+                    ),
+                }
+            }
+        }
+        crate::test_complete!("hydrate_temporal_from_state_replays_owner_cancelled_race_history");
+    }
+
+    #[test]
     fn oracle_suite_surfaces_fail_fast_region_leak_violations() {
         init_test("oracle_suite_surfaces_fail_fast_region_leak_violations");
         let mut suite = OracleSuite::new();

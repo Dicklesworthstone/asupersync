@@ -719,6 +719,31 @@ impl Metrics {
             .clone()
     }
 
+    /// Collect counters, gauges, and histogram totals for a custom exporter.
+    ///
+    /// Call this from the application's collection task, then pass the same
+    /// snapshot to `MultiExporter`. Collection allocates; updates through an
+    /// already acquired counter or gauge handle remain atomic operations.
+    /// Each histogram is read coherently, but different instruments are not
+    /// captured in one atomic transaction. Summaries and histogram buckets
+    /// are outside the legacy `MetricsSnapshot` representation.
+    #[cfg(feature = "metrics")]
+    #[must_use]
+    pub fn export_snapshot(&self) -> crate::observability::otel::MetricsSnapshot {
+        let mut snapshot = crate::observability::otel::MetricsSnapshot::new();
+        for (name, counter) in &self.counters {
+            snapshot.add_counter(name, Vec::new(), counter.get());
+        }
+        for (name, gauge) in &self.gauges {
+            snapshot.add_gauge(name, Vec::new(), gauge.get());
+        }
+        for (name, histogram) in &self.histograms {
+            let value = histogram.snapshot();
+            snapshot.add_histogram(name, Vec::new(), value.count, value.sum);
+        }
+        snapshot
+    }
+
     /// Exports metrics in a simple text format (Prometheus-like).
     ///
     /// br-asupersync-aog3fz: every metric name is sanitized through

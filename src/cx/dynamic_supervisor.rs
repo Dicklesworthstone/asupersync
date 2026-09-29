@@ -28,14 +28,193 @@ use super::{CancelWakerToken, ChildRegion, ChildRegionError, ChildRegionSpec, Cx
 use crate::record::region::RegionCloseOutcome;
 use crate::record::task::TaskOutcome;
 use crate::runtime::{JoinError, SpawnError};
-use crate::supervision::{ChildName, ManagedSupervisor, ManagedSupervisorHandle, ManagedSupervisorReport};
+use crate::supervision::{BackoffStrategy, BudgetRefusal, ChildName, ManagedSupervisor, ManagedSupervisorHandle,
+    ManagedSupervisorReport, RestartConfig, RestartTracker, RestartVerdict};
 use crate::types::{CancelReason, RegionId};
+use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll, Waker};
+
+/// One automatic-restart window shared by an entire dynamic supervision root.
+///
+/// This policy counts replacement batch reservations and applies backoff. Child
+/// region budgets and the existing per-tree policy remain additional limits.
+#[derive(Debug, Clone)]
+pub struct SharedRestartConfig {
+    max_restarts: u32,
+    window: std::time::Duration,
+    backoff: BackoffStrategy,
+}
+
+impl SharedRestartConfig {
+    /// Permit at most `max_restarts` batch reservations in the sliding window.
+    #[must_use]
+    pub fn new(max_restarts: u32, window: std::time::Duration) -> Self {
+        Self { max_restarts, window, backoff: BackoffStrategy::None }
+    }
+
+    /// Add shared backoff; the longer of shared and per-tree delay is used.
+    #[must_use]
+    pub fn with_backoff(mut self, backoff: BackoffStrategy) -> Self {
+        self.backoff = backoff;
+        self
+    }
+}
+
+/// Shared restart accounting for one dynamic root, including already reaped names.
+///
+/// Counts are admitted replacement batches, before their drain/backoff. An
+/// interrupted batch is not refunded. This prevents concurrent controllers from
+/// reserving the same remaining slot or cancellation from laundering attempts.
+#[derive(Debug, Clone)]
+pub struct SharedRestartStatus {
+    /// Total admitted replacement batches during this owner's lifetime.
+    pub admitted: u64,
+    /// Admitted batches still inside the configured sliding window.
+    pub recent: usize,
+    /// First refusal; once present, this owner never admits another child.
+    pub refusal: Option<BudgetRefusal>,
+}
+
+struct SharedRestartState {
+    tracker: RestartTracker,
+    pending: usize,
+    admitted: u64,
+    refusal: Option<BudgetRefusal>,
+    waiter: Option<Waker>,
+}
+
+/// Private bridge into the existing managed generation driver, never a second
+/// executor. The root is attached before any managed tree can be submitted.
+pub(crate) struct SharedRestartDomain {
+    state: Mutex<SharedRestartState>,
+    root: OnceLock<Cx>,
+    cancellation_sent: AtomicBool,
+}
+
+impl SharedRestartDomain {
+    pub(crate) fn new(config: SharedRestartConfig) -> Self {
+        Self {
+            state: Mutex::new(SharedRestartState {
+                tracker: RestartTracker::from_restart_config(
+                    RestartConfig::new(config.max_restarts, config.window).with_backoff(config.backoff),
+                ),
+                pending: 0,
+                admitted: 0,
+                refusal: None,
+                waiter: None,
+            }),
+            root: OnceLock::new(),
+            cancellation_sent: AtomicBool::new(false),
+        }
+    }
+
+    pub(crate) fn status(&self) -> SharedRestartStatus {
+        let now = self.root.get().map_or(0, |cx| cx.now().as_nanos());
+        let state = self.state.lock();
+        SharedRestartStatus {
+            admitted: state.admitted,
+            recent: state.tracker.recent_count(now).saturating_add(state.pending),
+            refusal: state.refusal.clone(),
+        }
+    }
+
+    fn register(&self, waker: &Waker) {
+        let candidate = waker.clone();
+        let retired = {
+            let mut state = self.state.lock();
+            if state.waiter.as_ref().is_none_or(|old| !old.will_wake(&candidate)) {
+                state.waiter.replace(candidate)
+            } else {
+                Some(candidate)
+            }
+        };
+        // Neither a user waker destructor nor its wake callback runs under the
+        // accounting lock or prevents cancellation of the common root.
+        if let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(retired))) {
+            std::mem::forget(payload);
+        }
+    }
+
+    pub(crate) fn admit(&self) -> RestartVerdict {
+        self.admit_with_clock(|| self.root.get().map_or(0, |cx| cx.now().as_nanos()))
+    }
+
+    fn admit_with_clock(&self, now: impl Fn() -> u64) -> RestartVerdict {
+        let evaluated_at = now();
+        let (verdict, wake) = {
+            let mut state = self.state.lock();
+            if let Some(refusal) = &state.refusal {
+                return RestartVerdict::Denied { refusal: refusal.clone() };
+            }
+            // A delayed clock sample can only retain too much OLD history.
+            // Newly accepted slots stay pending until stamped AFTER admission,
+            // so a preempted caller cannot backdate its reservation and cause
+            // another controller to prune it immediately. Clock callbacks run
+            // outside the lock; pending slots cannot expire in that interval.
+            let recent = state.tracker.recent_count(evaluated_at).saturating_add(state.pending);
+            let policy = state.tracker.history().config();
+            let verdict = if recent >= policy.max_restarts as usize {
+                RestartVerdict::Denied {
+                    refusal: BudgetRefusal::WindowExhausted {
+                        max_restarts: policy.max_restarts,
+                        window: policy.window,
+                    },
+                }
+            } else {
+                let attempt = u32::try_from(recent).expect("below u32 restart ceiling");
+                RestartVerdict::Allowed {
+                    attempt: attempt + 1,
+                    delay: policy.backoff.delay_for_attempt(attempt),
+                }
+            };
+            let wake = match &verdict {
+                RestartVerdict::Allowed { .. } => {
+                    state.pending += 1;
+                    state.admitted = state.admitted.saturating_add(1);
+                    None
+                }
+                RestartVerdict::Denied { refusal } => {
+                    state.refusal = Some(refusal.clone());
+                    state.waiter.take()
+                }
+            };
+            (verdict, wake)
+        };
+        if verdict.is_allowed() {
+            // A clock panic leaves this counted slot pending until owner drop.
+            // It cannot silently refund a reservation or reopen shared capacity.
+            let admitted_at = now();
+            let mut state = self.state.lock();
+            state.tracker.record(admitted_at);
+            state.pending -= 1;
+        }
+        if let Some(waker) = wake {
+            if let Err(payload) = catch_unwind(AssertUnwindSafe(|| waker.wake())) {
+                std::mem::forget(payload);
+            }
+        }
+        verdict
+    }
+
+    pub(crate) fn cancel_root(&self, reason: CancelReason) -> Result<bool, SpawnError> {
+        if self.cancellation_sent.swap(true, Ordering::AcqRel) {
+            return Ok(false);
+        }
+        let root = self.root.get().ok_or(SpawnError::RuntimeUnavailable)?;
+        root.spawn_gateway_handle().ok_or(SpawnError::RuntimeUnavailable)?
+            .enqueue_region_command(crate::runtime::spawn_mailbox::RegionCommand::Cancel {
+                region_id: root.region_id(), reason,
+            })?;
+        Ok(true)
+    }
+}
 
 /// Explicit resource and region limits for a dynamic owner.
 #[derive(Debug, Clone)]
@@ -163,6 +342,9 @@ pub enum DynamicSupervisorError {
     /// Admission was sealed by shutdown or a failed admission cleanup.
     #[error("dynamic supervisor is closing")]
     Closing,
+    /// The common restart window failed; all trees in this root are stopping.
+    #[error("shared dynamic restart allowance exhausted: {0}")]
+    SharedRestartLimit(BudgetRefusal),
     /// The owning context observed cancellation.
     #[error("dynamic supervisor owner is cancelled: {0:?}")]
     Cancelled(CancelReason),
@@ -297,6 +479,7 @@ pub struct DynamicSupervisor<E> {
     sealed: bool,
     cancel_waker: Option<CancelWakerToken>,
     children: BTreeMap<ChildName, Child<E>>,
+    shared_restarts: Option<Arc<SharedRestartDomain>>,
 }
 
 impl<E> fmt::Debug for DynamicSupervisor<E> {
@@ -315,16 +498,52 @@ impl Cx {
     pub async fn open_dynamic_supervisor<E: Send + 'static>(
         &self, config: DynamicSupervisorConfig,
     ) -> Result<DynamicSupervisor<E>, DynamicSupervisorError> {
+        self.open_dynamic_supervisor_with_domain(config, None).await
+    }
+
+    /// Open an owner with one restart allowance shared by every admitted tree.
+    ///
+    /// Static siblings inside each tree and dynamically admitted workers consume
+    /// this same window, in addition to their existing per-tree policies. A
+    /// restart batch reserves one shared slot before drain/backoff; the stricter
+    /// of shared and local backoff applies. Reaping a name never resets history.
+    /// Initial admission, including an explicit terminate/re-admit, is not an
+    /// automatic restart and consumes no slot; any subsequent automatic restart
+    /// still uses this owner's retained window. Admission capacity remains a
+    /// separate bound on concurrently retained names.
+    ///
+    /// A shared refusal permanently seals this owner and cancels its entire root,
+    /// even if the individual tree uses Stop or ResetCounter. The caller's parent
+    /// region is not cancelled. Inspect `shared_restart_status`, each child report,
+    /// and shutdown closure; a signal alone never proves cleanup completed.
+    pub async fn open_dynamic_supervisor_with_shared_restarts<E: Send + 'static>(
+        &self, config: DynamicSupervisorConfig, restarts: SharedRestartConfig,
+    ) -> Result<DynamicSupervisor<E>, DynamicSupervisorError> {
+        self.open_dynamic_supervisor_with_domain(
+            config, Some(Arc::new(SharedRestartDomain::new(restarts))),
+        ).await
+    }
+
+    pub(crate) async fn open_dynamic_supervisor_with_domain<E: Send + 'static>(
+        &self, config: DynamicSupervisorConfig,
+        shared_restarts: Option<Arc<SharedRestartDomain>>,
+    ) -> Result<DynamicSupervisor<E>, DynamicSupervisorError> {
         if self.checkpoint().is_err() {
             return Err(DynamicSupervisorError::Cancelled(
                 self.cancel_reason().unwrap_or_else(|| CancelReason::user("dynamic owner cancelled")),
             ));
         }
         let root = self.open_child_region(config.region).await?;
+        if let Some(domain) = &shared_restarts {
+            // Every call receives a fresh domain; no caller can rebind it to a
+            // different runtime or authority while old generations still live.
+            let attached = domain.root.set(root.cx().clone());
+            debug_assert!(attached.is_ok());
+        }
         Ok(DynamicSupervisor {
             owner: self.clone(), region: root.region_id(), root: Some(root),
             max_children: config.max_children, generation: 0, sealed: false, cancel_waker: None,
-            children: BTreeMap::new(),
+            children: BTreeMap::new(), shared_restarts,
         })
     }
 }
@@ -345,6 +564,11 @@ impl<E> DynamicSupervisor<E> {
     /// Whether explicit shutdown has sealed admission.
     #[must_use]
     pub const fn is_closing(&self) -> bool { self.sealed }
+    /// Shared accounting remains available after names have been reaped.
+    #[must_use]
+    pub fn shared_restart_status(&self) -> Option<SharedRestartStatus> {
+        self.shared_restarts.as_ref().map(|domain| domain.status())
+    }
     /// Snapshot of reserved names in stable lexical order; never consumes results.
     #[must_use]
     pub fn children(&self) -> Vec<DynamicChildInfo> {
@@ -368,12 +592,23 @@ impl<E> DynamicSupervisor<E> {
 
     fn observe_cancellation(&mut self, cx: &Context<'_>) {
         if !self.sealed {
+            if let Some(domain) = &self.shared_restarts {
+                domain.register(cx.waker());
+                if domain.status().refusal.is_some() {
+                    self.begin_shutdown();
+                    return;
+                }
+            }
             self.cancel_waker = Some(self.owner.refresh_cancel_waker(self.cancel_waker, cx.waker()));
             if self.owner.checkpoint().is_err() { self.begin_shutdown(); }
         }
     }
 
     fn check_admission(&mut self, name: &ChildName) -> Result<(), DynamicSupervisorError> {
+        if let Some(refusal) = self.shared_restart_status().and_then(|status| status.refusal) {
+            self.begin_shutdown();
+            return Err(DynamicSupervisorError::SharedRestartLimit(refusal));
+        }
         if self.sealed { return Err(DynamicSupervisorError::Closing); }
         if self.owner.checkpoint().is_err() {
             self.begin_shutdown();
@@ -411,7 +646,7 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
     /// No existing topology or restart tracker is mutated. A reused name receives
     /// a new owner-local generation AND a new generational region identity.
     pub async fn start_child(
-        &mut self, name: impl Into<ChildName>, supervisor: ManagedSupervisor<E>,
+        &mut self, name: impl Into<ChildName>, mut supervisor: ManagedSupervisor<E>,
     ) -> Result<DynamicChildId, DynamicSupervisorError> {
         let name = name.into();
         self.check_admission(&name)?;
@@ -428,6 +663,14 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
             return Err(DynamicSupervisorError::Cancelled(
                 self.owner.cancel_reason().unwrap_or_else(|| CancelReason::user("dynamic owner cancelled")),
             ));
+        }
+        if let Some(domain) = &self.shared_restarts {
+            if let Some(refusal) = domain.status().refusal {
+                self.begin_shutdown();
+                region.close_with_outcome().await?;
+                return Err(DynamicSupervisorError::SharedRestartLimit(refusal));
+            }
+            supervisor.set_shared_restarts(Arc::clone(domain));
         }
         let handle = match supervisor.spawn(region.cx()) {
             Ok(handle) => handle,
@@ -572,6 +815,103 @@ impl<E> Drop for DynamicSupervisor<E> {
 
 mod worker;
 pub use worker::DynamicWorkerConfig;
+
+#[cfg(test)]
+mod shared_restart_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
+
+    #[test]
+    fn shared_reservations_atomically_limit_concurrent_controllers() {
+        let domain = Arc::new(SharedRestartDomain::new(
+            SharedRestartConfig::new(3, Duration::from_secs(1)),
+        ));
+        let barrier = Arc::new(std::sync::Barrier::new(16));
+        // Every thread must be spawned before any join: the barrier waits for
+        // all 16, so joining from a lazy iterator would deadlock.
+        #[allow(clippy::needless_collect)]
+        let threads: Vec<_> = (0..16).map(|_| {
+            let domain = Arc::clone(&domain);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                domain.admit_with_clock(|| 10).is_allowed()
+            })
+        }).collect();
+        let allowed = threads.into_iter()
+            .map(|thread| thread.join().expect("reservation caller terminated"))
+            .filter(|allowed| *allowed).count();
+        assert_eq!(allowed, 3);
+        let state = domain.state.lock();
+        assert_eq!((state.admitted, state.pending), (3, 0));
+        assert!(state.refusal.is_some());
+    }
+
+    #[test]
+    fn shared_admission_timestamps_are_sampled_after_the_slot_is_reserved() {
+        let domain = SharedRestartDomain::new(
+            SharedRestartConfig::new(2, Duration::from_nanos(10)),
+        );
+        assert!(domain.admit_with_clock(|| 100).is_allowed());
+        let calls = AtomicUsize::new(0);
+        assert!(domain.admit_with_clock(|| {
+            if calls.fetch_add(1, Ordering::Relaxed) == 0 { 0 } else { 100 }
+        }).is_allowed());
+        assert!(matches!(domain.admit_with_clock(|| 101), RestartVerdict::Denied {
+            refusal: BudgetRefusal::WindowExhausted { max_restarts: 2, .. }
+        }));
+        assert_eq!(domain.state.lock().tracker.recent_count(101), 2);
+    }
+
+    #[test]
+    fn shared_pending_slots_are_counted_and_clock_panic_does_not_refund() {
+        let domain = SharedRestartDomain::new(
+            SharedRestartConfig::new(2, Duration::from_nanos(10))
+                .with_backoff(BackoffStrategy::Exponential {
+                    initial: Duration::from_millis(1), max: Duration::from_secs(1), multiplier: 2.0,
+                }),
+        );
+        let calls = AtomicUsize::new(0);
+        assert!(catch_unwind(AssertUnwindSafe(|| domain.admit_with_clock(|| {
+            assert_eq!(calls.fetch_add(1, Ordering::Relaxed), 0, "post-reservation clock panic");
+            0
+        }))).is_err());
+        assert_eq!(domain.state.lock().pending, 1);
+        assert_eq!(domain.status().recent, 1);
+        assert!(matches!(domain.admit_with_clock(|| 100), RestartVerdict::Allowed {
+            attempt: 2, delay: Some(delay),
+        } if delay == Duration::from_millis(2)));
+        assert!(matches!(domain.admit_with_clock(|| 101), RestartVerdict::Denied { .. }));
+        assert_eq!(domain.status().admitted, 2);
+    }
+
+    #[test]
+    fn shared_window_expires_but_a_latched_refusal_never_reopens() {
+        let domain = SharedRestartDomain::new(
+            SharedRestartConfig::new(1, Duration::from_nanos(10)),
+        );
+        assert!(domain.admit_with_clock(|| 0).is_allowed());
+        assert!(domain.admit_with_clock(|| 11).is_allowed());
+        assert!(matches!(domain.admit_with_clock(|| 21), RestartVerdict::Denied { .. }));
+        assert!(matches!(domain.admit_with_clock(|| 1_000), RestartVerdict::Denied { .. }));
+        assert_eq!(domain.status().admitted, 2);
+    }
+
+    #[test]
+    fn shared_refusal_contains_a_panicking_notification_after_unlock() {
+        struct Panics;
+        impl std::task::Wake for Panics {
+            fn wake(self: Arc<Self>) { panic!("notification panic"); }
+        }
+        let domain = SharedRestartDomain::new(
+            SharedRestartConfig::new(0, Duration::from_secs(1)),
+        );
+        domain.register(&Waker::from(Arc::new(Panics)));
+        assert!(matches!(domain.admit_with_clock(|| 0), RestartVerdict::Denied { .. }));
+        assert!(domain.status().refusal.is_some());
+    }
+}
 
 #[cfg(test)]
 mod tests;

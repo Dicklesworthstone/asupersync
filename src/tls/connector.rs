@@ -92,6 +92,11 @@ impl TlsConnector {
         self.handshake_timeout
     }
 
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    pub(crate) fn single_enforcing_spki(&self) -> Option<[u8; 32]> {
+        self.pin_set.as_ref()?.single_enforcing_spki()
+    }
+
     /// br-asupersync-m209nx — Attach a `CertificatePinSet` to a
     /// connector built from a raw `ClientConfig` (i.e., one that
     /// did not flow through `TlsConnectorBuilder::with_certificate_pins`).

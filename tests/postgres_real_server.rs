@@ -22,14 +22,23 @@
 
 #![cfg(all(test, feature = "postgres"))]
 #![allow(clippy::pedantic, clippy::nursery, clippy::print_stderr)]
+// An integration test is its own crate and does not inherit `src/lib.rs`'s
+// `recursion_limit`. Proving `Send` for its async chains exceeds rustc's default
+// depth, which the future-incompatible `recursion_depth_exceeding_limit` lint
+// (rust-lang #159228) will turn into a hard error.
+#![recursion_limit = "256"]
 
+use asupersync::channel::oneshot;
 use asupersync::cx::Cx;
-use asupersync::database::postgres::{PgConnectOptions, PgConnection, PgError};
+use asupersync::database::postgres::{Format, PgConnectOptions, PgConnection, PgError};
+use asupersync::runtime::RuntimeBuilder;
 use asupersync::test_utils::run_test_with_cx;
+use asupersync::time::{sleep, timeout};
 use asupersync::types::{CancelKind, Outcome};
 
+use std::future::{Future, poll_fn};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Configuration for the real-server harness — env-var driven, with hard
@@ -77,8 +86,8 @@ impl RealPgConfig {
 }
 
 fn postgres_url_host_is_local(url: &str) -> bool {
-    match PgConnectOptions::parse(url) {
-        Ok(opts) => {
+    match PgConnectOptions::parse_with_tls(url) {
+        Ok((opts, _)) => {
             opts.host.eq_ignore_ascii_case("localhost")
                 || matches!(opts.host.as_str(), "127.0.0.1" | "::1")
         }
@@ -199,6 +208,61 @@ fn postgres_real_config_localhost_gate_rejects_prefix_spoofing() {
         "postgres://postgres:postgres@10.0.0.5:5432/postgres"
     ));
     assert!(!postgres_url_host_is_local("not-a-postgres-url"));
+    assert!(postgres_url_host_is_local(
+        "postgres://localhost/postgres?sslmode=verify-full&sslrootcert=%2Fprivate%20ca.pem"
+    ));
+}
+
+/// Run against an actual private-CA PostgreSQL server with REAL_POSTGRES_TESTS=true
+/// and PGSSLROOTCERT set to its CA bundle. Each mode must authenticate and the
+/// backend's own pg_stat_ssl row must confirm that this session uses TLS.
+#[cfg(feature = "tls")]
+#[test]
+fn pg_real_private_ca_tls_verification() {
+    use asupersync::database::postgres::{PgTlsOptions, PgTlsVerification};
+
+    let cfg = RealPgConfig::from_env();
+    if skip_if_disabled(&cfg, "pg_real_private_ca_tls_verification") {
+        return;
+    }
+    let Ok(root_path) = std::env::var("PGSSLROOTCERT") else {
+        eprintln!(
+            r#"{{"event":"test_skipped","test":"pg_real_private_ca_tls_verification","reason":"PGSSLROOTCERT private CA bundle not configured"}}"#
+        );
+        return;
+    };
+    let log = PgTestLogger::new("postgres_real", "pg_real_private_ca_tls_verification");
+    run_test_with_cx(|cx| async move {
+        for mode in [PgTlsVerification::VerifyCa, PgTlsVerification::VerifyFull] {
+            let (options, _) = PgConnectOptions::parse_with_tls(&cfg.url).unwrap();
+            let tls = PgTlsOptions::new()
+                .root_certificate_file(&root_path)
+                .verification(mode);
+            let mut connection = unwrap_pg(
+                PgConnection::connect_with_tls_options(&cx, options, tls).await,
+                &log,
+                "private_ca_connect",
+            );
+            let rows = unwrap_pg(
+                connection
+                    .query_unchecked(
+                        &cx,
+                        "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
+                    )
+                    .await,
+                &log,
+                "backend_tls_state",
+            );
+            assert_eq!(rows.len(), 1);
+            assert!(rows[0].get_bool("ssl").expect("backend SSL flag"));
+            log.line(
+                "private_ca_authenticated",
+                &[("mode", &format!("{mode:?}")), ("backend_ssl", "true")],
+            );
+            connection.close().await.unwrap();
+        }
+        log.end("pass");
+    });
 }
 
 fn unwrap_pg<T>(out: Outcome<T, PgError>, log: &PgTestLogger, op: &str) -> T {
@@ -545,151 +609,395 @@ fn pg_real_copy_from_chunks_streams_and_recovers() {
     });
 }
 
-/// Cancel-in-flight: real-server roundtrip for the PostgreSQL `CancelRequest`
-/// protocol (PG protocol §53.2.7 — separate TCP, 16-byte frame containing the
-/// backend's process_id + secret_key from `BackendKeyData`). Until this test
-/// landed, the cancel path was only exercised by `postgres_cancellation_audit.rs`
-/// (println-only commentary using `tokio::test`) and `cancelled_commit_marks_
-/// connection_for_rollback` (synthetic state). Neither verifies that asupersync
-/// actually delivers the CancelRequest to a live backend, that the backend
-/// SIGINTs the worker, or that the in-flight `query_unchecked` returns
-/// `Outcome::Cancelled` long before the query's natural duration.
-///
-/// asupersync-xgkg5w: the test starts `SELECT pg_sleep(30)` on a clonable Cx,
-/// sleeps ~200 ms in a sidecar thread, then calls `cx.cancel_with(CancelKind::
-/// User, ...)`. The expected fail-fast invariant is that the query observes
-/// `cx.checkpoint().is_err()` in its message-loop, calls `cancel_in_flight`
-/// (src/database/postgres.rs:3440) which spawns the detached
-/// `pg-cancel-request` thread (line 3197), opens a fresh TCP socket to the
-/// same host:port, and writes the 16-byte frame so the server SIGINTs the
-/// backend worker. The original socket is then torn down via
-/// `abort_in_flight_exchange`, so the cancelled `PgConnection` is poisoned —
-/// recovery requires opening a *fresh* connection on the same URL.
-///
-/// Assertions:
-/// 1. `query_unchecked` returns `Outcome::Cancelled` (NOT Ok, NOT Err) — the
-///    SIGINT-cancelled query never produces rows.
-/// 2. Total elapsed is well under `pg_sleep`'s 30-second nap. We use a 10-
-///    second hard ceiling so a regression that loses the CancelRequest path
-///    (e.g. closes the socket without firing the request) fails the test
-///    rather than silently waiting out the sleep.
-/// 3. A *fresh* `PgConnection` against the same URL serves a `SELECT 1` after
-///    the cancel — proves the server worker exited cleanly without leaving a
-///    poisoned session.
+/// Export text and binary COPY data, drain a partly consumed export, and run a
+/// normal query on the same real PostgreSQL connection afterward.
 #[test]
-fn pg_real_cancel_in_flight_during_long_query() {
+fn pg_real_copy_out_streams_and_drains_then_reuses_connection() {
     let cfg = RealPgConfig::from_env();
-    if skip_if_disabled(&cfg, "pg_real_cancel_in_flight_during_long_query") {
+    if skip_if_disabled(&cfg, "pg_real_copy_out_streams_and_drains_then_reuses_connection") {
         return;
     }
     let log = PgTestLogger::new(
         "postgres_real",
-        "pg_real_cancel_in_flight_during_long_query",
+        "pg_real_copy_out_streams_and_drains_then_reuses_connection",
     );
 
     run_test_with_cx(|cx| async move {
         log.phase("connect");
         let mut conn = unwrap_pg(PgConnection::connect(&cx, &cfg.url).await, &log, "connect");
 
-        // Spawn a sidecar thread that flips the *same* Cx (Cx is cheaply
-        // clonable; clones share cancellation state via Arc — see
-        // src/cx/cx.rs:175) into the cancelled state ~200 ms after the
-        // query starts. Trying to cancel via `tokio::time::sleep` here
-        // would tie the test to a different runtime; a plain
-        // `std::thread::sleep` is the simplest way to fire the cancel
-        // signal from outside the asupersync runtime that owns `cx`.
-        let canceller_cx: Cx = cx.clone();
-        let cancel_thread = thread::Builder::new()
-            .name("pg-real-cancel-trigger".into())
-            .spawn(move || {
-                thread::sleep(Duration::from_millis(200));
-                canceller_cx.cancel_with(
-                    CancelKind::User,
-                    Some("pg_real_cancel_in_flight_during_long_query trigger"),
-                );
-            })
-            .expect("spawn cancel-trigger thread");
-
-        log.phase("long_query_with_cancel");
-        let started = Instant::now();
-        // pg_sleep(30) is the canonical "definitely-still-running" probe.
-        // If the cancel never lands the test waits 30s, hits the panic
-        // branch in unwrap_pg via Outcome::Ok, and fails with a clear
-        // diagnostic. The hard ceiling below pins the upper bound so the
-        // failure mode never exceeds 10s.
-        let outcome = conn
-            .query_unchecked(&cx, "SELECT pg_sleep(30) AS slept")
-            .await;
-        let elapsed = started.elapsed();
-        cancel_thread.join().expect("cancel-trigger thread");
-
-        log.line(
-            "cancel_outcome",
-            &[
-                ("variant", outcome_label(&outcome)),
-                ("elapsed_ms", &elapsed.as_millis().to_string()),
-            ],
+        log.phase("copy_text_export");
+        let mut copy = unwrap_pg(
+            conn.copy_out(
+                &cx,
+                "COPY (SELECT id, name FROM (VALUES (1, 'alice'), (2, 'bob')) \
+                 AS exported_rows(id, name) ORDER BY id) TO STDOUT WITH (FORMAT text)",
+            )
+            .await,
+            &log,
+            "copy_text_start",
         );
+        assert_eq!(copy.response().overall_format(), Format::Text);
+        assert_eq!(copy.response().column_formats(), &[Format::Text, Format::Text]);
+        let mut text = Vec::new();
+        while let Some(chunk) = unwrap_pg(copy.next_chunk(&cx).await, &log, "copy_text_chunk") {
+            text.extend_from_slice(&chunk);
+        }
+        assert_eq!(text, b"1\talice\n2\tbob\n");
+        let complete = unwrap_pg(copy.finish(&cx).await, &log, "copy_text_finish");
+        assert_eq!(complete.affected_rows(), 2);
+        assert_eq!(complete.bytes_received(), text.len() as u64);
+        assert!(complete.chunks_received() > 0);
+        log.assert_match("copy_text_rows", "2", &complete.affected_rows().to_string());
+
+        log.phase("copy_binary_export");
+        let mut copy = unwrap_pg(
+            conn.copy_out(&cx, "COPY (SELECT 42::int4 AS id) TO STDOUT WITH (FORMAT binary)")
+                .await,
+            &log,
+            "copy_binary_start",
+        );
+        assert_eq!(copy.response().overall_format(), Format::Binary);
+        assert_eq!(copy.response().column_formats(), &[Format::Binary]);
+        let mut binary = Vec::new();
+        while let Some(chunk) = unwrap_pg(copy.next_chunk(&cx).await, &log, "copy_binary_chunk") {
+            binary.extend_from_slice(&chunk);
+        }
+        let mut expected_binary = b"PGCOPY\n\xff\r\n\0".to_vec();
+        expected_binary.extend_from_slice(&0u32.to_be_bytes());
+        expected_binary.extend_from_slice(&0u32.to_be_bytes());
+        expected_binary.extend_from_slice(&1i16.to_be_bytes());
+        expected_binary.extend_from_slice(&4i32.to_be_bytes());
+        expected_binary.extend_from_slice(&42i32.to_be_bytes());
+        expected_binary.extend_from_slice(&(-1i16).to_be_bytes());
+        assert_eq!(binary, expected_binary, "binary COPY bytes must remain exact");
+        let complete = unwrap_pg(copy.finish(&cx).await, &log, "copy_binary_finish");
+        assert_eq!(complete.affected_rows(), 1);
+        assert_eq!(complete.bytes_received(), expected_binary.len() as u64);
+
+        log.phase("copy_finish_drains_unread_rows");
+        let mut copy = unwrap_pg(
+            conn.copy_out(
+                &cx,
+                "COPY (SELECT generate_series(1, 10000)) TO STDOUT WITH (FORMAT text)",
+            )
+            .await,
+            &log,
+            "copy_drain_start",
+        );
+        let first = unwrap_pg(copy.next_chunk(&cx).await, &log, "copy_drain_first")
+            .expect("nonempty export has a first chunk");
+        assert!(!first.is_empty());
+        let complete = unwrap_pg(copy.finish(&cx).await, &log, "copy_drain_finish");
+        assert_eq!(complete.affected_rows(), 10_000);
+        let expected_bytes: usize = (1..=10_000).map(|row| row.to_string().len() + 1).sum();
+        assert_eq!(complete.bytes_received(), expected_bytes as u64);
+        log.assert_match("copy_drained_rows", "10000", &complete.affected_rows().to_string());
+
+        log.phase("copy_server_error");
+        let failed_export = match conn.copy_out(&cx, "COPY (SELECT 1 / 0) TO STDOUT").await {
+            Outcome::Ok(copy) => copy.finish(&cx).await.map(drop),
+            other => other.map(drop),
+        };
+        match failed_export {
+            Outcome::Err(error) => assert_eq!(error.error_code(), Some("22012")),
+            other => panic!("expected COPY division-by-zero SQLSTATE 22012, got {other:?}"),
+        }
+
+        log.phase("query_after_exports_and_error");
+        let rows = unwrap_pg(
+            conn.query_unchecked(&cx, "SELECT 42::int4 AS answer").await,
+            &log,
+            "query_after_copy",
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get_i32("answer").expect("answer int4"), 42);
+        log.end("pass");
+    });
+}
+
+/// br-asupersync-bi2462.110: the gvkj1r/xgkg5w test measured only client
+/// latency, so closing the socket without sending CancelRequest passed it.
+/// This replacement witnesses the actual native query's Pending poll and
+/// PostgreSQL's active/PgSleep state before cancellation. The independent
+/// observer must then see the backend stop within two seconds.
+#[test]
+fn pg_real_cancel_in_flight_during_long_query() {
+    pg_real_cancel_parked_query("pg_real_cancel_in_flight_during_long_query", false);
+}
+
+/// The same parked cancellation must release a real UPDATE's transaction
+/// lock. A session-local temporary table keeps the fixture isolated; its
+/// granted RowExclusiveLock is observed directly through pg_locks.
+#[test]
+fn pg_real_cancel_in_flight_releases_update_lock() {
+    pg_real_cancel_parked_query("pg_real_cancel_in_flight_releases_update_lock", true);
+}
+
+#[derive(Debug)]
+struct ParkedPgQuery {
+    cx: Cx,
+    pid: i32,
+    relation_oid: i64,
+    parked_at: Instant,
+}
+
+#[derive(Debug)]
+struct PgCancelBackendState {
+    state: String,
+    wait_event: String,
+    update_locks: i64,
+}
+
+async fn pg_cancel_backend_state(
+    observer: &mut PgConnection,
+    cx: &Cx,
+    parked: &ParkedPgQuery,
+    log: &PgTestLogger,
+) -> Result<PgCancelBackendState, String> {
+    // Only server-supplied numeric identifiers enter this trusted SQL.
+    // Each observation is its own transaction, so pg_stat_activity does not
+    // retain a transaction-scoped statistics snapshot between observations.
+    let sql = format!(
+        "SELECT pg_backend_pid() AS observer_pid, \
+         COALESCE((SELECT state FROM pg_stat_activity WHERE pid = {pid}), 'gone') AS state, \
+         COALESCE((SELECT wait_event FROM pg_stat_activity WHERE pid = {pid}), '') AS wait_event, \
+         (SELECT count(*)::int8 FROM pg_locks \
+          WHERE pid = {pid} AND locktype = 'relation' AND relation = {oid}::oid \
+          AND mode = 'RowExclusiveLock' AND granted) AS update_locks",
+        pid = parked.pid,
+        oid = parked.relation_oid,
+    );
+    let rows = match observer.query_unchecked(cx, &sql).await {
+        Outcome::Ok(rows) => rows,
+        other => return Err(format!("backend observation failed: {other:?}")),
+    };
+    if rows.len() != 1 {
+        return Err(format!("backend observation returned {} rows", rows.len()));
+    }
+    let observer_pid = rows[0].get_i32("observer_pid").map_err(|e| e.to_string())?;
+    if observer_pid == parked.pid {
+        return Err("observer must use a separate backend".to_string());
+    }
+    let state = PgCancelBackendState {
+        state: rows[0]
+            .get_str("state")
+            .map_err(|e| e.to_string())?
+            .to_string(),
+        wait_event: rows[0]
+            .get_str("wait_event")
+            .map_err(|e| e.to_string())?
+            .to_string(),
+        update_locks: rows[0].get_i64("update_locks").map_err(|e| e.to_string())?,
+    };
+    log.line(
+        "backend_observation",
+        &[
+            ("pid", &parked.pid.to_string()),
+            ("observer_pid", &observer_pid.to_string()),
+            ("state", &state.state),
+            ("wait_event", &state.wait_event),
+            ("relation_oid", &parked.relation_oid.to_string()),
+            ("update_locks", &state.update_locks.to_string()),
+            (
+                "since_parked_ms",
+                &parked.parked_at.elapsed().as_millis().to_string(),
+            ),
+        ],
+    );
+    Ok(state)
+}
+
+fn pg_real_cancel_parked_query(test_name: &'static str, hold_update_lock: bool) {
+    let cfg = RealPgConfig::from_env();
+    if skip_if_disabled(&cfg, test_name) {
+        return;
+    }
+    let log = Arc::new(PgTestLogger::new("postgres_real", test_name));
+    let runtime = RuntimeBuilder::current_thread()
+        .with_reactor(asupersync::runtime::reactor::create_reactor().expect("native reactor"))
+        .build()
+        .expect("native runtime");
+
+    runtime.block_on(async move {
+        let cx = Cx::current().expect("native observer context");
+        let mut observer = unwrap_pg(
+            timeout(cx.now(), Duration::from_secs(5), PgConnection::connect(&cx, &cfg.url))
+                .await
+                .expect("observer connect deadline"),
+            &log,
+            "observer_connect",
+        );
+        let (parked_tx, mut parked_rx) = oneshot::channel();
+        let query_log = Arc::clone(&log);
+        let query_url = cfg.url.clone();
+        let mut query_task = cx.spawn(move |query_cx| async move {
+            let mut conn = unwrap_pg(
+                PgConnection::connect(&query_cx, &query_url).await,
+                &query_log,
+                "query_connect",
+            );
+            // A short server statement_timeout or periodic disconnect check
+            // would mask a missing CancelRequest. Keep both out of the two-
+            // second oracle; the observer's deadlines still bound failures.
+            conn.set_statement_timeout_override(Some(Duration::from_secs(35)));
+            unwrap_pg(
+                conn.execute_unchecked(&query_cx, "SET client_connection_check_interval = 0").await,
+                &query_log,
+                "disable_disconnect_polling",
+            );
+            let rows = unwrap_pg(
+                conn.query_unchecked(&query_cx, "SELECT pg_backend_pid() AS pid").await,
+                &query_log,
+                "query_backend_pid",
+            );
+            let pid = rows[0].get_i32("pid").expect("backend PID");
+            query_log.line("query_backend", &[
+                ("pid", &pid.to_string()),
+                ("server_version", conn.server_version().unwrap_or("<missing>")),
+            ]);
+            let relation_oid = if hold_update_lock {
+                unwrap_pg(
+                    conn.execute_unchecked(
+                        &query_cx,
+                        "CREATE TEMP TABLE asupersync_cancel_lock AS SELECT 0::int4 AS v",
+                    ).await,
+                    &query_log,
+                    "create_temporary_lock_fixture",
+                );
+                let rows = unwrap_pg(
+                    conn.query_unchecked(
+                        &query_cx,
+                        "SELECT 'pg_temp.asupersync_cancel_lock'::regclass::oid::int8 AS oid",
+                    ).await,
+                    &query_log,
+                    "lock_relation_oid",
+                );
+                unwrap_pg(conn.execute_unchecked(&query_cx, "BEGIN").await, &query_log, "begin");
+                rows[0].get_i64("oid").expect("temporary relation OID")
+            } else {
+                0
+            };
+            let sql = if hold_update_lock {
+                "UPDATE asupersync_cancel_lock SET v = v + 1; SELECT pg_sleep(30) AS slept"
+            } else {
+                "SELECT pg_sleep(30) AS slept"
+            };
+            let mut query = std::pin::pin!(conn.query_unchecked(&query_cx, sql));
+            let mut parked_tx = Some(parked_tx);
+            let outcome = timeout(query_cx.now(), Duration::from_secs(35), poll_fn(|task_cx| {
+                let poll = query.as_mut().poll(task_cx);
+                if poll.is_pending()
+                    && let Some(tx) = parked_tx.take()
+                {
+                    query_log.line("native_query_parked", &[("pid", &pid.to_string())]);
+                    // Publish a witness without waking the query itself. The
+                    // socket read is left parked on its real reactor waker.
+                    tx.send_blocking(ParkedPgQuery {
+                        cx: query_cx.clone(),
+                        pid,
+                        relation_oid,
+                        parked_at: Instant::now(),
+                    }).expect("observer must receive parked witness");
+                }
+                poll
+            })).await.expect("long-query safety deadline");
+            query_log.line("cancel_outcome", &[("pid", &pid.to_string()), ("variant", outcome_label(&outcome))]);
+            outcome
+        }).expect("spawn native query task");
+
+        let parked = timeout(cx.now(), Duration::from_secs(10), parked_rx.recv(&cx))
+            .await.expect("native parked witness deadline").expect("native parked witness");
+        let active = timeout(cx.now(), Duration::from_secs(5), async {
+            loop {
+                let state = pg_cancel_backend_state(&mut observer, &cx, &parked, &log).await?;
+                if state.state == "active" && state.wait_event == "PgSleep"
+                    && (!hold_update_lock || state.update_locks > 0)
+                {
+                    break Ok::<(), String>(());
+                }
+                sleep(cx.now(), Duration::from_millis(10)).await;
+            }
+        }).await;
+        let active_witnessed = matches!(&active, Ok(Ok(())));
+        log.line("cancel_trigger", &[
+            ("pid", &parked.pid.to_string()),
+            ("required_backend_witness", if active_witnessed { "true" } else { "false" }),
+            ("hold_update_lock", if hold_update_lock { "true" } else { "false" }),
+            ("since_parked_ms", &parked.parked_at.elapsed().as_millis().to_string()),
+        ]);
+        let triggered_at = Instant::now();
+        parked.cx.cancel_with(CancelKind::User, Some("parked PostgreSQL query cancellation"));
+        let stopped = if active_witnessed {
+            Some(timeout(cx.now(), Duration::from_secs(2).saturating_sub(triggered_at.elapsed()), async {
+                loop {
+                    let state = pg_cancel_backend_state(&mut observer, &cx, &parked, &log).await?;
+                    if state.state != "active" && state.update_locks == 0 {
+                        break Ok::<PgCancelBackendState, String>(state);
+                    }
+                    sleep(cx.now(), Duration::from_millis(10)).await;
+                }
+            }).await)
+        } else {
+            None
+        };
+        let elapsed = triggered_at.elapsed();
+        let stopped_in_time = matches!(&stopped, Some(Ok(Ok(_)))) && elapsed < Duration::from_secs(2);
+        log.line("remote_cancel_result", &[
+            ("pid", &parked.pid.to_string()),
+            ("stopped_and_locks_released", if stopped_in_time { "true" } else { "false" }),
+            ("elapsed_ms", &elapsed.as_millis().to_string()),
+        ]);
+        if !stopped_in_time {
+            // Preserve the failed oracle before cleanup. Terminate only this
+            // test's witnessed backend so an old-red run leaves no 30s query
+            // or temporary transaction behind; cleanup cannot make it pass.
+            let cleanup_sql = format!("SELECT pg_terminate_backend({}, 1000) AS terminated", parked.pid);
+            let cleanup = timeout(cx.now(), Duration::from_secs(5), async {
+                // A timed-out observation may have poisoned its connection.
+                let mut cleanup_conn = unwrap_pg(
+                    PgConnection::connect(&cx, &cfg.url).await,
+                    &log,
+                    "failure_cleanup_connect",
+                );
+                cleanup_conn.query_unchecked(&cx, &cleanup_sql).await
+            }).await;
+            let terminated = match &cleanup {
+                Ok(Outcome::Ok(rows)) => rows.first().is_some_and(|row| matches!(row.get_bool("terminated"), Ok(true))),
+                _ => false,
+            };
+            log.line("failed_probe_cleanup", &[
+                ("pid", &parked.pid.to_string()),
+                ("result", cleanup.as_ref().map_or("timeout", outcome_label)),
+                ("backend_terminated", if terminated { "true" } else { "false" }),
+            ]);
+        }
+        let outcome = timeout(cx.now(), Duration::from_secs(2), query_task.join(&cx))
+            .await.expect("cancelled native task join deadline").expect("native task must publish its typed result");
 
         match outcome {
             Outcome::Cancelled(reason) => {
-                log.line(
-                    "cancel_reason",
-                    &[
-                        ("kind", &format!("{:?}", reason.kind)),
-                        ("message", reason.message.as_deref().unwrap_or("<none>")),
-                    ],
-                );
-                assert_eq!(
-                    reason.kind,
-                    CancelKind::User,
-                    "cancel attribution must reflect User-triggered cancel, got {:?}",
-                    reason.kind
-                );
+                assert_eq!(reason.kind, CancelKind::User, "query cancellation attribution");
+                assert_eq!(reason.message.as_deref(), Some("parked PostgreSQL query cancellation"));
             }
-            Outcome::Ok(_) => {
-                log.end("fail");
-                panic!(
-                    "pg_sleep(30) completed normally in {elapsed:?} — cancel did not fire \
-                     or did not propagate to query_unchecked"
-                );
-            }
-            Outcome::Err(err) => {
-                log.end("fail");
-                panic!(
-                    "pg_sleep(30) returned PgError after {elapsed:?}, expected Outcome::Cancelled: {err}"
-                );
-            }
-            Outcome::Panicked(p) => {
-                log.end("fail");
-                panic!("pg_sleep(30) panicked after {elapsed:?}: {p:?}");
-            }
+            other => panic!("expected Outcome::Cancelled(User), got {other:?}"),
         }
-
-        // Ceiling at 10s leaves room for slow CI / loaded boxes while
-        // still catching a regression that closes the socket without
-        // firing the CancelRequest (in which case the server keeps
-        // sleeping until ~30s). 5s is a tighter local-dev target.
+        assert!(active_witnessed, "backend {} never reached active/PgSleep with its expected UPDATE lock: {active:?}", parked.pid);
         assert!(
-            elapsed < Duration::from_secs(10),
-            "cancel must short-circuit pg_sleep(30) well under 10s, took {elapsed:?}"
+            stopped_in_time,
+            "backend {} must stop and release its UPDATE lock within 2s of cancellation; elapsed={elapsed:?}, observed={stopped:?}",
+            parked.pid,
         );
-        log.assert_match("cancel_under_10s", "true", "true");
 
         log.phase("recovery_fresh_connection");
-        // The cancelled connection is intentionally poisoned by
-        // abort_in_flight_exchange — open a NEW connection to verify the
-        // server worker exited cleanly.
-        let cx_recover = Cx::for_testing();
         let mut conn2 = unwrap_pg(
-            PgConnection::connect(&cx_recover, &cfg.url).await,
+            timeout(cx.now(), Duration::from_secs(5), PgConnection::connect(&cx, &cfg.url)).await.expect("recovery connect deadline"),
             &log,
             "recover_connect",
         );
         let rows = unwrap_pg(
-            conn2
-                .query_unchecked(&cx_recover, "SELECT 1::int4 AS v")
-                .await,
+            timeout(cx.now(), Duration::from_secs(5), conn2.query_unchecked(&cx, "SELECT 1::int4 AS v"))
+                .await.expect("recovery query deadline"),
             &log,
             "recover_select",
         );

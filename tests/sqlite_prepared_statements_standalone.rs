@@ -169,7 +169,10 @@ fn test_sqlite_deterministic_small_scale() {
     let iterations = 5; // Small scale first
     let mut execution_results = Vec::new();
 
-    for seed in 0..iterations {
+    // Every iteration replays the SAME seed: determinism means an identical
+    // seed yields an identical result. Distinct seeds legitimately differ.
+    let seed: u64 = 0x5eed;
+    for _iteration in 0..iterations {
         let result = block_on(async {
             let runtime = Arc::new(LabRuntime::new(LabConfig::default()));
             let cx = test_cx();

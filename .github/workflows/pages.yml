@@ -36,6 +36,7 @@ jobs:
           cp packages/browser-core/asupersync.js _site/packages/browser-core/
           cp packages/browser-core/asupersync_bg.wasm _site/packages/browser-core/
           cp packages/browser-core/index.js _site/packages/browser-core/
+          cp packages/browser-core/webtransport-streams.js _site/packages/browser-core/
           mkdir -p _site/assets
           cp assets/og-share-image.png _site/assets/
 

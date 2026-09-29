@@ -475,6 +475,12 @@ struct AtpSendArgs {
     /// Explain path, scheduler, and repair decisions
     #[arg(long = "explain", action = ArgAction::SetTrue)]
     explain: bool,
+
+    /// Permit the plaintext, unauthenticated ATP-over-TCP send to a
+    /// non-loopback target. Without it such a send is refused; a loopback
+    /// target never needs it.
+    #[arg(long = "allow-plaintext", action = ArgAction::SetTrue)]
+    allow_plaintext: bool,
 }
 
 #[derive(Args, Debug)]
@@ -703,6 +709,12 @@ struct AtpServeArgs {
     /// Run as daemon (detach from terminal)
     #[arg(long = "daemon", action = ArgAction::SetTrue)]
     daemon: bool,
+
+    /// Permit the plaintext, unauthenticated ATP-over-TCP listener on a
+    /// non-loopback address (including the default 0.0.0.0). Without it such a
+    /// listener is refused; a loopback `--listen` never needs it.
+    #[arg(long = "allow-plaintext", action = ArgAction::SetTrue)]
+    allow_plaintext: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1257,6 +1269,7 @@ impl Outputtable for AtpSendResultOutput {
 fn run_real_atp_send(
     source: &Path,
     target: &str,
+    allow_plaintext: bool,
 ) -> Result<asupersync::net::atp::transport_tcp::SendReport, CliError> {
     use std::net::ToSocketAddrs;
 
@@ -1282,6 +1295,20 @@ fn run_real_atp_send(
             .detail(format!("target '{target}'"))
             .exit_code(ExitCode::USER_ERROR)
         })?;
+    // asupersync-bi2462.126: this send is plaintext, unauthenticated
+    // ATP-over-TCP, as refused for `asupersync atp serve`. Refuse a
+    // non-loopback target before any connection unless the caller opts in.
+    if !addr.ip().is_loopback() && !allow_plaintext {
+        return Err(CliError::new(
+            "atp_plaintext_refused",
+            "ATP send refuses a plaintext, unauthenticated transfer to a non-loopback target",
+        )
+        .detail(format!(
+            "{addr}: an on-path attacker could substitute the manifest and the bytes. Send to a \
+             loopback address, or pass --allow-plaintext to accept the risk."
+        ))
+        .exit_code(ExitCode::USER_ERROR));
+    }
 
     let runtime = asupersync::runtime::RuntimeBuilder::multi_thread()
         .build()
@@ -5537,7 +5564,7 @@ fn atp_send(args: &AtpSendArgs, output: &mut Output) -> Result<(), CliError> {
         // Real ATP-over-TCP transfer (br-asupersync-qk02uw). This moves actual
         // verified bytes to the peer and fails closed on an unreachable target
         // or a receiver integrity rejection — no simulated progress.
-        let report = run_real_atp_send(&args.source, &args.target)?;
+        let report = run_real_atp_send(&args.source, &args.target, args.allow_plaintext)?;
 
         let payload = AtpSendResultOutput::from_report(&args.source, &args.target, &report);
         output
@@ -5720,6 +5747,27 @@ fn atp_watch(_args: &AtpWatchArgs, _output: &mut Output) -> Result<(), CliError>
     atp_not_implemented("watch")
 }
 
+/// Resolves a leading `~` or `~/` in a directory argument against `home`
+/// (asupersync-bi2462.128). Other paths, including `~user`, are unchanged.
+fn expand_home(path: &Path, home: Option<&Path>) -> Result<PathBuf, CliError> {
+    let Ok(rest) = path.strip_prefix("~") else {
+        return Ok(path.to_path_buf());
+    };
+    let home = home.ok_or_else(|| {
+        CliError::new("home_unset", "Cannot expand ~ because HOME is not set")
+            .detail(format!(
+                "Path: {}; pass an absolute directory",
+                path.display()
+            ))
+            .exit_code(ExitCode::USER_ERROR)
+    })?;
+    if rest.as_os_str().is_empty() {
+        Ok(home.to_path_buf())
+    } else {
+        Ok(home.join(rest))
+    }
+}
+
 fn atp_serve(args: &AtpServeArgs, output: &mut Output) -> Result<(), CliError> {
     use std::net::ToSocketAddrs;
 
@@ -5742,7 +5790,32 @@ fn atp_serve(args: &AtpServeArgs, output: &mut Output) -> Result<(), CliError> {
             .detail(args.listen.clone())
             .exit_code(ExitCode::USER_ERROR)
         })?;
-    let dest_dir = args.data_dir.join("inbox");
+    // asupersync-bi2462.126: this listener speaks plaintext, unauthenticated
+    // ATP-over-TCP, whose integrity check trusts a manifest an on-path attacker
+    // can substitute. Refuse it off loopback unless the operator opts in.
+    if !listen.ip().is_loopback() && !args.allow_plaintext {
+        return Err(CliError::new(
+            "atp_plaintext_refused",
+            "ATP serve refuses a plaintext, unauthenticated listener on a non-loopback address",
+        )
+        .detail(format!(
+            "{listen}: an on-path attacker could substitute the manifest and the bytes. Listen on \
+             a loopback address, or pass --allow-plaintext to accept the risk."
+        ))
+        .exit_code(ExitCode::USER_ERROR));
+    }
+    let data_dir = expand_home(
+        &args.data_dir,
+        std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+    )?;
+    if data_dir != args.data_dir && Path::new("~").join(".atp").is_dir() {
+        eprintln!(
+            "note: ATP serve now resolves ~ from HOME ({}); the ./~/.atp directory an \
+             earlier version created in this working directory is no longer used",
+            data_dir.display()
+        );
+    }
+    let dest_dir = data_dir.join("inbox");
     let listen_label = listen.to_string();
 
     std::fs::create_dir_all(&dest_dir).map_err(|err| {
@@ -17416,6 +17489,7 @@ lab:
             verbose: false,
             progress: false,
             explain: false,
+            allow_plaintext: false,
         };
 
         atp_send(&args, &mut output).expect("atp send should work");
@@ -17556,6 +17630,7 @@ lab:
             verbose: false,
             progress: true,
             explain: true,
+            allow_plaintext: false,
         };
 
         // --explain used to print hardcoded QUIC/RTT/loss numbers; until real
@@ -17668,6 +17743,36 @@ lab:
         assert_atp_not_implemented(atp_bench(&bench, &mut output), "bench must fail closed");
     }
 
+    /// asupersync-bi2462.128: `atp serve` used to create a directory literally
+    /// named `~` in the working directory for its default `--data-dir ~/.atp`.
+    #[test]
+    fn atp_data_dir_tilde_resolves_from_home_not_the_working_directory() {
+        let home = Path::new("/home/atp-user");
+        let cli = Cli::parse_from(["asupersync", "atp", "serve"]);
+        let Command::Atp(AtpArgs {
+            command: AtpCommand::Serve(args),
+        }) = cli.command
+        else {
+            panic!("expected atp serve");
+        };
+        assert_eq!(
+            expand_home(&args.data_dir, Some(home)).expect("default expands"),
+            home.join(".atp")
+        );
+        assert_eq!(
+            expand_home(Path::new("~"), Some(home)).expect("bare tilde"),
+            home.to_path_buf()
+        );
+        for unchanged in ["/srv/atp", "data/atp", "~alice/atp"] {
+            assert_eq!(
+                expand_home(Path::new(unchanged), Some(home)).expect("no expansion"),
+                PathBuf::from(unchanged)
+            );
+        }
+        let err = expand_home(Path::new("~/.atp"), None).expect_err("HOME unset");
+        assert_eq!(err.error_type, "home_unset");
+    }
+
     #[test]
     fn atp_serve_does_not_report_listening_when_bind_fails() {
         let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve test port");
@@ -17680,6 +17785,7 @@ lab:
             listen,
             data_dir: temp.path().join("atp"),
             daemon: false,
+            allow_plaintext: false,
         };
 
         let err = atp_serve(&args, &mut output).expect_err("occupied port must fail");
@@ -17689,6 +17795,84 @@ lab:
             capture.contents().is_empty(),
             "serve must not report listening before bind succeeds"
         );
+    }
+
+    /// asupersync-bi2462.126: the plaintext ATP-over-TCP listener is refused off
+    /// loopback (including the default 0.0.0.0) unless the operator opts in, and the
+    /// refusal happens before any directory is created or port is bound.
+    #[test]
+    fn atp_serve_refuses_plaintext_off_loopback_without_the_opt_in() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let capture = SharedWrite::default();
+        let mut output = Output::with_writer(OutputFormat::Human, capture.clone());
+        let cli = Cli::parse_from(["asupersync", "atp", "serve"]);
+        let Command::Atp(AtpArgs {
+            command: AtpCommand::Serve(mut args),
+        }) = cli.command
+        else {
+            panic!("expected atp serve");
+        };
+        assert_eq!(args.listen, "0.0.0.0:8080");
+        assert!(!args.allow_plaintext);
+        args.data_dir = temp.path().join("atp");
+
+        let err = atp_serve(&args, &mut output).expect_err("default listen must be refused");
+        assert_eq!(err.error_type, "atp_plaintext_refused");
+        assert!(
+            capture.contents().is_empty(),
+            "nothing reported as listening"
+        );
+        assert!(
+            !temp.path().join("atp").exists(),
+            "refusal precedes creating the inbox directory"
+        );
+
+        let cli = Cli::parse_from(["asupersync", "atp", "serve", "--allow-plaintext"]);
+        let Command::Atp(AtpArgs {
+            command: AtpCommand::Serve(args),
+        }) = cli.command
+        else {
+            panic!("expected atp serve");
+        };
+        assert!(args.allow_plaintext);
+    }
+
+    /// asupersync-bi2462.126: `asupersync atp send` is plaintext ATP-over-TCP too.
+    /// A non-loopback target is refused before any connection unless opted in.
+    #[test]
+    fn atp_send_refuses_plaintext_off_loopback_without_the_opt_in() {
+        let capture = SharedWrite::default();
+        let mut output = Output::with_writer(OutputFormat::Human, capture.clone());
+        // TEST-NET-1 is unroutable: a send that got past the refusal would
+        // block in connect instead of returning at once.
+        let cli = Cli::parse_from(["asupersync", "atp", "send", "Cargo.toml", "192.0.2.1:9"]);
+        let Command::Atp(AtpArgs {
+            command: AtpCommand::Send(args),
+        }) = cli.command
+        else {
+            panic!("expected atp send");
+        };
+        assert!(!args.allow_plaintext);
+
+        let err = atp_send(&args, &mut output).expect_err("non-loopback target must be refused");
+        assert_eq!(err.error_type, "atp_plaintext_refused");
+        assert!(capture.contents().is_empty(), "nothing reported as sent");
+
+        let cli = Cli::parse_from([
+            "asupersync",
+            "atp",
+            "send",
+            "Cargo.toml",
+            "192.0.2.1:9",
+            "--allow-plaintext",
+        ]);
+        let Command::Atp(AtpArgs {
+            command: AtpCommand::Send(args),
+        }) = cli.command
+        else {
+            panic!("expected atp send");
+        };
+        assert!(args.allow_plaintext);
     }
 
     #[test]

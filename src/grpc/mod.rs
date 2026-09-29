@@ -110,7 +110,7 @@ pub use interceptor::{
     logging_interceptor, metadata_propagator, rate_limiter, timeout_interceptor, trace_interceptor,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use native_stream::NativeStreamConfig;
+pub use native_stream::{NativeDuplexEvent, NativeDuplexStream, NativeStreamConfig, NativeStreamKeepalive};
 #[cfg(not(target_arch = "wasm32"))]
 pub use native_streaming::NativeServerStream;
 pub use protobuf::{
@@ -128,6 +128,8 @@ pub use server::{
     CallContext, CallContextWithCx, Interceptor, Server, ServerBuilder, ServerConfig,
     format_grpc_timeout, parse_grpc_timeout,
 };
+#[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+pub use server::{RegisteredRequestStream, ServerDuplexConfig};
 pub use service::{
     BidiStreamingMethod, ClientStreamingMethod, MethodDescriptor, NamedService,
     ServerStreamingMethod, ServiceDescriptor, ServiceHandler, ServiceHandlerFuture, UnaryMethod,

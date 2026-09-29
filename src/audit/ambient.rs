@@ -109,7 +109,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     // ── Spawn ───────────────────────────────────────────────────────────
     AmbientFinding {
         file: "time/sleep.rs",
-        line: 957,
+        line: 1001,
         evidence_pattern: "std::thread::spawn",
         category: AmbientCategory::Spawn,
         severity: Severity::Medium,
@@ -126,6 +126,18 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
         description: "Worker thread spawning in blocking pool",
         exempt: true,
         exemption_reason: Some("Blocking pool requires real OS threads by design"),
+    },
+    AmbientFinding {
+        file: "process/reaper.rs",
+        line: 36,
+        evidence_pattern: "std::thread::Builder::new()",
+        category: AmbientCategory::Spawn,
+        severity: Severity::Low,
+        description: "Process-wide Unix child reaper admitted before OS process creation",
+        exempt: true,
+        exemption_reason: Some(
+            "Process cleanup provider: one worker owns abandoned child handles beyond runtime shutdown",
+        ),
     },
     // ── Entropy ─────────────────────────────────────────────────────────
     // NOTE: net/websocket/handshake.rs and net/websocket/frame.rs now use
@@ -1514,7 +1526,31 @@ fn test_function() {
     // br-asupersync-bi2462.23, so this count and the snapshot text move only
     // when a site is added, removed or rewritten — never when code above a
     // site shifts.
-    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 725;
+    // 725 -> 726 (br-asupersync-bi2462.114): one process-lifetime Unix
+    // child-reaper worker is admitted before OS child creation. The exact
+    // spawn remains scanned and pinned in both inventory sections; no
+    // existing scanner exemption or detection pattern is broadened.
+    // 726 -> 769 (br-asupersync-bi2462.86.1): the snapshot had not tracked the
+    // 09-18..09-24 landings. New sites: the ATP SDK native_live transport and
+    // its durable checkpoint/journal syncs, gRPC native-stream connect,
+    // replay-group sessions, the MySQL SSL_CERT_FILE root (postgres_tls already
+    // had it), one more H2 bind, and QUIC/desktop clock reads, plus test files
+    // under src/. Fewer clock reads in epoch_tracking, priority_inversion_oracle
+    // and invariant_monitor offset part of it. Every row was reviewed with the
+    // grouped snapshot; no scanner exemption or detection pattern changed.
+    // 769 -> 809 (br-asupersync-bi2462.147.4, reviewed at f4fd8552e): the
+    // 09-24..09-28 landings. Production: the gRPC client and native-stream
+    // connects split into hostname and address forms (1 -> 2 each), the
+    // native H2 client and the WSS client connect the same way, one more
+    // H2 listener bind variant (1185e0de8), QUIC udp_connection idle-expiry
+    // clock reads (7 -> 14) and the handshake driver's resend stamp
+    // (o7stss). Every one is a connect, bind or clock read inside its own
+    // transport or listener. NATS now wraps its connect in nats_io(cx, ..),
+    // which only changes an occurrence excerpt. The rest are test harnesses
+    // under src/: grpc native_stream and server duplex tests.rs, plus the
+    // QUIC handshake-driver tests (UDP peers, threads, eprintln). No scanner
+    // exemption or detection pattern changed.
+    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 809;
 
     fn src_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
@@ -2022,6 +2058,7 @@ fn test_function() {
             "time/driver.rs",
             "time/sleep.rs",
             "runtime/blocking_pool.rs",
+            "process/reaper.rs",
             "web/debug.rs",
             "util/entropy.rs",
             "fs/",

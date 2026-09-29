@@ -47,6 +47,15 @@ use std::pin::Pin;
 use std::process as std_process;
 use std::task::{Context, Poll};
 
+#[cfg(all(test, target_os = "linux"))]
+mod cancel_drain_tests;
+#[cfg(all(test, target_os = "linux"))]
+mod drop_reap_tests;
+#[cfg(all(test, target_os = "linux"))]
+mod parent_death_tests;
+#[cfg(unix)]
+mod reaper;
+
 #[cfg(windows)]
 use std::cmp::Ordering;
 #[cfg(unix)]
@@ -292,6 +301,23 @@ fn configure_unix_process_group(mode: ProcessGroupMode) -> io::Result<()> {
     }
 }
 
+// Runs in the forked child before exec, so it only makes async-signal-safe
+// calls. `parent` is the spawning process's pid, read before the fork.
+#[cfg(target_os = "linux")]
+fn configure_linux_parent_death_signal(signal: i32, parent: libc::pid_t) -> io::Result<()> {
+    let signal =
+        libc::c_ulong::try_from(signal).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, signal) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // A parent that died between fork and prctl never delivers the signal, and
+    // the child has already been reparented, so exit before running anything.
+    if unsafe { libc::getppid() } != parent {
+        unsafe { libc::_exit(127) };
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn child_pid_t(child: &std_process::Child) -> Result<libc::pid_t, ProcessError> {
     libc::pid_t::try_from(child.id()).map_err(|_| {
@@ -443,6 +469,16 @@ unsafe extern "system" {
 const GRACEFUL_KILL_POLLS: u32 = 200;
 const GRACEFUL_KILL_POLL_MAX_BACKOFF_MS: u64 = 10;
 const REAP_AFTER_KILL_POLLS: u32 = 200;
+
+/// Cleanup has its own finite grace/reap window. An ordinary `Sleep` observes
+/// the ambient owner's cancellation and would complete every delay immediately,
+/// escalating to SIGKILL before the child can handle SIGTERM and exhausting the
+/// reap loop before the kernel has delivered the signal. Poll only the timer's
+/// deadline here; cancellation of the parent remains published throughout.
+async fn cancel_drain_delay(duration: std::time::Duration) {
+    let mut delay = std::pin::pin!(crate::time::sleep(crate::time::wall_now(), duration));
+    std::future::poll_fn(|cx| delay.as_mut().poll_deadline(cx)).await;
+}
 
 #[cfg(windows)]
 const WINDOWS_TRUE: i32 = 1;
@@ -1721,9 +1757,27 @@ pub struct Command {
     kill_on_drop: bool,
     process_group_mode: ProcessGroupMode,
     signal_target: ProcessSignalTarget,
+    parent_death_signal: Option<i32>,
 }
 
 impl Command {
+    fn validate_parent_death_signal(&self) -> Result<(), ProcessError> {
+        let Some(signal) = self.parent_death_signal else {
+            return Ok(());
+        };
+        if cfg!(not(target_os = "linux")) {
+            return Err(ProcessError::Unsupported(
+                "parent-death signals are only supported on Linux".to_owned(),
+            ));
+        }
+        if signal <= 0 {
+            return Err(ProcessError::InvalidConfiguration(format!(
+                "parent-death signal must be a positive signal number, got {signal}"
+            )));
+        }
+        Ok(())
+    }
+
     fn validate_process_group_configuration(&self) -> Result<(), ProcessError> {
         #[cfg(not(unix))]
         {
@@ -1783,6 +1837,7 @@ impl Command {
             kill_on_drop: false,
             process_group_mode: ProcessGroupMode::default(),
             signal_target: ProcessSignalTarget::default(),
+            parent_death_signal: None,
         }
     }
 
@@ -2008,6 +2063,41 @@ impl Command {
         self
     }
 
+    /// Asks the kernel to send `signal` to the child when its parent dies.
+    ///
+    /// This covers what [`kill_on_drop`](Self::kill_on_drop) cannot: a parent
+    /// that is killed (`SIGKILL`, OOM kill, harness timeout) never runs `Drop`.
+    /// It also reaches a child in its own process group, which group kills of
+    /// the parent's group miss. `None`, the default, sets nothing.
+    ///
+    /// Linux only (`PR_SET_PDEATHSIG`). Its semantics:
+    /// - The signal is sent when the *thread* that called
+    ///   [`spawn`](Self::spawn) exits, not only when the whole process does.
+    ///   Spawn from a thread that lives as long as the child should, not from
+    ///   a short-lived thread such as an idle blocking-pool worker.
+    /// - The kernel clears the setting when the child executes a set-user-ID,
+    ///   set-group-ID or file-capability program.
+    /// - If the parent dies between the fork and the setting taking effect,
+    ///   the child exits with status 127 before executing the program.
+    ///
+    /// On other platforms, [`spawn`](Self::spawn) returns
+    /// [`ProcessError::Unsupported`] when this is set. A signal number that is
+    /// not positive returns [`ProcessError::InvalidConfiguration`], and the
+    /// kernel rejects an out-of-range signal with an I/O error from `spawn`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let child = Command::new("worker")
+    ///     .kill_on_drop(true)
+    ///     .parent_death_signal(Some(libc::SIGKILL))
+    ///     .spawn()?;
+    /// ```
+    pub fn parent_death_signal(&mut self, signal: Option<i32>) -> &mut Self {
+        self.parent_death_signal = signal;
+        self
+    }
+
     /// Spawns the command as a child process.
     ///
     /// Returns a `Child` handle that can be used to interact with the process.
@@ -2017,6 +2107,7 @@ impl Command {
     /// Returns an error if:
     /// - The program doesn't exist
     /// - Permission is denied
+    /// - The Unix child reaper cannot be started (before any process is spawned)
     /// - Another I/O error occurs
     ///
     /// # Example
@@ -2030,6 +2121,12 @@ impl Command {
     /// ```
     pub fn spawn(&mut self) -> Result<Child, ProcessError> {
         self.validate_process_group_configuration()?;
+        self.validate_parent_death_signal()?;
+
+        // Admit cleanup before creating a process: failure to start the shared
+        // reaper must not leave an already-running child without a wait owner.
+        #[cfg(unix)]
+        reaper::ensure_started()?;
 
         let mut cmd = std_process::Command::new(&self.program);
 
@@ -2058,9 +2155,30 @@ impl Command {
         #[cfg(unix)]
         {
             let mode = self.process_group_mode;
-            if mode != ProcessGroupMode::Inherit {
+            #[cfg(target_os = "linux")]
+            let parent_death = match self.parent_death_signal {
+                Some(signal) => Some((
+                    signal,
+                    libc::pid_t::try_from(std_process::id()).map_err(|_| {
+                        ProcessError::InvalidConfiguration(
+                            "spawning process id does not fit pid_t".to_owned(),
+                        )
+                    })?,
+                )),
+                None => None,
+            };
+            #[cfg(not(target_os = "linux"))]
+            let parent_death: Option<(i32, libc::pid_t)> = None;
+            if mode != ProcessGroupMode::Inherit || parent_death.is_some() {
                 unsafe {
-                    cmd.pre_exec(move || configure_unix_process_group(mode));
+                    cmd.pre_exec(move || {
+                        configure_unix_process_group(mode)?;
+                        #[cfg(target_os = "linux")]
+                        if let Some((signal, parent)) = parent_death {
+                            configure_linux_parent_death_signal(signal, parent)?;
+                        }
+                        Ok(())
+                    });
                 }
             }
         }
@@ -2237,8 +2355,11 @@ impl Command {
 ///
 /// # Drop Behavior
 ///
-/// By default, dropping a `Child` does *not* kill the process. Set
-/// `kill_on_drop(true)` on the `Command` to enable automatic cleanup.
+/// By default, dropping a `Child` does *not* kill the process. On Unix,
+/// a shared reaper retains the process handle until the child exits naturally
+/// and collects its status without waiting for process exit on the dropping
+/// thread. Set `kill_on_drop(true)` on the `Command` to also terminate the child
+/// on drop.
 #[derive(Debug)]
 pub struct Child {
     inner: Option<std_process::Child>,
@@ -2414,8 +2535,7 @@ impl Child {
                 Ok(None) => {}
                 Err(_) => return, // child gone or already reaped — done.
             }
-            let now = crate::time::wall_now();
-            crate::time::sleep(now, std::time::Duration::from_millis(backoff_ms)).await;
+            cancel_drain_delay(std::time::Duration::from_millis(backoff_ms)).await;
             backoff_ms = (backoff_ms * 2).min(GRACEFUL_KILL_POLL_MAX_BACKOFF_MS);
         }
 
@@ -2433,8 +2553,7 @@ impl Child {
                 Ok(Some(_)) | Err(_) => return,
                 Ok(None) => {}
             }
-            let now = crate::time::wall_now();
-            crate::time::sleep(now, std::time::Duration::from_millis(2)).await;
+            cancel_drain_delay(std::time::Duration::from_millis(2)).await;
         }
     }
 
@@ -2947,7 +3066,9 @@ enum KillOnDropReapStrategy {
 fn blocking_pool_for_kill_on_drop_reap() -> Option<crate::runtime::blocking_pool::BlockingPoolHandle>
 {
     Cx::current()
-        .and_then(|cx| cx.blocking_pool_handle())
+        // Reaping an already-owned child is cleanup, not permission to spawn
+        // new work. Preserve the inherited pool under a restricted context.
+        .and_then(|cx| cx.blocking_pool_handle_for_inheritance())
         .filter(|pool| !pool.is_shutdown())
         .or_else(|| {
             crate::runtime::Runtime::current_handle()
@@ -3050,32 +3171,15 @@ fn reap_kill_on_drop_child(mut child: std_process::Child) {
 }
 
 impl Drop for Child {
-    /// Drop the child handle.
+    /// Close stdin and release the process handle.
     ///
-    /// The previous behavior was: with `kill_on_drop = false` (the default),
-    /// the OS-level child was leaked as a zombie until the parent process
-    /// exited — `std::process::Child` does NOT reap on drop, and we did
-    /// nothing either. Long-lived parents (servers, the runtime itself) would
-    /// accumulate zombies.
+    /// `kill_on_drop(true)` preserves the configured signal target and existing
+    /// kill-and-reap strategy. On Unix the default path does not kill: it reaps
+    /// an already-exited child immediately, or transfers the owned child to the
+    /// shared reaper until natural exit (br-asupersync-bi2462.114). No process-exit
+    /// wait or fallible worker startup occurs in this default drop path.
     ///
-    /// New behavior (br-asupersync-bn2iln):
-    ///
-    ///   * If `kill_on_drop = true`: as before, signal the child and reap
-    ///     it via the runtime's blocking pool / detached reaper / direct
-    ///     wait fallback.
-    ///   * If `kill_on_drop = false` (default): do a non-blocking
-    ///     `waitpid(pid, &mut status, WNOHANG)` to reap the child if it
-    ///     has already exited. This eliminates the zombie-leak class for
-    ///     the common case where the child completed before the handle
-    ///     dropped (test harnesses, short-lived helper processes, racing
-    ///     primitives that drop the loser). If the child is still running,
-    ///     `WNOHANG` returns immediately with 0 and we leave the OS
-    ///     reaping responsibility to whoever called us — preserving the
-    ///     "drop does not kill" contract while removing the silent
-    ///     accumulation.
-    ///
-    /// Windows: no-op. Win32 cleans up child process handles automatically
-    /// via the kernel handle's reference count; there is no zombie class.
+    /// On non-Unix platforms, the default path only closes the process handle.
     fn drop(&mut self) {
         drop(self.stdin.take());
 
@@ -3097,33 +3201,14 @@ impl Drop for Child {
             return;
         }
 
-        // kill_on_drop = false: opportunistic non-blocking reap so an
-        // already-exited child does not linger as a zombie.
         #[cfg(unix)]
-        {
-            if let Some(child) = self.inner.as_ref() {
-                let Ok(pid) = libc::pid_t::try_from(child.id()) else {
-                    return;
-                };
-                let mut status: libc::c_int = 0;
-                // Safety: pid is the kernel-assigned PID for our owned
-                // child; `&mut status` is a valid out-pointer.
-                // `WNOHANG` makes this non-blocking — returns 0 if the
-                // child is still running, the pid if it was reaped, -1 on
-                // error. We ignore the result: success reaps the zombie,
-                // ECHILD means already reaped or never existed, EINTR
-                // means try-later (and we don't), and any other error is
-                // best-effort cleanup.
-                let _ = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
-            }
+        if let Some(child) = self.inner.take() {
+            // Preserve the std child's cached status and ownership. An EINTR
+            // or a still-running result must not discard the reaping owner.
+            reaper::reap_or_enqueue(child);
         }
 
-        // Drop std_process::Child without further action. The descriptor
-        // closes, but on Unix the OS still requires SOMEONE to wait() the
-        // child if WNOHANG above didn't catch it. That responsibility
-        // remains with the original caller (per the documented contract:
-        // "drop does not kill"); this commit only added the non-blocking
-        // best-effort reap.
+        #[cfg(not(unix))]
         let _ = self.inner.take();
     }
 }
@@ -4438,6 +4523,26 @@ mod tests {
 
         drop(runtime);
         crate::test_complete!("test_kill_on_drop_reap_strategy_prefers_cx_blocking_pool");
+    }
+
+    #[test]
+    fn test_kill_on_drop_reap_retains_restricted_cx_pool() {
+        let pool = crate::runtime::BlockingPool::new(1, 1);
+        let restricted = Cx::for_testing()
+            .with_blocking_pool_handle(Some(pool.handle()))
+            .restrict::<crate::cx::cap::None>();
+        let _guard = restricted.set_current_restricted();
+        let ambient = Cx::current().expect("restricted ambient context");
+        assert!(!ambient.capabilities().spawn);
+        assert!(ambient.blocking_pool_handle().is_none());
+        assert!(
+            blocking_pool_for_kill_on_drop_reap().is_some(),
+            "cleanup must retain its inherited pool without exposing spawn authority"
+        );
+        assert_eq!(
+            kill_on_drop_reap_strategy(),
+            KillOnDropReapStrategy::BlockingPool
+        );
     }
 
     #[test]

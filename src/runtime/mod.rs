@@ -218,7 +218,7 @@ pub use builder::{
     BrowserServiceWorkerBrokerSupportReason, BrowserSharedWorkerCoordinatorSupportDiagnostics,
     BrowserSharedWorkerCoordinatorSupportReason, BrowserWorkerFallbackTarget, BrowserWorkerPump,
     CheckedJoinHandle, DeadlineMonitoringBuilder, JoinHandle, LocalJoinHandle, PumpDrainOutcome,
-    RootDrainOutcome, Runtime, RuntimeBuilder, RuntimeHandle,
+    RootDrainOutcome, RootDrainReport, Runtime, RuntimeBuilder, RuntimeHandle,
 };
 pub use cache::{
     ArtifactCache, ArtifactCacheConfig, ArtifactMemoryPressureSnapshot, ArtifactMetadata,

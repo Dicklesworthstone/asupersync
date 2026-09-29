@@ -9,6 +9,11 @@
 //! 127.0.0.1, deriving 1-RTT keys from the wire transcript on both sides.
 
 #![cfg(all(feature = "tls", feature = "test-internals"))]
+// An integration test is its own crate and does not inherit `src/lib.rs`'s
+// `recursion_limit`. Proving `Send` for its async chains exceeds rustc's default
+// depth, which the future-incompatible `recursion_depth_exceeding_limit` lint
+// (rust-lang #159228) will turn into a hard error.
+#![recursion_limit = "256"]
 
 use asupersync::bytes::Bytes;
 use asupersync::cx::Cx;
@@ -151,8 +156,13 @@ fn run_handshake_drop_proxy(
                         client_addr = Some(src);
                         server_addr
                     };
-                    if deduplicate_server && from_server {
-                        let fresh = seen_server_packets.insert(buf[..len].to_vec());
+                    if deduplicate_server && from_server && buf[0] & 0x80 != 0 {
+                        // A resent server flight carries new packet numbers,
+                        // so its bytes differ (RFC 9000 section 12.3). Header
+                        // protection masks only the low first-byte bits, so
+                        // the long-header form and type plus the datagram
+                        // length identify a resent flight datagram.
+                        let fresh = seen_server_packets.insert((buf[0] & 0xf0, len));
                         eprintln!("handshake proxy server packet: bytes={len} fresh={fresh}");
                         if !fresh {
                             continue;
@@ -703,8 +713,8 @@ fn real_tls13_final_ack_does_not_retransmit_client_finished() {
                 .unwrap();
         let server_addr = server_endpoint.local_addr();
         // Retained server CRYPTO flights legitimately request a Finished
-        // resend. Remove byte-identical server retransmissions in this
-        // fixture so the post-handoff receive isolates the fresh final ACK.
+        // resend. Remove resent server flights in this fixture so the
+        // post-handoff receive isolates the fresh final ACK.
         let proxy = HandshakeDropProxy::spawn_with_server_deduplication(server_addr, true);
         let client_tls = client_config(
             vec![parse_one_cert(CA_CERT_PEM)],
@@ -904,6 +914,15 @@ fn establish_for_application_data(
 /// over the same real sockets.
 #[test]
 fn datagram_and_stream_cross_real_udp_after_real_handshake() {
+    datagram_and_stream_exchange(false);
+}
+
+#[test]
+fn managed_keys_rotate_repeatedly_over_real_udp_after_real_handshake() {
+    datagram_and_stream_exchange(true);
+}
+
+fn datagram_and_stream_exchange(rotate_keys: bool) {
     block_on(async {
         let cx = Cx::for_testing();
         let udp_config = QuicUdpEndpointConfig {
@@ -975,14 +994,18 @@ fn datagram_and_stream_cross_real_udp_after_real_handshake() {
             .create_connection(&cx, app_cid, client_addr, true)
             .await
             .expect("create server connection");
+        let mut client_protection = AtpPacketProtection::from_provider(
+            Box::new(client_driver.into_provider()),
+            AtpPacketProtectionConfig::default(),
+        );
+        if rotate_keys {
+            client_protection.set_key_update_confidentiality_threshold(1);
+        }
         client_router
             .install_packet_protection(
                 &cx,
                 app_cid,
-                AtpPacketProtection::from_provider(
-                    Box::new(client_driver.into_provider()),
-                    AtpPacketProtectionConfig::default(),
-                ),
+                client_protection,
             )
             .expect("install client protection");
         server_router
@@ -1111,13 +1134,16 @@ fn datagram_and_stream_cross_real_udp_after_real_handshake() {
         .expect("app-data recv timed out")
         .expect("receive app data over real UDP");
         assert!(!received.is_empty(), "expected app-data UDP batch");
+        let mut acknowledgements = Vec::new();
         for packet in received {
             match server_router
                 .route_packet(&cx, packet)
                 .await
                 .expect("route")
             {
-                RoutingResult::Routed { .. } => {}
+                RoutingResult::Routed { outgoing_packets, .. } => {
+                    acknowledgements.extend(outgoing_packets);
+                }
                 other => panic!("expected routed app-data packet, got {other:?}"),
             }
         }
@@ -1139,6 +1165,73 @@ fn datagram_and_stream_cross_real_udp_after_real_handshake() {
             Some(&b"raptorq-symbol-1"[..])
         );
         assert!(conn.recv_datagram().is_none());
+
+        if rotate_keys {
+            timeout(wall_now(), Duration::from_secs(10), async {
+                for round in 0..3 {
+                    // These ACKs come from the actual receiving router and
+                    // cross UDP under the corresponding TLS-derived send key.
+                    assert!(!acknowledgements.is_empty(), "round {round}: missing ACK");
+                    server_ep.send_batch(&cx, &acknowledgements).await.unwrap();
+                    acknowledgements.clear();
+                    loop {
+                        let mut routed = false;
+                        for packet in client_ep.receive_batch(&cx, 16).await.unwrap() {
+                            if packet.data[0] & 0x80 != 0 {
+                                // A retained final TLS flight can still arrive.
+                                continue;
+                            }
+                            let RoutingResult::Routed { outgoing_packets, .. } =
+                                client_router.route_packet(&cx, packet).await.unwrap()
+                            else {
+                                panic!("round {round}: ACK was not routed");
+                            };
+                            if !outgoing_packets.is_empty() {
+                                client_ep.send_batch(&cx, &outgoing_packets).await.unwrap();
+                            }
+                            routed = true;
+                        }
+                        if routed {
+                            break;
+                        }
+                    }
+
+                    let client = client_router.connection_mut_for_testing(&cx, app_cid).unwrap();
+                    let previous_phase = client.tls().local_key_phase();
+                    let payload = Bytes::from(vec![round; 32]);
+                    client.send_datagram(&cx, payload.clone()).unwrap();
+                    let packets = client_router.drain_application_data_for_testing(
+                        &cx, app_cid, server_addr, Instant::now(),
+                    ).await.unwrap();
+                    assert!(!packets.is_empty());
+                    let phase = client_router.connection_mut_for_testing(&cx, app_cid)
+                        .unwrap().tls().local_key_phase();
+                    assert_ne!(phase, previous_phase, "round {round}: send key did not rotate");
+                    client_ep.send_batch(&cx, &packets).await.unwrap();
+                    loop {
+                        for packet in server_ep.receive_batch(&cx, 16).await.unwrap() {
+                            if packet.data[0] & 0x80 != 0 {
+                                continue;
+                            }
+                            let RoutingResult::Routed { outgoing_packets, .. } =
+                                server_router.route_packet(&cx, packet).await.unwrap()
+                            else {
+                                panic!("round {round}: updated-key packet was not routed");
+                            };
+                            acknowledgements.extend(outgoing_packets);
+                        }
+                        let server = server_router.connection_mut_for_testing(&cx, app_cid).unwrap();
+                        if let Some(received) = server.recv_datagram() {
+                            assert_eq!(received, payload, "round {round}: decrypted payload");
+                            assert_eq!(server.tls().remote_key_phase(), phase);
+                            assert_eq!(server.tls().local_key_phase(), phase);
+                            assert!(server.recv_datagram().is_none());
+                            break;
+                        }
+                    }
+                }
+            }).await.expect("repeated key updates and acknowledgements timed out");
+        }
     });
 }
 
@@ -1470,6 +1563,14 @@ mod managed_quiet {
                 ManagedEndpointConfig {
                     is_server: server,
                     packet_batch_size: 2,
+                    // The quiet oracle requires zero pending timers, and the PTO
+                    // phase withholds all peer input for up to 90 s. The default
+                    // 30 s local idle cap (enforced since 57dd29152) would hold an
+                    // idle-reap timer in every quiet state and reap the connection
+                    // mid-recovery. Neither side advertises max_idle_timeout, so
+                    // zero leaves no idle deadline. Idle reaping has its own live
+                    // UDP tests in tests/quic_h3_live_udp.rs.
+                    connection_idle_timeout_micros: 0,
                     ..Default::default()
                 },
             )
@@ -1663,16 +1764,16 @@ mod managed_quiet {
         });
         let (mut receipt, task, region) = runtime.block_on(runtime.handle().spawn(parent));
         reader.join().unwrap();
-        runtime.block_on(async {
-            let started = Instant::now();
-            while !runtime.is_quiescent() {
-                assert!(
-                    started.elapsed() < Duration::from_secs(5),
-                    "actual task/obligation cleanup"
-                );
-                asupersync::runtime::yield_now().await;
-            }
-        });
+        // block_on registers its own root task (d8e81f2cd), so quiescence is
+        // checked outside it; each turn drives work that is still draining.
+        let started = Instant::now();
+        while !runtime.is_quiescent() {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "actual task/obligation cleanup"
+            );
+            runtime.block_on(asupersync::runtime::yield_now());
+        }
         assert!(
             runtime
                 .task_inspector(Default::default())
@@ -1804,13 +1905,19 @@ mod managed_quiet {
                     }
                     if line.starts_with("test result:") {
                         assert!(terminal.is_none(), "one selected libtest terminal");
-                        let elapsed = line.strip_prefix("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in ")
-                            .expect("exact helper selection must be 1/0/0/0/4");
+                        // Exactly the helper ran. The filtered count is every other
+                        // test in this binary, so it grows as tests are added.
+                        let rest = line.strip_prefix("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; ")
+                            .expect("exact helper selection must be 1/0/0/0");
+                        let (filtered, elapsed) = rest
+                            .split_once(" filtered out; finished in ")
+                            .expect("libtest filtered/elapsed terminal");
+                        let filtered: u64 = filtered.parse().expect("filtered count");
                         let elapsed_seconds: f64 =
                             elapsed.strip_suffix('s').unwrap().parse().unwrap();
                         assert!(elapsed_seconds.is_finite() && elapsed_seconds >= 0.0);
                         terminal = Some(json!({"raw":line, "passed":1, "failed":0,
-                            "ignored":0, "measured":0, "filtered":4, "elapsed_seconds":elapsed_seconds}));
+                            "ignored":0, "measured":0, "filtered":filtered, "elapsed_seconds":elapsed_seconds}));
                     }
                 }
                 terminal

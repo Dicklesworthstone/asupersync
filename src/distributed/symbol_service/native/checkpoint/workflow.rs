@@ -5,6 +5,7 @@ use super::super::{RemoteSymbolTransport, SymbolBatchKey, SymbolStoreError, enco
 use super::super::recovery::{RemoteRecoveryConfig, RemoteRecoveryError, ReplicaFetch, SnapshotDecodeLimits, SnapshotIdentity};
 use crate::cx::Cx;
 use crate::distributed::{EncodedState, RegionSnapshot};
+use crate::distributed::assignment::{AssignmentStrategy, ReplicaAssignment};
 use crate::distributed::distribution::{DistributionResult, DistributorTransport, ReplicaAck, ReplicaFailure, SymbolDistributor};
 use crate::distributed::recovery::{RecoveryDecodingConfig, StateDecoder};
 use crate::error::ErrorKind;
@@ -17,6 +18,7 @@ use std::fmt;
 use std::future::{Future, poll_fn};
 use std::task::Poll;
 use std::time::Duration;
+use sha2::{Digest, Sha256};
 
 /// Explicit authority for publishing one exact authenticated snapshot.
 /// The symbol key is supplied by the transport and signing SecurityContext.
@@ -83,6 +85,13 @@ pub enum CheckpointError {
         /// Actual completed distribution, without a successful recovery manifest.
         distribution: DistributionResult,
     },
+    /// Receipts met the write threshold, but the acknowledged symbol union did
+    /// not reconstruct the exact prevalidated snapshot. No manifest was sealed.
+    #[error("acknowledged checkpoint stripes do not reconstruct the source snapshot")]
+    InsufficientCoverage {
+        /// Completed writes may still exist at these replicas.
+        distribution: DistributionResult,
+    },
     /// A caller attempted to weaken the manifest's minimum recovery requirement.
     #[error("recovery configuration weakens the authenticated replica threshold")]
     RecoveryThreshold,
@@ -134,10 +143,42 @@ impl DistributorTransport for CheckedTransport<'_> {
     }
 }
 
+struct Stripe {
+    assignment: ReplicaAssignment,
+    key: SymbolBatchKey,
+    count: u32,
+}
+
+// Assignment identity is local authority. Bind every send to the exact batch
+// prepared for that replica, including its count, rather than one full-copy key.
+struct CheckedStripedTransport<'a> {
+    inner: &'a RemoteSymbolTransport,
+    stripes: &'a [Stripe],
+}
+impl DistributorTransport for CheckedStripedTransport<'_> {
+    async fn send_symbols(&self, replica: &str, symbols: Vec<AuthenticatedSymbol>)
+        -> Result<ReplicaAck, ReplicaFailure>
+    {
+        let expected = self.stripes.iter().find(|stripe| stripe.assignment.replica_id == replica);
+        let matches = expected.is_some_and(|stripe| {
+            encode_symbol_batch(&symbols, self.inner.limits)
+                .is_ok_and(|batch| batch.key() == stripe.key && batch.symbol_count() == stripe.count)
+        });
+        if !matches {
+            return Err(ReplicaFailure { replica_id: replica.to_owned(),
+                error: "checkpoint outgoing stripe changed after validation".into(), error_kind: ErrorKind::ProtocolError });
+        }
+        self.inner.send_symbols(replica, symbols).await
+    }
+}
+
 impl RemoteSymbolTransport {
     /// Authenticate a supplied encoding, distribute full copies, and seal only
     /// confirmed replica keys. Reuses the caller's distributor and its metrics,
-    /// including opt-in hedging. Unknown, duplicate, unavailable or unauthorized
+    /// including opt-in hedging. Its fanout is lowered to this transport's
+    /// [`Self::max_in_flight`] for the call, as recovery's is, so a wider
+    /// distributor does not turn admission refusals into replica failures.
+    /// Admission stays shared with clones. Unknown, duplicate, unavailable or unauthorized
     /// input targets refuse before dispatch instead of reducing the denominator.
     ///
     /// Source/count/byte/decode/manifest limits are checked before network work.
@@ -157,14 +198,143 @@ impl RemoteSymbolTransport {
         if config.timeout.is_zero() || self.max_in_flight() == 0 { return Err(CheckpointError::Configuration); }
         let timer = self.cx.timer_driver().ok_or(CheckpointError::NoTimer)?;
         let deadline = timer.now() + config.timeout;
-        let (draft, count, required) = prepare(self, distributor, encoded, replicas, security, &authority, config)?;
+        let (draft, count, required, _) = prepare(self, distributor, encoded, replicas, security, &authority, config)?;
         if self.cx.is_cancel_requested() { return Err(CheckpointError::Cancelled); }
         if timer.now() >= deadline { return Err(CheckpointError::Deadline); }
         let checked = CheckedTransport { inner: self, key: draft.replicas[0].key };
+        // SymbolDistributor::distribute's plan, with fanout bounded by this transport's admission.
+        let assignments = SymbolDistributor::compute_assignments_with_strategy(
+            encoded, replicas, security, None, AssignmentStrategy::Full);
         let distribution = before_deadline(&self.cx, timer.clone(), deadline,
-            distributor.distribute(&self.cx, encoded, replicas, &checked, security)).await?;
+            distributor.distribute_assignments(&self.cx, encoded, assignments, &checked, security,
+                self.max_in_flight())).await?;
         // before_deadline destroys the complete distributor future before sealing.
         let result = seal(draft, distribution, count, required, authority.manifest_key, config.manifest)?;
+        if self.cx.is_cancel_requested() { return Err(CheckpointError::Cancelled); }
+        if timer.now() >= deadline { return Err(CheckpointError::Deadline); }
+        Ok(result)
+    }
+
+    /// Publish erasure-coded stripes and seal their exact per-replica batch keys.
+    ///
+    /// Each encoded symbol is assigned once, round-robin over the supplied
+    /// replicas. Unlike full replication, a single replica need not reconstruct
+    /// the snapshot. The acknowledged union must actually decode and authenticate
+    /// to the same canonical snapshot as the source before any manifest escapes.
+    /// Receipt quorum or a count of symbols is never sufficient by itself.
+    ///
+    /// Configure enough repair symbols for the intended failure pattern. A
+    /// recovery replica floor is an admission policy, not a promise that any
+    /// subset of that size decodes. Recovery collects all available manifest
+    /// donors and fails if their union is insufficient. Quorum-first hedging may
+    /// retire stripes needed for decoding; such a publication refuses with
+    /// [`CheckpointError::InsufficientCoverage`] even when its write quorum met.
+    ///
+    /// All existing source, signing, decoder, transport and manifest limits still
+    /// apply to the complete source. Empty stripes refuse before dispatch. V1
+    /// batch/manifest bytes and the full-copy [`Self::replicate_checkpoint`] API
+    /// are unchanged. The returned metadata must be persisted separately.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn replicate_striped_checkpoint(
+        &self, distributor: &mut SymbolDistributor, encoded: &EncodedState,
+        replicas: &[ReplicaInfo], security: &SecurityContext,
+        authority: CheckpointAuthority<'_>, config: CheckpointConfig,
+    ) -> Result<ReplicatedCheckpoint, CheckpointError> {
+        self.replicate_striped_checkpoint_inner(distributor, encoded, replicas, security, authority, config, false).await
+    }
+
+    /// Publish stripes until a fixed write quorum actually reconstructs the snapshot.
+    ///
+    /// A fast receipt quorum with insufficient equations keeps admitting useful
+    /// replicas. Success requires independent snapshot authentication and exact
+    /// equality with the prevalidated source, as well as the original distinct
+    /// replica threshold. Once both conditions hold, remaining local sends and
+    /// timers are destroyed before the signed manifest is returned.
+    ///
+    /// The distributor's concurrency ceiling (at most [`Self::max_in_flight`])
+    /// and acknowledgement deadlines apply.
+    /// With hedging enabled, spare attempts follow its hedge delay; after receipt
+    /// quorum without coverage, at least one further attempt is ordinary required
+    /// work. Without hedging, all available slots are filled and early completion
+    /// still retires unnecessary local work. Existing publication APIs keep their
+    /// established completion policies.
+    ///
+    /// Decoding runs only after each block has enough distinct equations and the
+    /// replica floor is met. Another attempt requires newly acknowledged equations;
+    /// the number of attempts is bounded by successful replica replies. Synchronous
+    /// decoding obeys the admitted dimensions but is not preempted inside a poll.
+    /// Cancellation and the total deadline are checked again after it. Closing a
+    /// local socket neither rolls back remote storage nor proves remote quiescence.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn replicate_striped_checkpoint_on_quorum(
+        &self, distributor: &mut SymbolDistributor, encoded: &EncodedState,
+        replicas: &[ReplicaInfo], security: &SecurityContext,
+        authority: CheckpointAuthority<'_>, config: CheckpointConfig,
+    ) -> Result<ReplicatedCheckpoint, CheckpointError> {
+        self.replicate_striped_checkpoint_inner(distributor, encoded, replicas, security, authority, config, true).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn replicate_striped_checkpoint_inner(
+        &self, distributor: &mut SymbolDistributor, encoded: &EncodedState,
+        replicas: &[ReplicaInfo], security: &SecurityContext,
+        authority: CheckpointAuthority<'_>, config: CheckpointConfig, on_quorum: bool,
+    ) -> Result<ReplicatedCheckpoint, CheckpointError> {
+        if self.cx.is_cancel_requested() { return Err(CheckpointError::Cancelled); }
+        if config.timeout.is_zero() || self.max_in_flight() == 0 { return Err(CheckpointError::Configuration); }
+        let timer = self.cx.timer_driver().ok_or(CheckpointError::NoTimer)?;
+        let deadline = timer.now() + config.timeout;
+        let (mut draft, _, required, snapshot) =
+            prepare(self, distributor, encoded, replicas, security, &authority, config)?;
+        let source_digest = Sha256::digest(snapshot.to_bytes()).into();
+        drop(snapshot);
+        let stripes = prepare_stripes(self, encoded, replicas, security)?;
+        for replica in &mut draft.replicas {
+            let stripe = stripes.iter().find(|stripe| stripe.assignment.replica_id == replica.replica_id)
+                .ok_or(CheckpointError::Configuration)?;
+            replica.key = stripe.key;
+        }
+        if self.cx.is_cancel_requested() { return Err(CheckpointError::Cancelled); }
+        if timer.now() >= deadline { return Err(CheckpointError::Deadline); }
+        let checked = CheckedStripedTransport { inner: self, stripes: &stripes };
+        let assignments = stripes.iter().map(|stripe| stripe.assignment.clone()).collect();
+        let result = if on_quorum {
+            let mut indices = BTreeSet::new();
+            let mut confirmed = BTreeSet::new();
+            let mut verified = false;
+            let mut attempted_equations = 0;
+            let distribution = {
+                let mut complete = |ack: &ReplicaAck| {
+                    let Some(stripe) = stripes.iter().find(|stripe| stripe.assignment.replica_id == ack.replica_id)
+                        else { return false; };
+                    if ack.symbols_received != stripe.count || !confirmed.insert(ack.replica_id.clone()) {
+                        return false;
+                    }
+                    indices.extend(stripe.assignment.symbol_indices.iter().copied());
+                    if confirmed.len() >= required && indices.len() != attempted_equations {
+                        attempted_equations = indices.len();
+                        verified = stripe_union_matches(self, encoded, &indices, source_digest, &authority);
+                    }
+                    verified
+                };
+                before_deadline(&self.cx, timer.clone(), deadline,
+                    distributor.distribute_assignments_with_completion(
+                        &self.cx, encoded, assignments, &checked, security, self.max_in_flight(),
+                        Some(&mut complete),
+                    )).await?
+            };
+            // Reuse the exact successful decode, but still validate every final
+            // receipt and compare the final equation set before sealing. Neither
+            // an extra decode without new equations nor a count-only proof enters.
+            seal_striped_with_coverage(draft, distribution, &stripes, required,
+                authority.manifest_key, config.manifest, |actual| verified && *actual == indices)?
+        } else {
+            let distribution = before_deadline(&self.cx, timer.clone(), deadline,
+                distributor.distribute_assignments(&self.cx, encoded, assignments, &checked, security,
+                    self.max_in_flight())).await?;
+            seal_striped(self, draft, distribution, &stripes, encoded, required,
+                source_digest, &authority, config.manifest)?
+        };
         if self.cx.is_cancel_requested() { return Err(CheckpointError::Cancelled); }
         if timer.now() >= deadline { return Err(CheckpointError::Deadline); }
         Ok(result)
@@ -184,13 +354,32 @@ impl RemoteSymbolTransport {
         Ok(self.recover_snapshot(manifest.replicas(), config, manifest.params(), manifest.identity(),
             decode_limits, snapshot_key).await?)
     }
+
+    /// Recover a manifest as soon as its authenticated replica floor and actual
+    /// decodability are established, without waiting for every planned donor.
+    ///
+    /// Preserves the manifest's namespace, exact snapshot provenance and minimum
+    /// distinct-replica requirement. A quorum of insufficient stripes continues
+    /// collecting; only independently authenticated reconstruction can stop the
+    /// remaining local fetches early. See [`Self::recover_snapshot_on_quorum`] for
+    /// decoder bounds, cancellation and local connection ownership semantics.
+    pub async fn recover_checkpoint_on_quorum(
+        &self, manifest: &RecoveryManifest, config: RemoteRecoveryConfig,
+        decode_limits: SnapshotDecodeLimits, snapshot_key: &AuthKey,
+    ) -> Result<RegionSnapshot, CheckpointError> {
+        if self.cx.is_cancel_requested() { return Err(CheckpointError::Cancelled); }
+        if self.hello.peer_node() != manifest.peer_node() { return Err(ManifestError::Identity.into()); }
+        if config.required_replicas < manifest.minimum_replicas() { return Err(CheckpointError::RecoveryThreshold); }
+        Ok(self.recover_snapshot_on_quorum(manifest.replicas(), config, manifest.params(), manifest.identity(),
+            decode_limits, snapshot_key).await?)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn prepare(
     transport: &RemoteSymbolTransport, distributor: &SymbolDistributor, encoded: &EncodedState,
     replicas: &[ReplicaInfo], security: &SecurityContext, authority: &CheckpointAuthority<'_>, config: CheckpointConfig,
-) -> Result<(RecoveryManifest, u32, usize), CheckpointError> {
+) -> Result<(RecoveryManifest, u32, usize, RegionSnapshot), CheckpointError> {
     counts(replicas.len(), config.minimum_recovery_replicas, config.manifest)?;
     dimensions(encoded.params)?;
     let policy = distributor.config();
@@ -205,7 +394,9 @@ fn prepare(
     { return Err(ManifestError::Limit("snapshot decode").into()); }
     let mut names = BTreeSet::new();
     for replica in replicas {
-        if !super::valid_label(&replica.id) || !names.insert(replica.id.as_str()) || !transport.routes.contains_key(&replica.id) {
+        if !super::valid_label(&replica.id) || !names.insert(replica.id.as_str()) || !transport.routes.contains_key(&replica.id)
+            || !security.is_replica_authorized(&replica.id, None)
+        {
             return Err(CheckpointError::Configuration);
         }
     }
@@ -218,10 +409,6 @@ fn prepare(
     }
     n.checked_mul(replicas.len()).and_then(|entries| entries.checked_mul(std::mem::size_of::<usize>()))
         .ok_or(ManifestError::Overflow)?;
-    let assignments = SymbolDistributor::compute_assignments_with_auth(encoded, replicas, security, None);
-    if assignments.len() != replicas.len() || assignments.iter().any(|assignment|
-        assignment.symbol_indices.len() != n || assignment.symbol_indices.iter().enumerate().any(|(index, value)| index != *value))
-    { return Err(CheckpointError::Configuration); }
     let mut signed = Vec::new();
     signed.try_reserve_exact(n).map_err(|_| ManifestError::Allocation)?;
     for symbol in &encoded.symbols {
@@ -247,7 +434,110 @@ fn prepare(
     if (snapshot.region_id, snapshot.origin_id, snapshot.epoch, snapshot.sequence)
         != (authority.expected.region_id, authority.expected.origin_id, authority.expected.epoch, authority.expected.sequence)
     { return Err(CheckpointError::Identity); }
-    Ok((draft, batch.symbol_count(), required))
+    Ok((draft, batch.symbol_count(), required, snapshot))
+}
+
+fn prepare_stripes(
+    transport: &RemoteSymbolTransport, encoded: &EncodedState,
+    replicas: &[ReplicaInfo], security: &SecurityContext,
+) -> Result<Vec<Stripe>, CheckpointError> {
+    let assignments = SymbolDistributor::compute_assignments_with_strategy(
+        encoded, replicas, security, None, AssignmentStrategy::Striped,
+    );
+    if assignments.len() != replicas.len() || assignments.iter().any(|assignment| assignment.symbol_indices.is_empty()) {
+        return Err(CheckpointError::Configuration);
+    }
+    let mut stripes = Vec::new();
+    stripes.try_reserve_exact(assignments.len()).map_err(|_| ManifestError::Allocation)?;
+    for assignment in assignments {
+        let mut signed = Vec::new();
+        signed.try_reserve_exact(assignment.symbol_indices.len()).map_err(|_| ManifestError::Allocation)?;
+        for &index in &assignment.symbol_indices {
+            let authenticated = security.sign_symbol(&encoded.symbols[index]);
+            if !authenticated.tag().verify(&transport.auth_key, authenticated.symbol()) {
+                return Err(SymbolStoreError::Authentication.into());
+            }
+            signed.push(authenticated);
+        }
+        let batch = encode_symbol_batch(&signed, transport.limits)?;
+        stripes.push(Stripe { assignment, key: batch.key(), count: batch.symbol_count() });
+    }
+    Ok(stripes)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn seal_striped(
+    transport: &RemoteSymbolTransport, draft: RecoveryManifest,
+    distribution: DistributionResult, stripes: &[Stripe], encoded: &EncodedState,
+    required: usize, source_digest: [u8; 32], authority: &CheckpointAuthority<'_>,
+    limits: ManifestLimits,
+) -> Result<ReplicatedCheckpoint, CheckpointError> {
+    seal_striped_with_coverage(draft, distribution, stripes, required, authority.manifest_key, limits,
+        |indices| stripe_union_matches(transport, encoded, indices, source_digest, authority))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn seal_striped_with_coverage(
+    mut draft: RecoveryManifest, distribution: DistributionResult, stripes: &[Stripe], required: usize,
+    manifest_key: &AuthKey, limits: ManifestLimits, verify: impl FnOnce(&BTreeSet<usize>) -> bool,
+) -> Result<ReplicatedCheckpoint, CheckpointError> {
+    if !distribution.quorum_achieved || distribution.acks.len() < required
+        || distribution.acks.len() < draft.minimum_replicas
+    { return Err(CheckpointError::Quorum { distribution }); }
+    if distribution.object_id != draft.params.object_id { return Err(CheckpointError::Configuration); }
+    let mut confirmed = BTreeSet::new();
+    let mut indices = BTreeSet::new();
+    for ack in &distribution.acks {
+        let stripe = stripes.iter().find(|stripe| stripe.assignment.replica_id == ack.replica_id)
+            .ok_or(CheckpointError::Configuration)?;
+        if ack.symbols_received != stripe.count || !confirmed.insert(ack.replica_id.clone()) {
+            return Err(CheckpointError::Configuration);
+        }
+        indices.extend(stripe.assignment.symbol_indices.iter().copied());
+    }
+    if !verify(&indices) { return Err(CheckpointError::InsufficientCoverage { distribution }); }
+    draft.replicas.retain(|replica| confirmed.contains(replica.replica_id.as_str()));
+    drop(confirmed);
+    let encoded = draft.to_canonical_bytes(manifest_key, limits.max_encoded_bytes)?;
+    Ok(ReplicatedCheckpoint { manifest: draft, encoded, distribution })
+}
+
+fn stripe_union_matches(
+    transport: &RemoteSymbolTransport, encoded: &EncodedState, indices: &BTreeSet<usize>,
+    source_digest: [u8; 32], authority: &CheckpointAuthority<'_>,
+) -> bool {
+    // Source admission has rejected duplicate identities and bounded dimensions.
+    // Count coverage per block before constructing the decoder; an aggregate K
+    // threshold cannot compensate for equations missing from one source block.
+    let params = encoded.params;
+    let mut received = [0usize; 256];
+    for &index in indices {
+        let Some(symbol) = encoded.symbols.get(index) else { return false; };
+        let block = usize::from(symbol.sbn());
+        if block < usize::from(params.source_blocks) && symbol.data().len() == usize::from(params.symbol_size) {
+            received[block] += 1;
+        }
+    }
+    let block_bytes = u64::from(params.symbol_size) * u64::from(params.symbols_per_block);
+    if !(0..params.source_blocks).all(|block| {
+        let bytes = (params.object_size - u64::from(block) * block_bytes).min(block_bytes);
+        received[usize::from(block)] as u64 >= bytes.div_ceil(u64::from(params.symbol_size))
+    }) { return false; }
+    let signing = SecurityContext::new(transport.auth_key.as_ref().clone());
+    let mut decoder = StateDecoder::new(RecoveryDecodingConfig {
+        verify_integrity: true, auth_context: Some(SecurityContext::new(transport.auth_key.as_ref().clone())),
+        snapshot_auth_key: Some(authority.snapshot_key.clone()), max_decode_attempts: 1, allow_partial_decode: false,
+    });
+    for &index in indices {
+        if decoder.add_symbol(&signing.sign_symbol(&encoded.symbols[index])).is_err() {
+            return false;
+        }
+    }
+    decoder.decode_snapshot(&params).is_ok_and(|snapshot| {
+        let digest: [u8; 32] = Sha256::digest(snapshot.to_bytes()).into();
+        digest == source_digest && (snapshot.region_id, snapshot.origin_id, snapshot.epoch, snapshot.sequence)
+            == (authority.expected.region_id, authority.expected.origin_id, authority.expected.epoch, authority.expected.sequence)
+    })
 }
 
 fn seal(

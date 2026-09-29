@@ -7,9 +7,8 @@
 
 use super::{
     Bytes, BytesMut, CallContext, CompressionEncoding, Cx, FramedCodec, GrpcError, HostPolicy,
-    Http2Listener, HttpRequest, HttpResponse, Metadata, Response, RuntimeHandle,
-    Server, ServerConfig, ServiceHandler, ShutdownStats, Status,
-    grpc_request_trailer_key_is_reserved,
+    Http2Listener, HttpRequest, HttpResponse, Metadata, Response, RuntimeHandle, Server,
+    ServerConfig, ServiceHandler, ShutdownStats, Status, grpc_request_trailer_key_is_reserved,
 };
 use crate::grpc::codec::IdentityCodec;
 use crate::grpc::service::RegisteredServerStream;
@@ -51,7 +50,7 @@ pub struct ServerStreamingConfig {
 }
 
 impl ServerStreamingConfig {
-    fn validate(self) -> io::Result<()> {
+    pub(super) fn validate(self) -> io::Result<()> {
         if self
             .frame_capacity
             .get()
@@ -69,19 +68,18 @@ impl ServerStreamingConfig {
     }
 }
 
-type ProducedGrpcFuture =
-    Pin<Box<dyn Future<Output = Http2ProducedResponse> + Send + 'static>>;
+type ProducedGrpcFuture = Pin<Box<dyn Future<Output = Http2ProducedResponse> + Send + 'static>>;
 
 /// Freeze the request's absolute deadline before it waits for producer admission.
 /// Keep its clock with it: a later task-local context must not change time domains.
-struct StreamDeadline {
+pub(super) struct StreamDeadline {
     at: Option<Time>,
     clock: Option<TimerDriverHandle>,
-    source: RequestBudgetSource,
+    pub(super) source: RequestBudgetSource,
 }
 
 impl StreamDeadline {
-    fn capture(cx: &Cx, metadata: &Metadata, config: &ServerConfig) -> Self {
+    pub(super) fn capture(cx: &Cx, metadata: &Metadata, config: &ServerConfig) -> Self {
         let clock = cx.timer_driver();
         let now = clock
             .as_ref()
@@ -113,17 +111,17 @@ impl StreamDeadline {
         }
     }
 
-    fn now(&self) -> Time {
+    pub(super) fn now(&self) -> Time {
         self.clock
             .as_ref()
             .map_or_else(crate::time::wall_now, TimerDriverHandle::now)
     }
 
-    fn expired(&self) -> bool {
+    pub(super) fn expired(&self) -> bool {
         self.at.is_some_and(|at| self.now() >= at)
     }
 
-    fn budget(&self, mut inherited: Budget) -> Budget {
+    pub(super) fn budget(&self, mut inherited: Budget) -> Budget {
         inherited.deadline = earlier_deadline(inherited.deadline, self.at);
         inherited
     }
@@ -184,9 +182,7 @@ impl Server {
         addr: A,
         host_policy: HostPolicy,
         streaming: ServerStreamingConfig,
-    ) -> io::Result<
-        Http2Listener<impl Fn(HttpRequest) -> ProducedGrpcFuture + Send + Sync + 'static>,
-    >
+    ) -> io::Result<Http2Listener<impl Fn(HttpRequest) -> ProducedGrpcFuture + Send + Sync + 'static>>
     where
         A: ToSocketAddrs + Send + 'static,
     {
@@ -239,7 +235,9 @@ impl Server {
         let (name, method_name) = path
             .strip_prefix('/')
             .and_then(|route| route.split_once('/'))
-            .filter(|(name, method)| !name.is_empty() && !method.is_empty() && !method.contains('/'))
+            .filter(|(name, method)| {
+                !name.is_empty() && !method.is_empty() && !method.contains('/')
+            })
             .ok_or_else(|| Status::unimplemented("invalid registered gRPC method path"))?;
         let service = self
             .services
@@ -314,7 +312,7 @@ impl Server {
         )
     }
 
-    fn streaming_output_codec(
+    pub(super) fn streaming_output_codec(
         &self,
     ) -> Result<(FramedCodec<IdentityCodec>, Option<&'static str>), Status> {
         let mut codec = self.framed_codec(IdentityCodec);
@@ -322,7 +320,9 @@ impl Server {
             Some(CompressionEncoding::Gzip) => {
                 let compressor = CompressionEncoding::Gzip
                     .frame_compressor()
-                    .ok_or_else(|| Status::unimplemented("response compression is not compiled in"))?;
+                    .ok_or_else(|| {
+                        Status::unimplemented("response compression is not compiled in")
+                    })?;
                 codec = codec.with_frame_hooks(Some(compressor), None);
                 Some("gzip")
             }
@@ -390,15 +390,14 @@ impl Server {
         let source = region.instrumented(deadline.source, dispatch);
         // Catch both user polling and terminal destruction. Catching only the
         // H2 producer outside this adapter loses gRPC INTERNAL attribution.
-        let mut result = match crate::util::future::catch_unwind(std::panic::AssertUnwindSafe(source))
-            .await
-        {
-            Ok(result) => result,
-            Err(_payload) => {
-                cx.trace("grpc.server_stream.panicked");
-                Err(Status::internal("gRPC server stream panicked"))
-            }
-        };
+        let mut result =
+            match crate::util::future::catch_unwind(std::panic::AssertUnwindSafe(source)).await {
+                Ok(result) => result,
+                Err(_payload) => {
+                    cx.trace("grpc.server_stream.panicked");
+                    Err(Status::internal("gRPC server stream panicked"))
+                }
+            };
         // A synchronous response interceptor may have used the remaining time.
         // Do not accept its late success merely because no further await ran.
         if result.is_ok() && deadline.expired() {
@@ -446,7 +445,7 @@ fn cancellation_status(cx: &Cx) -> Status {
     }
 }
 
-async fn poll_cancellable<F: Future>(
+pub(super) async fn poll_cancellable<F: Future>(
     owner: &Cx,
     call: &Cx,
     future: F,
@@ -477,7 +476,10 @@ async fn poll_cancellable<F: Future>(
                 .as_pin_mut()
                 .is_some_and(|timer| timer.poll(task_cx).is_ready())
         {
-            call.cancel_with(CancelKind::Timeout, Some("gRPC streaming deadline exceeded"));
+            call.cancel_with(
+                CancelKind::Timeout,
+                Some("gRPC streaming deadline exceeded"),
+            );
             return Poll::Ready(Err(Status::deadline_exceeded(
                 "gRPC stream deadline exceeded",
             )));
@@ -488,7 +490,7 @@ async fn poll_cancellable<F: Future>(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn forward_messages(
+pub(super) async fn forward_messages(
     owner: &Cx,
     cx: &Cx,
     stream: RegisteredServerStream,
@@ -578,7 +580,10 @@ fn encoded_metadata_len(metadata: &Metadata) -> Option<usize> {
     Some(total)
 }
 
-fn bounded_terminal_trailers(result: Result<Response<Bytes>, Status>, limit: usize) -> HeaderMap {
+pub(super) fn bounded_terminal_trailers(
+    result: Result<Response<Bytes>, Status>,
+    limit: usize,
+) -> HeaderMap {
     match result {
         Ok(response) => {
             if !response.get_ref().is_empty() {

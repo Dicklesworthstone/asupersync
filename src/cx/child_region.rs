@@ -30,6 +30,7 @@
 //! point, and the outcome is published into a caller-shared slot after the
 //! runtime lock drops.
 
+use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
@@ -137,15 +138,20 @@ impl From<RegionCreateError> for ChildRegionError {
 /// opener directly. Derivation failures — including a detached context with
 /// no runtime gateway and a runtime that vanished while pending — resolve as
 /// [`ChildRegionError`] instead of panicking or hanging.
+///
+/// `Caps` is the opener's compile-time capability set. The child's principal
+/// context carries the same set, so opening a region cannot widen a restricted
+/// context back to `cap::All` (asupersync-cwxavr).
 #[must_use = "an opening that is never awaited never observes its mint outcome"]
-pub struct ChildRegionOpening {
+pub struct ChildRegionOpening<Caps = crate::cx::cap::All> {
     pending: Option<(Arc<AdmittedRegionSlot>, Weak<()>)>,
     failure: Option<ChildRegionError>,
     parent_mask: crate::cx::cap::CapMask,
     parent_remote: Option<Arc<crate::remote::RemoteCap>>,
+    caps: PhantomData<fn() -> Caps>,
 }
 
-impl ChildRegionOpening {
+impl<Caps> ChildRegionOpening<Caps> {
     pub(crate) fn new(
         slot: Arc<AdmittedRegionSlot>,
         liveness: Weak<()>,
@@ -157,6 +163,7 @@ impl ChildRegionOpening {
             failure: None,
             parent_mask,
             parent_remote,
+            caps: PhantomData,
         }
     }
 
@@ -166,12 +173,13 @@ impl ChildRegionOpening {
             failure: Some(error),
             parent_mask: crate::cx::cap::CapMask::none(),
             parent_remote: None,
+            caps: PhantomData,
         }
     }
 }
 
-impl Future for ChildRegionOpening {
-    type Output = Result<ChildRegion, ChildRegionError>;
+impl<Caps> Future for ChildRegionOpening<Caps> {
+    type Output = Result<ChildRegion<Caps>, ChildRegionError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
@@ -217,9 +225,12 @@ impl Future for ChildRegionOpening {
 /// spawned through it rides the standard admission path. Handlers that need
 /// checkpoint-observable cancellation should run as spawned tasks — each
 /// gets its own admission-built context wired to a real record.
-pub struct ChildRegion {
+///
+/// `Caps` is the opener's compile-time capability set (`cap::All` for an
+/// unrestricted opener), so [`ChildRegion::cx`] never exceeds it.
+pub struct ChildRegion<Caps = crate::cx::cap::All> {
     region_id: RegionId,
-    cx: crate::cx::Cx,
+    cx: crate::cx::Cx<Caps>,
     close_notify: Arc<Mutex<RegionCloseState>>,
     close_receipt: Arc<Mutex<Option<crate::record::region::RegionCloseOutcome>>>,
     gateway: Option<Arc<SpawnGateway>>,
@@ -230,7 +241,7 @@ pub struct ChildRegion {
     closed: bool,
 }
 
-impl std::fmt::Debug for ChildRegion {
+impl<Caps> std::fmt::Debug for ChildRegion<Caps> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ChildRegion")
             .field("region_id", &self.region_id)
@@ -239,12 +250,15 @@ impl std::fmt::Debug for ChildRegion {
     }
 }
 
-impl ChildRegion {
+impl<Caps> ChildRegion<Caps> {
     pub(crate) fn from_admitted(admitted: crate::runtime::spawn_mailbox::AdmittedRegion) -> Self {
         let handles = admitted.cx.spawn_gateway_handle();
         Self {
             region_id: admitted.region_id,
-            cx: admitted.cx,
+            // The scheduler mints a Cx<All>. Re-type it to the opener's
+            // compile-time set; the runtime mask was already met with the
+            // opener's in ChildRegionOpening::poll.
+            cx: admitted.cx.retype(),
             close_notify: admitted.close_notify,
             close_receipt: admitted.close_receipt,
             gateway: handles,
@@ -260,8 +274,30 @@ impl ChildRegion {
 
     /// Principal capability context for spawning body work into this region.
     #[must_use]
-    pub fn cx(&self) -> &crate::cx::Cx {
+    pub fn cx(&self) -> &crate::cx::Cx<Caps> {
         &self.cx
+    }
+
+    /// Attach an owned value to real finalizer work before admitting a body.
+    /// The acknowledgment prevents a caller from exposing the value before
+    /// the runtime accepted its lifetime. Register this before user finalizers
+    /// so LIFO cleanup retains it through their completion.
+    pub(crate) async fn retain_until_finalized<T: Send + 'static>(
+        &self,
+        retained: T,
+    ) -> Result<(), ChildRegionError> {
+        let (complete, mut completed) = crate::channel::oneshot::channel();
+        let request = crate::runtime::spawn_mailbox::RegisterRegionFinalizer::new(
+            self.region_id,
+            move || drop(retained),
+            complete,
+        );
+        self.enqueue(RegionCommand::RegisterFinalizer(request))?;
+        completed
+            .recv_uninterruptible()
+            .await
+            .map_err(|_| ChildRegionError::RuntimeUnavailable)?
+            .map_err(ChildRegionError::Create)
     }
 
     fn enqueue(&self, command: RegionCommand) -> Result<(), ChildRegionError> {
@@ -347,7 +383,7 @@ impl ChildRegion {
     }
 }
 
-impl Drop for ChildRegion {
+impl<Caps> Drop for ChildRegion<Caps> {
     fn drop(&mut self) {
         // Best-effort structured-close backstop: an abandoned handle must not
         // leak live children. Enqueue failures are swallowed because Drop can
@@ -424,6 +460,33 @@ mod tests {
         }
     }
 
+    /// A restricted opener's child keeps the opener's compile-time capability
+    /// set (asupersync-cwxavr). The type annotations are the assertion: before
+    /// the fix, the child's context was always `Cx<cap::All>`.
+    #[test]
+    fn a_restricted_opener_keeps_its_capability_set_in_the_child() {
+        use crate::cx::cap;
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime builds");
+        let parent = runtime.request_cx_with_budget(Budget::with_deadline_at_secs(10));
+        let restricted: Cx<cap::None> = parent.restrict();
+        runtime.block_on_with_cx(parent.clone(), async move {
+            let opening: ChildRegionOpening<cap::None> =
+                restricted.open_child_region(ChildRegionSpec::inherit());
+            let child: ChildRegion<cap::None> = opening
+                .await
+                .expect("a restricted context still mints a child region");
+            let child_cx: &Cx<cap::None> = child.cx();
+            assert_eq!(child_cx.region_id(), child.region_id());
+            assert!(
+                restricted.runtime_mask.contains(child_cx.runtime_mask),
+                "the child's runtime mask never exceeds the opener's"
+            );
+            child.close().await.expect("child region closes");
+        });
+    }
+
     #[test]
     fn open_child_region_mints_distinct_region_and_spawns_body() {
         let runtime = RuntimeBuilder::current_thread()
@@ -450,6 +513,177 @@ mod tests {
             let value = body.join(child.cx()).await.expect("body joins");
             assert_eq!(value, 7);
 
+            child.close().await.expect("close reaches quiescence");
+        });
+    }
+
+    #[test]
+    fn child_region_preserves_caller_budget_attenuation_on_native_workers() {
+        for workers in [1, 4] {
+            let runtime = if workers == 1 {
+                RuntimeBuilder::current_thread().build().unwrap()
+            } else {
+                RuntimeBuilder::new()
+                    .worker_threads(workers)
+                    .build()
+                    .unwrap()
+            };
+            let parent_budget = Budget::with_deadline_at_secs(60)
+                .with_poll_quota(4096)
+                .with_cost_quota(512);
+            // Request contexts share the runtime root region. Their private
+            // limits are deliberately stricter than that region's record.
+            let parent = runtime.request_cx_with_budget(parent_budget);
+            let envelope = CapabilityBudget::new()
+                .with_io_bytes(128)
+                .with_memory_bytes(256)
+                .with_cpu_units(64)
+                .with_artifact_bytes(32)
+                .with_cleanup_budget(Budget::new().with_poll_quota(128));
+            parent
+                .apply_child_capability_budget(envelope, CapabilityBudgetRequirements::NONE)
+                .unwrap();
+            runtime.block_on_with_cx(parent.clone(), async move {
+                let mut relaxed = ChildRegionSpec::inherit().with_budget(Budget::INFINITE);
+                relaxed.capability_budget = Some(
+                    CapabilityBudget::new()
+                        .with_io_bytes(4096)
+                        .with_memory_bytes(8192)
+                        .with_cpu_units(4096)
+                        .with_artifact_bytes(4096)
+                        .with_cleanup_budget(Budget::INFINITE),
+                );
+                for spec in [ChildRegionSpec::inherit(), relaxed] {
+                    let child = parent.open_child_region(spec).await.unwrap();
+                    assert_eq!(child.cx().budget(), parent_budget);
+                    assert_eq!(child.cx().capability_budget(), envelope);
+                    let mut body = child
+                        .cx()
+                        .spawn(move |cx| async move {
+                            assert_eq!(cx.capability_budget(), envelope);
+                            assert_eq!(cx.budget().deadline, parent_budget.deadline);
+                            assert_eq!(cx.budget().cost_quota, parent_budget.cost_quota);
+                            assert!(cx.budget().poll_quota <= parent_budget.poll_quota);
+                            crate::runtime::yield_now().await;
+                            assert_eq!(cx.capability_budget(), envelope);
+                            let ambient = Cx::current().expect("native task context");
+                            assert_eq!(ambient.capability_budget(), envelope);
+                            7_u32
+                        })
+                        .unwrap();
+                    assert_eq!(body.join(child.cx()).await.unwrap(), 7);
+                    child.close().await.unwrap();
+                    assert_eq!(parent.capability_budget(), envelope);
+                    assert_eq!(parent.budget(), parent_budget);
+                }
+                let mut tighter = ChildRegionSpec::inherit().with_budget(
+                    Budget::with_deadline_at_secs(30)
+                        .with_poll_quota(2048)
+                        .with_cost_quota(256),
+                );
+                tighter.capability_budget = Some(CapabilityBudget::new().with_io_bytes(64));
+                let child = parent.open_child_region(tighter).await.unwrap();
+                assert_eq!(
+                    child.cx().budget().deadline,
+                    Some(crate::types::Time::from_secs(30))
+                );
+                assert_eq!(child.cx().budget().poll_quota, 2048);
+                assert_eq!(child.cx().budget().cost_quota, Some(256));
+                assert_eq!(child.cx().capability_budget(), envelope.with_io_bytes(64));
+                child.close().await.unwrap();
+                assert_eq!(parent.capability_budget(), envelope);
+            });
+            assert!(runtime.shutdown_timeout(std::time::Duration::from_secs(3)));
+        }
+    }
+
+    #[test]
+    fn child_region_cannot_replenish_an_exhausted_caller_envelope() {
+        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        let parent = runtime.request_cx_with_budget(Budget::INFINITE);
+        parent
+            .apply_child_capability_budget(
+                CapabilityBudget::new().with_io_bytes(0),
+                CapabilityBudgetRequirements::NONE,
+            )
+            .unwrap();
+        runtime.block_on_with_cx(parent.clone(), async move {
+            let mut spec = ChildRegionSpec::inherit();
+            spec.capability_budget = Some(CapabilityBudget::new().with_io_bytes(4096));
+            spec.requirements = CapabilityBudgetRequirements::NONE.require_io_bytes();
+            assert!(matches!(
+                parent.open_child_region(spec).await,
+                Err(ChildRegionError::Create(
+                    RegionCreateError::CapabilityBudgetRefused {
+                        reason: crate::types::CapabilityBudgetRefusal::Exhausted(
+                            crate::types::CapabilityBudgetDimension::IoBytes
+                        ),
+                        ..
+                    }
+                ))
+            ));
+            // A refusal must not poison the parent or silently replenish it.
+            let child = parent
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .unwrap();
+            assert_eq!(child.cx().capability_budget().io_bytes, Some(0));
+            child.close().await.unwrap();
+            assert_eq!(parent.capability_budget().io_bytes, Some(0));
+        });
+        assert!(runtime.shutdown_timeout(std::time::Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn child_region_work_runs_under_the_planned_capability_budget() {
+        // asupersync-mkybj0: the region record carried the planned envelope
+        // but its principal (and so every task spawned through it) did not.
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime builds");
+        let parent = runtime.request_cx_with_budget(Budget::with_deadline_at_secs(10));
+        runtime.block_on_with_cx(parent.clone(), async move {
+            let mut planned = CapabilityBudget::UNSPECIFIED;
+            planned.io_bytes = Some(128);
+            planned.memory_bytes = Some(256);
+            let mut spec = ChildRegionSpec::inherit();
+            spec.capability_budget = Some(planned);
+            let child = parent
+                .open_child_region(spec)
+                .await
+                .expect("owned child region mints");
+            assert_eq!(child.cx().capability_budget(), planned);
+
+            let mut body = child
+                .cx()
+                .spawn(|task_cx| async move { task_cx.capability_budget() })
+                .expect("child principal context spawns through the gateway");
+            let seen = body.join(child.cx()).await.expect("body joins");
+            assert_eq!(seen, planned, "spawned work must run under the envelope");
+
+            // A nested request can only tighten: a looser ask stays clamped.
+            let mut looser = CapabilityBudget::UNSPECIFIED;
+            looser.io_bytes = Some(512);
+            looser.memory_bytes = Some(64);
+            let mut nested_spec = ChildRegionSpec::inherit();
+            nested_spec.capability_budget = Some(looser);
+            let nested = child
+                .cx()
+                .open_child_region(nested_spec)
+                .await
+                .expect("nested child region mints");
+            let mut nested_body = nested
+                .cx()
+                .spawn(|task_cx| async move { task_cx.capability_budget() })
+                .expect("nested principal spawns");
+            let nested_seen = nested_body
+                .join(nested.cx())
+                .await
+                .expect("nested body joins");
+            assert_eq!(nested_seen.io_bytes, Some(128));
+            assert_eq!(nested_seen.memory_bytes, Some(64));
+
+            nested.close().await.expect("nested close reaches quiescence");
             child.close().await.expect("close reaches quiescence");
         });
     }

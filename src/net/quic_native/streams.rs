@@ -395,10 +395,31 @@ impl RecvPacketRuns {
     }
 }
 
+/// Resident cost of one retained slice: its handle plus its own allocation.
+/// A run whose slices cost more than the bytes they hold is joined into one.
+const RECV_PIECE_OVERHEAD: u64 = 64;
+
 impl RecvRun {
     fn push_back(&mut self, bytes: Bytes) {
         self.len += bytes.len() as u64;
         self.pieces.push_back(bytes);
+        self.compact_if_fragmented();
+    }
+
+    /// A peer can split credited bytes into one-byte frames, in either order.
+    /// Joining only when the slices outweigh their payload keeps large frames
+    /// zero-copy and costs about `RECV_PIECE_OVERHEAD` copied bytes per tiny
+    /// frame, amortized.
+    fn compact_if_fragmented(&mut self) {
+        let pieces = self.pieces.len() as u64;
+        if pieces <= 1 || pieces.saturating_mul(RECV_PIECE_OVERHEAD) <= self.len {
+            return;
+        }
+        let mut joined = BytesMut::with_capacity(usize::try_from(self.len).unwrap_or(0));
+        for piece in self.pieces.drain(..) {
+            joined.extend_from_slice(&piece);
+        }
+        self.pieces.push_back(joined.freeze());
     }
 
     fn append(&mut self, mut other: Self) {
@@ -413,6 +434,7 @@ impl RecvRun {
         } else {
             self.pieces.append(&mut other.pieces);
         }
+        self.compact_if_fragmented();
     }
 
     fn read(&mut self, max_len: usize) -> Bytes {
@@ -1340,6 +1362,23 @@ impl StreamTable {
         self.next_local_uni_seq += 1;
         self.insert_new_stream(id)?;
         Ok(id)
+    }
+
+    /// Apply an already validated peer MAX_STREAMS limit. Limits count all
+    /// streams opened in a direction over the connection's lifetime, including
+    /// closed streams; a new grant never resets the next stream sequence.
+    pub(crate) fn increase_local_stream_limit(
+        &mut self,
+        direction: StreamDirection,
+        maximum_streams: u64,
+    ) {
+        let limit = match direction {
+            StreamDirection::Bidirectional => &mut self.max_local_bidi,
+            StreamDirection::Unidirectional => &mut self.max_local_uni,
+        };
+        // Reordered and retransmitted grants cannot revoke credit already
+        // received (RFC 9000 sections 4.6 and 19.11).
+        *limit = (*limit).max(maximum_streams);
     }
 
     /// Set the maximum number of remotely-initiated streams (per direction) this
@@ -2743,6 +2782,43 @@ mod tests {
     }
 
     #[test]
+    fn tiny_frames_do_not_keep_one_retained_slice_per_credited_byte() {
+        const FRAMES: usize = 100_000;
+        for reverse in [false, true] {
+            let mut stream = QuicStream::new(StreamId(0), 0, FRAMES as u64);
+            for index in 0..FRAMES {
+                let offset = if reverse { FRAMES - 1 - index } else { index };
+                stream
+                    .receive_bytes(
+                        offset as u64,
+                        Bytes::from(vec![(offset % 251) as u8]),
+                        false,
+                    )
+                    .expect("one-byte frame");
+            }
+            assert_eq!(stream.recv_chunks.len(), 1, "reverse={reverse}");
+            let slices = stream.recv_chunks[&0].pieces.len();
+            assert!(
+                slices as u64 <= FRAMES as u64 / RECV_PIECE_OVERHEAD + 1,
+                "reverse={reverse}: {slices} slices retained for {FRAMES} one-byte frames"
+            );
+            let mut read = Vec::with_capacity(FRAMES);
+            while read.len() < FRAMES {
+                let data = stream.read_bytes(4096);
+                assert!(!data.is_empty(), "reverse={reverse}");
+                read.extend_from_slice(&data);
+            }
+            assert!(
+                read.iter()
+                    .enumerate()
+                    .all(|(i, byte)| *byte == (i % 251) as u8),
+                "reverse={reverse}: bytes out of order"
+            );
+            assert!(stream.recv_chunks.is_empty());
+        }
+    }
+
+    #[test]
     fn recv_reassembly_counts_one_hole_as_two_runs() {
         const FRAME_LEN: usize = 1024;
         const FRAMES: usize = 8192;
@@ -3090,6 +3166,82 @@ mod tests {
                 limit: 1
             }
         );
+    }
+
+    #[test]
+    fn local_stream_credit_preserves_sequences_and_direction() {
+        for role in [StreamRole::Client, StreamRole::Server] {
+            let mut table = StreamTable::new(role, 1, 0, 1024, 1024);
+            table.set_remote_stream_limits(2, 3);
+            let first = table.open_local_bidi().expect("initial bidi credit");
+            let stream = table.stream_mut(first).expect("opened stream");
+            stream.finish_send().expect("finish request");
+            stream.receive_segment(0, 0, true).expect("finish response");
+            assert!(
+                table.open_local_bidi().is_err(),
+                "FIN does not renew credit"
+            );
+
+            table.increase_local_stream_limit(StreamDirection::Unidirectional, 2);
+            for seq in 0..2 {
+                assert_eq!(
+                    table.open_local_uni().expect("new uni credit"),
+                    StreamId::local(role, StreamDirection::Unidirectional, seq)
+                );
+            }
+            assert!(table.open_local_uni().is_err());
+            assert!(
+                table.open_local_bidi().is_err(),
+                "uni grant leaves bidi blocked"
+            );
+
+            table.increase_local_stream_limit(StreamDirection::Bidirectional, 3);
+            assert_eq!(
+                table.open_local_bidi().expect("new bidi credit"),
+                StreamId::local(role, StreamDirection::Bidirectional, 1)
+            );
+            for reordered in [0, 1, 3, 2] {
+                table.increase_local_stream_limit(StreamDirection::Bidirectional, reordered);
+            }
+            assert_eq!(
+                table
+                    .open_local_bidi()
+                    .expect("reordered grant preserves credit"),
+                StreamId::local(role, StreamDirection::Bidirectional, 2)
+            );
+            assert_eq!(
+                table.open_local_bidi(),
+                Err(StreamTableError::StreamLimitExceeded {
+                    direction: StreamDirection::Bidirectional,
+                    limit: 3,
+                })
+            );
+            assert_eq!(table.remote_stream_limits(), (2, 3));
+            assert_eq!(table.len(), 5, "credit updates allocate no streams");
+        }
+    }
+
+    #[test]
+    fn local_stream_credit_accepts_last_encodable_ids_without_wrapping() {
+        let limit = 1u64 << 60;
+        for role in [StreamRole::Client, StreamRole::Server] {
+            let mut table = StreamTable::new(role, 0, 0, 1024, 1024);
+            table.increase_local_stream_limit(StreamDirection::Bidirectional, limit);
+            table.increase_local_stream_limit(StreamDirection::Unidirectional, limit);
+            assert!(table.is_empty(), "a large grant is only a counter update");
+            // Place the counters at the final credit without allocating the
+            // preceding 2^60 - 1 stream owners.
+            table.next_local_bidi_seq = limit - 1;
+            table.next_local_uni_seq = limit - 1;
+            let bidi = table.open_local_bidi().expect("last bidi ID");
+            let uni = table.open_local_uni().expect("last uni ID");
+            let initiator = u64::from(role == StreamRole::Server);
+            assert_eq!(bidi.0, VARINT_MAX - 3 + initiator);
+            assert_eq!(uni.0, VARINT_MAX - 1 + initiator);
+            assert!(table.open_local_bidi().is_err());
+            assert!(table.open_local_uni().is_err());
+            assert_eq!(table.len(), 2, "exhaustion cannot wrap and reuse an ID");
+        }
     }
 
     #[test]

@@ -38,13 +38,13 @@
       {"path": "src/bin/asupersync.rs", "sha256": "db9679da2c0ba6050f209264fb353da75892b0046429dffe0ba7edce5d74517a", "line_count": 17878},
       {"path": "src/cli/atp_workflows.rs", "sha256": "552e87ffb23988adb422609577741f9503c7451a74040f97b83d24d81e5ffba0", "line_count": 1973},
       {"path": "src/atp/benchmark/suite.rs", "sha256": "e5516a91702a38bfb7f21c35b29f302849b4a1514e7618ecc046148268f7fc57", "line_count": 349},
-      {"path": "src/database/postgres.rs", "sha256": "bf2f7e452eba0e56897c6f95a272e9ffae705e4a3fc8fd51ff8c313f85388b87", "line_count": 9212},
+      {"path": "src/database/postgres.rs", "sha256": "09e26582f5614a1f5d24bee4aefbe26cf8dac45ec89a2caad55cc83b6d70b1d4", "line_count": 9278},
       {"path": "src/messaging/redis.rs", "sha256": "1632fe48e99d37e29ba1c56ca2d57dcf0f4548940390d3be5334487aec309360", "line_count": 6633},
       {"path": "src/bin/offline_tuner.rs", "sha256": "61c73ca18846a95ec6939aaa158dc2b063bb97b76a2d34fffa0141dc12e9039c", "line_count": 668},
       {"path": "src/trace/replay.rs", "sha256": "b47a4c045653fa4a12540a177dcb1824111a8899d8380695e0751fae7fdef954", "line_count": 1825}
     ],
     "added_source_pins": [
-      {"path": "src/database/postgres_tests.rs", "sha256": "d375eba0dae52926ded4562d8aafef37c2d5c4ffa991fa097192967784ac61c9", "line_count": 10681},
+      {"path": "src/database/postgres_tests.rs", "sha256": "8a1632d6a2847a9a3fef34524c307f26f4361bfdce0be83325995637f7049a6e", "line_count": 10889},
       {"path": "src/messaging/redis_tests.rs", "sha256": "51a845c5ab3ed61742564be27cf6b345f8a4732c78ed74fb68a36d23a068f75e", "line_count": 6398},
       {"path": "tests/dependency_oracle_policy_contract.rs", "sha256": "7944dbdf05b6c177bfdc701869ac3e3b5c64bc49618391aac32b10e95bf7f4bf", "line_count": 3970},
       {"path": "tests/dependency_supply_chain_policy_contract.rs", "sha256": "2861693f278a93b0e524e76acf5cd3ee15ed8ad5ac2ba0364ff80badb4d9e39a", "line_count": 495}

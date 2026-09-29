@@ -8,7 +8,8 @@
 //!
 //! - `File::open`: A started open may complete; its discarded handle is closed
 //! - `File::create`/`create_new`: A started call may still create or truncate
-//! - Poll-based read/write/seek operations: one synchronous syscall per poll
+//! - Poll-based read/write/seek operations: bounded blocking-pool syscalls;
+//!   started operations may complete after the borrowing future is dropped
 //! - Owned cursor operations: soft-cancelled syscalls may still commit, but a
 //!   per-file completion gate prevents later cursor access from overtaking them
 //! - Direct path mutations: soft-cancelled work may commit after future drop
@@ -18,6 +19,11 @@
 //!   rollback for path operations
 //! - `sync_all`, `sync_data`: A started sync may finish after its future drops
 //! - Owned seek/read cancellation is ordered, not rollback-safe
+//!
+//! File I/O retains its inherited blocking-pool placement when task-spawn
+//! authority is restricted. A runtime without a blocking pool uses the existing
+//! inline fallback and can block its async worker on filesystem calls. Configure
+//! `RuntimeBuilder::blocking_threads` when worker responsiveness is required.
 //!
 //! # Example
 //!

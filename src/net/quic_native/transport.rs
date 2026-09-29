@@ -196,9 +196,18 @@ pub enum QuicConnectionState {
     Closed,
 }
 
+/// ACK-only packets kept per space even when no in-flight packet needs them,
+/// so a late acknowledgment of one still resets the PTO backoff.
+const RETAINED_ACK_ONLY_PACKETS: usize = 64;
+/// History length at which ACK-only pruning first runs.
+const ACK_ONLY_PRUNE_FLOOR: usize = 1024;
+
 #[derive(Debug, Clone)]
 struct LossRecovery {
     sent_packets: VecDeque<SentPacketMeta>,
+    /// History length that triggers the next ACK-only prune. It doubles from
+    /// the length left after each prune, so pruning is amortized O(1).
+    ack_only_prune_at: usize,
     newly_lost_packet_numbers: [Vec<u64>; 3],
     largest_acked: [Option<u64>; 3],
     bytes_in_flight: u64,
@@ -227,6 +236,7 @@ impl Default for LossRecovery {
     fn default() -> Self {
         Self {
             sent_packets: VecDeque::new(),
+            ack_only_prune_at: ACK_ONLY_PRUNE_FLOOR,
             newly_lost_packet_numbers: std::array::from_fn(|_| Vec::new()),
             largest_acked: [None, None, None],
             bytes_in_flight: 0,
@@ -249,6 +259,7 @@ impl Default for LossRecovery {
 impl LossRecovery {
     fn clear(&mut self) {
         self.sent_packets.clear();
+        self.ack_only_prune_at = ACK_ONLY_PRUNE_FLOOR;
         for lost in &mut self.newly_lost_packet_numbers {
             lost.clear();
         }
@@ -289,7 +300,48 @@ impl LossRecovery {
         if packet.in_flight {
             self.bytes_in_flight = self.bytes_in_flight.saturating_add(packet.bytes);
         }
+        let ack_only = !packet.in_flight;
         self.sent_packets.push_back(packet);
+        // A pure receiver's peer never acknowledges its ACK-only packets, so
+        // largest_acked never passes them and loss detection never forgets them.
+        if ack_only && self.sent_packets.len() >= self.ack_only_prune_at {
+            self.prune_ack_only_packets();
+            self.ack_only_prune_at = self
+                .sent_packets
+                .len()
+                .saturating_mul(2)
+                .max(ACK_ONLY_PRUNE_FLOOR);
+        }
+    }
+
+    /// Forget ACK-only packets no recovery decision can still use.
+    ///
+    /// RFC 9002 section 7.6.2 asks whether any packet sent between two lost
+    /// in-flight packets was acknowledged. An ACK-only packet sent before every
+    /// in-flight packet of its space cannot lie between two of them, so only
+    /// the newest few such packets are kept, for PTO-backoff resets.
+    fn prune_ack_only_packets(&mut self) {
+        let mut oldest_in_flight: [Option<u64>; 3] = [None; 3];
+        for pkt in self.sent_packets.iter().filter(|pkt| pkt.in_flight) {
+            let oldest = &mut oldest_in_flight[pkt.space.idx()];
+            *oldest =
+                Some(oldest.map_or(pkt.time_sent_micros, |seen| seen.min(pkt.time_sent_micros)));
+        }
+        let mut kept = [0usize; 3];
+        let mut retained = VecDeque::with_capacity(self.sent_packets.len());
+        while let Some(pkt) = self.sent_packets.pop_back() {
+            if !pkt.in_flight {
+                let idx = pkt.space.idx();
+                let needed =
+                    oldest_in_flight[idx].is_some_and(|oldest| pkt.time_sent_micros >= oldest);
+                if !needed && kept[idx] >= RETAINED_ACK_ONLY_PACKETS {
+                    continue;
+                }
+                kept[idx] += 1;
+            }
+            retained.push_front(pkt);
+        }
+        self.sent_packets = retained;
     }
 
     fn on_ack_from_packet_numbers(
@@ -924,6 +976,13 @@ impl QuicTransportMachine {
     ) -> AckEvent {
         self.recovery
             .on_ack_ranges(space, ack_ranges, ack_delay_micros, now_micros)
+    }
+
+    /// Highest ACK that matched a packet in this transport's sent history.
+    /// Unsent packet numbers and ACKs from other spaces cannot confirm a
+    /// locally initiated 1-RTT key update.
+    pub(crate) fn largest_acked_packet_number(&self, space: PacketNumberSpace) -> Option<u64> {
+        self.recovery.largest_acked[space.idx()]
     }
 
     /// Compute PTO deadline from current recovery state.
@@ -1952,6 +2011,51 @@ mod tests {
         let late = t.on_ack_received(space, &[1], 0, 50_000);
         assert_eq!(late, AckEvent::empty());
         assert_eq!(t.packets_acked_total(), 4);
+    }
+
+    /// A pure receiver sends only ACK-only packets, which its peer never
+    /// acknowledges, so largest_acked never advances past them.
+    #[test]
+    fn a_pure_receivers_ack_only_history_stays_bounded() {
+        let mut t = QuicTransportMachine::new();
+        t.begin_handshake().expect("hs");
+        t.on_established().expect("est");
+        let space = PacketNumberSpace::ApplicationData;
+        for pn in 0..100_000u64 {
+            t.on_packet_sent(ack_only(space, pn, 10_000 + pn));
+            assert!(
+                t.recovery.sent_packets.len() <= ACK_ONLY_PRUNE_FLOOR,
+                "history grew to {} entries by packet {pn}",
+                t.recovery.sent_packets.len()
+            );
+        }
+        assert_eq!(t.bytes_in_flight(), 0);
+        // The newest ACK-only packets stay tracked for PTO-backoff resets.
+        let event = t.on_ack_received(space, &[99_999], 0, 200_000);
+        assert_eq!(event.acked_packets, 1);
+    }
+
+    /// RFC 9002 section 7.6.2: an acknowledged packet sent between two lost
+    /// in-flight packets breaks a persistent-congestion run, so pruning keeps
+    /// every ACK-only packet sent after an outstanding in-flight packet.
+    #[test]
+    fn ack_only_packets_sent_after_an_in_flight_packet_survive_pruning() {
+        let mut t = QuicTransportMachine::new();
+        t.begin_handshake().expect("hs");
+        t.on_established().expect("est");
+        let space = PacketNumberSpace::ApplicationData;
+        t.on_packet_sent(sent(space, 0, 10_000));
+        for pn in 1..=2_000u64 {
+            t.on_packet_sent(ack_only(space, pn, 10_000 + pn));
+        }
+        assert_eq!(t.recovery.sent_packets.len(), 2_001);
+        assert_eq!(t.bytes_in_flight(), 100);
+        let event = t.on_ack_received(space, &[1_000], 0, 20_000);
+        assert_eq!(event.acked_packets, 1);
+        assert_eq!(
+            event.lost_packets, 1,
+            "the in-flight packet is past the threshold"
+        );
     }
 
     /// Same defect through the time threshold: the ACK-only packet is older

@@ -427,21 +427,70 @@ pub enum LoserDrainHistoryEvent {
         /// Logical runtime time when the task completed.
         time: Time,
     },
-    /// A race completed with a selected winner after loser drain.
+    /// A race completed after every required participant drained.
     RaceCompleted {
         /// Stable race identifier inside the runtime state.
         race_id: u64,
-        /// Winning task for the completed race.
+        /// Winning participant, or the cancelling owner when no branch won.
+        ///
+        /// A cancelling owner is outside the participant list, so the drain
+        /// oracle requires every participant to complete. The historical
+        /// field name preserves the public and serialized event format.
         winner: TaskId,
         /// Logical runtime time when the race completed.
         time: Time,
     },
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct LoserDrainHistoryRecorder {
     next_race_id: AtomicU64,
-    events: parking_lot::Mutex<Vec<LoserDrainHistoryEvent>>,
+    events: parking_lot::Mutex<LoserDrainHistoryLog>,
+    /// Completed races kept after they finish; `usize::MAX` keeps every race.
+    completed_race_limit: AtomicUsize,
+}
+
+impl Default for LoserDrainHistoryRecorder {
+    fn default() -> Self {
+        Self {
+            next_race_id: AtomicU64::new(0),
+            events: parking_lot::Mutex::default(),
+            completed_race_limit: AtomicUsize::new(usize::MAX),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct LoserDrainHistoryLog {
+    events: Vec<LoserDrainHistoryEvent>,
+    /// Completed race ids, oldest first, while a retention limit applies.
+    completed: VecDeque<u64>,
+}
+
+impl LoserDrainHistoryLog {
+    /// Forgets every event of the oldest completed races beyond `keep`.
+    fn forget_oldest_completed(&mut self, keep: usize) {
+        let excess = self.completed.len().saturating_sub(keep);
+        let races: HashSet<u64> = self.completed.drain(..excess).collect();
+        let mut participants = HashSet::new();
+        for event in &self.events {
+            if let LoserDrainHistoryEvent::RaceStarted {
+                race_id,
+                participants: tasks,
+                ..
+            } = event
+            {
+                if races.contains(race_id) {
+                    participants.extend(tasks.iter().copied());
+                }
+            }
+        }
+        self.events.retain(|event| match event {
+            LoserDrainHistoryEvent::RaceStarted { race_id, .. }
+            | LoserDrainHistoryEvent::RaceCompleted { race_id, .. } => !races.contains(race_id),
+            LoserDrainHistoryEvent::TaskCompleted { task, .. } => !participants.contains(task),
+        });
+    }
 }
 
 pub(crate) type LoserDrainHistoryHandle = Arc<LoserDrainHistoryRecorder>;
@@ -450,6 +499,12 @@ impl LoserDrainHistoryRecorder {
     #[must_use]
     pub(crate) fn new_handle() -> LoserDrainHistoryHandle {
         Arc::new(Self::default())
+    }
+
+    /// Keeps every in-flight race but only the most recent `limit` completed
+    /// ones (pruned in batches, so up to twice that many between prunes).
+    pub(crate) fn retain_completed_races(&self, limit: usize) {
+        self.completed_race_limit.store(limit, Ordering::Relaxed);
     }
 
     pub(crate) fn record_race_start(
@@ -461,6 +516,7 @@ impl LoserDrainHistoryRecorder {
         let race_id = self.next_race_id.fetch_add(1, Ordering::Relaxed);
         self.events
             .lock()
+            .events
             .push(LoserDrainHistoryEvent::RaceStarted {
                 race_id,
                 region,
@@ -473,22 +529,39 @@ impl LoserDrainHistoryRecorder {
     pub(crate) fn record_task_complete(&self, task: TaskId, time: Time) {
         self.events
             .lock()
+            .events
             .push(LoserDrainHistoryEvent::TaskCompleted { task, time });
     }
 
     pub(crate) fn record_race_complete(&self, race_id: u64, winner: TaskId, time: Time) {
-        self.events
-            .lock()
-            .push(LoserDrainHistoryEvent::RaceCompleted {
-                race_id,
-                winner,
-                time,
-            });
+        let limit = self.completed_race_limit.load(Ordering::Relaxed);
+        let mut log = self.events.lock();
+        log.events.push(LoserDrainHistoryEvent::RaceCompleted {
+            race_id,
+            winner,
+            time,
+        });
+        if limit == usize::MAX {
+            return;
+        }
+        log.completed.push_back(race_id);
+        if log.completed.len() > limit.saturating_mul(2) {
+            log.forget_oldest_completed(limit);
+        }
+    }
+
+    /// Records owner cancellation after every race participant has drained.
+    ///
+    /// The owner must be outside the participant list. Using that decision
+    /// identity in the existing completion event preserves the public event
+    /// format while ensuring the oracle exempts no participant from draining.
+    pub(crate) fn record_race_cancelled(&self, race_id: u64, owner: TaskId, time: Time) {
+        self.record_race_complete(race_id, owner, time);
     }
 
     #[must_use]
     pub(crate) fn snapshot(&self) -> Vec<LoserDrainHistoryEvent> {
-        self.events.lock().clone()
+        self.events.lock().events.clone()
     }
 }
 
@@ -1869,9 +1942,16 @@ pub struct RuntimeState {
     /// region remains here until the driver explicitly completes or abandons
     /// the receipt; dropping the receipt therefore fails closed.
     active_manual_finalizers: HashMap<RegionId, u64>,
-    /// Append-only finalizer lifecycle history for post-run oracle hydration.
+    /// Finalizer lifecycle history for post-run oracle hydration. Append-only
+    /// unless `closed_region_history_limit` bounds it (native runtimes).
     finalizer_history: Vec<FinalizerHistoryEvent>,
-    /// Append-only loser-drain evidence for post-run oracle hydration.
+    /// Closed regions, oldest first, whose finalizer history is still kept
+    /// while `closed_region_history_limit` applies.
+    finalizer_history_closed_regions: VecDeque<RegionId>,
+    /// Closed regions kept in `finalizer_history`; `None` keeps every region.
+    closed_region_history_limit: Option<usize>,
+    /// Loser-drain evidence for post-run oracle hydration. Append-only unless
+    /// bounded by [`RuntimeState::bound_oracle_histories`] (native runtimes).
     loser_drain_history: LoserDrainHistoryHandle,
     /// Monotonic id source for finalizer registrations.
     next_finalizer_id: u64,
@@ -2066,6 +2146,8 @@ impl RuntimeState {
             active_async_finalizers: HashMap::new(),
             active_manual_finalizers: HashMap::new(),
             finalizer_history: Vec::new(),
+            finalizer_history_closed_regions: VecDeque::new(),
+            closed_region_history_limit: None,
             loser_drain_history: LoserDrainHistoryRecorder::new_handle(),
             next_finalizer_id: 0,
             region_table_epoch: EpochId::GENESIS,
@@ -4464,6 +4546,22 @@ impl RuntimeState {
         // at the two task-minting seams above.
         principal_cx.set_trace_buffer(self.trace_handle());
         principal_cx.set_loser_drain_history_handle(self.loser_drain_history_handle());
+        // Carry the envelope the region record admitted (the parent's envelope
+        // narrowed by the requested child budget). Work spawned through this
+        // context inherits it; without it a child region's tasks ran with an
+        // unspecified envelope (asupersync-bi2462.46).
+        let region_capability_budget = self.region(child_region).map_or(
+            capability_budget,
+            crate::record::RegionRecord::capability_budget,
+        );
+        let applied = principal_cx.apply_child_capability_budget(
+            region_capability_budget,
+            crate::types::CapabilityBudgetRequirements::NONE,
+        );
+        debug_assert!(
+            applied.is_ok(),
+            "an unspecified context accepts any admitted region envelope"
+        );
         let close_notify = self
             .region(child_region)
             .map(|region| region.close_notify.clone())
@@ -7410,6 +7508,17 @@ impl RuntimeState {
         &mut self,
         task: &mut TaskRecord,
     ) -> TaskCompletionEffects {
+        self.task_completed_from_external_record_resuming(task, &mut false)
+    }
+
+    /// Detached-record completion whose caller retains progress across a
+    /// configured leak panic. Protocol retirement precedes the obligation
+    /// audit and must not run again when the same owned record resumes cleanup.
+    pub(crate) fn task_completed_from_external_record_resuming(
+        &mut self,
+        task: &mut TaskRecord,
+        protocol_retired: &mut bool,
+    ) -> TaskCompletionEffects {
         let task_id = task.id;
         let waiters = std::mem::take(&mut task.waiters);
         let waiter_count = waiters.len();
@@ -7430,12 +7539,18 @@ impl RuntimeState {
         // wins after cancellation was requested. Terminal state alone would
         // lose that ordering witness for Completed(Panicked).
         let cancellation_materialized = task.cancel_epoch > 0;
-        self.validate_and_retire_external_task_protocol(
-            task_id,
-            task_event,
-            &context,
-            cancellation_materialized,
-        );
+        if !*protocol_retired {
+            // Validator mutation is callback-free and removes the generation
+            // before diagnostic dispatch. Retain progress even if that later
+            // diagnostic unwinds before the completion audit begins.
+            *protocol_retired = true;
+            self.validate_and_retire_external_task_protocol(
+                task_id,
+                task_event,
+                &context,
+                cancellation_materialized,
+            );
+        }
 
         let retired_cancel_wakers =
             task.cx_inner
@@ -8444,6 +8559,54 @@ impl RuntimeState {
         self.pending_finalizer_ids.remove(&region);
         self.finalizer_history
             .push(FinalizerHistoryEvent::RegionClosed { region, time: now });
+        if let Some(limit) = self.closed_region_history_limit {
+            self.finalizer_history_closed_regions.push_back(region);
+            if self.finalizer_history_closed_regions.len() > limit.saturating_mul(2) {
+                self.forget_oldest_closed_region_history(limit);
+            }
+        }
+    }
+
+    /// Forgets the finalizer history of the oldest closed regions beyond `keep`.
+    fn forget_oldest_closed_region_history(&mut self, keep: usize) {
+        let excess = self
+            .finalizer_history_closed_regions
+            .len()
+            .saturating_sub(keep);
+        let regions: HashSet<RegionId> = self
+            .finalizer_history_closed_regions
+            .drain(..excess)
+            .collect();
+        let finalizers: HashSet<u64> = self
+            .finalizer_history
+            .iter()
+            .filter_map(|event| match event {
+                FinalizerHistoryEvent::Registered { id, region, .. }
+                    if regions.contains(region) =>
+                {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .collect();
+        self.finalizer_history.retain(|event| match event {
+            FinalizerHistoryEvent::Registered { region, .. }
+            | FinalizerHistoryEvent::RegionClosed { region, .. } => !regions.contains(region),
+            FinalizerHistoryEvent::Ran { id, .. } => !finalizers.contains(id),
+        });
+    }
+
+    /// Bounds the oracle-hydration histories for a long-running runtime.
+    ///
+    /// Both histories are append-only by default because the lab oracles replay
+    /// them after a run. A native runtime never replays them, yet every region
+    /// close and every drain-correct race appended to them for the life of the
+    /// process. Once bounded, open regions and in-flight races stay complete,
+    /// and only the most recent `limit` closed regions and completed races are
+    /// kept (pruned in batches, so up to twice that many between prunes).
+    pub(crate) fn bound_oracle_histories(&mut self, limit: usize) {
+        self.closed_region_history_limit = Some(limit);
+        self.loser_drain_history.retain_completed_races(limit);
     }
 
     fn pop_tracked_finalizer(
@@ -9491,6 +9654,12 @@ impl RuntimeState {
                                 },
                             );
                             self.resource_monitor.clear_region_priority(region_id);
+                            // The governor admits new regions against its live
+                            // envelope count; a closed region must release its
+                            // envelope (and any workload lease bound to it).
+                            let _ = self
+                                .swarm_pressure_governor
+                                .unregister_region_envelope(region_id);
 
                             if let Some(parent_id) = parent {
                                 let cleanup_outcome = regions
@@ -9840,8 +10009,14 @@ pub struct RuntimeSnapshot {
     /// Recent trace events (if tracing is enabled).
     pub recent_events: Vec<EventSnapshot>,
     /// Finalizer lifecycle history for oracle hydration.
+    ///
+    /// A lab runtime keeps the full history. A native runtime keeps the events
+    /// of open regions and of only its most recently closed regions.
     pub finalizer_history: Vec<FinalizerHistoryEvent>,
     /// Loser-drain race history for oracle hydration.
+    ///
+    /// A lab runtime keeps the full history. A native runtime keeps every
+    /// in-flight race and only its most recently completed races.
     pub loser_drain_history: Vec<LoserDrainHistoryEvent>,
 }
 
@@ -10890,7 +11065,6 @@ pub(crate) mod completion_observer_test_support {
         completed_state_observed: AtomicUsize,
         completion_panics_remaining: AtomicUsize,
         panic_payload_drop_counter: Option<Arc<AtomicUsize>>,
-        panic_while_recording_task_panic: AtomicBool,
         provider_drop_attempts: Option<Arc<AtomicUsize>>,
         provider_drop_while_state_locked: Option<Arc<AtomicUsize>>,
         panic_on_provider_drop: bool,
@@ -10905,7 +11079,6 @@ pub(crate) mod completion_observer_test_support {
                 completed_state_observed: AtomicUsize::new(0),
                 completion_panics_remaining: AtomicUsize::new(completion_panics_remaining),
                 panic_payload_drop_counter: None,
-                panic_while_recording_task_panic: AtomicBool::new(false),
                 provider_drop_attempts: None,
                 provider_drop_while_state_locked: None,
                 panic_on_provider_drop: false,
@@ -10930,7 +11103,6 @@ pub(crate) mod completion_observer_test_support {
                 completed_state_observed: AtomicUsize::new(0),
                 completion_panics_remaining: AtomicUsize::new(1),
                 panic_payload_drop_counter: Some(drop_counter),
-                panic_while_recording_task_panic: AtomicBool::new(false),
                 provider_drop_attempts: None,
                 provider_drop_while_state_locked: None,
                 panic_on_provider_drop: false,
@@ -10948,7 +11120,6 @@ pub(crate) mod completion_observer_test_support {
                 completed_state_observed: AtomicUsize::new(0),
                 completion_panics_remaining: AtomicUsize::new(0),
                 panic_payload_drop_counter: None,
-                panic_while_recording_task_panic: AtomicBool::new(false),
                 provider_drop_attempts: Some(drop_attempts),
                 provider_drop_while_state_locked: Some(drop_while_state_locked),
                 panic_on_provider_drop: false,
@@ -10965,19 +11136,10 @@ pub(crate) mod completion_observer_test_support {
                 completed_state_observed: AtomicUsize::new(0),
                 completion_panics_remaining: AtomicUsize::new(1),
                 panic_payload_drop_counter: None,
-                panic_while_recording_task_panic: AtomicBool::new(false),
                 provider_drop_attempts: Some(drop_attempts),
                 provider_drop_while_state_locked: None,
                 panic_on_provider_drop: true,
             })
-        }
-
-        pub(crate) fn panic_persistently_and_trigger_guard_drop() -> Arc<Self> {
-            let metrics = Self::panic_persistently();
-            metrics
-                .panic_while_recording_task_panic
-                .store(true, Ordering::Relaxed);
-            metrics
         }
 
         pub(crate) fn attach_state(&self, state: &Arc<ContendedMutex<RuntimeState>>) {
@@ -11076,15 +11238,6 @@ pub(crate) mod completion_observer_test_support {
         fn obligation_leaked(&self, _: RegionId) {}
 
         fn scheduler_tick(&self, _: usize, _: Duration) {}
-
-        fn record_panic(&self, _: &'static str) {
-            if self
-                .panic_while_recording_task_panic
-                .load(Ordering::Relaxed)
-            {
-                panic!("force TaskExecutionGuard unwind fallback");
-            }
-        }
     }
 
     impl Drop for PanickingCompletionMetrics {
@@ -11324,5 +11477,133 @@ mod obligation_transfer_epoch_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod oracle_history_retention_tests {
+    use super::*;
+
+    /// A two-participant race whose first participant has finished; `finish`
+    /// completes the second participant and the race.
+    fn race(recorder: &LoserDrainHistoryRecorder, first_task: u32, finish: bool) -> u64 {
+        let participants = vec![
+            TaskId::new_for_test(first_task, 1),
+            TaskId::new_for_test(first_task + 1, 1),
+        ];
+        let race_id = recorder.record_race_start(
+            RegionId::new_for_test(0, 1),
+            participants.clone(),
+            Time::ZERO,
+        );
+        recorder.record_task_complete(participants[0], Time::ZERO);
+        if finish {
+            recorder.record_task_complete(participants[1], Time::ZERO);
+            recorder.record_race_complete(race_id, participants[0], Time::ZERO);
+        }
+        race_id
+    }
+
+    fn started(events: &[LoserDrainHistoryEvent]) -> Vec<u64> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                LoserDrainHistoryEvent::RaceStarted { race_id, .. } => Some(*race_id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn bounded_loser_drain_history_keeps_in_flight_and_recent_completed_races() {
+        let recorder = LoserDrainHistoryRecorder::default();
+        recorder.retain_completed_races(2);
+        let in_flight = race(&recorder, 100, false);
+        for round in 0..5 {
+            race(&recorder, round * 2, true);
+        }
+        let events = recorder.snapshot();
+        // Five completed races exceed twice the limit, so the three oldest
+        // are forgotten; the in-flight race keeps its partial evidence.
+        assert_eq!(started(&events), vec![in_flight, 4, 5]);
+        let completed_tasks: Vec<TaskId> = events
+            .iter()
+            .filter_map(|event| match event {
+                LoserDrainHistoryEvent::TaskCompleted { task, .. } => Some(*task),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            completed_tasks,
+            [100, 6, 7, 8, 9].map(|index| TaskId::new_for_test(index, 1))
+        );
+        let completed_races: Vec<u64> = events
+            .iter()
+            .filter_map(|event| match event {
+                LoserDrainHistoryEvent::RaceCompleted { race_id, .. } => Some(*race_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(completed_races, vec![4, 5]);
+    }
+
+    #[test]
+    fn unbounded_loser_drain_history_keeps_every_race_for_oracle_replay() {
+        let recorder = LoserDrainHistoryRecorder::default();
+        for round in 0..5 {
+            race(&recorder, round * 2, true);
+        }
+        assert_eq!(started(&recorder.snapshot()), vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn bounded_finalizer_history_keeps_open_regions_and_recent_closed_regions() {
+        let mut state = RuntimeState::new();
+        state.bound_oracle_histories(1);
+        let open = RegionId::new_for_test(50, 1);
+        state
+            .finalizer_history
+            .push(FinalizerHistoryEvent::Registered {
+                id: 900,
+                region: open,
+                time: Time::ZERO,
+            });
+        for index in 0..3_u32 {
+            let region = RegionId::new_for_test(index, 1);
+            let id = u64::from(index);
+            state
+                .finalizer_history
+                .push(FinalizerHistoryEvent::Registered {
+                    id,
+                    region,
+                    time: Time::ZERO,
+                });
+            state.finalizer_history.push(FinalizerHistoryEvent::Ran {
+                id,
+                time: Time::ZERO,
+            });
+            state.record_finalizer_close_for_test(region);
+        }
+        // Three closed regions exceed twice the limit, so the two oldest are
+        // forgotten with their finalizers; the open region is untouched.
+        let kept: Vec<(u8, u64, Option<RegionId>)> = state
+            .finalizer_history()
+            .iter()
+            .map(|event| match event {
+                FinalizerHistoryEvent::Registered { id, region, .. } => (0, *id, Some(*region)),
+                FinalizerHistoryEvent::Ran { id, .. } => (1, *id, None),
+                FinalizerHistoryEvent::RegionClosed { region, .. } => (2, 0, Some(*region)),
+            })
+            .collect();
+        let last = RegionId::new_for_test(2, 1);
+        assert_eq!(
+            kept,
+            vec![
+                (0, 900, Some(open)),
+                (0, 2, Some(last)),
+                (1, 2, None),
+                (2, 0, Some(last))
+            ]
+        );
     }
 }

@@ -82,3 +82,7 @@ pub mod owned;
 /// Restart-safe authenticated membership decisions in caller-owned files.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod durable;
+
+/// Runtime-owned UDP gossip/probe loop with bounded, non-authoritative observations.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod driver;

@@ -112,6 +112,7 @@ use crate::cx::{Cx, cap};
 use crate::record::AdmissionError;
 use crate::record::task::TaskState;
 use crate::runtime::resource_monitor::RegionPriority;
+use crate::runtime::scheduler::three_lane::scheduler_drives_current_task;
 use crate::runtime::task_handle::{JoinError, TaskHandle};
 use crate::runtime::{RegionCreateError, RuntimeState, SpawnError, StoredTask};
 use crate::types::{
@@ -937,19 +938,7 @@ impl<'scope, P: Policy> Scope<'scope, P> {
         (r1, r2)
     }
 
-    /// Races two tasks, waiting for the first to complete.
-    ///
-    /// The loser is cancelled and drained (awaited until it completes cancellation).
-    ///
-    /// # Example
-    /// ```ignore
-    /// let h1 = scope.spawn_registered(...);
-    /// let h2 = scope.spawn_registered(...);
-    /// match scope.race(cx, h1, h2).await {
-    ///     Ok(val) => println!("Winner result: {val}"),
-    ///     Err(e) => println!("Race failed: {e}"),
-    /// }
-    /// ```
+    /// Records the start of a race whose participants must all drain.
     fn record_loser_drain_start(&self, cx: &Cx, participants: Vec<TaskId>) -> Option<u64> {
         let time = cx.now_for_observability();
         cx.loser_drain_history_handle()
@@ -968,6 +957,36 @@ impl<'scope, P: Policy> Scope<'scope, P> {
         }
     }
 
+    async fn drain_owner_cancelled_race<T>(
+        cx: &Cx,
+        handles: &mut [TaskHandle<T>],
+        participants: &[TaskId],
+        race_id: Option<u64>,
+        reason: CancelReason,
+    ) -> JoinError {
+        // Publish every cancellation before joining any participant: one
+        // branch's cleanup may depend on another first observing the request.
+        for handle in handles.iter() {
+            if !handle.is_finished() {
+                handle.abort_with_reason(reason.clone());
+            }
+        }
+        let mut terminal = JoinError::Cancelled(reason);
+        for (handle, &participant) in handles.iter_mut().zip(participants) {
+            let result = handle.join(cx).await;
+            Self::record_loser_drain_task_complete(cx, participant);
+            if let Err(JoinError::Panicked(payload)) = result {
+                if !matches!(terminal, JoinError::Panicked(_)) {
+                    terminal = JoinError::Panicked(payload);
+                }
+            }
+        }
+        if let (Some(race_id), Some(history)) = (race_id, cx.loser_drain_history_handle()) {
+            history.record_race_cancelled(race_id, cx.task_id(), cx.now_for_observability());
+        }
+        terminal
+    }
+
     fn best_effort_poll_loser_join<T>(cx: &Cx, handle: &mut TaskHandle<T>) -> bool {
         let mut drain = std::pin::pin!(handle.join(cx));
         let waker = std::task::Waker::noop();
@@ -976,6 +995,26 @@ impl<'scope, P: Policy> Scope<'scope, P> {
     }
 
     /// Races two task handles and returns the winner while draining the loser.
+    ///
+    /// If the owner observes cancellation before a branch completes, both
+    /// branches receive its reason and are drained before returning cancellation.
+    /// A panic during drain takes precedence. Cancellation masking is respected;
+    /// cancellation after a winner was selected does not replace that result.
+    ///
+    /// Loser cancellation targets each handle's task. A task that awaits on a
+    /// captured parent context never observes it, and the drain waits until
+    /// that task finishes on its own; spawn each branch with the context its
+    /// spawn closure receives.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let h1 = scope.spawn_registered(state, cx, |child| async move { work_a(&child).await })?;
+    /// let h2 = scope.spawn_registered(state, cx, |child| async move { work_b(&child).await })?;
+    /// match scope.race(cx, h1, h2).await {
+    ///     Ok(val) => println!("Winner result: {val}"),
+    ///     Err(e) => println!("Race failed: {e}"),
+    /// }
+    /// ```
     pub async fn race<T>(
         &self,
         cx: &Cx,
@@ -992,25 +1031,57 @@ impl<'scope, P: Policy> Scope<'scope, P> {
             let mut f1 = std::pin::pin!(f1);
             let f2 = h2.join_with_drop_reason(cx, CancelReason::race_loser());
             let mut f2 = std::pin::pin!(f2);
-            Select::new(f1.as_mut(), f2.as_mut())
+            let decision = {
+                let mut selection = std::pin::pin!(Select::new(f1.as_mut(), f2.as_mut()));
+                let mut cancelled = std::pin::pin!(cx.cancelled());
+                std::future::poll_fn(|poll_cx| {
+                    if let Poll::Ready(result) = selection.as_mut().poll(poll_cx) {
+                        return Poll::Ready(Ok(result));
+                    }
+                    if cancelled.as_mut().poll(poll_cx).is_ready() && cx.checkpoint().is_err() {
+                        return Poll::Ready(Err(cx
+                            .cancel_reason()
+                            .unwrap_or_else(|| CancelReason::user("race owner cancelled"))));
+                    }
+                    Poll::Pending
+                })
                 .await
-                .map_err(|_| JoinError::PolledAfterCompletion)?
+            };
+            if decision.is_err() {
+                // Dropping an armed join would publish RaceLost before the
+                // owner's reason, which cannot replace it when less severe.
+                f1.defuse_drop_abort();
+                f2.defuse_drop_abort();
+            }
+            decision
+        };
+        let winner = match winner {
+            Ok(result) => result.map_err(|_| JoinError::PolledAfterCompletion)?,
+            Err(reason) => {
+                return Err(Self::drain_owner_cancelled_race(
+                    cx,
+                    &mut [h1, h2],
+                    &[first_task, second_task],
+                    race_id,
+                    reason,
+                )
+                .await);
+            }
         };
 
         match winner {
             Either::Left(res) => {
                 Self::record_loser_drain_task_complete(cx, first_task);
-                if matches!(&res, Err(JoinError::Panicked(_)))
-                    && crate::runtime::scheduler::three_lane::current_worker_id().is_none()
-                {
+                if matches!(&res, Err(JoinError::Panicked(_))) && !scheduler_drives_current_task() {
                     // In direct block_on tests there is no scheduler driving the
                     // loser task after the winner panic surfaces. Best-effort poll
                     // once so a cooperative loser can observe cancellation, then
                     // preserve the winner panic without deadlocking the test.
+                    // Only a drain that happened is recorded (bi2462.101).
                     if Self::best_effort_poll_loser_join(cx, &mut h2) {
                         Self::record_loser_drain_task_complete(cx, second_task);
+                        Self::record_loser_drain_complete(cx, race_id, first_task);
                     }
-                    Self::record_loser_drain_complete(cx, race_id, first_task);
                     return res;
                 }
                 let loser_res = h2.join(cx).await;
@@ -1026,14 +1097,12 @@ impl<'scope, P: Policy> Scope<'scope, P> {
             }
             Either::Right(res) => {
                 Self::record_loser_drain_task_complete(cx, second_task);
-                if matches!(&res, Err(JoinError::Panicked(_)))
-                    && crate::runtime::scheduler::three_lane::current_worker_id().is_none()
-                {
+                if matches!(&res, Err(JoinError::Panicked(_))) && !scheduler_drives_current_task() {
                     // See the left-branch comment above.
                     if Self::best_effort_poll_loser_join(cx, &mut h1) {
                         Self::record_loser_drain_task_complete(cx, first_task);
+                        Self::record_loser_drain_complete(cx, race_id, second_task);
                     }
-                    Self::record_loser_drain_complete(cx, race_id, second_task);
                     return res;
                 }
                 let loser_res = h1.join(cx).await;
@@ -1057,7 +1126,9 @@ impl<'scope, P: Policy> Scope<'scope, P> {
     /// 3. If primary finishes before delay: returns primary result.
     /// 4. If delay fires: spawns backup task and races them.
     ///
-    /// The loser is cancelled and drained.
+    /// The loser is cancelled and drained. Owner cancellation during the delay
+    /// cancels and drains the primary without starting the backup. After the
+    /// backup starts, cancellation and winner precedence follow [`Self::race`].
     ///
     /// # Arguments
     /// * `state` - The runtime state
@@ -1084,7 +1155,6 @@ impl<'scope, P: Policy> Scope<'scope, P> {
         T: Send + 'static,
     {
         use crate::combinator::Either;
-        use crate::combinator::select::Select;
         // 1. Spawn primary
         let mut h1 = self
             .spawn_registered(state, cx, primary)
@@ -1102,13 +1172,52 @@ impl<'scope, P: Policy> Scope<'scope, P> {
             let sleep_fut = crate::time::sleep(now, delay);
             let mut sleep_pinned = std::pin::pin!(sleep_fut);
 
-            let res = Select::new(f1_primary.as_mut(), sleep_pinned.as_mut())
+            let res = {
+                let mut cancelled = std::pin::pin!(cx.cancelled());
+                std::future::poll_fn(|poll_cx| {
+                    // A ready primary wins even when cancellation also wakes
+                    // Sleep. Poll it explicitly before either decision so an
+                    // alternating Select cannot skip an already-ready result.
+                    if let Poll::Ready(result) = f1_primary.as_mut().poll(poll_cx) {
+                        return Poll::Ready(Ok(Either::Left(result)));
+                    }
+                    if cancelled.as_mut().poll(poll_cx).is_ready() && cx.checkpoint().is_err() {
+                        return Poll::Ready(Err(cx
+                            .cancel_reason()
+                            .unwrap_or_else(|| CancelReason::user("hedge owner cancelled"))));
+                    }
+                    if sleep_pinned.as_mut().poll(poll_cx).is_ready() {
+                        // Cancellation can also arrive during the timer poll.
+                        if cx.is_cancel_requested() && cx.checkpoint().is_err() {
+                            return Poll::Ready(Err(cx
+                                .cancel_reason()
+                                .unwrap_or_else(|| CancelReason::user("hedge owner cancelled"))));
+                        }
+                        return Poll::Ready(Ok(Either::Right(())));
+                    }
+                    Poll::Pending
+                })
                 .await
-                .map_err(|_| JoinError::PolledAfterCompletion)?;
-            if matches!(res, Either::Right(())) {
+            };
+            if res.is_err() || matches!(res, Ok(Either::Right(()))) {
                 f1_primary.defuse_drop_abort();
             }
             res
+        };
+        let primary_or_delay = match primary_or_delay {
+            Ok(result) => result,
+            Err(reason) => {
+                let participants = [h1.task_id()];
+                let race_id = self.record_loser_drain_start(cx, participants.to_vec());
+                return Err(Self::drain_owner_cancelled_race(
+                    cx,
+                    &mut [h1],
+                    &participants,
+                    race_id,
+                    reason,
+                )
+                .await);
+            }
         };
 
         match primary_or_delay {
@@ -1118,12 +1227,30 @@ impl<'scope, P: Policy> Scope<'scope, P> {
             }
             Either::Right(()) => {
                 // Timeout fired. Spawn backup.
-                let Ok(mut h2) = self.spawn_registered(state, cx, backup) else {
+                let Ok(h2) = self.spawn_registered(state, cx, backup) else {
+                    // Cancellation can arrive between selecting the delay and
+                    // admitting its backup. Preserve the owner attribution and
+                    // full drain guarantee on that refusal as well.
+                    if cx.is_cancel_requested() && cx.checkpoint().is_err() {
+                        let participants = [h1.task_id()];
+                        let race_id = self.record_loser_drain_start(cx, participants.to_vec());
+                        let reason = cx
+                            .cancel_reason()
+                            .unwrap_or_else(|| CancelReason::user("hedge owner cancelled"));
+                        return Err(Self::drain_owner_cancelled_race(
+                            cx,
+                            &mut [h1],
+                            &participants,
+                            race_id,
+                            reason,
+                        )
+                        .await);
+                    }
                     // Backup admission failed after primary already started.
                     // Request cancellation on primary to avoid orphaned work.
                     h1.abort_with_reason(CancelReason::resource_unavailable());
 
-                    if crate::runtime::scheduler::three_lane::current_worker_id().is_some() {
+                    if scheduler_drives_current_task() {
                         // In scheduler-backed runtime execution, fully drain the
                         // cancelled primary before returning.
                         match h1.join(cx).await {
@@ -1150,51 +1277,7 @@ impl<'scope, P: Policy> Scope<'scope, P> {
                     return Err(JoinError::Cancelled(CancelReason::resource_unavailable()));
                 };
 
-                // Now race h1 and h2 with bounded future borrows.
-                let race_outcome = {
-                    let f1_race = h1.join_with_drop_reason(cx, CancelReason::race_loser());
-                    let mut f1_race = std::pin::pin!(f1_race);
-                    let f2_race = h2.join_with_drop_reason(cx, CancelReason::race_loser());
-                    let mut f2_race = std::pin::pin!(f2_race);
-                    Select::new(f1_race.as_mut(), f2_race.as_mut())
-                        .await
-                        .map_err(|_| JoinError::PolledAfterCompletion)?
-                };
-
-                match race_outcome {
-                    Either::Left(res) => {
-                        if matches!(&res, Err(JoinError::Panicked(_)))
-                            && crate::runtime::scheduler::three_lane::current_worker_id().is_none()
-                        {
-                            Self::best_effort_poll_loser_join(cx, &mut h2);
-                            return res;
-                        }
-                        let loser_res = h2.join(cx).await;
-                        if let Err(JoinError::Panicked(p)) = res {
-                            Err(JoinError::Panicked(p))
-                        } else if let Err(JoinError::Panicked(p)) = loser_res {
-                            Err(JoinError::Panicked(p))
-                        } else {
-                            res
-                        }
-                    }
-                    Either::Right(res) => {
-                        if matches!(&res, Err(JoinError::Panicked(_)))
-                            && crate::runtime::scheduler::three_lane::current_worker_id().is_none()
-                        {
-                            Self::best_effort_poll_loser_join(cx, &mut h1);
-                            return res;
-                        }
-                        let loser_res = h1.join(cx).await;
-                        if let Err(JoinError::Panicked(p)) = res {
-                            Err(JoinError::Panicked(p))
-                        } else if let Err(JoinError::Panicked(p)) = loser_res {
-                            Err(JoinError::Panicked(p))
-                        } else {
-                            res
-                        }
-                    }
-                }
+                self.race(cx, h1, h2).await
             }
         }
     }
@@ -1202,6 +1285,16 @@ impl<'scope, P: Policy> Scope<'scope, P> {
     /// Races multiple tasks, waiting for the first to complete.
     ///
     /// The winner's result is returned. Losers are cancelled and drained.
+    /// Owner cancellation before selection cancels every unfinished participant
+    /// with the owner's reason and drains all of them. A panic during that drain
+    /// takes precedence over cancellation. A same-poll ready branch wins over
+    /// owner cancellation; cancellation masking is respected.
+    ///
+    /// As with [`Scope::race`], a participant must observe cancellation on its
+    /// own task context; one awaiting on a captured parent context is never
+    /// reached by loser cancellation, and the drain waits until it finishes.
+    /// [`Diagnostics::find_stalled_race_drains`](crate::observability::Diagnostics::find_stalled_race_drains)
+    /// reports such races.
     ///
     /// # Arguments
     /// * `cx` - The capability context
@@ -1217,7 +1310,9 @@ impl<'scope, P: Policy> Scope<'scope, P> {
     ) -> Result<(T, usize), JoinError> {
         let mut handles = handles;
         if handles.is_empty() {
-            return std::future::poll_fn(|_poll_cx| {
+            let mut cancelled = std::pin::pin!(cx.cancelled());
+            return std::future::poll_fn(|poll_cx| {
+                let _ = cancelled.as_mut().poll(poll_cx);
                 if cx.checkpoint().is_err() {
                     let reason = cx
                         .cancel_reason()
@@ -1245,28 +1340,53 @@ impl<'scope, P: Policy> Scope<'scope, P> {
         // Poll every candidate in each round and keep all same-round ready
         // outcomes. This prevents losing loser panic outcomes when multiple
         // tasks become ready in the same poll.
-        let winner_idx = std::future::poll_fn(|poll_cx| {
-            let mut newly_ready = Vec::new();
+        let selection = {
+            let mut cancelled = std::pin::pin!(cx.cancelled());
+            std::future::poll_fn(|poll_cx| {
+                let mut newly_ready = Vec::new();
 
-            for (i, future) in futures.iter_mut().enumerate() {
-                if ready_results[i].is_some() {
-                    continue;
+                for (i, future) in futures.iter_mut().enumerate() {
+                    if ready_results[i].is_some() {
+                        continue;
+                    }
+                    if let Poll::Ready(res) = std::pin::Pin::new(future).poll(poll_cx) {
+                        ready_results[i] = Some(res);
+                        newly_ready.push(i);
+                    }
                 }
-                if let std::task::Poll::Ready(res) = std::pin::Pin::new(future).poll(poll_cx) {
-                    ready_results[i] = Some(res);
-                    newly_ready.push(i);
-                }
-            }
 
-            if newly_ready.is_empty() {
-                std::task::Poll::Pending
-            } else {
-                // Fairly select a winner among all that became ready in this round
-                let chosen = newly_ready[cx.random_usize(newly_ready.len())];
-                std::task::Poll::Ready(chosen)
+                if !newly_ready.is_empty() {
+                    // Keep same-round completion and fair winner selection
+                    // ahead of owner cancellation, as on the two-task path.
+                    let chosen = newly_ready[cx.random_usize(newly_ready.len())];
+                    return Poll::Ready(Ok(chosen));
+                }
+                if cancelled.as_mut().poll(poll_cx).is_ready() && cx.checkpoint().is_err() {
+                    return Poll::Ready(Err(cx
+                        .cancel_reason()
+                        .unwrap_or_else(|| CancelReason::user("race_all owner cancelled"))));
+                }
+                Poll::Pending
+            })
+            .await
+        };
+        let winner_idx = match selection {
+            Ok(index) => index,
+            Err(reason) => {
+                for future in &mut futures {
+                    future.defuse_drop_abort();
+                }
+                drop(futures);
+                return Err(Self::drain_owner_cancelled_race(
+                    cx,
+                    &mut handles,
+                    &participant_tasks,
+                    race_id,
+                    reason,
+                )
+                .await);
             }
-        })
-        .await;
+        };
 
         let winner_result = ready_results[winner_idx]
             .take()
@@ -1312,19 +1432,24 @@ impl<'scope, P: Policy> Scope<'scope, P> {
         for &idx in &pending_loser_indices {
             handles[idx].abort_with_reason(CancelReason::race_loser());
         }
-        if matches!(&winner_result, Err(JoinError::Panicked(_)))
-            && crate::runtime::scheduler::three_lane::current_worker_id().is_none()
+        if matches!(&winner_result, Err(JoinError::Panicked(_))) && !scheduler_drives_current_task()
         {
             // In direct block_on tests there is no scheduler driving pending
             // losers after the winner panic surfaces. Best-effort poll each
             // loser once so cooperative tasks can observe cancellation, then
-            // preserve the winner panic without deadlocking the test.
+            // preserve the winner panic without deadlocking the test. Only a
+            // drain that happened is recorded (asupersync-bi2462.101).
+            let mut all_drained = true;
             for idx in pending_loser_indices {
                 if Self::best_effort_poll_loser_join(cx, &mut handles[idx]) {
                     Self::record_loser_drain_task_complete(cx, participant_tasks[idx]);
+                } else {
+                    all_drained = false;
                 }
             }
-            Self::record_loser_drain_complete(cx, race_id, winner_task);
+            if all_drained {
+                Self::record_loser_drain_complete(cx, race_id, winner_task);
+            }
             return winner_result.map(|val| (val, winner_idx));
         }
         for idx in pending_loser_indices {
@@ -2923,6 +3048,36 @@ mod tests {
                 assert_eq!(idx, 0);
             }
             res => unreachable!("Expected Ready(Ok((1, 0))), got {res:?}"),
+        }
+    }
+
+    #[test]
+    fn ready_race_result_precedes_same_poll_owner_cancellation() {
+        for all_handles in [false, true] {
+            let mut state = RuntimeState::new();
+            let cx = test_cx();
+            let region = state.create_root_region(Budget::INFINITE);
+            let scope = test_scope(region, Budget::INFINITE);
+            let (h1, mut t1) = scope
+                .create_stored_task(&mut state, &cx, |_| async { 7_u8 })
+                .unwrap();
+            let (h2, mut t2) = scope
+                .create_stored_task(&mut state, &cx, |_| async { 7_u8 })
+                .unwrap();
+            let mut poll_cx = Context::from_waker(std::task::Waker::noop());
+            assert!(t1.poll(&mut poll_cx).is_ready());
+            assert!(t2.poll(&mut poll_cx).is_ready());
+            cx.cancel_fast(CancelKind::User);
+            let result = if all_handles {
+                block_on(scope.race_all(&cx, vec![h1, h2])).map(|(value, _)| value)
+            } else {
+                block_on(scope.race(&cx, h1, h2))
+            };
+            assert_eq!(
+                result.unwrap(),
+                7,
+                "a ready result must retain selection priority"
+            );
         }
     }
 

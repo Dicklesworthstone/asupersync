@@ -46,8 +46,7 @@ use std::future::Future;
     all(not(feature = "kafka"), any(test, feature = "test-internals"))
 ))]
 use std::pin::Pin;
-#[cfg(any(test, feature = "kafka"))]
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(any(
     feature = "kafka",
@@ -55,6 +54,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 ))]
 use std::task::Poll;
 use std::time::Duration;
+
+mod owned;
+pub use owned::{KafkaConsumerHandle, KafkaConsumerLease};
 
 #[cfg(feature = "kafka")]
 use rdkafka::{
@@ -512,6 +514,217 @@ impl TopicPartitionOffset {
     }
 }
 
+/// An owned snapshot of a consumer's group membership for transactional offsets.
+///
+/// Obtain this from [`KafkaConsumer::group_metadata`] after polling the records
+/// being processed. Clones refer to the same snapshot. Local assignment changes
+/// invalidate it. The broker validates its native generation and member identity,
+/// including rebalances that preserve the same assignment. Capture a fresh
+/// snapshot after every rebalance rather than relying only on [`Self::generation`].
+/// The snapshot does not retain a native consumer or delay scoped teardown.
+#[derive(Clone)]
+pub struct ConsumerGroupMetadata {
+    inner: Arc<ConsumerGroupMetadataInner>,
+}
+
+#[cfg_attr(not(any(feature = "kafka", test)), allow(dead_code))]
+struct ConsumerGroupMetadataInner {
+    group_id: String,
+    generation: u64,
+    assignments: BTreeSet<(String, i32)>,
+    state: Weak<Mutex<ConsumerState>>,
+    closed: Weak<AtomicBool>,
+    #[cfg(feature = "kafka")]
+    native: Option<rdkafka::consumer::ConsumerGroupMetadata>,
+}
+
+impl fmt::Debug for ConsumerGroupMetadata {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConsumerGroupMetadata")
+            .field("group_id", &self.inner.group_id)
+            .field("generation", &self.inner.generation)
+            .field("partitions", &self.inner.assignments.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ConsumerGroupMetadata {
+    /// Consumer group whose offsets this snapshot can enroll.
+    #[must_use]
+    pub fn group_id(&self) -> &str {
+        &self.inner.group_id
+    }
+
+    /// The wrapper's assignment generation when the snapshot was captured.
+    /// This is not the broker's wire generation identifier.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.inner.generation
+    }
+
+    /// Whether this snapshot still describes its consumer's live membership.
+    ///
+    /// A closed or dropped consumer, a new rebalance generation or a changed
+    /// assignment never becomes current again, so a failure here is final
+    /// for the snapshot.
+    #[cfg(feature = "kafka")]
+    pub(crate) fn check_membership(&self) -> Result<(), KafkaError> {
+        let state = self.inner.state.upgrade().ok_or_else(|| {
+            KafkaError::Config("consumer group metadata owner has been dropped".into())
+        })?;
+        let closed = self.inner.closed.upgrade().ok_or_else(|| {
+            KafkaError::Config("consumer group metadata owner has been dropped".into())
+        })?;
+        let state = state.lock();
+        self.validate_membership(&state, &closed)
+    }
+
+    #[cfg(any(feature = "kafka", test))]
+    pub(crate) fn prepare_offsets(
+        &self,
+        offsets: &[TopicPartitionOffset],
+    ) -> Result<PreparedTransactionOffsets, KafkaError> {
+        if offsets.is_empty() {
+            return Err(KafkaError::Config("offsets cannot be empty".into()));
+        }
+        // The snapshot's assignment bounds both allocation and the amount of
+        // work before a duplicate/foreign partition can be rejected.
+        if offsets.len() > self.inner.assignments.len() {
+            return Err(KafkaError::Config(
+                "offset batch exceeds the captured assignment".into(),
+            ));
+        }
+        let state = self.inner.state.upgrade().ok_or_else(|| {
+            KafkaError::Config("consumer group metadata owner has been dropped".into())
+        })?;
+        let closed = self.inner.closed.upgrade().ok_or_else(|| {
+            KafkaError::Config("consumer group metadata owner has been dropped".into())
+        })?;
+        let state = state.lock();
+        self.validate_membership(&state, &closed)?;
+        let mut normalized = BTreeMap::new();
+        for offset in offsets {
+            validate_partition_number(offset.partition)?;
+            if offset.offset < 0 {
+                return Err(KafkaError::Config("offsets must be non-negative".into()));
+            }
+            let key = (offset.topic.clone(), offset.partition);
+            if !self.inner.assignments.contains(&key) {
+                return Err(KafkaError::Config(
+                    "partition is not assigned to the captured consumer group member".into(),
+                ));
+            }
+            if state
+                .committed_offsets
+                .get(&key)
+                .is_some_and(|previous| offset.offset < *previous)
+            {
+                return Err(KafkaError::Config("offset commit regression is not allowed".into()));
+            }
+            if normalized.insert(key, offset.offset).is_some() {
+                return Err(KafkaError::Config(
+                    "duplicate topic/partition entry in commit batch".into(),
+                ));
+            }
+        }
+        Ok(PreparedTransactionOffsets {
+            metadata: self.clone(),
+            offsets: normalized,
+        })
+    }
+
+    fn validate_membership(
+        &self,
+        state: &ConsumerState,
+        closed: &AtomicBool,
+    ) -> Result<(), KafkaError> {
+        if closed.load(Ordering::Acquire) {
+            return Err(KafkaError::Config("consumer is closed".into()));
+        }
+        if state.rebalance_generation != self.inner.generation
+            || state.assigned_partitions != self.inner.assignments
+        {
+            return Err(KafkaError::Transaction(
+                "consumer group metadata is stale after a rebalance".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "kafka")]
+    pub(crate) fn native(&self) -> Result<&rdkafka::consumer::ConsumerGroupMetadata, KafkaError> {
+        self.inner.native.as_ref().ok_or(KafkaError::FeatureDisabled)
+    }
+}
+
+/// Local bookkeeping for offsets already validated against one membership
+/// snapshot. It never sends a standalone consumer offset commit.
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedTransactionOffsets {
+    pub(crate) metadata: ConsumerGroupMetadata,
+    pub(crate) offsets: BTreeMap<(String, i32), i64>,
+}
+
+impl PreparedTransactionOffsets {
+    #[cfg(any(feature = "kafka", test))]
+    pub(crate) fn merge(&self, next: &Self) -> Result<Self, KafkaError> {
+        if !Arc::ptr_eq(&self.metadata.inner, &next.metadata.inner) {
+            return Err(KafkaError::Transaction(
+                "one transaction must use the same consumer group metadata snapshot".into(),
+            ));
+        }
+        let mut merged = self.clone();
+        for (key, offset) in &next.offsets {
+            if merged.offsets.get(key).is_some_and(|previous| offset < previous) {
+                return Err(KafkaError::Config(
+                    "transactional offset regression is not allowed".into(),
+                ));
+            }
+            merged.offsets.insert(key.clone(), *offset);
+        }
+        Ok(merged)
+    }
+
+    /// Revalidate immediately before entering librdkafka, after any blocking
+    /// pool queue delay. Broker-side membership fencing remains authoritative.
+    #[cfg(any(feature = "kafka", test))]
+    pub(crate) fn validate_current(&self) -> Result<(), KafkaError> {
+        let state = self.metadata.inner.state.upgrade().ok_or_else(|| {
+            KafkaError::Config("consumer group metadata owner has been dropped".into())
+        })?;
+        let closed = self.metadata.inner.closed.upgrade().ok_or_else(|| {
+            KafkaError::Config("consumer group metadata owner has been dropped".into())
+        })?;
+        let state = state.lock();
+        self.metadata.validate_membership(&state, &closed)?;
+        if self.offsets.iter().any(|(key, offset)| {
+            state.committed_offsets.get(key).is_some_and(|previous| offset < previous)
+        }) {
+            return Err(KafkaError::Config("offset commit regression is not allowed".into()));
+        }
+        Ok(())
+    }
+
+    /// Called only after a successful broker transaction commit. A stale or
+    /// dropped consumer must not have its new assignment's local state changed.
+    pub(crate) fn publish_committed(self) {
+        let Some(state) = self.metadata.inner.state.upgrade() else {
+            return;
+        };
+        let Some(closed) = self.metadata.inner.closed.upgrade() else {
+            return;
+        };
+        let mut state = state.lock();
+        if self.metadata.validate_membership(&state, &closed).is_err() {
+            return;
+        }
+        for (key, offset) in self.offsets {
+            let current = state.committed_offsets.entry(key).or_insert(offset);
+            *current = (*current).max(offset);
+        }
+    }
+}
+
 /// Result emitted after a consumer group rebalance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebalanceResult {
@@ -580,6 +793,17 @@ struct RebalanceCounters {
     eager_assigns: std::sync::atomic::AtomicU64,
     incremental_unassigns: std::sync::atomic::AtomicU64,
     eager_unassigns: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    native_drop_thread: Mutex<Option<(std::thread::ThreadId, Option<String>)>>,
+}
+
+#[cfg(all(test, feature = "kafka"))]
+impl Drop for BrokerConsumerContext {
+    fn drop(&mut self) {
+        let thread = std::thread::current();
+        *self.counters.native_drop_thread.lock() =
+            Some((thread.id(), thread.name().map(str::to_owned)));
+    }
 }
 
 #[cfg(feature = "kafka")]
@@ -708,6 +932,110 @@ fn leave_group_bounded(consumer: &BaseConsumer<BrokerConsumerContext>) {
     }
 }
 
+/// Serializes native calls and accounts for every handle retained by an
+/// in-flight blocking operation. Scoped teardown fences admission and waits for
+/// these leases; a cancelled async waiter is not evidence that its native call
+/// has returned.
+#[cfg(feature = "kafka")]
+#[derive(Debug, Default)]
+struct BrokerOperations {
+    serial: Mutex<()>,
+    lifetime: Mutex<BrokerOperationLifetime>,
+    retired: parking_lot::Condvar,
+    #[cfg(test)]
+    before_lock: Mutex<Option<crate::channel::oneshot::Sender<()>>>,
+}
+
+#[cfg(feature = "kafka")]
+#[derive(Debug, Default)]
+struct BrokerOperationLifetime {
+    leases: usize,
+    retiring: bool,
+}
+
+#[cfg(feature = "kafka")]
+impl BrokerOperations {
+    fn lock(&self) -> parking_lot::MutexGuard<'_, ()> {
+        #[cfg(test)]
+        let witness = self.before_lock.lock().take();
+        #[cfg(test)]
+        if let Some(witness) = witness {
+            let _ = witness.send_blocking(());
+        }
+        self.serial.lock()
+    }
+
+    fn retire_and_wait(&self) {
+        let mut state = self.lifetime.lock();
+        state.retiring = true;
+        while state.leases != 0 {
+            self.retired.wait(&mut state);
+        }
+    }
+}
+
+/// The native reference is released before the lease's retirement notification.
+/// Consequently observing zero leases after admission is fenced proves that the
+/// lifetime worker retains the only native handle, including after future drop.
+#[cfg(feature = "kafka")]
+struct BrokerConsumerLease {
+    consumer: Option<Arc<BaseConsumer<BrokerConsumerContext>>>,
+    operations: Arc<BrokerOperations>,
+}
+
+#[cfg(feature = "kafka")]
+impl BrokerConsumerLease {
+    fn acquire(
+        consumer: &Arc<BaseConsumer<BrokerConsumerContext>>,
+        operations: &Arc<BrokerOperations>,
+    ) -> Option<Self> {
+        let mut state = operations.lifetime.lock();
+        if state.retiring {
+            return None;
+        }
+        state.leases = state.leases.checked_add(1).expect("native consumer lease count overflow");
+        Some(Self {
+            consumer: Some(Arc::clone(consumer)),
+            operations: Arc::clone(operations),
+        })
+    }
+}
+
+#[cfg(feature = "kafka")]
+impl Clone for BrokerConsumerLease {
+    fn clone(&self) -> Self {
+        let mut state = self.operations.lifetime.lock();
+        // An existing operation may make another attempt after retirement has
+        // begun. Its own lease keeps the count nonzero throughout that handoff.
+        state.leases = state.leases.checked_add(1).expect("native consumer lease count overflow");
+        Self {
+            consumer: Some(Arc::clone(self.consumer.as_ref().expect("live native consumer lease"))),
+            operations: Arc::clone(&self.operations),
+        }
+    }
+}
+
+#[cfg(feature = "kafka")]
+impl std::ops::Deref for BrokerConsumerLease {
+    type Target = BaseConsumer<BrokerConsumerContext>;
+
+    fn deref(&self) -> &Self::Target {
+        self.consumer.as_deref().expect("live native consumer lease")
+    }
+}
+
+#[cfg(feature = "kafka")]
+impl Drop for BrokerConsumerLease {
+    fn drop(&mut self) {
+        drop(self.consumer.take());
+        let mut state = self.operations.lifetime.lock();
+        state.leases -= 1;
+        if state.leases == 0 {
+            self.operations.retired.notify_all();
+        }
+    }
+}
+
 impl Drop for KafkaConsumer {
     fn drop(&mut self) {
         #[cfg(feature = "kafka")]
@@ -730,15 +1058,15 @@ impl Drop for KafkaConsumer {
 /// compiled as crate unit tests.
 pub struct KafkaConsumer {
     config: ConsumerConfig,
-    state: Mutex<ConsumerState>,
-    closed: AtomicBool,
+    state: Arc<Mutex<ConsumerState>>,
+    closed: Arc<AtomicBool>,
     state_notify: Notify,
     #[cfg(feature = "kafka")]
     consumer: Option<Arc<BaseConsumer<BrokerConsumerContext>>>,
     #[cfg(feature = "kafka")]
     rebalance: Option<(bool, Arc<RebalanceCounters>)>,
     #[cfg(feature = "kafka")]
-    broker_ops: Option<Arc<Mutex<()>>>,
+    broker_ops: Option<Arc<BrokerOperations>>,
     #[cfg(feature = "kafka")]
     buffered_outcome: Arc<Mutex<Option<Result<BrokerPollOutcome, KafkaError>>>>,
     #[cfg(test)]
@@ -1136,11 +1464,11 @@ impl KafkaConsumer {
             None => (None, None),
         };
         #[cfg(feature = "kafka")]
-        let broker_ops = consumer.as_ref().map(|_| Arc::new(Mutex::new(())));
+        let broker_ops = consumer.as_ref().map(|_| Arc::new(BrokerOperations::default()));
         Ok(Self {
             config,
-            state: Mutex::new(ConsumerState::default()),
-            closed: AtomicBool::new(false),
+            state: Arc::new(Mutex::new(ConsumerState::default())),
+            closed: Arc::new(AtomicBool::new(false)),
             state_notify: Notify::new(),
             #[cfg(feature = "kafka")]
             consumer,
@@ -1205,11 +1533,14 @@ impl KafkaConsumer {
     }
 
     #[cfg(feature = "kafka")]
-    fn broker_backend(&self) -> Option<(Arc<BaseConsumer<BrokerConsumerContext>>, Arc<Mutex<()>>)> {
+    fn broker_backend(&self) -> Option<(BrokerConsumerLease, Arc<BrokerOperations>)> {
         self.consumer
             .as_ref()
             .zip(self.broker_ops.as_ref())
-            .map(|(consumer, broker_ops)| (Arc::clone(consumer), Arc::clone(broker_ops)))
+            .and_then(|(consumer, broker_ops)| {
+                BrokerConsumerLease::acquire(consumer, broker_ops)
+                    .map(|lease| (lease, Arc::clone(broker_ops)))
+            })
     }
 
     #[cfg(test)]
@@ -1220,6 +1551,24 @@ impl KafkaConsumer {
     #[cfg(all(test, not(feature = "kafka")))]
     fn install_poll_before_wait_hook(&self, hook: Arc<PollBeforeWaitHook>) {
         *self.poll_before_wait_hook.lock() = Some(hook);
+    }
+
+    /// Copy only wrapper state for private state-machine tests. The absent
+    /// native metadata deliberately makes the public enrollment API refuse it.
+    #[cfg(test)]
+    pub(crate) fn group_metadata_for_state_test(&self) -> ConsumerGroupMetadata {
+        let state = self.state.lock();
+        ConsumerGroupMetadata {
+            inner: Arc::new(ConsumerGroupMetadataInner {
+                group_id: self.config.group_id.clone(),
+                generation: state.rebalance_generation,
+                assignments: state.assigned_partitions.clone(),
+                state: Arc::downgrade(&self.state),
+                closed: Arc::downgrade(&self.closed),
+                #[cfg(feature = "kafka")]
+                native: None,
+            }),
+        }
     }
 
     /// Subscribe to a set of topics.
@@ -1553,7 +1902,7 @@ impl KafkaConsumer {
                     };
 
                     let outcome_res = crate::runtime::spawn_blocking::spawn_blocking_on_thread({
-                        let consumer = Arc::clone(&consumer);
+                        let consumer = consumer.clone();
                         let broker_ops = Arc::clone(&broker_ops);
                         let buffered_outcome = Arc::clone(&self.buffered_outcome);
                         move || -> Result<(), KafkaError> {
@@ -1736,6 +2085,70 @@ impl KafkaConsumer {
         }
     }
 
+    /// Capture group membership for an atomic consume/produce transaction.
+    ///
+    /// Automatic consumer commits must be disabled. After processing records,
+    /// pass this snapshot and their next offsets to
+    /// [`super::kafka::Transaction::send_offsets_to_transaction`], then commit
+    /// the producer transaction. Do not also call [`Self::commit_offsets`].
+    /// Capture a new snapshot for each transaction, and after every rebalance.
+    ///
+    /// The native metadata copy is made on a blocking worker under the same
+    /// operation lease as other consumer calls. Its lifetime is independent of
+    /// the native consumer. The no-`kafka` and model-only test backends return
+    /// [`KafkaError::FeatureDisabled`]; they cannot attest broker atomicity.
+    #[allow(unused_variables)]
+    pub async fn group_metadata(&self, cx: &Cx) -> Result<ConsumerGroupMetadata, KafkaError> {
+        cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+        self.ensure_open()?;
+        if self.config.enable_auto_commit {
+            return Err(KafkaError::Config(
+                "transactional offsets require enable_auto_commit=false".into(),
+            ));
+        }
+
+        #[cfg(feature = "kafka")]
+        {
+            let (consumer, broker_ops) = self.broker_backend().ok_or(KafkaError::FeatureDisabled)?;
+            let state = Arc::clone(&self.state);
+            let closed = Arc::clone(&self.closed);
+            let group_id = self.config.group_id.clone();
+            super::kafka::run_kafka_blocking(cx, move || {
+                let _guard = broker_ops.lock();
+                if closed.load(Ordering::Acquire) {
+                    return Err(KafkaError::Config("consumer is closed".into()));
+                }
+                let native = consumer.group_metadata().ok_or_else(|| {
+                    KafkaError::Transaction("consumer has no broker group metadata".into())
+                })?;
+                let snapshot = capture_broker_snapshot(&consumer)?;
+                let weak_state = Arc::downgrade(&state);
+                let mut state = state.lock();
+                apply_broker_snapshot(&mut state, snapshot);
+                if state.assigned_partitions.is_empty() {
+                    return Err(KafkaError::Transaction(
+                        "consumer has no assigned partitions; poll before capturing metadata".into(),
+                    ));
+                }
+                Ok(ConsumerGroupMetadata {
+                    inner: Arc::new(ConsumerGroupMetadataInner {
+                        group_id,
+                        generation: state.rebalance_generation,
+                        assignments: state.assigned_partitions.clone(),
+                        state: weak_state,
+                        closed: Arc::downgrade(&closed),
+                        native: Some(native),
+                    }),
+                })
+            })
+            .await
+        }
+        #[cfg(not(feature = "kafka"))]
+        {
+            Err(KafkaError::FeatureDisabled)
+        }
+    }
+
     /// Commit offsets explicitly.
     #[allow(unused_variables)]
     pub async fn commit_offsets(
@@ -1804,7 +2217,7 @@ impl KafkaConsumer {
                 // pinning the executor worker thread through
                 // `thread::scope().join()` for the full broker round-trip.
                 let commit_batch = commit_batch.clone();
-                let consumer = Arc::clone(&consumer);
+                let consumer = consumer.clone();
                 let broker_ops = Arc::clone(&broker_ops);
 
                 async move {
@@ -2170,6 +2583,94 @@ mod tests {
         lock_deterministic_broker_for_tests,
     };
     use crate::test_utils::run_test_with_cx;
+
+    #[test]
+    fn transactional_offsets_validate_batches_and_membership_before_enrollment() {
+        run_test_with_cx(|cx| async move {
+            let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
+            consumer.subscribe(&cx, &["input-a", "input-b"]).await.unwrap();
+            let metadata = consumer.group_metadata_for_state_test();
+            assert_eq!(metadata.group_id(), consumer.config().group_id);
+            assert_eq!(metadata.generation(), consumer.rebalance_generation());
+            let valid = metadata.prepare_offsets(&[
+                TopicPartitionOffset::new("input-a", 0, 0),
+                TopicPartitionOffset::new("input-b", 0, i64::MAX),
+            ]).unwrap();
+            assert_eq!(valid.offsets.len(), 2);
+            for bad in [
+                vec![],
+                vec![TopicPartitionOffset::new("input-a", -1, 2)],
+                vec![TopicPartitionOffset::new("input-a", 0, -1)],
+                vec![TopicPartitionOffset::new("foreign", 0, 2)],
+                vec![TopicPartitionOffset::new("input-a", 1, 2)],
+                vec![
+                    TopicPartitionOffset::new("input-a", 0, 1),
+                    TopicPartitionOffset::new("input-a", 0, 2),
+                ],
+                vec![TopicPartitionOffset::new("input-a", 0, 2); 3],
+            ] {
+                assert!(metadata.prepare_offsets(&bad).is_err(), "batch {bad:?}");
+            }
+            consumer.state.lock().committed_offsets.insert(("input-a".into(), 0), 7);
+            assert!(metadata.prepare_offsets(&[TopicPartitionOffset::new("input-a", 0, 6)]).is_err());
+            let pending = metadata.prepare_offsets(&[TopicPartitionOffset::new("input-a", 0, 8)]).unwrap();
+            consumer.rebalance(&cx, &[TopicPartitionOffset::new("input-b", 0, 0)]).await.unwrap();
+            assert!(matches!(pending.validate_current(), Err(KafkaError::Transaction(_))));
+            assert!(metadata.prepare_offsets(&[TopicPartitionOffset::new("input-a", 0, 8)]).is_err());
+            let current = consumer.group_metadata_for_state_test();
+            consumer.close(&cx).await.unwrap();
+            assert!(current.prepare_offsets(&[TopicPartitionOffset::new("input-b", 0, 1)]).is_err());
+            drop(consumer);
+            assert!(current.prepare_offsets(&[TopicPartitionOffset::new("input-b", 0, 1)]).is_err());
+        });
+    }
+
+    #[test]
+    fn transactional_offsets_merge_monotonically_and_publish_only_current_cache() {
+        run_test_with_cx(|cx| async move {
+            let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
+            consumer.subscribe(&cx, &["input-a", "input-b"]).await.unwrap();
+            let metadata = consumer.group_metadata_for_state_test();
+            let first = metadata.prepare_offsets(&[TopicPartitionOffset::new("input-a", 0, 3)]).unwrap();
+            let second = metadata.clone().prepare_offsets(&[
+                TopicPartitionOffset::new("input-a", 0, 7),
+                TopicPartitionOffset::new("input-b", 0, 2),
+            ]).unwrap();
+            let merged = first.merge(&second).unwrap();
+            assert_eq!(merged.offsets.get(&("input-a".into(), 0)), Some(&7));
+            assert_eq!(merged.offsets.get(&("input-b".into(), 0)), Some(&2));
+            assert_eq!(consumer.committed_offset("input-a", 0), None, "enrollment is not a commit");
+            assert!(merged.merge(&first).is_err(), "later enrollment must not regress an earlier offset");
+            let another_snapshot = consumer.group_metadata_for_state_test()
+                .prepare_offsets(&[TopicPartitionOffset::new("input-a", 0, 8)]).unwrap();
+            assert!(merged.merge(&another_snapshot).is_err(), "cannot replace membership in one transaction");
+            merged.clone().publish_committed();
+            assert_eq!(consumer.committed_offset("input-a", 0), Some(7));
+            assert_eq!(consumer.committed_offset("input-b", 0), Some(2));
+            consumer.state.lock().committed_offsets.insert(("input-a".into(), 0), 11);
+            merged.clone().publish_committed();
+            assert_eq!(consumer.committed_offset("input-a", 0), Some(11));
+            assert!(merged.validate_current().is_err(), "queued enrollment must recheck concurrent commits");
+            consumer.state.lock().rebalance_generation += 1;
+            consumer.state.lock().committed_offsets.clear();
+            merged.publish_committed();
+            assert_eq!(consumer.committed_offset("input-a", 0), None, "old assignment must not update a new owner");
+            consumer.close(&cx).await.unwrap();
+        });
+    }
+
+    #[test]
+    fn transactional_group_metadata_refuses_auto_commit_and_model_backends() {
+        run_test_with_cx(|cx| async move {
+            let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
+            assert!(matches!(consumer.group_metadata(&cx).await, Err(KafkaError::FeatureDisabled)));
+            consumer.close(&cx).await.unwrap();
+            let consumer = KafkaConsumer::new(ConsumerConfig::default().enable_auto_commit(true)).unwrap();
+            assert!(matches!(consumer.group_metadata(&cx).await, Err(KafkaError::Config(message))
+                if message.contains("enable_auto_commit=false")));
+            consumer.close(&cx).await.unwrap();
+        });
+    }
 
     /// br-asupersync-bi2462.26: raw properties keep insertion order and a
     /// repeated key overrides in place (consumer and producer twins).

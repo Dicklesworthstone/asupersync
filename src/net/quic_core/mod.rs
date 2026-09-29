@@ -506,7 +506,23 @@ pub struct TransportParameters {
 
 impl TransportParameters {
     /// Encode transport parameters to TLV bytes.
+    ///
+    /// Values that RFC 9000 §18.2 makes invalid (and that [`Self::decode`]
+    /// therefore rejects from a peer) fail with
+    /// [`QuicCoreError::InvalidTransportParameter`] before anything is
+    /// written to `out`.
     pub fn encode(&self, out: &mut Vec<u8>) -> Result<(), QuicCoreError> {
+        for (id, value) in [
+            (TP_MAX_UDP_PAYLOAD_SIZE, self.max_udp_payload_size),
+            (TP_INITIAL_MAX_STREAMS_BIDI, self.initial_max_streams_bidi),
+            (TP_INITIAL_MAX_STREAMS_UNI, self.initial_max_streams_uni),
+            (TP_ACK_DELAY_EXPONENT, self.ack_delay_exponent),
+            (TP_MAX_ACK_DELAY, self.max_ack_delay),
+        ] {
+            if let Some(value) = value {
+                check_known_u64(id, value)?;
+            }
+        }
         encode_known_u64(out, TP_MAX_IDLE_TIMEOUT, self.max_idle_timeout)?;
         encode_known_u64(out, TP_MAX_UDP_PAYLOAD_SIZE, self.max_udp_payload_size)?;
         encode_known_u64(out, TP_INITIAL_MAX_DATA, self.initial_max_data)?;
@@ -575,10 +591,7 @@ impl TransportParameters {
             match id {
                 TP_MAX_IDLE_TIMEOUT => set_unique_u64(&mut tp.max_idle_timeout, id, value)?,
                 TP_MAX_UDP_PAYLOAD_SIZE => {
-                    set_unique_u64(&mut tp.max_udp_payload_size, id, value)?;
-                    if tp.max_udp_payload_size.is_some_and(|v| v < 1200) {
-                        return Err(QuicCoreError::InvalidTransportParameter(id));
-                    }
+                    set_checked_u64(&mut tp.max_udp_payload_size, id, value)?;
                 }
                 TP_INITIAL_MAX_DATA => set_unique_u64(&mut tp.initial_max_data, id, value)?,
                 TP_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL => {
@@ -591,23 +604,16 @@ impl TransportParameters {
                     set_unique_u64(&mut tp.initial_max_stream_data_uni, id, value)?;
                 }
                 TP_INITIAL_MAX_STREAMS_BIDI => {
-                    set_unique_u64(&mut tp.initial_max_streams_bidi, id, value)?;
+                    set_checked_u64(&mut tp.initial_max_streams_bidi, id, value)?;
                 }
                 TP_INITIAL_MAX_STREAMS_UNI => {
-                    set_unique_u64(&mut tp.initial_max_streams_uni, id, value)?;
+                    set_checked_u64(&mut tp.initial_max_streams_uni, id, value)?;
                 }
                 TP_ACK_DELAY_EXPONENT => {
-                    set_unique_u64(&mut tp.ack_delay_exponent, id, value)?;
-                    if tp.ack_delay_exponent.is_some_and(|v| v > 20) {
-                        return Err(QuicCoreError::InvalidTransportParameter(id));
-                    }
+                    set_checked_u64(&mut tp.ack_delay_exponent, id, value)?;
                 }
                 TP_MAX_ACK_DELAY => {
-                    set_unique_u64(&mut tp.max_ack_delay, id, value)?;
-                    // RFC 9000 §18.2 excludes delays of 2^14 ms or greater.
-                    if tp.max_ack_delay.is_some_and(|v| v >= (1 << 14)) {
-                        return Err(QuicCoreError::InvalidTransportParameter(id));
-                    }
+                    set_checked_u64(&mut tp.max_ack_delay, id, value)?;
                 }
                 TP_DISABLE_ACTIVE_MIGRATION => {
                     if tp.disable_active_migration {
@@ -996,6 +1002,31 @@ fn set_unique_u64(slot: &mut Option<u64>, id: u64, value: &[u8]) -> Result<(), Q
     }
     *slot = Some(decoded);
     Ok(())
+}
+
+/// RFC 9000 §18.2 value constraints on the integer transport parameters.
+/// Encode and decode share this predicate, so an endpoint never sends a
+/// value it would reject from its peer.
+fn check_known_u64(id: u64, value: u64) -> Result<(), QuicCoreError> {
+    let valid = match id {
+        TP_MAX_UDP_PAYLOAD_SIZE => value >= 1200,
+        // §4.6: a limit above 2^60 allows stream IDs that no varint can encode.
+        TP_INITIAL_MAX_STREAMS_BIDI | TP_INITIAL_MAX_STREAMS_UNI => value <= 1 << 60,
+        TP_ACK_DELAY_EXPONENT => value <= 20,
+        // Delays of 2^14 ms or greater are invalid.
+        TP_MAX_ACK_DELAY => value < 1 << 14,
+        _ => true,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(QuicCoreError::InvalidTransportParameter(id))
+    }
+}
+
+fn set_checked_u64(slot: &mut Option<u64>, id: u64, value: &[u8]) -> Result<(), QuicCoreError> {
+    set_unique_u64(slot, id, value)?;
+    slot.map_or(Ok(()), |decoded| check_known_u64(id, decoded))
 }
 
 fn read_cid(input: &[u8], pos: &mut usize, cid_len: usize) -> Result<ConnectionId, QuicCoreError> {
@@ -1618,6 +1649,77 @@ mod tests {
             err,
             QuicCoreError::InvalidTransportParameter(TP_ACK_DELAY_EXPONENT)
         );
+    }
+
+    /// The integer parameter that `id` names, for the RFC 9000 §18.2 value checks.
+    fn constrained_field(params: &mut TransportParameters, id: u64) -> &mut Option<u64> {
+        match id {
+            TP_MAX_UDP_PAYLOAD_SIZE => &mut params.max_udp_payload_size,
+            TP_INITIAL_MAX_STREAMS_BIDI => &mut params.initial_max_streams_bidi,
+            TP_INITIAL_MAX_STREAMS_UNI => &mut params.initial_max_streams_uni,
+            TP_ACK_DELAY_EXPONENT => &mut params.ack_delay_exponent,
+            TP_MAX_ACK_DELAY => &mut params.max_ack_delay,
+            _ => unreachable!("no value-constrained parameter 0x{id:x}"),
+        }
+    }
+
+    #[test]
+    fn transport_params_reject_stream_limits_above_two_to_the_sixty() {
+        // RFC 9000 §4.6: a max_streams value above 2^60 is a TRANSPORT_PARAMETER_ERROR.
+        for id in [TP_INITIAL_MAX_STREAMS_BIDI, TP_INITIAL_MAX_STREAMS_UNI] {
+            for value in [1 << 60, (1 << 60) + 1, QUIC_VARINT_MAX] {
+                let mut encoded = Vec::new();
+                let mut body = Vec::new();
+                encode_varint(value, &mut body).expect("varint");
+                encode_parameter(&mut encoded, id, &body).expect("encode");
+                let decoded = TransportParameters::decode(&encoded);
+                if value == 1 << 60 {
+                    let mut decoded = decoded.expect("2^60 is the largest valid stream limit");
+                    assert_eq!(*constrained_field(&mut decoded, id), Some(value));
+                } else {
+                    assert_eq!(
+                        decoded.expect_err("a stream limit above 2^60 must fail"),
+                        QuicCoreError::InvalidTransportParameter(id),
+                        "id 0x{id:x} value {value}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn transport_params_encode_refuses_what_decode_rejects_and_writes_nothing() {
+        // (id, largest or smallest valid value, first invalid value beyond it)
+        let cases = [
+            (TP_MAX_UDP_PAYLOAD_SIZE, 1200, 1199),
+            (TP_INITIAL_MAX_STREAMS_BIDI, 1 << 60, (1 << 60) + 1),
+            (TP_INITIAL_MAX_STREAMS_UNI, 1 << 60, (1 << 60) + 1),
+            (TP_ACK_DELAY_EXPONENT, 20, 21),
+            (TP_MAX_ACK_DELAY, (1 << 14) - 1, 1 << 14),
+        ];
+        for (id, boundary, invalid) in cases {
+            let mut params = TransportParameters {
+                max_idle_timeout: Some(30_000),
+                ..TransportParameters::default()
+            };
+            *constrained_field(&mut params, id) = Some(boundary);
+            let mut encoded = Vec::new();
+            params.encode(&mut encoded).expect("boundary value encodes");
+            assert_eq!(
+                TransportParameters::decode(&encoded).expect("boundary value decodes"),
+                params,
+                "id 0x{id:x} boundary {boundary}"
+            );
+
+            *constrained_field(&mut params, id) = Some(invalid);
+            let mut out = vec![0xAA, 0xBB];
+            assert_eq!(
+                params.encode(&mut out),
+                Err(QuicCoreError::InvalidTransportParameter(id)),
+                "id 0x{id:x} value {invalid}"
+            );
+            assert_eq!(out, [0xAA, 0xBB], "a refused encode writes nothing");
+        }
     }
 
     // ========================================================================

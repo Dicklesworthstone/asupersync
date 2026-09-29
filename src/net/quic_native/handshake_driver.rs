@@ -31,7 +31,7 @@
 //! CRYPTO frame handler + long-header packet I/O + connect/accept is tracked
 //! separately (P1/P2 of the ATP-over-QUIC plan).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -53,8 +53,8 @@ use crate::net::atp::protocol::quic_frames::QuicFrame;
 use crate::net::atp::protocol::varint::VarInt;
 use crate::net::quic_core::{
     ConnectionId, LongHeader, LongPacketType, PacketHeader, ProtectedHeaderPrefix,
-    ProtectedLongHeaderPrefix, apply_header_protection, decode_packet_number_reconstruct,
-    header_protection_sample, remove_header_protection,
+    ProtectedLongHeaderPrefix, RetryHeader, TransportParameters, apply_header_protection,
+    decode_packet_number_reconstruct, header_protection_sample, remove_header_protection,
 };
 use crate::net::quic_native::endpoint::{OutgoingPacket, QuicUdpEndpoint, ReceivedPacket};
 use std::net::SocketAddr;
@@ -153,8 +153,143 @@ pub(crate) fn is_unauthenticated_handshake_packet_error(error: &QuicTlsError) ->
         error,
         QuicTlsError::CryptoProviderFailure { provider, code }
             if *provider == "rustls-quic-handshake"
-                && (*code == PACKET_UNPROTECT_CODE || *code == PACKET_LENGTH_OVERRUN_CODE)
+                && matches!(*code,
+                    PACKET_UNPROTECT_CODE | PACKET_LENGTH_OVERRUN_CODE
+                        | "packet_header_decode" | "packet_body_too_short"
+                        | "expected_long_header" | "unexpected_long_packet_type"
+                        | "unexpected_crypto_packet_space")
     )
+}
+
+/// RFC 9001 §5.8 QUIC v1 Retry integrity key and nonce.
+const RETRY_INTEGRITY_KEY: [u8; 16] = [
+    0xbe, 0x0c, 0x69, 0x0b, 0x9f, 0x66, 0x57, 0x5a, 0x1d, 0x76, 0x6b, 0x54, 0xe3, 0x68, 0xc8, 0x4e,
+];
+const RETRY_INTEGRITY_NONCE: [u8; 12] = [
+    0x46, 0x15, 0x99, 0xd3, 0x5d, 0x63, 0x2b, 0xf2, 0x23, 0x98, 0x25, 0xbb,
+];
+
+/// The RFC 9001 §5.8 pseudo-packet: the original DCID, then the Retry packet
+/// without its integrity tag.
+fn retry_pseudo_packet(original_dcid: ConnectionId, retry_without_tag: &[u8]) -> Option<Vec<u8>> {
+    let mut pseudo_packet = Vec::with_capacity(1 + original_dcid.len() + retry_without_tag.len());
+    pseudo_packet.push(u8::try_from(original_dcid.len()).ok()?);
+    pseudo_packet.extend_from_slice(original_dcid.as_bytes());
+    pseudo_packet.extend_from_slice(retry_without_tag);
+    Some(pseudo_packet)
+}
+
+/// Integrity tag for a Retry the server sends in answer to an Initial that
+/// carried `original_dcid`.
+pub(crate) fn retry_integrity_tag(
+    original_dcid: ConnectionId,
+    retry_without_tag: &[u8],
+) -> Option<[u8; QUIC_AEAD_TAG_LEN]> {
+    use aes_gcm::aead::{AeadInOut, KeyInit};
+    use aes_gcm::{Aes128Gcm, Nonce};
+
+    let pseudo_packet = retry_pseudo_packet(original_dcid, retry_without_tag)?;
+    let cipher = Aes128Gcm::new_from_slice(&RETRY_INTEGRITY_KEY).ok()?;
+    let nonce = Nonce::try_from(RETRY_INTEGRITY_NONCE.as_slice()).ok()?;
+    let mut plaintext = [];
+    let tag = cipher
+        .encrypt_inout_detached(&nonce, &pseudo_packet, plaintext.as_mut_slice().into())
+        .ok()?;
+    tag.as_slice().try_into().ok()
+}
+
+/// Verify the RFC 9001 §5.8 Retry pseudo-packet with the QUIC v1 fixed key.
+/// Verify the bytes as received: the Retry header's unused bits participate in
+/// the integrity tag even though their value has no protocol meaning.
+fn validated_client_retry(
+    datagram: &[u8],
+    original_dcid: ConnectionId,
+    client_scid: ConnectionId,
+) -> Option<RetryHeader> {
+    use aes_gcm::aead::{AeadInOut, KeyInit};
+    use aes_gcm::{Aes128Gcm, Nonce, Tag};
+
+    let ProtectedHeaderPrefix::Retry(header) = ProtectedHeaderPrefix::decode(datagram, 0).ok()?
+    else {
+        return None;
+    };
+    if header.version != 1
+        || header.dst_cid != client_scid
+        || header.src_cid == original_dcid
+        || header.token.is_empty()
+    {
+        return None;
+    }
+
+    let tag_offset = datagram.len().checked_sub(QUIC_AEAD_TAG_LEN)?;
+    let pseudo_packet = retry_pseudo_packet(original_dcid, &datagram[..tag_offset])?;
+
+    let cipher = Aes128Gcm::new_from_slice(&RETRY_INTEGRITY_KEY).ok()?;
+    let nonce = Nonce::try_from(RETRY_INTEGRITY_NONCE.as_slice()).ok()?;
+    let tag = Tag::try_from(header.integrity_tag.as_slice()).ok()?;
+    let mut plaintext = [];
+    // The AEAD implementation verifies the tag in constant time; do not
+    // substitute a comparison against a locally generated tag.
+    cipher
+        .decrypt_inout_detached(
+            &nonce,
+            &pseudo_packet,
+            plaintext.as_mut_slice().into(),
+            &tag,
+        )
+        .ok()?;
+    Some(header)
+}
+
+fn validate_retry_transport_parameters(
+    encoded: &[u8],
+    original_dcid: ConnectionId,
+    retry_scid: ConnectionId,
+    server_scid: ConnectionId,
+) -> Result<(), QuicTlsError> {
+    let parameters = TransportParameters::decode(encoded)
+        .map_err(|_| handshake_failure("retry_transport_parameters_decode"))?;
+    for (id, expected, code) in [
+        (
+            0x00,
+            original_dcid,
+            "retry_original_destination_cid_mismatch",
+        ),
+        (0x0f, server_scid, "retry_initial_source_cid_mismatch"),
+        (0x10, retry_scid, "retry_source_cid_mismatch"),
+    ] {
+        if !parameters.unknown.iter().any(|parameter| {
+            parameter.id == id && parameter.value.as_slice() == expected.as_bytes()
+        }) {
+            return Err(handshake_failure(code));
+        }
+    }
+    Ok(())
+}
+
+/// Leave room for the largest legal varint widths in both the Initial header
+/// and CRYPTO frame. Normally Initials fit 1200 bytes. A Retry token already
+/// carried in a larger peer datagram can require a larger Initial; cap that
+/// case at the configured datagram limit and the IPv4 UDP payload maximum.
+/// Prefer room for 128 CRYPTO bytes when the configured limit permits it.
+fn initial_crypto_chunk_size(
+    token_len: usize,
+    dst_cid: ConnectionId,
+    src_cid: ConnectionId,
+    max_packet_size: usize,
+) -> Option<usize> {
+    let overhead = token_len
+        .checked_add(dst_cid.len())?
+        .checked_add(src_cid.len())?
+        .checked_add(64)?;
+    let datagram_budget = MIN_INITIAL_DATAGRAM_BYTES
+        .max(overhead.checked_add(128)?)
+        .min(max_packet_size)
+        .min(65_507);
+    if datagram_budget < MIN_INITIAL_DATAGRAM_BYTES || datagram_budget <= overhead {
+        return None;
+    }
+    Some(datagram_budget - overhead)
 }
 
 fn invalid_certificate(error: CertificateError) -> RustlsError {
@@ -357,7 +492,9 @@ pub struct HandshakeSegment {
 #[derive(Debug, Default)]
 struct HandshakeCryptoReassembler {
     next_offset: u64,
-    pending: BTreeMap<u64, Vec<u8>>,
+    // Ranges are disjoint and non-adjacent. A deque lets a range grow in either
+    // direction without copying its accepted prefix/suffix on every packet.
+    pending: BTreeMap<u64, VecDeque<u8>>,
     pending_bytes: usize,
 }
 
@@ -381,74 +518,128 @@ impl HandshakeCryptoReassembler {
             return Ok(Vec::new());
         }
 
-        // Build the merged candidate transactionally. Overlapping ranges are
-        // removed temporarily so transitive adjacency remains easy to detect,
-        // but every error path restores the exact accepted state. In
-        // particular, a conflicting or oversized fragment must not erase
-        // bytes that authenticated packets already contributed.
-        let original_pending_bytes = self.pending_bytes;
-        let mut removed = Vec::new();
-        let candidate = (|| {
-            let mut merged_start = offset;
-            let mut merged = data.to_vec();
-            loop {
-                let merged_len = u64::try_from(merged.len())
-                    .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
-                let merged_end = merged_start
-                    .checked_add(merged_len)
-                    .ok_or_else(|| handshake_failure("crypto_offset_overflow"))?;
-                let overlapping = self.pending.iter().find_map(|(&start, bytes)| {
-                    let len = u64::try_from(bytes.len()).ok()?;
-                    let end = start.checked_add(len)?;
-                    (start <= merged_end && end >= merged_start).then_some(start)
-                });
-                let Some(existing_start) = overlapping else {
-                    break;
-                };
-                let Some(existing) = self.pending.remove(&existing_start) else {
-                    return Err(handshake_failure("crypto_reassembly_state"));
-                };
-                let existing_len = existing.len();
-                let merged_range =
-                    merge_crypto_ranges(merged_start, &merged, existing_start, &existing);
-                removed.push((existing_start, existing));
-                self.pending_bytes = self
-                    .pending_bytes
-                    .checked_sub(existing_len)
-                    .ok_or_else(|| handshake_failure("crypto_reassembly_state"))?;
-                (merged_start, merged) = merged_range?;
+        // There is at most one predecessor intersecting this fragment. All
+        // other affected ranges start inside it, or exactly at its end. Since
+        // accepted ranges are already coalesced, no full-map scan or repeated
+        // search for transitive adjacency is necessary.
+        let mut merged_start = offset;
+        if let Some((&start, bytes)) = self.pending.range(..offset).next_back() {
+            let existing_end = start
+                .checked_add(
+                    u64::try_from(bytes.len())
+                        .map_err(|_| handshake_failure("crypto_offset_overflow"))?,
+                )
+                .ok_or_else(|| handshake_failure("crypto_offset_overflow"))?;
+            if existing_end >= offset {
+                merged_start = start;
             }
+        }
 
-            let new_pending_bytes = self
-                .pending_bytes
-                .checked_add(merged.len())
-                .ok_or_else(|| handshake_failure("crypto_buffer_limit"))?;
-            // A range beginning at the current receive head is removed again
-            // immediately below and fed to rustls. Rejecting that range merely
-            // because either retained-data budget is full would let a peer fill
-            // the cap behind a gap and make the one fragment capable of
-            // advancing the stream permanently inadmissible. The wire packet
-            // already bounds immediately deliverable input; these limits bound
-            // only bytes and tree nodes retained behind a gap.
-            let drains_from_head = merged_start == self.next_offset;
-            if !drains_from_head && new_pending_bytes > MAX_BUFFERED_HANDSHAKE_CRYPTO_BYTES {
-                return Err(handshake_failure("crypto_buffer_limit"));
-            }
-            if !drains_from_head && self.pending.len() >= MAX_BUFFERED_HANDSHAKE_CRYPTO_RANGES {
-                return Err(handshake_failure("crypto_range_limit"));
-            }
-            Ok((merged_start, merged, new_pending_bytes))
-        })();
-        let (merged_start, merged, new_pending_bytes) = match candidate {
-            Ok(candidate) => candidate,
-            Err(err) => {
-                for (start, bytes) in removed {
-                    let displaced = self.pending.insert(start, bytes);
-                    debug_assert!(displaced.is_none(), "removed CRYPTO range key was reused");
+        // Preflight every overlap and both retention budgets before changing
+        // the accepted state or allocating a merged payload. The prefix and
+        // suffix lengths name existing bytes *outside* the incoming fragment;
+        // its matching interior can replace all smaller interior ranges.
+        let mut affected = Vec::new();
+        let mut merged_end = end;
+        let mut replaced_bytes = 0_usize;
+        let mut largest = None;
+        for (&start, bytes) in self.pending.range(merged_start..=end) {
+            let existing_end = start
+                .checked_add(
+                    u64::try_from(bytes.len())
+                        .map_err(|_| handshake_failure("crypto_offset_overflow"))?,
+                )
+                .ok_or_else(|| handshake_failure("crypto_offset_overflow"))?;
+            let overlap_start = offset.max(start);
+            let overlap_end = end.min(existing_end);
+            if overlap_start < overlap_end {
+                let overlap_len = usize::try_from(overlap_end - overlap_start)
+                    .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
+                let data_at = usize::try_from(overlap_start - offset)
+                    .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
+                let existing_at = usize::try_from(overlap_start - start)
+                    .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
+                if !bytes
+                    .range(existing_at..existing_at + overlap_len)
+                    .eq(data[data_at..data_at + overlap_len].iter())
+                {
+                    return Err(handshake_failure("crypto_overlap_conflict"));
                 }
-                self.pending_bytes = original_pending_bytes;
-                return Err(err);
             }
+            let prefix_len = usize::try_from(offset.saturating_sub(start))
+                .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
+            let suffix_at = usize::try_from(end.min(existing_end) - start)
+                .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
+            affected.push((start, prefix_len, suffix_at));
+            replaced_bytes = replaced_bytes
+                .checked_add(bytes.len())
+                .ok_or_else(|| handshake_failure("crypto_buffer_limit"))?;
+            merged_end = merged_end.max(existing_end);
+            if largest.is_none_or(|(_, _, len)| bytes.len() > len) {
+                largest = Some((start, existing_end, bytes.len()));
+            }
+        }
+        let merged_len = usize::try_from(merged_end - merged_start)
+            .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
+        let new_pending_bytes = self
+            .pending_bytes
+            .checked_sub(replaced_bytes)
+            .ok_or_else(|| handshake_failure("crypto_reassembly_state"))?
+            .checked_add(merged_len)
+            .ok_or_else(|| handshake_failure("crypto_buffer_limit"))?;
+        // These budgets cover data retained behind a gap. Receive-head data
+        // must remain admissible when either budget is full, so filling the
+        // gap can release the accepted data to TLS immediately.
+        let drains_from_head = merged_start == self.next_offset;
+        if !drains_from_head && new_pending_bytes > MAX_BUFFERED_HANDSHAKE_CRYPTO_BYTES {
+            return Err(handshake_failure("crypto_buffer_limit"));
+        }
+        if !drains_from_head
+            && self.pending.len() - affected.len() >= MAX_BUFFERED_HANDSHAKE_CRYPTO_RANGES
+        {
+            return Err(handshake_failure("crypto_range_limit"));
+        }
+        if merged_len == replaced_bytes {
+            // A contained retransmission adds nothing. In particular, it must
+            // not clone or replace a large accepted range for one repeated byte.
+            return Ok(Vec::new());
+        }
+
+        let merged = if let Some((largest_start, largest_end, _)) = largest {
+            let data_prefix_len = usize::try_from(largest_start.saturating_sub(offset))
+                .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
+            let data_suffix_at = usize::try_from(end.min(largest_end) - offset)
+                .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
+            let mut merged = self
+                .pending
+                .remove(&largest_start)
+                .ok_or_else(|| handshake_failure("crypto_reassembly_state"))?;
+            // Reuse the largest allocation. Adjacent append/prepend arrivals
+            // are amortized linear; a surviving smaller exterior range is
+            // copied into a range at least as large. Overlap comparison and
+            // interior replacement visit at most the incoming fragment's bytes.
+            merged.reserve(merged_len - merged.len());
+            for &byte in data[..data_prefix_len].iter().rev() {
+                merged.push_front(byte);
+            }
+            merged.extend(data[data_suffix_at..].iter().copied());
+            for (start, prefix_len, suffix_at) in affected {
+                if start == largest_start {
+                    continue;
+                }
+                let existing = self
+                    .pending
+                    .remove(&start)
+                    .expect("preflight retained every affected CRYPTO range");
+                for &byte in existing.range(..prefix_len).rev() {
+                    merged.push_front(byte);
+                }
+                merged.extend(existing.range(suffix_at..).copied());
+            }
+            debug_assert_eq!(merged.len(), merged_len);
+            merged
+        } else {
+            VecDeque::from(data.to_vec())
         };
         self.pending.insert(merged_start, merged);
         self.pending_bytes = new_pending_bytes;
@@ -465,57 +656,10 @@ impl HandshakeCryptoReassembler {
                 .next_offset
                 .checked_add(len)
                 .ok_or_else(|| handshake_failure("crypto_offset_overflow"))?;
-            ready.push(bytes);
+            ready.push(Vec::from(bytes));
         }
         Ok(ready)
     }
-}
-
-fn merge_crypto_ranges(
-    first_start: u64,
-    first: &[u8],
-    second_start: u64,
-    second: &[u8],
-) -> Result<(u64, Vec<u8>), QuicTlsError> {
-    let first_end = first_start
-        .checked_add(
-            u64::try_from(first.len()).map_err(|_| handshake_failure("crypto_offset_overflow"))?,
-        )
-        .ok_or_else(|| handshake_failure("crypto_offset_overflow"))?;
-    let second_end = second_start
-        .checked_add(
-            u64::try_from(second.len()).map_err(|_| handshake_failure("crypto_offset_overflow"))?,
-        )
-        .ok_or_else(|| handshake_failure("crypto_offset_overflow"))?;
-    let merged_start = first_start.min(second_start);
-    let merged_end = first_end.max(second_end);
-    let merged_len = usize::try_from(merged_end - merged_start)
-        .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
-    let mut merged = vec![0; merged_len];
-
-    let first_at = usize::try_from(first_start - merged_start)
-        .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
-    merged[first_at..first_at + first.len()].copy_from_slice(first);
-
-    let second_at = usize::try_from(second_start - merged_start)
-        .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
-    let overlap_start = first_start.max(second_start);
-    let overlap_end = first_end.min(second_end);
-    if overlap_start < overlap_end {
-        let overlap_len = usize::try_from(overlap_end - overlap_start)
-            .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
-        let first_overlap = usize::try_from(overlap_start - first_start)
-            .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
-        let second_overlap = usize::try_from(overlap_start - second_start)
-            .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
-        if first[first_overlap..first_overlap + overlap_len]
-            != second[second_overlap..second_overlap + overlap_len]
-        {
-            return Err(handshake_failure("crypto_overlap_conflict"));
-        }
-    }
-    merged[second_at..second_at + second.len()].copy_from_slice(second);
-    Ok((merged_start, merged))
 }
 
 /// Drives a real QUIC/TLS-1.3 handshake via rustls, installing the derived AEAD
@@ -537,6 +681,8 @@ pub struct QuicHandshakeDriver {
     peer_connection_id: Option<ConnectionId>,
     /// Per-level cumulative CRYPTO send offset (indexed Initial=0/Handshake=1/OneRtt=2).
     crypto_send_offset: [u64; 3],
+    /// A validated Retry token is repeated in every subsequent client Initial.
+    initial_token: Vec<u8>,
     /// Exact authenticated packet numbers already accepted for Initial/Handshake.
     handshake_recv_packet_numbers: [BTreeSet<u64>; 2],
     /// Largest authenticated packet number per Initial/Handshake space: the
@@ -654,6 +800,7 @@ impl QuicHandshakeDriver {
             local_transport_parameters,
             peer_connection_id: None,
             crypto_send_offset: [0; 3],
+            initial_token: Vec::new(),
             handshake_recv_packet_numbers: [BTreeSet::new(), BTreeSet::new()],
             handshake_recv_largest_packet_number: [None, None],
             handshake_crypto_reassembly: [
@@ -694,13 +841,44 @@ impl QuicHandshakeDriver {
         src_cid: ConnectionId,
         packet_number: u64,
     ) -> Result<Vec<u8>, QuicTlsError> {
+        let offset = self.next_crypto_offset(segment.level);
+        let packet =
+            self.assemble_handshake_packet_at(segment, offset, dst_cid, src_cid, packet_number)?;
+        self.crypto_send_offset[level_index(segment.level)] += segment.data.len() as u64;
+        Ok(packet)
+    }
+
+    /// The CRYPTO offset the next `level` segment is sent at.
+    pub(crate) fn next_crypto_offset(&self, level: HandshakeLevel) -> u64 {
+        self.crypto_send_offset[level_index(level)]
+    }
+
+    /// Packet numbers authenticated so far in an Initial or Handshake space.
+    #[cfg(test)]
+    pub(crate) fn received_handshake_packet_numbers(&self, level: HandshakeLevel) -> Vec<u64> {
+        self.handshake_recv_packet_numbers
+            .get(level_index(level))
+            .map(|numbers| numbers.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// Protect CRYPTO bytes already sent at `offset` again, under a new packet
+    /// number. A PTO retransmission resends the same data, but RFC 9000 section
+    /// 12.3 forbids reusing a packet number within its space.
+    pub(crate) fn assemble_handshake_packet_at(
+        &mut self,
+        segment: &HandshakeSegment,
+        offset: u64,
+        dst_cid: ConnectionId,
+        src_cid: ConnectionId,
+        packet_number: u64,
+    ) -> Result<Vec<u8>, QuicTlsError> {
         let packet_type = match segment.level {
             HandshakeLevel::Initial => LongPacketType::Initial,
             HandshakeLevel::Handshake => LongPacketType::Handshake,
             HandshakeLevel::OneRtt => return Err(handshake_failure("onertt_is_not_long_header")),
         };
         let space = level_protection_space(segment.level);
-        let offset = self.crypto_send_offset[level_index(segment.level)];
 
         let mut payload = BytesMut::new();
         QuicFrame::Crypto {
@@ -722,7 +900,7 @@ impl QuicHandshakeDriver {
                 version: 1,
                 dst_cid,
                 src_cid,
-                token: Vec::new(),
+                token: self.initial_token.clone(),
                 payload_length: MIN_INITIAL_DATAGRAM_BYTES as u64,
                 packet_number,
                 packet_number_len: HANDSHAKE_PACKET_NUMBER_LEN,
@@ -750,7 +928,11 @@ impl QuicHandshakeDriver {
             version: 1,
             dst_cid,
             src_cid,
-            token: Vec::new(),
+            token: if packet_type == LongPacketType::Initial {
+                self.initial_token.clone()
+            } else {
+                Vec::new()
+            },
             payload_length,
             packet_number,
             packet_number_len: HANDSHAKE_PACKET_NUMBER_LEN,
@@ -759,12 +941,17 @@ impl QuicHandshakeDriver {
         header
             .encode(&mut header_bytes)
             .map_err(|_| handshake_failure("long_header_encode"))?;
+        if packet_type == LongPacketType::Initial && payload_length < 64 {
+            // A long Retry token can leave fewer than 64 bytes for the
+            // Length-covered payload. Keep the two-byte Length width used by
+            // the padding probe: minimal encoding would shrink the datagram
+            // to 1199 bytes, and adding padding can jump straight to 1201 at
+            // the 63/64 boundary. QUIC explicitly permits wider varints.
+            let length_at = header_bytes.len() - usize::from(HANDSHAKE_PACKET_NUMBER_LEN) - 1;
+            header_bytes.insert(length_at, 0x40);
+        }
 
-        let packet =
-            self.protect_long_header_packet(space, &header_bytes, packet_number, &plaintext)?;
-
-        self.crypto_send_offset[level_index(segment.level)] += segment.data.len() as u64;
-        Ok(packet)
+        self.protect_long_header_packet(space, &header_bytes, packet_number, &plaintext)
     }
 
     /// Protect one long-header packet exactly as RFC 9001 §5 describes.
@@ -1069,6 +1256,39 @@ impl QuicHandshakeDriver {
             .map(|_| ())
     }
 
+    fn restart_initial_after_retry(
+        &mut self,
+        retry: RetryHeader,
+        initial_segments: &[HandshakeSegment],
+    ) {
+        self.provider
+            .install_retry_initial_keys(retry.src_cid.as_bytes(), &self.transcript);
+        self.initial_token = retry.token;
+        // TLS has already consumed the ClientHello through write_hs. Re-send
+        // the exact saved bytes without creating another TLS connection or
+        // feeding them through TLS again. Only the CRYPTO stream's send cursor
+        // is rewound; packet numbers are owned by the caller and never reset.
+        self.crypto_send_offset[level_index(HandshakeLevel::Initial)] = 0;
+        self.staged_segments = initial_segments.to_vec();
+    }
+
+    fn verify_completed_retry(
+        &self,
+        original_dcid: ConnectionId,
+        retry_scid: Option<ConnectionId>,
+    ) -> Result<(), QuicTlsError> {
+        let Some(retry_scid) = retry_scid else {
+            return Ok(());
+        };
+        let encoded = self
+            .peer_transport_parameters()
+            .ok_or_else(|| handshake_failure("retry_transport_parameters_missing"))?;
+        let server_scid = self
+            .peer_connection_id
+            .ok_or_else(|| handshake_failure("retry_server_cid_missing"))?;
+        validate_retry_transport_parameters(encoded, original_dcid, retry_scid, server_scid)
+    }
+
     /// Drain all currently-available outbound handshake bytes, installing each
     /// key change into the provider and advancing the write level as the
     /// handshake crosses encryption boundaries. Returns one segment per level
@@ -1199,8 +1419,8 @@ impl QuicHandshakeDriver {
     /// Pump pending outbound handshake segments, assemble + protect each as a
     /// long-header packet to `peer`, and send them over `endpoint`. OneRtt-level
     /// segments (post-handshake tickets) belong to the 1-RTT data plane and are
-    /// skipped. Returns the sent packet flight so the caller can retransmit it on
-    /// a handshake PTO.
+    /// skipped. Returns the sent flight so the caller can retransmit it on a
+    /// handshake PTO.
     async fn send_pending_flight(
         &mut self,
         cx: &Cx,
@@ -1209,21 +1429,41 @@ impl QuicHandshakeDriver {
         dst_cid: ConnectionId,
         src_cid: ConnectionId,
         packet_number: &mut u64,
-    ) -> Result<Vec<OutgoingPacket>, QuicTlsError> {
+    ) -> Result<SentHandshakeFlight, QuicTlsError> {
         let segments = self.pump_outbound()?;
         let mut packets = Vec::new();
+        let mut crypto = Vec::new();
         for segment in segments {
             if segment.level == HandshakeLevel::OneRtt {
                 continue;
             }
-            let data =
-                self.assemble_handshake_packet(&segment, dst_cid, src_cid, *packet_number)?;
-            *packet_number += 1;
-            packets.push(OutgoingPacket {
-                dst_addr: peer,
-                data,
-                send_time: None,
-            });
+            let chunk_size = if segment.level == HandshakeLevel::Initial {
+                initial_crypto_chunk_size(
+                    self.initial_token.len(),
+                    dst_cid,
+                    src_cid,
+                    endpoint.config().max_packet_size,
+                )
+                .ok_or_else(|| handshake_failure("initial_token_too_large"))?
+            } else {
+                segment.data.len().max(1)
+            };
+            for chunk in segment.data.chunks(chunk_size) {
+                let chunk = HandshakeSegment {
+                    level: segment.level,
+                    data: chunk.to_vec(),
+                };
+                let offset = self.next_crypto_offset(chunk.level);
+                let data =
+                    self.assemble_handshake_packet(&chunk, dst_cid, src_cid, *packet_number)?;
+                *packet_number += 1;
+                packets.push(OutgoingPacket {
+                    dst_addr: peer,
+                    data,
+                    send_time: None,
+                });
+                crypto.push((chunk, offset));
+            }
         }
         if !packets.is_empty() {
             endpoint
@@ -1231,20 +1471,60 @@ impl QuicHandshakeDriver {
                 .await
                 .map_err(|_| handshake_failure("udp_send"))?;
         }
-        Ok(packets)
+        Ok(SentHandshakeFlight {
+            packets,
+            crypto,
+            dst_cid,
+            src_cid,
+        })
     }
 
-    /// Acknowledge authenticated client Finished packets before handing the
-    /// server's completed handshake to the application-data owner.
-    async fn send_final_handshake_ack(
+    /// Resend a flight's CRYPTO offsets and bytes in new packets. RFC 9000
+    /// section 12.3 forbids reusing a packet number, and a peer that already
+    /// processed the first copy suppresses an exact duplicate.
+    async fn retransmit_flight(
         &mut self,
         cx: &Cx,
         endpoint: &mut QuicUdpEndpoint,
-        peer: SocketAddr,
+        flight: &mut SentHandshakeFlight,
+        packet_number: &mut u64,
+    ) -> Result<bool, QuicTlsError> {
+        let Some(peer) = flight.packets.first().map(|packet| packet.dst_addr) else {
+            return Ok(false);
+        };
+        let mut packets = Vec::with_capacity(flight.crypto.len());
+        for (segment, offset) in &flight.crypto {
+            let data = self.assemble_handshake_packet_at(
+                segment,
+                *offset,
+                flight.dst_cid,
+                flight.src_cid,
+                *packet_number,
+            )?;
+            *packet_number += 1;
+            packets.push(OutgoingPacket {
+                dst_addr: peer,
+                data,
+                send_time: None,
+            });
+        }
+        endpoint
+            .send_batch(cx, &packets)
+            .await
+            .map_err(|_| handshake_failure("udp_send"))?;
+        flight.packets = packets;
+        Ok(true)
+    }
+
+    /// Protect the final Handshake ACK without transferring its ownership to
+    /// an I/O future. Managed admissions retain it until the socket confirms
+    /// transmission, before exposing the completed application-data route.
+    pub(crate) fn assemble_final_handshake_ack(
+        &mut self,
         dst_cid: ConnectionId,
         src_cid: ConnectionId,
         packet_number: u64,
-    ) -> Result<(), QuicTlsError> {
+    ) -> Result<Vec<u8>, QuicTlsError> {
         let frame = handshake_ack_frame(&self.handshake_recv_packet_numbers[1])
             .ok_or_else(|| handshake_failure("completed_handshake_without_received_packet"))?;
         let mut payload = BytesMut::new();
@@ -1267,12 +1547,26 @@ impl QuicHandshakeDriver {
         header
             .encode(&mut header_bytes)
             .map_err(|_| handshake_failure("long_header_encode"))?;
-        let data = self.protect_long_header_packet(
+        self.protect_long_header_packet(
             PacketProtectionSpace::Handshake,
             &header_bytes,
             packet_number,
             &payload,
-        )?;
+        )
+    }
+
+    /// Acknowledge authenticated client Finished packets before handing the
+    /// server's completed handshake to the application-data owner.
+    async fn send_final_handshake_ack(
+        &mut self,
+        cx: &Cx,
+        endpoint: &mut QuicUdpEndpoint,
+        peer: SocketAddr,
+        dst_cid: ConnectionId,
+        src_cid: ConnectionId,
+        packet_number: u64,
+    ) -> Result<(), QuicTlsError> {
+        let data = self.assemble_final_handshake_ack(dst_cid, src_cid, packet_number)?;
         let report = endpoint
             .send_batch(
                 cx,
@@ -1328,19 +1622,14 @@ fn handshake_ack_frame(received: &BTreeSet<u64>) -> Option<QuicFrame> {
     })
 }
 
-async fn retransmit_handshake_flight(
-    cx: &Cx,
-    endpoint: &mut QuicUdpEndpoint,
-    packets: &[OutgoingPacket],
-) -> Result<bool, QuicTlsError> {
-    if packets.is_empty() {
-        return Ok(false);
-    }
-    endpoint
-        .send_batch(cx, packets)
-        .await
-        .map_err(|_| handshake_failure("udp_send"))?;
-    Ok(true)
+/// A sent handshake flight and the CRYPTO data behind each packet, so a
+/// retransmission resends the same offsets and bytes under new packet numbers.
+#[derive(Debug, Default)]
+struct SentHandshakeFlight {
+    packets: Vec<OutgoingPacket>,
+    crypto: Vec<(HandshakeSegment, u64)>,
+    dst_cid: ConnectionId,
+    src_cid: ConnectionId,
 }
 
 /// Drive a client QUIC/TLS-1.3 handshake to completion over `endpoint`.
@@ -1360,6 +1649,10 @@ pub async fn client_handshake_over_udp(
     client_scid: ConnectionId,
 ) -> Result<Vec<ReceivedPacket>, QuicTlsError> {
     driver.install_initial_keys(dcid.as_bytes())?;
+    // Retry changes packet protection, not the TLS handshake message. Keep the
+    // first flight's plaintext until the server's Initial rules out Retry.
+    let initial_segments = driver.pump_outbound()?;
+    driver.staged_segments.clone_from(&initial_segments);
     let mut packet_number = 0u64;
     let mut last_flight = driver
         .send_pending_flight(
@@ -1377,19 +1670,22 @@ pub async fn client_handshake_over_udp(
     // bound, which is the safe direction for an in-flight cap.
     let mut flight_sent_at = Instant::now();
     let mut early_one_rtt = Vec::new();
+    let mut accepted_retry = None;
+    let mut flights = 0usize;
+    let mut receive_deadline = cx.now() + HANDSHAKE_PTO;
 
-    for _ in 0..HANDSHAKE_MAX_FLIGHTS {
+    while flights < HANDSHAKE_MAX_FLIGHTS {
         if driver.is_complete() {
+            driver.verify_completed_retry(dcid, accepted_retry)?;
             // Retain the final flight (client Finished): if it was lost on the
             // wire the server cannot complete, and only the data plane will
             // observe the evidence (the server's retransmitted long-header
             // flight). See `QuicHandshakeDriver::final_flight`.
-            driver.final_flight = last_flight;
+            driver.final_flight = last_flight.packets;
             return Ok(early_one_rtt);
         }
-        let received = match crate::time::timeout(
-            cx.now(),
-            HANDSHAKE_PTO,
+        let received = match crate::time::timeout_at(
+            receive_deadline,
             endpoint.receive_batch(cx, HANDSHAKE_RECEIVE_BATCH_SIZE),
         )
         .await
@@ -1397,19 +1693,30 @@ pub async fn client_handshake_over_udp(
             Ok(Ok(packets)) => packets,
             Ok(Err(_)) => return Err(handshake_failure("udp_recv")),
             Err(_) => {
-                if retransmit_handshake_flight(cx, endpoint, &last_flight).await? {
+                flights += 1;
+                if driver
+                    .retransmit_flight(cx, endpoint, &mut last_flight, &mut packet_number)
+                    .await?
+                {
                     flight_sent_at = Instant::now();
+                    receive_deadline = cx.now() + HANDSHAKE_PTO;
                     continue;
                 }
                 return Err(handshake_failure("client_handshake_recv_timeout"));
             }
         };
+        let mut accepted_batch = false;
         // Pump after EACH packet: e.g. after the server's Initial (ServerHello)
         // the client must pump to install Handshake keys BEFORE it can unprotect
         // the server's Handshake-level flight that may arrive in the same batch.
         for packet in received {
+            if packet.src_addr != server_addr {
+                continue;
+            }
             if packet.data.first().is_none_or(|byte| byte & 0x80 == 0) {
-                if packet.src_addr != server_addr {
+                // Unauthenticated short-header traffic must not fill an early
+                // application queue before the server has even sent Initial.
+                if driver.peer_connection_id.is_none() {
                     continue;
                 }
                 if early_one_rtt.len() >= MAX_EARLY_ONE_RTT_PACKETS {
@@ -1418,7 +1725,53 @@ pub async fn client_handshake_over_udp(
                 early_one_rtt.push(packet);
                 continue;
             }
-            let (peer_dcid, consumed) = match driver.recv_handshake_packet_with_consumed(&packet.data) {
+            let prefix = match ProtectedHeaderPrefix::decode(&packet.data, 0) {
+                Ok(prefix) => prefix,
+                Err(_) => continue,
+            };
+            if let ProtectedHeaderPrefix::Retry(_) = prefix {
+                if accepted_retry.is_some() || driver.peer_connection_id.is_some() {
+                    continue;
+                }
+                let Some(retry) = validated_client_retry(&packet.data, dcid, client_scid) else {
+                    continue;
+                };
+                if initial_crypto_chunk_size(
+                    retry.token.len(),
+                    retry.src_cid,
+                    client_scid,
+                    endpoint.config().max_packet_size,
+                )
+                .is_none()
+                {
+                    continue;
+                }
+                let retry_scid = retry.src_cid;
+                driver.restart_initial_after_retry(retry, &initial_segments);
+                accepted_retry = Some(retry_scid);
+                last_flight = driver
+                    .send_pending_flight(
+                        cx,
+                        endpoint,
+                        server_addr,
+                        retry_scid,
+                        client_scid,
+                        &mut packet_number,
+                    )
+                    .await?;
+                flight_sent_at = Instant::now();
+                receive_deadline = cx.now() + HANDSHAKE_PTO;
+                accepted_batch = true;
+                continue;
+            }
+            if !matches!(prefix, ProtectedHeaderPrefix::Long(ref header)
+                if header.version == 1 && header.dst_cid == client_scid)
+            {
+                continue;
+            }
+            let (peer_dcid, consumed) = match driver
+                .recv_handshake_packet_with_consumed(&packet.data)
+            {
                 Ok(res) => {
                     // RFC 9000 section 7.2: after authenticating the server's
                     // first flight, address subsequent client handshake packets
@@ -1433,7 +1786,9 @@ pub async fn client_handshake_over_udp(
                     res
                 }
                 Err(err) if is_stale_handshake_packet_error(&err) => {
-                    let _ = retransmit_handshake_flight(cx, endpoint, &last_flight).await?;
+                    let _ = driver
+                        .retransmit_flight(cx, endpoint, &mut last_flight, &mut packet_number)
+                        .await?;
                     continue;
                 }
                 // A forged, corrupted or stray datagram is discarded (RFC
@@ -1442,6 +1797,7 @@ pub async fn client_handshake_over_udp(
                 Err(err) if is_unauthenticated_handshake_packet_error(&err) => continue,
                 Err(err) => return Err(err),
             };
+            accepted_batch = true;
             if consumed < packet.data.len()
                 && packet.src_addr == server_addr
                 && packet.data[consumed..].iter().any(|&b| b != 0)
@@ -1464,16 +1820,26 @@ pub async fn client_handshake_over_udp(
                     &mut packet_number,
                 )
                 .await?;
-            if !sent.is_empty() {
+            if !sent.packets.is_empty() {
                 last_flight = sent;
+                receive_deadline = cx.now() + HANDSHAKE_PTO;
             } else if !driver.is_complete() {
-                let _ = retransmit_handshake_flight(cx, endpoint, &last_flight).await?;
+                let _ = driver
+                    .retransmit_flight(cx, endpoint, &mut last_flight, &mut packet_number)
+                    .await?;
             }
+        }
+        // Stray datagrams neither spend the flight budget nor extend the PTO.
+        // Otherwise a burst of malformed packets can end a healthy handshake,
+        // or an endless trickle can keep it alive indefinitely.
+        if accepted_batch {
+            flights += 1;
         }
     }
 
     if driver.is_complete() {
-        driver.final_flight = last_flight;
+        driver.verify_completed_retry(dcid, accepted_retry)?;
+        driver.final_flight = last_flight.packets;
         Ok(early_one_rtt)
     } else {
         Err(handshake_failure("client_handshake_incomplete"))
@@ -1513,7 +1879,7 @@ pub(crate) async fn server_handshake_over_udp_with_early_data(
     driver.install_initial_keys(dcid.as_bytes())?;
     let mut packet_number = 0u64;
     let mut peer: Option<(SocketAddr, ConnectionId)> = None;
-    let mut last_flight = Vec::new();
+    let mut last_flight = SentHandshakeFlight::default();
     let mut early_one_rtt = Vec::new();
     let mut last_early_data_resend: Option<Instant> = None;
     let mut no_peer_idle_timeouts = 0usize;
@@ -1539,7 +1905,10 @@ pub(crate) async fn server_handshake_over_udp_with_early_data(
                     }
                     continue;
                 }
-                if retransmit_handshake_flight(cx, endpoint, &last_flight).await? {
+                if driver
+                    .retransmit_flight(cx, endpoint, &mut last_flight, &mut packet_number)
+                    .await?
+                {
                     continue;
                 }
                 return Err(handshake_failure("server_handshake_recv_timeout"));
@@ -1563,11 +1932,13 @@ pub(crate) async fn server_handshake_over_udp_with_early_data(
                 }
                 early_one_rtt.push(packet);
                 if !driver.is_complete()
-                    && !last_flight.is_empty()
+                    && !last_flight.packets.is_empty()
                     && last_early_data_resend.is_none_or(|at| at.elapsed() >= HANDSHAKE_PTO)
                 {
                     last_early_data_resend = Some(Instant::now());
-                    let _ = retransmit_handshake_flight(cx, endpoint, &last_flight).await?;
+                    let _ = driver
+                        .retransmit_flight(cx, endpoint, &mut last_flight, &mut packet_number)
+                        .await?;
                 }
                 continue;
             }
@@ -1575,7 +1946,9 @@ pub(crate) async fn server_handshake_over_udp_with_early_data(
                 Ok(res) => res,
                 Err(err) if is_stale_handshake_packet_error(&err) => {
                     if peer.is_some() {
-                        let _ = retransmit_handshake_flight(cx, endpoint, &last_flight).await?;
+                        let _ = driver
+                            .retransmit_flight(cx, endpoint, &mut last_flight, &mut packet_number)
+                            .await?;
                     }
                     continue;
                 }
@@ -1610,10 +1983,12 @@ pub(crate) async fn server_handshake_over_udp_with_early_data(
                         &mut packet_number,
                     )
                     .await?;
-                if !sent.is_empty() {
+                if !sent.packets.is_empty() {
                     last_flight = sent;
                 } else if !driver.is_complete() {
-                    let _ = retransmit_handshake_flight(cx, endpoint, &last_flight).await?;
+                    let _ = driver
+                        .retransmit_flight(cx, endpoint, &mut last_flight, &mut packet_number)
+                        .await?;
                 }
             }
         }
@@ -1716,6 +2091,104 @@ pub(crate) mod tests {
         assert_eq!(ack_ranges[1].gap.value(), 0);
         assert_eq!(ack_ranges[1].ack_range_length.value(), 0);
         assert!(ecn_counts.is_none());
+    }
+
+    #[test]
+    fn client_pto_resends_its_initial_under_a_new_packet_number() {
+        // A silent peer captures the client's first flight and its PTO copy.
+        let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        silent
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let server_addr = silent.local_addr().unwrap();
+        let peer = std::thread::spawn(move || {
+            let mut datagrams = Vec::new();
+            let mut buffer = vec![0_u8; 65_535];
+            while datagrams.len() < 2 {
+                let (length, _) = silent
+                    .recv_from(&mut buffer)
+                    .expect("client flight and its PTO copy");
+                datagrams.push(buffer[..length].to_vec());
+            }
+            datagrams
+        });
+        let original_cid = ConnectionId::new(&[0x4f; 8]).unwrap();
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .with_reactor(crate::runtime::reactor::create_reactor().unwrap())
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let cx = Cx::current().expect("native client context");
+            let mut endpoint = QuicUdpEndpoint::bind(
+                &cx,
+                "127.0.0.1:0".parse().unwrap(),
+                crate::net::quic_native::QuicUdpEndpointConfig::default(),
+            )
+            .await
+            .unwrap();
+            let mut driver = QuicHandshakeDriver::client(
+                client_config(vec![ca_cert()], vec![ATP_QUIC_ALPN.to_vec()]).unwrap(),
+                ServerName::try_from("localhost").unwrap(),
+                Vec::new(),
+            )
+            .unwrap();
+            // The peer never answers; stop once the first PTO has fired.
+            let result = crate::time::timeout(
+                cx.now(),
+                HANDSHAKE_PTO + Duration::from_millis(500),
+                client_handshake_over_udp(
+                    &cx,
+                    &mut endpoint,
+                    server_addr,
+                    &mut driver,
+                    original_cid,
+                    ConnectionId::new(&[0x50; 8]).unwrap(),
+                ),
+            )
+            .await;
+            assert!(result.is_err(), "a silent peer cannot complete TLS");
+        });
+        let datagrams = peer.join().unwrap();
+        assert_eq!(
+            datagrams[0].len(),
+            datagrams[1].len(),
+            "the same CRYPTO bytes"
+        );
+        assert_ne!(
+            datagrams[0], datagrams[1],
+            "a PTO copy never reuses a packet number"
+        );
+        let mut server = QuicHandshakeDriver::server(
+            server_config(vec![leaf_cert()], leaf_key(), vec![ATP_QUIC_ALPN.to_vec()]).unwrap(),
+            Vec::new(),
+        )
+        .unwrap();
+        server
+            .install_initial_keys(original_cid.as_bytes())
+            .unwrap();
+        server.recv_handshake_packet(&datagrams[0]).unwrap();
+        server.recv_handshake_packet(&datagrams[1]).unwrap();
+        assert_eq!(
+            server.received_handshake_packet_numbers(HandshakeLevel::Initial),
+            [0, 1],
+            "the peer authenticates the PTO copy as a new packet"
+        );
+    }
+
+    #[test]
+    fn retry_integrity_tag_matches_rfc_9001_appendix_a4() {
+        // RFC 9001 Appendix A.4: a Retry answering an Initial whose DCID was
+        // 0x8394c8f03e515708, with source CID 0xf067a5502a4262b5 and token "token".
+        let original =
+            ConnectionId::new(&[0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08]).unwrap();
+        let retry = [
+            0xff, 0x00, 0x00, 0x00, 0x01, 0x00, 0x08, 0xf0, 0x67, 0xa5, 0x50, 0x2a, 0x42, 0x62,
+            0xb5, 0x74, 0x6f, 0x6b, 0x65, 0x6e, 0x04, 0xa2, 0x65, 0xba, 0x2e, 0xff, 0x4d, 0x82,
+            0x90, 0x58, 0xfb, 0x3f, 0x0f, 0x24, 0x96, 0xba,
+        ];
+        let (body, tag) = retry.split_at(retry.len() - QUIC_AEAD_TAG_LEN);
+        assert_eq!(retry_integrity_tag(original, body).unwrap(), tag);
+        assert!(validated_client_retry(&retry, original, ConnectionId::default()).is_some());
     }
 
     #[test]
@@ -1926,6 +2399,542 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
     // Client's original Destination CID; both sides derive Initial keys from it.
     const DCID_BYTES: &[u8] = &[0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18];
 
+    fn client_retry_wire(
+        original_dcid: ConnectionId,
+        client_scid: ConnectionId,
+        retry_scid: ConnectionId,
+        token: &[u8],
+    ) -> Vec<u8> {
+        use aes_gcm::aead::{AeadInOut, KeyInit};
+        use aes_gcm::{Aes128Gcm, Nonce};
+
+        let mut wire = Vec::new();
+        PacketHeader::Retry(RetryHeader {
+            version: 1,
+            dst_cid: client_scid,
+            src_cid: retry_scid,
+            token: token.to_vec(),
+            integrity_tag: [0; 16],
+        })
+        .encode(&mut wire)
+        .unwrap();
+        wire.truncate(wire.len() - 16);
+        wire[0] |= 0x0b; // Nonzero unused bits must be authenticated as received.
+        let mut pseudo = vec![u8::try_from(original_dcid.len()).unwrap()];
+        pseudo.extend_from_slice(original_dcid.as_bytes());
+        pseudo.extend_from_slice(&wire);
+        let cipher = Aes128Gcm::new_from_slice(&hex("be0c690b9f66575a1d766b54e368c84e")).unwrap();
+        let nonce_bytes = hex("461599d35d632bf2239825bb");
+        let nonce = Nonce::try_from(nonce_bytes.as_slice()).unwrap();
+        let mut empty = [];
+        let tag = cipher
+            .encrypt_inout_detached(&nonce, &pseudo, empty.as_mut_slice().into())
+            .unwrap();
+        wire.extend_from_slice(&tag);
+        wire
+    }
+
+    #[test]
+    fn client_retry_rfc9001_vector_and_invalid_wire_are_distinguished() {
+        let original = ConnectionId::new(&hex("8394c8f03e515708")).unwrap();
+        let client = ConnectionId::new(&[]).unwrap();
+        // RFC 9001 Appendix A.4, independent of the test's signing helper.
+        let vector =
+            hex("ff000000010008f067a5502a4262b5746f6b656e04a265ba2eff4d829058fb3f0f2496ba");
+        let retry = validated_client_retry(&vector, original, client).unwrap();
+        assert_eq!(retry.token, b"token");
+        assert_eq!(retry.src_cid.as_bytes(), hex("f067a5502a4262b5"));
+        for at in [0, 14, vector.len() - 1] {
+            let mut corrupted = vector.clone();
+            corrupted[at] ^= 1;
+            assert!(validated_client_retry(&corrupted, original, client).is_none());
+        }
+        assert!(validated_client_retry(&vector, retry.src_cid, client).is_none());
+        assert!(validated_client_retry(&vector[..15], original, client).is_none());
+
+        for (destination, source, token) in [
+            (retry.src_cid, retry.src_cid, b"token".as_slice()),
+            (client, original, b"token".as_slice()),
+            (client, retry.src_cid, b"".as_slice()),
+        ] {
+            let rejected = client_retry_wire(original, destination, source, token);
+            assert!(validated_client_retry(&rejected, original, client).is_none());
+        }
+        let zero_cid_retry = client_retry_wire(original, client, client, b"token");
+        assert!(
+            validated_client_retry(&zero_cid_retry, original, client)
+                .unwrap()
+                .src_cid
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn client_retry_zero_length_cid_rekeys_identical_initial_without_tls_restart() {
+        let (mut client, mut server) = protected_pair();
+        let original = ConnectionId::new(DCID_BYTES).unwrap();
+        let client_cid = ConnectionId::new(b"retry-cl").unwrap();
+        let retry_cid = ConnectionId::new(&[]).unwrap();
+        let initial = client.pump_outbound().unwrap();
+        let original_packet = client
+            .assemble_handshake_packet(&initial[0], original, client_cid, 0)
+            .unwrap();
+        let retry = validated_client_retry(
+            &client_retry_wire(original, client_cid, retry_cid, b"bound-token"),
+            original,
+            client_cid,
+        )
+        .unwrap();
+        client.restart_initial_after_retry(retry, &initial);
+        let replay = client.pump_outbound().unwrap();
+        assert_eq!(replay.len(), initial.len());
+        assert_eq!(replay[0].data, initial[0].data);
+        let retried_packet = client
+            .assemble_handshake_packet(&replay[0], retry_cid, client_cid, 1)
+            .unwrap();
+        assert_ne!(retried_packet, original_packet);
+        let prefix = long_prefix(&retried_packet);
+        assert!(prefix.dst_cid.is_empty());
+        assert_eq!(prefix.token, b"bound-token");
+        // The old Initial key cannot authenticate the re-encrypted flight.
+        assert!(
+            server
+                .unprotect_long_header_packet(&prefix, &retried_packet)
+                .is_err()
+        );
+        server
+            .provider
+            .install_retry_initial_keys(&[], &server.transcript);
+        let (header, plaintext) = server
+            .unprotect_long_header_packet(&prefix, &retried_packet)
+            .unwrap();
+        assert_eq!(header.packet_number, 1);
+        let mut bytes = plaintext.as_slice();
+        let Some(QuicFrame::Crypto { offset, data }) = QuicFrame::decode(&mut bytes).unwrap()
+        else {
+            panic!("repeated ClientHello starts with CRYPTO");
+        };
+        assert_eq!(offset.value(), 0);
+        assert_eq!(data.as_ref(), initial[0].data.as_slice());
+        server.recv_handshake_packet(&retried_packet).unwrap();
+        assert!(!server.pump_outbound().unwrap().is_empty());
+        assert!(server.handshake_keys_installed());
+        assert!(initial_crypto_chunk_size(usize::MAX, retry_cid, client_cid, 65_507).is_none());
+        assert!(initial_crypto_chunk_size(65_500, retry_cid, client_cid, 65_507).is_none());
+        assert!(initial_crypto_chunk_size(1500, retry_cid, client_cid, 1500).is_none());
+    }
+
+    #[test]
+    fn client_retry_initial_padding_keeps_minimum_at_length_varint_boundary() {
+        let (mut client, mut server) = protected_pair();
+        let original = ConnectionId::new(DCID_BYTES).unwrap();
+        let client_cid = ConnectionId::new(b"retry-cl").unwrap();
+        let retry_cid = ConnectionId::new(b"retry-id").unwrap();
+        let initial = client.pump_outbound().unwrap();
+        let retry = validated_client_retry(
+            &client_retry_wire(original, client_cid, retry_cid, &vec![0xa5; 1110]),
+            original,
+            client_cid,
+        )
+        .unwrap();
+        client.restart_initial_after_retry(retry, &initial);
+        server
+            .provider
+            .install_retry_initial_keys(retry_cid.as_bytes(), &server.transcript);
+        let chunk_size = initial_crypto_chunk_size(1110, retry_cid, client_cid, 1200).unwrap();
+        assert_eq!(
+            chunk_size, 10,
+            "exercise tiny payload beneath a large Retry token"
+        );
+        let segment = HandshakeSegment {
+            level: HandshakeLevel::Initial,
+            data: initial[0].data[..chunk_size].to_vec(),
+        };
+        let packet = client
+            .assemble_handshake_packet(&segment, retry_cid, client_cid, 1)
+            .unwrap();
+        let prefix = long_prefix(&packet);
+        assert_eq!(
+            prefix.payload_length, 63,
+            "exercise the one-byte Length boundary"
+        );
+        assert_eq!(
+            packet.len(),
+            1200,
+            "Initial must fit the configured path exactly"
+        );
+        server
+            .unprotect_long_header_packet(&prefix, &packet)
+            .expect("wider Length encoding is covered by packet authentication");
+    }
+
+    fn client_retry_parameters(
+        original: ConnectionId,
+        retry: Option<ConnectionId>,
+        server: ConnectionId,
+        invalid_parameter: Option<u64>,
+    ) -> Vec<u8> {
+        use crate::net::quic_core::UnknownTransportParameter;
+
+        let mut parameters = TransportParameters {
+            max_udp_payload_size: Some(1200),
+            initial_max_data: Some(65_536),
+            initial_max_stream_data_bidi_local: Some(4096),
+            initial_max_stream_data_bidi_remote: Some(4096),
+            initial_max_stream_data_uni: Some(4096),
+            initial_max_streams_bidi: Some(4),
+            initial_max_streams_uni: Some(4),
+            ..TransportParameters::default()
+        };
+        for (id, value) in [(0x00, Some(original)), (0x0f, Some(server)), (0x10, retry)] {
+            if let Some(value) = value {
+                parameters.unknown.push(UnknownTransportParameter {
+                    id,
+                    value: if invalid_parameter == Some(id) {
+                        b"wrong-cid".to_vec()
+                    } else {
+                        value.as_bytes().to_vec()
+                    },
+                });
+            }
+        }
+        let mut encoded = Vec::new();
+        parameters.encode(&mut encoded).unwrap();
+        encoded
+    }
+
+    #[test]
+    fn client_retry_requires_all_tls_authenticated_connection_ids() {
+        let original = ConnectionId::new(DCID_BYTES).unwrap();
+        let retry = ConnectionId::new(b"retry-id").unwrap();
+        let server = ConnectionId::new(b"server-id").unwrap();
+        let valid = client_retry_parameters(original, Some(retry), server, None);
+        validate_retry_transport_parameters(&valid, original, retry, server).unwrap();
+        for (id, code) in [
+            (0x00, "retry_original_destination_cid_mismatch"),
+            (0x0f, "retry_initial_source_cid_mismatch"),
+            (0x10, "retry_source_cid_mismatch"),
+        ] {
+            let invalid = client_retry_parameters(original, Some(retry), server, Some(id));
+            let error =
+                validate_retry_transport_parameters(&invalid, original, retry, server).unwrap_err();
+            assert_eq!(failure_code(&error), code);
+        }
+        let missing = client_retry_parameters(original, None, server, None);
+        assert_eq!(
+            failure_code(
+                &validate_retry_transport_parameters(&missing, original, retry, server)
+                    .unwrap_err()
+            ),
+            "retry_source_cid_mismatch"
+        );
+    }
+
+    fn client_retry_crypto_bytes(plaintext: &[u8], ranges: &mut BTreeMap<u64, Vec<u8>>) {
+        let mut input = plaintext;
+        while let Some(frame) = QuicFrame::decode(&mut input).unwrap() {
+            if let QuicFrame::Crypto { offset, data } = frame {
+                if let Some(previous) = ranges.insert(offset.value(), data.to_vec()) {
+                    assert_eq!(
+                        previous,
+                        data.as_ref(),
+                        "retransmitted CRYPTO bytes changed"
+                    );
+                }
+            }
+        }
+    }
+
+    fn client_retry_join_crypto(ranges: &BTreeMap<u64, Vec<u8>>) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for (&offset, chunk) in ranges {
+            assert_eq!(offset, bytes.len() as u64, "CRYPTO flight has a gap");
+            bytes.extend_from_slice(chunk);
+        }
+        bytes
+    }
+
+    /// A real socket peer owns an independent server TLS driver. It witnesses
+    /// the original ClientHello before sending Retry, inspects the re-encrypted
+    /// Initials, then completes certificate-verified TLS with the native client.
+    fn run_client_retry_native(
+        workers: usize,
+        token_len: Option<usize>,
+        invalid_parameter: Option<u64>,
+    ) {
+        use crate::net::quic_native::{
+            NativeQuicConnectionConfig, NativeQuicUdpConnection, NativeQuicUdpConnectionError,
+            QuicConnectionState, QuicUdpEndpointConfig,
+        };
+
+        let original_cid = ConnectionId::new(DCID_BYTES).unwrap();
+        let client_cid = ConnectionId::new(b"retry-cl").unwrap();
+        let retry_cid = ConnectionId::new(b"retry-id").unwrap();
+        let server_cid = ConnectionId::new(b"retry-sv").unwrap();
+        let other_cid = ConnectionId::new(b"unwanted").unwrap();
+        let peer_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        peer_socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        peer_socket
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let server_addr = peer_socket.local_addr().unwrap();
+        let peer = std::thread::spawn(move || {
+            let protocols = vec![ATP_QUIC_ALPN.to_vec()];
+            let config = server_config(vec![leaf_cert()], leaf_key(), protocols).unwrap();
+            let parameters = client_retry_parameters(
+                original_cid,
+                token_len.map(|_| retry_cid),
+                server_cid,
+                invalid_parameter,
+            );
+            let mut original_inspector =
+                QuicHandshakeDriver::server(config.clone(), parameters.clone()).unwrap();
+            original_inspector.install_initial_keys(DCID_BYTES).unwrap();
+            let mut buffer = vec![0; 16_384];
+            let (length, client_addr) = peer_socket.recv_from(&mut buffer).unwrap();
+            let first = buffer[..length].to_vec();
+            let prefix = long_prefix(&first);
+            assert_eq!(prefix.dst_cid, original_cid);
+            assert_eq!(prefix.src_cid, client_cid);
+            assert!(prefix.token.is_empty());
+            let (first_header, first_plaintext) = original_inspector
+                .unprotect_long_header_packet(&prefix, &first)
+                .unwrap();
+            let mut first_crypto = BTreeMap::new();
+            client_retry_crypto_bytes(&first_plaintext, &mut first_crypto);
+            let original_hello = client_retry_join_crypto(&first_crypto);
+            assert!(
+                original_hello.len() > 128,
+                "large-token case must fragment this ClientHello"
+            );
+
+            let mut server = QuicHandshakeDriver::server(config, parameters).unwrap();
+            server
+                .install_initial_keys(if token_len.is_some() {
+                    retry_cid.as_bytes()
+                } else {
+                    original_cid.as_bytes()
+                })
+                .unwrap();
+            let token = token_len.map(|len| vec![0xa5; len]);
+            let mut pending_first = Some(first);
+            if let Some(token) = &token {
+                pending_first = None;
+                let retry = client_retry_wire(original_cid, client_cid, retry_cid, token);
+                // A correctly signed Retry from another socket is not this
+                // peer. The remaining rejects all come from the real address.
+                let stray = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+                stray.send_to(&retry, client_addr).unwrap();
+                let mut bad_tag = retry.clone();
+                *bad_tag.last_mut().unwrap() ^= 1;
+                for rejected in [
+                    vec![0xc0],
+                    vec![0xc0, 0, 0, 0, 1, 21],
+                    bad_tag,
+                    client_retry_wire(original_cid, other_cid, retry_cid, token),
+                    client_retry_wire(original_cid, client_cid, original_cid, token),
+                    client_retry_wire(original_cid, client_cid, retry_cid, b""),
+                ] {
+                    peer_socket.send_to(&rejected, client_addr).unwrap();
+                }
+                peer_socket.send_to(&retry, client_addr).unwrap();
+                // A second valid Retry must not replace the accepted token/CID.
+                let second = client_retry_wire(original_cid, client_cid, other_cid, b"second");
+                peer_socket.send_to(&second, client_addr).unwrap();
+            }
+
+            let mut initial_numbers = BTreeSet::new();
+            let mut repeated_crypto = BTreeMap::new();
+            let mut server_packet_number = 0;
+            let mut initial_sent = false;
+            for _ in 0..64 {
+                let packet = match pending_first.take() {
+                    Some(packet) => packet,
+                    None => {
+                        let (length, address) = peer_socket.recv_from(&mut buffer).unwrap();
+                        assert_eq!(address, client_addr);
+                        buffer[..length].to_vec()
+                    }
+                };
+                let prefix = long_prefix(&packet);
+                if prefix.packet_type == LongPacketType::Initial {
+                    assert_eq!(prefix.src_cid, client_cid, "Retry must keep the client CID");
+                    assert_eq!(
+                        prefix.dst_cid,
+                        if token.is_some() {
+                            retry_cid
+                        } else {
+                            original_cid
+                        }
+                    );
+                    assert_eq!(prefix.token, token.clone().unwrap_or_default());
+                    let (header, plaintext) = server
+                        .unprotect_long_header_packet(&prefix, &packet)
+                        .unwrap();
+                    if token.is_some() {
+                        assert!(header.packet_number > first_header.packet_number);
+                        assert!(
+                            packet.len() <= 1200,
+                            "test Retry Initial exceeds path budget"
+                        );
+                    }
+                    initial_numbers.insert(header.packet_number);
+                    client_retry_crypto_bytes(&plaintext, &mut repeated_crypto);
+                }
+                server.recv_handshake_packet(&packet).unwrap();
+                for segment in server.pump_outbound().unwrap() {
+                    if segment.level == HandshakeLevel::OneRtt {
+                        continue;
+                    }
+                    let outgoing = server
+                        .assemble_handshake_packet(
+                            &segment,
+                            client_cid,
+                            server_cid,
+                            server_packet_number,
+                        )
+                        .unwrap();
+                    server_packet_number += 1;
+                    peer_socket.send_to(&outgoing, client_addr).unwrap();
+                    if segment.level == HandshakeLevel::Initial && !initial_sent {
+                        initial_sent = true;
+                        let late = client_retry_wire(original_cid, client_cid, other_cid, b"late");
+                        peer_socket.send_to(&late, client_addr).unwrap();
+                    }
+                }
+                if server.is_complete() {
+                    assert!(server.one_rtt_keys_installed());
+                    assert_eq!(client_retry_join_crypto(&repeated_crypto), original_hello);
+                    if token_len == Some(1000) {
+                        assert!(
+                            initial_numbers.len() > 1,
+                            "token must force ClientHello fragmentation"
+                        );
+                    }
+                    return (initial_numbers.len(), original_hello.len(), initial_sent);
+                }
+            }
+            panic!("Retry peer did not complete TLS");
+        });
+
+        let builder = if workers == 1 {
+            crate::runtime::RuntimeBuilder::current_thread()
+        } else {
+            crate::runtime::RuntimeBuilder::multi_thread().worker_threads(workers)
+        };
+        let runtime = builder
+            .with_reactor(crate::runtime::reactor::create_reactor().unwrap())
+            .build()
+            .unwrap();
+        let result = runtime.block_on(async {
+            let cx = Cx::current().expect("native Retry caller context");
+            let endpoint = QuicUdpEndpoint::bind(
+                &cx,
+                "127.0.0.1:0".parse().unwrap(),
+                QuicUdpEndpointConfig {
+                    max_packet_size: 16_384,
+                    ..QuicUdpEndpointConfig::default()
+                },
+            )
+            .await
+            .unwrap();
+            let config = client_config(vec![ca_cert()], vec![ATP_QUIC_ALPN.to_vec()]).unwrap();
+            let local_parameters = TransportParameters {
+                initial_max_streams_bidi: Some(4),
+                initial_max_streams_uni: Some(4),
+                ..TransportParameters::default()
+            };
+            let mut encoded = Vec::new();
+            local_parameters.encode(&mut encoded).unwrap();
+            let driver = QuicHandshakeDriver::client(
+                config,
+                ServerName::try_from("localhost").unwrap(),
+                encoded,
+            )
+            .unwrap();
+            let result = crate::time::timeout(
+                cx.now(),
+                Duration::from_secs(8),
+                NativeQuicUdpConnection::connect(
+                    &cx,
+                    endpoint,
+                    server_addr,
+                    driver,
+                    original_cid,
+                    client_cid,
+                    NativeQuicConnectionConfig::default(),
+                    ATP_QUIC_ALPN,
+                ),
+            )
+            .await
+            .expect("native Retry handshake must finish before the watchdog");
+            let result = result.map(|connection| {
+                assert_eq!(
+                    connection.connection().state(),
+                    QuicConnectionState::Established
+                );
+                assert!(connection.connection().can_send_app_data());
+                drop(connection);
+            });
+            assert_eq!(cx.timer_driver().unwrap().pending_count(), 0);
+            result
+        });
+        let (initial_packets, hello_bytes, initial_sent) = peer.join().unwrap();
+        assert!(
+            initial_sent,
+            "peer sent an authenticated Initial before the late Retry"
+        );
+        match invalid_parameter {
+            None => result.expect("native caller establishes despite ignored Retry datagrams"),
+            Some(id) => {
+                let NativeQuicUdpConnectionError::Handshake(error) = result.unwrap_err() else {
+                    panic!("Retry CID mismatch must fail in authenticated handshake completion");
+                };
+                let expected = match id {
+                    0x00 => "retry_original_destination_cid_mismatch",
+                    0x0f => "retry_initial_source_cid_mismatch",
+                    0x10 => "retry_source_cid_mismatch",
+                    _ => panic!("unknown test parameter"),
+                };
+                assert_eq!(failure_code(&error), expected);
+            }
+        }
+        assert!(
+            runtime.is_quiescent(),
+            "Retry test leaves no runtime tasks or obligations"
+        );
+        eprintln!(
+            "bead=asupersync-bi2462.108 scenario=client_retry workers={workers} token_len={token_len:?} invalid_parameter={invalid_parameter:?} initial_packets={initial_packets} identical_client_hello_bytes={hello_bytes} tls_peer_complete=true runtime_quiescent=true"
+        );
+    }
+
+    #[test]
+    fn client_retry_native_establishes_with_token_fragmentation_and_ignored_forgeries() {
+        for workers in [1, 2] {
+            for token_len in [16, 1000] {
+                run_client_retry_native(workers, Some(token_len), None);
+            }
+        }
+    }
+
+    #[test]
+    fn client_retry_native_ignores_retry_after_authenticated_initial_without_prior_retry() {
+        for workers in [1, 2] {
+            run_client_retry_native(workers, None, None);
+        }
+    }
+
+    #[test]
+    fn client_retry_native_rejects_each_authenticated_cid_mismatch() {
+        for workers in [1, 2] {
+            for id in [0x00, 0x0f, 0x10] {
+                run_client_retry_native(workers, Some(16), Some(id));
+            }
+        }
+    }
+
     #[test]
     fn crypto_reassembler_waits_for_gaps_and_rejects_conflicting_overlap() {
         let mut reassembler = HandshakeCryptoReassembler::default();
@@ -2078,6 +3087,348 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
         assert_eq!(&ready[0][..2], b"x\0");
         assert!(reassembler.pending.is_empty());
         assert_eq!(reassembler.pending_bytes, 0);
+    }
+
+    #[test]
+    fn crypto_reassembler_reuses_spare_capacity_from_both_ends_and_for_duplicates() {
+        let mut reassembler = HandshakeCryptoReassembler::default();
+        reassembler.push(4096, &vec![17; 1024]).unwrap();
+        let accepted = reassembler.pending.get_mut(&4096).unwrap();
+        accepted.reserve(3072);
+        let capacity = accepted.capacity();
+        let marker = std::ptr::from_ref(&accepted[0]);
+
+        // The accepted byte must keep its address while spare capacity exists.
+        // This checks allocation reuse, not a wall-clock performance threshold.
+        for index in 1..=1024_usize {
+            let offset = 4096 - u64::try_from(index).unwrap();
+            assert!(reassembler.push(offset, &[17]).unwrap().is_empty());
+            let accepted = &reassembler.pending[&offset];
+            assert_eq!(accepted.capacity(), capacity);
+            assert_eq!(std::ptr::from_ref(&accepted[index]), marker);
+        }
+        for index in 0..1024_u64 {
+            assert!(reassembler.push(5120 + index, &[17]).unwrap().is_empty());
+            let accepted = &reassembler.pending[&3072];
+            assert_eq!(accepted.capacity(), capacity);
+            assert_eq!(std::ptr::from_ref(&accepted[1024]), marker);
+        }
+        assert_eq!(reassembler.pending.len(), 1);
+        assert_eq!(reassembler.pending_bytes, 3072);
+        for offset in [3072, 4096, 6143] {
+            assert!(reassembler.push(offset, &[17]).unwrap().is_empty());
+            let accepted = &reassembler.pending[&3072];
+            assert_eq!(accepted.capacity(), capacity);
+            assert_eq!(std::ptr::from_ref(&accepted[1024]), marker);
+            assert_eq!(reassembler.pending_bytes, 3072);
+        }
+        let ready = reassembler.push(0, &vec![17; 3072]).unwrap();
+        assert_eq!(ready, vec![vec![17; 6144]]);
+        assert!(reassembler.pending.is_empty());
+        assert_eq!(reassembler.pending_bytes, 0);
+    }
+
+    #[test]
+    fn crypto_reassembler_bridges_ranges_without_replacing_the_largest_allocation() {
+        for lengths in [[1024, 13, 29], [13, 1024, 29], [13, 29, 1024]] {
+            let starts = [5, 5 + lengths[0] + 7, 5 + lengths[0] + 7 + lengths[1] + 11];
+            let end = starts[2] + lengths[2];
+            let expected: Vec<u8> = (0..end)
+                .map(|index| u8::try_from(index % 251).unwrap())
+                .collect();
+            let mut reassembler = HandshakeCryptoReassembler::default();
+            for (&start, &len) in starts.iter().zip(&lengths) {
+                reassembler
+                    .push(u64::try_from(start).unwrap(), &expected[start..start + len])
+                    .unwrap();
+            }
+            let largest_index = lengths.iter().position(|&len| len == 1024).unwrap();
+            let largest_start = u64::try_from(starts[largest_index]).unwrap();
+            let largest = reassembler.pending.get_mut(&largest_start).unwrap();
+            largest.reserve(end);
+            let capacity = largest.capacity();
+            let marker = std::ptr::from_ref(&largest[0]);
+            let bridge_start = starts[0] + lengths[0] - 1;
+            let bridge_end = starts[2] + 1;
+            let before = reassembler.pending.clone();
+            let mut conflicting = expected[bridge_start..bridge_end].to_vec();
+            *conflicting.last_mut().unwrap() ^= 0x80;
+            assert!(matches!(
+                reassembler.push(u64::try_from(bridge_start).unwrap(), &conflicting),
+                Err(QuicTlsError::CryptoProviderFailure {
+                    provider: "rustls-quic-handshake",
+                    code: "crypto_overlap_conflict",
+                })
+            ));
+            assert_eq!(reassembler.pending, before);
+            assert_eq!(reassembler.pending_bytes, lengths.iter().sum::<usize>());
+            assert!(
+                reassembler
+                    .push(
+                        u64::try_from(bridge_start).unwrap(),
+                        &expected[bridge_start..bridge_end],
+                    )
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(reassembler.pending.len(), 1);
+            let merged = &reassembler.pending[&5];
+            assert_eq!(merged.capacity(), capacity);
+            assert_eq!(
+                std::ptr::from_ref(&merged[starts[largest_index] - 5]),
+                marker
+            );
+            assert!(merged.iter().eq(expected[5..].iter()));
+            assert_eq!(reassembler.pending_bytes, end - 5);
+            assert_eq!(reassembler.push(0, &expected[..5]).unwrap(), vec![expected]);
+            assert!(reassembler.pending.is_empty());
+        }
+    }
+
+    #[test]
+    fn crypto_reassembler_matches_byte_oracle_under_overlap_reordering_and_conflicts() {
+        fn check_push(
+            reassembler: &mut HandshakeCryptoReassembler,
+            oracle: &mut [Option<u8>],
+            head: &mut usize,
+            offset: usize,
+            data: &[u8],
+        ) {
+            let before = reassembler.pending.clone();
+            let before_bytes = reassembler.pending_bytes;
+            let conflict = data.iter().enumerate().any(|(index, &byte)| {
+                offset + index >= *head
+                    && oracle[offset + index].is_some_and(|accepted| accepted != byte)
+            });
+            let result = reassembler.push(u64::try_from(offset).unwrap(), data);
+            if conflict {
+                assert!(matches!(
+                    result,
+                    Err(QuicTlsError::CryptoProviderFailure {
+                        provider: "rustls-quic-handshake",
+                        code: "crypto_overlap_conflict",
+                    })
+                ));
+                assert_eq!(reassembler.pending, before);
+                assert_eq!(reassembler.pending_bytes, before_bytes);
+            } else {
+                for (index, &byte) in data.iter().enumerate() {
+                    if offset + index >= *head {
+                        oracle[offset + index] = Some(byte);
+                    }
+                }
+                let mut ready = Vec::new();
+                while let Some(Some(byte)) = oracle.get(*head) {
+                    ready.push(*byte);
+                    *head += 1;
+                }
+                assert_eq!(result.unwrap().concat(), ready);
+            }
+            assert_eq!(reassembler.next_offset, u64::try_from(*head).unwrap());
+            let mut retained = vec![None; oracle.len()];
+            let mut previous_end = u64::try_from(*head).unwrap();
+            let mut retained_bytes = 0;
+            for (&start, bytes) in &reassembler.pending {
+                assert!(
+                    start > previous_end,
+                    "accepted ranges must be separated by gaps"
+                );
+                previous_end = start + u64::try_from(bytes.len()).unwrap();
+                let start = usize::try_from(start).unwrap();
+                for (index, &byte) in bytes.iter().enumerate() {
+                    retained[start + index] = Some(byte);
+                }
+                retained_bytes += bytes.len();
+            }
+            assert_eq!(&retained[*head..], &oracle[*head..]);
+            assert_eq!(reassembler.pending_bytes, retained_bytes);
+        }
+
+        const LEN: usize = 2048;
+        let input: Vec<u8> = (0..LEN)
+            .map(|index| u8::try_from((index * 37 + index / 5) % 251).unwrap())
+            .collect();
+        for seed in [1_u64, 17, 0x5eed, 0xdead_beef] {
+            let mut state = seed;
+            let mut reassembler = HandshakeCryptoReassembler::default();
+            let mut oracle = vec![None; LEN];
+            let mut head = 0;
+            for step in 0..512 {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                // Leave the initial byte absent until the final drain. This
+                // keeps randomized overlaps and conflicts in retained state.
+                let offset = 1 + usize::try_from(state % 2047).unwrap();
+                let len = (1 + usize::try_from((state >> 32) % 193).unwrap()).min(LEN - offset);
+                let mut bytes = input[offset..offset + len].to_vec();
+                if step % 7 == 0 {
+                    bytes[len / 2] ^= 0x80;
+                }
+                check_push(&mut reassembler, &mut oracle, &mut head, offset, &bytes);
+            }
+            let completion: Vec<u8> = oracle
+                .iter()
+                .zip(&input)
+                .map(|(accepted, &byte)| accepted.unwrap_or(byte))
+                .collect();
+            check_push(&mut reassembler, &mut oracle, &mut head, 0, &completion);
+            assert_eq!(head, LEN);
+            // Delivered bytes remain idempotent even if a retransmission's
+            // discarded prefix differs; the receiver retains no TLS history.
+            check_push(&mut reassembler, &mut oracle, &mut head, 0, &vec![0; LEN]);
+            assert!(reassembler.push(u64::MAX, &[]).unwrap().is_empty());
+            assert!(matches!(
+                reassembler.push(u64::MAX, &[1]),
+                Err(QuicTlsError::CryptoProviderFailure {
+                    provider: "rustls-quic-handshake",
+                    code: "crypto_offset_overflow",
+                })
+            ));
+            assert_eq!(reassembler.next_offset, u64::try_from(LEN).unwrap());
+            assert!(reassembler.pending.is_empty());
+            eprintln!(
+                "bead=asupersync-bi2462.108 scenario=crypto_reassembly_byte_oracle seed={seed} fragments=512 conflicts_transactional=true delivered={head} retained_bytes=0"
+            );
+        }
+    }
+
+    #[test]
+    fn crypto_reassembler_completes_protected_tls_with_delayed_prefixes_and_retransmissions() {
+        for reverse in [false, true] {
+            let (mut client, mut server) = protected_pair();
+            let dcid = ConnectionId::new(DCID_BYTES).unwrap();
+            let client_scid = ConnectionId::new(&[0x11, 0x22, 0x33, 0x44]).unwrap();
+            let server_scid = ConnectionId::new(&[0x55, 0x66, 0x77, 0x88]).unwrap();
+            let mut client_pn = 0;
+            let mut server_pn = 0;
+            let mut flights: VecDeque<_> = client
+                .pump_outbound()
+                .unwrap()
+                .into_iter()
+                .map(|segment| (true, segment))
+                .collect();
+            let mut segments = 0;
+            let mut reordered_spaces = BTreeSet::new();
+            while let Some((from_client, segment)) = flights.pop_front() {
+                if segment.level == HandshakeLevel::OneRtt {
+                    continue;
+                }
+                segments += 1;
+                assert!(segments <= 32, "fragmented TLS handshake must converge");
+                let (sender, receiver, pn, dst, src) = if from_client {
+                    (&mut client, &mut server, &mut client_pn, dcid, client_scid)
+                } else {
+                    (
+                        &mut server,
+                        &mut client,
+                        &mut server_pn,
+                        client_scid,
+                        server_scid,
+                    )
+                };
+                let space = level_index(segment.level);
+                let start = sender.crypto_send_offset[space];
+                let head = receiver.handshake_crypto_reassembly[space].next_offset;
+                assert_eq!(start, head);
+                let mut packets = Vec::new();
+                for chunk in segment.data.chunks(17) {
+                    packets.push(
+                        sender
+                            .assemble_handshake_packet(
+                                &HandshakeSegment {
+                                    level: segment.level,
+                                    data: chunk.to_vec(),
+                                },
+                                dst,
+                                src,
+                                *pn,
+                            )
+                            .unwrap(),
+                    );
+                    *pn += 1;
+                }
+                assert!(!packets.is_empty());
+                let mut order: Vec<_> = (1..packets.len()).collect();
+                if reverse {
+                    order.reverse();
+                }
+                for index in order {
+                    receiver.recv_handshake_packet(&packets[index]).unwrap();
+                    assert_eq!(
+                        receiver.handshake_crypto_reassembly[space].next_offset,
+                        head
+                    );
+                    assert!(receiver.pump_outbound().unwrap().is_empty());
+                    reordered_spaces.insert(space);
+                }
+                if packets.len() > 1 {
+                    // A new packet number carrying already buffered CRYPTO
+                    // reaches reassembly, unlike packet-number replay filtering.
+                    let end = sender.crypto_send_offset[space];
+                    sender.crypto_send_offset[space] = start + 17;
+                    let retransmission = sender
+                        .assemble_handshake_packet(
+                            &HandshakeSegment {
+                                level: segment.level,
+                                data: segment.data[17..].to_vec(),
+                            },
+                            dst,
+                            src,
+                            *pn,
+                        )
+                        .unwrap();
+                    *pn += 1;
+                    sender.crypto_send_offset[space] = end;
+                    let retained = receiver.handshake_crypto_reassembly[space].pending_bytes;
+                    receiver.recv_handshake_packet(&retransmission).unwrap();
+                    assert_eq!(
+                        receiver.handshake_crypto_reassembly[space].pending_bytes,
+                        retained
+                    );
+                    assert_eq!(
+                        receiver.handshake_crypto_reassembly[space].next_offset,
+                        head
+                    );
+                    assert!(receiver.pump_outbound().unwrap().is_empty());
+                }
+                receiver.recv_handshake_packet(&packets[0]).unwrap();
+                assert_eq!(
+                    receiver.handshake_crypto_reassembly[space].next_offset,
+                    head + u64::try_from(segment.data.len()).unwrap()
+                );
+                assert!(
+                    receiver.handshake_crypto_reassembly[space]
+                        .pending
+                        .is_empty()
+                );
+                flights.extend(
+                    receiver
+                        .pump_outbound()
+                        .unwrap()
+                        .into_iter()
+                        .map(|segment| (!from_client, segment)),
+                );
+            }
+            assert!(client.is_complete() && server.is_complete());
+            assert!(client.one_rtt_keys_installed() && server.one_rtt_keys_installed());
+            assert_eq!(reordered_spaces, BTreeSet::from([0, 1]));
+            assert_eq!(
+                client.peer_transport_parameters(),
+                Some(b"server-params".as_slice())
+            );
+            assert_eq!(
+                server.peer_transport_parameters(),
+                Some(b"client-params".as_slice())
+            );
+            for driver in [&client, &server] {
+                for reassembler in &driver.handshake_crypto_reassembly {
+                    assert!(reassembler.pending.is_empty());
+                    assert_eq!(reassembler.pending_bytes, 0);
+                }
+            }
+            eprintln!(
+                "bead=asupersync-bi2462.108 scenario=crypto_reassembly_protected_tls reverse={reverse} segments={segments} client_packets={client_pn} server_packets={server_pn} both_crypto_spaces=true tls_complete=true retained_bytes=0"
+            );
+        }
     }
 
     #[test]

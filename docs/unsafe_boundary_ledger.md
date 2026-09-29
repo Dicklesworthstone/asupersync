@@ -77,6 +77,34 @@ remains 100 rows and 892 operations, with unchanged safety invariants,
 category evidence, and platform coverage limits. The focused RCH contract
 must validate the resulting source/ledger alignment before this bead closes.
 
+The September 27 reconciliation (`asupersync-31jdkv`) runs against
+`93ded6fe73136947a65d938637570ad5e0b2c469`. It follows the
+`asupersync-koo7j0` process row, which added the parent-death `prctl`,
+`getppid` and `_exit` operations.
+- It re-locates 39 locators in eight rows after safe-only line shifts
+  (TCP stream, ATPD, OTel, signal, builder, MySQL, ATP journal sparse writer
+  and ATP CLI).
+- It ledgers the io_uring `fstat` descriptor-identity operations and the
+  reused-descriptor test operations added by `746367874`, after review. That
+  test now replaces its duplicated descriptor with one atomic `dup2`, so it no
+  longer exposes a freed descriptor number to concurrent tests.
+- It drops the two removed io_uring `fcntl(F_GETFD)` operations.
+- It removes the `asupersync-tokio-compat/src/cancel.rs` row, whose only unsafe
+  block was deleted by `7fb2cbb68`.
+The inventory is now 99 rows and 895 operations. The categories, other safety
+invariants, category evidence and platform coverage limits are unchanged.
+
+On September 28, 2026 (`asupersync-bi2462.113`) one `test-or-lab-harness` row
+was added for `tests/signal_subscription_isolation.rs`: one `allow(unsafe_code)`
+scope and one `unsafe` block that restore `SIG_DFL` for the single signal a
+re-executed child raises, before any asupersync registration. A nohup-style
+launcher (RCH workers included) starts the test with `SIGHUP` ignored, and
+`std::process::Command` cannot reset inherited dispositions. The inventory is
+now 100 rows and 897 operations. The same change re-locates four
+`src/runtime/builder.rs` locators that `d2322f15a` shifted by 36 lines
+(`allow(unsafe_code)` and three test env-var mutations); their text and
+reasoning are unchanged.
+
 ## Row Schema
 
 Each `sites[]` row must include:

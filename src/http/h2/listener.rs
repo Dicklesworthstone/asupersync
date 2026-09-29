@@ -18,7 +18,7 @@ use crate::channel::mpsc;
 use crate::codec::Framed;
 use crate::cx::Cx;
 use crate::cx::child_region::{ChildRegion, ChildRegionSpec};
-use crate::http::body::{Body as _, Frame as BodyFrame, HeaderMap};
+use crate::http::body::{Frame as BodyFrame, HeaderMap};
 use crate::http::h1::HttpError;
 use crate::http::h1::server::{HostPolicy, parse_request_timeout_header, validate_host_header};
 use crate::http::h1::stream::{BodyKind, OutgoingBody, OutgoingBodySender};
@@ -27,12 +27,11 @@ use crate::http::h2::connection::{
     CLIENT_PREFACE, Connection, DecodedFrame, ListenerFrameCodec, ReceivedFrame,
 };
 use crate::http::h2::error::{ErrorCode, H2Error};
-#[cfg(test)]
 use crate::http::h2::frame::Frame;
 use crate::http::h2::hpack::Header;
 use crate::http::h2::settings::Settings;
 use crate::http::h2::stream::StreamState;
-use crate::io::AsyncReadExt as _;
+use crate::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, ReadBuf};
 use crate::net::tcp::listener::TcpListener;
 use crate::net::tcp::stream::TcpStream;
 use crate::runtime::{JoinError, JoinHandle, RuntimeHandle, SpawnError, TaskHandle};
@@ -42,6 +41,8 @@ use crate::server::shutdown::{
     ShutdownStats,
 };
 use crate::stream::Stream;
+#[cfg(feature = "tls")]
+use crate::tls::{TlsAcceptor, TlsStream};
 use crate::tracing_compat::error;
 use crate::types::{Budget, CancelKind, CancelReason, Time};
 use crate::web::WebBodyDiagnostic;
@@ -58,8 +59,13 @@ use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::task::Poll;
+use std::task::{Context, Poll};
 use std::time::Duration;
+
+mod ownership;
+use ownership::{H2RequestLimits, H2RequestOwners};
+mod flow_control;
+use flow_control::{H2FlowControlProgress, reset_flow_control_stream};
 
 #[cfg(feature = "http2-streaming")]
 mod streaming;
@@ -76,6 +82,163 @@ const DRAIN_SUPERVISION_TICK: Duration = Duration::from_millis(10);
 
 /// Capacity of the per-connection handler-response funnel.
 const RESPONSE_FUNNEL_CAPACITY: usize = 64;
+
+#[derive(Clone, Copy)]
+struct H2TransportTimeouts {
+    #[cfg(feature = "tls")]
+    tls_handshake: Duration,
+    preface: Duration,
+    write_progress: Duration,
+    flow_control: Duration,
+}
+
+impl Default for H2TransportTimeouts {
+    fn default() -> Self {
+        Self {
+            #[cfg(feature = "tls")]
+            tls_handshake: Duration::from_secs(10),
+            preface: Duration::from_secs(10),
+            write_progress: Duration::from_secs(10),
+            flow_control: Duration::from_secs(10),
+        }
+    }
+}
+
+/// Count socket writes beneath TLS, where flushing encrypted records can make
+/// progress after the framed plaintext buffer has already emptied.
+struct H2Socket {
+    stream: TcpStream,
+    bytes_written: u64,
+}
+
+impl AsyncRead for H2Socket {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for H2Socket {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let result = Pin::new(&mut self.stream).poll_write(cx, buf);
+        if let Poll::Ready(Ok(written)) = &result {
+            self.bytes_written = self.bytes_written.wrapping_add(*written as u64);
+        }
+        result
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let result = Pin::new(&mut self.stream).poll_write_vectored(cx, bufs);
+        if let Poll::Ready(Ok(written)) = &result {
+            self.bytes_written = self.bytes_written.wrapping_add(*written as u64);
+        }
+        result
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.stream.is_write_vectored()
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
+}
+
+/// Keep the frame pump identical for cleartext and authenticated TLS listeners.
+enum H2Transport {
+    Plain(H2Socket),
+    #[cfg(feature = "tls")]
+    Tls(Box<TlsStream<H2Socket>>),
+}
+
+impl H2Transport {
+    fn bytes_written(&self) -> u64 {
+        match self {
+            Self::Plain(socket) => socket.bytes_written,
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => stream.get_ref().bytes_written,
+        }
+    }
+}
+
+impl AsyncRead for H2Transport {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_read(cx, buf),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for H2Transport {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_write(cx, buf),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_write_vectored(cx, bufs),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_write_vectored(cx, bufs),
+        }
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        match self {
+            Self::Plain(stream) => stream.is_write_vectored(),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => stream.is_write_vectored(),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_flush(cx),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_shutdown(cx),
+        }
+    }
+}
 
 /// Default maximum DATA bytes retained in one produced-response frame.
 /// Default maximum DATA frame accepted from a produced HTTP/2 response.
@@ -1074,6 +1237,18 @@ struct InFlightRequestGuard {
 }
 
 impl InFlightRequestGuard {
+    fn try_acquire(counter: &Arc<AtomicUsize>, limit: usize) -> Option<Self> {
+        counter
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                (active < limit).then(|| active + 1)
+            })
+            .ok()
+            .map(|_| Self {
+                counter: Some(Arc::clone(counter)),
+            })
+    }
+
+    #[cfg(any(test, feature = "http2-streaming"))]
     fn acquire(counter: Option<&Arc<AtomicUsize>>) -> Self {
         if let Some(counter) = counter {
             counter.fetch_add(1, Ordering::AcqRel);
@@ -1119,9 +1294,9 @@ struct OwnedH2HopConfig {
     idle_timeout: Option<Duration>,
 }
 
-struct OwnedH2HopCompletion {
+struct OwnedH2HopCompletion<T = H2DispatchResponse> {
     /// The actual protocol return is distinct from task-level cancellation.
-    hop: ServerHopOutcome<H2DispatchResponse>,
+    hop: ServerHopOutcome<T>,
     task_outcome: Option<Result<(), JoinError>>,
     idle_expired: bool,
 }
@@ -1148,6 +1323,39 @@ impl Drop for H2ParentCancellation<'_> {
     fn drop(&mut self) {
         self.clear();
     }
+}
+
+/// Preserve the producer's own cancellation channel (body rejection, peer
+/// reset, or response abandonment), while also forwarding owner cancellation.
+/// Replacing that channel with only the coordinator would strand a producer
+/// parked in an operation that does not itself inspect its request context.
+async fn forward_h2_producer_cancellation<F: Future>(
+    owner: &Cx,
+    producer: &Cx,
+    future: F,
+) -> F::Output {
+    let mut registration = H2ParentCancellation {
+        cx: owner,
+        registration: None,
+    };
+    let mut forwarded = false;
+    let mut future = std::pin::pin!(future);
+    std::future::poll_fn(|cx| {
+        if !forwarded {
+            registration.registration =
+                Some(owner.refresh_cancel_waker(registration.registration, cx.waker()));
+            if owner.is_cancel_requested() {
+                producer.cancel_with(
+                    CancelKind::ParentCancelled,
+                    Some("HTTP/2 request coordinator cancelled its producer"),
+                );
+                forwarded = true;
+                registration.clear();
+            }
+        }
+        future.as_mut().poll(cx)
+    })
+    .await
 }
 
 impl Drop for OwnedH2Request {
@@ -1247,15 +1455,15 @@ impl OwnedH2Request {
     }
 }
 
-async fn execute_owned_h2_body<F, Fut>(
+async fn execute_owned_h2_body<F, Fut, T>(
     body_cx: Cx,
     config: OwnedH2HopConfig,
     signal: ShutdownSignal,
     factory: F,
-) -> ServerHopOutcome<H2DispatchResponse>
+) -> ServerHopOutcome<T>
 where
     F: FnOnce() -> Fut,
-    Fut: Future<Output = H2DispatchResponse>,
+    Fut: Future<Output = T>,
 {
     let region = ServerRequestRegion::from_body_cx("h2", body_cx.clone(), config.started_at);
     // A shutdown may win after the spawn post but before its first poll. Do
@@ -1289,15 +1497,16 @@ where
 }
 
 #[cfg(feature = "http2-streaming")]
-async fn run_owned_h2_hop_with_cx<F, Fut>(
+async fn run_owned_h2_hop_with_cx<F, Fut, T>(
     cx: &Cx,
     signal: &ShutdownSignal,
     config: OwnedH2HopConfig,
     factory: F,
-) -> Result<OwnedH2HopCompletion, String>
+) -> Result<OwnedH2HopCompletion<T>, String>
 where
     F: FnOnce(Cx) -> Fut + Send + 'static,
-    Fut: Future<Output = H2DispatchResponse> + Send + 'static,
+    Fut: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
 {
     run_owned_h2_hop(cx, signal, config, move || {
         // This factory is invoked by execute_owned_h2_body inside the actual
@@ -1307,15 +1516,16 @@ where
     .await
 }
 
-async fn run_owned_h2_hop<F, Fut>(
+async fn run_owned_h2_hop<F, Fut, T>(
     cx: &Cx,
     signal: &ShutdownSignal,
     config: OwnedH2HopConfig,
     factory: F,
-) -> Result<OwnedH2HopCompletion, String>
+) -> Result<OwnedH2HopCompletion<T>, String>
 where
     F: FnOnce() -> Fut + Send + 'static,
-    Fut: Future<Output = H2DispatchResponse> + Send + 'static,
+    Fut: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
 {
     let timer = cx
         .timer_driver()
@@ -1413,7 +1623,7 @@ enum FunnelItem {
     StreamingDone {
         stream_id: u32,
         response: Option<Http2Response>,
-        guard: InFlightRequestGuard,
+        guard: Arc<InFlightRequestGuard>,
         suppress_response_body: bool,
     },
     /// A completed response. The guard is retained until its queued frames
@@ -1766,6 +1976,24 @@ fn queue_h2_response(
     suppress_response_body: bool,
     response_guards: &mut HashMap<u32, Arc<InFlightRequestGuard>>,
 ) -> Vec<Http2PushOutcome> {
+    queue_h2_response_with_shared_guard(
+        conn,
+        stream_id,
+        response,
+        Arc::new(guard),
+        suppress_response_body,
+        response_guards,
+    )
+}
+
+fn queue_h2_response_with_shared_guard(
+    conn: &mut Connection,
+    stream_id: u32,
+    response: impl IntoHttp2Response,
+    guard: Arc<InFlightRequestGuard>,
+    suppress_response_body: bool,
+    response_guards: &mut HashMap<u32, Arc<InFlightRequestGuard>>,
+) -> Vec<Http2PushOutcome> {
     let mut response = response.into_h2_response();
     if suppress_response_body {
         suppress_response_body_for_head(&mut response.response);
@@ -1801,7 +2029,7 @@ fn queue_h2_response(
     }
 
     if queued_response && conn.has_pending_frames_for_stream(stream_id) {
-        let previous = response_guards.insert(stream_id, Arc::new(guard));
+        let previous = response_guards.insert(stream_id, guard);
         debug_assert!(
             previous.is_none(),
             "one response guard should be active per h2 stream"
@@ -1993,6 +2221,8 @@ fn suppress_response_body_for_head(resp: &mut Response) {
 
 /// One wake-up of the connection driver's event select.
 enum DriverEvent {
+    /// A coordinator has joined after its request subtree closed.
+    RequestRetired(u32, Result<(), JoinError>),
     /// Request-body consumption, source publication, or terminal progress.
     #[cfg(feature = "http2-streaming")]
     StreamingProgress,
@@ -2021,6 +2251,8 @@ enum DriverEvent {
     StreamIdleTimeout(u32),
     /// A failed producer exceeded its bounded committed-frame drain grace.
     ProducedDrainTimeout(u32),
+    /// A response could not send DATA within its peer-credit progress budget.
+    FlowControlTimeout(u32),
 }
 
 fn poll_produced_body_event(
@@ -2051,7 +2283,11 @@ fn poll_produced_body_event(
             return Poll::Pending;
         }
 
-        match Pin::new(&mut state.body).poll_frame(task_cx) {
+        // A producer whose context was cancelled can still have committed its
+        // terminal trailers under a mask. Drain committed frames before the
+        // cancellation, or the stream waits forever for trailers it discarded
+        // (br-asupersync-bi2462.105).
+        match state.body.poll_committed_frame(task_cx) {
             Poll::Ready(Some(frame)) => {
                 Poll::Ready(Some(ProducedBodyEvent::Frame { stream_id, frame }))
             }
@@ -2097,6 +2333,68 @@ fn poll_produced_body_event(
 enum H2PumpWriteError {
     Transport(io::Error),
     Encode(H2Error),
+    FlowControl(u32),
+}
+
+#[derive(Clone, Copy)]
+enum H2WriteOperation {
+    Ready,
+    Flush,
+    Close,
+}
+
+/// The transport's readiness, flush, and shutdown waits all have the same
+/// progress deadline. Only bytes actually accepted by the socket extend it;
+/// wakeups, queued frames, and peer traffic cannot keep a stalled write alive.
+async fn bounded_h2_write(
+    framed: &mut Framed<H2Transport, ListenerFrameCodec>,
+    signal: &ShutdownSignal,
+    timeout: Duration,
+    operation: H2WriteOperation,
+) -> io::Result<()> {
+    let timer = Cx::current()
+        .and_then(|cx| cx.timer_driver())
+        .ok_or_else(|| io::Error::other("HTTP/2 transport requires a timer driver"))?;
+    let mut expires_at = timer.now() + timeout;
+    let mut deadline = ServerRequestDeadline::new(timer.clone(), expires_at);
+    let mut force = std::pin::pin!(signal.wait_for_phase(ShutdownPhase::ForceClosing));
+    std::future::poll_fn(|cx| {
+        if signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8
+            || force.as_mut().poll(cx).is_ready()
+        {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "HTTP/2 transport force-closed",
+            )));
+        }
+        if timer.now() > expires_at {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "HTTP/2 transport write made no progress before its deadline",
+            )));
+        }
+        let before = framed.get_ref().bytes_written();
+        let result = match operation {
+            H2WriteOperation::Ready => framed.poll_ready(cx),
+            H2WriteOperation::Flush => framed.poll_flush(cx),
+            H2WriteOperation::Close => framed.poll_close(cx),
+        };
+        if result.is_ready() {
+            return result;
+        }
+        if framed.get_ref().bytes_written() != before {
+            expires_at = timer.now() + timeout;
+            deadline = ServerRequestDeadline::new(timer.clone(), expires_at);
+        }
+        if Pin::new(&mut deadline).poll(cx).is_ready() {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "HTTP/2 transport write made no progress before its deadline",
+            )));
+        }
+        Poll::Pending
+    })
+    .await
 }
 
 fn h2_pump_failure_diagnostic(error: &H2PumpWriteError) -> Option<WebBodyDiagnostic> {
@@ -2105,41 +2403,126 @@ fn h2_pump_failure_diagnostic(error: &H2PumpWriteError) -> Option<WebBodyDiagnos
         H2PumpWriteError::Encode(error) if error.stream_id.is_some() => {
             Some(WebBodyDiagnostic::ResponseProducerFailure)
         }
-        H2PumpWriteError::Encode(_) => None,
+        H2PumpWriteError::Encode(_) | H2PumpWriteError::FlowControl(_) => None,
     }
 }
 
 async fn pump_writes(
     conn: &mut Connection,
-    framed: &mut Framed<TcpStream, ListenerFrameCodec>,
+    framed: &mut Framed<H2Transport, ListenerFrameCodec>,
+    signal: &ShutdownSignal,
+    write_timeout: Duration,
+    mut progress: Option<&mut H2FlowControlProgress>,
+    response_guards: &HashMap<u32, Arc<InFlightRequestGuard>>,
+    produced_bodies: &BTreeMap<u32, ActiveProducedBody>,
 ) -> Result<(), H2PumpWriteError> {
     loop {
+        if let Some(progress) = &mut progress {
+            let _ = progress.next_deadline(
+                conn,
+                response_guards,
+                produced_bodies,
+                Cx::current().expect("H2 transport context").now(),
+            );
+        }
         // Respect the codec's soft buffer boundary before removing another
         // frame from Connection. This keeps a blocked transport from turning
         // the connection's pending frame queue into an unbounded BytesMut.
-        std::future::poll_fn(|cx| framed.poll_ready(cx))
-            .await
-            .map_err(H2PumpWriteError::Transport)?;
+        flow_control::write_with_deadline(
+            framed,
+            signal,
+            write_timeout,
+            H2WriteOperation::Ready,
+            progress
+                .as_deref()
+                .and_then(H2FlowControlProgress::armed_deadline),
+        )
+        .await?;
         let Some(frame) = conn.next_frame() else {
             break;
         };
+        let mut tracked_data = false;
+        if let Frame::Data(data) = &frame
+            && !data.data.is_empty()
+        {
+            tracked_data = progress
+                .as_deref()
+                .is_some_and(|progress| progress.tracks(data.stream_id));
+            if let Some(progress) = &mut progress {
+                progress.queued_data(data.stream_id);
+            }
+        }
         framed.start_send(frame).map_err(H2PumpWriteError::Encode)?;
+        // A previously stalled stream's progress must be observed before a
+        // later sibling write can park the pump. An interrupted write retains
+        // all codec bytes; resetting its stream never truncates a wire frame.
+        if tracked_data {
+            if let Some(progress) = &mut progress {
+                // next_frame consumed credit. A formerly writable stream may
+                // now be blocked again before this flush reaches Pending.
+                let _ = progress.next_deadline(
+                    conn,
+                    response_guards,
+                    produced_bodies,
+                    Cx::current().expect("H2 transport context").now(),
+                );
+            }
+            flow_control::write_with_deadline(
+                framed,
+                signal,
+                write_timeout,
+                H2WriteOperation::Flush,
+                progress
+                    .as_deref()
+                    .and_then(H2FlowControlProgress::armed_deadline),
+            )
+            .await?;
+            if let Some(progress) = &mut progress {
+                progress.flushed(Cx::current().expect("H2 transport context").now());
+            }
+        }
     }
-    std::future::poll_fn(|cx| framed.poll_flush(cx))
-        .await
-        .map_err(H2PumpWriteError::Transport)
+    flow_control::write_with_deadline(
+        framed,
+        signal,
+        write_timeout,
+        H2WriteOperation::Flush,
+        progress
+            .as_deref()
+            .and_then(H2FlowControlProgress::armed_deadline),
+    )
+    .await?;
+    if let Some(progress) = &mut progress {
+        progress.flushed(Cx::current().expect("H2 transport context").now());
+    }
+    Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn pump_writes_with_body_diagnostics(
     conn: &mut Connection,
-    framed: &mut Framed<TcpStream, ListenerFrameCodec>,
+    framed: &mut Framed<H2Transport, ListenerFrameCodec>,
     pending_requests: &HashMap<u32, (Vec<Header>, Vec<u8>)>,
     dispatched_streams: &HashSet<u32>,
     produced_bodies: &mut BTreeMap<u32, ActiveProducedBody>,
     response_guards: &HashMap<u32, Arc<InFlightRequestGuard>>,
-) -> io::Result<()> {
-    match pump_writes(conn, framed).await {
-        Ok(()) => Ok(()),
+    signal: &ShutdownSignal,
+    write_timeout: Duration,
+    progress: Option<&mut H2FlowControlProgress>,
+) -> io::Result<Option<u32>> {
+    match pump_writes(
+        conn,
+        framed,
+        signal,
+        write_timeout,
+        progress,
+        response_guards,
+        produced_bodies,
+    )
+    .await
+    {
+        Ok(()) => Ok(None),
+        Err(H2PumpWriteError::FlowControl(stream_id)) => Ok(Some(stream_id)),
         Err(error @ H2PumpWriteError::Transport(_)) => {
             let mut affected_streams = HashSet::new();
             affected_streams.extend(pending_requests.keys().copied());
@@ -2192,7 +2575,7 @@ async fn pump_writes_with_body_diagnostics(
 /// Wait for the next driver event: incoming frame, completed handler
 /// response, or a shutdown-phase transition.
 async fn next_driver_event(
-    framed: &mut Framed<TcpStream, ListenerFrameCodec>,
+    framed: &mut Framed<H2Transport, ListenerFrameCodec>,
     resp_rx: &mut mpsc::Receiver<FunnelItem>,
     #[cfg(not(feature = "http2-streaming"))] conn: &Connection,
     #[cfg(feature = "http2-streaming")] conn: &mut Connection,
@@ -2207,6 +2590,8 @@ async fn next_driver_event(
     continuation_deadline: Option<Time>,
     stream_idle_deadline: Option<(u32, Time)>,
     produced_failure_deadline: Option<(u32, Time)>,
+    flow_control_deadline: Option<(u32, Time)>,
+    request_owners: &mut H2RequestOwners,
 ) -> DriverEvent {
     if watch_drain && signal.is_shutting_down() {
         return DriverEvent::DrainRequested;
@@ -2260,6 +2645,12 @@ async fn next_driver_event(
             None => std::future::pending::<()>().await,
         }
     });
+    let mut flow_control_fut = std::pin::pin!(async move {
+        match flow_control_deadline {
+            Some((_, deadline)) => crate::time::sleep_until(deadline).await,
+            None => std::future::pending::<()>().await,
+        }
+    });
     std::future::poll_fn(move |cx| {
         if signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8
             || force_fut.as_mut().poll(cx).is_ready()
@@ -2288,6 +2679,11 @@ async fn next_driver_event(
                 return Poll::Ready(DriverEvent::ProducedDrainTimeout(stream_id));
             }
         }
+        if let Some((stream_id, _)) = flow_control_deadline
+            && flow_control_fut.as_mut().poll(cx).is_ready()
+        {
+            return Poll::Ready(DriverEvent::FlowControlTimeout(stream_id));
+        }
         #[cfg(feature = "http2-streaming")]
         if incoming
             .as_mut()
@@ -2297,8 +2693,8 @@ async fn next_driver_event(
         }
         // Cancel-correct channels make dropping a partially-polled recv
         // safe: no item is consumed unless the future completes.
-        if let Poll::Ready(Ok(item)) = recv_fut.as_mut().poll(cx) {
-            return Poll::Ready(DriverEvent::Response(item));
+        if let Poll::Ready(event) = request_owners.poll_event(recv_fut.as_mut(), cx) {
+            return Poll::Ready(event);
         }
         if let Poll::Ready(item) =
             poll_produced_body_event(conn, produced_bodies, produced_poll_after, cx)
@@ -2331,14 +2727,15 @@ fn dispatch_h2_request<F, Fut>(
     resp_tx: &mpsc::Sender<FunnelItem>,
     shutdown_signal: &ShutdownSignal,
     in_flight_requests: &Arc<AtomicUsize>,
-    runtime: &RuntimeHandle,
+    coordinator_cx: &Cx,
     host_policy: &HostPolicy,
     request_timeout: Option<Duration>,
     request_timeout_header_cap: Option<Duration>,
     request_drain_grace: Duration,
     stream_idle_timeout: Option<Duration>,
     owned_request: bool,
-) -> bool
+    global_request_limit: usize,
+) -> Option<TaskHandle<()>>
 where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = H2DispatchResponse> + Send + 'static,
@@ -2347,21 +2744,21 @@ where
         Ok(request) => request,
         Err(_) => {
             conn.reset_stream(stream_id, ErrorCode::ProtocolError);
-            return false;
+            return None;
         }
     };
     let suppress_response_body = request.method == Method::Head;
-    let guard = InFlightRequestGuard::acquire(Some(in_flight_requests));
+    let Some(guard) = InFlightRequestGuard::try_acquire(in_flight_requests, global_request_limit)
+    else {
+        conn.reset_stream(stream_id, ErrorCode::RefusedStream);
+        return None;
+    };
     let handler = Arc::clone(handler);
     let resp_tx = resp_tx.clone();
     let signal = shutdown_signal.clone();
     let host_policy = host_policy.clone();
-    let spawned = runtime.try_spawn(async move {
-        let Some(cx) = Cx::current() else {
-            drop(guard);
-            return;
-        };
-
+    let scope = coordinator_cx.scope();
+    let spawned = coordinator_cx.spawn_in(&scope, move |cx| async move {
         // br-asupersync-mfqfst M8: enforce the host allow-list BEFORE the
         // handler runs (h1 parity). h2 carries the effective authority in the
         // synthesized `host` header (see `request_from_h2_headers`); a request
@@ -2416,6 +2813,7 @@ where
         );
 
         let producer_signal = signal.clone();
+        let handler_connection_cx = cx.clone();
         let response = if owned_request {
             let completed = run_owned_h2_hop(
                 &cx,
@@ -2487,7 +2885,7 @@ where
                             &signal,
                             region.run_with_protocol_drain(
                                 budget_source,
-                                None,
+                                Some(handler_connection_cx),
                                 request_drain_grace,
                                 handler(request),
                             ),
@@ -2654,6 +3052,7 @@ where
                     request_drain_grace,
                     producer,
                 );
+                let run = forward_h2_producer_cancellation(&cx, &producer_cx, run);
                 let outcome = classify_h2_producer_hop(
                     race_force_close(&producer_signal, run).await,
                     &producer_cx,
@@ -2665,11 +3064,12 @@ where
             }
         }
     });
-    if spawned.is_err() {
-        conn.reset_stream(stream_id, ErrorCode::InternalError);
-        false
-    } else {
-        true
+    match spawned {
+        Ok(task) => Some(task),
+        Err(_) => {
+            conn.reset_stream(stream_id, ErrorCode::InternalError);
+            None
+        }
     }
 }
 
@@ -2689,6 +3089,28 @@ where
 /// protocol default (16 KiB), which would reject conformant peer frames sized
 /// within a larger advertised limit. `max_frame_size` must be the LOCAL
 /// advertised value, never the peer's (br-asupersync-i1r9cw).
+/// After peer input on a live request, re-arm its idle deadline while the body
+/// can still receive input, and drop it once the request has ended, failed or
+/// been abandoned. The timeout bounds a stalled upload; it must not cut a
+/// produced response that outlives its request (br-asupersync-yw6j42).
+#[cfg(feature = "http2-streaming")]
+fn refresh_live_request_idle(
+    deadlines: &mut HashMap<u32, Time>,
+    incoming: &StreamingRequests,
+    stream_id: u32,
+    timeout: Option<Duration>,
+    time_getter: fn() -> Time,
+) {
+    match timeout {
+        Some(timeout) if incoming.awaits_input(stream_id) => {
+            deadlines.insert(stream_id, time_getter() + timeout);
+        }
+        _ => {
+            deadlines.remove(&stream_id);
+        }
+    }
+}
+
 fn frame_codec_for(max_frame_size: u32) -> ListenerFrameCodec {
     let mut codec = ListenerFrameCodec::new();
     codec.set_max_frame_size(max_frame_size);
@@ -2698,14 +3120,15 @@ fn frame_codec_for(max_frame_size: u32) -> ListenerFrameCodec {
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
 async fn serve_h2_connection<F, Fut>(
-    mut stream: TcpStream,
+    stream: TcpStream,
+    #[cfg(feature = "tls")] tls_acceptor: Option<TlsAcceptor>,
     peer_addr: Option<SocketAddr>,
     handler: Arc<F>,
     settings: Settings,
     initial_connection_window_size: u32,
     shutdown_signal: ShutdownSignal,
     in_flight_requests: Arc<AtomicUsize>,
-    runtime: RuntimeHandle,
+    _runtime: RuntimeHandle,
     max_body_size: usize,
     host_policy: HostPolicy,
     request_timeout: Option<Duration>,
@@ -2716,20 +3139,77 @@ async fn serve_h2_connection<F, Fut>(
     stream_idle_timeout: Option<Duration>,
     time_getter: fn() -> Time,
     owned_request: bool,
+    transport_timeouts: H2TransportTimeouts,
+    request_limits: H2RequestLimits,
     #[cfg(feature = "http2-streaming")] streaming: Option<StreamingDispatch>,
 ) -> io::Result<()>
 where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = H2DispatchResponse> + Send + 'static,
 {
+    let task_cx = Cx::current()
+        .ok_or_else(|| io::Error::other("h2 connection task requires a runtime Cx"))?;
+    let socket = H2Socket {
+        stream,
+        bytes_written: 0,
+    };
+    #[cfg(feature = "tls")]
+    let mut stream = if let Some(acceptor) = tls_acceptor {
+        // Handshakes remain in the connection-owned task, so a silent peer
+        // cannot block accepting siblings. Dropping a timed-out or cancelled
+        // handshake also drops its socket and releases its connection slot.
+        let handshake = crate::time::timeout(
+            task_cx.now(),
+            transport_timeouts.tls_handshake,
+            acceptor.accept(socket),
+        );
+        let tls = match race_force_close(&shutdown_signal, handshake).await {
+            Some(Ok(result)) => result.map_err(io::Error::other)?,
+            Some(Err(_)) => {
+                task_cx.trace("h2_transport_tls_handshake_deadline_expired");
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "HTTP/2 TLS handshake deadline expired",
+                ));
+            }
+            None => return Ok(()),
+        };
+        // The acceptor may also serve HTTP/1.1 or allow absent ALPN. This
+        // listener only speaks h2 and must reject those outcomes before the
+        // preface, SETTINGS, or any request handler can reach the wire.
+        if tls.alpn_protocol() != Some(b"h2".as_slice()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "HTTP/2 TLS requires h2 ALPN negotiation",
+            ));
+        }
+        H2Transport::Tls(Box::new(tls))
+    } else {
+        H2Transport::Plain(socket)
+    };
+    #[cfg(not(feature = "tls"))]
+    let mut stream = H2Transport::Plain(socket);
+    let mut request_owners = H2RequestOwners::new(&task_cx).await?;
     #[cfg(feature = "http2-streaming")]
     let mut incoming = streaming.map(StreamingRequests::new);
     let result = async {
-        let task_cx = Cx::current()
-            .ok_or_else(|| io::Error::other("h2 connection task requires a runtime Cx"))?;
-
         let mut preface = [0u8; CLIENT_PREFACE.len()];
-        stream.read_exact(&mut preface).await?;
+        let preface_read = crate::time::timeout(
+            task_cx.now(),
+            transport_timeouts.preface,
+            stream.read_exact(&mut preface),
+        );
+        match race_force_close(&shutdown_signal, preface_read).await {
+            Some(Ok(result)) => result?,
+            Some(Err(_)) => {
+                task_cx.trace("h2_transport_preface_deadline_expired");
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "HTTP/2 client preface deadline expired",
+                ));
+            }
+            None => return Ok(()),
+        }
         if preface != *CLIENT_PREFACE {
             return Err(io::Error::other("invalid HTTP/2 client preface"));
         }
@@ -2777,22 +3257,44 @@ where
         // connection becomes fully quiescent and cleared as soon as activity
         // resumes (kept fixed in between so it is not pushed forward by wake-ups).
         let mut idle_at: Option<Time> = None;
+        let mut flow_control_progress = H2FlowControlProgress::new(transport_timeouts.flow_control);
 
         loop {
-            pump_writes_with_body_diagnostics(
+            flow_control_progress.retain_live(&conn);
+            let flow_timeout = pump_writes_with_body_diagnostics(
                 &mut conn,
                 &mut framed,
                 &pending_requests,
                 &dispatched_streams,
                 &mut produced_bodies,
                 &response_guards,
+                &shutdown_signal,
+                transport_timeouts.write_progress,
+                Some(&mut flow_control_progress),
             )
             .await?;
+            if let Some(stream_id) = flow_timeout {
+                reset_flow_control_stream(
+                    stream_id,
+                    &mut conn,
+                    &task_cx,
+                    &request_owners,
+                    &mut produced_bodies,
+                    &mut associated_pushes,
+                    #[cfg(feature = "http2-streaming")]
+                    &mut incoming,
+                );
+                // The interrupted pump has not certified a complete flush.
+                // Retain every response guard until a subsequent pump does.
+                continue;
+            }
             release_flushed_response_guards(&conn, &mut response_guards);
             #[cfg(feature = "http2-streaming")]
             if let Some(incoming) = &mut incoming {
-                let reset_queued = incoming.after_flush(&mut conn, &response_guards);
-                pending_stream_idle_deadlines.retain(|stream_id, _| incoming.is_active(*stream_id));
+                let reset_queued =
+                    incoming.after_flush(&mut conn, &response_guards, &produced_bodies);
+                pending_stream_idle_deadlines
+                    .retain(|stream_id, _| incoming.awaits_input(*stream_id));
                 if reset_queued {
                     continue;
                 }
@@ -2815,7 +3317,13 @@ where
             #[cfg(feature = "http2-streaming")]
             let can_close = can_close && incoming.as_ref().is_none_or(StreamingRequests::is_empty);
             if can_close {
-                std::future::poll_fn(|cx| framed.poll_close(cx)).await?;
+                bounded_h2_write(
+                    &mut framed,
+                    &shutdown_signal,
+                    transport_timeouts.write_progress,
+                    H2WriteOperation::Close,
+                )
+                .await?;
                 return Ok(());
             }
 
@@ -2823,6 +3331,12 @@ where
             let now = Cx::current()
                 .and_then(|cx| cx.timer_driver())
                 .map_or_else(crate::time::wall_now, |timer| timer.now());
+            let flow_control_at = flow_control_progress.next_deadline(
+                &conn,
+                &response_guards,
+                &produced_bodies,
+                now,
+            );
             // Arm the stage-2 finalize deadline once, when the stage-1 GOAWAY is
             // outstanding; keep it fixed across loop iterations so active traffic
             // cannot reset the window.
@@ -2895,10 +3409,31 @@ where
                 continuation_at,
                 stream_idle_at,
                 produced_failure_at,
+                flow_control_at,
+                &mut request_owners,
             )
             .await;
 
             match event {
+                DriverEvent::RequestRetired(stream_id, result) => {
+                    request_owners.remove_completed(stream_id);
+                    peer_reset_before_response.remove(&stream_id);
+                    // The funnel is polled before terminal handles, so a
+                    // successful response has already removed this marker.
+                    // A cancelled coordinator that publishes no response must
+                    // still retire the stream and its bookkeeping.
+                    if dispatched_streams.remove(&stream_id) {
+                        let code = if matches!(&result, Err(JoinError::Panicked(_))) {
+                            ErrorCode::InternalError
+                        } else {
+                            ErrorCode::Cancel
+                        };
+                        conn.reset_stream(stream_id, code);
+                    }
+                    if let Err(error) = result {
+                        task_cx.trace(&format!("h2_request_coordinator_terminal: {error:?}"));
+                    }
+                }
                 #[cfg(feature = "http2-streaming")]
                 DriverEvent::StreamingProgress => {}
                 DriverEvent::ForceClose => {
@@ -2929,16 +3464,25 @@ where
                         ErrorCode::NoError,
                         crate::bytes::Bytes::from_static(b"idle timeout"),
                     );
-                    pump_writes_with_body_diagnostics(
+                    let _ = pump_writes_with_body_diagnostics(
                         &mut conn,
                         &mut framed,
                         &pending_requests,
                         &dispatched_streams,
                         &mut produced_bodies,
                         &response_guards,
+                        &shutdown_signal,
+                        transport_timeouts.write_progress,
+                        None,
                     )
                     .await?;
-                    let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
+                    let _ = bounded_h2_write(
+                        &mut framed,
+                        &shutdown_signal,
+                        transport_timeouts.write_progress,
+                        H2WriteOperation::Close,
+                    )
+                    .await;
                     cancel_all_produced_bodies(
                         &mut produced_bodies,
                         "HTTP/2 connection idle timeout",
@@ -2955,16 +3499,25 @@ where
                         ErrorCode::ProtocolError,
                         crate::bytes::Bytes::from_static(b"CONTINUATION timeout"),
                     );
-                    pump_writes_with_body_diagnostics(
+                    let _ = pump_writes_with_body_diagnostics(
                         &mut conn,
                         &mut framed,
                         &pending_requests,
                         &dispatched_streams,
                         &mut produced_bodies,
                         &response_guards,
+                        &shutdown_signal,
+                        transport_timeouts.write_progress,
+                        None,
                     )
                     .await?;
-                    let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
+                    let _ = bounded_h2_write(
+                        &mut framed,
+                        &shutdown_signal,
+                        transport_timeouts.write_progress,
+                        H2WriteOperation::Close,
+                    )
+                    .await;
                     cancel_all_produced_bodies(&mut produced_bodies, "HTTP/2 CONTINUATION timeout");
                     return Ok(());
                 }
@@ -3027,6 +3580,11 @@ where
                         "HTTP/2 produced response exceeded failure drain grace",
                     );
                 }
+                DriverEvent::FlowControlTimeout(stream_id) => {
+                    reset_flow_control_stream(stream_id, &mut conn, &task_cx, &request_owners,
+                        &mut produced_bodies, &mut associated_pushes,
+                        #[cfg(feature = "http2-streaming")] &mut incoming);
+                }
                 DriverEvent::Frame(None) => {
                     // Peer closed the transport.
                     for stream_id in pending_requests.keys().copied() {
@@ -3058,16 +3616,25 @@ where
                 }
                 DriverEvent::Frame(Some(Err(decode_error))) => {
                     conn.goaway(decode_error.code, crate::bytes::Bytes::new());
-                    pump_writes_with_body_diagnostics(
+                    let _ = pump_writes_with_body_diagnostics(
                         &mut conn,
                         &mut framed,
                         &pending_requests,
                         &dispatched_streams,
                         &mut produced_bodies,
                         &response_guards,
+                        &shutdown_signal,
+                        transport_timeouts.write_progress,
+                        None,
                     )
                     .await?;
-                    let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
+                    let _ = bounded_h2_write(
+                        &mut framed,
+                        &shutdown_signal,
+                        transport_timeouts.write_progress,
+                        H2WriteOperation::Close,
+                    )
+                    .await;
                     cancel_all_produced_bodies(&mut produced_bodies, "HTTP/2 frame decode failed");
                     return Err(io::Error::other(decode_error));
                 }
@@ -3088,6 +3655,10 @@ where
                                 );
                             }
                             conn.reset_stream(stream_id, protocol_error.code);
+                            request_owners.cancel(
+                                stream_id,
+                                h2_request_cancel_reason(&task_cx, CancelKind::ParentCancelled),
+                            );
                             pending_requests.remove(&stream_id);
                             pending_stream_idle_deadlines.remove(&stream_id);
                             cancel_produced_body(
@@ -3098,16 +3669,25 @@ where
                             reset_associated_pushes(&mut conn, &mut associated_pushes, stream_id);
                         } else {
                             conn.goaway(protocol_error.code, crate::bytes::Bytes::new());
-                            pump_writes_with_body_diagnostics(
+                            let _ = pump_writes_with_body_diagnostics(
                                 &mut conn,
                                 &mut framed,
                                 &pending_requests,
                                 &dispatched_streams,
                                 &mut produced_bodies,
                                 &response_guards,
+                                &shutdown_signal,
+                                transport_timeouts.write_progress,
+                                None,
                             )
                             .await?;
-                            let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
+                            let _ = bounded_h2_write(
+                                &mut framed,
+                                &shutdown_signal,
+                                transport_timeouts.write_progress,
+                                H2WriteOperation::Close,
+                            )
+                            .await;
                             cancel_all_produced_bodies(
                                 &mut produced_bodies,
                                 "HTTP/2 connection protocol error",
@@ -3124,10 +3704,13 @@ where
                         if let Some(incoming) = &mut incoming {
                             if incoming.contains(stream_id) {
                                 incoming.trailers(stream_id, headers, end_stream, &mut conn);
-                                if let Some(timeout) = stream_idle_timeout {
-                                    pending_stream_idle_deadlines
-                                        .insert(stream_id, (time_getter)() + timeout);
-                                }
+                                refresh_live_request_idle(
+                                    &mut pending_stream_idle_deadlines,
+                                    incoming,
+                                    stream_id,
+                                    stream_idle_timeout,
+                                    time_getter,
+                                );
                             } else if incoming.admit(
                                 &mut conn,
                                 stream_id,
@@ -3137,15 +3720,19 @@ where
                                 &resp_tx,
                                 &shutdown_signal,
                                 &in_flight_requests,
-                                &runtime,
+                                &_runtime,
                                 &mut response_guards,
+                                request_limits,
                             ) {
                                 dispatched_streams.insert(stream_id);
                                 requests_dispatched = requests_dispatched.saturating_add(1);
-                                if let Some(timeout) = stream_idle_timeout {
-                                    pending_stream_idle_deadlines
-                                        .insert(stream_id, (time_getter)() + timeout);
-                                }
+                                refresh_live_request_idle(
+                                    &mut pending_stream_idle_deadlines,
+                                    incoming,
+                                    stream_id,
+                                    stream_idle_timeout,
+                                    time_getter,
+                                );
                             }
                             if !conn.goaway_sent()
                                 && max_requests_per_connection
@@ -3165,7 +3752,9 @@ where
                             // END_STREAM). The buffered request is now complete;
                             // dispatch it with the trailer block kept separate on
                             // the shared Request type for protocol adapters.
-                            if dispatch_h2_request(
+                            if request_owners.len() >= request_limits.connection {
+                                conn.reset_stream(stream_id, ErrorCode::RefusedStream);
+                            } else if let Some(task) = dispatch_h2_request(
                                 &mut conn,
                                 stream_id,
                                 req_headers,
@@ -3176,19 +3765,23 @@ where
                                 &resp_tx,
                                 &shutdown_signal,
                                 &in_flight_requests,
-                                &runtime,
+                                request_owners.cx(),
                                 &host_policy,
                                 request_timeout,
                                 request_timeout_header_cap,
                                 request_drain_grace,
                                 stream_idle_timeout,
                                 owned_request,
+                                request_limits.global,
                             ) {
+                                request_owners.insert(stream_id, task);
                                 dispatched_streams.insert(stream_id);
                                 requests_dispatched = requests_dispatched.saturating_add(1);
                             }
                         } else if end_stream {
-                            if dispatch_h2_request(
+                            if request_owners.len() >= request_limits.connection {
+                                conn.reset_stream(stream_id, ErrorCode::RefusedStream);
+                            } else if let Some(task) = dispatch_h2_request(
                                 &mut conn,
                                 stream_id,
                                 headers,
@@ -3199,14 +3792,16 @@ where
                                 &resp_tx,
                                 &shutdown_signal,
                                 &in_flight_requests,
-                                &runtime,
+                                request_owners.cx(),
                                 &host_policy,
                                 request_timeout,
                                 request_timeout_header_cap,
                                 request_drain_grace,
                                 stream_idle_timeout,
                                 owned_request,
+                                request_limits.global,
                             ) {
+                                request_owners.insert(stream_id, task);
                                 dispatched_streams.insert(stream_id);
                                 requests_dispatched = requests_dispatched.saturating_add(1);
                             }
@@ -3229,10 +3824,13 @@ where
                         #[cfg(feature = "http2-streaming")]
                         if let Some(incoming) = &mut incoming {
                             incoming.data(stream_id, data, end_stream, &mut conn);
-                            if let Some(timeout) = stream_idle_timeout {
-                                pending_stream_idle_deadlines
-                                    .insert(stream_id, (time_getter)() + timeout);
-                            }
+                            refresh_live_request_idle(
+                                &mut pending_stream_idle_deadlines,
+                                incoming,
+                                stream_id,
+                                stream_idle_timeout,
+                                time_getter,
+                            );
                             continue;
                         }
                         // Bytes buffered for every partially received request on
@@ -3269,7 +3867,9 @@ where
                                         .remove(&stream_id)
                                         .expect("pending request present");
                                     pending_stream_idle_deadlines.remove(&stream_id);
-                                    if dispatch_h2_request(
+                                    if request_owners.len() >= request_limits.connection {
+                                        conn.reset_stream(stream_id, ErrorCode::RefusedStream);
+                                    } else if let Some(task) = dispatch_h2_request(
                                         &mut conn,
                                         stream_id,
                                         headers,
@@ -3280,14 +3880,16 @@ where
                                         &resp_tx,
                                         &shutdown_signal,
                                         &in_flight_requests,
-                                        &runtime,
+                                        request_owners.cx(),
                                         &host_policy,
                                         request_timeout,
                                         request_timeout_header_cap,
                                         request_drain_grace,
                                         stream_idle_timeout,
                                         owned_request,
+                                        request_limits.global,
                                     ) {
+                                        request_owners.insert(stream_id, task);
                                         dispatched_streams.insert(stream_id);
                                         requests_dispatched = requests_dispatched.saturating_add(1);
                                     }
@@ -3296,6 +3898,10 @@ where
                         }
                     }
                     Ok(Some(ReceivedFrame::Reset { stream_id, .. })) => {
+                        request_owners.cancel(
+                            stream_id,
+                            h2_request_cancel_reason(&task_cx, CancelKind::ParentCancelled),
+                        );
                         #[cfg(feature = "http2-streaming")]
                         if let Some(incoming) = &mut incoming {
                             incoming.fail(
@@ -3472,7 +4078,7 @@ where
                         .await;
                         if accepted && !peer_reset {
                             if let Some(response) = response {
-                                let outcomes = queue_h2_response(
+                                let outcomes = queue_h2_response_with_shared_guard(
                                     &mut conn,
                                     stream_id,
                                     response,
@@ -3567,6 +4173,29 @@ where
                         debug_assert!(previous.is_none());
                     }
                     FunnelItem::ProducedDone { stream_id, outcome } => {
+                        #[cfg(feature = "http2-streaming")]
+                        if let Some(incoming) = &mut incoming
+                            && incoming.contains(stream_id)
+                        {
+                            // The live-body coordinator publishes this only
+                            // after its admitted child, descendants, and
+                            // finalizers have actually closed. Retain ingress
+                            // reservation until that terminal publication.
+                            dispatched_streams.remove(&stream_id);
+                            pending_stream_idle_deadlines.remove(&stream_id);
+                            let peer_reset = peer_reset_before_response.remove(&stream_id);
+                            let accepted = std::future::poll_fn(|poll_cx| {
+                                Poll::Ready(incoming.complete(stream_id, &mut conn, poll_cx))
+                            })
+                            .await;
+                            if !accepted || peer_reset {
+                                cancel_produced_body(
+                                    &mut produced_bodies,
+                                    stream_id,
+                                    "HTTP/2 live request retired before produced completion",
+                                );
+                            }
+                        }
                         if let Some(state) = produced_bodies.get_mut(&stream_id) {
                             if let Some((code, cause)) = h2_producer_outcome_diagnostic(outcome) {
                                 record_h2_body_diagnostic_code(stream_id, code, cause);
@@ -3640,6 +4269,17 @@ where
     // The frame driver owns both response-funnel endpoints. They are dropped
     // with the completed async block before close joins request coordinators,
     // waking even a coordinator blocked on a previously full response funnel.
+    let closing_reason = h2_request_cancel_reason(
+        &task_cx,
+        if shutdown_signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8 {
+            CancelKind::Shutdown
+        } else {
+            CancelKind::ParentCancelled
+        },
+    );
+    // Closing the frame-driver block above dropped both funnel endpoints.
+    // Cancel every coordinator before awaiting streaming or buffered cleanup.
+    request_owners.cancel_all(closing_reason.clone());
     #[cfg(feature = "http2-streaming")]
     if let Some(incoming) = &mut incoming {
         let error = if shutdown_signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8 {
@@ -3651,7 +4291,8 @@ where
         };
         incoming.close(error).await;
     }
-    result
+    let closed = request_owners.close(closing_reason).await;
+    result.and(closed)
 }
 
 /// How many full-size request bodies one connection may hold in partial
@@ -3907,12 +4548,16 @@ fn h2_shutdown_signal_for_time_getter(time_getter: fn() -> Time) -> ShutdownSign
 /// [`Http1Listener`]: crate::http::h1::listener::Http1Listener
 pub struct Http2Listener<F> {
     tcp_listener: TcpListener,
+    #[cfg(feature = "tls")]
+    tls_acceptor: Option<TlsAcceptor>,
     handler: Arc<F>,
     config: Http2ListenerConfig,
     shutdown_signal: ShutdownSignal,
     connection_manager: ConnectionManager,
     stats: Arc<Http2ListenerStats>,
     in_flight_requests: Arc<AtomicUsize>,
+    transport_timeouts: H2TransportTimeouts,
+    request_limits: H2RequestLimits,
     #[cfg(feature = "http2-streaming")]
     streaming_config: Option<Http2StreamingListenerConfig>,
 }
@@ -4038,11 +4683,85 @@ impl<F> Http2Listener<F> {
             config,
             handler: Arc::new(move |request| {
                 let handler = Arc::clone(&handler);
-                Box::pin(async move { handler(request).await.into_h2_response() })
+                Box::pin(async move {
+                    H2DispatchResponse::Buffered(handler(request).await.into_h2_response())
+                })
             }),
         };
         self.run_mapped(runtime, true, Some(dispatch), |_, _| async {
             // The streaming driver consumes every request HEADERS event.
+            H2DispatchResponse::Buffered(invalid_h2_response_fallback())
+        })
+        .await
+    }
+
+    /// Bind a native HTTP/2 listener with live request bodies and deferred
+    /// response producers. Request DATA and response DATA may progress
+    /// concurrently, with independent bounded queues and HTTP/2 flow control.
+    #[cfg(feature = "http2-streaming")]
+    pub async fn bind_streaming_produced_with_config<A, Fut>(
+        addr: A,
+        handler: F,
+        config: Http2StreamingListenerConfig,
+    ) -> io::Result<Self>
+    where
+        A: ToSocketAddrs + Send + 'static,
+        F: Fn(crate::http::h1::stream::StreamingServerRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Http2ProducedResponse> + Send + 'static,
+    {
+        config.validate()?;
+        let tcp_listener = TcpListener::bind(addr).await?;
+        Ok(Self::from_listener_streaming_produced(tcp_listener, handler, config))
+    }
+
+    /// Create a live-input, produced-response listener from an existing TCP
+    /// listener. Configuration is checked by [`Self::run_streaming_produced`].
+    #[must_use]
+    #[cfg(feature = "http2-streaming")]
+    pub fn from_listener_streaming_produced<Fut>(
+        tcp_listener: TcpListener,
+        handler: F,
+        config: Http2StreamingListenerConfig,
+    ) -> Self
+    where
+        F: Fn(crate::http::h1::stream::StreamingServerRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Http2ProducedResponse> + Send + 'static,
+    {
+        let mut listener = Self::from_parts(tcp_listener, handler, config.listener.clone());
+        listener.streaming_config = Some(config);
+        listener
+    }
+
+    /// Run live request ingress and produced response egress in the same
+    /// admitted request child region. The producer may retain and consume the
+    /// incoming body after the handler returns. Cancellation, peer reset, and
+    /// output rejection cancel that owner; terminal response frames wait for
+    /// the producer and all of its descendants and finalizers to retire.
+    #[cfg(feature = "http2-streaming")]
+    pub async fn run_streaming_produced<Fut>(
+        self,
+        runtime: &RuntimeHandle,
+    ) -> io::Result<ShutdownStats>
+    where
+        F: Fn(crate::http::h1::stream::StreamingServerRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Http2ProducedResponse> + Send + 'static,
+    {
+        let config = self.streaming_config.clone().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "run_streaming_produced requires a streaming listener constructor",
+            )
+        })?;
+        config.validate()?;
+        let handler = Arc::clone(&self.handler);
+        let dispatch = StreamingDispatch {
+            config,
+            handler: Arc::new(move |request| {
+                let handler = Arc::clone(&handler);
+                Box::pin(async move { handler(request).await.into_driver_response() })
+            }),
+        };
+        self.run_mapped(runtime, true, Some(dispatch), |_, _| async {
             H2DispatchResponse::Buffered(invalid_h2_response_fallback())
         })
         .await
@@ -4097,12 +4816,16 @@ impl<F> Http2Listener<F> {
         let stats = Arc::new(Http2ListenerStats::new(config.time_getter));
         Self {
             tcp_listener,
+            #[cfg(feature = "tls")]
+            tls_acceptor: None,
             handler: Arc::new(handler),
             config,
             shutdown_signal,
             connection_manager,
             stats,
             in_flight_requests: Arc::new(AtomicUsize::new(0)),
+            transport_timeouts: H2TransportTimeouts::default(),
+            request_limits: H2RequestLimits::default(),
             #[cfg(feature = "http2-streaming")]
             streaming_config: None,
         }
@@ -4112,6 +4835,76 @@ impl<F> Http2Listener<F> {
     #[must_use]
     pub fn shutdown_signal(&self) -> ShutdownSignal {
         self.shutdown_signal.clone()
+    }
+
+    /// Serve HTTP/2 over TLS using the supplied certificate and authentication
+    /// policy. The acceptor must advertise `h2`; connections that negotiate
+    /// another protocol or omit ALPN are rejected before HTTP processing.
+    ///
+    /// TLS applies to buffered, produced-response, and streaming listeners.
+    /// Handshakes consume connection capacity and obey force-close as well as
+    /// the listener's handshake deadline. Without this builder, connections
+    /// continue to use the cleartext HTTP/2 prior-knowledge preface.
+    #[cfg(feature = "tls")]
+    #[must_use]
+    pub fn with_tls(mut self, acceptor: TlsAcceptor) -> Self {
+        self.tls_acceptor = Some(acceptor);
+        self
+    }
+
+    /// Bounds a TLS handshake independently of the HTTP/2 preface deadline.
+    /// The default is ten seconds; partial handshake progress does not extend
+    /// it. An earlier timeout configured on the acceptor also remains active.
+    #[cfg(feature = "tls")]
+    #[must_use]
+    pub fn tls_handshake_timeout(mut self, timeout: Duration) -> Self {
+        self.transport_timeouts.tls_handshake = timeout;
+        self
+    }
+
+    /// Bounds receipt of the complete 24-byte client preface. The default is
+    /// ten seconds; partial input never extends the absolute deadline.
+    #[must_use]
+    pub fn preface_timeout(mut self, timeout: Duration) -> Self {
+        self.transport_timeouts.preface = timeout;
+        self
+    }
+
+    /// Bounds a transport write, flush, or shutdown that makes no progress.
+    /// The default is ten seconds. Only bytes accepted by the socket reset
+    /// this deadline; force-close interrupts every pending transport wait.
+    #[must_use]
+    pub fn write_progress_timeout(mut self, timeout: Duration) -> Self {
+        self.transport_timeouts.write_progress = timeout;
+        self
+    }
+
+    /// Bounds a response stalled by exhausted stream or connection DATA credit.
+    /// The default is ten seconds. Only flushed DATA for the affected stream
+    /// renews its deadline; PINGs, SETTINGS, and sibling traffic do not. Expiry
+    /// cancels that stream and its producer while retaining owned cleanup.
+    #[must_use]
+    pub fn flow_control_progress_timeout(mut self, timeout: Duration) -> Self {
+        self.transport_timeouts.flow_control = timeout;
+        self
+    }
+
+    /// Limits listener-wide requests, including cancellation cleanup and
+    /// responses waiting to flush. Excess requests receive REFUSED_STREAM.
+    /// The default is 4,096; the limit is shared by all connections and modes.
+    #[must_use]
+    pub fn max_in_flight_requests(mut self, max: NonZeroUsize) -> Self {
+        self.request_limits.global = max.get();
+        self
+    }
+
+    /// Limits live request coordinators on each connection. Resetting a stream
+    /// does not free its slot until its coordinator actually joins. The default
+    /// is 256; streaming requests also retain their byte-reservation limit.
+    #[must_use]
+    pub fn max_connection_in_flight_requests(mut self, max: NonZeroUsize) -> Self {
+        self.request_limits.connection = max.get();
+        self
     }
 
     /// Begins graceful shutdown using the listener's configured drain timeout.
@@ -4259,6 +5052,10 @@ impl<F> Http2Listener<F> {
             let idle_timeout = self.config.idle_timeout;
             let stream_idle_timeout = self.config.stream_idle_timeout;
             let conn_time_getter = self.config.time_getter;
+            let transport_timeouts = self.transport_timeouts;
+            let request_limits = self.request_limits;
+            #[cfg(feature = "tls")]
+            let tls_acceptor = self.tls_acceptor.clone();
             #[cfg(feature = "http2-streaming")]
             let streaming = streaming.clone();
             // Check the connection's Send boundary once before the runtime's
@@ -4267,6 +5064,8 @@ impl<F> Http2Listener<F> {
                 let peer_addr = Some(addr);
                 if let Err(err) = serve_h2_connection(
                     stream,
+                    #[cfg(feature = "tls")]
+                    tls_acceptor,
                     peer_addr,
                     handler,
                     settings,
@@ -4284,6 +5083,8 @@ impl<F> Http2Listener<F> {
                     stream_idle_timeout,
                     conn_time_getter,
                     owned_request,
+                    transport_timeouts,
+                    request_limits,
                     #[cfg(feature = "http2-streaming")]
                     streaming,
                 )
@@ -4464,6 +5265,7 @@ impl<F: Future> Future for CatchUnwind<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http::body::Body as _;
 
     #[test]
     fn accept_resource_exhaustion_retries_out_of_memory() {
@@ -5376,7 +6178,6 @@ mod tests {
         let runtime = crate::runtime::RuntimeBuilder::current_thread()
             .build()
             .expect("build current-thread runtime");
-        let handle = runtime.handle();
 
         runtime.block_on(async move {
             let cx = Cx::current().expect("runtime installs Cx for block_on");
@@ -5393,7 +6194,7 @@ mod tests {
                 })
             });
 
-            dispatch_h2_request(
+            let _coordinator = dispatch_h2_request(
                 &mut conn,
                 1,
                 request_block(&[]),
@@ -5404,14 +6205,15 @@ mod tests {
                 &resp_tx,
                 &shutdown_signal,
                 &in_flight,
-                &handle,
+                &cx,
                 &HostPolicy::allow_list(vec!["example.com".to_owned()]),
                 None,
                 None,
                 Duration::from_millis(500),
                 None,
                 false,
-            );
+                usize::MAX,
+            ).expect("dispatch coordinator");
 
             let start = resp_rx
                 .recv(&cx)
@@ -5441,7 +6243,6 @@ mod tests {
         let runtime = crate::runtime::RuntimeBuilder::current_thread()
             .build()
             .expect("build current-thread runtime");
-        let handle = runtime.handle();
 
         runtime.block_on(async move {
             let cx = Cx::current().expect("runtime installs Cx for block_on");
@@ -5473,7 +6274,7 @@ mod tests {
                 Header::new(":authority", "example.com"),
             ];
 
-            dispatch_h2_request(
+            let _coordinator = dispatch_h2_request(
                 &mut conn,
                 1,
                 headers,
@@ -5484,14 +6285,15 @@ mod tests {
                 &resp_tx,
                 &shutdown_signal,
                 &in_flight,
-                &handle,
+                &cx,
                 &HostPolicy::allow_list(vec!["example.com".to_owned()]),
                 None,
                 None,
                 Duration::from_millis(500),
                 None,
                 false,
-            );
+                usize::MAX,
+            ).expect("dispatch coordinator");
 
             let item = resp_rx
                 .recv(&cx)
@@ -6157,7 +6959,6 @@ mod tests {
         let runtime = crate::runtime::RuntimeBuilder::current_thread()
             .build()
             .expect("build current-thread runtime");
-        let handle = runtime.handle();
 
         runtime.block_on(async move {
             let cx = Cx::current().expect("runtime installs Cx for block_on");
@@ -6201,7 +7002,7 @@ mod tests {
             let in_flight = Arc::new(AtomicUsize::new(0));
             let handler = Arc::new(panicking_h2_handler);
 
-            dispatch_h2_request(
+            let _coordinator = dispatch_h2_request(
                 &mut conn,
                 stream_id,
                 headers,
@@ -6212,14 +7013,15 @@ mod tests {
                 &resp_tx,
                 &shutdown_signal,
                 &in_flight,
-                &handle,
+                &cx,
                 &HostPolicy::allow_list(vec!["panic.example".to_owned()]),
                 None,
                 None,
                 Duration::from_millis(500),
                 None,
                 true,
-            );
+                usize::MAX,
+            ).expect("dispatch coordinator");
 
             let item = resp_rx
                 .recv(&cx)
@@ -6279,7 +7081,6 @@ mod tests {
         let runtime = crate::runtime::RuntimeBuilder::current_thread()
             .build()
             .expect("build current-thread runtime");
-        let handle = runtime.handle();
 
         runtime.block_on(async move {
             let cx = Cx::current().expect("runtime installs Cx for block_on");
@@ -6302,7 +7103,7 @@ mod tests {
 
             // request_block carries `:authority example.com:8443` -> host
             // `example.com`, which is NOT on this allow-list.
-            dispatch_h2_request(
+            let _coordinator = dispatch_h2_request(
                 &mut conn,
                 1,
                 request_block(&[]),
@@ -6313,14 +7114,15 @@ mod tests {
                 &resp_tx,
                 &shutdown_signal,
                 &in_flight,
-                &handle,
+                &cx,
                 &HostPolicy::allow_list(vec!["allowed.example".to_owned()]),
                 None,
                 None,
                 Duration::from_millis(500),
                 None,
                 true,
-            );
+                usize::MAX,
+            ).expect("dispatch coordinator");
 
             let item = resp_rx
                 .recv(&cx)
@@ -6357,7 +7159,6 @@ mod tests {
         let runtime = crate::runtime::RuntimeBuilder::current_thread()
             .build()
             .expect("build current-thread runtime");
-        let handle = runtime.handle();
 
         runtime.block_on(async move {
             let cx = Cx::current().expect("runtime installs Cx for block_on");
@@ -6378,7 +7179,7 @@ mod tests {
                 }
             });
 
-            dispatch_h2_request(
+            let _coordinator = dispatch_h2_request(
                 &mut conn,
                 1,
                 request_block(&[]),
@@ -6389,14 +7190,15 @@ mod tests {
                 &resp_tx,
                 &shutdown_signal,
                 &in_flight,
-                &handle,
+                &cx,
                 &HostPolicy::allow_list(vec!["example.com".to_owned()]),
                 None,
                 None,
                 Duration::from_millis(500),
                 None,
                 true,
-            );
+                usize::MAX,
+            ).expect("dispatch coordinator");
 
             let item = resp_rx
                 .recv(&cx)
@@ -6426,7 +7228,6 @@ mod tests {
         let runtime = crate::runtime::RuntimeBuilder::current_thread()
             .build()
             .expect("build current-thread runtime");
-        let handle = runtime.handle();
 
         runtime.block_on(async move {
             let cx = Cx::current().expect("runtime installs Cx for block_on");
@@ -6436,7 +7237,7 @@ mod tests {
             let in_flight = Arc::new(AtomicUsize::new(0));
             let handler = Arc::new(|_req: Request| std::future::pending::<H2DispatchResponse>());
 
-            dispatch_h2_request(
+            let _coordinator = dispatch_h2_request(
                 &mut conn,
                 1,
                 request_block(&[]),
@@ -6447,14 +7248,15 @@ mod tests {
                 &resp_tx,
                 &shutdown_signal,
                 &in_flight,
-                &handle,
+                &cx,
                 &HostPolicy::allow_list(vec!["example.com".to_owned()]),
                 None,
                 None,
                 Duration::from_millis(500),
                 Some(Duration::ZERO),
                 true,
-            );
+                usize::MAX,
+            ).expect("dispatch coordinator");
 
             let item = resp_rx
                 .recv(&cx)

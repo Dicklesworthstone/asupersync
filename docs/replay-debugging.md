@@ -67,9 +67,11 @@ provenance claim.
 ## Production schedule projection (what a production trace can re-drive)
 
 `Runtime::trace_snapshot()` exports the production ring buffer in the same
-`TraceEvent` schema the lab records. Its task ids are arena slots with
-generations that a fresh lab run never reproduces, and it records outcomes
-(I/O results, timers firing) rather than the decisions that produced them.
+`TraceEvent` schema the lab records. Enable
+`RuntimeBuilder::capture_schedules(true)` before building to include actual
+native dispatch, poll-entry, wake, yield, and cancellation-ack observations.
+Capture is off by default. Its task ids are arena slots with generations that
+a fresh lab run need not reproduce.
 `asupersync::trace::ProductionSchedule` reduces such a trace to what the lab
 can re-drive:
 
@@ -83,27 +85,56 @@ can re-drive:
 
 `at_tick` is the production sequence number, monotone within the trace.
 
-Strictness: a task that acts before its `Spawn` means the ring buffer
+For a replayable native capture, prefer `Runtime::schedule_capture_snapshot()`
+and its checked `production_schedule()` method. The immutable snapshot carries
+the atomic insertion count, retained event count, worker identity and per-worker
+sequence for scheduler observations. Wake delivery is unattributed because a
+Waker can be called from any thread. The checked projection rejects ring
+eviction, absent poll/context observations, invalid task lifecycles and tasks
+that have not yet completed. The trace-storage profile bounds both events and
+context metadata. A live snapshot can be inspected even when it is incomplete.
+A snapshot in which every recorded task completed does not attest runtime
+quiescence or the absence of pending admissions: another task may not have
+entered the recorded task set yet. Establish that boundary in the source
+workload before treating the capture as its complete execution.
+
+Raw projection: a task that acts before its `Spawn` means the ring buffer
 truncated the trace (or it was filtered). `ProductionSchedule::from_runtime_trace`
 refuses with `ProjectionError::MissingSpawn { task, seq, kind }` rather than
 replaying a partial history; `from_runtime_trace_with(ProjectionOptions {
 allow_orphans: true })` admits such tasks at first sight and lists them in
 `summary().orphans`, which is the right choice for a long-running service
-whose early spawns predate the ring window. A duplicate `Spawn` for one id and
-a trace with no schedule events are also errors.
+whose early spawns predate the ring window. A duplicate `Spawn` for one id is
+an error. A spawn-only raw projection can have zero steps; it is not sufficient
+to replay and the checked capture API rejects it. Sequence gaps alone do not
+prove loss because the runtime may reserve and abandon an event sequence.
 
 ```rust
-let events = runtime.trace_snapshot();
-let schedule = asupersync::trace::ProductionSchedule::from_runtime_trace(&events)?;
+let runtime = asupersync::runtime::RuntimeBuilder::new()
+    .capture_schedules(true)
+    .build()?;
+// Run and await the workload. Observe task retirement before taking a complete snapshot.
+let capture = runtime.schedule_capture_snapshot().expect("capture enabled");
+let schedule = capture.production_schedule()?;
 for (spawn_ordinal, tick) in schedule.steps() {
     // the recorded interleaving: which task (by birth order) was polled, when
 }
 let replay_trace = schedule.into_trace(); // feeds trace::replayer::TraceReplayer
 ```
 
-Not yet: driving a `LabRuntime` from this projection (schedule re-execution)
-is the next step (bead `asupersync-bi2462.7`); until it lands, "production
-debugging" means offline analysis of the projected trace, not re-execution.
+Reconstruct the task workload and external inputs in a fresh `LabRuntime`, then
+call `run_production_schedule_strict` with explicit
+`StrictProductionReplayLimits`. Its typed receipt requires exact retained
+choice consumption, matching spawn counts, quiescence, and passing lab checks.
+The default `replay_production_schedule` also stops before unrecorded work;
+`replay_production_schedule_prefix` explicitly enables exploratory continuation
+and reports `Prefix` through `production_replay_boundary`.
+
+This captures poll-entry order, including polls that overlap on different
+workers. It does not replay instruction-level parallelism, I/O values, entropy,
+or arbitrary user effects. Supply those inputs independently and compare the
+workload's terminal values. The bounded capture detects ring eviction; an
+unvalidated raw slice carries no equivalent completeness evidence.
 
 ## Golden Replay-Delta Verification
 

@@ -1,5 +1,5 @@
 /**
- * Public Browser SDK reliable-stream integration regressions. Replay (Node 24+):
+ * Public Browser SDK WebTransport integration regressions. Replay (Node 24+):
  * node --experimental-vm-modules --test --test-concurrency=1 \
  *   scripts/test_browser_sdk_webtransport_streams.mjs
  *
@@ -117,7 +117,10 @@ async function fixture(t, options = {}) {
           cancel: (reason) => { this.events.push(["datagram-cancel", reason]); },
         }),
         writable: new WritableStream({
-          write: (value) => { this.events.push(["datagram-write", Array.from(value)]); },
+          write: (value) => {
+            this.events.push(["datagram-write", Array.from(value)]);
+            return options.datagramWrite?.(value);
+          },
           abort: (reason) => { this.events.push(["datagram-abort", reason]); },
         }),
       };
@@ -201,7 +204,10 @@ async function fixture(t, options = {}) {
   const coreModule = new SourceTextModule(coreSource, { context, identifier: corePath });
   const managerModule = new SourceTextModule(managerSource, { context, identifier: managerPath });
   const fetchModule = new SourceTextModule(fetchJavaScript, { context, identifier: fetchPath });
-  const sdkModule = new SourceTextModule(sdkJavaScript, { context, identifier: sdkPath });
+  const sdkModule = new SourceTextModule(
+    `${sdkJavaScript}\nexport { INFLIGHT_WEBTRANSPORTS as sdkHostSessions };`,
+    { context, identifier: sdkPath },
+  );
   await sdkModule.link((specifier) => {
     if (specifier === "@asupersync/browser-core") return coreModule;
     if (specifier === "./fetch.js") return fetchModule;
@@ -221,7 +227,7 @@ async function fixture(t, options = {}) {
   });
   function open(owner = scope) {
     const session = unwrap(owner.openWebTransport("https://transport.example.test/session"));
-    return { session, host: hosts.at(-1) };
+    return { session, host: hosts.at(-1), state: [...sdk.sdkHostSessions.values()].at(-1) };
   }
   return { sdk, runtime, scope, open, hosts, calls };
 }
@@ -609,3 +615,237 @@ test("SDK-WT-DATAGRAM-EOF: datagram terminal delivery also drains owned reliable
   assert.equal(rejected.outcome, "err");
   assert.equal(rejected.failure.code, "invalid_handle");
 });
+
+const MAX_DATAGRAM_BYTES = 65_536;
+const MAX_PENDING_DATAGRAMS = 256;
+const MAX_PENDING_DATAGRAM_BYTES = 1_048_576;
+
+async function promptOutcome(promise) {
+  return Promise.race([promise, turn().then(() => ({ outcome: "still_pending" }))]);
+}
+
+function assertDatagramCapacity(outcome) {
+  assert.equal(outcome.outcome, "err", "excess sends must be refused without awaiting the stalled host");
+  assert.equal(outcome.failure.code, "compatibility_rejected");
+  assert.equal(outcome.failure.recoverability, "transient");
+  assert.match(outcome.failure.message, /send queue capacity exhausted/);
+}
+
+function assertDatagramsReleased(state) {
+  assert.equal(state.pendingDatagramCount, 0);
+  assert.equal(state.pendingDatagramBytes, 0);
+  assert.equal(state.datagramWaiters.size, 0, "completed sends cannot accumulate cancellation listeners");
+}
+
+for (const limit of ["count", "bytes"]) {
+  test(`SDK-WT-DATAGRAM-PREREADY-${limit}: bound admission before readiness and cancel every waiting send`, { timeout: 5000 }, async (t) => {
+    const { scope, open, calls } = await fixture(t, { pendingHandshake: true });
+    const { session, host, state } = open();
+    const payload = limit === "count" ? new Uint8Array() : new Uint8Array(MAX_DATAGRAM_BYTES);
+    const count = limit === "count" ? MAX_PENDING_DATAGRAMS : MAX_PENDING_DATAGRAM_BYTES / MAX_DATAGRAM_BYTES;
+    const pending = Array.from({ length: count }, () => session.sendDatagram(payload));
+    assertDatagramCapacity(await promptOutcome(session.sendDatagram(limit === "count" ? [] : [1])));
+    assert.equal(state.pendingDatagramCount, count);
+    assert.equal(state.pendingDatagramBytes, count * payload.byteLength);
+    assert.equal(closeCount(host), 0, "capacity refusal does not terminate accepted work");
+    unwrap(scope.close());
+    for (const result of await Promise.all(pending)) {
+      const cancellation = cancelled(result);
+      assert.equal(cancellation.kind, "webtransport_close");
+      assert.equal(cancellation.message, "scope_close");
+    }
+    assertDatagramsReleased(state);
+    host.handshake.resolve();
+    await turn();
+    assert.equal(host.events.some(([kind]) => kind === "datagram-write"), false);
+    assert.equal(calls.join.length, 0, "scope closure owns retirement, not late send continuations");
+  });
+}
+
+test("SDK-WT-DATAGRAM-INFLIGHT: parked and queued sends share byte capacity, then permit retry", { timeout: 5000 }, async (t) => {
+  const parked = deferred();
+  let writes = 0;
+  const { open } = await fixture(t, { datagramWrite: () => ++writes === 1 ? parked.promise : undefined });
+  const { session, host, state } = open();
+  unwrap(await session.ready());
+  const pending = [session.sendDatagram(new Uint8Array(MAX_DATAGRAM_BYTES).fill(0))];
+  await turn();
+  assert.equal(writes, 1, "the host sink is parked before filling the remaining budget");
+  const count = MAX_PENDING_DATAGRAM_BYTES / MAX_DATAGRAM_BYTES;
+  for (let i = 1; i < count; i += 1) pending.push(session.sendDatagram(new Uint8Array(MAX_DATAGRAM_BYTES).fill(i)));
+  assertDatagramCapacity(await promptOutcome(session.sendDatagram([99])));
+  assert.equal(state.pendingDatagramCount, count);
+  assert.equal(state.pendingDatagramBytes, MAX_PENDING_DATAGRAM_BYTES);
+  parked.resolve();
+  for (const outcome of await Promise.all(pending)) unwrap(outcome);
+  assertDatagramsReleased(state);
+  unwrap(await session.sendDatagram([99]));
+  assertDatagramsReleased(state);
+  assert.deepEqual(host.events.filter(([kind]) => kind === "datagram-write").map(([, value]) => value[0]),
+    [...Array.from({ length: count }, (_, i) => i), 99]);
+});
+
+test("SDK-WT-DATAGRAM-SNAPSHOT: admission copies a bounded view before any readiness await", { timeout: 5000 }, async (t) => {
+  const { open } = await fixture(t, { pendingHandshake: true });
+  const { session, host, state } = open();
+  const backing = new Uint8Array(MAX_PENDING_DATAGRAM_BYTES * 2);
+  const view = backing.subarray(10, 13);
+  view.set([2, 3, 5]);
+  const sending = session.sendDatagram(view);
+  view.fill(99);
+  host.handshake.resolve();
+  unwrap(await sending);
+  assert.deepEqual(host.events.filter(([kind]) => kind === "datagram-write"), [["datagram-write", [2, 3, 5]]]);
+  assertDatagramsReleased(state);
+});
+
+test("SDK-WT-DATAGRAM-PREFLIGHT: oversize and invalid bytes release admission without invoking input iterators", { timeout: 5000 }, async (t) => {
+  const { open } = await fixture(t, { pendingHandshake: true });
+  const { session, host, state } = open();
+  let reads = 0;
+  const oversized = new Array(MAX_DATAGRAM_BYTES + 1);
+  Object.defineProperty(oversized, 0, { get() { reads += 1; return 1; } });
+  for (const input of [oversized, new Uint8Array(MAX_DATAGRAM_BYTES + 1),
+    new ArrayBuffer(MAX_DATAGRAM_BYTES + 1), new DataView(new ArrayBuffer(MAX_DATAGRAM_BYTES + 1)),
+    [256], [-1], [1.5], new Array(1)]) {
+    const outcome = await promptOutcome(session.sendDatagram(input));
+    assert.equal(outcome.outcome, "err");
+    assert.equal(outcome.failure.recoverability, "permanent");
+    assertDatagramsReleased(state);
+  }
+  assert.equal(reads, 0);
+  const input = [7, 8];
+  input[Symbol.iterator] = () => { throw new Error("an arbitrary iterator is not byte input"); };
+  const sending = session.sendDatagram(input);
+  host.handshake.resolve();
+  unwrap(await sending);
+  assert.deepEqual(host.events.filter(([kind]) => kind === "datagram-write"), [["datagram-write", [7, 8]]]);
+  assertDatagramsReleased(state);
+});
+
+test("SDK-WT-DATAGRAM-REENTRANT: reserve before input getters and refuse data after an owner closes", { timeout: 5000 }, async (t) => {
+  const { scope, open } = await fixture(t, { pendingHandshake: true });
+  const { session, state } = open();
+  const pending = Array.from({ length: MAX_PENDING_DATAGRAMS - 1 }, () => session.sendDatagram([]));
+  let nested;
+  const input = [1];
+  Object.defineProperty(input, 0, { get() { nested = session.sendDatagram([]); return 1; } });
+  pending.push(session.sendDatagram(input));
+  assert.notEqual(nested, undefined, "input snapshot occurs before an asynchronous handoff");
+  assertDatagramCapacity(await promptOutcome(nested));
+  unwrap(scope.close());
+  for (const outcome of await Promise.all(pending)) cancelled(outcome);
+  assertDatagramsReleased(state);
+
+  const other = await fixture(t, { pendingHandshake: true });
+  const stopped = other.open();
+  const closing = [1];
+  Object.defineProperty(closing, 0, { get() { other.scope.close(); return 1; } });
+  const terminal = cancelled(await promptOutcome(stopped.session.sendDatagram(closing)));
+  assert.equal(terminal.message, "scope_close");
+  assertDatagramsReleased(stopped.state);
+});
+
+test("SDK-WT-DATAGRAM-CANCEL: owner cancellation wins a parked write and suppresses queued host writes", { timeout: 5000 }, async (t) => {
+  const parked = deferred();
+  const { open, calls } = await fixture(t, { datagramWrite: () => parked.promise });
+  const { session, host, state } = open();
+  unwrap(await session.ready());
+  const writing = session.sendDatagram([1]);
+  await turn();
+  assert.equal(host.events.filter(([kind]) => kind === "datagram-write").length, 1);
+  const queued = session.sendDatagram([2]);
+  await turn();
+  const terminal = cancelled(session.cancel("navigation", "owner left"));
+  for (const outcome of await Promise.all([writing, queued])) {
+    assert.deepEqual(clone(cancelled(outcome)), clone(terminal));
+  }
+  assertDatagramsReleased(state);
+  parked.resolve();
+  await turn();
+  assert.equal(host.events.filter(([kind]) => kind === "datagram-write").length, 1);
+  assert.equal(calls.cancel.length, 1);
+  assert.equal(calls.join.length, 1);
+});
+
+test("SDK-WT-DATAGRAM-WRITE-ERROR: failed host writes release credit while preserving the session", { timeout: 5000 }, async (t) => {
+  let fail = true;
+  const { open } = await fixture(t, {
+    datagramWrite: () => { if (fail) throw new Error("host refused send"); },
+  });
+  const { session, host, state } = open();
+  const result = await session.sendDatagram([1, 2]);
+  assert.equal(result.outcome, "err");
+  assert.match(result.failure.message, /host refused send/);
+  assertDatagramsReleased(state);
+  assert.equal(closeCount(host), 0, "a send failure retains the existing SDK error boundary");
+  fail = false;
+  assert.equal((await session.sendDatagram([3])).outcome, "err", "an errored native writer stays errored");
+  assertDatagramsReleased(state);
+});
+
+test("SDK-WT-DATAGRAM-HOST-REENTRANT: owner close during method lookup prevents late I/O", { timeout: 5000 }, async (t) => {
+  const { scope, open, calls } = await fixture(t);
+  const { session, host, state } = open();
+  const writer = await state.writer;
+  const write = writer.write;
+  Object.defineProperty(writer, "write", {
+    get() { scope.close(); return write; },
+  });
+  const terminal = cancelled(await session.sendDatagram([7]));
+  assert.equal(terminal.message, "scope_close");
+  assertDatagramsReleased(state);
+  assert.equal(host.events.some(([kind]) => kind === "datagram-write"), false);
+  assert.equal(calls.join.length, 0);
+});
+
+test("SDK-WT-DATAGRAM-COMPLETION-RACE: owner close before the send continuation preserves cancellation", { timeout: 5000 }, async (t) => {
+  const { scope, open } = await fixture(t);
+  const { session, host, state } = open();
+  const writer = await state.writer;
+  const write = writer.write;
+  writer.write = function (chunk) {
+    const written = write.call(this, chunk);
+    void written.then(() => queueMicrotask(() => scope.close()));
+    return written;
+  };
+  const terminal = cancelled(await session.sendDatagram([8]));
+  assert.equal(terminal.message, "scope_close");
+  assertDatagramsReleased(state);
+  assert.equal(host.events.filter(([kind]) => kind === "datagram-write").length, 1);
+});
+
+for (const action of ["close", "cancel", "task-cancel"]) {
+  test(`SDK-WT-DATAGRAM-DEFAULT-${action}: message-free teardown aborts queued writes with the owner's exact cause`, { timeout: 5000 }, async (t) => {
+    const parked = deferred();
+    const { sdk, open } = await fixture(t, { datagramWrite: () => parked.promise });
+    const { session, host, state } = open();
+    unwrap(await session.ready());
+    const writing = session.sendDatagram([1]);
+    await turn();
+    assert.equal(host.events.filter(([kind]) => kind === "datagram-write").length, 1);
+    const queued = session.sendDatagram([2]);
+    await turn();
+    let expected;
+    if (action === "close") expected = cancelled(session.close());
+    else if (action === "cancel") expected = cancelled(session.cancel("navigation"));
+    else unwrap(new sdk.TaskHandle(session.core).cancel("navigation"));
+    const completed = await promptOutcome(Promise.all([writing, queued]).then((value) => ({ outcome: "settled", value })));
+    assert.equal(completed.outcome, "settled", "teardown settles send waiters without waiting for the parked host");
+    for (const outcome of completed.value) {
+      const terminal = cancelled(outcome);
+      if (expected) assert.deepEqual(clone(terminal), clone(expected));
+      else {
+        assert.equal(terminal.kind, "navigation");
+        assert.equal(terminal.phase, "cancelling");
+        assert.equal(terminal.message, null);
+      }
+    }
+    assertDatagramsReleased(state);
+    parked.resolve();
+    await turn();
+    assert.equal(host.events.filter(([kind]) => kind === "datagram-write").length, 1,
+      "a cancelled queued datagram must never be sent after owner closure");
+    assert.equal(host.events.filter(([kind]) => kind === "datagram-abort").length, 1);
+  });
+}

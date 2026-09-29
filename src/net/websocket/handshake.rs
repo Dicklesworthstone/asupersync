@@ -615,7 +615,7 @@ impl ClientHandshake {
                     || !self
                         .extensions
                         .iter()
-                        .any(|requested| requested.eq_ignore_ascii_case(token))
+                        .any(|requested| extension_token(requested).eq_ignore_ascii_case(token))
                 {
                     invalid.push(extension.clone());
                 }

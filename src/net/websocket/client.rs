@@ -30,6 +30,12 @@ use crate::codec::Decoder;
 use crate::cx::{CancelWakerToken, Cx};
 use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use crate::net::TcpStream;
+#[cfg(feature = "tls")]
+use crate::time::{Sleep, TimerDriverHandle};
+#[cfg(feature = "tls")]
+use crate::tls::{TlsConnector, TlsError, TlsStream};
+#[cfg(feature = "tls")]
+use crate::types::Time;
 use crate::util::{EntropySource, OsEntropy};
 use std::io;
 use std::pin::Pin;
@@ -94,6 +100,7 @@ impl Message {
 struct PartialMessage {
     opcode: Opcode,
     data: BytesMut,
+    compressed: bool,
 }
 
 #[derive(Debug)]
@@ -134,7 +141,8 @@ impl MessageAssembler {
         }
 
         if frame.fin {
-            return Ok(Some(message_from_payload(frame.opcode, frame.payload)?));
+            let payload = super::compression::incoming(frame.payload, frame.rsv1, self.max_message_size)?;
+            return Ok(Some(message_from_payload(frame.opcode, payload)?));
         }
 
         let mut data = BytesMut::with_capacity(payload_len);
@@ -142,6 +150,7 @@ impl MessageAssembler {
         self.partial = Some(PartialMessage {
             opcode: frame.opcode,
             data,
+            compressed: frame.rsv1,
         });
         Ok(None)
     }
@@ -170,8 +179,10 @@ impl MessageAssembler {
         }
 
         let opcode = partial.opcode;
+        let compressed = partial.compressed;
         let data = std::mem::take(&mut partial.data).freeze();
         self.partial = None;
+        let data = super::compression::incoming(data, compressed, self.max_message_size)?;
         Ok(Some(message_from_payload(opcode, data)?))
     }
 }
@@ -241,7 +252,12 @@ pub struct WebSocketConfig {
     pub max_frame_size: usize,
     /// Maximum message size (for fragmented messages).
     pub max_message_size: usize,
-    /// Ping interval for keepalive.
+    /// Automatic Ping cadence while `recv` is being polled. A matching Pong
+    /// must arrive within one more interval, including any blocked Ping write.
+    /// `None` disables heartbeat; zero is rounded up to one millisecond.
+    /// The timer and outstanding payload survive dropped/recreated `recv`
+    /// waits and split/reunite. No background task is spawned: callers must
+    /// keep receiving to drive heartbeats.
     pub ping_interval: Option<Duration>,
     /// Close handshake configuration.
     pub close_config: CloseConfig,
@@ -251,7 +267,9 @@ pub struct WebSocketConfig {
     pub slow_consumer_policy: SlowConsumerPolicy,
     /// Requested subprotocols.
     pub protocols: Vec<String>,
-    /// Connection timeout.
+    /// Connection timeout. Plaintext `connect` bounds TCP and HTTP upgrade
+    /// separately. `connect_tls` uses one budget for DNS, TCP, TLS, and upgrade.
+    /// `None` removes this limit; caller deadlines still apply to `connect_tls`.
     pub connect_timeout: Option<Duration>,
     /// Enable TCP_NODELAY.
     pub nodelay: bool,
@@ -418,6 +436,8 @@ pub struct WebSocket<IO> {
     pub(super) pending_pongs: std::collections::VecDeque<Bytes>,
     /// Entropy used for client masking when no per-call Cx is available.
     pub(super) entropy: Arc<dyn EntropySource>,
+    /// Retained heartbeat deadlines and the one outstanding Ping payload.
+    pub(super) heartbeat: super::heartbeat::Heartbeat,
 }
 
 impl<IO> WebSocket<IO>
@@ -453,7 +473,39 @@ where
             protocol: None,
             pending_pongs: std::collections::VecDeque::new(),
             entropy,
+            heartbeat: super::heartbeat::Heartbeat::default(),
         }
+    }
+
+    /// Create a client connection after an independently performed upgrade.
+    ///
+    /// The caller must validate the HTTP response, offered extensions, and TLS
+    /// identity before transferring the transport. This method validates the
+    /// agreed RFC 7692 profile: a 15-bit window and no server context takeover.
+    /// An empty list preserves ordinary uncompressed behavior. Compression uses
+    /// the existing `compression` Cargo feature. Encoded fragments and decoded
+    /// messages are independently bounded by `max_message_size`. At most 256
+    /// final DEFLATE sections (including a synthetic terminator) are admitted
+    /// per message, bounding dictionary restoration work below 8 MiB.
+    ///
+    /// # Errors
+    /// Returns an extension mismatch if the negotiated parameters are unsupported.
+    pub fn from_upgraded_with_extensions(
+        io: IO,
+        config: WebSocketConfig,
+        extensions: &[String],
+        entropy: Arc<dyn EntropySource>,
+    ) -> Result<Self, HandshakeError> {
+        let compressed = super::compression::negotiated_client(extensions)?;
+        let mut ws = Self::from_upgraded_with_entropy(io, config, entropy);
+        if compressed { ws.codec.enable_permessage_deflate(); }
+        Ok(ws)
+    }
+
+    /// Whether this connection negotiated permessage-deflate.
+    #[must_use]
+    pub fn compression_enabled(&self) -> bool {
+        self.codec.permessage_deflate_enabled()
     }
 
     /// Get the negotiated subprotocol (if any).
@@ -510,7 +562,11 @@ where
                 .await;
         }
 
-        let frame = Frame::from(msg);
+        let frame = super::compression::outgoing(
+            Frame::from(msg), self.codec.permessage_deflate_enabled(),
+            self.config.max_message_size,
+            self.config.max_frame_size,
+        )?;
         match self
             .send_frame_with_entropy_with_cx(Some(cx), &frame, cx.entropy())
             .await
@@ -563,6 +619,30 @@ where
                 )));
             }
 
+            if self.heartbeat.failed() {
+                return Ok(None);
+            }
+            match self.heartbeat.update(
+                cx,
+                self.config.ping_interval,
+                self.close_handshake.is_open(),
+            ) {
+                Ok(Some(payload)) => {
+                    let frame = Frame::ping(payload);
+                    let encoded = self.encode_frame_bytes_with_entropy(&frame, cx.entropy())?;
+                    self.config
+                        .check_outbound_write_budget(self.write_buf.len(), encoded.len())?;
+                    self.write_buf.extend_from_slice(&encoded);
+                    self.heartbeat.ping_queued();
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.close_handshake
+                        .force_close(CloseReason::new(super::CloseCode::Abnormal, None));
+                    return Err(error);
+                }
+            }
+
             // Send any pending pongs in FIFO order (cancel-safe: pop_front() takes
             // one at a time from the front without reversing the whole queue).
             while let Some(payload) = self.pending_pongs.pop_front() {
@@ -571,8 +651,21 @@ where
             }
 
             if !self.write_buf.is_empty() {
-                match self.flush_write_buf_with_cx(Some(cx)).await {
-                    Ok(()) => {}
+                let deadline = self.heartbeat.write_deadline();
+                match super::heartbeat::wait_until(
+                    cx,
+                    deadline,
+                    self.flush_write_buf_with_cx(Some(cx)),
+                )
+                .await
+                {
+                    Ok(Some(())) => {}
+                    Ok(None) => {
+                        self.heartbeat.fail();
+                        self.close_handshake
+                            .force_close(CloseReason::new(super::CloseCode::Abnormal, None));
+                        return Err(super::heartbeat::timeout_error());
+                    }
                     Err(WsError::Io(e))
                         if e.kind() == io::ErrorKind::Interrupted && cx.checkpoint().is_err() =>
                     {
@@ -582,7 +675,10 @@ where
                 }
             }
 
-            if let Some(frame) = self.codec.decode(&mut self.read_buf)? {
+            let decoded = self.codec.decode(&mut self.read_buf).inspect_err(|error| {
+                self.close_handshake.force_close(CloseReason::new(error.as_close_code(), None));
+            })?;
+            if let Some(frame) = decoded {
                 // Handle control frames
                 match frame.opcode {
                     Opcode::Ping => {
@@ -594,17 +690,25 @@ where
                         self.pending_pongs.push_back(frame.payload);
                     }
                     Opcode::Pong => {
-                        // Pong received - keepalive confirmed
+                        self.heartbeat.received_pong(&frame.payload);
                     }
                     Opcode::Close => {
                         // Handle close handshake
                         if let Some(response) = self.close_handshake.receive_close(&frame)? {
-                            let send_result = async {
+                            let deadline = self.heartbeat.write_deadline();
+                            let send_result = super::heartbeat::wait_until(cx, deadline, async {
                                 self.encode_frame_with_entropy(&response, cx.entropy())?;
                                 self.flush_write_buf_with_cx(Some(cx)).await
-                            }
+                            })
                             .await;
-                            send_result?;
+                            if send_result?.is_none() {
+                                self.heartbeat.fail();
+                                self.close_handshake.force_close(CloseReason::new(
+                                    super::CloseCode::Abnormal,
+                                    None,
+                                ));
+                                return Err(super::heartbeat::timeout_error());
+                            }
                             self.close_handshake.mark_response_sent();
                         }
                         let reason = CloseReason::parse(&frame.payload).ok();
@@ -626,8 +730,10 @@ where
                     return Ok(None);
                 }
 
-                let n = match self.read_more(cx).await {
-                    Ok(n) => n,
+                let deadline = self.heartbeat.deadline();
+                let n = match super::heartbeat::wait_until(cx, deadline, self.read_more(cx)).await {
+                    Ok(Some(n)) => n,
+                    Ok(None) => continue,
                     Err(WsError::Io(e))
                         if e.kind() == io::ErrorKind::Interrupted && cx.checkpoint().is_err() =>
                     {
@@ -833,6 +939,10 @@ where
     async fn flush_write_buf_with_cx(&mut self, op_cx: Option<&Cx>) -> Result<(), WsError> {
         use std::future::poll_fn;
 
+        if self.heartbeat.failed() {
+            return Err(super::heartbeat::timeout_error());
+        }
+
         // br-asupersync-2k3o9x: wake a write parked on a stalled (non-reading)
         // peer when an external cancel fires, instead of only noticing it on the
         // next self-poll. Effective cx = the explicit op_cx, else the ambient Cx.
@@ -889,6 +999,10 @@ where
         buf: &mut BytesMut,
     ) -> Result<(), WsError> {
         use std::future::poll_fn;
+
+        if self.heartbeat.failed() {
+            return Err(super::heartbeat::timeout_error());
+        }
 
         if buf.is_empty() {
             return Ok(());
@@ -1082,6 +1196,25 @@ impl WebSocket<TcpStream> {
         url: &str,
         config: WebSocketConfig,
     ) -> Result<Self, WsConnectError> {
+        Self::connect_configured(cx, url, config, false).await
+    }
+
+    /// Offer bounded permessage-deflate with a fresh dictionary per message.
+    ///
+    /// The peer may decline compression. If it accepts, its response must
+    /// disable server context takeover and use 15-bit windows. The client never
+    /// reuses its outgoing dictionary. Existing deadlines, cancellation and
+    /// encoded-write limits apply to the same owned connection.
+    #[cfg(feature = "compression")]
+    pub async fn connect_with_compression(
+        cx: &Cx, url: &str, config: WebSocketConfig,
+    ) -> Result<Self, WsConnectError> {
+        Self::connect_configured(cx, url, config, true).await
+    }
+
+    async fn connect_configured(
+        cx: &Cx, url: &str, config: WebSocketConfig, compression: bool,
+    ) -> Result<Self, WsConnectError> {
         // Parse URL
         let parsed = WsUrl::parse(url)?;
 
@@ -1113,52 +1246,274 @@ impl WebSocket<TcpStream> {
         }
 
         // Perform handshake
-        Self::perform_handshake(cx, tcp, &parsed, &config).await
+        perform_client_handshake(cx, tcp, &parsed, &config, compression, config.connect_timeout).await
+    }
+}
+
+#[cfg(feature = "tls")]
+impl WebSocket<TlsStream<TcpStream>> {
+    /// Connect to a secure WebSocket (`wss://`) with explicit TLS policy.
+    ///
+    /// The URL's hostname or IP is the certificate identity. DNS names also
+    /// supply SNI. Configure roots, certificate pins, or client certificates on
+    /// `connector`; this method never installs implicit trust or falls back to
+    /// plaintext. Offer `http/1.1` ALPN (or no ALPN): a negotiated protocol other
+    /// than `http/1.1` is rejected before any HTTP request is sent.
+    ///
+    /// One `connect_timeout` budget covers DNS, TCP, TLS, and the HTTP upgrade,
+    /// tightened by both the explicit caller's and the ambient task's deadlines.
+    /// The connector's own TLS timeout may tighten its handshake phase further.
+    /// `None` removes only the configured setup limit. Successful setup does not
+    /// impose this deadline on subsequent messages.
+    ///
+    /// The explicit context and current native task must both hold I/O and timer
+    /// authority on the same runtime clock. Cancellation wakes a parked setup;
+    /// dropping setup closes any acquired socket. No background WebSocket driver
+    /// is spawned. Hostnames use the native offloaded system resolver: a lookup
+    /// already executing may finish after its cancelled wait. Literal addresses
+    /// avoid that resolver. TLS errors are returned
+    /// as [`WsConnectError::Io`] with the underlying [`TlsError`] as their source.
+    /// Existing plaintext [`WebSocket::connect`] remains a separate entry point.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "tls")]
+    /// # async fn example(cx: &asupersync::Cx, connector: &asupersync::tls::TlsConnector)
+    /// # -> Result<(), asupersync::net::websocket::WsConnectError> {
+    /// use asupersync::net::websocket::{Message, WebSocket, WebSocketConfig};
+    /// let mut socket = WebSocket::connect_tls(
+    ///     cx, "wss://example.com/events", WebSocketConfig::default(), connector,
+    /// ).await?;
+    /// socket.send(cx, Message::text("subscribe")).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn connect_tls(
+        cx: &Cx,
+        url: &str,
+        config: WebSocketConfig,
+        connector: &TlsConnector,
+    ) -> Result<Self, WsConnectError> {
+        Self::connect_tls_configured(cx, url, config, connector, false).await
     }
 
-    /// Internal: perform HTTP upgrade handshake.
-    async fn perform_handshake(
+    /// Connect with TLS and offer bounded permessage-deflate.
+    ///
+    /// TLS policy, ownership, and setup limits match [`Self::connect_tls`]. The
+    /// compression profile matches [`WebSocket::connect_with_compression`]; the
+    /// peer may decline it without preventing the secure connection.
+    #[cfg(feature = "compression")]
+    pub async fn connect_tls_with_compression(
         cx: &Cx,
-        mut tcp: TcpStream,
-        url: &WsUrl,
-        config: &WebSocketConfig,
+        url: &str,
+        config: WebSocketConfig,
+        connector: &TlsConnector,
     ) -> Result<Self, WsConnectError> {
-        // Build handshake request
-        let mut handshake = ClientHandshake::new(
-            &format!("ws://{}:{}{}", url.host, url.port, url.path),
-            cx.entropy(),
-        )?;
+        Self::connect_tls_configured(cx, url, config, connector, true).await
+    }
 
-        for protocol in &config.protocols {
-            handshake = handshake.protocol(protocol);
+    async fn connect_tls_configured(
+        cx: &Cx,
+        url: &str,
+        config: WebSocketConfig,
+        connector: &TlsConnector,
+        compression: bool,
+    ) -> Result<Self, WsConnectError> {
+        let parsed = WsUrl::parse(url).map_err(WsConnectError::InvalidUrl)?;
+        if !parsed.tls {
+            return Err(WsConnectError::InvalidUrl(HandshakeError::InvalidUrl(
+                "connect_tls requires a wss:// URL".into(),
+            )));
         }
+        TlsConnector::validate_domain(&parsed.host).map_err(map_tls_connect_error)?;
+        if parsed.host.parse::<std::net::IpAddr>().is_err() && !connector.config().enable_sni {
+            return Err(WsConnectError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "secure WebSocket DNS connections require TLS SNI",
+            )));
+        }
+        let ambient = Cx::current().ok_or_else(missing_tls_setup_authority)?;
+        let mut setup = WsTlsSetup::new(cx, &ambient, config.connect_timeout)?;
+        let tcp = setup.run(async {
+            let result = if let Ok(ip) = parsed.host.parse::<std::net::IpAddr>() {
+                TcpStream::connect(std::net::SocketAddr::new(ip, parsed.port)).await
+            } else {
+                TcpStream::connect((parsed.host.clone(), parsed.port)).await
+            };
+            result.map_err(|error| map_tcp_connect_error(cx, error))
+        }).await?;
+        if config.nodelay {
+            let _ = tcp.set_nodelay(true);
+        }
+        let tls = setup.run(async {
+            connector.connect(&parsed.host, tcp).await.map_err(map_tls_connect_error)
+        }).await?;
+        if tls.alpn_protocol().is_some_and(|protocol| protocol != b"http/1.1") {
+            return Err(WsConnectError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "secure WebSocket peer negotiated a protocol other than HTTP/1.1",
+            )));
+        }
+        // The outer setup retains the original timer. Starting HTTP must not
+        // restore a full timeout after a slow DNS/TCP/TLS phase.
+        setup.run(perform_client_handshake(cx, tls, &parsed, &config, compression, None)).await
+    }
+}
 
-        // Check cancellation
-        if cx.checkpoint().is_err() {
+#[cfg(feature = "tls")]
+fn missing_tls_setup_authority() -> WsConnectError {
+    WsConnectError::Io(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "secure WebSocket setup requires explicit and current native I/O and timer authority",
+    ))
+}
+
+#[cfg(feature = "tls")]
+fn map_tls_connect_error(error: TlsError) -> WsConnectError {
+    let kind = match &error {
+        TlsError::Io(error) => error.kind(),
+        TlsError::Timeout(_) => io::ErrorKind::TimedOut,
+        TlsError::InvalidDnsName(_) => io::ErrorKind::InvalidInput,
+        _ => io::ErrorKind::InvalidData,
+    };
+    WsConnectError::Io(io::Error::new(kind, error))
+}
+
+/// A single retained deadline and cancellation registration across setup phases.
+#[cfg(feature = "tls")]
+struct WsTlsSetup<'a> {
+    cx: &'a Cx,
+    ambient: &'a Cx,
+    clock: TimerDriverHandle,
+    deadline: Option<Time>,
+    timer: Option<Sleep>,
+    caller_cancel: WsCancelWakerGuard<'a>,
+    ambient_cancel: WsCancelWakerGuard<'a>,
+}
+
+#[cfg(feature = "tls")]
+impl<'a> WsTlsSetup<'a> {
+    fn new(cx: &'a Cx, ambient: &'a Cx, timeout: Option<Duration>) -> Result<Self, WsConnectError> {
+        for context in [cx, ambient] {
+            if !context.runtime_mask.has(crate::cx::cap::CapMask::IO)
+                || context.io_driver_handle().is_none()
+                || context.timer_driver().is_none()
+            {
+                return Err(missing_tls_setup_authority());
+            }
+        }
+        let clock = cx.timer_driver().ok_or_else(missing_tls_setup_authority)?;
+        if !ambient.timer_driver().is_some_and(|ambient_clock| clock.ptr_eq(&ambient_clock)) {
+            return Err(missing_tls_setup_authority());
+        }
+        let mut deadline = timeout.map(|timeout| clock.now().saturating_add_nanos(
+            u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX),
+        ));
+        for context in [cx, ambient] {
+            if let Some(bound) = context.budget().deadline {
+                deadline = Some(deadline.map_or(bound, |until| until.min(bound)));
+            }
+        }
+        let setup = Self {
+            cx,
+            ambient,
+            timer: deadline.map(|at| Sleep::with_timer_driver(at, clock.clone())),
+            clock,
+            deadline,
+            caller_cancel: WsCancelWakerGuard::new(cx),
+            ambient_cancel: WsCancelWakerGuard::new(ambient),
+        };
+        setup.check()?;
+        Ok(setup)
+    }
+
+    fn check(&self) -> Result<(), WsConnectError> {
+        if self.cx.checkpoint().is_err() || self.ambient.checkpoint().is_err() {
             return Err(WsConnectError::Cancelled);
         }
-
-        // Send request
-        let request = handshake.request_bytes();
-        write_all(&mut tcp, &request).await?;
-
-        // Read response — trailing bytes after \r\n\r\n belong to the
-        // first WebSocket frame and must be seeded into the read buffer.
-        let (response_bytes, trailing) = read_http_response(&mut tcp).await?;
-        let response = HttpResponse::parse(&response_bytes)?;
-
-        // Validate response
-        handshake.validate_response(&response)?;
-
-        // Create WebSocket
-        let mut ws = Self::from_upgraded_with_entropy(tcp, config.clone(), cx.entropy_handle());
-        ws.protocol = response.header("sec-websocket-protocol").map(String::from);
-        if !trailing.is_empty() {
-            ws.read_buf.extend_from_slice(&trailing);
+        if self.deadline.is_some_and(|until| self.clock.now() >= until) {
+            return Err(WsConnectError::Io(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "secure WebSocket connection setup deadline exceeded",
+            )));
         }
-
-        Ok(ws)
+        Ok(())
     }
+
+    async fn run<T>(
+        &mut self,
+        future: impl std::future::Future<Output = Result<T, WsConnectError>>,
+    ) -> Result<T, WsConnectError> {
+        let mut future = std::pin::pin!(future);
+        std::future::poll_fn(|task| {
+            // TCP/DNS/TLS adapters consult the current context. Poll under the
+            // supplied context without restoring any authority attenuated by
+            // the task that created this setup or the current polling task.
+            let current = Cx::current().ok_or_else(missing_tls_setup_authority)?;
+            let mut io_cx = self.cx.clone();
+            io_cx.runtime_mask = io_cx.runtime_mask
+                .intersect(self.ambient.runtime_mask)
+                .intersect(current.runtime_mask);
+            if !io_cx.runtime_mask.has(crate::cx::cap::CapMask::IO)
+                || io_cx.timer_driver().is_none()
+                || !current.timer_driver().is_some_and(|clock| self.clock.ptr_eq(&clock))
+            {
+                return Poll::Ready(Err(missing_tls_setup_authority()));
+            }
+            let _current = Cx::set_current(Some(io_cx));
+            self.caller_cancel.refresh(task.waker());
+            self.ambient_cancel.refresh(task.waker());
+            self.check()?;
+            let timer_ready = self.timer.as_mut()
+                .is_some_and(|timer| Pin::new(timer).poll_deadline(task).is_ready());
+            if timer_ready {
+                self.check()?;
+                // A timer backend may wake early; retain the absolute bound.
+                if let (Some(timer), Some(deadline)) = (&mut self.timer, self.deadline) {
+                    timer.reset(deadline);
+                    task.waker().wake_by_ref();
+                }
+            }
+            match future.as_mut().poll(task) {
+                Poll::Ready(result) => Poll::Ready(self.check().and(result)),
+                Poll::Pending => Poll::Pending,
+            }
+        }).await
+    }
+}
+
+/// Shared HTTP/1 upgrade over an already owned plaintext or TLS transport.
+async fn perform_client_handshake<IO: AsyncRead + AsyncWrite + Unpin>(
+    cx: &Cx,
+    mut io: IO,
+    url: &WsUrl,
+    config: &WebSocketConfig,
+    compression: bool,
+    upgrade_timeout: Option<Duration>,
+) -> Result<WebSocket<IO>, WsConnectError> {
+    let scheme = if url.tls { "wss" } else { "ws" };
+    let mut handshake = ClientHandshake::new(
+        &format!("{scheme}://{}{}", url.host_header(), url.path),
+        cx.entropy(),
+    )?;
+    for protocol in &config.protocols {
+        handshake = handshake.protocol(protocol);
+    }
+    if compression { handshake = handshake.extension(super::compression::OFFER); }
+    if cx.checkpoint().is_err() {
+        return Err(WsConnectError::Cancelled);
+    }
+    let request = handshake.request_bytes();
+    let (response_bytes, trailing) =
+        bounded_upgrade_exchange(cx, &mut io, &request, upgrade_timeout).await?;
+    let response = HttpResponse::parse(&response_bytes)?;
+    handshake.validate_response(&response)?;
+    let extensions: Vec<String> = response.header("sec-websocket-extensions")
+        .map(|value| value.split(',').map(|field| field.trim().to_owned()).collect())
+        .unwrap_or_default();
+    let mut ws = WebSocket::from_upgraded_with_extensions(io, config.clone(), &extensions, cx.entropy_handle())?;
+    ws.protocol = response.header("sec-websocket-protocol").map(String::from);
+    ws.read_buf.extend_from_slice(&trailing);
+    Ok(ws)
 }
 
 fn map_tcp_connect_error(cx: &Cx, err: io::Error) -> WsConnectError {
@@ -1182,6 +1537,47 @@ async fn write_all<IO: AsyncWrite + Unpin>(io: &mut IO, buf: &[u8]) -> io::Resul
         written += n;
     }
     Ok(())
+}
+
+/// Run the client upgrade exchange (write the request, read the response
+/// head) under `limit` and the caller's cancellation.
+///
+/// `connect_timeout` used to cover only the TCP connect, and nothing re-polled
+/// the response read, so a server that accepted TCP and never answered parked
+/// `connect` forever (br-asupersync-bi2462.120).
+async fn bounded_upgrade_exchange<IO: AsyncRead + AsyncWrite + Unpin>(
+    cx: &Cx,
+    io: &mut IO,
+    request: &[u8],
+    limit: Option<Duration>,
+) -> Result<(Vec<u8>, Vec<u8>), WsConnectError> {
+    use std::future::poll_fn;
+
+    let mut exchange = std::pin::pin!(async {
+        write_all(&mut *io, request).await?;
+        read_http_response(&mut *io).await
+    });
+    let mut deadline = limit.map(|limit| crate::time::sleep(cx.now(), limit));
+    let mut cancel_wake = WsCancelWakerGuard::new(cx);
+    poll_fn(|poll_cx| {
+        if cx.checkpoint().is_err() {
+            return Poll::Ready(Err(WsConnectError::Cancelled));
+        }
+        cancel_wake.refresh(poll_cx.waker());
+        if let Poll::Ready(result) = exchange.as_mut().poll(poll_cx) {
+            return Poll::Ready(result.map_err(WsConnectError::Io));
+        }
+        if let Some(sleep) = deadline.as_mut()
+            && Pin::new(sleep).poll_deadline(poll_cx).is_ready()
+        {
+            return Poll::Ready(Err(WsConnectError::Io(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "websocket upgrade response not received within connect_timeout",
+            ))));
+        }
+        Poll::Pending
+    })
+    .await
 }
 
 /// Read HTTP response (until the blank line ending the headers).
@@ -2487,6 +2883,186 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_secs(5),
             "cancel must wake the parked read promptly, took {elapsed:?}"
+        );
+    }
+
+    /// A peer that takes the whole upgrade request and never answers. Each
+    /// write is reported so a test can prove the exchange reached its parked
+    /// response read before it times out or is cancelled.
+    struct SilentUpgradePeer {
+        written: std::sync::mpsc::Sender<usize>,
+    }
+
+    impl AsyncRead for SilentUpgradePeer {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    impl AsyncWrite for SilentUpgradePeer {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let _ = self.written.send(buf.len());
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    type ExchangeOutcome = (
+        Result<(Vec<u8>, Vec<u8>), WsConnectError>,
+        std::time::Duration,
+    );
+
+    /// Runs the upgrade exchange against a silent peer on its own thread.
+    /// Returns once the whole request is written, with the exchange parked on
+    /// the response read.
+    fn park_upgrade_exchange(
+        cx: Cx,
+        limit: Option<std::time::Duration>,
+    ) -> std::sync::mpsc::Receiver<ExchangeOutcome> {
+        let request = b"GET /chat HTTP/1.1\r\nHost: peer\r\n\r\n".to_vec();
+        let (written_tx, written_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let expected = request.len();
+        std::thread::Builder::new()
+            .name("ws-upgrade-exchange".into())
+            .spawn(move || {
+                let started = std::time::Instant::now();
+                let mut peer = SilentUpgradePeer {
+                    written: written_tx,
+                };
+                let result =
+                    future::block_on(bounded_upgrade_exchange(&cx, &mut peer, &request, limit));
+                let _ = done_tx.send((result, started.elapsed()));
+            })
+            .expect("spawn exchange thread");
+        let mut written = 0;
+        while written < expected {
+            written += written_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("the upgrade request reaches the peer");
+        }
+        done_rx
+    }
+
+    #[test]
+    fn upgrade_exchange_times_out_when_the_peer_never_answers() {
+        let limit = std::time::Duration::from_millis(200);
+        let done = park_upgrade_exchange(Cx::for_testing(), Some(limit));
+        let (result, elapsed) = done
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("a silent peer must not hold the upgrade past connect_timeout");
+        assert!(
+            matches!(&result, Err(WsConnectError::Io(error)) if error.kind() == io::ErrorKind::TimedOut),
+            "expected TimedOut, got {result:?}"
+        );
+        assert!(
+            elapsed >= limit && elapsed < std::time::Duration::from_secs(5),
+            "timed out after {elapsed:?} for a {limit:?} bound"
+        );
+    }
+
+    #[test]
+    fn cancelling_a_parked_upgrade_exchange_returns_cancelled() {
+        let cx = Cx::for_testing();
+        let canceller = cx.clone();
+        // No bound: only the cancellation can end this exchange.
+        let done = park_upgrade_exchange(cx, None);
+        canceller.cancel_with(
+            crate::types::CancelKind::User,
+            Some("cancel while the upgrade response is awaited"),
+        );
+        let (result, elapsed) = done
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("cancel must wake the parked upgrade read");
+        assert!(
+            matches!(result, Err(WsConnectError::Cancelled)),
+            "expected Cancelled, got {result:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn connect_times_out_when_a_tcp_server_never_answers_the_upgrade() {
+        // The server accepts, reads the complete upgrade request, then stays
+        // silent with the socket open until the test releases it.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let (request_seen_tx, request_seen_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            use std::io::Read;
+            let (mut socket, _) = listener.accept().expect("accept");
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 512];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let n = socket.read(&mut chunk).expect("read request");
+                assert!(n > 0, "client closed before finishing the request");
+                request.extend_from_slice(&chunk[..n]);
+            }
+            let _ = request_seen_tx.send(request);
+            let _ = release_rx.recv_timeout(std::time::Duration::from_secs(20));
+        });
+
+        let limit = std::time::Duration::from_millis(300);
+        let url = format!("ws://{addr}/chat");
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let client = std::thread::spawn(move || {
+            let runtime = crate::runtime::RuntimeBuilder::new()
+                .build()
+                .expect("runtime");
+            let started = std::time::Instant::now();
+            let handle = runtime.handle().spawn(async move {
+                let cx = Cx::current().expect("runtime task context");
+                let config = WebSocketConfig::new().connect_timeout(Some(limit));
+                WebSocket::connect_with_config(&cx, &url, config)
+                    .await
+                    .map(|_| ())
+            });
+            let result = runtime.block_on(handle);
+            let _ = done_tx.send((result, started.elapsed()));
+        });
+
+        let request = request_seen_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the upgrade request reaches the server");
+        assert!(request.starts_with(b"GET /chat HTTP/1.1\r\n"));
+        let (result, elapsed) = done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("connect must not hang on a server that never answers");
+        let _ = release_tx.send(());
+        server.join().expect("server thread");
+        client.join().expect("client thread");
+        assert!(
+            matches!(&result, Err(WsConnectError::Io(error)) if error.kind() == io::ErrorKind::TimedOut),
+            "expected TimedOut, got {result:?}"
+        );
+        assert!(
+            elapsed >= limit && elapsed < std::time::Duration::from_secs(5),
+            "connect timed out after {elapsed:?} for a {limit:?} bound"
         );
     }
 }

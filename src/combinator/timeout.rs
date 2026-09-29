@@ -341,30 +341,32 @@ impl TimeoutConfig {
 
 /// Runs a future with a timeout.
 ///
-/// This macro races the provided future against a sleep, returning
-/// the result if it completes in time, or an error if it times out.
+/// `timeout!(cx, duration, future)` expands to
+/// [`crate::time::TimeoutFuture::after`] starting at `cx.now()`: it races the
+/// future against a sleep and returns `Ok(value)` if the future completes
+/// first, or `Err(Elapsed)` once the deadline passes.
 ///
 /// # Semantics
 ///
 /// ```ignore
-/// let result = timeout!(Duration::from_secs(5), operation).await;
+/// let result = timeout!(cx, Duration::from_secs(5), operation).await;
 ///
 /// match result {
 ///     Ok(value) => println!("Completed: {:?}", value),
-///     Err(Elapsed) => println!("Timed out"),
+///     Err(elapsed) => println!("Timed out: {:?}", elapsed),
 /// }
 /// ```
 ///
 /// # Cancellation Behavior
 ///
-/// When timeout fires:
-/// 1. Main future is cancelled
-/// 2. Cancellation follows standard protocol (drain + finalize)
-/// 3. `timeout!` returns after main future is fully drained
+/// When the deadline passes, `timeout!` returns `Err(Elapsed)` without
+/// draining the timed-out future: that future is dropped with the returned
+/// `TimeoutFuture`, so cleanup it would run after observing cancellation does
+/// not happen. Use [`crate::cx::Scope::timeout`] or
+/// [`crate::Cx::race_drained_with_timeout`] when the operation must be
+/// cancelled and its cleanup awaited before the call returns.
 ///
-/// When main future completes:
-/// 1. Sleep is cancelled
-/// 2. `timeout!` returns immediately (sleep cleanup is fast)
+/// When the future completes first, the sleep is dropped.
 #[macro_export]
 macro_rules! timeout {
     // Basic syntax: timeout!(duration, future) would require ambient context.

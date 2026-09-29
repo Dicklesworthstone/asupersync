@@ -1567,12 +1567,33 @@ fn mailbox_and_scope_spawn_paths_classify_before_terminal_publication() {
     // fail this lane until its publication behavior is deliberately classified.
     let expected_census = BTreeMap::from([
         ("src/combinator/join_set.rs|TaskHandle::new(".to_owned(), 1),
+        // Classified (27a96729f, bi2462.102): a `#[cfg(test)]` fixture in the
+        // HTTP/2 request-owner tests that builds a handle over a hand-held
+        // oneshot to publish a terminal between two probes. It is not a spawn
+        // adapter: production h2 request tasks are spawned with
+        // `Cx::spawn_in` / `spawn_in_cancellation_dominant`, whose pair
+        // factories are counted under src/cx/cx.rs.
+        (
+            "src/http/h2/listener/ownership.rs|TaskHandle::new(".to_owned(),
+            1,
+        ),
         (
             "src/cx/cx.rs|crate::runtime::task_handle::pending_task_handle_channel::<".to_owned(),
             2,
         ),
         (
             "src/cx/scope.rs|crate::runtime::task_handle::task_handle_channel::<".to_owned(),
+            1,
+        ),
+        // Classified (ecda43b5b, bi2462.156, q1fhxo): a `#[cfg(test)]` fixture
+        // in the drained blocking unit tests that builds a handle over a
+        // directly held publisher, so it can close the task's terminal
+        // publisher before the pool finishes. It is not a spawn adapter:
+        // production drained blocking work is spawned with `Cx::spawn` /
+        // `Cx::spawn_in`, whose pair factories are counted under src/cx/cx.rs.
+        (
+            "src/runtime/spawn_blocking.rs|crate::runtime::task_handle::task_handle_channel::<"
+                .to_owned(),
             1,
         ),
         (

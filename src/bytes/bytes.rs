@@ -123,6 +123,18 @@ impl Bytes {
         self.len
     }
 
+    /// Capacity retained by this view, including an otherwise hidden backing
+    /// allocation when the view is a slice. Static bytes are charged by view
+    /// length so retention budgets also bound their logical payload volume.
+    #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+    pub(crate) fn retained_capacity(&self) -> usize {
+        match &self.data {
+            BytesInner::Shared(data) => data.capacity(),
+            BytesInner::Static(_) => self.len,
+            BytesInner::Empty => 0,
+        }
+    }
+
     /// Returns true if empty.
     #[inline]
     #[must_use]

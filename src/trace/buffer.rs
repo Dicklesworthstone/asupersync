@@ -179,8 +179,8 @@ impl TraceBufferHandle {
         {
             let mut buffer = self.inner.buffer.lock();
             buffer.push(event);
+            self.inner.total_pushed.fetch_add(1, Ordering::Relaxed);
         }
-        self.inner.total_pushed.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Builds and pushes a trace event while holding the buffer lock.
@@ -197,7 +197,6 @@ impl TraceBufferHandle {
         let mut buffer = self.inner.buffer.lock();
         let seq = self.inner.next_seq.fetch_add(1, Ordering::Relaxed);
         buffer.push(build(seq));
-        drop(buffer);
         self.inner.total_pushed.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -215,11 +214,19 @@ impl TraceBufferHandle {
     /// seq is an ordering key, not a dense index.
     #[must_use]
     pub fn snapshot(&self) -> Vec<TraceEvent> {
+        self.snapshot_with_stats().0
+    }
+
+    /// Samples retained events and the lifetime insertion count at one boundary.
+    /// The insertion count must advance under the same lock as the ring write:
+    /// otherwise a concurrent snapshot could mistake an eviction for a full trace.
+    pub(crate) fn snapshot_with_stats(&self) -> (Vec<TraceEvent>, u64) {
         let buffer = self.inner.buffer.lock();
         let mut events: Vec<TraceEvent> = buffer.iter().cloned().collect();
+        let total_pushed = self.inner.total_pushed.load(Ordering::Relaxed);
         drop(buffer);
         events.sort_by_key(|event| event.seq);
-        events
+        (events, total_pushed)
     }
 
     /// Returns the current number of buffered events.

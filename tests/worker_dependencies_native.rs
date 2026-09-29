@@ -34,6 +34,13 @@ async fn witness_pending<F: Future>(future: F, signal: oneshot::Sender<()>) -> F
     }).await
 }
 
+/// Poll post-acknowledgement cleanup with cancellation masked, as bracket
+/// release does: runtime I/O refuses an unmasked cancelled Cx (Interrupted).
+async fn cleanup_masked<F: Future>(cx: &Cx, future: F) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    poll_fn(|task| cx.masked(|| future.as_mut().poll(task))).await
+}
+
 async fn prerequisite(
     owner: &mut DynamicSupervisor<&'static str>,
     name: &'static str,
@@ -108,11 +115,13 @@ async fn scenario(cx: Cx, trigger: u8) {
                     let mut socket = TcpStream::connect(address).await.unwrap();
                     witness_pending(child.cancelled(), descendant_parked).await;
                     assert!(child.checkpoint().is_err(), "acknowledge before asynchronous cleanup");
-                    socket.write_all(b"DRAIN").await.unwrap();
-                    let mut ack = [0; 3];
-                    witness_pending(socket.read_exact(&mut ack), cleanup_parked).await.unwrap();
-                    assert_eq!(&ack, b"ACK");
-                    AsyncWriteExt::shutdown(&mut socket).await.unwrap();
+                    cleanup_masked(&child, async {
+                        socket.write_all(b"DRAIN").await.unwrap();
+                        let mut ack = [0; 3];
+                        witness_pending(socket.read_exact(&mut ack), cleanup_parked).await.unwrap();
+                        assert_eq!(&ack, b"ACK");
+                        AsyncWriteExt::shutdown(&mut socket).await.unwrap();
+                    }).await;
                     completed.fetch_add(1, Ordering::SeqCst);
                 }).unwrap();
                 drop(descendant); // Its actual region must retain drain ownership.

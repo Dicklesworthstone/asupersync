@@ -37,14 +37,328 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use asupersync::http::h1::listener::{Http1Listener, Http1ListenerConfig};
-use asupersync::http::h1::server::{HostPolicy, Http1Config};
+use asupersync::http::h1::server::{HostPolicy, Http1Config, Http1Server, Http1StreamingServer};
 use asupersync::http::h1::stream::Http1ProducedResponse;
 use asupersync::http::h1::types::Response;
 use asupersync::http::{HeaderMap, HeaderName, HeaderValue};
+use asupersync::io::{AsyncRead, AsyncWrite};
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::server::shutdown::ShutdownPhase;
 use asupersync::sync::Notify;
 use asupersync::web::sse::{SseEvent, StreamingSse, StreamingSseError, StreamingSseSource};
+
+/// Observes an actual reactor-backed write returning Pending. It never
+/// manufactures Pending and never wakes the serving task itself.
+struct ObservedResponseSocket {
+    inner: asupersync::net::tcp::stream::TcpStream,
+    pending: Arc<AtomicUsize>,
+    parked: Arc<Notify>,
+    first_write: Arc<std::sync::Mutex<Vec<u8>>>,
+}
+
+impl AsyncRead for ObservedResponseSocket {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut asupersync::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for ObservedResponseSocket {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        {
+            let mut first = self.first_write.lock().expect("response witness lock");
+            if first.is_empty() {
+                first.extend_from_slice(&buf[..buf.len().min(64)]);
+            }
+        }
+        let polled = std::pin::Pin::new(&mut self.inner).poll_write(cx, buf);
+        if polled.is_pending() {
+            self.pending.fetch_add(1, Ordering::AcqRel);
+            self.parked.notify_one();
+        }
+        polled
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+/// The peer holds its receive window closed throughout the verdict. For a
+/// short error response, fill the real TCP send queue first; otherwise a
+/// 100-byte refusal can fit even though the application never reads it.
+fn nonreading_response_peer(
+    request: &[u8],
+    prefill: bool,
+) -> (std::net::TcpStream, std::net::TcpStream, usize) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind response socket");
+    let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)
+        .expect("create nonreading peer");
+    socket
+        .set_recv_buffer_size(4096)
+        .expect("small receive window");
+    socket
+        .connect(
+            &listener
+                .local_addr()
+                .expect("response socket address")
+                .into(),
+        )
+        .expect("connect nonreading peer");
+    let mut client = std::net::TcpStream::from(socket);
+    client
+        .write_all(request)
+        .expect("send request before parking");
+    let (mut server, _) = listener.accept().expect("accept response socket");
+    socket2::SockRef::from(&server)
+        .set_send_buffer_size(4096)
+        .expect("small server send queue");
+    server
+        .set_nonblocking(true)
+        .expect("nonblocking response socket");
+    let mut filled = 0;
+    if prefill {
+        let started = std::time::Instant::now();
+        let mut blocked_since = None;
+        let fill = [b'x'; 16 * 1024];
+        loop {
+            assert!(
+                started.elapsed() < Duration::from_secs(3),
+                "TCP queue never filled"
+            );
+            match server.write(&fill) {
+                Ok(0) => panic!("response socket closed during setup"),
+                Ok(count) => {
+                    filled += count;
+                    blocked_since = None;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    let blocked = blocked_since.get_or_insert_with(std::time::Instant::now);
+                    if blocked.elapsed() >= Duration::from_millis(50) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("fill response socket: {error}"),
+            }
+        }
+    }
+    (server, client, filled)
+}
+
+fn stalled_response_matrix(force_close: bool) {
+    let cases = [
+        ("streaming", b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n".to_vec(), 200),
+        ("bad-head", b"BROKEN\r\n\r\n".to_vec(), 400),
+        ("large-head", format!("GET / HTTP/1.1\r\nHost: localhost\r\nX-Large: {}\r\n\r\n", "x".repeat(1024)).into_bytes(), 431),
+        ("host-refused", b"GET / HTTP/1.1\r\nHost: invalid.example\r\n\r\n".to_vec(), 421),
+        ("expect-refused", b"GET / HTTP/1.1\r\nHost: localhost\r\nExpect: impossible\r\n\r\n".to_vec(), 417),
+        ("continue", b"POST / HTTP/1.1\r\nHost: localhost\r\nExpect: 100-continue\r\nContent-Length: 1\r\n\r\n".to_vec(), 100),
+    ];
+    for workers in [1, 2] {
+        for (scenario, request, status) in &cases {
+            let streaming = *scenario == "streaming";
+            let (server, client, filled) = nonreading_response_peer(request, !streaming);
+            let runtime = RuntimeBuilder::new()
+                .worker_threads(workers)
+                .build()
+                .expect("native runtime");
+            let handle = runtime.handle();
+            runtime.block_on(async move {
+                let pending = Arc::new(AtomicUsize::new(0));
+                let parked = Arc::new(Notify::new());
+                let first_write = Arc::new(std::sync::Mutex::new(Vec::new()));
+                let in_flight = Arc::new(AtomicUsize::new(0));
+                let shutdown = asupersync::server::shutdown::ShutdownSignal::new();
+                let socket = ObservedResponseSocket {
+                    inner: asupersync::net::tcp::stream::TcpStream::from_std(server).expect("reactor socket"),
+                    pending: Arc::clone(&pending),
+                    parked: Arc::clone(&parked),
+                    first_write: Arc::clone(&first_write),
+                };
+                let config = Http1Config {
+                    max_headers_size: if *scenario == "large-head" { 256 } else { 8192 },
+                    allowed_hosts: HostPolicy::allow_list(vec!["localhost".to_owned()]),
+                    idle_timeout: (!force_close).then_some(Duration::from_millis(300)),
+                    ..Http1Config::default()
+                };
+                let serving_signal = shutdown.clone();
+                let serving_in_flight = Arc::clone(&in_flight);
+                let serving = handle.try_spawn(async move {
+                    if streaming {
+                        let cx = asupersync::Cx::current().expect("serving context");
+                        Http1StreamingServer::with_config(
+                            |_cx, _request| async { Response::new(200, "OK", vec![b'x'; 8 * 1024 * 1024]) },
+                            config,
+                        )
+                        .with_shutdown_signal(serving_signal)
+                        .with_in_flight_requests(serving_in_flight)
+                        .serve(&cx, socket)
+                        .await
+                    } else {
+                        Http1Server::with_config(
+                            |_request| async { panic!("rejected request reached handler") }, config,
+                        )
+                        .with_shutdown_signal(serving_signal)
+                        .with_in_flight_requests(serving_in_flight)
+                        .serve(socket)
+                        .await
+                    }
+                }).expect("spawn connection");
+                asupersync::time::timeout(asupersync::time::wall_now(), Duration::from_secs(2),
+                    parked.wait_until(|| pending.load(Ordering::Acquire) > 0),
+                ).await.expect("real response write must park before trigger");
+                let prefix = first_write.lock().expect("response prefix").clone();
+                assert!(prefix.starts_with(format!("HTTP/1.1 {status} ").as_bytes()), "wrong response path: {prefix:?}");
+                let in_flight_at_park = in_flight.load(Ordering::Acquire);
+                if streaming {
+                    assert_eq!(in_flight_at_park, 1);
+                }
+                let triggered = std::time::Instant::now();
+                if force_close {
+                    assert!(shutdown.begin_drain(Duration::from_secs(10)));
+                    assert!(shutdown.begin_force_close());
+                }
+                let result = asupersync::time::timeout(
+                    asupersync::time::wall_now(), Duration::from_secs(2), serving,
+                ).await;
+                let elapsed = triggered.elapsed();
+                // Failure cleanup happens after the verdict. The nonreader
+                // cannot make a missing response deadline look successful.
+                drop(client);
+                let result = result.expect("parked response must release its connection");
+                if *scenario != "continue" {
+                    assert!(matches!(result, Err(asupersync::http::h1::codec::HttpError::Io(ref error))
+                        if error.kind() == if force_close { std::io::ErrorKind::Interrupted } else { std::io::ErrorKind::TimedOut }),
+                        "unexpected response result: {result:?}");
+                }
+                assert_eq!(in_flight.load(Ordering::Acquire), 0, "request slot leaked");
+                eprintln!("{{\"bead\":\"asupersync-bi2462.103\",\"scenario\":\"{scenario}\",\"workers\":{workers},\"force_close\":{force_close},\"prefill_bytes\":{filled},\"pending_writes\":{},\"in_flight_at_park\":{in_flight_at_park},\"elapsed_ms\":{},\"retired\":true}}", pending.load(Ordering::Acquire), elapsed.as_millis());
+            });
+        }
+    }
+}
+
+#[test]
+fn nonreading_peer_releases_streaming_and_error_responses_at_idle_deadline() {
+    stalled_response_matrix(false);
+}
+
+#[test]
+fn force_close_releases_parked_streaming_and_error_responses_without_idle_timeout() {
+    stalled_response_matrix(true);
+}
+
+struct PendingProducerDrop(Arc<AtomicUsize>);
+
+impl Drop for PendingProducerDrop {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+#[test]
+fn produced_listener_bounds_parked_frame_and_terminal_receipt_waits() {
+    for workers in [1, 2] {
+        for terminal_receipt in [false, true] {
+            let runtime = RuntimeBuilder::new()
+                .worker_threads(workers)
+                .build()
+                .expect("native producer runtime");
+            let handle = runtime.handle();
+            runtime.block_on(async move {
+                let parked = Arc::new(Notify::new());
+                let polls = Arc::new(AtomicUsize::new(0));
+                let drops = Arc::new(AtomicUsize::new(0));
+                let handler_parked = Arc::clone(&parked);
+                let handler_polls = Arc::clone(&polls);
+                let handler_drops = Arc::clone(&drops);
+                let listener = Http1Listener::bind_produced_with_config(
+                    "127.0.0.1:0",
+                    move |_cx, _request| {
+                        let parked = Arc::clone(&handler_parked);
+                        let polls = Arc::clone(&handler_polls);
+                        let drops = Arc::clone(&handler_drops);
+                        async move {
+                            Http1ProducedResponse::chunked(NonZeroUsize::MIN, 200, "OK", move |cx, mut sender| async move {
+                                let _drop = PendingProducerDrop(drops);
+                                sender.send_chunk(&cx, b"alpha").await?;
+                                if terminal_receipt {
+                                    sender.finish(&cx)?;
+                                }
+                                std::future::poll_fn(move |_task| {
+                                    polls.fetch_add(1, Ordering::AcqRel);
+                                    parked.notify_one();
+                                    // No self-wake and no external release: only
+                                    // the server's deadline can end this wait.
+                                    std::task::Poll::<()>::Pending
+                                }).await;
+                                Ok(sender)
+                            })
+                        }
+                    },
+                    localhost_config(Duration::from_secs(5), Duration::from_secs(10))
+                        .http_config(Http1Config {
+                            allowed_hosts: HostPolicy::allow_list(vec!["localhost".to_owned()]),
+                            idle_timeout: Some(Duration::from_millis(300)),
+                            request_drain_grace: Duration::from_millis(25),
+                            ..Http1Config::default()
+                        }),
+                ).await.expect("bind stalled producer listener");
+                let address = listener.local_addr().expect("producer address");
+                let manager = listener.connection_manager().clone();
+                let in_flight = listener.in_flight_requests();
+                let shutdown = listener.shutdown_signal();
+                let running = handle.clone().try_spawn(async move { listener.run_produced(&handle).await }).expect("spawn producer listener");
+                let client = blocking_client(address);
+                asupersync::time::timeout(asupersync::time::wall_now(), Duration::from_secs(2),
+                    parked.wait_until(|| polls.load(Ordering::Acquire) > 0),
+                ).await.expect("producer reached an actual pending poll");
+                assert_eq!(in_flight.load(Ordering::Acquire), 1);
+                let started = std::time::Instant::now();
+                let retired = asupersync::time::timeout(asupersync::time::wall_now(), Duration::from_secs(2), async {
+                    while !manager.is_empty() || in_flight.load(Ordering::Acquire) != 0 {
+                        asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+                    }
+                }).await;
+                let elapsed = started.elapsed();
+                // Begin drain only after recording the independent idle-bound
+                // verdict. Shutdown cannot rescue a stuck producer into green.
+                assert!(manager.begin_drain(Duration::from_secs(5)));
+                if retired.is_err() {
+                    let _ = shutdown.begin_force_close();
+                }
+                let stats = asupersync::time::timeout(asupersync::time::wall_now(), Duration::from_secs(2), running)
+                    .await.expect("listener shutdown must finish").expect("listener result");
+                let response = client.join().expect("producer client");
+                retired.expect("idle deadline must retire a parked producer");
+                assert_eq!(drops.load(Ordering::Acquire), 1, "producer dropped exactly once");
+                assert_eq!(stats.force_closed, 0);
+                assert_eq!(shutdown.phase(), ShutdownPhase::Stopped);
+                assert!(response_body(&response).starts_with("5\r\nalpha\r\n"));
+                assert!(!response_body(&response).contains("0\r\n\r\n"), "no clean terminator without producer receipt");
+                eprintln!("{{\"bead\":\"asupersync-bi2462.103\",\"scenario\":\"parked-producer\",\"workers\":{workers},\"terminal_receipt\":{terminal_receipt},\"pending_polls\":{},\"elapsed_ms\":{},\"retired_before_shutdown\":true}}", polls.load(Ordering::Acquire), elapsed.as_millis());
+            });
+        }
+    }
+}
 
 fn localhost_config(drain: Duration, hard: Duration) -> Http1ListenerConfig {
     Http1ListenerConfig::default()

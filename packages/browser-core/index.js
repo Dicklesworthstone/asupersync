@@ -39,6 +39,14 @@ const reliableStreams = createReliableStreamManager({
 const WEBTRANSPORT_TASK_LABEL = "browser-webtransport";
 const WEBTRANSPORT_CANCEL_KIND = "abort_signal";
 const WEBTRANSPORT_CLOSE_KIND = "webtransport_close";
+// Per-session, per-direction bounds on facade-owned payloads, not host buffers.
+// Send admission includes the in-flight write and any reserved input copy.
+// The receive terminal outcome has a reserved slot beyond the count limit.
+const WEBTRANSPORT_DATAGRAM_LIMITS = Object.freeze({
+  maxDatagramBytes: 65_536,
+  maxQueuedDatagrams: 256,
+  maxQueuedBytes: 1_048_576,
+});
 
 const CANCELLATION_PHASE_ORDER = Object.freeze([
   "requested",
@@ -694,14 +702,89 @@ function resolveWebTransportConstructor() {
   return globalObject.WebTransport;
 }
 
-function encodeWebTransportDatagram(value, label) {
+function checkWebTransportDatagramLength(length, label) {
+  if (!Number.isSafeInteger(length) || length < 0
+    || length > WEBTRANSPORT_DATAGRAM_LIMITS.maxDatagramBytes) {
+    throw new RangeError(`${label} exceeds the WebTransport datagram byte limit`);
+  }
+}
+
+function prepareWebTransportDatagram(value, label) {
+  let view;
+  if (ArrayBuffer.isView(value)) {
+    const length = value.byteLength;
+    checkWebTransportDatagramLength(length, label);
+    view = new Uint8Array(value.buffer, value.byteOffset, length);
+  } else if (value instanceof ArrayBuffer) {
+    const length = value.byteLength;
+    checkWebTransportDatagramLength(length, label);
+    view = new Uint8Array(value, 0, length);
+  } else if (Array.isArray(value)) {
+    const length = value.length;
+    checkWebTransportDatagramLength(length, label);
+    return {
+      byteLength: length,
+      copy() {
+        const bytes = new Uint8Array(length);
+        // Cache the bounded length; never invoke arbitrary input iterators or
+        // let an element getter expand the allocation after admission.
+        for (let i = 0; i < length; i += 1) {
+          const byte = value[i];
+          if (!Number.isInteger(byte) || byte < 0 || byte > 255) {
+            throw new TypeError(`${label} must contain only integer bytes`);
+          }
+          bytes[i] = byte;
+        }
+        return bytes;
+      },
+    };
+  } else {
+    throw new TypeError(`${label} must be Uint8Array, ArrayBuffer, ArrayBufferView, or byte[]`);
+  }
+  // Freeze the view before admission, then copy only its admitted bytes.
+  // The queued payload never retains an arbitrarily large backing buffer.
+  return { byteLength: view.byteLength, copy: () => new Uint8Array(view) };
+}
+
+function copyWebTransportDatagram(value, label) {
+  return prepareWebTransportDatagram(value, label).copy();
+}
+
+function prepareWebTransportWrite(value, label) {
   if (typeof value === "string") {
     if (typeof TextEncoder !== "function") {
       throw new TypeError("webtransport string datagrams require TextEncoder support");
     }
-    return new TextEncoder().encode(value);
+    // UTF-8 is at least as long as UTF-16 code units. Refuse obviously large
+    // strings first, then measure exactly without allocating an encoded copy.
+    checkWebTransportDatagramLength(value.length, label);
+    let byteLength = 0;
+    for (let i = 0; i < value.length; i += 1) {
+      const unit = value.charCodeAt(i);
+      if (unit <= 0x7f) byteLength += 1;
+      else if (unit <= 0x7ff) byteLength += 2;
+      else if (unit >= 0xd800 && unit <= 0xdbff
+        && value.charCodeAt(i + 1) >= 0xdc00 && value.charCodeAt(i + 1) <= 0xdfff) {
+        byteLength += 4;
+        i += 1;
+      } else {
+        // Unpaired surrogates become the three-byte replacement character.
+        byteLength += 3;
+      }
+      checkWebTransportDatagramLength(byteLength, label);
+    }
+    return { byteLength, copy: () => new TextEncoder().encode(value) };
   }
-  return Uint8Array.from(normalizeByteArray(value, label));
+  return prepareWebTransportDatagram(value, label);
+}
+
+function releaseWebTransportWrite(state, byteLength) {
+  // Closing the owner releases all reservations, including a parked write.
+  // Its eventual completion or rejection must not subtract that credit twice.
+  if (!state.closed) {
+    state.pendingWriteCount -= 1;
+    state.pendingWriteBytes -= byteLength;
+  }
 }
 
 function queueWebTransportOutcome(state, outcome, { terminal = false } = {}) {
@@ -710,6 +793,20 @@ function queueWebTransportOutcome(state, outcome, { terminal = false } = {}) {
   }
   if (terminal) {
     state.terminalQueued = true;
+  } else {
+    // Input accessors can close the owner while the datagram is being copied.
+    if (state.closed) return;
+    const bytes = outcome.value.byteLength;
+    if (state.inbox.length >= WEBTRANSPORT_DATAGRAM_LIMITS.maxQueuedDatagrams
+      || bytes > WEBTRANSPORT_DATAGRAM_LIMITS.maxQueuedBytes - state.inboxBytes) {
+      settleHostWebTransportState(
+        state,
+        failOut("compatibility_rejected", "transient", "webtransport receive queue capacity exhausted"),
+        "receive_overflow",
+      );
+      return;
+    }
+    state.inboxBytes += bytes;
   }
   state.inbox.push(outcome);
 }
@@ -740,6 +837,8 @@ function closeHostWebTransportState(state, reason = undefined, outcome = undefin
     outcome ?? cancelOut(WEBTRANSPORT_CLOSE_KIND, "completed", reason ?? "session closed", state.sessionOrigin),
   );
   state.pendingWrites.length = 0;
+  state.pendingWriteCount = 0;
+  state.pendingWriteBytes = 0;
   // Each host operation may throw synchronously as well as reject. A failed
   // cleanup must not skip the remaining resources or the task's terminal join.
   try {
@@ -784,9 +883,17 @@ function flushPendingWebTransportWrites(state, sessionOrigin) {
   state.flushPromise = Promise.resolve()
     .then(async () => {
       while (!state.closed && state.pendingWrites.length > 0) {
-        const datagram = state.pendingWrites.shift();
+        let datagram = state.pendingWrites.shift();
+        const byteLength = datagram.byteLength;
         try {
-          await state.writer.write(datagram);
+          const writer = state.writer;
+          const write = writer.write;
+          if (state.closed) break;
+          const written = write.call(writer, datagram);
+          // The host may retain its write, but the facade's parked future need
+          // not retain the payload after close releases the owner's budget.
+          datagram = null;
+          await written;
         } catch (error) {
           settleHostWebTransportState(
             state,
@@ -798,6 +905,8 @@ function flushPendingWebTransportWrites(state, sessionOrigin) {
             "write_failure",
           );
           break;
+        } finally {
+          releaseWebTransportWrite(state, byteLength);
         }
       }
     })
@@ -845,7 +954,7 @@ async function pumpWebTransportReads(state, sessionOrigin) {
       if (value !== undefined) {
         queueWebTransportOutcome(
           state,
-          Outcome.ok(Uint8Array.from(normalizeByteArray(value, "webtransport datagram"))),
+          Outcome.ok(copyWebTransportDatagram(value, "webtransport datagram")),
         );
       }
     } catch (error) {
@@ -1247,7 +1356,10 @@ export function webtransport_open(request, consumerVersion = null) {
       sessionOrigin,
       scopeKey: keyOf(request.scope, "request.scope", "region"),
       inbox: [],
+      inboxBytes: 0,
       pendingWrites: [],
+      pendingWriteCount: 0,
+      pendingWriteBytes: 0,
       ready: false,
       closed: false,
       settled: false,
@@ -1296,8 +1408,9 @@ export function webtransport_send(request, _consumerVersion = null) {
       "webtransport_send rejected: WebTransport session is already closed",
     );
   }
+  let input;
   try {
-    state.pendingWrites.push(encodeWebTransportDatagram(request.value, "request.value"));
+    input = prepareWebTransportWrite(request.value, "request.value");
   } catch (error) {
     return failOut(
       "compatibility_rejected",
@@ -1305,6 +1418,40 @@ export function webtransport_send(request, _consumerVersion = null) {
       `webtransport_send rejected: ${errorMessage(error)}`,
     );
   }
+  if (state.closed) {
+    return failOut(
+      "invalid_handle", "permanent",
+      "webtransport_send rejected: session closed during request processing",
+    );
+  }
+  if (state.pendingWriteCount >= WEBTRANSPORT_DATAGRAM_LIMITS.maxQueuedDatagrams
+    || input.byteLength > WEBTRANSPORT_DATAGRAM_LIMITS.maxQueuedBytes - state.pendingWriteBytes) {
+    return failOut(
+      "compatibility_rejected", "transient",
+      "webtransport_send rejected: send queue capacity exhausted; retry after pending writes drain",
+    );
+  }
+  // Reserve before allocating or invoking array element getters. A getter can
+  // reenter send(), so checking only after normalization would over-admit.
+  state.pendingWriteCount += 1;
+  state.pendingWriteBytes += input.byteLength;
+  let datagram;
+  try {
+    datagram = input.copy();
+  } catch (error) {
+    releaseWebTransportWrite(state, input.byteLength);
+    return failOut(
+      "compatibility_rejected", "permanent",
+      `webtransport_send rejected: ${errorMessage(error)}`,
+    );
+  }
+  if (state.closed) {
+    return failOut(
+      "invalid_handle", "permanent",
+      "webtransport_send rejected: session closed during request processing",
+    );
+  }
+  state.pendingWrites.push(datagram);
   flushPendingWebTransportWrites(state, state.sessionOrigin);
   return Outcome.ok(undefined);
 }
@@ -1330,6 +1477,9 @@ export function webtransport_recv(request, _consumerVersion = null) {
     );
   }
   const result = state.inbox.shift() ?? Outcome.ok(undefined);
+  if (result.outcome === "ok" && result.value !== undefined) {
+    state.inboxBytes -= result.value.byteLength;
+  }
   if (isTerminalOutcome(result)) {
     INFLIGHT_WEBTRANSPORTS.delete(sessionKey);
   }

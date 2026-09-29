@@ -55,16 +55,16 @@ fn exercise_executing_combinators(sharded: bool) {
         Box::pin(execute_public_journeys(sharded));
     let (map_in_flight, retained_maps, pipeline_window) =
         runtime.block_on(runtime.handle().spawn(future));
-    runtime.block_on(async {
-        let started = Instant::now();
-        while !runtime.is_quiescent() {
-            assert!(
-                started.elapsed() < Duration::from_secs(5),
-                "children failed to drain"
-            );
-            asupersync::runtime::yield_now().await;
-        }
-    });
+    // block_on registers its own root task, so quiescence is checked outside
+    // it; each turn drives children that are still draining.
+    let started = Instant::now();
+    while !runtime.is_quiescent() {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "children failed to drain"
+        );
+        runtime.block_on(asupersync::runtime::yield_now());
+    }
     assert!(
         runtime
             .task_inspector(Default::default())

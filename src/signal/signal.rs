@@ -7,10 +7,8 @@
 //! # Design
 //!
 //! On Unix and Windows, a global dispatcher thread is installed once and receives
-//! process signals via `signal-hook`. Unix handlers are registered only for
-//! requested kinds; once registered, a handler remains installed even if its
-//! last stream is dropped. Delivered signals are fanned out to per-kind async
-//! waiters using `Notify` + monotone delivery counters.
+//! process signals via `signal-hook`. Delivered signals are fanned out to
+//! per-kind async waiters using `Notify` + monotone delivery counters.
 
 use std::io;
 
@@ -110,7 +108,7 @@ impl SignalSlot {
 struct SignalDispatcher {
     slots: HashMap<SignalKind, Arc<SignalSlot>>,
     #[cfg(unix)]
-    _handle: signal_hook::iterator::Handle,
+    handle: signal_hook::iterator::Handle,
     /// Windows-only: kernel event handles + JoinHandle for the
     /// background poller thread. The poller waits on these events with
     /// `WaitForMultipleObjects(INFINITE)`; the CTRL signal handler
@@ -207,16 +205,17 @@ impl Drop for SignalDispatcher {
 
 #[cfg(unix)]
 impl SignalDispatcher {
-    fn start(kind: SignalKind) -> io::Result<Self> {
+    fn start() -> io::Result<Self> {
         let mut slots = HashMap::with_capacity(8);
         for kind in all_signal_kinds() {
             slots.insert(kind, Arc::new(SignalSlot::new()));
         }
 
-        // Register only the requested kind. Installing every supported handler
-        // here would replace the process's default SIGTERM disposition when a
-        // caller merely asks to wait for Ctrl-C.
-        let mut signals = signal_hook::iterator::Signals::new([raw_signal_for_kind(kind)])?;
+        // Slots are bookkeeping, not permission to intercept every signal.
+        // Start with no OS registrations; Signal::new adds only the requested
+        // kind through the iterator's thread-safe, idempotent handle API.
+        let raw_signals: [i32; 0] = [];
+        let mut signals = signal_hook::iterator::Signals::new(raw_signals)?;
         let handle = signals.handle();
 
         let thread_slots = slots.clone();
@@ -233,21 +232,11 @@ impl SignalDispatcher {
             })
             .map_err(|e| io::Error::other(format!("failed to spawn signal dispatcher: {e}")))?;
 
-        Ok(Self {
-            slots,
-            _handle: handle,
-        })
+        Ok(Self { slots, handle })
     }
 
     fn slot(&self, kind: SignalKind) -> Option<Arc<SignalSlot>> {
         self.slots.get(&kind).cloned()
-    }
-
-    fn register(&self, kind: SignalKind) -> io::Result<()> {
-        // Handle::add_signal deduplicates registrations under its own lock.
-        // A requested handler stays installed for the process lifetime, even
-        // after every stream for that kind has been dropped.
-        self._handle.add_signal(raw_signal_for_kind(kind))
     }
 
     #[cfg(test)]
@@ -502,18 +491,9 @@ static SIGNAL_DISPATCHER: OnceLock<io::Result<SignalDispatcher>> = OnceLock::new
 
 #[cfg(any(unix, windows))]
 fn dispatcher_for(kind: SignalKind) -> Result<&'static SignalDispatcher, SignalError> {
-    #[cfg(unix)]
-    let result = SIGNAL_DISPATCHER.get_or_init(|| SignalDispatcher::start(kind));
-    #[cfg(windows)]
     let result = SIGNAL_DISPATCHER.get_or_init(SignalDispatcher::start);
     match result {
-        Ok(dispatcher) => {
-            #[cfg(unix)]
-            dispatcher.register(kind).map_err(|err| {
-                SignalError::unsupported(kind, format!("failed to register signal handler: {err}"))
-            })?;
-            Ok(dispatcher)
-        }
+        Ok(dispatcher) => Ok(dispatcher),
         Err(err) => Err(SignalError::unsupported(
             kind,
             format!("failed to initialize signal dispatcher: {err}"),
@@ -562,7 +542,17 @@ impl Signal {
             let slot = dispatcher.slot(kind).ok_or_else(|| {
                 SignalError::unsupported(kind, "signal kind is not supported by dispatcher")
             })?;
+            // Take the cursor before registering. Once add_signal returns, the
+            // default disposition is gone, so a delivery recorded in between
+            // must belong to this stream rather than count as already seen.
             let seen_deliveries = slot.deliveries.load(Ordering::Acquire);
+            #[cfg(unix)]
+            dispatcher
+                .handle
+                .add_signal(raw_signal_for_kind(kind))
+                .map_err(|err| {
+                    SignalError::unsupported(kind, format!("failed to register signal: {err}"))
+                })?;
             Ok(Self {
                 kind,
                 slot,
@@ -627,9 +617,12 @@ impl Signal {
 
 /// Creates a new stream that receives signals of the given kind.
 ///
-/// On Unix, this installs a process-wide handler only for `kind`. The handler
-/// remains installed after the stream is dropped. Asupersync leaves the
-/// dispositions of kinds never requested through this API unchanged.
+/// On Unix, registration intercepts only this signal kind; creating an
+/// interrupt stream does not also intercept termination, hangup, or alarm.
+/// Registrations remain process-global and persist after all streams of that
+/// kind are dropped. Dropping a stream does not restore its default disposition.
+/// Other libraries' signal handlers are subject to `signal-hook`'s usual
+/// composition rules; this function does not replace their policies.
 ///
 /// # Errors
 ///

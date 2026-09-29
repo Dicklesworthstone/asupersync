@@ -685,6 +685,510 @@ fn h2_lb_compat_keeps_socket_until_drain_completes() {
     });
 }
 
+mod transport_stalls {
+    use super::*;
+    use asupersync::http::h2::frame::{Setting, WindowUpdateFrame};
+    use std::time::Instant;
+
+    fn wait_for(label: &str, mut ready: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !ready() {
+            assert!(Instant::now() < deadline, "{label} did not become ready");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn stalled_connection(workers: usize, non_reader: bool, force_close: bool) {
+        const RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(workers)
+            .build()
+            .expect("native runtime");
+        let handle = runtime.handle();
+        let handler_completed = Arc::new(AtomicUsize::new(0));
+        let completion = Arc::clone(&handler_completed);
+        let configured_timeout = if force_close {
+            Duration::from_secs(30)
+        } else {
+            Duration::from_millis(400)
+        };
+        let listener = runtime
+            .block_on(Http2Listener::bind_with_config(
+                "127.0.0.1:0",
+                move |_| {
+                    let completion = Arc::clone(&completion);
+                    async move {
+                        let response = Response::new(200, "OK", vec![b'x'; RESPONSE_BYTES]);
+                        completion.fetch_add(1, Ordering::Release);
+                        response
+                    }
+                },
+                drain_config(Duration::from_millis(50), Duration::from_millis(200))
+                    .max_connections(Some(1))
+                    .idle_timeout(None),
+            ))
+            .expect("bind listener")
+            .preface_timeout(configured_timeout)
+            .write_progress_timeout(configured_timeout);
+        let address = listener.local_addr().unwrap();
+        let manager = listener.connection_manager().clone();
+        let signal = listener.shutdown_signal();
+        let in_flight = listener.in_flight_requests();
+        let run = handle
+            .clone()
+            .try_spawn(boxed_listener_run(
+                async move { listener.run(&handle).await },
+            ))
+            .expect("spawn listener");
+
+        // Set the receive window before connect. With 64 MiB of HTTP/2 send
+        // credit and only 2 KiB of socket receive capacity, a non-reading peer
+        // cannot mistake HTTP/2 flow-control blocking for transport pressure.
+        let socket = socket2::Socket::new(
+            socket2::Domain::IPV4,
+            socket2::Type::STREAM,
+            Some(socket2::Protocol::TCP),
+        )
+        .expect("client socket");
+        socket.set_recv_buffer_size(2048).unwrap();
+        socket.connect(&address.into()).unwrap();
+        let mut client: std::net::TcpStream = socket.into();
+        client
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let started = Instant::now();
+        if non_reader {
+            client.write_all(CLIENT_PREFACE).unwrap();
+            let mut frames = BytesMut::new();
+            Frame::Settings(SettingsFrame::new(vec![Setting::InitialWindowSize(
+                128 * 1024 * 1024,
+            )]))
+            .encode(&mut frames)
+            .unwrap();
+            Frame::WindowUpdate(WindowUpdateFrame::new(0, 128 * 1024 * 1024 - 65_535))
+                .encode(&mut frames)
+                .unwrap();
+            let mut headers = BytesMut::new();
+            HpackEncoder::new().encode(
+                &[
+                    Header::new(":method", "GET"),
+                    Header::new(":scheme", "http"),
+                    Header::new(":path", "/non-reader"),
+                    Header::new(":authority", "localhost"),
+                ],
+                &mut headers,
+            );
+            Frame::Headers(HeadersFrame::new(1, headers.freeze(), true, true))
+                .encode(&mut frames)
+                .unwrap();
+            client.write_all(&frames).unwrap();
+            wait_for("large response completed by handler", || {
+                handler_completed.load(Ordering::Acquire) == 1
+            });
+        } else {
+            client.write_all(&CLIENT_PREFACE[..3]).unwrap();
+        }
+        wait_for("accepted connection", || manager.active_count() == 1);
+        std::thread::sleep(Duration::from_millis(30));
+        assert_eq!(
+            manager.active_count(),
+            1,
+            "stall must be live before trigger"
+        );
+        assert_eq!(
+            in_flight.load(Ordering::Acquire),
+            usize::from(non_reader),
+            "non-reading socket retains its queued response; partial preface dispatches nothing"
+        );
+        let trigger = Instant::now();
+        if force_close {
+            assert!(manager.begin_drain(Duration::from_millis(50)));
+            assert!(signal.begin_force_close());
+        } else {
+            // Keep the client open and do not consume even a single byte. Slot
+            // retirement must be caused by the listener's own deadline.
+            wait_for("stalled connection deadline retires slot", || {
+                manager.is_empty()
+            });
+            assert_eq!(signal.phase(), ShutdownPhase::Running);
+            assert_eq!(in_flight.load(Ordering::Acquire), 0);
+            assert!(manager.begin_drain(Duration::from_millis(50)));
+        }
+        let stats = runtime
+            .block_on(async move {
+                asupersync::time::timeout(
+                    Cx::current().expect("join Cx").now(),
+                    Duration::from_secs(3),
+                    run,
+                )
+                .await
+            })
+            .expect("listener must return while the stalled client is still open")
+            .expect("listener run");
+        assert!(manager.is_empty());
+        assert_eq!(in_flight.load(Ordering::Acquire), 0);
+        assert!(trigger.elapsed() < Duration::from_secs(3));
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "bead": "asupersync-bi2462.102",
+                "scenario": if non_reader { "non_reading_transport" } else { "partial_preface" },
+                "workers": workers,
+                "force_close": force_close,
+                "configured_timeout_ms": configured_timeout.as_millis(),
+                "handler_completed": handler_completed.load(Ordering::Acquire),
+                "active_connections": manager.active_count(),
+                "in_flight": in_flight.load(Ordering::Acquire),
+                "elapsed_ms": started.elapsed().as_millis(),
+                "trigger_to_join_ms": trigger.elapsed().as_millis(),
+                "drained": stats.drained,
+                "force_closed": stats.force_closed,
+                "peer_kept_open_without_reads": true,
+            })
+        );
+        drop(client);
+    }
+
+    #[test]
+    fn h2_partial_preface_deadline_and_force_close_release_connection() {
+        for workers in [1, 2] {
+            for force_close in [false, true] {
+                stalled_connection(workers, false, force_close);
+            }
+        }
+    }
+
+    #[test]
+    fn h2_non_reading_peer_write_deadline_and_force_close_release_connection() {
+        for workers in [1, 2] {
+            for force_close in [false, true] {
+                stalled_connection(workers, true, force_close);
+            }
+        }
+    }
+}
+
+mod request_ownership {
+    use super::*;
+    use asupersync::http::h1::types::Request;
+    use asupersync::http::h2::ErrorCode;
+    use asupersync::http::h2::frame::RstStreamFrame;
+    use asupersync::http::h2::listener::Http2ProducedResponse;
+    use std::num::NonZeroUsize;
+    use std::sync::atomic::AtomicBool;
+    use std::task::Poll;
+    use std::time::Instant;
+
+    struct Work {
+        starts: AtomicUsize,
+        cancelled: AtomicUsize,
+        cleaned: AtomicUsize,
+        parked: std::sync::mpsc::Sender<()>,
+        release: Notify,
+        released: AtomicBool,
+    }
+
+    async fn handler(work: Arc<Work>, request: Request) -> Response {
+        if request.uri == "/recover" {
+            return Response::new(200, "OK", b"recovered".to_vec());
+        }
+        work.starts.fetch_add(1, Ordering::Release);
+        let cx = Cx::current().expect("actual request task Cx");
+        let mut cancel = std::pin::pin!(cx.cancelled());
+        let mut witnessed = false;
+        std::future::poll_fn(|task_cx| match cancel.as_mut().poll(task_cx) {
+            Poll::Ready(reason) => Poll::Ready(reason),
+            Poll::Pending => {
+                // This witness follows the actual cancellation-waker
+                // registration, not merely entry into the handler factory.
+                if !witnessed {
+                    work.parked.send(()).expect("parked-state observer");
+                    witnessed = true;
+                }
+                Poll::Pending
+            }
+        })
+        .await;
+        work.cancelled.fetch_add(1, Ordering::Release);
+        work.release
+            .wait_until(|| work.released.load(Ordering::Acquire))
+            .await;
+        work.cleaned.fetch_add(1, Ordering::Release);
+        Response::new(200, "OK", b"cancelled response must not escape".to_vec())
+    }
+
+    fn wait_for(label: &str, mut condition: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !condition() {
+            assert!(Instant::now() < deadline, "{label}");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    struct Peer {
+        socket: std::net::TcpStream,
+        codec: FrameCodec,
+        buffered: BytesMut,
+        encoder: HpackEncoder,
+    }
+
+    impl Peer {
+        fn connect(address: SocketAddr) -> Self {
+            let mut socket = std::net::TcpStream::connect(address).expect("client connect");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            socket
+                .set_write_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            socket.write_all(CLIENT_PREFACE).unwrap();
+            let mut peer = Self {
+                socket,
+                codec: FrameCodec::new(),
+                buffered: BytesMut::new(),
+                encoder: HpackEncoder::new(),
+            };
+            peer.send(Frame::Settings(SettingsFrame::new(Vec::new())));
+            peer
+        }
+
+        fn send(&mut self, frame: Frame) {
+            let mut bytes = BytesMut::new();
+            frame.encode(&mut bytes).unwrap();
+            self.socket.write_all(&bytes).unwrap();
+        }
+
+        fn request(&mut self, stream_id: u32, path: &str) {
+            let mut headers = BytesMut::new();
+            self.encoder.encode(
+                &[
+                    Header::new(":method", "GET"),
+                    Header::new(":scheme", "http"),
+                    Header::new(":path", path),
+                    Header::new(":authority", "localhost"),
+                ],
+                &mut headers,
+            );
+            self.send(Frame::Headers(HeadersFrame::new(
+                stream_id,
+                headers.freeze(),
+                true,
+                true,
+            )));
+        }
+
+        fn wait_stream(&mut self, stream_id: u32, refused: bool) {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                assert!(
+                    Instant::now() < deadline,
+                    "no terminal frame for stream {stream_id}"
+                );
+                if let Some(frame) = self.codec.decode(&mut self.buffered).unwrap() {
+                    match frame {
+                        Frame::Settings(settings) if !settings.ack => {
+                            self.send(Frame::Settings(SettingsFrame::ack()));
+                        }
+                        Frame::RstStream(reset) if reset.stream_id == stream_id => {
+                            assert!(refused, "recovery stream was reset: {reset:?}");
+                            assert_eq!(reset.error_code, ErrorCode::RefusedStream);
+                            return;
+                        }
+                        Frame::Data(data) if data.stream_id == stream_id && data.end_stream => {
+                            assert!(!refused, "request exceeded its admission cap");
+                            assert_eq!(&data.data[..], b"recovered");
+                            return;
+                        }
+                        Frame::GoAway(goaway) => panic!("unexpected GOAWAY: {goaway:?}"),
+                        _ => {}
+                    }
+                } else {
+                    let mut chunk = [0u8; 4096];
+                    let count = self.socket.read(&mut chunk).expect("read response frame");
+                    assert_ne!(count, 0, "peer closed before stream {stream_id} terminated");
+                    self.buffered.extend_from_slice(&chunk[..count]);
+                }
+            }
+        }
+    }
+
+    fn cancellation_retains_admission(
+        workers: usize,
+        trigger: &str,
+        produced: bool,
+        global_limit: usize,
+    ) {
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(workers)
+            .build()
+            .unwrap();
+        let runtime_handle = runtime.handle();
+        let (parked, witness) = std::sync::mpsc::channel();
+        let work = Arc::new(Work {
+            starts: AtomicUsize::new(0),
+            cancelled: AtomicUsize::new(0),
+            cleaned: AtomicUsize::new(0),
+            parked,
+            release: Notify::new(),
+            released: AtomicBool::new(false),
+        });
+        let handler_work = Arc::clone(&work);
+        let config = drain_config(Duration::from_millis(100), Duration::from_secs(1))
+            .request_drain_grace(Duration::from_secs(10));
+        let (address, manager, in_flight, run) = if produced {
+            let listener = runtime
+                .block_on(Http2Listener::bind_produced_with_config(
+                    "127.0.0.1:0",
+                    move |request| {
+                        let future = handler(Arc::clone(&handler_work), request);
+                        async move { Http2ProducedResponse::buffered(future.await) }
+                    },
+                    config,
+                ))
+                .unwrap()
+                .max_in_flight_requests(NonZeroUsize::new(global_limit).unwrap())
+                .max_connection_in_flight_requests(NonZeroUsize::MIN);
+            let address = listener.local_addr().unwrap();
+            let manager = listener.connection_manager().clone();
+            let in_flight = listener.in_flight_requests();
+            let run = runtime_handle
+                .clone()
+                .try_spawn(boxed_listener_run(async move {
+                    listener.run_produced(&runtime_handle).await
+                }))
+                .unwrap();
+            (address, manager, in_flight, run)
+        } else {
+            let listener = runtime
+                .block_on(Http2Listener::bind_with_config(
+                    "127.0.0.1:0",
+                    move |request| handler(Arc::clone(&handler_work), request),
+                    config,
+                ))
+                .unwrap()
+                .max_in_flight_requests(NonZeroUsize::new(global_limit).unwrap())
+                .max_connection_in_flight_requests(NonZeroUsize::MIN);
+            let address = listener.local_addr().unwrap();
+            let manager = listener.connection_manager().clone();
+            let in_flight = listener.in_flight_requests();
+            let run = runtime_handle
+                .clone()
+                .try_spawn(boxed_listener_run(async move {
+                    listener.run(&runtime_handle).await
+                }))
+                .unwrap();
+            (address, manager, in_flight, run)
+        };
+        let mut first = Peer::connect(address);
+        first.request(1, "/parked");
+        witness
+            .recv_timeout(Duration::from_secs(3))
+            .expect("actual parked handler");
+        let started = Instant::now();
+        match trigger {
+            "rst" => first.send(Frame::RstStream(RstStreamFrame::new(1, ErrorCode::Cancel))),
+            "stream_error" => {
+                // Intentionally malformed wire input: the public encoder
+                // correctly rejects zero and must retain that validation.
+                first
+                    .socket
+                    .write_all(&[0, 0, 4, 8, 0, 0, 0, 0, 1, 0, 0, 0, 0])
+                    .unwrap();
+            }
+            "disconnect" => first.socket.shutdown(std::net::Shutdown::Both).unwrap(),
+            _ => unreachable!(),
+        }
+        wait_for("handler never observed cancellation", || {
+            work.cancelled.load(Ordering::Acquire) == 1
+        });
+        assert_eq!(work.cleaned.load(Ordering::Acquire), 0);
+        assert_eq!(
+            in_flight.load(Ordering::Acquire),
+            1,
+            "cleanup retains global admission"
+        );
+        assert_eq!(
+            manager.active_count(),
+            1,
+            "connection ownership cannot retire during cleanup"
+        );
+        if trigger != "disconnect" {
+            first.request(3, "/must-not-run");
+            first.wait_stream(3, true);
+        }
+        let mut second = Peer::connect(address);
+        if global_limit == 1 {
+            second.request(1, "/must-not-run");
+            second.wait_stream(1, true);
+        } else {
+            // With global headroom, the first connection still refused its
+            // replacement while this separate connection remains usable.
+            second.request(1, "/recover");
+            second.wait_stream(1, false);
+        }
+        assert_eq!(
+            work.starts.load(Ordering::Acquire),
+            1,
+            "both admission caps cover draining work"
+        );
+        assert_eq!(work.cleaned.load(Ordering::Acquire), 0);
+        work.released.store(true, Ordering::Release);
+        work.release.notify_waiters();
+        wait_for("cleanup never released admission", || {
+            in_flight.load(Ordering::Acquire) == 0
+        });
+        assert_eq!(work.cleaned.load(Ordering::Acquire), 1);
+        let mut recovery = Peer::connect(address);
+        recovery.request(1, "/recover");
+        recovery.wait_stream(1, false);
+        drop(first);
+        drop(second);
+        drop(recovery);
+        assert!(manager.begin_drain(Duration::from_millis(100)));
+        runtime.block_on(async move {
+            asupersync::time::timeout(Cx::current().unwrap().now(), Duration::from_secs(3), run)
+                .await
+                .expect("listener drains owned coordinators")
+                .expect("listener result")
+        });
+        assert_eq!(in_flight.load(Ordering::Acquire), 0);
+        assert!(manager.is_empty());
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "bead": "asupersync-bi2462.102", "scenario": trigger,
+                "workers": workers, "produced_dispatch": produced,
+                "global_limit": global_limit, "connection_limit": 1,
+                "parked_witness": true, "cancelled": work.cancelled.load(Ordering::Acquire),
+                "cleaned": work.cleaned.load(Ordering::Acquire),
+                "blocked_handlers_started": work.starts.load(Ordering::Acquire) - 1,
+                "in_flight": in_flight.load(Ordering::Acquire),
+                "elapsed_ms": started.elapsed().as_millis(), "recovery_response": true,
+            })
+        );
+    }
+
+    #[test]
+    fn h2_cancelled_requests_retain_admission_until_owned_cleanup_finishes() {
+        for workers in [1, 2] {
+            for trigger in ["rst", "stream_error", "disconnect"] {
+                cancellation_retains_admission(workers, trigger, false, 1);
+            }
+            cancellation_retains_admission(workers, "rst", false, 2);
+        }
+    }
+
+    #[test]
+    fn h2_produced_dispatch_observes_stream_cancel_before_response_publication() {
+        for workers in [1, 2] {
+            for trigger in ["rst", "stream_error", "disconnect"] {
+                cancellation_retains_admission(workers, trigger, true, 1);
+            }
+            cancellation_retains_admission(workers, "rst", true, 2);
+        }
+    }
+}
+
 // The external oracle is deliberately opt-in. A maintained proof command must
 // select this exact ignored test; an ordinary ignored/zero-test run is no proof.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
