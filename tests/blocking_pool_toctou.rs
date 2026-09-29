@@ -153,7 +153,11 @@ fn blocking_helper_boundary_census_requires_classification() {
 
     // Free helpers preserve the assigned placement independently of SPAWN.
     // Cx methods admit region-owned tasks through a SPAWN-checked gateway.
-    // Runtime/RuntimeHandle methods use explicitly held pool ownership.
+    // The drained Cx methods (ecda43b5b) live in the same `Caps: HasSpawn` impl
+    // and admit through `spawn` / `spawn_in` like `spawn_blocking`.
+    // Runtime/RuntimeHandle methods use explicitly held pool ownership; their
+    // drained variants mint the owning runtime's request Cx and delegate to
+    // that same SPAWN-checked Cx gateway.
     // The two private free-helper dispatchers preserve pool/thread fallbacks.
     let expected = [
         ("runtime/spawn_blocking.rs", "spawn_blocking", 1),
@@ -162,7 +166,10 @@ fn blocking_helper_boundary_census_requires_classification() {
         ("runtime/spawn_blocking.rs", "spawn_blocking_on_thread", 1),
         ("cx/cx.rs", "spawn_blocking", 1),
         ("cx/cx.rs", "spawn_blocking_in", 1),
+        ("cx/cx.rs", "spawn_blocking_drained", 1),
+        ("cx/cx.rs", "spawn_blocking_drained_in", 1),
         ("runtime/builder.rs", "spawn_blocking", 2),
+        ("runtime/builder.rs", "spawn_blocking_drained", 2),
         ("runtime/builder.rs", "spawn_blocking_on_cohort", 2),
     ]
     .into_iter()
