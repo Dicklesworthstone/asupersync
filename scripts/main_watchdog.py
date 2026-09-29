@@ -131,7 +131,11 @@ FIRST_ERROR_RE = re.compile(r"^(?:\S+\.rs:\d+:\d+: error(?:\[E\d+\])?:.*|error(?
 FAILED_TEST_RE = re.compile(r"^test (\S+) \.\.\. FAILED$")
 NO_TARGET_RE = re.compile(r"error: no (?:test|bin|example|bench) target named `([^`]+)`")
 # rustc itself was killed (the worker ran out of memory): it never reached a verdict.
-COMPILER_KILLED_RE = re.compile(r"process didn't exit successfully: `(?:[^`\s]*/)?rustc [^`]*` \(signal: 9, SIGKILL: kill\)")
+# Under clippy the killed command is `clippy-driver <path>/rustc ...` (bi2462.147.65).
+COMPILER_KILLED_RE = re.compile(
+    r"process didn't exit successfully: `(?:[^`\s]*/)?(?:clippy-driver\s+(?:[^`\s]*/)?)?rustc [^`]*` "
+    r"\(signal: 9, SIGKILL: kill\)"
+)
 # The worker lost files a dependency build needed (a registry cache pruned mid-build,
 # a rustc it could not start, a failed download). No commit here can cause these.
 WORKER_FAULT_RE = re.compile(

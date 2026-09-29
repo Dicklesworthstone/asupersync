@@ -424,6 +424,31 @@ fn a_preflight_refused_head_moves_the_next_batch_past_it() {
     assert_eq!(released["state"]["last_covered"], head, "{released:#}");
 }
 
+/// Under clippy the kernel kills `clippy-driver <path>/rustc ...`. That OOM was
+/// once read as red and bisected onto an innocent commit (bi2462.147.65).
+#[test]
+fn a_clippy_driver_killed_on_the_worker_is_undecided() {
+    let head = sha(9);
+    let log = "  INFO rch::hook: Selected worker: vmi1264463 at root@host\nerror: could not compile `asupersync` (lib test)\n\nCaused by:\n  process didn't exit successfully: `/root/.rustup/toolchains/nightly-2026-08-31-x86_64-unknown-linux-gnu/bin/clippy-driver /root/.rustup/toolchains/nightly-2026-08-31-x86_64-unknown-linux-gnu/bin/rustc --crate-name asupersync --edition=2024 src/lib.rs --test` (signal: 9, SIGKILL: kill)\n  Remote command finished: exit=101 in 1363895ms\n";
+    let scenario = json!({
+        "plan": {
+            "commits": [commit(9, "dev@example.com", "nine")],
+            "lanes": [{"id": "clippy-default", "kind": "build", "argv": ["cargo"], "expected_targets": []}],
+        },
+        "lane_logs": {"clippy-default": {head.clone(): {"log": log}}},
+    });
+    let result = evaluate(&scenario);
+    let outcome = receipt(&result, "clippy-default");
+    assert_eq!(outcome["verdict"], "no-evidence", "{result:#}");
+    assert!(
+        result["bead_payloads"]
+            .as_array()
+            .expect("array")
+            .is_empty(),
+        "a killed clippy-driver must never file a bead: {result:#}"
+    );
+}
+
 #[test]
 fn a_compiler_killed_on_the_worker_is_undecided_unless_a_real_failure_sits_beside_it() {
     let head = sha(9);
