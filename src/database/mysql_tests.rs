@@ -1372,6 +1372,48 @@ mod tests {
         }
     }
 
+    /// MySQL 8.0.24+ closes an idle connection after an unsolicited ERR packet
+    /// (error 4031) with sequence 0. The next command reads it out of
+    /// sequence. That must surface as a transient loss of the connection, not
+    /// a protocol desync, and leave the connection closed.
+    #[test]
+    fn idle_disconnect_notice_read_out_of_sequence_is_a_transient_connection_loss() {
+        init_test("mysql_idle_disconnect_notice_read_out_of_sequence");
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let cx = Cx::for_testing();
+        write_response_packet(
+            &mut peer,
+            0,
+            error_packet_payload(
+                4031,
+                "HY000",
+                "The client was disconnected by the server because of inactivity.",
+            ),
+        );
+        let server = std::thread::spawn(move || {
+            peer.set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+            let command = read_client_command(&mut peer);
+            command_sql(&command)
+        });
+
+        let outcome = run(conn.query_static_sql(&cx, "SELECT 1"));
+        let sent = server.join().expect("mysql server thread should finish");
+        assert_eq!(sent, "SELECT 1");
+        match outcome {
+            Outcome::Err(error) => {
+                assert!(error.is_transient(), "{error:?}");
+                assert!(error.to_string().contains("MySQL error 4031"), "{error}");
+            }
+            Outcome::Ok(_) => panic!("an idle-disconnected connection cannot answer"),
+            Outcome::Cancelled(_) | Outcome::Panicked(_) => panic!("unexpected outcome"),
+        }
+        assert!(
+            conn.inner.closed,
+            "the connection the server dropped stays closed"
+        );
+    }
+
     // ─── transaction-as-obligation (br-asupersync-server-stack-hardening-eeexl1.5) ───
 
     #[test]

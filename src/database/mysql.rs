@@ -200,14 +200,14 @@ impl MySqlError {
 
     /// Returns `true` if this error is transient and may succeed on retry.
     ///
-    /// Transient errors: deadlock (1213), lock wait timeout (1205),
-    /// server gone (2006), lost connection (2013), and I/O errors.
+    /// Transient errors: deadlock (1213), lock wait timeout (1205), server
+    /// gone (2006), lost connection (2013), idle disconnect (4031), and I/O.
     #[must_use]
     pub fn is_transient(&self) -> bool {
         if matches!(self, Self::Io(_) | Self::ConnectionClosed) {
             return true;
         }
-        matches!(self.server_code(), Some(1205 | 1213 | 2006 | 2013))
+        matches!(self.server_code(), Some(1205 | 1213 | 2006 | 2013 | 4031))
     }
 
     /// Returns `true` if this error is safe to retry automatically.
@@ -5649,7 +5649,12 @@ impl MySqlConnection {
             let mut header = [0u8; 4];
             self.read_exact(cx, &mut header).await?;
 
-            let (len, seq) = Self::decode_packet_header(header, expected_seq)?;
+            let (len, seq) = match Self::decode_packet_header(header, expected_seq) {
+                Ok(decoded) => decoded,
+                Err(mismatch) => {
+                    return Err(self.unsolicited_server_error(cx, header, mismatch).await);
+                }
+            };
             last_seq = seq;
 
             if len > 0 {
@@ -5670,6 +5675,44 @@ impl MySqlConnection {
                 return Ok((data, last_seq));
             }
         }
+    }
+
+    /// A server that drops a connection first sends an unsolicited ERR packet
+    /// with sequence 0. MySQL 8.0.24 and later do this for an idle connection
+    /// (error 4031, "disconnected by the server because of inactivity"). The
+    /// next command then reads that packet out of sequence. Mark the
+    /// connection closed and report the server's reason as a transient
+    /// ConnectionAborted I/O error, instead of a protocol desync, so callers
+    /// retry on a fresh connection. It is deliberately not a `Server` error,
+    /// because callers treat those as answers on a live connection and reopen
+    /// it. Anything else stays the original `mismatch`.
+    async fn unsolicited_server_error(
+        &mut self,
+        cx: Option<&Cx>,
+        header: [u8; 4],
+        mismatch: MySqlError,
+    ) -> MySqlError {
+        let len = u32::from(header[0]) | (u32::from(header[1]) << 8) | (u32::from(header[2]) << 16);
+        if header[3] != 0 || len == 0 || len >= MAX_PACKET_SIZE {
+            return mismatch;
+        }
+        let mut payload = vec![0u8; len as usize];
+        if self.read_exact(cx, &mut payload).await.is_err() || payload.first() != Some(&0xFF) {
+            return mismatch;
+        }
+        self.inner.closed = true;
+        // Server error Display is sanitized, so name the error by code and
+        // SQLSTATE rather than repeating the server's text.
+        let detail = match Self::parse_error(&payload) {
+            MySqlError::Server {
+                code, sql_state, ..
+            } => format!("MySQL error {code}, SQLSTATE {sql_state}"),
+            other => other.to_string(),
+        };
+        MySqlError::Io(io::Error::new(
+            io::ErrorKind::ConnectionAborted,
+            format!("server closed the connection: {detail}"),
+        ))
     }
 
     #[inline]
