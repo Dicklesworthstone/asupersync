@@ -463,7 +463,7 @@ For lab metrics that benefit from calibrated prediction sets, Asupersync uses sp
 P(Y ∈ C(X)) ≥ 1 − α
 ```
 
-The calibrator is opt-in today: you feed it oracle reports yourself (`ConformalCalibrator::calibrate`, then `predict`). No lab oracle or schedule explorer feeds it yet, so no built-in alert or verdict depends on it (`asupersync-bi2462.150.1` tracks that wire).
+The calibrator is opt-in: `ScheduleExplorer::with_conformal_calibration` feeds it every explored run's oracle report and `conformal_anomaly_seeds()` lists the seeds whose metrics fall outside the prediction set, even when no invariant failed. You can also feed it reports yourself (`ConformalCalibrator::calibrate`, then `predict`). No lab oracle consults it on its own, so no default verdict depends on it.
 
 ### Explainable Evidence Ledgers (Bayes Factors, Galaxy-Brain Diagnostics)
 
@@ -1889,9 +1889,9 @@ Payoff: turn long-running exploration into statistically sound monitoring, with 
 
 `src/lab/conformal.rs` calibrates oracle-metric thresholds with split conformal prediction, giving finite-sample, distribution-free coverage guarantees under exchangeability assumptions across deterministic schedule seeds.
 
-Status: opt-in. You feed the calibrator oracle reports yourself; no lab oracle or schedule explorer feeds it yet (`asupersync-bi2462.150.1`).
+Status: opt-in. `ScheduleExplorer::with_conformal_calibration` calibrates across explored seeds and reports the anomalous ones; no lab oracle consults the calibrator on its own.
 
-Payoff, once fed: stable false-alarm behavior under workload drift, without hand-tuned magic constants.
+Payoff when enabled: stable false-alarm behavior under workload drift, without hand-tuned magic constants.
 
 ### Algebraic Law Sheets + Rewrite Engines With Side-Condition Lattices
 
