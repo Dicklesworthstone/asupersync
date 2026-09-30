@@ -507,15 +507,20 @@ impl UnixListener {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// use futures::StreamExt;
+    /// ```no_run
+    /// use asupersync::net::unix::UnixListener;
+    /// use asupersync::stream::StreamExt;
     ///
-    /// let listener = UnixListener::bind("/tmp/socket.sock").await?;
-    /// let mut incoming = listener.incoming();
+    /// async fn serve() -> std::io::Result<()> {
+    ///     let listener = UnixListener::bind("/tmp/socket.sock").await?;
+    ///     let mut incoming = listener.incoming();
     ///
-    /// while let Some(stream) = incoming.next().await {
-    ///     let stream = stream?;
-    ///     // Handle connection...
+    ///     while let Some(stream) = incoming.next().await {
+    ///         let stream = stream?;
+    ///         // Handle connection...
+    ///         # let _ = stream;
+    ///     }
+    ///     Ok(())
     /// }
     /// ```
     #[must_use]

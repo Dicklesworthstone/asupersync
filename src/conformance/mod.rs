@@ -10,19 +10,18 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use asupersync::conformance::{ConformanceTarget, TestConfig, conformance_test};
+//! ```
+//! use asupersync::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
+//! use asupersync::conformance_test;
 //!
-//! // Define a conformance test
-//! conformance_test!(test_basic_spawn, |target, config| {
-//!     let runtime = target.create_runtime(config);
-//!     target.block_on(&runtime, async {
-//!         // Test that basic spawning works
-//!         let cx = Cx::current().unwrap();
-//!         let handle = target.spawn(&cx, async { 42 });
-//!         assert_eq!(handle.await, 42);
-//!     });
+//! // Define a conformance test. The macro emits a `#[test]` that runs the body
+//! // with `TestConfig::default()`; the body picks the target it runs against.
+//! conformance_test!(test_basic_block_on, |config: &TestConfig| {
+//!     let mut runtime = LabRuntimeTarget::create_runtime(config.clone());
+//!     let value = LabRuntimeTarget::block_on(&mut runtime, async { 42 });
+//!     assert_eq!(value, 42);
 //! });
+//! # fn main() {}
 //! ```
 
 // Vendored in-crate (was `#[path = "../../conformance/src/traceability.rs"]`, which
@@ -477,12 +476,12 @@ pub fn render_conformance_report_markdown(
 ///
 /// # Example
 ///
-/// ```ignore
-/// use asupersync::conformance::{conformance_test, TestConfig};
+/// ```
+/// use asupersync::conformance::TestConfig;
+/// use asupersync::conformance_test;
 ///
 /// conformance_test!(test_spawn_completes, |config: &TestConfig| {
-///     use asupersync::conformance::ConformanceTarget;
-///     use asupersync::lab::LabRuntime;
+///     use asupersync::conformance::{ConformanceTarget, LabRuntimeTarget};
 ///
 ///     // Create runtime and run test
 ///     let mut runtime = LabRuntimeTarget::create_runtime(config.clone());
@@ -490,6 +489,7 @@ pub fn render_conformance_report_markdown(
 ///         // Test implementation
 ///     });
 /// });
+/// # fn main() {}
 /// ```
 #[macro_export]
 macro_rules! conformance_test {
