@@ -20,7 +20,8 @@
 //! reserved permit is a live obligation of its kind, held by the reserving
 //! task in its region. Send or drop resolves it. A forgotten permit becomes
 //! a confirmed leak once its holder finishes. A task cancelled while it
-//! holds a permit aborts the permit instead of leaking it.
+//! holds a permit, or ended by its region's close, aborts the permit
+//! instead of leaking it.
 //!
 //! No-claim: `Mutex` / `RwLock` guards are not obligations and are not
 //! covered here. Futurelock detection is a lab facility and is proved only
@@ -31,6 +32,7 @@ use std::sync::{Arc, Mutex};
 
 use asupersync::Cx;
 use asupersync::channel::{broadcast, mpsc, oneshot};
+use asupersync::cx::ChildRegionSpec;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::observability::{Diagnostics, ObligationLeak};
 use asupersync::record::ObligationKind;
@@ -598,6 +600,66 @@ fn native_task_cancelled_while_holding_a_permit_aborts_it_without_a_leak() {
             assert!(
                 confirmed(&diagnostics, holder, ObligationKind::SendPermit).is_empty(),
                 "{flavor}: a permit dropped on the cancellation path is not a leak; confirmed = {:?}",
+                diagnostics.find_confirmed_obligation_leaks()
+            );
+        });
+    }
+}
+
+#[test]
+fn native_region_close_aborts_a_permit_held_by_a_task_inside_it() {
+    for (flavor, runtime) in native_runtimes() {
+        let diagnostics = runtime.diagnostics();
+        runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs a root Cx");
+            let child = cx
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .expect("open a child region");
+            let child_region = child.region_id();
+            let holder_slot = Arc::new(Mutex::new(None));
+            let slot = Arc::clone(&holder_slot);
+            // The task waits on a cancel-aware receive that nothing will
+            // satisfy, so only the region's close can end it. The sender stays
+            // alive until after the close.
+            let (_gate_tx, mut gate_rx) = mpsc::channel::<u8>(1);
+            let _handle = child
+                .cx()
+                .spawn(move |task_cx| async move {
+                    let (tx, _rx) = mpsc::channel::<u8>(1);
+                    let _permit = tx.reserve(&task_cx).await.expect("reserve capacity");
+                    *slot.lock().expect("holder slot") = Some(task_cx.task_id());
+                    let _ = gate_rx.recv(&task_cx).await;
+                })
+                .expect("spawn inside the child region");
+
+            assert!(
+                yield_until(|| holder_slot.lock().expect("holder slot").is_some()).await,
+                "{flavor}: the task reserved its permit"
+            );
+            let holder = holder_slot.lock().expect("holder slot").expect("holder id");
+            assert!(
+                yield_until(|| live(&diagnostics, holder, ObligationKind::SendPermit).len() == 1)
+                    .await,
+                "{flavor}: the permit is live before the close (state witness)"
+            );
+            let record = live(&diagnostics, holder, ObligationKind::SendPermit)
+                .pop()
+                .expect("live SendPermit record");
+            assert_eq!(
+                record.region_id, child_region,
+                "{flavor}: the permit is held in the child region"
+            );
+
+            child.close().await.expect("close the child region");
+            assert!(
+                yield_until(|| live(&diagnostics, holder, ObligationKind::SendPermit).is_empty())
+                    .await,
+                "{flavor}: closing the region aborts the held permit's obligation"
+            );
+            assert!(
+                confirmed(&diagnostics, holder, ObligationKind::SendPermit).is_empty(),
+                "{flavor}: a permit dropped when its region closes is not a leak; confirmed = {:?}",
                 diagnostics.find_confirmed_obligation_leaks()
             );
         });
