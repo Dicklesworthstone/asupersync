@@ -36,18 +36,45 @@ function release(lock) {
   try { lock?.releaseLock(); } catch {}
 }
 
+// Read internal slots, not shadowable instance properties. A forged `buffer`
+// can otherwise invoke an iterator or allocate an arbitrary-sized typed array
+// before the byte limit is checked. Intrinsics also accept same-origin iframe
+// values without relying on this realm's instanceof identity.
+const TYPED_ARRAY = Object.getPrototypeOf(Uint8Array.prototype);
+const VIEW_BUFFER = Object.getOwnPropertyDescriptor(TYPED_ARRAY, "buffer").get;
+const VIEW_OFFSET = Object.getOwnPropertyDescriptor(TYPED_ARRAY, "byteOffset").get;
+const VIEW_LENGTH = Object.getOwnPropertyDescriptor(TYPED_ARRAY, "byteLength").get;
+const VIEW_TAG = Object.getOwnPropertyDescriptor(TYPED_ARRAY, Symbol.toStringTag).get;
+const VIEW_VALUES = TYPED_ARRAY.values;
+const DATA_BUFFER = Object.getOwnPropertyDescriptor(DataView.prototype, "buffer").get;
+const DATA_OFFSET = Object.getOwnPropertyDescriptor(DataView.prototype, "byteOffset").get;
+const DATA_LENGTH = Object.getOwnPropertyDescriptor(DataView.prototype, "byteLength").get;
+const BUFFER_LENGTH = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength").get;
+
 function copyWriteBytes(value) {
-  let view;
-  if (ArrayBuffer.isView(value)) {
-    view = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-  } else if (value instanceof ArrayBuffer) {
-    view = new Uint8Array(value);
+  let buffer;
+  let offset = 0;
+  let length;
+  if (Reflect.apply(VIEW_TAG, value, []) !== undefined) {
+    // byteLength alone returns zero for a detached or out-of-bounds typed
+    // array. Creating an intrinsic iterator validates it without consuming
+    // bytes, invoking user iterators, or consulting Symbol.species.
+    Reflect.apply(VIEW_VALUES, value, []);
+    buffer = Reflect.apply(VIEW_BUFFER, value, []);
+    offset = Reflect.apply(VIEW_OFFSET, value, []);
+    length = Reflect.apply(VIEW_LENGTH, value, []);
+  } else if (ArrayBuffer.isView(value)) {
+    buffer = Reflect.apply(DATA_BUFFER, value, []);
+    offset = Reflect.apply(DATA_OFFSET, value, []);
+    length = Reflect.apply(DATA_LENGTH, value, []);
   } else {
-    throw new TypeError("stream writes require an ArrayBuffer or ArrayBufferView");
+    length = Reflect.apply(BUFFER_LENGTH, value, []);
+    buffer = value;
   }
-  if (view.byteLength > WEBTRANSPORT_STREAM_LIMITS.maxWriteBytes) {
+  if (length > WEBTRANSPORT_STREAM_LIMITS.maxWriteBytes) {
     throw new RangeError("stream write exceeds maxWriteBytes; split the byte sequence into chunks");
   }
+  const view = new Uint8Array(buffer, offset, length);
   // Own the bytes until host backpressure clears: caller mutation must not
   // modify an already-admitted write. Message boundaries are not preserved.
   return view.slice();
@@ -227,9 +254,10 @@ export function createReliableStreamManager({ lookup, ok, fail, cancelled }) {
           }
           const value = result.value;
           if (stopping) return completion.promise;
-          if (!(value instanceof Uint8Array)) {
+          if (Reflect.apply(VIEW_TAG, value, []) !== "Uint8Array") {
             return stop(hostError("read", new TypeError("host returned a non-byte chunk")));
           }
+          Reflect.apply(VIEW_VALUES, value, []);
           return ok({ done: false, value });
         } catch (cause) {
           return stop(hostError("read", cause));
