@@ -283,9 +283,8 @@ fn race_panicking_winner_still_drains_loser(cx: Cx) -> ScenarioFuture {
         let winner = cx
             .spawn(move |_cx| async move {
                 wait_for(&gate).await;
-                if gate.load(Ordering::SeqCst) {
-                    panic!("differential: race winner panics");
-                }
+                // Panics on purpose: the gate is always set here.
+                assert!(!gate.load(Ordering::SeqCst), "differential: race winner panics");
                 1u32
             })
             .expect("spawn winner");
@@ -401,9 +400,8 @@ fn hedge_panicking_backup_still_drains_the_primary(cx: Cx) -> ScenarioFuture {
                 move |cx| parked_loser(cx, s, d),
                 move |_cx| async move {
                     wait_for(&gate).await;
-                    if gate.load(Ordering::SeqCst) {
-                        panic!("differential: hedge backup panics");
-                    }
+                    // Panics on purpose: the gate is always set here.
+                    assert!(!gate.load(Ordering::SeqCst), "differential: hedge backup panics");
                     2u32
                 },
             )
@@ -512,9 +510,8 @@ fn scope_join_reports_both_outcomes(cx: Cx) -> ScenarioFuture {
         let panics = cx
             .spawn(|_cx| async {
                 yield_now().await;
-                if std::hint::black_box(true) {
-                    panic!("differential: joined task panics");
-                }
+                // Panics on purpose; black_box keeps the value opaque.
+                assert!(!std::hint::black_box(true), "differential: joined task panics");
                 2u32
             })
             .expect("spawn panicking");
