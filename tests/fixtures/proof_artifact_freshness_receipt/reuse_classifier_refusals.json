@@ -26,7 +26,9 @@
       "git_branch": "main",
       "manifest_lane_id": "proof-lane-manifest-contract",
       "claim_scope": "proof-lane-manifest-schema",
-      "allowed_cache_hit_claims": ["proof-lane-manifest-schema"],
+      "allowed_cache_hit_claims": [
+        "proof-lane-manifest-schema"
+      ],
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_lane_manifest cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
       "command_fingerprint": "sha256:proof-lane-manifest-command",
       "source_fingerprint": "sha256:source-current",
@@ -47,7 +49,9 @@
       "git_branch": "main",
       "manifest_lane_id": "proof-lane-manifest-contract",
       "claim_scope": "proof-lane-manifest-schema",
-      "allowed_cache_hit_claims": ["proof-lane-manifest-schema"],
+      "allowed_cache_hit_claims": [
+        "proof-lane-manifest-schema"
+      ],
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_lane_manifest cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
       "command_fingerprint": "sha256:proof-lane-manifest-command",
       "source_fingerprint": "sha256:source-current",
@@ -68,7 +72,9 @@
       "git_branch": "main",
       "manifest_lane_id": "proof-lane-manifest-contract",
       "claim_scope": "proof-lane-manifest-schema",
-      "allowed_cache_hit_claims": ["proof-lane-manifest-schema"],
+      "allowed_cache_hit_claims": [
+        "proof-lane-manifest-schema"
+      ],
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_lane_manifest cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
       "command_fingerprint": "sha256:proof-lane-manifest-command",
       "source_fingerprint": "sha256:source-current",
@@ -89,7 +95,9 @@
       "git_branch": "main",
       "manifest_lane_id": "proof-lane-manifest-contract",
       "claim_scope": "proof-lane-manifest-schema",
-      "allowed_cache_hit_claims": ["proof-lane-manifest-schema"],
+      "allowed_cache_hit_claims": [
+        "proof-lane-manifest-schema"
+      ],
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_lane_manifest cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
       "command_fingerprint": "sha256:proof-lane-manifest-command",
       "source_fingerprint": "sha256:source-current",
@@ -97,7 +105,9 @@
       "toolchain_fingerprint": "sha256:toolchain-current",
       "feature_flags": [],
       "stdout": "[RCH] remote rch-worker-reuse-dirty (10.0s)",
-      "touched_files": ["src/dirty.rs"],
+      "touched_files": [
+        "src/dirty.rs"
+      ],
       "status": "pass",
       "generated_at": "2026-06-04T01:24:00Z"
     },
@@ -107,7 +117,9 @@
       "git_branch": "main",
       "manifest_lane_id": "proof-lane-manifest-contract",
       "claim_scope": "proof-lane-manifest-schema",
-      "allowed_cache_hit_claims": ["proof-lane-manifest-schema"],
+      "allowed_cache_hit_claims": [
+        "proof-lane-manifest-schema"
+      ],
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_other cargo test -p asupersync --test other_contract",
       "command_fingerprint": "sha256:other-command",
       "source_fingerprint": "sha256:source-current",
@@ -128,7 +140,9 @@
       "git_branch": "main",
       "manifest_lane_id": "proof-lane-manifest-contract",
       "claim_scope": "proof-lane-manifest-schema",
-      "allowed_cache_hit_claims": ["proof-lane-manifest-schema"],
+      "allowed_cache_hit_claims": [
+        "proof-lane-manifest-schema"
+      ],
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_lane_manifest cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
       "command_fingerprint": "sha256:proof-lane-manifest-command",
       "source_fingerprint": "sha256:source-old",
@@ -149,13 +163,17 @@
       "git_branch": "main",
       "manifest_lane_id": "proof-lane-manifest-contract",
       "claim_scope": "proof-lane-manifest-schema",
-      "allowed_cache_hit_claims": ["proof-lane-manifest-schema"],
+      "allowed_cache_hit_claims": [
+        "proof-lane-manifest-schema"
+      ],
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_lane_manifest cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
       "command_fingerprint": "sha256:proof-lane-manifest-command",
       "source_fingerprint": "sha256:source-current",
       "tree_fingerprint": "git-tree:current",
       "toolchain_fingerprint": "sha256:toolchain-old",
-      "feature_flags": ["metrics"],
+      "feature_flags": [
+        "metrics"
+      ],
       "stdout": "[RCH] remote rch-worker-reuse-toolchain (10.0s)",
       "touched_files": [
         "artifacts/proof_lane_manifest_v1.json",
@@ -170,7 +188,9 @@
       "git_branch": "main",
       "manifest_lane_id": "proof-lane-manifest-contract",
       "claim_scope": "other-scope",
-      "allowed_cache_hit_claims": ["other-scope"],
+      "allowed_cache_hit_claims": [
+        "other-scope"
+      ],
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_lane_manifest cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
       "command_fingerprint": "sha256:proof-lane-manifest-command",
       "source_fingerprint": "sha256:source-current",
@@ -212,7 +232,9 @@
       "git_branch": "main",
       "manifest_lane_id": "proof-lane-manifest-contract",
       "claim_scope": "proof-lane-manifest-schema",
-      "allowed_cache_hit_claims": ["proof-lane-manifest-schema"],
+      "allowed_cache_hit_claims": [
+        "proof-lane-manifest-schema"
+      ],
       "command": "python3 -m json.tool artifacts/proof_lane_manifest_v1.json",
       "command_fingerprint": "sha256:proof-lane-manifest-command",
       "source_fingerprint": "sha256:source-current",
@@ -233,14 +255,18 @@
       "git_branch": "main",
       "manifest_lane_id": "proof-lane-manifest-contract",
       "claim_scope": "proof-lane-manifest-schema",
-      "allowed_cache_hit_claims": ["proof-lane-manifest-schema"],
+      "allowed_cache_hit_claims": [
+        "proof-lane-manifest-schema"
+      ],
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_lane_manifest cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
       "command_fingerprint": "sha256:proof-lane-manifest-command",
       "source_fingerprint": "sha256:source-current",
       "tree_fingerprint": "git-tree:current",
       "toolchain_fingerprint": "sha256:toolchain-current",
       "feature_flags": [],
-      "local_fallback_markers": ["[RCH] local (daemon unavailable)"],
+      "local_fallback_markers": [
+        "[RCH] local (daemon unavailable)"
+      ],
       "stdout": "[RCH] remote rch-worker-reuse-marker (10.0s)",
       "touched_files": [
         "artifacts/proof_lane_manifest_v1.json",
@@ -255,7 +281,9 @@
       "git_branch": "main",
       "manifest_lane_id": "all-targets-check",
       "claim_scope": "proof-lane-manifest-schema",
-      "allowed_cache_hit_claims": ["proof-lane-manifest-schema"],
+      "allowed_cache_hit_claims": [
+        "proof-lane-manifest-schema"
+      ],
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_lane_manifest cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
       "command_fingerprint": "sha256:proof-lane-manifest-command",
       "source_fingerprint": "sha256:source-current",

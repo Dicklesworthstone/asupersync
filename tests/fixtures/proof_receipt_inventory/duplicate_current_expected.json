@@ -49,7 +49,9 @@
       "summary": "Checks whether validation artifacts overlap dirty paths.",
       "superseded_by": "",
       "test_path": "tests/validation_artifact_freshness_contract.py",
-      "validation": ["python3 -m pytest tests/validation_artifact_freshness_contract.py"]
+      "validation": [
+        "python3 -m pytest tests/validation_artifact_freshness_contract.py"
+      ]
     }
   ],
   "redaction_counts": {

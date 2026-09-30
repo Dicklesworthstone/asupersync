@@ -10,9 +10,9 @@
     "runner_profile": "smoke",
     "suite_count": 2,
     "unstable_suite_count": 0,
-    "flake_rate_pct": 0.0,
+    "flake_rate_pct": 0.00,
     "false_positive_proxy_count": 0,
-    "false_positive_proxy_rate_pct": 0.0,
+    "false_positive_proxy_rate_pct": 0.00,
     "total_duration_s": 150,
     "runtime_budget_s": 180,
     "runtime_ratio": 0.833

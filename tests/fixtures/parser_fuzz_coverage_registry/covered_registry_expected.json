@@ -3,7 +3,9 @@
   "coverage": [
     {
       "evidence": {
-        "covering_targets": ["fuzz_http_h1_codec_split_crlf"],
+        "covering_targets": [
+          "fuzz_http_h1_codec_split_crlf"
+        ],
         "exemption_status": "missing",
         "partial_targets": [],
         "stale_covering_targets": []
@@ -22,7 +24,9 @@
     },
     {
       "evidence": {
-        "covering_targets": ["fuzz_redis_resp3_map_parse"],
+        "covering_targets": [
+          "fuzz_redis_resp3_map_parse"
+        ],
         "exemption_status": "missing",
         "partial_targets": [],
         "stale_covering_targets": []
