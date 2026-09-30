@@ -3545,8 +3545,14 @@ fn atpd_quic_listener_accepts_atp_send_and_reports_diagnostics() {
     if !sender.status.success() {
         let _ = daemon.kill();
         let _ = daemon.wait();
+        // atpd logs why it refused or dropped the transfer; the sender only
+        // sees silence (br-asupersync-t1a9cf).
+        let mut daemon_lines = Vec::new();
+        while let Ok(line) = daemon_output.recv_timeout(Duration::from_secs(2)) {
+            daemon_lines.push(strip_ansi_escapes(&line));
+        }
         panic!(
-            "atp quic sender to atpd failed; stdout: {}; stderr: {}",
+            "atp quic sender to atpd failed; stdout: {}; stderr: {}; atpd output after readiness: {daemon_lines:#?}",
             String::from_utf8_lossy(&sender.stdout),
             String::from_utf8_lossy(&sender.stderr)
         );
