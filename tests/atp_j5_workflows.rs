@@ -107,7 +107,7 @@ fn ci_push_then_pull_restores_the_artifact() {
                         compression_level: 6,
                         dedupe: true,
                         // A scoped push needs an authorized scope, which nothing can
-                        // configure yet (asupersync-kh02d2.1.3).
+                        // configure yet (asupersync-ipoyrq).
                         scope: None,
                     }),
                 },
@@ -407,7 +407,7 @@ fn coordinators_with_different_roots_share_nothing() {
 
 /// Workflows carry their capability scope; scoped push and seed succeed.
 #[test]
-#[ignore = "asupersync-kh02d2.1.3: the coordinator's cache authorizes no scopes, so every scoped push fails closed"]
+#[ignore = "asupersync-ipoyrq: the coordinator's cache authorizes no scopes, so every scoped push fails closed"]
 fn capability_scoped_workflows() {
     run_test_with_cx(|cx| async move {
         let dir = workdir();

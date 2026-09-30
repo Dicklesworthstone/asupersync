@@ -1,0 +1,1093 @@
+---
+source: tests/golden_doctor_health_report.rs
+expression: diagnostics_bundle
+---
+{
+  "core_contract": {
+    "contract_version": "doctor-core-report-v1",
+    "required_sections": [
+      "commands",
+      "evidence",
+      "findings",
+      "provenance",
+      "summary"
+    ],
+    "summary_required_fields": [
+      "critical_findings",
+      "overall_outcome",
+      "status",
+      "total_findings"
+    ],
+    "finding_required_fields": [
+      "command_refs",
+      "evidence_refs",
+      "finding_id",
+      "severity",
+      "status",
+      "title"
+    ],
+    "evidence_required_fields": [
+      "artifact_pointer",
+      "evidence_id",
+      "franken_trace_id",
+      "outcome_class",
+      "replay_pointer",
+      "source"
+    ],
+    "command_required_fields": [
+      "command",
+      "command_id",
+      "exit_code",
+      "outcome_class",
+      "tool"
+    ],
+    "provenance_required_fields": [
+      "generated_at",
+      "generated_by",
+      "run_id",
+      "scenario_id",
+      "seed",
+      "trace_id"
+    ],
+    "outcome_classes": [
+      "cancelled",
+      "failed",
+      "success"
+    ],
+    "logging_contract_version": "doctor-logging-v1",
+    "evidence_schema_version": "doctor-evidence-v1",
+    "compatibility": {
+      "minimum_reader_version": "doctor-core-report-v1",
+      "supported_reader_versions": [
+        "doctor-core-report-v1"
+      ],
+      "migration_guidance": [
+        {
+          "from_version": "doctor-core-report-v0",
+          "to_version": "doctor-core-report-v1",
+          "breaking": false,
+          "required_actions": [
+            "Fail validation when report lists are not lexically ordered.",
+            "Preserve command/evidence pointers exactly for deterministic replay.",
+            "Treat summary/findings/evidence/commands/provenance as required sections."
+          ]
+        }
+      ]
+    },
+    "advanced_extension_bead": "asupersync-2b4jj.5.8",
+    "integration_gate_beads": [
+      "asupersync-2b4jj.5.3",
+      "asupersync-2b4jj.5.5"
+    ]
+  },
+  "extension_contract": {
+    "contract_version": "doctor-advanced-report-v1",
+    "base_contract_version": "doctor-core-report-v1",
+    "taxonomy_contract_version": "doctor-observability-v1",
+    "required_extension_sections": [
+      "collaboration_trail",
+      "remediation_deltas",
+      "troubleshooting_playbooks",
+      "trust_transitions"
+    ],
+    "remediation_delta_required_fields": [
+      "delta_id",
+      "delta_outcome",
+      "finding_id",
+      "mapped_taxonomy_class",
+      "mapped_taxonomy_dimension",
+      "next_status",
+      "previous_status",
+      "verification_evidence_refs"
+    ],
+    "trust_transition_required_fields": [
+      "mapped_taxonomy_severity",
+      "next_score",
+      "outcome_class",
+      "previous_score",
+      "rationale",
+      "stage",
+      "transition_id"
+    ],
+    "collaboration_required_fields": [
+      "action",
+      "actor",
+      "bead_ref",
+      "channel",
+      "entry_id",
+      "mapped_taxonomy_narrative",
+      "message_ref",
+      "thread_id"
+    ],
+    "playbook_required_fields": [
+      "command_refs",
+      "evidence_refs",
+      "ordered_steps",
+      "playbook_id",
+      "title",
+      "trigger_taxonomy_class",
+      "trigger_taxonomy_severity"
+    ],
+    "outcome_classes": [
+      "cancelled",
+      "failed",
+      "success"
+    ],
+    "taxonomy_mapping": {
+      "class_allowlist": [
+        "command_lifecycle",
+        "integration_reliability",
+        "remediation_safety",
+        "replay_determinism",
+        "verification_governance"
+      ],
+      "dimension_allowlist": [
+        "cancellation_path",
+        "contract_compliance",
+        "determinism",
+        "external_dependency",
+        "operator_action",
+        "recovery_planning",
+        "runtime_invariant"
+      ],
+      "severity_allowlist": [
+        "critical",
+        "error",
+        "info",
+        "warning"
+      ]
+    },
+    "compatibility": {
+      "minimum_reader_version": "doctor-advanced-report-v1",
+      "supported_reader_versions": [
+        "doctor-advanced-report-v1"
+      ],
+      "migration_guidance": [
+        {
+          "from_version": "doctor-advanced-report-v0",
+          "to_version": "doctor-advanced-report-v1",
+          "breaking": false,
+          "required_actions": [
+            "Map extension taxonomy fields to doctor-observability-v1 allowlists.",
+            "Preserve deterministic lexical ordering for all extension vectors.",
+            "Validate extension references against base core report ids."
+          ]
+        }
+      ]
+    },
+    "integration_handoff_bead": "asupersync-2b4jj.5.5"
+  },
+  "fixtures": [
+    {
+      "fixture_id": "advanced_conflicting_signal_path",
+      "description": "Conflicting-signal fixture with diverging verification and replay outcomes.",
+      "core_report": {
+        "schema_version": "doctor-core-report-v1",
+        "report_id": "doctor-report-failure-v1",
+        "summary": {
+          "status": "failed",
+          "overall_outcome": "failed",
+          "total_findings": 2,
+          "critical_findings": 1
+        },
+        "findings": [
+          {
+            "finding_id": "finding-001",
+            "title": "Obligation leak during shutdown path",
+            "severity": "critical",
+            "status": "open",
+            "evidence_refs": [
+              "evidence-001"
+            ],
+            "command_refs": [
+              "command-001"
+            ]
+          },
+          {
+            "finding_id": "finding-002",
+            "title": "Replay mismatch for cancellation timeline",
+            "severity": "high",
+            "status": "in_progress",
+            "evidence_refs": [
+              "evidence-002"
+            ],
+            "command_refs": [
+              "command-002"
+            ]
+          }
+        ],
+        "evidence": [
+          {
+            "evidence_id": "evidence-001",
+            "source": "structured_log",
+            "artifact_pointer": "artifacts/run-doctor-failure/doctor/core-report/finding-001.json",
+            "replay_pointer": "rch exec -- cargo test -p asupersync -- obligation_leak",
+            "outcome_class": "failed",
+            "franken_trace_id": "trace-franken-failure-001"
+          },
+          {
+            "evidence_id": "evidence-002",
+            "source": "trace",
+            "artifact_pointer": "artifacts/run-doctor-failure/doctor/core-report/trace-002.json",
+            "replay_pointer": "asupersync trace verify artifacts/run-doctor-failure/trace-002.bin",
+            "outcome_class": "failed",
+            "franken_trace_id": "trace-franken-failure-002"
+          }
+        ],
+        "commands": [
+          {
+            "command_id": "command-001",
+            "command": "rch exec -- cargo test -p asupersync obligation_leak -- --nocapture",
+            "tool": "rch",
+            "exit_code": 101,
+            "outcome_class": "failed"
+          },
+          {
+            "command_id": "command-002",
+            "command": "asupersync trace verify artifacts/run-doctor-failure/trace-002.bin",
+            "tool": "asupersync",
+            "exit_code": 2,
+            "outcome_class": "failed"
+          }
+        ],
+        "provenance": {
+          "run_id": "run-doctor-failure",
+          "scenario_id": "doctor-core-report-failure",
+          "trace_id": "trace-doctor-failure",
+          "seed": "1337",
+          "generated_by": "doctor_asupersync",
+          "generated_at": "2026-02-26T06:00:00Z"
+        }
+      },
+      "extension": {
+        "schema_version": "doctor-advanced-report-v1",
+        "base_report_id": "doctor-report-failure-v1",
+        "base_report_schema_version": "doctor-core-report-v1",
+        "remediation_deltas": [
+          {
+            "delta_id": "delta-020",
+            "finding_id": "finding-001",
+            "previous_status": "open",
+            "next_status": "resolved",
+            "delta_outcome": "success",
+            "mapped_taxonomy_class": "verification_governance",
+            "mapped_taxonomy_dimension": "contract_compliance",
+            "verification_evidence_refs": [
+              "evidence-001"
+            ]
+          },
+          {
+            "delta_id": "delta-021",
+            "finding_id": "finding-002",
+            "previous_status": "in_progress",
+            "next_status": "open",
+            "delta_outcome": "failed",
+            "mapped_taxonomy_class": "replay_determinism",
+            "mapped_taxonomy_dimension": "determinism",
+            "verification_evidence_refs": [
+              "evidence-002"
+            ]
+          }
+        ],
+        "trust_transitions": [
+          {
+            "transition_id": "trust-020",
+            "stage": "initial-remediation-pass",
+            "previous_score": 58,
+            "next_score": 74,
+            "outcome_class": "success",
+            "mapped_taxonomy_severity": "info",
+            "rationale": "Primary remediation improved obligation metrics."
+          },
+          {
+            "transition_id": "trust-021",
+            "stage": "replay-cross-check",
+            "previous_score": 74,
+            "next_score": 49,
+            "outcome_class": "failed",
+            "mapped_taxonomy_severity": "warning",
+            "rationale": "Replay signal conflicted with remediation progress; mismatch diagnostics required."
+          }
+        ],
+        "collaboration_trail": [
+          {
+            "entry_id": "collab-020",
+            "channel": "agent_mail",
+            "actor": "ChartreuseBrook",
+            "action": "posted conflicting replay evidence",
+            "thread_id": "br-2b4jj.5.9",
+            "message_ref": "mail-advanced-020",
+            "bead_ref": "asupersync-2b4jj.5.9",
+            "mapped_taxonomy_narrative": "Agent Mail replay report conflicts with remediation verification."
+          },
+          {
+            "entry_id": "collab-021",
+            "channel": "beads",
+            "actor": "ChartreuseBrook",
+            "action": "ranked mismatch as high-impact in bv triage",
+            "thread_id": "br-2b4jj.5.9",
+            "message_ref": "bv:triage-advanced-020",
+            "bead_ref": "asupersync-2b4jj.5.9",
+            "mapped_taxonomy_narrative": "Beads/bv dependency pressure requires conflict resolution before closure."
+          }
+        ],
+        "troubleshooting_playbooks": [
+          {
+            "playbook_id": "playbook-020",
+            "title": "Conflicting-signal reconciliation loop",
+            "trigger_taxonomy_class": "replay_determinism",
+            "trigger_taxonomy_severity": "warning",
+            "ordered_steps": [
+              "capture_conflicting_artifacts",
+              "compare_replay_and_verification",
+              "escalate_with_mismatch_bundle"
+            ],
+            "command_refs": [
+              "command-001",
+              "command-002"
+            ],
+            "evidence_refs": [
+              "evidence-001",
+              "evidence-002"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "fixture_id": "advanced_cross_system_mismatch_path",
+      "description": "Cross-system mismatch fixture linking beads/bv, Agent Mail, and FrankenSuite provenance.",
+      "core_report": {
+        "schema_version": "doctor-core-report-v1",
+        "report_id": "doctor-report-failure-v1",
+        "summary": {
+          "status": "failed",
+          "overall_outcome": "failed",
+          "total_findings": 2,
+          "critical_findings": 1
+        },
+        "findings": [
+          {
+            "finding_id": "finding-001",
+            "title": "Obligation leak during shutdown path",
+            "severity": "critical",
+            "status": "open",
+            "evidence_refs": [
+              "evidence-001"
+            ],
+            "command_refs": [
+              "command-001"
+            ]
+          },
+          {
+            "finding_id": "finding-002",
+            "title": "Replay mismatch for cancellation timeline",
+            "severity": "high",
+            "status": "in_progress",
+            "evidence_refs": [
+              "evidence-002"
+            ],
+            "command_refs": [
+              "command-002"
+            ]
+          }
+        ],
+        "evidence": [
+          {
+            "evidence_id": "evidence-001",
+            "source": "structured_log",
+            "artifact_pointer": "artifacts/run-doctor-failure/doctor/core-report/finding-001.json",
+            "replay_pointer": "rch exec -- cargo test -p asupersync -- obligation_leak",
+            "outcome_class": "failed",
+            "franken_trace_id": "trace-franken-failure-001"
+          },
+          {
+            "evidence_id": "evidence-002",
+            "source": "trace",
+            "artifact_pointer": "artifacts/run-doctor-failure/doctor/core-report/trace-002.json",
+            "replay_pointer": "asupersync trace verify artifacts/run-doctor-failure/trace-002.bin",
+            "outcome_class": "failed",
+            "franken_trace_id": "trace-franken-failure-002"
+          }
+        ],
+        "commands": [
+          {
+            "command_id": "command-001",
+            "command": "rch exec -- cargo test -p asupersync obligation_leak -- --nocapture",
+            "tool": "rch",
+            "exit_code": 101,
+            "outcome_class": "failed"
+          },
+          {
+            "command_id": "command-002",
+            "command": "asupersync trace verify artifacts/run-doctor-failure/trace-002.bin",
+            "tool": "asupersync",
+            "exit_code": 2,
+            "outcome_class": "failed"
+          }
+        ],
+        "provenance": {
+          "run_id": "run-doctor-failure",
+          "scenario_id": "doctor-core-report-failure",
+          "trace_id": "trace-doctor-failure",
+          "seed": "1337",
+          "generated_by": "doctor_asupersync",
+          "generated_at": "2026-02-26T06:00:00Z"
+        }
+      },
+      "extension": {
+        "schema_version": "doctor-advanced-report-v1",
+        "base_report_id": "doctor-report-failure-v1",
+        "base_report_schema_version": "doctor-core-report-v1",
+        "remediation_deltas": [
+          {
+            "delta_id": "delta-040",
+            "finding_id": "finding-001",
+            "previous_status": "open",
+            "next_status": "in_progress",
+            "delta_outcome": "failed",
+            "mapped_taxonomy_class": "integration_reliability",
+            "mapped_taxonomy_dimension": "external_dependency",
+            "verification_evidence_refs": [
+              "evidence-001",
+              "evidence-002"
+            ]
+          }
+        ],
+        "trust_transitions": [
+          {
+            "transition_id": "trust-040",
+            "stage": "cross-system-correlation",
+            "previous_score": 63,
+            "next_score": 41,
+            "outcome_class": "failed",
+            "mapped_taxonomy_severity": "error",
+            "rationale": "Cross-system mismatch between beads/bv priority state, Agent Mail thread status, and FrankenSuite evidence chain."
+          }
+        ],
+        "collaboration_trail": [
+          {
+            "entry_id": "collab-040",
+            "channel": "agent_mail",
+            "actor": "ChartreuseBrook",
+            "action": "reported unresolved remediation in threaded handoff",
+            "thread_id": "br-2b4jj.5.9",
+            "message_ref": "mail-advanced-040",
+            "bead_ref": "asupersync-2b4jj.5.9",
+            "mapped_taxonomy_narrative": "Agent Mail thread indicates unresolved state while export looked healthy."
+          },
+          {
+            "entry_id": "collab-041",
+            "channel": "beads",
+            "actor": "ChartreuseBrook",
+            "action": "captured bv ranking evidence for blocked downstream work",
+            "thread_id": "br-2b4jj.5.9",
+            "message_ref": "bv:triage-advanced-040",
+            "bead_ref": "asupersync-2b4jj.5.9",
+            "mapped_taxonomy_narrative": "Beads/bv graph marks this issue as blocking despite optimistic report status."
+          },
+          {
+            "entry_id": "collab-042",
+            "channel": "frankensuite",
+            "actor": "ChartreuseBrook",
+            "action": "linked decision/evidence mismatch packet",
+            "thread_id": "br-2b4jj.5.9",
+            "message_ref": "franken-evidence-040",
+            "bead_ref": "asupersync-2b4jj.5.9",
+            "mapped_taxonomy_narrative": "FrankenSuite decision stream disagrees with exported remediation outcome."
+          }
+        ],
+        "troubleshooting_playbooks": [
+          {
+            "playbook_id": "playbook-040",
+            "title": "Cross-system mismatch triage",
+            "trigger_taxonomy_class": "integration_reliability",
+            "trigger_taxonomy_severity": "error",
+            "ordered_steps": [
+              "correlate_beads_bv_agent_mail",
+              "generate_mismatch_diagnostics_bundle",
+              "verify_frankensuite_evidence_chain"
+            ],
+            "command_refs": [
+              "command-001",
+              "command-002"
+            ],
+            "evidence_refs": [
+              "evidence-001",
+              "evidence-002"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "fixture_id": "advanced_failure_path",
+      "description": "Failure-path extension fixture with remediation delta and collaboration trail.",
+      "core_report": {
+        "schema_version": "doctor-core-report-v1",
+        "report_id": "doctor-report-failure-v1",
+        "summary": {
+          "status": "failed",
+          "overall_outcome": "failed",
+          "total_findings": 2,
+          "critical_findings": 1
+        },
+        "findings": [
+          {
+            "finding_id": "finding-001",
+            "title": "Obligation leak during shutdown path",
+            "severity": "critical",
+            "status": "open",
+            "evidence_refs": [
+              "evidence-001"
+            ],
+            "command_refs": [
+              "command-001"
+            ]
+          },
+          {
+            "finding_id": "finding-002",
+            "title": "Replay mismatch for cancellation timeline",
+            "severity": "high",
+            "status": "in_progress",
+            "evidence_refs": [
+              "evidence-002"
+            ],
+            "command_refs": [
+              "command-002"
+            ]
+          }
+        ],
+        "evidence": [
+          {
+            "evidence_id": "evidence-001",
+            "source": "structured_log",
+            "artifact_pointer": "artifacts/run-doctor-failure/doctor/core-report/finding-001.json",
+            "replay_pointer": "rch exec -- cargo test -p asupersync -- obligation_leak",
+            "outcome_class": "failed",
+            "franken_trace_id": "trace-franken-failure-001"
+          },
+          {
+            "evidence_id": "evidence-002",
+            "source": "trace",
+            "artifact_pointer": "artifacts/run-doctor-failure/doctor/core-report/trace-002.json",
+            "replay_pointer": "asupersync trace verify artifacts/run-doctor-failure/trace-002.bin",
+            "outcome_class": "failed",
+            "franken_trace_id": "trace-franken-failure-002"
+          }
+        ],
+        "commands": [
+          {
+            "command_id": "command-001",
+            "command": "rch exec -- cargo test -p asupersync obligation_leak -- --nocapture",
+            "tool": "rch",
+            "exit_code": 101,
+            "outcome_class": "failed"
+          },
+          {
+            "command_id": "command-002",
+            "command": "asupersync trace verify artifacts/run-doctor-failure/trace-002.bin",
+            "tool": "asupersync",
+            "exit_code": 2,
+            "outcome_class": "failed"
+          }
+        ],
+        "provenance": {
+          "run_id": "run-doctor-failure",
+          "scenario_id": "doctor-core-report-failure",
+          "trace_id": "trace-doctor-failure",
+          "seed": "1337",
+          "generated_by": "doctor_asupersync",
+          "generated_at": "2026-02-26T06:00:00Z"
+        }
+      },
+      "extension": {
+        "schema_version": "doctor-advanced-report-v1",
+        "base_report_id": "doctor-report-failure-v1",
+        "base_report_schema_version": "doctor-core-report-v1",
+        "remediation_deltas": [
+          {
+            "delta_id": "delta-001",
+            "finding_id": "finding-001",
+            "previous_status": "open",
+            "next_status": "in_progress",
+            "delta_outcome": "failed",
+            "mapped_taxonomy_class": "remediation_safety",
+            "mapped_taxonomy_dimension": "recovery_planning",
+            "verification_evidence_refs": [
+              "evidence-001"
+            ]
+          }
+        ],
+        "trust_transitions": [
+          {
+            "transition_id": "trust-001",
+            "stage": "post-remediation-attempt",
+            "previous_score": 82,
+            "next_score": 44,
+            "outcome_class": "failed",
+            "mapped_taxonomy_severity": "error",
+            "rationale": "Critical finding persisted after first remediation pass."
+          }
+        ],
+        "collaboration_trail": [
+          {
+            "entry_id": "collab-001",
+            "channel": "agent_mail",
+            "actor": "ChartreuseBrook",
+            "action": "requested remediation follow-up",
+            "thread_id": "br-2b4jj.5.9",
+            "message_ref": "mail-advanced-001",
+            "bead_ref": "asupersync-2b4jj.5.9",
+            "mapped_taxonomy_narrative": "Remediation safety remained degraded after failed verification."
+          }
+        ],
+        "troubleshooting_playbooks": [
+          {
+            "playbook_id": "playbook-001",
+            "title": "Critical remediation retry loop",
+            "trigger_taxonomy_class": "remediation_safety",
+            "trigger_taxonomy_severity": "error",
+            "ordered_steps": [
+              "capture_fresh_evidence",
+              "reproduce_failure_with_rch",
+              "stage_patch_and_verify"
+            ],
+            "command_refs": [
+              "command-001"
+            ],
+            "evidence_refs": [
+              "evidence-001"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "fixture_id": "advanced_happy_path",
+      "description": "Healthy-path extension fixture with trust improvement and closure guidance.",
+      "core_report": {
+        "schema_version": "doctor-core-report-v1",
+        "report_id": "doctor-report-happy-v1",
+        "summary": {
+          "status": "healthy",
+          "overall_outcome": "success",
+          "total_findings": 1,
+          "critical_findings": 0
+        },
+        "findings": [
+          {
+            "finding_id": "finding-010",
+            "title": "Baseline diagnostics fixture coverage verified",
+            "severity": "low",
+            "status": "resolved",
+            "evidence_refs": [
+              "evidence-010"
+            ],
+            "command_refs": [
+              "command-010"
+            ]
+          }
+        ],
+        "evidence": [
+          {
+            "evidence_id": "evidence-010",
+            "source": "benchmark",
+            "artifact_pointer": "artifacts/run-doctor-happy/doctor/core-report/benchmark-010.json",
+            "replay_pointer": "rch exec -- cargo test -p asupersync doctor_core_report_smoke",
+            "outcome_class": "success",
+            "franken_trace_id": "trace-franken-happy-010"
+          }
+        ],
+        "commands": [
+          {
+            "command_id": "command-010",
+            "command": "rch exec -- cargo test -p asupersync doctor_core_report_smoke -- --nocapture",
+            "tool": "rch",
+            "exit_code": 0,
+            "outcome_class": "success"
+          }
+        ],
+        "provenance": {
+          "run_id": "run-doctor-happy",
+          "scenario_id": "doctor-core-report-happy",
+          "trace_id": "trace-doctor-happy",
+          "seed": "2026",
+          "generated_by": "doctor_asupersync",
+          "generated_at": "2026-02-26T06:01:00Z"
+        }
+      },
+      "extension": {
+        "schema_version": "doctor-advanced-report-v1",
+        "base_report_id": "doctor-report-happy-v1",
+        "base_report_schema_version": "doctor-core-report-v1",
+        "remediation_deltas": [
+          {
+            "delta_id": "delta-010",
+            "finding_id": "finding-010",
+            "previous_status": "in_progress",
+            "next_status": "resolved",
+            "delta_outcome": "success",
+            "mapped_taxonomy_class": "verification_governance",
+            "mapped_taxonomy_dimension": "contract_compliance",
+            "verification_evidence_refs": [
+              "evidence-010"
+            ]
+          }
+        ],
+        "trust_transitions": [
+          {
+            "transition_id": "trust-010",
+            "stage": "post-verification",
+            "previous_score": 76,
+            "next_score": 95,
+            "outcome_class": "success",
+            "mapped_taxonomy_severity": "info",
+            "rationale": "Verification summary and replay checks indicate stable healthy state."
+          }
+        ],
+        "collaboration_trail": [
+          {
+            "entry_id": "collab-010",
+            "channel": "beads",
+            "actor": "ChartreuseBrook",
+            "action": "closed remediation bead",
+            "thread_id": "br-2b4jj.5.9",
+            "message_ref": "bv:triage-advanced-010",
+            "bead_ref": "asupersync-2b4jj.5.9",
+            "mapped_taxonomy_narrative": "Verification governance is healthy and ready for promotion."
+          }
+        ],
+        "troubleshooting_playbooks": [
+          {
+            "playbook_id": "playbook-010",
+            "title": "Healthy promotion checklist",
+            "trigger_taxonomy_class": "verification_governance",
+            "trigger_taxonomy_severity": "info",
+            "ordered_steps": [
+              "archive_artifacts",
+              "promote_release",
+              "publish_summary"
+            ],
+            "command_refs": [
+              "command-010"
+            ],
+            "evidence_refs": [
+              "evidence-010"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "fixture_id": "advanced_partial_success_path",
+      "description": "Partial-success fixture where one remediation clears and another remains incomplete.",
+      "core_report": {
+        "schema_version": "doctor-core-report-v1",
+        "report_id": "doctor-report-failure-v1",
+        "summary": {
+          "status": "failed",
+          "overall_outcome": "failed",
+          "total_findings": 2,
+          "critical_findings": 1
+        },
+        "findings": [
+          {
+            "finding_id": "finding-001",
+            "title": "Obligation leak during shutdown path",
+            "severity": "critical",
+            "status": "open",
+            "evidence_refs": [
+              "evidence-001"
+            ],
+            "command_refs": [
+              "command-001"
+            ]
+          },
+          {
+            "finding_id": "finding-002",
+            "title": "Replay mismatch for cancellation timeline",
+            "severity": "high",
+            "status": "in_progress",
+            "evidence_refs": [
+              "evidence-002"
+            ],
+            "command_refs": [
+              "command-002"
+            ]
+          }
+        ],
+        "evidence": [
+          {
+            "evidence_id": "evidence-001",
+            "source": "structured_log",
+            "artifact_pointer": "artifacts/run-doctor-failure/doctor/core-report/finding-001.json",
+            "replay_pointer": "rch exec -- cargo test -p asupersync -- obligation_leak",
+            "outcome_class": "failed",
+            "franken_trace_id": "trace-franken-failure-001"
+          },
+          {
+            "evidence_id": "evidence-002",
+            "source": "trace",
+            "artifact_pointer": "artifacts/run-doctor-failure/doctor/core-report/trace-002.json",
+            "replay_pointer": "asupersync trace verify artifacts/run-doctor-failure/trace-002.bin",
+            "outcome_class": "failed",
+            "franken_trace_id": "trace-franken-failure-002"
+          }
+        ],
+        "commands": [
+          {
+            "command_id": "command-001",
+            "command": "rch exec -- cargo test -p asupersync obligation_leak -- --nocapture",
+            "tool": "rch",
+            "exit_code": 101,
+            "outcome_class": "failed"
+          },
+          {
+            "command_id": "command-002",
+            "command": "asupersync trace verify artifacts/run-doctor-failure/trace-002.bin",
+            "tool": "asupersync",
+            "exit_code": 2,
+            "outcome_class": "failed"
+          }
+        ],
+        "provenance": {
+          "run_id": "run-doctor-failure",
+          "scenario_id": "doctor-core-report-failure",
+          "trace_id": "trace-doctor-failure",
+          "seed": "1337",
+          "generated_by": "doctor_asupersync",
+          "generated_at": "2026-02-26T06:00:00Z"
+        }
+      },
+      "extension": {
+        "schema_version": "doctor-advanced-report-v1",
+        "base_report_id": "doctor-report-failure-v1",
+        "base_report_schema_version": "doctor-core-report-v1",
+        "remediation_deltas": [
+          {
+            "delta_id": "delta-060",
+            "finding_id": "finding-001",
+            "previous_status": "open",
+            "next_status": "resolved",
+            "delta_outcome": "success",
+            "mapped_taxonomy_class": "verification_governance",
+            "mapped_taxonomy_dimension": "contract_compliance",
+            "verification_evidence_refs": [
+              "evidence-001"
+            ]
+          },
+          {
+            "delta_id": "delta-061",
+            "finding_id": "finding-002",
+            "previous_status": "in_progress",
+            "next_status": "in_progress",
+            "delta_outcome": "cancelled",
+            "mapped_taxonomy_class": "integration_reliability",
+            "mapped_taxonomy_dimension": "external_dependency",
+            "verification_evidence_refs": [
+              "evidence-002"
+            ]
+          }
+        ],
+        "trust_transitions": [
+          {
+            "transition_id": "trust-060",
+            "stage": "post-remediation-partial-success",
+            "previous_score": 65,
+            "next_score": 72,
+            "outcome_class": "cancelled",
+            "mapped_taxonomy_severity": "warning",
+            "rationale": "Primary fix succeeded but secondary verification was cancelled after dependency timeout."
+          }
+        ],
+        "collaboration_trail": [
+          {
+            "entry_id": "collab-060",
+            "channel": "agent_mail",
+            "actor": "ChartreuseBrook",
+            "action": "requested follow-up verification rerun",
+            "thread_id": "br-2b4jj.5.9",
+            "message_ref": "mail-advanced-060",
+            "bead_ref": "asupersync-2b4jj.5.9",
+            "mapped_taxonomy_narrative": "Partial-success state requires deterministic rerun before closure."
+          },
+          {
+            "entry_id": "collab-061",
+            "channel": "beads",
+            "actor": "ChartreuseBrook",
+            "action": "kept dependent work blocked pending rerun",
+            "thread_id": "br-2b4jj.5.9",
+            "message_ref": "bv:triage-advanced-060",
+            "bead_ref": "asupersync-2b4jj.5.9",
+            "mapped_taxonomy_narrative": "Beads graph retains blocker edge until cancelled verification is rerun."
+          }
+        ],
+        "troubleshooting_playbooks": [
+          {
+            "playbook_id": "playbook-060",
+            "title": "Partial-success continuation checklist",
+            "trigger_taxonomy_class": "verification_governance",
+            "trigger_taxonomy_severity": "warning",
+            "ordered_steps": [
+              "capture_partial_success_snapshot",
+              "resume_cancelled_validation",
+              "schedule_follow_up_remediation"
+            ],
+            "command_refs": [
+              "command-001",
+              "command-002"
+            ],
+            "evidence_refs": [
+              "evidence-001",
+              "evidence-002"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "fixture_id": "advanced_rollback_path",
+      "description": "Rollback fixture with failed apply verification and explicit recovery path.",
+      "core_report": {
+        "schema_version": "doctor-core-report-v1",
+        "report_id": "doctor-report-failure-v1",
+        "summary": {
+          "status": "failed",
+          "overall_outcome": "failed",
+          "total_findings": 2,
+          "critical_findings": 1
+        },
+        "findings": [
+          {
+            "finding_id": "finding-001",
+            "title": "Obligation leak during shutdown path",
+            "severity": "critical",
+            "status": "open",
+            "evidence_refs": [
+              "evidence-001"
+            ],
+            "command_refs": [
+              "command-001"
+            ]
+          },
+          {
+            "finding_id": "finding-002",
+            "title": "Replay mismatch for cancellation timeline",
+            "severity": "high",
+            "status": "in_progress",
+            "evidence_refs": [
+              "evidence-002"
+            ],
+            "command_refs": [
+              "command-002"
+            ]
+          }
+        ],
+        "evidence": [
+          {
+            "evidence_id": "evidence-001",
+            "source": "structured_log",
+            "artifact_pointer": "artifacts/run-doctor-failure/doctor/core-report/finding-001.json",
+            "replay_pointer": "rch exec -- cargo test -p asupersync -- obligation_leak",
+            "outcome_class": "failed",
+            "franken_trace_id": "trace-franken-failure-001"
+          },
+          {
+            "evidence_id": "evidence-002",
+            "source": "trace",
+            "artifact_pointer": "artifacts/run-doctor-failure/doctor/core-report/trace-002.json",
+            "replay_pointer": "asupersync trace verify artifacts/run-doctor-failure/trace-002.bin",
+            "outcome_class": "failed",
+            "franken_trace_id": "trace-franken-failure-002"
+          }
+        ],
+        "commands": [
+          {
+            "command_id": "command-001",
+            "command": "rch exec -- cargo test -p asupersync obligation_leak -- --nocapture",
+            "tool": "rch",
+            "exit_code": 101,
+            "outcome_class": "failed"
+          },
+          {
+            "command_id": "command-002",
+            "command": "asupersync trace verify artifacts/run-doctor-failure/trace-002.bin",
+            "tool": "asupersync",
+            "exit_code": 2,
+            "outcome_class": "failed"
+          }
+        ],
+        "provenance": {
+          "run_id": "run-doctor-failure",
+          "scenario_id": "doctor-core-report-failure",
+          "trace_id": "trace-doctor-failure",
+          "seed": "1337",
+          "generated_by": "doctor_asupersync",
+          "generated_at": "2026-02-26T06:00:00Z"
+        }
+      },
+      "extension": {
+        "schema_version": "doctor-advanced-report-v1",
+        "base_report_id": "doctor-report-failure-v1",
+        "base_report_schema_version": "doctor-core-report-v1",
+        "remediation_deltas": [
+          {
+            "delta_id": "delta-080",
+            "finding_id": "finding-001",
+            "previous_status": "open",
+            "next_status": "open",
+            "delta_outcome": "failed",
+            "mapped_taxonomy_class": "remediation_safety",
+            "mapped_taxonomy_dimension": "recovery_planning",
+            "verification_evidence_refs": [
+              "evidence-001"
+            ]
+          }
+        ],
+        "trust_transitions": [
+          {
+            "transition_id": "trust-080",
+            "stage": "rollback-validation",
+            "previous_score": 61,
+            "next_score": 38,
+            "outcome_class": "failed",
+            "mapped_taxonomy_severity": "critical",
+            "rationale": "Rollback required after failed post-apply verification."
+          }
+        ],
+        "collaboration_trail": [
+          {
+            "entry_id": "collab-080",
+            "channel": "agent_mail",
+            "actor": "ChartreuseBrook",
+            "action": "requested immediate rollback execution",
+            "thread_id": "br-2b4jj.5.9",
+            "message_ref": "mail-advanced-080",
+            "bead_ref": "asupersync-2b4jj.5.9",
+            "mapped_taxonomy_narrative": "Remediation remained unsafe; rollback is mandatory before retry."
+          }
+        ],
+        "troubleshooting_playbooks": [
+          {
+            "playbook_id": "playbook-080",
+            "title": "Rollback and recovery checklist",
+            "trigger_taxonomy_class": "remediation_safety",
+            "trigger_taxonomy_severity": "critical",
+            "ordered_steps": [
+              "execute_rollback_plan",
+              "reopen_blocking_bead",
+              "verify_rollback_state"
+            ],
+            "command_refs": [
+              "command-001"
+            ],
+            "evidence_refs": [
+              "evidence-001"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
