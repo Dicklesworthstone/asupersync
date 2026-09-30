@@ -2017,6 +2017,37 @@ Asupersync is feature-light by default; the lab runtime is available without fla
 | `wasm-browser-dev` | Browser WASM: development profile with browser I/O | No |
 | `wasm-browser-prod` | Browser WASM: production profile with browser I/O | No |
 | `wasm-browser-deterministic` | Browser WASM: replay-safe with browser trace | No |
+| `wasm-runtime` | Browser runtime capability slices for WASM profile composition (implies `wasm-browser-preview`) | No |
+| `wasm-browser-preview` | Opt-in guard for experimental browser-targeted builds; not full WASM parity | No |
+| `browser-io` | Browser I/O capability slice for the `wasm-browser-*` profiles; not allowed with `wasm-browser-minimal` | No |
+| `browser-trace` | Browser trace capability slice; not allowed with `wasm-browser-minimal` | No |
+| `deterministic-mode` | Replay-safe deterministic timestamps for lab oracles and the deterministic browser profile | No |
+| `desktop-runtime-profile` | Bounded runtime configuration for native desktop hosts | No |
+| `quic` | Native, Tokio-free QUIC transport surfaces | No |
+| `http3` | Native HTTP/3 (`http::h3`, `http::h3_quic`); implies `quic` | No |
+| `http2-streaming` | Live HTTP/2 request ingress with bounded body queues and consumption-based receive credit | No |
+| `compression` | HTTP response compression (gzip, deflate, Brotli) | No |
+| `atp-cli` | The standalone `atp` file-transfer binary (bundles `tls`) | No |
+| `atpd-daemon` | The unpublished `atpd` ATP daemon binary (`cli`) | No |
+| `tailscale-path-provider` | ATP Tailscale candidate-provider integration points; no Tailscale dependency | No |
+| `messaging-fabric` | Reserved name for the native FABRIC messaging lane; its module wiring is not fully gated yet | No |
+| `tokio-compat` | Tokio compatibility layer for ATP transfer actors; the general wrappers live in the separate `asupersync-tokio-compat` crate | No |
+| `runtime-metrics` | Scheduler and timer instrumentation counters; zero cost when disabled | No |
+| `obligation-leak-detection` | Real-time obligation leak detection with stack traces and region-boundary checks | No |
+| `lab-stack-traces` | Stack-trace capture for lab oracle violations | No |
+| `cancel-correctness-oracle` | Cancel-correctness property oracle for the cancellation protocol | No |
+| `waker-profiling` | Waker allocation hot-path profiling hooks | No |
+| `fuzz` | Fuzzing support (`arbitrary` derives, OTLP request helpers); outside the no-Tokio guarantee | No |
+| `criterion-benches` | Criterion-powered benchmark targets | No |
+| `benchmark-adapters` | Tokio-backed benchmark adapters; a benchmark-only quarantine lane | No |
+| `dependency-ledger` | Dependency marginal-ledger generator; build tooling, not a production graph | No |
+
+The remaining features select internal proof lanes and CI umbrellas and are not
+meant for applications: `channel-mpsc-select-e2e`, `cross-subsystem-recovery-e2e`,
+`distributed-hash-snapshot-recovery-e2e`, `h3-websocket-e2e`,
+`obligation-cleanup-e2e`, `raptorq-roundtrip-e2e`, `real-service-e2e`,
+`serialization-golden-harnesses`, `legacy-internal-test-harnesses` and
+`ci-cross-platform`.
 
 ### Minimum Supported Rust Version
 
