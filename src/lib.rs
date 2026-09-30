@@ -527,3 +527,10 @@ pub mod proc_macros {
         session_protocol, spawn, test,
     };
 }
+
+/// The README's Rust samples, compiled by `cargo test --doc` so they cannot drift
+/// from the API they show (asupersync-bi2462.142). Blocks that are illustrative
+/// only are fenced `ignore` with a stated reason.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;

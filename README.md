@@ -102,7 +102,7 @@ If you already know tokio, this section maps the primitives you use daily to the
 | `tokio::time::sleep(dur)` | `sleep(now, dur)` | Takes current `Time` instead of reading the clock implicitly. Works with virtual time in lab runtime. |
 | `tokio::time::timeout(dur, fut)` | `timeout(now, dur, fut)` or `cx.scope().timeout(&cx, dur, \|cx\| op)` | `time::timeout` returns `Result<T, Elapsed>` and drops the inner future when the clock wins; `Scope::timeout` spawns the operation as a region task and cancels **and drains** it on expiry, reporting a late terminal outcome instead of losing it. |
 | `tokio::time::interval(dur)` | `interval(now, dur)` | Same `MissedTickBehavior` options (Burst, Delay, Skip). |
-| `tokio::sync::mpsc::channel(n)` | `channel::mpsc::channel::<T>(n)` | Two-phase send: `tx.reserve(&cx).await?.send(val)`. Reserve is cancel-safe; commit cannot fail. |
+| `tokio::sync::mpsc::channel(n)` | `channel::mpsc::channel::<T>(n)` | Two-phase send: `tx.reserve(&cx).await?.send(val)`. Reserve is cancel-safe; the commit returns an `Outcome`, which is `Err` with the value back if the receiver is gone. |
 | `tokio::sync::oneshot::channel()` | `channel::oneshot::channel::<T>()` | Two-phase: `tx.reserve(&cx)` then `permit.send(val)`. |
 | `tokio::sync::broadcast::channel(n)` | `channel::broadcast::channel::<T>(n)` | Two-phase send. Lagging receivers get `RecvError::Lagged`. |
 | `tokio::sync::watch::channel(init)` | `channel::watch::channel(init)` | `rx.changed(&cx).await?` then `rx.borrow_and_clone()`. |
@@ -119,7 +119,8 @@ If you already know tokio, this section maps the primitives you use daily to the
 **1. Every async operation takes `&Cx`.**
 Where tokio reads ambient runtime state from thread-locals, asupersync passes an explicit capability context. This means cancellation and budgets compose structurally -- you can see exactly what a function can do from its signature.
 
-```rust
+<!-- Illustrative fragment: `tx` and `cx` come from the surrounding code. -->
+```rust,ignore
 // tokio
 let permit = tx.reserve().await?;
 
@@ -206,32 +207,25 @@ accounting, and runtime/oracle checks rather than by discipline. It is not a
 claim that Rust's type system alone proves every adapter or host-boundary path.
 
 ```rust
-// Typical executors: what happens when this scope exits?
-spawn(async { /* orphaned? cancelled? who knows */ });
+use asupersync::{main, prelude::*};
 
-// Asupersync: scope guarantees quiescence
-scope
-    .region(
-        &mut state,
-        &cx,
-        asupersync::types::policy::FailFast,
-        |sub, state| async move {
-            sub.spawn_registered(state, &cx, |task_cx| async move {
-                task_cx.checkpoint()?;
-                Outcome::ok(())
-            })
-                .expect("spawn task_a");
-            sub.spawn_registered(state, &cx, |task_cx| async move {
-                task_cx.checkpoint()?;
-                Outcome::ok(())
-            })
-                .expect("spawn task_b");
-            Outcome::ok(())
-        },
-    )
-    .await
-    .expect("create child region");
-// ← guaranteed: nothing from inside is still running once the child region closes
+// Typical executors: `spawn(async { ... })` detaches the task; nothing waits
+// for it, and nothing cancels it, when the caller returns.
+
+// Asupersync: the tasks belong to a region of this scope.
+#[main]
+async fn main(cx: &Cx) {
+    let scope = cx.scope_with_budget(Budget::new().with_poll_quota(64));
+    let mut tasks = JoinSet::new(&scope);
+    for value in 1..=2_u32 {
+        tasks
+            .spawn(cx, move |_| async move { Ok::<_, Error>(value) })
+            .expect("spawn region-owned task");
+    }
+    let results = tasks.join_all(cx).await;
+    // ← guaranteed: nothing spawned into the set is still running here
+    assert_eq!(results.len(), 2);
+}
 ```
 
 ### 2. Cancellation as a First-Class Protocol
@@ -239,7 +233,7 @@ scope
 Cancellation is request, acknowledgement, drain, and finalization—not a silent
 `drop`. It operates as a multi-phase protocol:
 
-```
+```text
 Running → CancelRequested → Cancelling → Finalizing → Completed(Cancelled)
             ↓                    ↓             ↓
          (bounded)          (cleanup)    (finalizers)
@@ -285,7 +279,8 @@ Cancellation progress is observable through `ProgressCertificate` where the runt
 
 For covered two-phase communication surfaces where cancellation could otherwise lose a message, Asupersync uses reserve/commit:
 
-```rust
+<!-- Illustrative fragment: `tx`, `cx` and `message` come from the surrounding code. -->
+```rust,ignore
 let permit = tx.reserve(cx).await?; // nothing committed yet
 let outcome = permit.send(message);
 // Inspect outcome: success publishes; disconnect returns the original value.
@@ -300,11 +295,12 @@ This is not a blanket claim for every effect. Inherently partial I/O and adapter
 
 Runtime-managed effects flow through explicit capability tokens:
 
-```rust
-async fn my_task(cx: &mut Cx) {
-    cx.spawn(...);        // ← need spawn capability
-    cx.sleep_until(...);  // ← need time capability
-    cx.trace(...);        // ← need trace capability
+<!-- Illustrative sketch: `...` stands for a task factory. -->
+```rust,ignore
+async fn my_task(cx: &Cx) {
+    cx.spawn(...);                          // ← spawn capability
+    sleep(cx.now(), Duration::from_millis(10)).await; // ← time, read through the Cx
+    cx.trace("checkpoint reached");         // ← trace capability
 }
 ```
 
@@ -823,7 +819,8 @@ consumer-profile contracts.
 
 ### Outcome — Four-Valued Result
 
-```rust
+<!-- Type shape, not a program: see src/types/outcome.rs. -->
+```rust,ignore
 pub enum Outcome<T, E> {
     Ok(T),                    // Success
     Err(E),                   // Application error
@@ -837,7 +834,8 @@ pub enum Outcome<T, E> {
 
 ### Budget — Resource Constraints
 
-```rust
+<!-- Type shape, not a program: see src/types/budget.rs. -->
+```rust,ignore
 pub struct Budget {
     pub deadline: Option<Time>,   // Absolute deadline
     pub poll_quota: u32,          // Max poll calls
@@ -853,30 +851,38 @@ let effective = outer_budget.meet(inner_budget);
 
 ```rust
 pub enum CancelKind {
-    User,             // Explicit cancellation
-    Timeout,          // Deadline exceeded
-    FailFast,         // Sibling failed
-    RaceLost,         // Lost a race
-    ParentCancelled,  // Parent region cancelled
-    Shutdown,         // Runtime shutdown
+    User,                 // Explicit cancellation
+    Timeout,              // Timeout exceeded
+    Deadline,             // Deadline passed
+    PollQuota,            // Poll budget exhausted
+    CostBudget,           // Cost budget exhausted
+    FailFast,             // Sibling failed
+    RaceLost,             // Lost a race
+    ParentCancelled,      // Parent region cancelled
+    ResourceUnavailable,  // A required resource is unavailable
+    Shutdown,             // Runtime shutdown
+    LinkedExit,           // A linked task exited
 }
 
-// Severity: User < Timeout < FailFast < ParentCancelled < Shutdown
+// Severity (CancelKind::severity):
+//   User < Timeout = Deadline < PollQuota = CostBudget
+//   < FailFast = RaceLost = LinkedExit < ParentCancelled = ResourceUnavailable < Shutdown
 // Cleanup budgets scale inversely with severity
 ```
 
 ### Cx — Capability Context
 
-```rust
+<!-- Signature sketch, not a program: see src/cx/cx.rs. -->
+```rust,ignore
 pub struct Cx { /* ... */ }
 
 impl Cx {
     pub fn spawn<F, Fut>(&self, f: F) -> Result<TaskHandle<Fut::Output>, SpawnError>;
     pub fn spawn_in<F, Fut, P>(&self, scope: &Scope<'_, P>, f: F)
         -> Result<TaskHandle<Fut::Output>, SpawnError>;
-    pub fn checkpoint(&self) -> Result<(), Cancelled>;
+    pub fn checkpoint(&self) -> Result<(), Error>; // Err once cancellation is requested
     pub fn masked<F, R>(&self, f: F) -> R; // Run a synchronous closure with cancellation deferred
-    pub fn trace(&self, event: TraceEvent);
+    pub fn trace(&self, message: &str);
     pub fn budget(&self) -> Budget;
     pub fn is_cancel_requested(&self) -> bool;
 }
@@ -886,7 +892,7 @@ impl Cx {
 
 ## Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                               EXECUTION TIERS                               │
 ├─────────────────────────────────────────────────────────────────────────────┤
@@ -1594,25 +1600,27 @@ atp bond-pull /srv/payload /dest --donors alice@h1,bob@h2 \
 
 **Programmatic use** — the `BondedTransfer` SDK builder drives a real bonded transfer over the same data path, cancel-correctly:
 
-```rust
+<!-- Illustrative fragment: `dest`, `local_src`, `key_hex` and `cx` come from the caller. -->
+```rust,ignore
 use asupersync::net::atp::sdk::BondedTransfer;
 
-// Blocking receive with a final report:
+// Receive to completion and get the final report:
 let report = BondedTransfer::receive(dest, local_src)
     .expect_donors(2)
     .listen("0.0.0.0:8473".parse()?)
     .auth_key_hex(key_hex)
-    .run(&cx);
+    .run(&cx)
+    .await;
 
 // Or spawn as an owned child and stream live progress:
-let handle = BondedTransfer::receive(dest, local_src)
+let mut handle = BondedTransfer::receive(dest, local_src)
     .expect_donors(2)
     .spawn(&cx)?;
-let addr = handle.control_addr();            // bound control endpoint for donors
-while let Some(p) = handle.next_progress() { // per-donor ingress, blocks remaining, feedback rounds
+let addr = handle.control_addr().await;            // bound control endpoint for donors
+while let Some(p) = handle.next_progress().await { // per-donor ingress, blocks remaining, feedback rounds
     println!("{:.0}% ({}/{} blocks)", p.progress_percent(), p.blocks_total - p.blocks_remaining, p.blocks_total);
 }
-let outcome = handle.wait_for_completion();  // AtpOutcome: Ok / Err / Cancelled / Panicked
+let outcome = handle.wait_for_completion().await;  // AtpOutcome: Ok / Err / Cancelled / Panicked
 ```
 
 `spawn` runs the receiver as an owned child of the `Cx`'s region; `handle.cancel()` aborts it and the child unwinds to quiescence committing nothing (a final `cx.checkpoint()` guards even the last instant before the irreversible commit). The progress stream emits a terminal `Completed` on success or `Failed` on a verification failure; cancellation and other terminal errors are observed as the stream closes plus the join outcome.
@@ -1656,15 +1664,21 @@ For structural runtime risk, diagnostics also maintain a spectral health monitor
 
 `asupersync-macros/` provides proc macros for ergonomic structured concurrency:
 
-```rust
+<!-- Illustrative: `worker_a`, `worker_b`, `task_a` and `task_b` are user code, and
+     `scope!` needs the `&mut RuntimeState` that lab and custom runtimes expose.
+     See docs/macro-dsl.md. -->
+```rust,ignore
 use asupersync::{join, race, scope, spawn, Cx};
 use asupersync::runtime::RuntimeState;
 
 async fn macro_example(cx: &Cx, state: &mut RuntimeState) {
+    // `join!` awaits futures side by side and returns all their outputs.
+    let (a, b) = join!(worker_a(), worker_b());
+
+    // `spawn!` inside `scope!` creates region-owned tasks; the scope does not
+    // return until they are done. A `TaskHandle` is not a future to `join!`.
     scope!(cx, state: state, {
-        let a = spawn!(async { worker_a().await });
-        let b = spawn!(async { worker_b().await });
-        join!(a, b)
+        let _task = spawn!(async { worker_a().await });
     });
 
     // Each branch gets its own child `Cx`, so a losing branch observes its
@@ -2057,6 +2071,8 @@ use asupersync::{
 Framework authors (e.g., HTTP servers) should wrap `Cx`:
 
 ```rust
+use asupersync::{Budget, Cx};
+
 /// Framework-specific request context
 pub struct RequestContext<'a> {
     cx: &'a Cx,
@@ -2095,18 +2111,18 @@ impl<'a> RequestContext<'a> {
 ### Lab Runtime Configuration
 
 ```rust
-let config = LabConfig::default()
-    // Seed for deterministic scheduling (same seed = same execution)
-    .seed(42)
+use asupersync::lab::{LabConfig, LabRuntime};
 
+// Seed for deterministic scheduling (same seed = same execution)
+let config = LabConfig::new(42)
     // Maximum steps before timeout (prevents infinite loops)
     .max_steps(100_000)
 
-    // Enable futurelock detection (tasks holding obligations without progress)
+    // Futurelock detection: tasks holding obligations without being polled
     .futurelock_max_idle_steps(1000)
 
-    // Enable trace capture for replay
-    .capture_trace(true);
+    // Record the execution for replay
+    .with_default_replay_recording();
 
 let lab = LabRuntime::new(config);
 ```
@@ -2121,13 +2137,16 @@ If a leak is detected while the thread is already unwinding, a `Panic` response 
 ### Budget Configuration
 
 ```rust
+use asupersync::{Budget, Time};
+use std::time::Duration;
+
 let now = Time::from_secs(1_000); // current logical time from the runtime or lab clock
 
 // Request timeout with poll budget
 let request_budget = Budget::new()
     .with_timeout(now, Duration::from_secs(30))
     .with_poll_quota(10_000)      // Max 10k polls
-    .with_priority(100);          // Normal priority
+    .with_priority(192);          // Above the default priority (128)
 
 // Cleanup budget (tighter for faster shutdown)
 let cleanup_budget = Budget::new()
@@ -2146,7 +2165,8 @@ and terminal transition to locate the owner or adapter that lost it. Ordinary
 MPSC permit destruction aborts and resolves the reservation; dropping that
 permit is a supported path, not itself a leak.
 
-```rust
+<!-- Illustrative fragment: `tx`, `cx` and `message` come from the surrounding code. -->
+```rust,ignore
 // Abort an unused reservation and release its capacity.
 let permit = tx.reserve(cx).await?;
 drop(permit);
@@ -2161,7 +2181,8 @@ let outcome = permit.send(message);
 
 A region is stuck waiting for children that won't complete.
 
-```rust
+<!-- Illustrative fragment: runs inside a task that has a `cx`. -->
+```rust,ignore
 // Check for: infinite loops without checkpoints
 loop {
     cx.checkpoint()?;  // Add checkpoints in loops
@@ -2173,7 +2194,8 @@ loop {
 
 A task is holding obligations but not making progress.
 
-```rust
+<!-- Illustrative fragment: `tx`, `cx`, `other_thing` and `msg` come from the surrounding code. -->
+```rust,ignore
 // Check for: awaiting something that will never resolve
 // while holding a permit/lock
 let permit = tx.reserve(cx).await?;
@@ -2186,7 +2208,8 @@ let outcome = permit.send(msg);
 
 Same seed should give same execution. If not:
 
-```rust
+<!-- Illustrative fragment: runs inside a task that has a `cx`. -->
+```rust,ignore
 // Check for: time-based operations
 // WRONG: uses wall-clock time
 let now = std::time::Instant::now();
@@ -2197,7 +2220,8 @@ let now = cx.now();
 
 Also check for ambient randomness:
 
-```rust
+<!-- Illustrative fragment: the WRONG line names a crate asupersync does not depend on. -->
+```rust,ignore
 // WRONG: ambient entropy breaks determinism
 let id = rand::random::<u64>();
 
@@ -2397,6 +2421,8 @@ For the preview Rust lane, inspect the truthful execution ladder before and
 after requesting a lane:
 
 ```rust
+use asupersync::runtime::RuntimeBuilder;
+
 let ladder = RuntimeBuilder::new().inspect_browser_execution_ladder();
 let selection = RuntimeBuilder::browser().build_selection();
 ```
