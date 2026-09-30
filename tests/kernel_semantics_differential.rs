@@ -1603,6 +1603,220 @@ fn join_set_join_next_yields_every_member_once(cx: Cx) -> ScenarioFuture {
     })
 }
 
+/// A task that panics while holding a mutex poisons it: the join reports the
+/// panic and every later locker sees `Poisoned`.
+fn panic_while_holding_a_mutex_poisons_it(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let mutex = Arc::new(Mutex::new(0u32));
+        let lock = Arc::clone(&mutex);
+        let mut handle = cx
+            .spawn(move |task_cx| async move {
+                let held = lock.lock(&task_cx).await.map_err(|error| format!("{error:?}"))?;
+                // Panics on purpose: the value is still 0 here.
+                assert!(*held != 0, "differential: panic while holding the lock");
+                Ok::<u32, String>(*held)
+            })
+            .expect("spawn");
+        let joined = handle.join(&cx).await;
+        let relock = mutex
+            .lock(&cx)
+            .await
+            .map(|_| ())
+            .map_err(|error| format!("{error:?}"));
+        observe([
+            ("join", outcome(&joined)),
+            ("poisoned", mutex.is_poisoned().to_string()),
+            ("relock", format!("{relock:?}")),
+        ])
+    })
+}
+
+/// A watcher sees values in send order, never one twice or out of order,
+/// ends on the last value, and then sees `Closed`. How many intermediate
+/// values it observes depends on the schedule.
+fn watch_values_arrive_in_order_and_end_on_the_last(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let (tx, mut rx) = watch::channel(0u32);
+        let (started, _) = flags();
+        let s = Arc::clone(&started);
+        let mut watcher = cx
+            .spawn(move |task_cx| async move {
+                let mut seen = Vec::new();
+                s.store(true, Ordering::SeqCst);
+                let end = loop {
+                    match rx.changed(&task_cx).await {
+                        Ok(()) => seen.push(*rx.borrow_and_update()),
+                        Err(error) => break format!("{error:?}"),
+                    }
+                };
+                (seen, end)
+            })
+            .expect("spawn watcher");
+        wait_for(&started).await;
+        for value in 1..=5u32 {
+            tx.send(value).expect("receiver alive");
+            if value % 2 == 0 {
+                yield_now().await;
+            }
+        }
+        yield_now().await;
+        drop(tx);
+        let (seen, end) = watcher.join(&cx).await.expect("watcher finishes");
+        let increasing = seen.windows(2).all(|pair| pair[0] < pair[1]);
+        observe([
+            ("strictly_increasing", increasing.to_string()),
+            ("last", format!("{:?}", seen.last())),
+            ("end", end),
+            ("seen", format!("{seen:?}")),
+        ])
+    })
+}
+
+/// Sixty-four tasks sleep to the same deadline. Every one wakes, none early:
+/// a timer lost to coalescing or wheel promotion hangs the scenario.
+fn sixty_four_sleepers_with_one_deadline_all_wake(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let start = cx.now();
+        let mut handles = Vec::new();
+        for _ in 0..64 {
+            handles.push(
+                cx.spawn(move |task_cx| async move {
+                    sleep(start, Duration::from_millis(10)).await;
+                    task_cx.now().duration_since(start) >= 10_000_000
+                })
+                .expect("spawn sleeper"),
+            );
+        }
+        let mut woke = 0usize;
+        let mut on_time = true;
+        for handle in &mut handles {
+            on_time &= handle.join(&cx).await.expect("sleeper finishes");
+            woke += 1;
+        }
+        observe([
+            ("woke", woke.to_string()),
+            ("none_early", on_time.to_string()),
+        ])
+    })
+}
+
+/// Closing a semaphore wakes every parked acquirer with `Closed`.
+fn semaphore_close_wakes_every_waiter(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let semaphore = Arc::new(Semaphore::new(1));
+        let held = semaphore.acquire(&cx, 1).await.expect("parent acquires");
+        let mut handles = Vec::new();
+        for _ in 0..3 {
+            let sem = Arc::clone(&semaphore);
+            handles.push(
+                cx.spawn(move |task_cx| async move {
+                    sem.acquire(&task_cx, 1)
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("{error:?}"))
+                })
+                .expect("spawn waiter"),
+            );
+        }
+        while semaphore.telemetry_snapshot(0).waiter_count < 3 {
+            yield_now().await;
+        }
+        semaphore.close();
+        let mut results = Vec::new();
+        for handle in &mut handles {
+            results.push(outcome(&handle.join(&cx).await));
+        }
+        drop(held);
+        observe([("waiters", results.join(","))])
+    })
+}
+
+/// Aborting a task does not cancel a task it spawned: the child belongs to
+/// the region, not to its spawner, and keeps running until it finishes.
+fn aborting_a_spawner_leaves_its_child_running(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let (child_started, _) = flags();
+        let child_result = Arc::new(std::sync::Mutex::new(None::<String>));
+        let (tx, rx) = mpsc::channel::<u32>(1);
+        let (started, result) = (Arc::clone(&child_started), Arc::clone(&child_result));
+        let mut spawner = cx
+            .spawn(move |task_cx| async move {
+                let _child = task_cx
+                    .spawn(move |child_cx| async move {
+                        let mut rx = rx;
+                        started.store(true, Ordering::SeqCst);
+                        let received = rx.recv(&child_cx).await;
+                        *result.lock().expect("result lock") = Some(format!("{received:?}"));
+                    })
+                    .expect("spawn child");
+                let (_hold, mut never) = mpsc::channel::<u32>(1);
+                never.recv(&task_cx).await.map_err(|error| format!("{error:?}"))
+            })
+            .expect("spawn spawner");
+        wait_for(&child_started).await;
+        spawner.abort();
+        let spawner_joined = spawner.join(&cx).await;
+        let sent = tx.send(&cx, 9).await.map_err(|error| format!("{error:?}"));
+        let child = loop {
+            if let Some(received) = child_result.lock().expect("result lock").clone() {
+                break received;
+            }
+            yield_now().await;
+        };
+        observe([
+            ("spawner", outcome(&spawner_joined)),
+            ("send_to_child", format!("{sent:?}")),
+            ("child_received", child),
+        ])
+    })
+}
+
+/// A oneshot whose receiving task was aborted is closed: the send hands the
+/// value back instead of losing it.
+fn oneshot_send_after_the_receiver_was_aborted_returns_the_value(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let (tx, rx) = oneshot::channel::<u32>();
+        let (started, _) = flags();
+        let s = Arc::clone(&started);
+        let mut receiver = cx
+            .spawn(move |task_cx| async move {
+                let mut rx = rx;
+                s.store(true, Ordering::SeqCst);
+                rx.recv(&task_cx).await.map_err(|error| format!("{error:?}"))
+            })
+            .expect("spawn receiver");
+        wait_for(&started).await;
+        yield_now().await;
+        receiver.abort();
+        let joined = receiver.join(&cx).await;
+        let sent = tx.send(&cx, 5).map_err(|error| format!("{error:?}"));
+        observe([("receiver", outcome(&joined)), ("send", format!("{sent:?}"))])
+    })
+}
+
+/// A weaker cancel reason arriving after a stronger one does not weaken it:
+/// a task aborted with `Shutdown` and then `User` observes `Shutdown`.
+fn a_weaker_abort_does_not_weaken_the_reason(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let (started, _) = flags();
+        let s = Arc::clone(&started);
+        let mut handle = cx
+            .spawn(move |task_cx| async move {
+                let (_hold, mut never) = mpsc::channel::<u32>(1);
+                s.store(true, Ordering::SeqCst);
+                let _ = never.recv(&task_cx).await;
+                task_cx.cancel_reason().map(|reason| format!("{:?}", reason.kind))
+            })
+            .expect("spawn");
+        wait_for(&started).await;
+        yield_now().await;
+        handle.abort_with_reason(CancelReason::shutdown());
+        handle.abort_with_reason(CancelReason::user("differential: weaker second reason"));
+        let joined = handle.join(&cx).await;
+        observe([("join", outcome(&joined))])
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Lab-only invariants the differential runs surfaced
 // ---------------------------------------------------------------------------
@@ -1821,5 +2035,40 @@ differential!(
 differential!(
     differential_join_set_join_next,
     join_set_join_next_yields_every_member_once,
+    []
+);
+differential!(
+    differential_panic_poisons_mutex,
+    panic_while_holding_a_mutex_poisons_it,
+    []
+);
+differential!(
+    differential_watch_order,
+    watch_values_arrive_in_order_and_end_on_the_last,
+    ["seen"]
+);
+differential!(
+    differential_sleep_storm,
+    sixty_four_sleepers_with_one_deadline_all_wake,
+    []
+);
+differential!(
+    differential_semaphore_close,
+    semaphore_close_wakes_every_waiter,
+    []
+);
+differential!(
+    differential_spawner_abort_child,
+    aborting_a_spawner_leaves_its_child_running,
+    []
+);
+differential!(
+    differential_oneshot_after_receiver_abort,
+    oneshot_send_after_the_receiver_was_aborted_returns_the_value,
+    []
+);
+differential!(
+    differential_abort_reason_strength,
+    a_weaker_abort_does_not_weaken_the_reason,
     []
 );
