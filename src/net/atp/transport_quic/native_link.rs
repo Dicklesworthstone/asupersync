@@ -1466,6 +1466,53 @@ async fn send_native_proof_until_close<T: serde::Serialize + Sync>(
     }
 }
 
+/// Longest refusal reason sent back to the sender, in bytes.
+const MANIFEST_REFUSAL_REASON_MAX_BYTES: usize = 512;
+
+/// Tells the sender why its manifest was refused, with the failed-commit Proof
+/// it already understands (`committed: false` plus a reason), then Close.
+/// Before this the receiver returned the error and dropped the connection, and
+/// the sender saw only silence until its idle timeout (360 s by default,
+/// br-asupersync-nnm3gw). Best effort: the refusal is still the error the
+/// caller returns, whether or not the Proof gets through.
+async fn refuse_manifest_in_band(
+    cx: &Cx,
+    link: &mut QuicLink,
+    control: &mut NativeQuicFrameTransport,
+    error: &QuicTransportError,
+    config: &QuicConfig,
+) {
+    let detail = match error {
+        QuicTransportError::Source(message) => message.clone(),
+        other => other.to_string(),
+    };
+    let mut reason = format!("receiver refused the manifest: {detail}");
+    if reason.len() > MANIFEST_REFUSAL_REASON_MAX_BYTES {
+        let mut end = MANIFEST_REFUSAL_REASON_MAX_BYTES;
+        while !reason.is_char_boundary(end) {
+            end -= 1;
+        }
+        reason.truncate(end);
+    }
+    super::quic_progress(format_args!("receiver: manifest refused: {reason}"));
+    let receipt = ReceiveReceipt {
+        committed: false,
+        bytes_received: 0,
+        files: 0,
+        sha_ok: false,
+        merkle_ok: false,
+        symbols_accepted: 0,
+        feedback_rounds: 0,
+        decode_count: 0,
+        decode_micros: 0,
+        reason: Some(reason),
+        committed_paths: Vec::new(),
+    };
+    let _ = send_native_proof_until_close(cx, link, control, &receipt, &receipt, config).await;
+    let _ = super::send_native_close(cx, &mut link.conn, control);
+    let _ = link.flush(cx).await;
+}
+
 fn same_need_more_request_shape(left: &QuicNeedMore, right: &QuicNeedMore) -> bool {
     left.feedback_round == right.feedback_round
         && left.pending == right.pending
@@ -10742,7 +10789,10 @@ async fn run_receiver_session(
     } else {
         let manifest: TransferManifest =
             super::parse_json_frame(&manifest_frame, FrameType::ObjectManifest, "ObjectManifest")?;
-        super::validate_quic_manifest(&manifest, config)?;
+        if let Err(error) = super::validate_quic_manifest(&manifest, config) {
+            refuse_manifest_in_band(cx, link, &mut control, &error, config).await;
+            return Err(error);
+        }
         (manifest, None)
     };
     super::quic_progress(format_args!(

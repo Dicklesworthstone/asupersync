@@ -779,6 +779,60 @@ fn assert_send_fails_closed_before_commit(send: QuicConfig, recv: QuicConfig, fi
     );
 }
 
+/// asupersync-nnm3gw: a receiver that refuses the manifest must say so. The
+/// receiver's metadata policy denies timestamps, and the sender's preserves
+/// them (as `atp send` does). The receiver used to drop the connection without
+/// a word, so the sender waited out its whole idle timeout, 360 s by default.
+/// It now sends the failed-commit Proof with the reason. Both idle timeouts
+/// here are 120 s, so only the in-band refusal can end the send quickly.
+#[test]
+fn receiver_manifest_refusal_reaches_the_sender_with_its_reason() {
+    const REFUSAL_BOUND: Duration = Duration::from_secs(60);
+    let src = tempfile::tempdir().expect("src dir");
+    let dst = tempfile::tempdir().expect("dst dir");
+    let source = src.path().join("payload.bin");
+    std::fs::write(&source, vec![7_u8; 4096]).expect("write source");
+
+    let mut cfg = transport_authenticated_configs();
+    cfg.send.metadata_policy = MetadataPolicy {
+        preserve_timestamps: true,
+        ..MetadataPolicy::default()
+    };
+    cfg.recv.metadata_policy = MetadataPolicy {
+        preserve_timestamps: false,
+        ..MetadataPolicy::default()
+    };
+    cfg.send.idle_timeout = Duration::from_secs(120);
+    cfg.recv.idle_timeout = Duration::from_secs(120);
+
+    let started = Instant::now();
+    let (sent, received) = run_transfer(cfg.send, cfg.recv, &source, dst.path());
+    let elapsed = started.elapsed();
+
+    let received = received.expect_err("the receiver refuses a timestamped manifest");
+    assert!(
+        matches!(received, QuicTransportError::Source(ref message)
+            if message.contains("timestamps are denied by receiver metadata policy")),
+        "receiver error: {received:?}"
+    );
+    let sent = sent.expect_err("the sender must learn of the refusal");
+    assert!(
+        matches!(sent, QuicTransportError::Integrity(ref reason)
+            if reason.starts_with("receiver refused the manifest: ")
+                && reason.contains("timestamps are denied by receiver metadata policy")),
+        "sender error: {sent:?}"
+    );
+    assert!(
+        elapsed < REFUSAL_BOUND,
+        "the refusal reached the sender only after {elapsed:?}"
+    );
+    assert!(
+        std::fs::read(dst.path().join("payload.bin")).is_err(),
+        "a refused manifest must commit nothing"
+    );
+    assert_no_staging_residue(dst.path());
+}
+
 /// asupersync-wlbrlr: a RELATIVE destination directory (`atp recv out/dir`,
 /// the bench harness's cell paths) must be accepted. The receiver's
 /// destination-root preparation walked the empty ancestor of a relative path
