@@ -191,13 +191,26 @@ impl<A, B> Default for Race<A, B> {
 /// - **Region quiescence**: All children done before return
 /// - **Deterministic**: Same seed → same winner in lab runtime (on ties)
 ///
-/// # Example (API shape)
-/// ```ignore
-/// let result = scope.race_all(cx, vec![
-///     async { fetch_from_primary(cx).await },
-///     async { fetch_from_replica_1(cx).await },
-///     async { fetch_from_replica_2(cx).await },
-/// ]).await;
+/// # Example
+/// ```no_run
+/// # use asupersync::Cx;
+/// # async fn fetch_from_primary(_cx: &Cx) -> String { String::new() }
+/// # async fn fetch_from_replica_1(_cx: &Cx) -> String { String::new() }
+/// # async fn fetch_from_replica_2(_cx: &Cx) -> String { String::new() }
+/// # async fn demo(cx: &Cx) -> Result<(), Box<dyn std::error::Error>> {
+/// let scope = cx.scope();
+/// // `Scope::race_all` races task handles, not bare futures: spawn each
+/// // branch into the scope first.
+/// let handles = vec![
+///     cx.spawn_in(&scope, |cx| async move { fetch_from_primary(&cx).await })?,
+///     cx.spawn_in(&scope, |cx| async move { fetch_from_replica_1(&cx).await })?,
+///     cx.spawn_in(&scope, |cx| async move { fetch_from_replica_2(&cx).await })?,
+/// ];
+/// // Ok((value, winner_index)); the losers are cancelled and drained first.
+/// let (value, winner) = scope.race_all(cx, handles).await?;
+/// # let _ = (value, winner);
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug)]
 pub struct RaceAll<T> {

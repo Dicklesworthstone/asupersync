@@ -101,13 +101,27 @@ impl<A, B> Default for Join<A, B> {
 /// - **Region quiescence**: All children done before return
 /// - **Deterministic**: Same seed → same execution order in lab runtime
 ///
-/// # Example (API shape)
-/// ```ignore
-/// let results = scope.join_all(cx, vec![
-///     async { compute_a(cx).await },
-///     async { compute_b(cx).await },
-///     async { compute_c(cx).await },
-/// ]).await;
+/// # Example
+/// ```no_run
+/// # use asupersync::Cx;
+/// # async fn compute_a(_cx: &Cx) -> u64 { 1 }
+/// # async fn compute_b(_cx: &Cx) -> u64 { 2 }
+/// # async fn compute_c(_cx: &Cx) -> u64 { 3 }
+/// # async fn demo(cx: &Cx) -> Result<(), asupersync::runtime::SpawnError> {
+/// let scope = cx.scope();
+/// // `Scope::join_all` joins task handles, not bare futures: spawn each branch
+/// // into the scope first (each async block has its own type, but every
+/// // handle is a `TaskHandle<T>`).
+/// let handles = vec![
+///     cx.spawn_in(&scope, |cx| async move { compute_a(&cx).await })?,
+///     cx.spawn_in(&scope, |cx| async move { compute_b(&cx).await })?,
+///     cx.spawn_in(&scope, |cx| async move { compute_c(&cx).await })?,
+/// ];
+/// // One `Result<u64, JoinError>` per handle, in input order.
+/// let results = scope.join_all(cx, handles).await;
+/// # let _ = results;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug)]
 pub struct JoinAll<T> {
