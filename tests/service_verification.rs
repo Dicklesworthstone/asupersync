@@ -1198,12 +1198,25 @@ mod tower_adapter_tests {
     fn tower_adapter_overloaded_on_low_budget() {
         init_test("tower_adapter_overloaded_on_low_budget");
 
-        let cx: Cx = Cx::for_testing_with_budget(Budget::new().with_poll_quota(0));
+        // A quota below the default floor of 10 polls, but not zero, is
+        // overload. A zero quota is budget exhaustion: the adapter's first
+        // checkpoint reports it as cancellation (PollQuota), as it has since
+        // v0.4.3, before the budget floor is consulted.
+        let low: Cx = Cx::for_testing_with_budget(Budget::new().with_poll_quota(5));
+        let exhausted: Cx = Cx::for_testing_with_budget(Budget::new().with_poll_quota(0));
         let adapter = AsupersyncAdapter::new(TowerAddOne);
 
         run_test_with_cx(|_| async move {
-            let err = adapter.call(&cx, 1).await.expect_err("expected overload");
-            assert!(matches!(err, TowerAdapterError::Overloaded));
+            let err = adapter.call(&low, 1).await.expect_err("expected overload");
+            assert!(
+                matches!(err, TowerAdapterError::Overloaded),
+                "quota 5 < floor 10 must be Overloaded, got {err:?}"
+            );
+            let err = adapter.call(&exhausted, 1).await.expect_err("expected cancel");
+            assert!(
+                matches!(err, TowerAdapterError::Cancelled),
+                "an exhausted poll quota must be Cancelled, got {err:?}"
+            );
         });
 
         test_complete!("tower_adapter_overloaded_on_low_budget");
