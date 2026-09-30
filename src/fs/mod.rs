@@ -27,8 +27,9 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use asupersync::fs::File;
+//! use asupersync::io::{AsyncReadExt, AsyncWriteExt};
 //!
 //! async fn example() -> std::io::Result<()> {
 //!     // Create and write

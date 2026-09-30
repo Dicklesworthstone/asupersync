@@ -18,18 +18,17 @@
 //! ```ignore
 //! use asupersync::spork::prelude::*;
 //!
-//! // Build an application with a supervisor and children
-//! let app = AppSpec::new("my_app")
+//! // Build an application with a supervisor and children. Starting and
+//! // stopping take the runtime state that lab and custom runtimes expose;
+//! // examples/spork_minimal_supervised_app.rs is a complete, runnable program.
+//! let mut app = AppSpec::new("my_app")
 //!     .child(
-//!         ChildSpec::new("worker", MyWorkerStart)
-//!             .restart_policy(SupervisionStrategy::Restart(
-//!                 RestartConfig::default()
-//!             ))
+//!         ChildSpec::new("worker", my_worker_start)
+//!             .with_restart(SupervisionStrategy::Restart(RestartConfig::default())),
 //!     )
-//!     .start(&mut cx)
-//!     .await?;
+//!     .start(&mut state, &cx, parent_region)?;
 //!
-//! app.stop(&mut cx).await?;
+//! let stopped = app.stop(&mut state)?;
 //! ```
 //!
 //! # Invariant Checklist

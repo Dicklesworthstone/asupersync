@@ -80,7 +80,7 @@
 //!
 //!     // All downstream operations now respect the timeout
 //!     match next.run_with_cx(req, &cx).await {
-//!         Outcome::Cancelled(reason) if reason.is_deadline() => {
+//!         Outcome::Cancelled(reason) if reason.is_time_exceeded() => {
 //!             Outcome::Err(TimeoutError::RequestTimeout)
 //!         }
 //!         other => other,
