@@ -873,7 +873,7 @@
       "file": "examples/spork_minimal_supervised_app.rs",
       "loc": {
         "start": 1,
-        "end": 247
+        "end": 257
       },
       "kind": "rust",
       "demonstrates": [
