@@ -27,23 +27,25 @@
 //! The oracle integrates with the lab runtime and can be used in both
 //! development and testing environments:
 //!
-//! ```ignore
-//! use asupersync::lab::oracle::region_leak::RegionLeakOracle;
+//! ```
+//! use asupersync::lab::oracle::region_leak::{RegionLeakConfig, RegionLeakOracle};
+//! use asupersync::types::{Budget, Outcome, RegionId, TaskId};
 //!
-//! let mut oracle = RegionLeakOracle::new(config);
+//! fn audit(region_id: RegionId, parent_id: RegionId, task_id: TaskId) -> Result<(), String> {
+//!     let mut oracle = RegionLeakOracle::new(RegionLeakConfig::default());
 //!
-//! // Hook into region events
-//! oracle.on_region_created(region_id, parent_id, context);
-//! oracle.on_task_spawned(task_id, region_id, context);
-//! oracle.on_task_completed(task_id, outcome, context);
-//! oracle.on_region_closing(region_id, context);
-//! oracle.on_region_closed(region_id, context);
+//!     // Hook into region events
+//!     oracle.on_region_created(region_id, Some(parent_id), None, Budget::INFINITE);
+//!     oracle.on_task_spawned(task_id, region_id, None);
+//!     oracle.on_task_completed(task_id, Outcome::Ok(()));
+//!     oracle.on_region_closing(region_id, 0); // no finalizers expected
+//!     oracle.on_region_closed(region_id);
 //!
-//! // Check for violations
-//! if let Some(violations) = oracle.check()? {
-//!     for violation in violations {
-//!         eprintln!("Region leak detected: {:?}", violation);
+//!     // Check for violations
+//!     for violation in oracle.check_for_violations()? {
+//!         eprintln!("Region leak detected: {violation:?}");
 //!     }
+//!     Ok(())
 //! }
 //! ```
 

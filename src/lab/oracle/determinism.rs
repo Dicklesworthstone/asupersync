@@ -6,20 +6,22 @@
 //!
 //! # Usage
 //!
-//! ```rust,ignore
+//! ```rust
 //! use asupersync::lab::{LabConfig, LabRuntime};
 //! use asupersync::lab::oracle::determinism::DeterminismOracle;
 //!
 //! let config = LabConfig::new(42);
 //!
 //! // Run a program twice with the same config and verify identical traces
-//! let result = DeterminismOracle::verify(config, |runtime| {
+//! let result = DeterminismOracle::new().verify(config, |runtime: &mut LabRuntime| {
 //!     // Your test scenario here
 //!     runtime.run_until_quiescent();
 //! });
 //!
 //! assert!(result.is_ok(), "Traces should be identical");
 //! ```
+//!
+//! [`assert_deterministic`] does the same and panics with the first divergence.
 
 use crate::lab::{LabConfig, LabRuntime};
 use crate::trace::event::TraceEventKind;

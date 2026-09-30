@@ -11,23 +11,29 @@
 //!
 //! The easiest way to create a pool is with [`GenericPool`] and a factory function:
 //!
-//! ```ignore
+//! ```no_run
+//! use asupersync::Cx;
+//! use asupersync::io::AsyncWriteExt;
+//! use asupersync::net::TcpStream;
 //! use asupersync::sync::{GenericPool, Pool, PoolConfig};
 //!
-//! // Create a factory that produces resources
-//! let factory = || Box::pin(async {
-//!     Ok(TcpStream::connect("localhost:5432").await?)
-//! });
+//! // A factory is any `Fn() -> impl Future<Output = Result<R, E>>`.
+//! let factory = || async { TcpStream::connect("localhost:5432").await };
 //!
 //! // Create pool with configuration
 //! let pool = GenericPool::new(factory, PoolConfig::default());
 //!
 //! // Acquire and use a resource
-//! async fn example(cx: &Cx, pool: &impl Pool<Resource = TcpStream>) {
-//!     let conn = pool.acquire(cx).await?;
+//! async fn example(
+//!     cx: &Cx,
+//!     pool: &impl Pool<Resource = TcpStream>,
+//! ) -> Result<(), Box<dyn std::error::Error>> {
+//!     let mut conn = pool.acquire(cx).await?;
 //!     conn.write_all(b"SELECT 1").await?;
 //!     conn.return_to_pool();  // Or just drop - both work!
+//!     Ok(())
 //! }
+//! # let _ = pool;
 //! ```
 //!
 //! ## Implementing the Pool Trait
@@ -77,7 +83,10 @@
 //! | `idle_timeout` | 600s | Max time a resource can be idle |
 //! | `max_lifetime` | 3600s | Max lifetime of a resource |
 //!
-//! ```ignore
+//! ```
+//! use asupersync::sync::PoolConfig;
+//! use std::time::Duration;
+//!
 //! let config = PoolConfig::with_max_size(20)
 //!     .min_size(5)
 //!     .acquire_timeout(Duration::from_secs(10))
@@ -118,10 +127,16 @@
 //! [`PooledResource::discard()`] to remove it from the pool rather than
 //! returning it:
 //!
-//! ```ignore
-//! async fn handle_connection(conn: PooledResource<TcpStream>) {
-//!     match conn.write_all(b"PING").await {
-//!         Ok(_) => conn.return_to_pool(),
+//! ```
+//! use asupersync::io::AsyncWriteExt;
+//! use asupersync::net::TcpStream;
+//! use asupersync::sync::PooledResource;
+//!
+//! async fn handle_connection(mut conn: PooledResource<TcpStream>) {
+//!     // Bind the result first: the write borrows `conn`, and both arms move it.
+//!     let written = conn.write_all(b"PING").await;
+//!     match written {
+//!         Ok(()) => conn.return_to_pool(),
 //!         Err(_) => conn.discard(),  // Don't return broken connections
 //!     }
 //! }
@@ -1653,7 +1668,7 @@ where
     /// let metrics = PoolMetrics::new(&meter);
     ///
     /// let pool = GenericPool::new(factory, PoolConfig::default())
-    ///     .with_metrics("db_pool", metrics.handle("db_pool"));
+    ///     .with_metrics(metrics.handle("db_pool"));
     /// ```
     #[cfg(feature = "metrics")]
     #[must_use]
@@ -2759,7 +2774,7 @@ mod pool_metrics {
     /// let metrics = PoolMetrics::new(&meter);
     ///
     /// let pool = GenericPool::new(factory, PoolConfig::default())
-    ///     .with_metrics("db_pool", metrics.handle());
+    ///     .with_metrics(metrics.handle("db_pool"));
     /// ```
     #[derive(Clone)]
     pub struct PoolMetrics {
