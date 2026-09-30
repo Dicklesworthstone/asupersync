@@ -444,7 +444,7 @@
       "file": "examples/macros_basic.rs",
       "loc": {
         "start": 1,
-        "end": 72
+        "end": 47
       },
       "kind": "rust",
       "demonstrates": [
@@ -495,7 +495,7 @@
       "file": "examples/macros_race.rs",
       "loc": {
         "start": 1,
-        "end": 71
+        "end": 59
       },
       "kind": "rust",
       "demonstrates": [
