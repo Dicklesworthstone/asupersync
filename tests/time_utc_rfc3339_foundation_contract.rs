@@ -78,20 +78,39 @@ fn expected_json(
     created_at: Option<&str>,
     description: &str,
 ) -> Vec<u8> {
-    let value = json!({
-        "file": path.display().to_string(),
-        "file_version": TRACE_FILE_VERSION,
-        "schema_version": REPLAY_SCHEMA_VERSION,
-        "compressed": false,
-        "compression": "none",
-        "size_bytes": size_bytes,
-        "event_count": 0,
-        "duration_nanos": null,
-        "created_at": created_at,
-        "seed": 42,
-        "config_hash": 99,
-        "description": description,
-    });
+    // The CLI serializes its TraceInfo struct in field declaration order, the
+    // v0.4.3 shape that 97e7850a9 restored. A `json!` map would sort the keys
+    // (serde_json is built without preserve_order), which is the regressed
+    // 05-27..09-28 output this contract was first written against.
+    #[derive(serde::Serialize)]
+    struct ExpectedTraceInfo<'a> {
+        file: String,
+        file_version: u16,
+        schema_version: u32,
+        compressed: bool,
+        compression: &'a str,
+        size_bytes: u64,
+        event_count: u64,
+        duration_nanos: Option<u64>,
+        created_at: Option<&'a str>,
+        seed: u64,
+        config_hash: u64,
+        description: &'a str,
+    }
+    let value = ExpectedTraceInfo {
+        file: path.display().to_string(),
+        file_version: TRACE_FILE_VERSION,
+        schema_version: REPLAY_SCHEMA_VERSION,
+        compressed: false,
+        compression: "none",
+        size_bytes,
+        event_count: 0,
+        duration_nanos: None,
+        created_at,
+        seed: 42,
+        config_hash: 99,
+        description,
+    };
     let mut bytes = serde_json::to_vec(&value).expect("serialize expected JSON");
     bytes.push(b'\n');
     bytes
