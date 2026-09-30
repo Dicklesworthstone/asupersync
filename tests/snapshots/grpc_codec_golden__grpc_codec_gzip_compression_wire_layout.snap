@@ -1,0 +1,12 @@
+---
+source: tests/grpc_codec_golden.rs
+assertion_line: 94
+expression: "frame_fixture(\"gzip\", wire.as_ref())"
+---
+{
+  "compressed": true,
+  "declared_length": 36,
+  "name": "gzip",
+  "wire_hex": "01 00 00 00 24 1f 8b 08 00 00 00 00 00 00 ff 4b af ca 2c d0 2d cf 2c 4a d5 cd 49 ac cc 2f 2d 01 00 bd f0 96 ce 10 00 00 00",
+  "wire_len": 41
+}
