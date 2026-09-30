@@ -1030,7 +1030,7 @@ mod tower_adapter_tests {
     use asupersync::runtime::yield_now;
     use asupersync::service::{
         AdapterConfig, AsupersyncAdapter, AsupersyncService, AsupersyncServiceExt,
-        CancellationMode, TowerAdapterError,
+        CancellationMode, CxProvider, TowerAdapterError, TowerAdapterWithProvider,
     };
     use asupersync::{Budget, Cx};
     use std::convert::Infallible;
@@ -1095,6 +1095,36 @@ mod tower_adapter_tests {
         }
 
         test_complete!("tower_adapter_with_provider_no_cx_error");
+    }
+
+    /// A caller outside the crate can supply its own Cx source: `CxProvider` is
+    /// exported, so `with_provider` accepts a user type (the "custom runtime
+    /// integration" case its docs describe).
+    #[test]
+    fn tower_adapter_with_a_caller_defined_cx_provider() {
+        init_test("tower_adapter_with_a_caller_defined_cx_provider");
+
+        struct CallerProvider(Cx);
+
+        impl CxProvider for CallerProvider {
+            fn current_cx(&self) -> Option<Cx> {
+                Some(self.0.clone())
+            }
+        }
+
+        let mut adapter = TowerAdapterWithProvider::with_provider(
+            AddOneService,
+            CallerProvider(Cx::for_testing()),
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let future = adapter.call(41);
+        let mut pinned = Box::pin(future);
+        let result = Pin::new(&mut pinned).poll(&mut cx);
+
+        assert!(matches!(result, Poll::Ready(Ok(42))));
+        test_complete!("tower_adapter_with_a_caller_defined_cx_provider");
     }
 
     #[cfg(feature = "test-internals")]
