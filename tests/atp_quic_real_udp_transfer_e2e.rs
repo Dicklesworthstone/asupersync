@@ -890,10 +890,13 @@ fn receiver_destination_refusal_reaches_the_sender_without_its_paths() {
 /// sends keep-alive pings until its own 30 s idle timeout. It reads the Proof
 /// only after its last byte. Every ping restarted the receiver's wait for
 /// Close. The receiver must still return within a few PTOs, because a listener
-/// that serves transfers one at a time (atpd) is blocked until it does.
+/// that serves transfers one at a time (atpd) is blocked until it does. The
+/// sender must hear the refusal while it is stalled, and fail with the
+/// receiver's reason instead of its own idle timeout.
 #[test]
 fn refusing_receiver_does_not_wait_for_a_streaming_sender() {
     const RECEIVER_BOUND: Duration = Duration::from_secs(15);
+    const SENDER_BOUND: Duration = Duration::from_secs(15);
     let src = tempfile::tempdir().expect("src dir");
     let dst = tempfile::tempdir().expect("dst dir");
     let source = src.path().join("payload.bin");
@@ -961,7 +964,16 @@ fn refusing_receiver_does_not_wait_for_a_streaming_sender() {
         received_at < RECEIVER_BOUND,
         "the refusing receiver returned only after {received_at:?} (sender finished at {sent_at:?})"
     );
-    assert!(sent.is_err(), "the sender must not report success: {sent:?}");
+    let sent = sent.expect_err("the sender must not report success");
+    assert!(
+        matches!(sent, QuicTransportError::Integrity(ref reason)
+            if reason.contains("timestamps are denied by receiver metadata policy")),
+        "the sender must report the receiver's reason: {sent:?}"
+    );
+    assert!(
+        sent_at < SENDER_BOUND,
+        "the stalled sender heard the refusal only after {sent_at:?}"
+    );
     assert!(
         std::fs::read(dst.path().join("payload.bin")).is_err(),
         "a refused manifest must commit nothing"
