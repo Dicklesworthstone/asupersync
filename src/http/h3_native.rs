@@ -608,6 +608,23 @@ impl H3ControlState {
     }
 }
 
+/// RFC 9114 §7.2.8: the frame types HTTP/2 used without an HTTP/3 equivalent
+/// (PRIORITY 0x02, PING 0x06, WINDOW_UPDATE 0x08, CONTINUATION 0x09) are
+/// reserved, and receiving one is a connection error (H3_FRAME_UNEXPECTED).
+/// Other unknown frame types are still ignored (section 9).
+fn reject_http2_reserved_frame(frame: &H3Frame) -> Result<(), H3NativeError> {
+    if let H3Frame::Unknown {
+        frame_type: 0x02 | 0x06 | 0x08 | 0x09,
+        ..
+    } = frame
+    {
+        return Err(H3NativeError::ControlProtocol(
+            "HTTP/2 frame type is reserved in HTTP/3",
+        ));
+    }
+    Ok(())
+}
+
 /// Validate that a frame is allowed on bidirectional request/response streams.
 ///
 /// Per RFC 9114 §6.1, bidirectional streams are used for request/response
@@ -3992,6 +4009,7 @@ pub struct H3ConnectionState {
     qpack_encoder_stream_id: Option<u64>,
     qpack_decoder_stream_id: Option<u64>,
     goaway_id: Option<u64>,
+    max_push_id_received: Option<u64>,
 }
 
 impl H3ConnectionState {
@@ -4032,6 +4050,7 @@ impl H3ConnectionState {
             qpack_encoder_stream_id: None,
             qpack_decoder_stream_id: None,
             goaway_id: None,
+            max_push_id_received: None,
         }
     }
 
@@ -4047,12 +4066,23 @@ impl H3ConnectionState {
     /// Process a control-stream frame.
     pub fn on_control_frame(&mut self, frame: &H3Frame) -> Result<(), H3NativeError> {
         self.control.on_remote_control_frame(frame)?;
+        reject_http2_reserved_frame(frame)?;
         if self.config.endpoint_role == H3EndpointRole::Client
             && matches!(frame, H3Frame::MaxPushId(_))
         {
             return Err(H3NativeError::ControlProtocol(
                 "client must not receive MAX_PUSH_ID",
             ));
+        }
+        if let H3Frame::MaxPushId(id) = frame {
+            // RFC 9114 §7.2.7: a MAX_PUSH_ID frame cannot reduce the maximum
+            // push ID (H3_ID_ERROR).
+            if self.max_push_id_received.is_some_and(|prev| *id < prev) {
+                return Err(H3NativeError::ControlProtocol(
+                    "MAX_PUSH_ID must not decrease",
+                ));
+            }
+            self.max_push_id_received = Some(*id);
         }
         if let H3Frame::Goaway(id) = frame {
             if self.config.endpoint_role == H3EndpointRole::Client
@@ -4086,6 +4116,16 @@ impl H3ConnectionState {
         if self.uni_stream_types.contains_key(&stream_id) {
             return Err(H3NativeError::StreamProtocol(
                 "request stream id is registered as unidirectional",
+            ));
+        }
+        reject_http2_reserved_frame(frame)?;
+        // RFC 9114 §7.2.5: a client MUST NOT send PUSH_PROMISE; a server
+        // treats one as a connection error (H3_FRAME_UNEXPECTED).
+        if self.config.endpoint_role == H3EndpointRole::Server
+            && matches!(frame, H3Frame::PushPromise { .. })
+        {
+            return Err(H3NativeError::ControlProtocol(
+                "client must not send PUSH_PROMISE",
             ));
         }
         if self.is_request_stream_finished(stream_id) {

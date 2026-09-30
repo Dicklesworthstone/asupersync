@@ -1637,6 +1637,88 @@ mod tests {
     }
 
     #[test]
+    fn http2_reserved_frame_types_are_connection_errors() {
+        let reserved = Err(H3NativeError::ControlProtocol(
+            "HTTP/2 frame type is reserved in HTTP/3",
+        ));
+        for frame_type in [0x02_u64, 0x06, 0x08, 0x09] {
+            let frame = H3Frame::Unknown {
+                frame_type,
+                payload: Vec::new(),
+            };
+            let mut control = H3ConnectionState::new_server();
+            control
+                .on_control_frame(&H3Frame::Settings(H3Settings::default()))
+                .expect("settings");
+            assert_eq!(
+                control.on_control_frame(&frame),
+                reserved,
+                "control {frame_type:#x}"
+            );
+            let mut request = H3ConnectionState::new_server();
+            assert_eq!(
+                request.on_request_stream_frame(0, &frame),
+                reserved,
+                "request {frame_type:#x}"
+            );
+        }
+
+        // Every other unknown frame type, GREASE included, is still ignored.
+        let mut server = H3ConnectionState::new_server();
+        server
+            .on_control_frame(&H3Frame::Settings(H3Settings::default()))
+            .expect("settings");
+        for frame_type in [0x0b_u64, 0x21] {
+            let frame = H3Frame::Unknown {
+                frame_type,
+                payload: Vec::new(),
+            };
+            server.on_control_frame(&frame).expect("ignored on control");
+            server
+                .on_request_stream_frame(0, &frame)
+                .expect("ignored on a request stream");
+        }
+    }
+
+    #[test]
+    fn server_rejects_a_push_promise_from_the_client() {
+        let mut server = H3ConnectionState::new_server();
+        let frame = H3Frame::PushPromise {
+            push_id: 0,
+            field_block: vec![0x00, 0x00],
+        };
+        assert_eq!(
+            server.on_request_stream_frame(0, &frame),
+            Err(H3NativeError::ControlProtocol(
+                "client must not send PUSH_PROMISE"
+            ))
+        );
+    }
+
+    #[test]
+    fn server_rejects_a_decreasing_max_push_id() {
+        let mut server = H3ConnectionState::new_server();
+        server
+            .on_control_frame(&H3Frame::Settings(H3Settings::default()))
+            .expect("settings");
+        server
+            .on_control_frame(&H3Frame::MaxPushId(10))
+            .expect("first MAX_PUSH_ID");
+        server
+            .on_control_frame(&H3Frame::MaxPushId(10))
+            .expect("repeating the same value is allowed");
+        server
+            .on_control_frame(&H3Frame::MaxPushId(12))
+            .expect("increase");
+        assert_eq!(
+            server.on_control_frame(&H3Frame::MaxPushId(11)),
+            Err(H3NativeError::ControlProtocol(
+                "MAX_PUSH_ID must not decrease"
+            ))
+        );
+    }
+
+    #[test]
     fn client_role_goaway_zero_blocks_all_request_streams() {
         let mut c = H3ConnectionState::new();
         c.on_control_frame(&H3Frame::Settings(H3Settings::default()))
