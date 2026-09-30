@@ -3,6 +3,19 @@
 //! This module provides a pure Rust Redis client implementing the RESP
 //! (REdis Serialization Protocol) with Cx integration for cancel-correct
 //! command execution.
+//!
+//! # Cancellation
+//!
+//! Socket I/O for a command observes two contexts: the `&Cx` passed to the
+//! call and the context of the task driving it. Cancelling either one, or
+//! reaching the budget deadline of either one, ends a read or write parked on
+//! the server with `RedisError::Cancelled`, and the interrupted connection is
+//! discarded rather than returned to the pool. In particular, a task that has
+//! been cancelled cannot run Redis commands by passing a fresh, live `Cx`: a
+//! cleanup call (for example releasing a lock) fails with `Cancelled` too.
+//! Run such cleanup inside [`commit_section`](crate::combinator::commit_section)
+//! on the task's own `Cx`, which masks its cancellation for a bounded number
+//! of polls, or from a task that is not cancelled.
 
 use crate::cx::{CancelWakerToken, Cx};
 use std::task::Waker;
@@ -2579,6 +2592,12 @@ impl Drop for CancelWakerGuard {
 /// context during pooled connection creation, redirects, or Pub/Sub work.
 /// Neither context is installed here: ambient capability restrictions and
 /// cancellation masks continue to govern the underlying socket/TLS future.
+///
+/// A budget deadline on either context is a cancellation source too, but
+/// `Cx::checkpoint` only notices an expired deadline when something polls.
+/// A timer armed for the earlier deadline re-polls a read or write parked on
+/// a silent server, so it fails with `Cancelled` at the deadline instead of
+/// waiting for the server or the OS TCP timeout (br-asupersync-798g1k).
 async fn redis_io<T, E>(
     cx: &Cx,
     future: impl Future<Output = Result<T, E>>,
@@ -2588,6 +2607,16 @@ where
 {
     let mut owner_cancel = CancelWakerGuard::new(cx);
     let mut driver_cancel = Cx::current().as_ref().map(CancelWakerGuard::new);
+    let deadline = [
+        cx.budget().deadline,
+        driver_cancel
+            .as_ref()
+            .and_then(|driver| driver.cx.budget().deadline),
+    ]
+    .into_iter()
+    .flatten()
+    .min();
+    let mut deadline_timer = deadline.map(|at| Box::pin(crate::time::sleep_until(at)));
     let mut future = std::pin::pin!(future);
     std::future::poll_fn(|task_cx| {
         // Register before checking. Cancellation may occur while a new Waker
@@ -2595,6 +2624,14 @@ where
         owner_cancel.refresh(task_cx.waker());
         if let Some(driver) = driver_cancel.as_mut() {
             driver.refresh(task_cx.waker());
+        }
+        // Arm (or re-arm) the deadline wakeup. Once it has fired it is
+        // dropped: the checkpoints below observe the expired budget.
+        if deadline_timer
+            .as_mut()
+            .is_some_and(|timer| timer.as_mut().poll(task_cx).is_ready())
+        {
+            deadline_timer = None;
         }
         let cancelled = || {
             cx.checkpoint().is_err()
@@ -2873,28 +2910,27 @@ impl RedisConnection {
             }
 
             let mut tmp = [0u8; 4096];
+            // `Ok(None)` is this loop's own cancellation signal. A transport
+            // error of kind `Interrupted` stays an I/O error: redis_io still
+            // reports it as `Cancelled` when either context is cancelled,
+            // but a plain EINTR is not a cancellation (br-asupersync-798g1k).
             let read_result = std::future::poll_fn(|task_cx| {
                 if cx.checkpoint().is_err() {
-                    return std::task::Poll::Ready(Err(std::io::Error::new(
-                        std::io::ErrorKind::Interrupted,
-                        "cancelled",
-                    )));
+                    return std::task::Poll::Ready(Ok(None));
                 }
                 let mut read_buf = ReadBuf::new(&mut tmp);
                 match Pin::new(&mut self.stream).poll_read(task_cx, &mut read_buf) {
                     std::task::Poll::Pending => std::task::Poll::Pending,
                     std::task::Poll::Ready(Ok(())) => {
-                        std::task::Poll::Ready(Ok(read_buf.filled().len()))
+                        std::task::Poll::Ready(Ok(Some(read_buf.filled().len())))
                     }
                     std::task::Poll::Ready(Err(e)) => std::task::Poll::Ready(Err(e)),
                 }
             })
             .await;
             let n = match read_result {
-                Ok(n) => n,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
-                    return Err(RedisError::Cancelled);
-                }
+                Ok(Some(n)) => n,
+                Ok(None) => return Err(RedisError::Cancelled),
                 Err(e) => return Err(RedisError::Io(e)),
             };
             if n == 0 {

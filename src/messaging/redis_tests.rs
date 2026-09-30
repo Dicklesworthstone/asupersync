@@ -7411,4 +7411,47 @@ mod tests {
 
         server.join().ok();
     }
+
+    #[test]
+    fn redis_budget_deadline_wakes_a_read_parked_on_a_silent_server() {
+        // br-asupersync-798g1k: an expired budget deadline is observed only by a
+        // checkpoint, and a read parked on a silent server is never re-polled on
+        // its own. redis_io arms a timer for the deadline, so the read fails
+        // with Cancelled at the deadline. Without it the read stays parked
+        // until the server closes the socket (5 s here).
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            let (_stream, _peer) = listener.accept().expect("accept client");
+            thread::sleep(Duration::from_secs(5));
+        });
+
+        run_test_with_cx(|_cx| async move {
+            let config = RedisConfig {
+                host: addr.ip().to_string(),
+                port: addr.port(),
+                ..Default::default()
+            };
+            let mut conn = RedisConnection::connect(config, None)
+                .await
+                .expect("connect to the silent server (TCP only, no handshake read)");
+
+            let deadline = crate::time::wall_now() + Duration::from_millis(200);
+            let cx =
+                Cx::for_testing_with_budget(crate::types::Budget::new().with_deadline(deadline));
+            let started = std::time::Instant::now();
+            let result = conn.read_response(&cx).await;
+            let elapsed = started.elapsed();
+            assert!(
+                matches!(result, Err(RedisError::Cancelled)),
+                "expected Cancelled at the budget deadline, got {result:?}"
+            );
+            assert!(
+                elapsed >= Duration::from_millis(150) && elapsed < Duration::from_millis(2500),
+                "the read must end at its budget deadline (200 ms), took {elapsed:?}"
+            );
+        });
+
+        server.join().ok();
+    }
 }

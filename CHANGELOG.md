@@ -233,6 +233,13 @@ cancelled `Cx` as `Cancelled` rather than as
 - The scheduler polls the I/O driver every 64 busy dispatches, so I/O readiness
   is not starved by a hot dispatch loop.
 - A V3 peer lease is bounded to 24 hours for expiry enforcement.
+- A Redis read or write parked on a silent server ends with `Cancelled` at the
+  budget deadline of the caller's `Cx` or of the task driving it; before, the
+  deadline went unnoticed until the server answered or TCP gave up. A transport
+  `Interrupted` error is no longer reported as `Cancelled` unless a context was
+  actually cancelled. The Redis module docs now describe the two-context
+  cancellation rule (a cancelled task cannot run cleanup commands by passing a
+  fresh `Cx`).
 
 ### UDP launch-time sends and the socket error queue (Linux, GH #73)
 
