@@ -295,7 +295,7 @@ fn executable_sender_and_receiver_commit_multiple_files_on_one_bound_port() {
         ] {
             let (status, sent) =
                 fixture.send(fixture.sender_config(address, "allowed", workers), bytes);
-            assert!(status.success());
+            assert!(status.success(), "sender exited {status}: {sent}");
             let received = receiver.event("completion");
             let path = verify_publication(&fixture, &sent, &received, bytes);
             assert!(
@@ -340,7 +340,7 @@ fn executable_authentication_refuses_unlisted_expired_and_wrong_server_names() {
     }
     // A refused client must not have killed the reusable listener.
     let (status, sent) = fixture.send(fixture.sender_config(address, "allowed", 1), b"accepted");
-    assert!(status.success());
+    assert!(status.success(), "sender exited {status}: {sent}");
     verify_publication(&fixture, &sent, &receiver.event("completion"), b"accepted");
     receiver.stop();
 }
@@ -352,7 +352,7 @@ fn executable_retention_refusal_survives_process_restart_without_deleting_data()
     let (mut receiver, address) = fixture.start_receiver(config.clone());
     let bytes = [0xa5; 64];
     let (status, sent) = fixture.send(fixture.sender_config(address, "allowed", 2), &bytes);
-    assert!(status.success());
+    assert!(status.success(), "sender exited {status}: {sent}");
     let path = verify_publication(&fixture, &sent, &receiver.event("completion"), &bytes);
     let before = fixture.entries();
     let (status, _) = fixture.send(fixture.sender_config(address, "allowed", 1), b"next");
@@ -420,7 +420,7 @@ fn executable_startup_rejects_concurrent_inbox_owner_and_invalid_configuration()
         fixture.sender_config(address, "allowed", 1),
         b"original owner still serves",
     );
-    assert!(status.success());
+    assert!(status.success(), "sender exited {status}: {sent}");
     verify_publication(
         &fixture,
         &sent,
