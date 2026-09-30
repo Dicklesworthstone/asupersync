@@ -330,6 +330,12 @@ fn wait_for_atpd_quic_and_diagnostics_addrs(
         let wait = (deadline - now).min(Duration::from_millis(250));
         match rx.recv_timeout(wait) {
             Ok(line) => {
+                // stdout is a pipe here, so atpd must not color its log
+                // (br-asupersync-prcxmw).
+                assert!(
+                    !line.contains('\u{1b}'),
+                    "atpd wrote ANSI escapes to a pipe: {line:?}"
+                );
                 if quic_addr.is_none() {
                     quic_addr = parse_tracing_bind_addr(
                         &line,

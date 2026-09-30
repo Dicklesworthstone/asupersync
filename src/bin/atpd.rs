@@ -1439,7 +1439,7 @@ fn init_logging(level: &str) -> Result<()> {
             tracing_subscriber::fmt::layer()
                 .with_target(false)
                 .with_level(true)
-                .with_thread_ids(false)
+                .with_ansi(atpd_log_colors())
                 .with_line_number(true),
         )
         .with(tracing_subscriber::filter::LevelFilter::from_level(level))
@@ -2327,6 +2327,15 @@ fn atpd_transfer_config_defaults() -> asupersync::net::atp::transport_tcp::Trans
         metadata_policy: atpd_receive_metadata_policy(),
         ..asupersync::net::atp::transport_tcp::TransferConfig::default()
     }
+}
+
+/// Color the daemon's log only on a terminal, and never under NO_COLOR, as the
+/// CLI does (src/cli/output.rs). Escape codes in a pipe or a log file break
+/// line-oriented readers (br-asupersync-prcxmw).
+fn atpd_log_colors() -> bool {
+    use std::io::IsTerminal;
+
+    std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal()
 }
 
 #[cfg(feature = "tls")]
