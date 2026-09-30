@@ -21,11 +21,13 @@
 //! This implementation is **experimental and incomplete**. The normal-case
 //! three-phase path (pre-prepare/prepare/commit) is implemented, but
 //! view-change/new-view handling is **not** (the handlers fail closed rather
-//! than silently succeed), and there is no message authentication, no
-//! watermark/checkpoint stability, and no log pruning. As a result it does
-//! **not** provide liveness under primary failure or safety against a
-//! Byzantine primary. Do not rely on it for fault tolerance. Tracked by
-//! `asupersync-v8mszr`.
+//! than silently succeed), and there is no watermark/checkpoint stability and
+//! no log pruning. This node's own message APIs are unsigned; the opt-in
+//! `authenticated` adapter signs and verifies replica traffic against a pinned
+//! static membership, but authentication alone is not Byzantine fault
+//! tolerance. As a result it does **not** provide liveness under primary
+//! failure or safety against a Byzantine primary. Do not rely on it for fault
+//! tolerance. Tracked by `asupersync-v8mszr`.
 //!
 //! For application execution on the experimental normal-case path, use
 //! [`PbftExecution`] with an explicit [`PbftStateMachine`]. The legacy

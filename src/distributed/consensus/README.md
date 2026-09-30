@@ -1,95 +1,31 @@
-# Byzantine Consensus Implementation
+# PBFT Consensus (experimental)
 
-This module provides a Practical Byzantine Fault Tolerance (PBFT) consensus algorithm implementation for the asupersync distributed runtime.
+This module contains an **experimental** implementation of Practical Byzantine Fault Tolerance (PBFT) for the asupersync distributed runtime. Only the normal-case path is implemented. It is **not Byzantine-fault-tolerant yet**: do not rely on it for safety against a faulty primary or for liveness under primary failure. Nothing outside this module uses it.
 
-## Overview
+## What exists
 
-PBFT is a Byzantine fault-tolerant consensus algorithm that provides safety and liveness guarantees in partially synchronous networks with up to f Byzantine faults in a system of 3f+1 replicas.
+- **Normal-case three-phase protocol** (`pbft.rs`): pre-prepare, prepare and commit with 2f+1 quorums, then ordered application execution through `PbftExecution` and an explicit `PbftStateMachine`.
+- **Authenticated transport, opt-in** (`authenticated.rs`): `AuthenticatedPbftNode` and `PbftAuthenticator` sign and verify replica traffic against an explicitly pinned static membership (`PbftMembership`). The legacy message APIs remain trusted, unsigned boundaries.
+- **UDP transport** (`udp.rs`, not on wasm32): `UdpPbftTransport`.
+- **Core types** (`types.rs`): `ReplicaId`, `ViewNumber`, `SequenceNumber`, `MessageDigest`, `ConsensusRequest`, `ConsensusBatch`, `ConsensusResponse`.
 
-## Components
+## What does not exist yet
 
-### Core Types (`types.rs`)
-- `ReplicaId`: Unique identifier for each replica
-- `ViewNumber`: View number for leader election
-- `SequenceNumber`: Request ordering within views
-- `MessageDigest`: Cryptographic digest for message verification
-- `ConsensusRequest`: Client request for consensus
-- `ConsensusBatch`: Batch of requests for efficiency
+- **View change / new view**: the handlers fail closed instead of electing a new primary. A faulty or failed primary stops progress.
+- **Checkpoints, watermarks and log pruning**: the message logs grow without bound.
+- **Durable recovery** and dynamic reconfiguration.
 
-### PBFT Protocol (`pbft.rs`)
-- `PbftConfig`: Configuration for fault tolerance and timeouts
-- `PbftNode`: Individual replica state machine
-- `PbftConsensus`: High-level consensus interface
-- `PbftTransport`: Abstract transport for message delivery
+Authentication alone does not establish Byzantine fault tolerance. Completing view change and checkpoints is the prerequisite for the safety and liveness properties PBFT is known for. Tracked by `asupersync-v8mszr` (implementation) and `asupersync-bi2462.124` (whether PBFT continues).
 
-### Message Types
-- `PrePrepare`: Primary proposes request ordering
-- `Prepare`: Replicas agree on ordering
-- `Commit`: Replicas commit to execution
-- `ViewChange`: Request new primary election
-- `NewView`: Establish new view with new primary
+## Protocol flow (normal case)
 
-## Protocol Flow
+1. The primary assigns a sequence number to a request batch and broadcasts `PrePrepare`.
+2. Replicas validate it and broadcast `Prepare`.
+3. After 2f+1 matching `Prepare` messages, replicas broadcast `Commit`.
+4. After 2f+1 matching `Commit` messages, replicas execute the batch in sequence order.
 
-1. **Normal Case Operation:**
-   - Client sends request to primary replica
-   - Primary creates batch and sends PrePrepare message
-   - Replicas validate and send Prepare messages
-   - After 2f+1 Prepare messages, replicas send Commit
-   - After 2f+1 Commit messages, replicas execute requests
+## Usage
 
-2. **View Change:**
-   - Triggered when primary is suspected of being faulty
-   - Replicas stop accepting messages from current primary
-   - New primary selected based on view number
+Use `PbftExecution` with your own `PbftStateMachine` to execute requests on the normal-case path. See the rustdoc of `pbft::PbftExecution` and the module's tests for complete examples.
 
-## Safety Properties
-
-- **Agreement:** All non-faulty replicas agree on request ordering
-- **Validity:** Only client requests are ordered and executed
-- **Integrity:** Requests are executed exactly once in the agreed order
-
-## Liveness Properties
-
-- **Termination:** All client requests eventually get executed
-- **Requires:** Partial synchrony (bounded message delays after some time)
-
-## Usage Example
-
-```rust
-use asupersync::distributed::consensus::{
-    PbftConfig, PbftConsensus, ReplicaId, ConsensusRequest
-};
-
-// Create configuration for 4 replicas tolerating 1 Byzantine fault
-let config = PbftConfig::new(4, 1)?;
-
-// Create consensus node
-let replica_id = ReplicaId::new("replica-0".to_string());
-let consensus = PbftConsensus::new(replica_id, config, transport)?;
-
-// Submit request
-let request = ConsensusRequest::new(
-    "client-1".to_string(),
-    Time::from_millis(1000),
-    b"operation data".to_vec(),
-);
-
-let response = consensus.submit(&cx, request).await?;
-```
-
-## Implementation Notes
-
-- Current implementation provides basic PBFT protocol
-- View change is simplified (not fully implemented)
-- Message authentication uses SHA-256 digests
-- Transport is abstract to allow different network backends
-- Designed to integrate with asupersync's structured concurrency
-
-## Future Enhancements
-
-- Complete view change implementation
-- Digital signature support for message authentication
-- Garbage collection for old log entries
-- Checkpoint protocol for log compaction
-- Dynamic reconfiguration support
+`PbftConsensus::submit` is **deprecated**: it forwards the request and then returns a fixed placeholder response (`b"consensus result"`, view 0, sequence 0). It does not wait for, or return, the replicated result. It remains exported only for compatibility.
