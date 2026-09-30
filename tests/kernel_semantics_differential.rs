@@ -17,7 +17,9 @@
 //! kinds, cancellation kinds, whether a cancelled loser finished its cleanup
 //! before the combinator returned, and whether capacity, locks and permits
 //! are usable again afterwards. Runtime-internal accounting is not compared.
-//! The lab additionally must report no invariant violation.
+//! The lab additionally must report no invariant violation, and every native
+//! run must leave no live reservation and no confirmed obligation leak behind
+//! (`Runtime::diagnostics`).
 //!
 //! Not differential: region finalizers registered with `Scope::defer_*` need
 //! `&mut RuntimeState`, which only the lab exposes, and `#[main]`'s root
@@ -36,10 +38,10 @@ use std::time::Duration;
 use asupersync::channel::{broadcast, mpsc, oneshot, watch};
 use asupersync::combinator::map_reduce::MapReduceLimits;
 use asupersync::combinator::timeout::TimedResult;
-use asupersync::combinator::{JoinSet, PipelineExecutionConfig};
+use asupersync::combinator::{JoinSet, PipelineExecutionConfig, bracket};
 use asupersync::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
 use asupersync::cx::ChildRegionSpec;
-use asupersync::runtime::{JoinError, RuntimeBuilder, yield_now};
+use asupersync::runtime::{JoinError, RuntimeBuilder, SpawnError, yield_now};
 use asupersync::sync::{Barrier, Mutex, Notify, OwnedMutexGuard, RwLock, Semaphore};
 use asupersync::time::{sleep, timeout};
 use asupersync::types::{Budget, Outcome};
@@ -101,12 +103,28 @@ fn run_native(workers: Option<usize>, scenario: &Scenario) -> Observation {
             run(cx).await
         });
         let observation = runtime.block_on(handle);
+        // No obligation may outlive the scenario. Obligation posts settle
+        // asynchronously, so drive the runtime briefly before judging.
+        let settle = std::time::Instant::now();
+        let mut live = runtime.diagnostics().find_leaked_obligations();
+        while !live.is_empty() && settle.elapsed() < Duration::from_secs(2) {
+            runtime.block_on(yield_now());
+            live = runtime.diagnostics().find_leaked_obligations();
+        }
+        let confirmed = runtime.diagnostics().find_confirmed_obligation_leaks();
+        let obligations =
+            (live.is_empty() && confirmed.is_empty()).then_some(()).ok_or_else(|| {
+                format!("live reservations {live:?}; confirmed leaks {confirmed:?}")
+            });
         let quiescent = runtime.shutdown_timeout(Duration::from_secs(10));
-        let _ = done_tx.send((observation, quiescent));
+        let _ = done_tx.send((observation, quiescent, obligations));
     });
     match done_rx.recv_timeout(NATIVE_HANG_LIMIT) {
-        Ok((observation, quiescent)) => {
+        Ok((observation, quiescent, obligations)) => {
             assert!(quiescent, "{name}: native runtime must reach quiescence and shut down");
+            if let Err(detail) = obligations {
+                panic!("{name}: native run ({workers:?} workers) left obligations behind: {detail}");
+            }
             observation
         }
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -1290,6 +1308,301 @@ fn spawn_blocking_returns_its_value(cx: Cx) -> ScenarioFuture {
     })
 }
 
+fn send_waiters(tx: &mpsc::Sender<u32>) -> usize {
+    tx.telemetry_snapshot(0).send_waiter_count
+}
+
+/// Two senders park on a full channel and the first is aborted. Freeing the
+/// slot must wake the survivor, whose message is delivered; the aborted
+/// sender's message never appears. A cancelled waiter that keeps its place
+/// in the queue swallows the wakeup instead.
+fn aborted_parked_sender_hands_the_slot_to_the_next(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let (tx, mut rx) = mpsc::channel::<u32>(1);
+        tx.try_send(1).expect("fill the only slot");
+        let spawn_sender = |value: u32| {
+            let sender = tx.clone();
+            cx.spawn(move |task_cx| async move {
+                sender
+                    .send(&task_cx, value)
+                    .await
+                    .map_err(|error| format!("{error:?}"))
+            })
+            .expect("spawn sender")
+        };
+        let mut first = spawn_sender(2);
+        while send_waiters(&tx) < 1 {
+            yield_now().await;
+        }
+        let mut second = spawn_sender(3);
+        while send_waiters(&tx) < 2 {
+            yield_now().await;
+        }
+        first.abort();
+        let first_joined = first.join(&cx).await;
+        let waiters_after_abort = send_waiters(&tx);
+        let received = rx.recv(&cx).await.map_err(|error| format!("{error:?}"));
+        let second_joined = second.join(&cx).await;
+        let next = rx.try_recv().map_err(|error| format!("{error:?}"));
+        let then = rx.try_recv().map_err(|error| format!("{error:?}"));
+        observe([
+            ("first_join", outcome(&first_joined)),
+            ("send_waiters_after_abort", waiters_after_abort.to_string()),
+            ("received", format!("{received:?}")),
+            ("second_join", outcome(&second_joined)),
+            ("next", format!("{next:?}")),
+            ("then", format!("{then:?}")),
+        ])
+    })
+}
+
+/// Two tasks park on a held mutex and the first is aborted. Unlocking must
+/// hand the lock to the second.
+fn aborted_mutex_waiter_hands_the_lock_to_the_next(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let mutex = Arc::new(Mutex::new(0u32));
+        let guard = OwnedMutexGuard::lock(Arc::clone(&mutex), &cx)
+            .await
+            .expect("parent locks");
+        let spawn_waiter = |value: u32| {
+            let lock = Arc::clone(&mutex);
+            cx.spawn(move |task_cx| async move {
+                let mut held = lock.lock(&task_cx).await.map_err(|error| format!("{error:?}"))?;
+                *held = value;
+                Ok::<u32, String>(value)
+            })
+            .expect("spawn waiter")
+        };
+        let mut first = spawn_waiter(1);
+        while mutex.waiters() < 1 {
+            yield_now().await;
+        }
+        let mut second = spawn_waiter(2);
+        while mutex.waiters() < 2 {
+            yield_now().await;
+        }
+        first.abort();
+        let first_joined = first.join(&cx).await;
+        drop(guard);
+        let second_joined = second.join(&cx).await;
+        let value = *mutex.lock(&cx).await.expect("relock");
+        observe([
+            ("first_join", outcome(&first_joined)),
+            ("second_join", outcome(&second_joined)),
+            ("value", value.to_string()),
+        ])
+    })
+}
+
+/// Two tasks park on an exhausted semaphore and the first is aborted.
+/// Releasing the permit must hand it to the second.
+fn aborted_semaphore_waiter_hands_the_permit_to_the_next(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let semaphore = Arc::new(Semaphore::new(1));
+        let held = semaphore.acquire(&cx, 1).await.expect("parent acquires");
+        let waiters = |semaphore: &Semaphore| semaphore.telemetry_snapshot(0).waiter_count;
+        let spawn_waiter = || {
+            let sem = Arc::clone(&semaphore);
+            cx.spawn(move |task_cx| async move {
+                sem.acquire(&task_cx, 1)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| format!("{error:?}"))
+            })
+            .expect("spawn waiter")
+        };
+        let mut first = spawn_waiter();
+        while waiters(&semaphore) < 1 {
+            yield_now().await;
+        }
+        let mut second = spawn_waiter();
+        while waiters(&semaphore) < 2 {
+            yield_now().await;
+        }
+        first.abort();
+        let first_joined = first.join(&cx).await;
+        drop(held);
+        let second_joined = second.join(&cx).await;
+        observe([
+            ("first_join", outcome(&first_joined)),
+            ("second_join", outcome(&second_joined)),
+            ("permits_after", semaphore.available_permits().to_string()),
+        ])
+    })
+}
+
+/// An aborted task that holds a reserved send permit gives it back: capacity
+/// returns, nothing is sent and no reservation stays live.
+fn abort_releases_a_held_send_permit(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let (tx, mut rx) = mpsc::channel::<u32>(1);
+        let (started, _) = flags();
+        let (task_tx, s) = (tx.clone(), Arc::clone(&started));
+        let mut handle = cx
+            .spawn(move |task_cx| async move {
+                let _permit = task_tx
+                    .reserve(&task_cx)
+                    .await
+                    .map_err(|error| format!("{error:?}"))?;
+                let (_hold, mut never) = mpsc::channel::<u32>(1);
+                s.store(true, Ordering::SeqCst);
+                never.recv(&task_cx).await.map_err(|error| format!("{error:?}"))
+            })
+            .expect("spawn");
+        wait_for(&started).await;
+        let reserved_while_parked = tx.telemetry_snapshot(0).reserved_uncommitted_obligations;
+        handle.abort();
+        let joined = handle.join(&cx).await;
+        let reserved_after_join = tx.telemetry_snapshot(0).reserved_uncommitted_obligations;
+        observe([
+            ("join", outcome(&joined)),
+            ("reserved_while_parked", reserved_while_parked.to_string()),
+            ("reserved_after_join", reserved_after_join.to_string()),
+            ("nothing_sent", rx.try_recv().is_err().to_string()),
+            ("capacity_restored", tx.try_reserve().is_ok().to_string()),
+        ])
+    })
+}
+
+/// A message sent right at a receive's timeout is delivered exactly once:
+/// either to the timed receive or, if that was abandoned, to the next one.
+/// Which of the two gets it depends on the schedule.
+fn message_racing_a_receive_timeout_is_delivered_once(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let (tx, mut rx) = mpsc::channel::<u32>(1);
+        let start = cx.now();
+        let mut sender = cx
+            .spawn(move |task_cx| async move {
+                sleep(start, Duration::from_millis(10)).await;
+                tx.send(&task_cx, 9).await.map_err(|error| format!("{error:?}"))
+            })
+            .expect("spawn sender");
+        let timed = timeout(start, Duration::from_millis(10), rx.recv(&cx)).await;
+        let sent = sender.join(&cx).await;
+        let (taken_by, deliveries) = match timed {
+            Ok(Ok(value)) => ("timed_receive", vec![value]),
+            _ => ("next_receive", rx.recv(&cx).await.into_iter().collect()),
+        };
+        let leftover = rx.try_recv().is_ok();
+        observe([
+            ("sent", outcome(&sent)),
+            ("deliveries", format!("{deliveries:?}")),
+            ("leftover", leftover.to_string()),
+            ("taken_by", taken_by.to_string()),
+        ])
+    })
+}
+
+/// `bracket` runs its release when the use phase is cancelled by an abort,
+/// and the release has finished by the time the join returns.
+fn bracket_release_runs_when_the_use_is_aborted(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let (started, released) = flags();
+        let (s, r) = (Arc::clone(&started), Arc::clone(&released));
+        let mut handle = cx
+            .spawn(move |task_cx| async move {
+                bracket(
+                    async { Ok::<u32, String>(7) },
+                    move |resource| async move {
+                        let (_hold, mut never) = mpsc::channel::<u32>(1);
+                        s.store(true, Ordering::SeqCst);
+                        never
+                            .recv(&task_cx)
+                            .await
+                            .map(|_| resource)
+                            .map_err(|error| format!("{error:?}"))
+                    },
+                    move |_resource| async move {
+                        yield_now().await;
+                        r.store(true, Ordering::SeqCst);
+                    },
+                )
+                .await
+            })
+            .expect("spawn");
+        wait_for(&started).await;
+        yield_now().await;
+        handle.abort();
+        let joined = handle.join(&cx).await;
+        observe([
+            ("join", outcome(&joined)),
+            ("released_before_join_returned", released.load(Ordering::SeqCst).to_string()),
+        ])
+    })
+}
+
+/// Inside `Cx::masked` a delivered abort is invisible to `checkpoint`;
+/// the first checkpoint after the masked section observes it.
+fn masked_section_defers_an_abort_until_it_ends(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let (started, _) = flags();
+        let s = Arc::clone(&started);
+        let mut handle = cx
+            .spawn(move |task_cx| async move {
+                s.store(true, Ordering::SeqCst);
+                while !task_cx.is_cancel_requested() {
+                    yield_now().await;
+                }
+                let masked = task_cx.masked(|| task_cx.checkpoint().is_ok());
+                let unmasked = task_cx.checkpoint().is_ok();
+                format!("masked_checkpoint_ok={masked} unmasked_checkpoint_ok={unmasked}")
+            })
+            .expect("spawn");
+        wait_for(&started).await;
+        handle.abort();
+        let joined = handle.join(&cx).await;
+        observe([("join", outcome(&joined))])
+    })
+}
+
+/// A region that has closed admits no new task, and the refusal is an
+/// error from `spawn` or a join that reports it, never a hang.
+fn spawn_into_a_closed_region_is_refused(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let child = cx
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .expect("open child region");
+        let region_cx = child.cx().clone();
+        let closed = child.close().await;
+        let late = match region_cx.spawn(|_cx| async { 1u32 }) {
+            Err(SpawnError::RegionClosed(_)) => "refused:region_closed".to_string(),
+            Err(SpawnError::RegionNotFound(_)) => "refused:region_not_found".to_string(),
+            Err(other) => format!("refused:{other:?}"),
+            Ok(mut handle) => format!("admitted:{}", outcome(&handle.join(&cx).await)),
+        };
+        observe([("close", format!("{closed:?}")), ("spawn_after_close", late)])
+    })
+}
+
+/// `JoinSet::join_next` yields every member exactly once, then `None`.
+fn join_set_join_next_yields_every_member_once(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let mut set = JoinSet::in_cx(&cx);
+        for value in 0..4u32 {
+            set.spawn(&cx, move |_task_cx| async move {
+                for _ in 0..value {
+                    yield_now().await;
+                }
+                Ok::<u32, String>(value)
+            })
+            .expect("spawn member");
+        }
+        let mut members = Vec::new();
+        while let Some(joined) = set.join_next(&cx).await {
+            members.push(match joined {
+                Outcome::Ok(value) => value.to_string(),
+                other => outcome_kind(&other),
+            });
+        }
+        members.sort();
+        observe([
+            ("members", members.join(",")),
+            ("empty_afterwards", set.try_join_next().is_none().to_string()),
+        ])
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Lab-only invariants the differential runs surfaced
 // ---------------------------------------------------------------------------
@@ -1469,3 +1782,44 @@ differential!(
 );
 differential!(differential_abort_mpsc_receiver, abort_task_parked_on_mpsc_recv, []);
 differential!(differential_abort_semaphore_waiter, abort_task_parked_on_semaphore, []);
+differential!(
+    differential_aborted_sender_handoff,
+    aborted_parked_sender_hands_the_slot_to_the_next,
+    []
+);
+differential!(
+    differential_aborted_mutex_waiter_handoff,
+    aborted_mutex_waiter_hands_the_lock_to_the_next,
+    []
+);
+differential!(
+    differential_aborted_semaphore_waiter_handoff,
+    aborted_semaphore_waiter_hands_the_permit_to_the_next,
+    []
+);
+differential!(differential_abort_held_permit, abort_releases_a_held_send_permit, []);
+differential!(
+    differential_receive_timeout_race,
+    message_racing_a_receive_timeout_is_delivered_once,
+    ["taken_by"]
+);
+differential!(
+    differential_bracket_release_on_abort,
+    bracket_release_runs_when_the_use_is_aborted,
+    []
+);
+differential!(
+    differential_masked_checkpoint,
+    masked_section_defers_an_abort_until_it_ends,
+    []
+);
+differential!(
+    differential_spawn_into_closed_region,
+    spawn_into_a_closed_region_is_refused,
+    []
+);
+differential!(
+    differential_join_set_join_next,
+    join_set_join_next_yields_every_member_once,
+    []
+);

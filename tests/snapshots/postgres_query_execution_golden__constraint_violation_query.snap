@@ -1,0 +1,14 @@
+---
+source: tests/postgres_query_execution_golden.rs
+expression: log
+---
+=== PostgreSQL Query Execution Log ===
+Query ID: 12348
+SQL: INSERT INTO users (email, name) VALUES ($1, $2)
+Execution Time: 8ms
+Status: ERROR
+Error: PostgreSQL error [23505]: duplicate key value violates unique constraint "users_email_key" (detail: Key (email)=(alice@example.com) already exists.)
+SQL State: 23505
+Is Transient: false
+Is Retryable: false
+=====================================

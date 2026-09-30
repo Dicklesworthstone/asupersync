@@ -5845,6 +5845,11 @@ fn atp_serve(args: &AtpServeArgs, output: &mut Output) -> Result<(), CliError> {
             .detail(format!("{listen_label}: {err}"))
             .exit_code(ExitCode::RUNTIME_ERROR)
         })?;
+    // Report the address actually bound: for `--listen 127.0.0.1:0` the OS picks
+    // the port, and the requested address would announce port 0.
+    let listen_label = listener
+        .local_addr()
+        .map_or(listen_label, |bound| bound.to_string());
 
     let payload = AtpServeOutput::new("listening", &listen_label);
     output
@@ -17873,6 +17878,110 @@ lab:
             panic!("expected atp send");
         };
         assert!(args.allow_plaintext);
+    }
+
+    /// asupersync-bi2462.73: `asupersync atp serve` and `asupersync atp send`
+    /// move a real file over loopback through both handlers. `serve` reports
+    /// the port it bound, so `--listen 127.0.0.1:0` is usable.
+    #[test]
+    fn atp_serve_and_send_move_a_file_over_loopback() {
+        fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
+            for entry in std::fs::read_dir(dir).ok()?.flatten() {
+                let path = entry.path();
+                let found = if path.is_dir() {
+                    find_file(&path, name)
+                } else {
+                    path.file_name()
+                        .is_some_and(|file| file == name)
+                        .then_some(path)
+                };
+                if found.is_some() {
+                    return found;
+                }
+            }
+            None
+        }
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("payload.bin");
+        let payload: Vec<u8> = (0..300_000u32)
+            .map(|index| u8::try_from(index % 251).expect("below 251"))
+            .collect();
+        std::fs::write(&source, &payload).expect("write source");
+        let data_dir = temp.path().join("atp");
+
+        let serve_capture = SharedWrite::default();
+        let serve_writer = serve_capture.clone();
+        let serve_args = AtpServeArgs {
+            profile: "full".to_string(),
+            listen: "127.0.0.1:0".to_string(),
+            data_dir: data_dir.clone(),
+            daemon: false,
+            allow_plaintext: false,
+        };
+        // The serve loop runs until the test process exits.
+        std::thread::spawn(move || {
+            let mut output = Output::with_writer(OutputFormat::StreamJson, serve_writer);
+            let _ = atp_serve(&serve_args, &mut output);
+        });
+        let mut status = None;
+        for _ in 0..1500 {
+            let text = serve_capture.contents();
+            if text.ends_with('\n') && text.contains("listen_address") {
+                status = Some(text);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let status = status.expect("serve reports that it is listening within 30 s");
+        let status: serde_json::Value =
+            serde_json::from_str(status.trim()).expect("serve status is one JSON object");
+        assert_eq!(status["message"], "listening", "{status}");
+        let target = status["listen_address"]
+            .as_str()
+            .expect("listen address is a string")
+            .to_string();
+        let port = target
+            .rsplit_once(':')
+            .and_then(|(_, port)| port.parse::<u16>().ok())
+            .expect("listen address ends in a port");
+        assert_ne!(port, 0, "serve must report the port it bound, got {target}");
+
+        let send_capture = SharedWrite::default();
+        let mut output = Output::with_writer(OutputFormat::StreamJson, send_capture.clone());
+        let cli = Cli::parse_from([
+            "asupersync",
+            "atp",
+            "send",
+            source.to_str().expect("temp path is UTF-8"),
+            &target,
+        ]);
+        let Command::Atp(AtpArgs {
+            command: AtpCommand::Send(args),
+        }) = cli.command
+        else {
+            panic!("expected atp send");
+        };
+        atp_send(&args, &mut output).expect("send to the loopback listener");
+        let result: serde_json::Value = serde_json::from_str(send_capture.contents().trim())
+            .expect("send result is one JSON object");
+        assert_eq!(result["status"], "committed", "{result}");
+        assert_eq!(result["committed"], true, "{result}");
+        assert_eq!(result["sha_ok"], true, "{result}");
+        assert_eq!(result["merkle_ok"], true, "{result}");
+        assert_eq!(result["files"], 1, "{result}");
+        assert_eq!(result["bytes_sent"], payload.len(), "{result}");
+
+        let received = find_file(&data_dir.join("inbox"), "payload.bin")
+            .expect("the committed file is under the serve inbox");
+        let bytes = std::fs::read(&received).expect("read the committed file");
+        assert!(
+            bytes == payload,
+            "{} holds {} bytes that differ from the {}-byte source",
+            received.display(),
+            bytes.len(),
+            payload.len()
+        );
     }
 
     #[test]
