@@ -1796,6 +1796,14 @@ impl ThreeLaneScheduler {
             .map(|capture| capture.snapshot())
     }
 
+    /// Tells an enabled schedule capture that `task` owns a `block_on`
+    /// caller's root future, which no worker dispatches.
+    pub(crate) fn note_caller_task(&self, task: TaskId) {
+        if let Some(capture) = self.schedule_capture.get() {
+            capture.note_caller_task(task);
+        }
+    }
+
     /// Process-unique key of this runtime's per-thread local-task stores
     /// (GH#58, asupersync-1fyc8f); every worker and the current-thread driver
     /// use this same key.

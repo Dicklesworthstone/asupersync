@@ -5568,10 +5568,10 @@ impl CallerTaskRegistration {
         };
         // These internal channel owners have no consumers. Retire them outside
         // the state lock, after the task-lifetime guard is established.
-        drop(handle);
-        drop(result_tx);
+        drop((handle, result_tx));
         drop(spawn_guard);
         spawn_effects.dispatch();
+        inner.scheduler.note_caller_task(registration.cx.task_id());
         Ok(registration)
     }
 

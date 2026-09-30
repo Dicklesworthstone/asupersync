@@ -43,6 +43,33 @@ fn completed_capture(runtime: &Runtime) -> ScheduleCaptureSnapshot {
     }
 }
 
+/// Each `join_native` call runs one `block_on`, whose caller-polled root is
+/// registered as a task. The capture must report exactly those tasks, none of
+/// which a worker ever polled, and leave them out of the projection.
+fn assert_caller_tasks_left_out(snapshot: &ScheduleCaptureSnapshot, block_on_calls: usize) {
+    let callers = snapshot.caller_tasks();
+    assert_eq!(
+        callers.len(),
+        block_on_calls,
+        "one caller task per block_on"
+    );
+    for caller in callers {
+        let spawned = snapshot.events().iter().any(|event| {
+            event.kind == TraceEventKind::Spawn
+                && matches!(event.data, TraceData::Task { task, .. } if task == *caller)
+        });
+        let polled = snapshot.events().iter().any(|event| {
+            event.kind == TraceEventKind::Poll
+                && matches!(event.data, TraceData::Task { task, .. } if task == *caller)
+        });
+        assert!(
+            spawned,
+            "caller task {caller:?} has its Spawn in the capture"
+        );
+        assert!(!polled, "no worker polled caller task {caller:?}");
+    }
+}
+
 async fn receive_input(
     mut receiver: oneshot::Receiver<u32>,
     parked: Option<mpsc::Sender<TaskId>>,
@@ -114,6 +141,7 @@ fn native_parked_wakes_replay_with_identical_terminal_values() {
             let snapshot = completed_capture(&runtime);
             assert_eq!(snapshot.dropped_events(), 0);
             assert_eq!(snapshot.worker_count(), workers);
+            assert_caller_tasks_left_out(&snapshot, values.len());
             let schedule = snapshot.production_schedule().unwrap();
             assert_eq!(schedule.summary().spawned, 2);
             assert!(schedule.summary().steps >= 4);
