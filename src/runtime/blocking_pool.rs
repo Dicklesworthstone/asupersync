@@ -31,14 +31,23 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! The pool runs `FnOnce()` closures; send a result back over a channel.
+//! Async code normally uses [`spawn_blocking`](crate::runtime::spawn_blocking())
+//! instead, which awaits the closure's return value.
+//!
+//! ```
 //! use asupersync::runtime::BlockingPool;
+//! use std::sync::mpsc;
 //!
 //! let pool = BlockingPool::new(1, 4);
-//! let handle = pool.spawn(|| {
-//!     std::fs::read_to_string("/etc/hosts")
+//! let (tx, rx) = mpsc::channel();
+//! let handle = pool.spawn(move || {
+//!     let checksum: u64 = (1..=1_000u64).sum();
+//!     let _ = tx.send(checksum);
 //! });
-//! let result = handle.await?;
+//! handle.wait(); // blocks this thread until the closure has run
+//! assert_eq!(rx.recv().unwrap(), 500_500);
+//! pool.shutdown();
 //! ```
 
 use crate::runtime::config::BlockingPoolAffinityProfile;

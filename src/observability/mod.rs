@@ -19,7 +19,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use asupersync::observability::{LogEntry, LogLevel, Metrics, ObservabilityConfig};
 //!
 //! let config = ObservabilityConfig::default()
@@ -27,12 +27,14 @@
 //!     .with_sample_rate(0.1);
 //!
 //! let mut metrics = Metrics::new();
-//! metrics.counter("symbols_encoded").increment(1);
+//! metrics.counter("symbols_encoded").add(1);
 //! metrics.gauge("pending_symbols").set(42);
+//! assert_eq!(metrics.counter("symbols_encoded").get(), 1);
 //!
 //! let entry = LogEntry::info("Symbol encoded successfully")
 //!     .with_field("object_id", "Obj-12345678")
 //!     .with_field("symbol_count", "10");
+//! # let _ = (config, entry);
 //! ```
 
 pub mod analyzer_plugin;

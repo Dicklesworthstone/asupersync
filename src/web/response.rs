@@ -1290,7 +1290,14 @@ impl<T: IntoResponse, E: IntoResponse> IntoResponse for Result<T, E> {
 ///
 /// Serializes the inner value as JSON with `application/json` content type.
 ///
-/// ```ignore
+/// ```
+/// use asupersync::web::Json;
+///
+/// #[derive(serde::Serialize)]
+/// struct User {
+///     name: String,
+/// }
+///
 /// async fn get_user() -> Json<User> {
 ///     Json(User { name: "alice".into() })
 /// }

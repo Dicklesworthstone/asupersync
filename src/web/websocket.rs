@@ -7,15 +7,27 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use asupersync::web::websocket::{Message, ServerWebSocket, WebSocketUpgrade};
+//! ```
+//! use asupersync::web::Response;
+//! use asupersync::web::websocket::{Message, WebSocketUpgrade};
 //!
-//! async fn ws_handler(upgrade: WebSocketUpgrade) -> Response {
-//!     upgrade.protocols(["chat"]).into_response()
+//! fn ws_handler(upgrade: WebSocketUpgrade) -> Response {
+//!     // Answers 101; the callback runs once the response is flushed, with the
+//!     // connection's `Cx` and a `ServerWebSocket`.
+//!     upgrade.protocols(["chat"]).on_upgrade(|cx, mut ws| async move {
+//!         while let Ok(Some(msg)) = ws.recv(&cx).await {
+//!             match msg {
+//!                 Message::Text(text) => {
+//!                     if ws.send(&cx, Message::text(format!("echo: {text}"))).await.is_err() {
+//!                         break;
+//!                     }
+//!                 }
+//!                 Message::Close(_) => break,
+//!                 _ => {}
+//!             }
+//!         }
+//!     })
 //! }
-//!
-//! // After upgrade, use the ServerWebSocket:
-//! // while let Some(msg) = ws.recv(&cx).await? { ... }
 //! ```
 //!
 //! # Design
