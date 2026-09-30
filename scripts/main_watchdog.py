@@ -140,7 +140,8 @@ CARGO_FAILED_TARGET_RE = re.compile(
 )
 COULD_NOT_COMPILE_RE = re.compile(r"error: could not compile `([^`]+)`(?: \(([^)]*)\))?")
 FIRST_ERROR_RE = re.compile(r"^(?:\S+\.rs:\d+:\d+: error(?:\[E\d+\])?:.*|error(?:\[E\d+\])?: (?!could not compile|aborting).*)$")
-FAILED_TEST_RE = re.compile(r"^test (\S+) \.\.\. FAILED$")
+# A doctest's name has spaces: `src/x.rs - item (line 3)`.
+FAILED_TEST_RE = re.compile(r"^test (.+?) \.\.\. FAILED$")
 NO_TARGET_RE = re.compile(r"error: no (?:test|bin|example|bench) target named `([^`]+)`")
 # rustc itself was killed (the worker ran out of memory): it never reached a verdict.
 # Under clippy the killed command is `clippy-driver <path>/rustc ...` (bi2462.147.65).
@@ -1297,6 +1298,12 @@ def touches_test_registration(paths: list[str]) -> bool:
     return any(path == "Cargo.toml" or re.fullmatch(r"tests/[^/]+\.rs", path) for path in paths)
 
 
+def touches_rustdoc(paths: list[str]) -> bool:
+    """A change to crate source or the README can break a rustdoc example (the README
+    compiles as a doctest, ReadmeDoctests), and no other lane runs them (asupersync-69l7je)."""
+    return any(path == "README.md" or (path.startswith("src/") and path.endswith(".rs")) for path in paths)
+
+
 def targeted_tests(head: str, paths: list[str]) -> dict[str, Any]:
     """Map changed paths to integration targets grouped by feature set, lib filters, unmapped
     paths, the features gating the touched `src/` modules, and touched workspace member crates."""
@@ -1464,6 +1471,17 @@ def build_lanes(head: str, paths: list[str], jobs: int, with_all_features: bool)
                 "argv": [*LEAN_TEST_ENV, "cargo", "test", "-j", str(jobs), "-p", "asupersync", *feature_args, "--lib", "--", *lib_filters],
                 "expected_targets": [],
                 "lib_filters": lib_filters,
+            }
+        )
+    if touches_rustdoc(paths):
+        # One `Doc-tests` header can own two libtest blocks (merged and standalone
+        # doctests); the classifier then keys a failure by cargo's `--doc`.
+        lanes.append(
+            {
+                "id": "doctests",
+                "kind": "test",
+                "argv": [*LEAN_TEST_ENV, "cargo", "test", "-j", str(jobs), "-p", "asupersync", *feature_args, "--doc"],
+                "expected_targets": ["doc"],
             }
         )
     for crate in mapped["crates"]:
@@ -1799,6 +1817,135 @@ def rotation_pick(names: list[str], cursor: int, count: int) -> tuple[list[str],
     return picked, (start + len(picked)) % len(names)
 
 
+# Feature-gated rotation (asupersync-kh02d2.1): the default rotation above never runs a
+# target that needs a feature the test build lacks, and the feature lanes only check them.
+
+FEATURE_ROTATION_LANE = "rotation[features]"
+CFG_OPEN_RE = re.compile(r"\bcfg(?:_attr)?!?\s*\(")
+FEATURE_NAME_RE = re.compile(r'\bfeature\s*=\s*"([^"]+)"')
+# Features the fleet cannot run a plain `cargo test` under.
+FEATURE_ROTATION_EXEMPT = {"loom-tests": "needs RUSTFLAGS=--cfg loom"}
+
+
+def code_and_mask(source: str) -> tuple[str, str]:
+    """`source` without `//` and `/* */` comments, and a same-length copy of that with
+    every string literal's contents blanked, so a match in the mask is in code."""
+    out: list[str] = []
+    mask: list[str] = []
+    i, n, in_string = 0, len(source), False
+    while i < n:
+        c = source[i]
+        if in_string:
+            if c == "\\" and i + 1 < n:
+                out.append(source[i : i + 2])
+                mask.append("  ")
+                i += 2
+                continue
+            in_string = c != '"'
+            out.append(c)
+            mask.append(c if c == '"' else " ")
+        elif source.startswith("//", i):
+            i = source.find("\n", i)
+            if i < 0:
+                break
+            continue
+        elif source.startswith("/*", i):
+            end = source.find("*/", i + 2)
+            i = n if end < 0 else end + 2
+            continue
+        elif literal := next((q for q in ("'\"'", "'\\\"'") if source.startswith(q, i)), None):
+            out.append(literal)  # a quote char literal must not open a string
+            mask.append(" " * len(literal))
+            i += len(literal)
+            continue
+        else:
+            in_string = c == '"'
+            out.append(c)
+            mask.append(c)
+        i += 1
+    return "".join(out), "".join(mask)
+
+
+def cfg_feature_mentions(source: str) -> set[str]:
+    """Features named inside any `cfg(..)`, `cfg_attr(..)` or `cfg!(..)` in a source
+    file's code (a `cfg(` inside a comment or a string literal does not count)."""
+    found: set[str] = set()
+    code, mask = code_and_mask(source)
+    for match in CFG_OPEN_RE.finditer(mask):
+        end = _balanced_end(code, match.end() - 1)
+        if end > 0:
+            found.update(FEATURE_NAME_RE.findall(code[match.end() : end - 1]))
+    return found
+
+
+def feature_closure(features: dict[str, list[str]], wanted: set[str]) -> frozenset[str]:
+    """`wanted` plus every feature they turn on (`dep:` and `crate/feature` entries aside)."""
+    out: set[str] = set()
+    stack = list(wanted)
+    while stack:
+        name = stack.pop()
+        if name in out:
+            continue
+        out.add(name)
+        stack.extend(d for d in features.get(name, []) if "/" not in d and not d.startswith("dep:"))
+    return frozenset(out)
+
+
+def test_build_features(manifest: dict[str, Any], member_manifest: Callable[[str], dict[str, Any]]) -> frozenset[str]:
+    """Features every integration-test build of the root package already has.
+
+    Cargo unifies the features that path dev-dependencies ask of this package, so a test
+    build carries the defaults plus those: the conformance dev-dependency adds
+    test-internals, metrics, tracing-integration and fuzz (asupersync-z2kt29).
+    """
+    package = manifest.get("package", {}).get("name", "asupersync")
+    wanted = set(manifest.get("features", {}).get("default", []))
+    for spec in manifest.get("dev-dependencies", {}).values():
+        if not (isinstance(spec, dict) and "path" in spec):
+            continue
+        for name, dep in member_manifest(spec["path"]).get("dependencies", {}).items():
+            if isinstance(dep, dict) and dep.get("package", name) == package:
+                wanted.update(dep.get("features", []))
+    return feature_closure(manifest.get("features", {}), wanted)
+
+
+def feature_rotation_rows(
+    registry: dict[str, dict[str, Any]], sources: dict[str, str], test_build: frozenset[str], known: frozenset[str]
+) -> list[tuple[str, str, str]]:
+    """(feature set, target, required-features) for every integration target (registered,
+    or a top-level `tests/*.rs`) with code the test build compiles out, sorted so each
+    feature set's targets are adjacent.
+
+    The set is what the target needs beyond the test build: its required-features plus
+    every feature of the manifest (`known`) its code names in a cfg; `--features` with an
+    undefined name would fail the whole run. Targets whose sets match build the same
+    library. A target whose set holds an exempt feature is left out.
+    """
+    rows = set()
+    for path in set(registry) | {p for p in sources if re.fullmatch(r"tests/[^/]+\.rs", p)}:
+        entry = registry.get(path, {"name": path[len("tests/") : -len(".rs")], "features": []})
+        required = set(entry["features"])
+        extra = (required | (cfg_feature_mentions(sources.get(path, "")) & known)) - test_build
+        if not extra or extra & FEATURE_ROTATION_EXEMPT.keys():
+            continue
+        rows.add((",".join(sorted(extra)), entry["name"], ",".join(sorted(required))))
+    return sorted(rows)
+
+
+def feature_rotation_pick(rows: list[tuple[str, str, str]], cursor: int, count: int) -> tuple[str, list[str], int]:
+    """The `--features` value, up to `count` targets of the feature set at `cursor`, and the
+    cursor after them. A run never mixes sets, so it builds the library once; the value
+    also names every picked target's required-features, which cargo checks as written."""
+    if not rows or count <= 0:
+        return "", [], 0
+    start = cursor % len(rows)
+    end = start
+    while end < len(rows) and end - start < count and rows[end][0] == rows[start][0]:
+        end += 1
+    features = {f for row in rows[start:end] for csv in (row[0], row[2]) for f in csv.split(",") if f}
+    return ",".join(sorted(features)), [row[1] for row in rows[start:end]], end % len(rows)
+
+
 def rotation_fold(
     results: dict[str, Any], picked: list[str], outcome: dict[str, Any], head: str, now: str
 ) -> dict[str, list[str]]:
@@ -1850,9 +1997,11 @@ def rotation_payload(lane: dict[str, Any], head: str, outcome: dict[str, Any], n
     description = "\n".join(
         [
             "## What the rotation saw",
-            "The watchdog's rotation runs the default-feature integration targets in turn, whatever a batch",
-            "touched, so a target no batch lane selects still runs (execution debt, asupersync-kh02d2). It does",
-            "not bisect: a rotation red is not attributed to a commit.",
+            "The watchdog's rotation runs integration targets in turn, whatever a batch touched, so a target",
+            "no batch lane selects still runs (execution debt, asupersync-kh02d2). `rotation[default]` walks the",
+            "default-feature targets; `rotation[features]` walks those with code the test build compiles out,",
+            "under the features that code needs (asupersync-kh02d2.1). It does not bisect: a rotation red is",
+            "not attributed to a commit.",
             f"- Head: `{head}`",
             f"- Lane: `{lane['id']}`: `{lane['display_command']}`",
             f"- Worker: {outcome.get('worker') or 'unknown'}",
@@ -1906,6 +2055,18 @@ def rotation_file(
                 entry["bead"] = found
     rotation["pending"] = still_pending
     return beads
+
+
+def feature_rotation_probe(case: dict[str, Any]) -> dict[str, Any]:
+    """Evaluate helper: the test-build feature set, the feature-gated rows, and successive picks."""
+    build = test_build_features(case["manifest"], lambda path: case.get("members", {}).get(path, {}))
+    known = frozenset(case["manifest"].get("features", {}))
+    rows = feature_rotation_rows(case.get("registry", {}), case.get("sources", {}), build, known)
+    picks, cursor = [], case.get("cursor", 0)
+    for _ in range(case.get("picks", 1)):
+        feature_set, picked, cursor = feature_rotation_pick(rows, cursor, case["count"])
+        picks.append({"features": feature_set, "picked": picked, "cursor": cursor})
+    return {"test_build": sorted(build), "rows": [list(row[:2]) for row in rows], "picks": picks}
 
 
 def rotation_probe(case: dict[str, Any]) -> dict[str, Any]:
@@ -2466,19 +2627,43 @@ def rotate(args: argparse.Namespace, now: dt.datetime) -> int:
     `state["rotation"]`, receipts in `rotation.jsonl`. A failing test is keyed by
     the target whose `Running` header pairs with its libtest block
     (classify_lane_output); a failure no picked target owns marks nothing green.
+
+    `--feature-gated` walks instead the targets with code the test build compiles
+    out (feature_rotation_rows), one feature set per run, in `state["rotation_features"]`.
     """
     state_path = args.state_dir / "state.json"
     state = load_state(state_path)
     if not args.no_fetch:
         git("fetch", "-q", "origin", check=False)
     head = git("rev-parse", args.until).strip()
-    rotation = state.setdefault("rotation", {"cursor": 0, "results": {}})
-    names = default_test_targets(git("ls-tree", "--name-only", head, "tests/").split(), cargo_test_registry(head))
-    picked, cursor = rotation_pick(names, rotation.get("cursor", 0), args.count)
+    registry = cargo_test_registry(head)
+    features: list[str] = []
+    if args.feature_gated:
+        lane_id = FEATURE_ROTATION_LANE
+        rotation = state.setdefault("rotation_features", {"cursor": 0, "results": {}})
+        manifest = manifest_at(head)
+        build = test_build_features(
+            manifest, lambda path: tomllib.loads(git("show", f"{head}:{path}/Cargo.toml", check=False) or "")
+        )
+        known = frozenset(manifest.get("features", {}))
+        rows = feature_rotation_rows(registry, tree_sources(head, "tests/"), build, known)
+        feature_set, picked, cursor = feature_rotation_pick(rows, rotation.get("cursor", 0), args.count)
+        features, total = ["--features", feature_set], len(rows)
+    else:
+        lane_id = ROTATION_LANE
+        rotation = state.setdefault("rotation", {"cursor": 0, "results": {}})
+        names = default_test_targets(git("ls-tree", "--name-only", head, "tests/").split(), registry)
+        picked, cursor = rotation_pick(names, rotation.get("cursor", 0), args.count)
+        total = len(names)
+    if not picked:
+        # Nothing to run; a `cargo test` without `--test` would run the whole suite.
+        json.dump({"lane": lane_id, "sha": head, "picked": [], "of": total}, sys.stdout, sort_keys=True)
+        sys.stdout.write("\n")
+        return 0
     lane: dict[str, Any] = {
-        "id": ROTATION_LANE,
+        "id": lane_id,
         "kind": "test",
-        "argv": [*LEAN_TEST_ENV, "cargo", "test", "-j", str(args.jobs), "-p", "asupersync", "--no-fail-fast"]
+        "argv": [*LEAN_TEST_ENV, "cargo", "test", "-j", str(args.jobs), "-p", "asupersync", "--no-fail-fast", *features]
         + [arg for name in picked for arg in ("--test", name)],
         "expected_targets": picked,
     }
@@ -2498,10 +2683,10 @@ def rotate(args: argparse.Namespace, now: dt.datetime) -> int:
     receipt = {
         "schema": SCHEMA_VERSION,
         "recorded_at": now.isoformat(),
-        "lane": ROTATION_LANE,
+        "lane": lane_id,
         "sha": head,
         "picked": picked,
-        "of": len(names),
+        "of": total,
         "filed_beads": filed,
         **fold,
         **{k: outcome[k] for k in ("verdict", "reason", "worker", "failing_targets", "first_error", "counts", "targets_seen")},
@@ -2557,6 +2742,11 @@ def main(argv: list[str]) -> int:
     o.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
     o.add_argument("--no-fetch", action="store_true", help="skip `git fetch origin` before selecting")
     o.add_argument("--file-beads", action="store_true", help="file a P1 bead per rotation run with new reds")
+    o.add_argument(
+        "--feature-gated",
+        action="store_true",
+        help="walk the targets with code the test build compiles out, one feature set per run",
+    )
     o.add_argument("--admission-attempts", type=int, default=40)
     o.add_argument("--admission-sleep", type=int, default=90)
     args = parser.parse_args(argv)
@@ -2617,6 +2807,7 @@ def main(argv: list[str]) -> int:
             "touches_test_registration": [
                 touches_test_registration(paths) for paths in probes.get("touches_test_registration", [])
             ],
+            "touches_rustdoc": [touches_rustdoc(paths) for paths in probes.get("touches_rustdoc", [])],
             "receipt_ledger": [
                 {
                     "ledger": (ledger := receipt_ledger(case["commits"], case["receipts"], dt.datetime.fromisoformat(case["now"]))),
@@ -2644,6 +2835,7 @@ def main(argv: list[str]) -> int:
                 select_batch(case["shas"], case["max_batch"], case["state"]) for case in probes.get("select_batch", [])
             ],
             "rotation": [rotation_probe(case) for case in probes.get("rotation", [])],
+            "feature_rotation": [feature_rotation_probe(case) for case in probes.get("feature_rotation", [])],
         }
         json.dump(result, sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")

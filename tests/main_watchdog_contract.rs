@@ -822,6 +822,54 @@ fn a_lib_filter_that_ran_no_test_is_reported_not_hidden() {
     assert_eq!(lib["unexercised_filters"], json!(["database::postgres"]));
 }
 
+/// Only this lane runs the rustdoc examples, the README's included (br-asupersync-69l7je).
+/// It runs when a batch touches crate source or the README. One `Doc-tests` header owns
+/// two libtest blocks (merged, then standalone doctests), so a failure is keyed by cargo's
+/// `--doc` and names the doctest, spaces and all.
+#[test]
+fn doctests_run_for_source_or_readme_changes_and_a_failure_names_the_doctest() {
+    let probed = evaluate(&json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {"touches_rustdoc": [
+            ["src/lib.rs"], ["README.md"], ["src/net/tcp/mod.rs", "docs/x.md"],
+            ["tests/a.rs", "Cargo.toml"], ["docs/README.md", "scripts/x.py"],
+        ]},
+    }));
+    assert_eq!(
+        probed["probe_results"]["touches_rustdoc"],
+        json!([true, true, true, false, false]),
+        "{probed:#}"
+    );
+
+    let lane = json!({
+        "id": "doctests", "kind": "test", "argv": ["cargo", "test", "--doc"],
+        "expected_targets": ["doc"],
+    });
+    let green = "   Doc-tests asupersync\nrunning 3 tests\ntest src/a.rs - a (line 3) ... ok\ntest src/b.rs - b (line 9) - compile ... ok\ntest src/c.rs - c (line 1) ... ignored\ntest result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s\n\nrunning 1 test\ntest src/d.rs - d (line 5) ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s\n  Remote command finished: exit=0 in 1000ms\n";
+    let red = "   Doc-tests asupersync\nrunning 2 tests\ntest src/a.rs - a (line 3) ... ok\ntest src/stream/mod.rs - stream::StreamExt::try_buffered (line 450) ... FAILED\n\nfailures:\n\nfailures:\n    src/stream/mod.rs - stream::StreamExt::try_buffered (line 450)\n\ntest result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n\nerror: doctest failed, to rerun pass `-p asupersync --doc`\n  Remote command finished: exit=101 in 1000ms\n";
+    for (log, verdict, failing) in [
+        (green, "green", json!([])),
+        (
+            red,
+            "red",
+            json!(["doc::src/stream/mod.rs - stream::StreamExt::try_buffered (line 450)"]),
+        ),
+    ] {
+        let result = evaluate(&json!({
+            "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": [lane.clone()]},
+            "lane_logs": {"doctests": {sha(1): {"log": log, "client_exit": if verdict == "red" { 101 } else { 0 }}}},
+        }));
+        let doc = receipt(&result, "doctests");
+        assert_eq!(doc["verdict"], verdict, "{doc:#}");
+        assert_eq!(
+            doc["failing_targets"].as_array().cloned().unwrap_or_default(),
+            failing.as_array().cloned().unwrap_or_default(),
+            "{doc:#}"
+        );
+    }
+}
+
 /// A batch that touches Cargo.toml or a top-level integration test runs the test
 /// registration contract (bi2462.87): a commit that never ran `cargo test` can
 /// still add a feature-gated test without its `[[test]]` required-features.
@@ -1088,6 +1136,88 @@ fn node_suites_are_keyed_by_suite_and_test_and_a_missing_reference_proves_nothin
             .expect("reason")
             .contains("WATCHDOG_FAKE_INDEXEDDB_SOURCE"),
         "{result:#}"
+    );
+}
+
+/// The feature-gated rotation (br-asupersync-kh02d2.1) runs what the test build compiles
+/// out. The test build has the defaults plus what a path dev-dependency unifies in (here
+/// `extra`, which turns on `implied`), so a target that needs only those belongs to the
+/// default rotation. Any other target is a row keyed by the features its code needs:
+/// its required-features plus every manifest feature a cfg names (not a comment or a
+/// string; an undefined name would make `--features` fail the run). An exempt feature
+/// drops the target, and one pick never spans two feature sets.
+#[test]
+fn feature_rotation_runs_what_the_test_build_compiles_out_one_feature_set_at_a_time() {
+    let probed = evaluate(&json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {"feature_rotation": [{
+            "manifest": {
+                "package": {"name": "asupersync"},
+                "features": {
+                    "default": ["core"], "core": [], "extra": ["implied", "dep:serde"],
+                    "implied": [], "tls": ["dep:rustls"], "cli": ["tls"], "tower": [],
+                    "loom-tests": [],
+                },
+                "dev-dependencies": {
+                    "conformance": {"package": "asupersync-conformance", "path": "conformance"},
+                    "serde_json": "1",
+                },
+            },
+            "members": {"conformance": {"dependencies": {
+                "asupersync": {"path": "..", "default-features": false, "features": ["extra"]},
+            }}},
+            "registry": {
+                "tests/cli_a.rs": {"name": "cli_a", "features": ["cli"]},
+                "tests/nested/tls_b.rs": {"name": "tls_b", "features": ["tls"]},
+                "tests/tls_d.rs": {"name": "tls_d", "features": ["implied", "tls"]},
+                "tests/implied_only.rs": {"name": "implied_only", "features": ["implied"]},
+                "tests/loom.rs": {"name": "loom", "features": ["loom-tests"]},
+            },
+            "sources": {
+                "tests/cli_a.rs": "",
+                "tests/nested/tls_b.rs": "",
+                "tests/tls_d.rs": "",
+                "tests/implied_only.rs": "",
+                "tests/loom.rs": "",
+                "tests/plain.rs": "#[test]\nfn t() {}\n",
+                "tests/inner.rs": "#[cfg(feature = \"tower\")]\nmod tower_tests {}\n#[cfg(all(feature = \"extra\", not(feature = \"tls\")))]\nmod x {}\n#[cfg(feature = \"no-such-feature\")]\nmod y {}\n",
+                "tests/mentions.rs": "// cfg(feature = \"tls\") in a comment\nconst S: &str = \"#[cfg(feature = \\\"cli\\\")]\";\nconst Q: char = '\"';\n",
+                "tests/tls_c.rs": "#[cfg_attr(feature = \"tls\", ignore)]\n#[test]\nfn t() {}\n",
+                "tests/common/mod.rs": "#[cfg(feature = \"tls\")]\npub fn helper() {}\n",
+            },
+            "count": 2,
+            "picks": 4,
+        }]},
+    }));
+    let result = &probed["probe_results"]["feature_rotation"][0];
+    assert_eq!(
+        result["test_build"],
+        json!(["core", "extra", "implied"]),
+        "{probed:#}"
+    );
+    assert_eq!(
+        result["rows"],
+        json!([
+            ["cli", "cli_a"],
+            ["tls", "tls_b"],
+            ["tls", "tls_c"],
+            ["tls", "tls_d"],
+            ["tls,tower", "inner"]
+        ]),
+        "{probed:#}"
+    );
+    // `tls_d` shares the `tls` build (it needs `implied` too, which the test build has),
+    // and its pick still names `implied`: cargo checks required-features as written.
+    assert_eq!(
+        result["picks"],
+        json!([
+            {"features": "cli", "picked": ["cli_a"], "cursor": 1},
+            {"features": "tls", "picked": ["tls_b", "tls_c"], "cursor": 3},
+            {"features": "implied,tls", "picked": ["tls_d"], "cursor": 4},
+            {"features": "tls,tower", "picked": ["inner"], "cursor": 0},
+        ]),
+        "{probed:#}"
     );
 }
 
