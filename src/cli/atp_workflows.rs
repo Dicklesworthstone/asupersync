@@ -47,16 +47,42 @@ pub struct AtpWorkflowCoordinator {
     seeding_service: AtpSeedingService,
     /// Output formatter for results.
     output: Output,
+    /// Explicit state root; `None` resolves `$ASUPERSYNC_ATP_WORKFLOW_ROOT`, else
+    /// `./.asupersync/atp`, on every access.
+    root: Option<PathBuf>,
 }
 
 impl AtpWorkflowCoordinator {
     /// Create a new workflow coordinator with default configuration.
+    ///
+    /// Workflow state lives under `$ASUPERSYNC_ATP_WORKFLOW_ROOT`, or
+    /// `./.asupersync/atp` when that is unset.
     pub fn new(output_format: OutputFormat) -> Result<Self, CliError> {
-        let cache_config = CacheConfig::default();
+        Self::build(output_format, None)
+    }
+
+    /// Create a workflow coordinator whose state lives under `root`.
+    ///
+    /// Indexes, archives, the seed root and large cache entries are all kept below
+    /// `root` (created on first write). Unlike [`new`](Self::new), this reads no
+    /// environment variable and does not depend on the current directory, so two
+    /// coordinators with different roots never share state.
+    pub fn with_root(output_format: OutputFormat, root: impl Into<PathBuf>) -> Result<Self, CliError> {
+        Self::build(output_format, Some(root.into()))
+    }
+
+    fn build(output_format: OutputFormat, root: Option<PathBuf>) -> Result<Self, CliError> {
+        let mut cache_config = CacheConfig::default();
+        if let Some(root) = &root {
+            cache_config.storage_root = root.join("cache");
+        }
         let cache = AtpCache::new(cache_config.clone());
 
         let mut seeding_config = SeedingConfig::default();
         seeding_config.enabled = true;
+        if let Some(root) = &root {
+            seeding_config.seed_root = root.join("seeds");
+        }
         let seeding_service = AtpSeedingService::new(seeding_config, AtpCache::new(cache_config));
 
         let output = Output::new(output_format);
@@ -65,6 +91,7 @@ impl AtpWorkflowCoordinator {
             cache,
             seeding_service,
             output,
+            root,
         })
     }
 
@@ -1499,6 +1526,9 @@ impl AtpWorkflowCoordinator {
     }
 
     fn workflow_root(&self) -> Result<PathBuf, CliError> {
+        if let Some(root) = &self.root {
+            return Ok(root.clone());
+        }
         if let Ok(root) = std::env::var("ASUPERSYNC_ATP_WORKFLOW_ROOT") {
             return Ok(PathBuf::from(root));
         }
