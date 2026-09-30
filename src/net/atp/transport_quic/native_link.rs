@@ -1469,24 +1469,30 @@ async fn send_native_proof_until_close<T: serde::Serialize + Sync>(
 /// Longest refusal reason sent back to the sender, in bytes.
 const MANIFEST_REFUSAL_REASON_MAX_BYTES: usize = 512;
 
-/// Tells the sender why its manifest was refused, with the failed-commit Proof
-/// it already understands (`committed: false` plus a reason), then Close.
-/// Before this the receiver returned the error and dropped the connection, and
-/// the sender saw only silence until its idle timeout (360 s by default,
-/// br-asupersync-nnm3gw). Best effort: the refusal is still the error the
-/// caller returns, whether or not the Proof gets through.
-async fn refuse_manifest_in_band(
-    cx: &Cx,
-    link: &mut QuicLink,
-    control: &mut NativeQuicFrameTransport,
-    error: &QuicTransportError,
-    config: &QuicConfig,
-) {
+/// The reason sent for a manifest the receiver cannot accept. The detail comes
+/// from the sender's own manifest (entry names, sizes, metadata), never from
+/// the receiver's filesystem.
+fn manifest_refusal_reason(error: &QuicTransportError) -> String {
     let detail = match error {
         QuicTransportError::Source(message) => message.clone(),
         other => other.to_string(),
     };
-    let mut reason = format!("receiver refused the manifest: {detail}");
+    format!("receiver refused the manifest: {detail}")
+}
+
+/// Tells the sender why the receiver will not take the transfer, with the
+/// failed-commit Proof it already understands (`committed: false` plus a
+/// reason), then Close. Before this the receiver returned the error and
+/// dropped the connection, and the sender saw only silence until its idle
+/// timeout (360 s by default, br-asupersync-nnm3gw). Best effort: the refusal
+/// is still the error the caller returns, whether or not the Proof gets through.
+async fn refuse_transfer_in_band(
+    cx: &Cx,
+    link: &mut QuicLink,
+    control: &mut NativeQuicFrameTransport,
+    mut reason: String,
+    config: &QuicConfig,
+) {
     if reason.len() > MANIFEST_REFUSAL_REASON_MAX_BYTES {
         let mut end = MANIFEST_REFUSAL_REASON_MAX_BYTES;
         while !reason.is_char_boundary(end) {
@@ -1494,7 +1500,7 @@ async fn refuse_manifest_in_band(
         }
         reason.truncate(end);
     }
-    super::quic_progress(format_args!("receiver: manifest refused: {reason}"));
+    super::quic_progress(format_args!("receiver: transfer refused: {reason}"));
     let receipt = ReceiveReceipt {
         committed: false,
         bytes_received: 0,
@@ -10790,7 +10796,8 @@ async fn run_receiver_session(
         let manifest: TransferManifest =
             super::parse_json_frame(&manifest_frame, FrameType::ObjectManifest, "ObjectManifest")?;
         if let Err(error) = super::validate_quic_manifest(&manifest, config) {
-            refuse_manifest_in_band(cx, link, &mut control, &error, config).await;
+            refuse_transfer_in_band(cx, link, &mut control, manifest_refusal_reason(&error), config)
+                .await;
             return Err(error);
         }
         (manifest, None)
@@ -10804,6 +10811,9 @@ async fn run_receiver_session(
         config.max_block_size
     ));
     link.flush(cx).await?;
+    // A delta sender expects a delta proof, so only a plain transfer gets the
+    // in-band refusal below.
+    let plain_transfer = delta_session.is_none();
 
     let mut delta_full_request_frame = None;
     if let Some(session) = delta_session {
@@ -10918,8 +10928,25 @@ async fn run_receiver_session(
         }
     }
 
-    let mut decoders = super::decoders_from_manifest(&manifest, config)?;
-    super::prepare_quic_destination_root(dest_dir).await?;
+    let mut decoders = match super::decoders_from_manifest(&manifest, config) {
+        Ok(decoders) => decoders,
+        Err(error) => {
+            if plain_transfer {
+                let reason = manifest_refusal_reason(&error);
+                refuse_transfer_in_band(cx, link, &mut control, reason, config).await;
+            }
+            return Err(error);
+        }
+    };
+    if let Err(error) = super::prepare_quic_destination_root(dest_dir).await {
+        // The error names receiver-side paths; the sender only learns that the
+        // destination was unusable.
+        if plain_transfer {
+            let reason = "receiver could not prepare its destination".to_string();
+            refuse_transfer_in_band(cx, link, &mut control, reason, config).await;
+        }
+        return Err(error);
+    }
     let mut staging_guard = None;
     for _ in 0..32 {
         let staging_seq = QUIC_STAGING_SEQ.fetch_add(1, Ordering::Relaxed);

@@ -833,6 +833,57 @@ fn receiver_manifest_refusal_reaches_the_sender_with_its_reason() {
     assert_no_staging_residue(dst.path());
 }
 
+/// asupersync-nnm3gw: a receiver that cannot prepare its destination (here the
+/// destination crosses a symlink) tells the sender so promptly, without
+/// naming any receiver-side path.
+#[cfg(unix)]
+#[test]
+fn receiver_destination_refusal_reaches_the_sender_without_its_paths() {
+    const REFUSAL_BOUND: Duration = Duration::from_secs(60);
+    let src = tempfile::tempdir().expect("src dir");
+    let source = src.path().join("payload.bin");
+    std::fs::write(&source, vec![9_u8; 4096]).expect("write source");
+    let root = tempfile::tempdir().expect("receiver root");
+    let real = root.path().join("real");
+    std::fs::create_dir_all(&real).expect("real dir");
+    let linked = root.path().join("linked");
+    std::os::unix::fs::symlink(&real, &linked).expect("symlink");
+    let dest = linked.join("inbox");
+
+    let mut cfg = transport_authenticated_configs();
+    cfg.send.idle_timeout = Duration::from_secs(120);
+    cfg.recv.idle_timeout = Duration::from_secs(120);
+
+    let started = Instant::now();
+    let (sent, received) = run_transfer(cfg.send, cfg.recv, &source, &dest);
+    let elapsed = started.elapsed();
+
+    let received = received.expect_err("the receiver refuses a destination through a symlink");
+    assert!(
+        matches!(received, QuicTransportError::Source(ref message) if message.contains("symlink")),
+        "receiver error: {received:?}"
+    );
+    let sent = sent.expect_err("the sender must learn of the refusal");
+    assert!(
+        matches!(sent, QuicTransportError::Integrity(ref reason)
+            if reason == "receiver could not prepare its destination"),
+        "sender error: {sent:?}"
+    );
+    let receiver_root = root.path().display().to_string();
+    assert!(
+        !format!("{sent:?}").contains(&receiver_root),
+        "the sender must not learn receiver paths: {sent:?}"
+    );
+    assert!(
+        elapsed < REFUSAL_BOUND,
+        "the refusal reached the sender only after {elapsed:?}"
+    );
+    assert!(
+        !real.join("inbox").exists(),
+        "a refused destination must stay untouched"
+    );
+}
+
 /// asupersync-wlbrlr: a RELATIVE destination directory (`atp recv out/dir`,
 /// the bench harness's cell paths) must be accepted. The receiver's
 /// destination-root preparation walked the empty ancestor of a relative path
