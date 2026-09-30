@@ -42,7 +42,7 @@ use asupersync::cx::ChildRegionSpec;
 use asupersync::runtime::{JoinError, RuntimeBuilder, yield_now};
 use asupersync::sync::{Barrier, Mutex, Notify, OwnedMutexGuard, RwLock, Semaphore};
 use asupersync::time::{sleep, timeout};
-use asupersync::types::Outcome;
+use asupersync::types::{Budget, Outcome};
 use asupersync::{CancelReason, Cx};
 
 type Observation = BTreeMap<&'static str, String>;
@@ -1193,6 +1193,95 @@ fn scope_timeout_with_a_real_deadline(cx: Cx) -> ScenarioFuture {
     })
 }
 
+/// A child region with a 50 ms deadline: the task parked inside it must be
+/// cancelled once the deadline passes, with the deadline as its reason, on
+/// either clock (lab virtual time, native timer driver).
+fn region_deadline_cancels_a_parked_task(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let mut spec = ChildRegionSpec::inherit();
+        spec.budget = Some(Budget::new().with_timeout(cx.now(), Duration::from_millis(50)));
+        let child = cx
+            .open_child_region(spec)
+            .await
+            .expect("open child region with a deadline");
+        let mut handle = child
+            .cx()
+            .spawn(|task_cx| async move {
+                let (_hold, mut never) = mpsc::channel::<u32>(1);
+                let received = never.recv(&task_cx).await.map_err(|error| format!("{error:?}"));
+                (
+                    format!("{received:?}"),
+                    task_cx.cancel_reason().map(|reason| format!("{:?}", reason.kind)),
+                )
+            })
+            .expect("spawn inside the child region");
+        let joined = handle.join(&cx).await;
+        let closed = child.close().await;
+        observe([("join", outcome(&joined)), ("close", format!("{closed:?}"))])
+    })
+}
+
+/// A child region with a 50 ms deadline and a task that checkpoints every
+/// 5 ms: both runtimes enforce the deadline at the first checkpoint after it
+/// passes, with the deadline as the reason. (A task parked across the deadline
+/// is never woken; see `region_deadline_cancels_a_parked_task`.)
+fn region_deadline_stops_a_checkpointing_task(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let mut spec = ChildRegionSpec::inherit();
+        spec.budget = Some(Budget::new().with_timeout(cx.now(), Duration::from_millis(50)));
+        let child = cx
+            .open_child_region(spec)
+            .await
+            .expect("open child region with a deadline");
+        let mut handle = child
+            .cx()
+            .spawn(|task_cx| async move {
+                for round in 0..400u32 {
+                    if task_cx.checkpoint().is_err() {
+                        let reason = task_cx.cancel_reason().map(|reason| format!("{:?}", reason.kind));
+                        return (Some(round > 0), reason);
+                    }
+                    sleep(task_cx.now(), Duration::from_millis(5)).await;
+                }
+                (None, None)
+            })
+            .expect("spawn inside the child region");
+        let joined = handle.join(&cx).await;
+        let closed = child.close().await;
+        observe([("join", outcome(&joined)), ("close", format!("{closed:?}"))])
+    })
+}
+
+/// A child region with a poll quota of 8: a task that keeps yielding must be
+/// stopped by the quota, at the same round and with the same reason on every
+/// runtime (poll accounting is the thing compared).
+fn region_poll_quota_stops_a_busy_task(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let mut spec = ChildRegionSpec::inherit();
+        spec.budget = Some(Budget::new().with_poll_quota(8));
+        let child = cx
+            .open_child_region(spec)
+            .await
+            .expect("open child region with a poll quota");
+        let mut handle = child
+            .cx()
+            .spawn(|task_cx| async move {
+                for round in 0..1_000u32 {
+                    if task_cx.checkpoint().is_err() {
+                        let reason = task_cx.cancel_reason().map(|reason| format!("{:?}", reason.kind));
+                        return (Some(round), reason);
+                    }
+                    yield_now().await;
+                }
+                (None, None)
+            })
+            .expect("spawn inside the child region");
+        let joined = handle.join(&cx).await;
+        let closed = child.close().await;
+        observe([("join", outcome(&joined)), ("close", format!("{closed:?}"))])
+    })
+}
+
 fn spawn_blocking_returns_its_value(cx: Cx) -> ScenarioFuture {
     Box::pin(async move {
         let mut handle = cx.spawn_blocking(|_cx| 41u32 + 1).expect("spawn_blocking");
@@ -1242,6 +1331,19 @@ fn lab_time_does_not_advance_past_a_pending_spawn() {
 macro_rules! differential {
     ($test:ident, $scenario:ident, [$($dependent:literal),*]) => {
         #[test]
+        fn $test() {
+            check(&Scenario {
+                name: stringify!($scenario),
+                run: $scenario,
+                schedule_dependent: &[$($dependent),*],
+            });
+        }
+    };
+    // A known lab/native gap, tracked by the bead named in the reason. The
+    // scenario is the regression test for that bead: un-ignore it with the fix.
+    ($test:ident, $scenario:ident, [$($dependent:literal),*], ignore = $reason:literal) => {
+        #[test]
+        #[ignore = $reason]
         fn $test() {
             check(&Scenario {
                 name: stringify!($scenario),
@@ -1338,6 +1440,23 @@ differential!(
 );
 differential!(differential_spawn_blocking, spawn_blocking_returns_its_value, []);
 differential!(differential_sleeps_never_early, sleeps_never_end_early, []);
+differential!(
+    differential_region_deadline_checkpointing,
+    region_deadline_stops_a_checkpointing_task,
+    []
+);
+differential!(
+    differential_region_deadline_parked,
+    region_deadline_cancels_a_parked_task,
+    [],
+    ignore = "asupersync-pev2xi: neither runtime wakes a parked task at a region deadline (lab runs out of steps, native hangs)"
+);
+differential!(
+    differential_region_poll_quota,
+    region_poll_quota_stops_a_busy_task,
+    [],
+    ignore = "asupersync-r017wv: only the lab enforces poll quotas (lab stops at round 7, native runs 1000 rounds)"
+);
 differential!(
     differential_time_timeout,
     time_timeout_elapses_only_for_the_parked_future,
