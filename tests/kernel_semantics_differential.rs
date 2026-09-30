@@ -33,15 +33,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use asupersync::Cx;
-use asupersync::channel::mpsc;
-use asupersync::combinator::PipelineExecutionConfig;
+use asupersync::channel::{broadcast, mpsc, oneshot, watch};
 use asupersync::combinator::map_reduce::MapReduceLimits;
+use asupersync::combinator::timeout::TimedResult;
+use asupersync::combinator::{JoinSet, PipelineExecutionConfig};
 use asupersync::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
 use asupersync::cx::ChildRegionSpec;
 use asupersync::runtime::{JoinError, RuntimeBuilder, yield_now};
-use asupersync::sync::{Mutex, OwnedMutexGuard, Semaphore};
+use asupersync::sync::{Barrier, Mutex, Notify, OwnedMutexGuard, RwLock, Semaphore};
 use asupersync::types::Outcome;
+use asupersync::{CancelReason, Cx};
 
 type Observation = BTreeMap<&'static str, String>;
 type ScenarioFuture = Pin<Box<dyn Future<Output = Observation> + Send>>;
@@ -56,6 +57,7 @@ struct Scenario {
 const LAB_SEEDS: [u64; 6] = [1, 2, 3, 0x5EED, 0xBEEF, 0xC0FFEE];
 const NATIVE_REPEATS: usize = 3;
 const NATIVE_WORKERS: usize = 4;
+const NATIVE_HANG_LIMIT: Duration = Duration::from_secs(60);
 
 // ---------------------------------------------------------------------------
 // Runners
@@ -81,20 +83,38 @@ fn run_lab(seed: u64, scenario: &Scenario) -> Observation {
     observation
 }
 
-fn run_native(builder: RuntimeBuilder, scenario: &Scenario) -> Observation {
-    let runtime = builder.build().expect("build native runtime");
-    let run = scenario.run;
-    let handle = runtime.handle().spawn(async move {
-        let cx = Cx::current().expect("runtime task installs Cx");
-        run(cx).await
+/// Runs the scenario on its own thread so that a hang fails the test with a
+/// message instead of stalling the whole lane. `workers: None` is the
+/// current-thread runtime.
+fn run_native(workers: Option<usize>, scenario: &Scenario) -> Observation {
+    let (name, run) = (scenario.name, scenario.run);
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let builder = match workers {
+            None => RuntimeBuilder::current_thread(),
+            Some(count) => RuntimeBuilder::multi_thread().worker_threads(count),
+        };
+        let runtime = builder.build().expect("build native runtime");
+        let handle = runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("runtime task installs Cx");
+            run(cx).await
+        });
+        let observation = runtime.block_on(handle);
+        let quiescent = runtime.shutdown_timeout(Duration::from_secs(10));
+        let _ = done_tx.send((observation, quiescent));
     });
-    let observation = runtime.block_on(handle);
-    assert!(
-        runtime.shutdown_timeout(Duration::from_secs(10)),
-        "{}: native runtime must reach quiescence and shut down",
-        scenario.name
-    );
-    observation
+    match done_rx.recv_timeout(NATIVE_HANG_LIMIT) {
+        Ok((observation, quiescent)) => {
+            assert!(quiescent, "{name}: native runtime must reach quiescence and shut down");
+            observation
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("{name}: native run ({workers:?} workers) hung for {NATIVE_HANG_LIMIT:?}")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("{name}: native run ({workers:?} workers) panicked; see its message above")
+        }
+    }
 }
 
 /// Run `scenario` everywhere and require one observation, modulo the
@@ -107,14 +127,11 @@ fn check(scenario: &Scenario) {
     for repeat in 0..NATIVE_REPEATS {
         runs.push((
             format!("native current-thread #{repeat}"),
-            run_native(RuntimeBuilder::current_thread(), scenario),
+            run_native(None, scenario),
         ));
         runs.push((
             format!("native {NATIVE_WORKERS} workers #{repeat}"),
-            run_native(
-                RuntimeBuilder::multi_thread().worker_threads(NATIVE_WORKERS),
-                scenario,
-            ),
+            run_native(Some(NATIVE_WORKERS), scenario),
         ));
     }
     let compared = |observation: &Observation| -> Observation {
@@ -143,8 +160,22 @@ fn check(scenario: &Scenario) {
             table.join("\n")
         );
     }
+    // Show which values each schedule-dependent field actually took, so a
+    // declared dependence that never varies (or an always-false oracle) is
+    // visible in a passing log.
+    let varied: BTreeMap<&str, std::collections::BTreeSet<&str>> = scenario
+        .schedule_dependent
+        .iter()
+        .map(|key| {
+            let values = runs
+                .iter()
+                .filter_map(|(_, observation)| observation.get(key).map(String::as_str))
+                .collect();
+            (*key, values)
+        })
+        .collect();
     eprintln!(
-        "differential scenario={} runs={} observation={reference:?}",
+        "differential scenario={} runs={} observation={reference:?} schedule_dependent={varied:?}",
         scenario.name,
         runs.len()
     );
@@ -655,6 +686,440 @@ fn abort_task_parked_on_semaphore(cx: Cx) -> ScenarioFuture {
     })
 }
 
+/// Three sender tasks each send five tagged messages; one receiver collects
+/// all fifteen. Per-sender FIFO order must hold on every runtime.
+fn mpsc_per_sender_order_under_contention(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let (tx, mut rx) = mpsc::channel::<(u32, u32)>(2);
+        let mut senders = Vec::new();
+        for sender in 0..3u32 {
+            let tx = tx.clone();
+            senders.push(
+                cx.spawn(move |task_cx| async move {
+                    for sequence in 0..5u32 {
+                        tx.send(&task_cx, (sender, sequence)).await.expect("receiver alive");
+                        yield_now().await;
+                    }
+                })
+                .expect("spawn sender"),
+            );
+        }
+        drop(tx);
+        let mut next = [0u32; 3];
+        let mut in_order = true;
+        let mut received = 0;
+        while let Ok((sender, sequence)) = rx.recv(&cx).await {
+            in_order &= next[sender as usize] == sequence;
+            next[sender as usize] += 1;
+            received += 1;
+        }
+        for handle in &mut senders {
+            handle.join(&cx).await.expect("sender finishes");
+        }
+        observe([
+            ("received", received.to_string()),
+            ("per_sender_fifo", in_order.to_string()),
+        ])
+    })
+}
+
+/// Four tasks increment under a mutex, yielding inside the critical section.
+/// No two holders may ever overlap, and no increment may be lost.
+fn mutex_excludes_across_yields(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let mutex = Arc::new(Mutex::new(0u32));
+        let holders = Arc::new(AtomicUsize::new(0));
+        let overlapped = Arc::new(AtomicBool::new(false));
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let (m, h, o) = (Arc::clone(&mutex), Arc::clone(&holders), Arc::clone(&overlapped));
+            handles.push(
+                cx.spawn(move |task_cx| async move {
+                    for _ in 0..10 {
+                        let mut guard = OwnedMutexGuard::lock(Arc::clone(&m), &task_cx)
+                            .await
+                            .expect("lock");
+                        if h.fetch_add(1, Ordering::SeqCst) != 0 {
+                            o.store(true, Ordering::SeqCst);
+                        }
+                        yield_now().await;
+                        *guard += 1;
+                        h.fetch_sub(1, Ordering::SeqCst);
+                    }
+                })
+                .expect("spawn incrementer"),
+            );
+        }
+        for handle in &mut handles {
+            handle.join(&cx).await.expect("incrementer finishes");
+        }
+        let total = *mutex.lock(&cx).await.expect("final lock");
+        observe([
+            ("total", total.to_string()),
+            ("holders_overlapped", overlapped.load(Ordering::SeqCst).to_string()),
+        ])
+    })
+}
+
+/// Writers and readers share an RwLock, yielding while they hold it. A reader
+/// must never see a writer inside, and every write must land.
+fn rwlock_excludes_writers_from_readers(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let lock = Arc::new(RwLock::new(0u32));
+        let writing = Arc::new(AtomicBool::new(false));
+        let violated = Arc::new(AtomicBool::new(false));
+        let mut handles = Vec::new();
+        for index in 0..6u32 {
+            let (l, w, v) = (Arc::clone(&lock), Arc::clone(&writing), Arc::clone(&violated));
+            handles.push(
+                cx.spawn(move |task_cx| async move {
+                    for _ in 0..5 {
+                        if index % 2 == 0 {
+                            let mut guard = l.write(&task_cx).await.expect("write");
+                            w.store(true, Ordering::SeqCst);
+                            yield_now().await;
+                            *guard += 1;
+                            w.store(false, Ordering::SeqCst);
+                        } else {
+                            let _guard = l.read(&task_cx).await.expect("read");
+                            if w.load(Ordering::SeqCst) {
+                                v.store(true, Ordering::SeqCst);
+                            }
+                            yield_now().await;
+                        }
+                    }
+                })
+                .expect("spawn lock user"),
+            );
+        }
+        for handle in &mut handles {
+            handle.join(&cx).await.expect("lock user finishes");
+        }
+        let total = *lock.read(&cx).await.expect("final read");
+        observe([
+            ("writes", total.to_string()),
+            ("reader_saw_writer", violated.load(Ordering::SeqCst).to_string()),
+        ])
+    })
+}
+
+/// A receiver parked on a oneshot sees `Closed` when the sender's task drops
+/// the sender, and a dropped reserved permit also closes the channel.
+fn oneshot_sender_and_permit_drop_close_the_receiver(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let (tx, mut rx) = oneshot::channel::<u32>();
+        let (started, _) = flags();
+        let s = Arc::clone(&started);
+        let mut dropper = cx
+            .spawn(move |_cx| async move {
+                wait_for(&s).await;
+                drop(tx);
+            })
+            .expect("spawn dropper");
+        let (ready_tx, mut ready_rx) = oneshot::channel::<u32>();
+        let mut receiver = cx
+            .spawn(move |task_cx| async move {
+                started.store(true, Ordering::SeqCst);
+                format!("{:?}", rx.recv(&task_cx).await)
+            })
+            .expect("spawn receiver");
+        let after_sender_drop = receiver.join(&cx).await.expect("receiver finishes");
+        dropper.join(&cx).await.expect("dropper finishes");
+        let permit = ready_tx.reserve(&cx).expect("reserve the only send");
+        drop(permit);
+        let after_permit_drop = format!("{:?}", ready_rx.recv(&cx).await);
+        observe([
+            ("after_sender_drop", after_sender_drop),
+            ("after_permit_drop", after_permit_drop),
+        ])
+    })
+}
+
+/// Two subscribers each receive every message in order, then `Closed` once
+/// the sender is gone and the buffer is drained.
+fn broadcast_subscribers_drain_then_see_closed(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let (tx, first) = broadcast::channel::<u32>(4);
+        let second = tx.subscribe();
+        let mut handles = Vec::new();
+        for mut rx in [first, second] {
+            handles.push(
+                cx.spawn(move |task_cx| async move {
+                    let mut seen = Vec::new();
+                    loop {
+                        match rx.recv(&task_cx).await {
+                            Ok(value) => seen.push(value),
+                            Err(error) => return format!("{seen:?} then {error:?}"),
+                        }
+                    }
+                })
+                .expect("spawn subscriber"),
+            );
+        }
+        for value in 1..=3u32 {
+            tx.send(&cx, value).expect("subscribers alive");
+            yield_now().await;
+        }
+        drop(tx);
+        let mut outcomes = Vec::new();
+        for handle in &mut handles {
+            outcomes.push(handle.join(&cx).await.expect("subscriber finishes"));
+        }
+        observe([("first", outcomes[0].clone()), ("second", outcomes[1].clone())])
+    })
+}
+
+/// A receiver parked on `changed` wakes for a new value, and sees `Closed`
+/// once the sender is dropped with nothing unseen.
+fn watch_changed_wakes_then_closes(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let (tx, mut rx) = watch::channel(0u32);
+        let (started, _) = flags();
+        let s = Arc::clone(&started);
+        let mut watcher = cx
+            .spawn(move |task_cx| async move {
+                s.store(true, Ordering::SeqCst);
+                let first = rx.changed(&task_cx).await;
+                let value = *rx.borrow_and_update();
+                let second = rx.changed(&task_cx).await;
+                format!("{first:?}/{value}/{second:?}")
+            })
+            .expect("spawn watcher");
+        wait_for(&started).await;
+        yield_now().await;
+        tx.send(5).expect("receiver alive");
+        yield_now().await;
+        drop(tx);
+        let seen = watcher.join(&cx).await.expect("watcher finishes");
+        observe([("changed_value_then_close", seen)])
+    })
+}
+
+/// Two waiters are registered; each `notify_one` releases exactly one. A
+/// notification with no waiter is stored for the next `notified`.
+fn notify_one_releases_exactly_one_waiter(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let notify = Arc::new(Notify::new());
+        let woken = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let (n, w) = (Arc::clone(&notify), Arc::clone(&woken));
+            handles.push(
+                cx.spawn(move |_cx| async move {
+                    n.notified().await;
+                    w.fetch_add(1, Ordering::SeqCst);
+                })
+                .expect("spawn waiter"),
+            );
+        }
+        while notify.waiter_count() < 2 {
+            yield_now().await;
+        }
+        let first_woke_a_waiter = notify.notify_one();
+        while woken.load(Ordering::SeqCst) < 1 {
+            yield_now().await;
+        }
+        for _ in 0..4 {
+            yield_now().await;
+        }
+        let after_first = woken.load(Ordering::SeqCst);
+        notify.notify_one();
+        for handle in &mut handles {
+            handle.join(&cx).await.expect("waiter finishes");
+        }
+        let stored = !notify.notify_one();
+        notify.notified().await;
+        observe([
+            ("first_notify_woke_a_waiter", first_woke_a_waiter.to_string()),
+            ("woken_after_first_notify", after_first.to_string()),
+            ("woken_after_second_notify", woken.load(Ordering::SeqCst).to_string()),
+            ("notify_without_waiter_is_stored", stored.to_string()),
+        ])
+    })
+}
+
+/// Three parties meet at a barrier: all are released and exactly one leads.
+fn barrier_releases_all_with_one_leader(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let barrier = Arc::new(Barrier::new(3));
+        let mut handles = Vec::new();
+        for _ in 0..3 {
+            let b = Arc::clone(&barrier);
+            handles.push(
+                cx.spawn(move |task_cx| async move {
+                    b.wait(&task_cx).await.map(|result| result.is_leader())
+                })
+                .expect("spawn party"),
+            );
+        }
+        let mut leaders = 0;
+        let mut released = 0;
+        for handle in &mut handles {
+            if let Ok(Ok(is_leader)) = handle.join(&cx).await {
+                released += 1;
+                leaders += usize::from(is_leader);
+            }
+        }
+        observe([("released", released.to_string()), ("leaders", leaders.to_string())])
+    })
+}
+
+/// `cancel_all` cancels three parked members and reports every outcome, in
+/// spawn order, as cancelled with the user reason.
+fn join_set_cancel_all_reports_every_member(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let mut set = JoinSet::in_cx(&cx);
+        let started = Arc::new(AtomicUsize::new(0));
+        for _ in 0..3 {
+            let s = Arc::clone(&started);
+            set.spawn(&cx, move |task_cx| async move {
+                let (_hold, mut never) = mpsc::channel::<u32>(1);
+                s.fetch_add(1, Ordering::SeqCst);
+                never.recv(&task_cx).await.map_err(|error| format!("{error:?}"))
+            })
+            .expect("spawn member");
+        }
+        while started.load(Ordering::SeqCst) < 3 {
+            yield_now().await;
+        }
+        let outcomes: Vec<String> = set
+            .cancel_all(&cx)
+            .await
+            .iter()
+            .map(|outcome| match outcome {
+                Outcome::Cancelled(reason) => format!("cancelled:{:?}", reason.kind),
+                other => outcome_kind(other),
+            })
+            .collect();
+        observe([("outcomes", outcomes.join(","))])
+    })
+}
+
+/// A zero-length `Scope::timeout` around a parked operation. Whether the
+/// operation was polled before the deadline depends on the schedule, and the
+/// classification follows the acknowledged-value rule (`Scope::timeout`
+/// docs). An operation polled before the cancel observes it and returns
+/// `Completed(Ok(0))`. One cancelled before its first poll is `TimedOut`, even
+/// though its body may still run once for cleanup (so "the body started"
+/// does not witness "polled before the cancel"). Either way, cleanup has run
+/// before `timeout` returns.
+fn scope_timeout_drains_the_timed_out_operation(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let (started, done) = flags();
+        let (s, d) = (Arc::clone(&started), Arc::clone(&done));
+        let result = cx
+            .scope()
+            .timeout(&cx, Duration::ZERO, move |task_cx| async move {
+                Ok::<u32, String>(parked_loser(task_cx, s, d).await)
+            })
+            .await;
+        let started = started.load(Ordering::SeqCst);
+        let shape = match &result {
+            Ok(TimedResult::Completed(Outcome::Ok(0))) => "completed:ok(0)".to_string(),
+            Ok(TimedResult::Completed(other)) => format!("completed:{}", outcome_kind(other)),
+            Ok(TimedResult::TimedOut(_)) => "timed_out".to_string(),
+            Err(error) => format!("spawn_error:{error:?}"),
+        };
+        let expected = shape == "timed_out" || (shape == "completed:ok(0)" && started);
+        observe([
+            ("completed_ok_after_start_or_timed_out", expected.to_string()),
+            ("started_implies_cleaned_up", (!started || done.load(Ordering::SeqCst)).to_string()),
+            ("result", shape),
+            ("operation_started", started.to_string()),
+        ])
+    })
+}
+
+/// The reason given to `abort_with_reason` is the one the task observes.
+fn abort_reason_reaches_the_task(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let (started, _) = flags();
+        let s = Arc::clone(&started);
+        let mut handle = cx
+            .spawn(move |task_cx| async move {
+                let (_hold, mut never) = mpsc::channel::<u32>(1);
+                s.store(true, Ordering::SeqCst);
+                let _ = never.recv(&task_cx).await;
+                task_cx.cancel_reason().map(|reason| format!("{:?}", reason.kind))
+            })
+            .expect("spawn");
+        wait_for(&started).await;
+        yield_now().await;
+        handle.abort_with_reason(CancelReason::shutdown());
+        let joined = handle.join(&cx).await;
+        observe([("join", outcome(&joined))])
+    })
+}
+
+/// Cancelling a child region reaches a parked task inside it with the given
+/// reason; the region then closes cleanly.
+fn child_region_cancel_reason_reaches_its_task(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let child = cx
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .expect("open child region");
+        let (started, _) = flags();
+        let s = Arc::clone(&started);
+        let mut handle = child
+            .cx()
+            .spawn(move |task_cx| async move {
+                let (_hold, mut never) = mpsc::channel::<u32>(1);
+                s.store(true, Ordering::SeqCst);
+                let _ = never.recv(&task_cx).await;
+                task_cx.cancel_reason().map(|reason| format!("{:?}", reason.kind))
+            })
+            .expect("spawn inside the child region");
+        wait_for(&started).await;
+        let cancelled = child.cancel(CancelReason::shutdown());
+        let joined = handle.join(&cx).await;
+        let closed = child.close().await;
+        observe([
+            ("cancel", format!("{cancelled:?}")),
+            ("join", outcome(&joined)),
+            ("close", format!("{closed:?}")),
+        ])
+    })
+}
+
+/// Closing a region closes the region nested inside it, and a task parked
+/// in the grandchild finishes its cleanup before the outer close returns.
+fn nested_region_close_drains_the_grandchild(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let child = cx
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .expect("open child region");
+        let grandchild = child
+            .cx()
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .expect("open grandchild region");
+        let (started, done) = flags();
+        let (s, d) = (Arc::clone(&started), Arc::clone(&done));
+        let _handle = grandchild
+            .cx()
+            .spawn(move |task_cx| parked_loser(task_cx, s, d))
+            .expect("spawn inside the grandchild region");
+        wait_for(&started).await;
+        let closed = child.close().await;
+        let drained = done.load(Ordering::SeqCst);
+        drop(grandchild);
+        observe([
+            ("close", format!("{closed:?}")),
+            ("grandchild_task_drained_before_close_returned", drained.to_string()),
+        ])
+    })
+}
+
+fn spawn_blocking_returns_its_value(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let mut handle = cx.spawn_blocking(|_cx| 41u32 + 1).expect("spawn_blocking");
+        let joined = handle.join(&cx).await;
+        observe([("join", outcome(&joined))])
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Tests: one per scenario
 // ---------------------------------------------------------------------------
@@ -715,5 +1180,47 @@ differential!(
     ["body_ran"]
 );
 differential!(differential_abort_mutex_waiter, abort_task_parked_on_mutex, []);
+differential!(
+    differential_mpsc_per_sender_order,
+    mpsc_per_sender_order_under_contention,
+    []
+);
+differential!(differential_mutex_exclusion, mutex_excludes_across_yields, []);
+differential!(differential_rwlock_exclusion, rwlock_excludes_writers_from_readers, []);
+differential!(
+    differential_oneshot_close,
+    oneshot_sender_and_permit_drop_close_the_receiver,
+    []
+);
+differential!(
+    differential_broadcast_close,
+    broadcast_subscribers_drain_then_see_closed,
+    []
+);
+differential!(differential_watch_changed, watch_changed_wakes_then_closes, []);
+differential!(differential_notify_one, notify_one_releases_exactly_one_waiter, []);
+differential!(differential_barrier, barrier_releases_all_with_one_leader, []);
+differential!(
+    differential_join_set_cancel_all,
+    join_set_cancel_all_reports_every_member,
+    []
+);
+differential!(
+    differential_scope_timeout,
+    scope_timeout_drains_the_timed_out_operation,
+    ["result", "operation_started"]
+);
+differential!(differential_abort_reason, abort_reason_reaches_the_task, []);
+differential!(
+    differential_child_region_cancel_reason,
+    child_region_cancel_reason_reaches_its_task,
+    []
+);
+differential!(
+    differential_nested_region_close,
+    nested_region_close_drains_the_grandchild,
+    []
+);
+differential!(differential_spawn_blocking, spawn_blocking_returns_its_value, []);
 differential!(differential_abort_mpsc_receiver, abort_task_parked_on_mpsc_recv, []);
 differential!(differential_abort_semaphore_waiter, abort_task_parked_on_semaphore, []);
