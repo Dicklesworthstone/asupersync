@@ -1468,6 +1468,9 @@ async fn send_native_proof_until_close<T: serde::Serialize + Sync>(
 
 /// Longest refusal reason sent back to the sender, in bytes.
 const MANIFEST_REFUSAL_REASON_MAX_BYTES: usize = 512;
+/// Rounds a refusing receiver spends waiting for the sender's Close, each one
+/// PTO (`NEEDMORE_PTO`) long, counted whether or not packets arrive.
+const REFUSAL_CLOSE_WAIT_ROUNDS: u32 = 4;
 
 /// The reason sent for a manifest the receiver cannot accept. The detail comes
 /// from the sender's own manifest (entry names, sizes, metadata), never from
@@ -1491,7 +1494,6 @@ async fn refuse_transfer_in_band(
     link: &mut QuicLink,
     control: &mut NativeQuicFrameTransport,
     mut reason: String,
-    config: &QuicConfig,
 ) {
     if reason.len() > MANIFEST_REFUSAL_REASON_MAX_BYTES {
         let mut end = MANIFEST_REFUSAL_REASON_MAX_BYTES;
@@ -1514,7 +1516,44 @@ async fn refuse_transfer_in_band(
         reason: Some(reason),
         committed_paths: Vec::new(),
     };
-    let _ = send_native_proof_until_close(cx, link, control, &receipt, &receipt, config).await;
+    let Ok(proof_frame) = super::json_frame(FrameType::Proof, &receipt) else {
+        return;
+    };
+    if control.send(cx, &mut link.conn, &proof_frame).is_err() || link.flush(cx).await.is_err() {
+        return;
+    }
+    let proof_frames = link.last_flushed_stream_frames();
+    // Bounded, unlike the terminal-proof wait of a completed transfer: that
+    // wait restarts whenever packets arrive, and a sender still streaming (or
+    // credit-blocked and sending keep-alives) never reads the Proof, so a
+    // refusal would hold the receiver, and a listener serving transfers one at
+    // a time, until the sender's own idle timeout.
+    for _ in 0..REFUSAL_CLOSE_WAIT_ROUNDS {
+        if cx.checkpoint().is_err() {
+            return;
+        }
+        loop {
+            match control.try_recv(cx, &mut link.conn) {
+                Ok(Some(frame)) if frame.frame_type() == FrameType::Close => {
+                    let _ = link.flush(cx).await;
+                    return;
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(_) => return,
+            }
+        }
+        if link.pump_inbound_for(cx, NEEDMORE_PTO).await.is_err() {
+            return;
+        }
+        if link
+            .retransmit_stream_frames(cx, &proof_frames, "refusal_proof_pto")
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
     let _ = super::send_native_close(cx, &mut link.conn, control);
     let _ = link.flush(cx).await;
 }
@@ -10796,8 +10835,7 @@ async fn run_receiver_session(
         let manifest: TransferManifest =
             super::parse_json_frame(&manifest_frame, FrameType::ObjectManifest, "ObjectManifest")?;
         if let Err(error) = super::validate_quic_manifest(&manifest, config) {
-            refuse_transfer_in_band(cx, link, &mut control, manifest_refusal_reason(&error), config)
-                .await;
+            refuse_transfer_in_band(cx, link, &mut control, manifest_refusal_reason(&error)).await;
             return Err(error);
         }
         (manifest, None)
@@ -10933,7 +10971,7 @@ async fn run_receiver_session(
         Err(error) => {
             if plain_transfer {
                 let reason = manifest_refusal_reason(&error);
-                refuse_transfer_in_band(cx, link, &mut control, reason, config).await;
+                refuse_transfer_in_band(cx, link, &mut control, reason).await;
             }
             return Err(error);
         }
@@ -10943,7 +10981,7 @@ async fn run_receiver_session(
         // destination was unusable.
         if plain_transfer {
             let reason = "receiver could not prepare its destination".to_string();
-            refuse_transfer_in_band(cx, link, &mut control, reason, config).await;
+            refuse_transfer_in_band(cx, link, &mut control, reason).await;
         }
         return Err(error);
     }

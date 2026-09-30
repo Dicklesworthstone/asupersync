@@ -884,6 +884,91 @@ fn receiver_destination_refusal_reaches_the_sender_without_its_paths() {
     );
 }
 
+/// asupersync-nnm3gw: a refusing receiver does not wait on a sender that is
+/// still streaming. The source-stream sender queues an 8 MiB payload. It
+/// stalls on stream credit that the refusing receiver no longer grants, and
+/// sends keep-alive pings until its own 30 s idle timeout. It reads the Proof
+/// only after its last byte. Every ping restarted the receiver's wait for
+/// Close. The receiver must still return within a few PTOs, because a listener
+/// that serves transfers one at a time (atpd) is blocked until it does.
+#[test]
+fn refusing_receiver_does_not_wait_for_a_streaming_sender() {
+    const RECEIVER_BOUND: Duration = Duration::from_secs(15);
+    let src = tempfile::tempdir().expect("src dir");
+    let dst = tempfile::tempdir().expect("dst dir");
+    let source = src.path().join("payload.bin");
+    // Four times the receiver's 2 MiB stream window: once the receiver
+    // refuses, it grants no more credit, and the sender sits credit-blocked,
+    // sending keep-alive pings.
+    let mut noise = DeterministicLoss::new(0x5EED_0930);
+    let payload: Vec<u8> = (0..8 << 20).map(|_| noise.next_u32().to_le_bytes()[0]).collect();
+    std::fs::write(&source, &payload).expect("write source");
+
+    let mut cfg = transport_authenticated_configs();
+    cfg.send.metadata_policy = MetadataPolicy {
+        preserve_timestamps: true,
+        ..MetadataPolicy::default()
+    };
+    cfg.recv.metadata_policy = MetadataPolicy {
+        preserve_timestamps: false,
+        ..MetadataPolicy::default()
+    };
+    // The reliable source stream (no bwlimit, low loss target): its sender
+    // reads no control frame until the last byte is queued. A spray sender
+    // checks control between symbols and stops at the refusal on its own.
+    cfg.send.round0_loss_target = 0.001;
+    cfg.recv.round0_loss_target = 0.001;
+    cfg.send.idle_timeout = Duration::from_secs(30);
+    cfg.recv.idle_timeout = Duration::from_secs(40);
+    let (send_cfg, recv_cfg) = (cfg.send, cfg.recv);
+
+    let started = Instant::now();
+    let ((sent, sent_at), (received, received_at)) = block_on(async {
+        let cx = Cx::for_testing();
+        let listen: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let server_endpoint = bind_server_endpoint(&cx, listen)
+            .await
+            .expect("bind server endpoint");
+        let server_addr = server_endpoint.local_addr();
+        zip(
+            async {
+                let result = send_path(&cx, server_addr, &source, send_cfg, "atp-quic-client").await;
+                (result, started.elapsed())
+            },
+            async {
+                let result = receive_on_endpoint(
+                    &cx,
+                    server_endpoint,
+                    dst.path(),
+                    &recv_cfg,
+                    "atp-quic-server",
+                )
+                .await;
+                (result, started.elapsed())
+            },
+        )
+        .await
+    });
+
+    let received = received.expect_err("the receiver refuses a timestamped manifest");
+    assert!(
+        matches!(received, QuicTransportError::Source(ref message)
+            if message.contains("timestamps are denied by receiver metadata policy")),
+        "receiver error: {received:?}"
+    );
+    eprintln!("refusal timing: receiver {received_at:?}, sender {sent_at:?}: {sent:?}");
+    assert!(
+        received_at < RECEIVER_BOUND,
+        "the refusing receiver returned only after {received_at:?} (sender finished at {sent_at:?})"
+    );
+    assert!(sent.is_err(), "the sender must not report success: {sent:?}");
+    assert!(
+        std::fs::read(dst.path().join("payload.bin")).is_err(),
+        "a refused manifest must commit nothing"
+    );
+    assert_no_staging_residue(dst.path());
+}
+
 /// asupersync-wlbrlr: a RELATIVE destination directory (`atp recv out/dir`,
 /// the bench harness's cell paths) must be accepted. The receiver's
 /// destination-root preparation walked the empty ancestor of a relative path
