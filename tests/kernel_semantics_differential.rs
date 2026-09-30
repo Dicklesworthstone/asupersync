@@ -41,6 +41,7 @@ use asupersync::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
 use asupersync::cx::ChildRegionSpec;
 use asupersync::runtime::{JoinError, RuntimeBuilder, yield_now};
 use asupersync::sync::{Barrier, Mutex, Notify, OwnedMutexGuard, RwLock, Semaphore};
+use asupersync::time::{sleep, timeout};
 use asupersync::types::Outcome;
 use asupersync::{CancelReason, Cx};
 
@@ -160,20 +161,25 @@ fn check(scenario: &Scenario) {
             table.join("\n")
         );
     }
-    // Show which values each schedule-dependent field actually took, so a
-    // declared dependence that never varies (or an always-false oracle) is
-    // visible in a passing log.
-    let varied: BTreeMap<&str, std::collections::BTreeSet<&str>> = scenario
-        .schedule_dependent
-        .iter()
-        .map(|key| {
-            let values = runs
-                .iter()
-                .filter_map(|(_, observation)| observation.get(key).map(String::as_str))
-                .collect();
-            (*key, values)
-        })
-        .collect();
+    // Show which values each schedule-dependent field actually took, and on
+    // which runtime, so a declared dependence that never varies, or one that
+    // varies between lab and native rather than within native, is visible in
+    // a passing log.
+    let mut varied: BTreeMap<&str, BTreeMap<&str, BTreeMap<&str, usize>>> = BTreeMap::new();
+    for key in scenario.schedule_dependent {
+        for (runtime, observation) in &runs {
+            if let Some(value) = observation.get(key) {
+                let class = runtime.split(" #").next().and_then(|class| class.split(" seed").next());
+                *varied
+                    .entry(*key)
+                    .or_default()
+                    .entry(value.as_str())
+                    .or_default()
+                    .entry(class.unwrap_or(runtime.as_str()))
+                    .or_default() += 1;
+            }
+        }
+    }
     eprintln!(
         "differential scenario={} runs={} observation={reference:?} schedule_dependent={varied:?}",
         scenario.name,
@@ -1112,12 +1118,124 @@ fn nested_region_close_drains_the_grandchild(cx: Cx) -> ScenarioFuture {
     })
 }
 
+/// Three tasks sleep for different lengths. On every clock (lab virtual
+/// time, native timer driver) no sleep ends before its deadline. Completion
+/// order is not compared: a stalled native worker can release several
+/// expired sleeps at once.
+fn sleeps_never_end_early(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let mut handles = Vec::new();
+        for millis in [30u64, 10, 20] {
+            handles.push(
+                cx.spawn(move |task_cx| async move {
+                    let start = task_cx.now();
+                    sleep(start, Duration::from_millis(millis)).await;
+                    task_cx.now().duration_since(start) >= millis * 1_000_000
+                })
+                .expect("spawn sleeper"),
+            );
+        }
+        let mut on_time = true;
+        for handle in &mut handles {
+            on_time &= handle.join(&cx).await.expect("sleeper finishes");
+        }
+        observe([("no_sleep_ended_early", on_time.to_string())])
+    })
+}
+
+/// `time::timeout` elapses for a parked future, and not before its
+/// deadline; a future that is already ready beats a long timeout.
+fn time_timeout_elapses_only_for_the_parked_future(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let (_hold, mut never) = mpsc::channel::<u32>(1);
+        let start = cx.now();
+        let parked = timeout(start, Duration::from_millis(20), never.recv(&cx))
+            .await
+            .map(|received| received.is_ok())
+            .map_err(|_elapsed| "elapsed");
+        let waited = cx.now().duration_since(start);
+        let fast = timeout(cx.now(), Duration::from_secs(30), async { 7u32 })
+            .await
+            .map_err(|_elapsed| "elapsed");
+        observe([
+            ("parked", format!("{parked:?}")),
+            ("not_before_deadline", (waited >= 20_000_000).to_string()),
+            ("fast", format!("{fast:?}")),
+        ])
+    })
+}
+
+/// `Scope::timeout` with a real 50 ms deadline around a parked operation.
+/// Normally the operation is polled first, so it observes the timeout,
+/// cleans up and returns: `Completed(Ok(0))`. A native worker stalled past the
+/// deadline can cancel it before its first poll instead (`TimedOut`), so the
+/// shape is schedule-dependent; the invariants are not.
+fn scope_timeout_with_a_real_deadline(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let (started, done) = flags();
+        let (s, d) = (Arc::clone(&started), Arc::clone(&done));
+        let result = cx
+            .scope()
+            .timeout(&cx, Duration::from_millis(50), move |task_cx| async move {
+                Ok::<u32, String>(parked_loser(task_cx, s, d).await)
+            })
+            .await;
+        let started = started.load(Ordering::SeqCst);
+        let shape = match &result {
+            Ok(TimedResult::Completed(Outcome::Ok(0))) => "completed:ok(0)".to_string(),
+            Ok(TimedResult::Completed(other)) => format!("completed:{}", outcome_kind(other)),
+            Ok(TimedResult::TimedOut(_)) => "timed_out".to_string(),
+            Err(error) => format!("spawn_error:{error:?}"),
+        };
+        let expected = shape == "timed_out" || (shape == "completed:ok(0)" && started);
+        observe([
+            ("completed_ok_after_start_or_timed_out", expected.to_string()),
+            ("started_implies_cleaned_up", (!started || done.load(Ordering::SeqCst)).to_string()),
+            ("result", shape),
+        ])
+    })
+}
+
 fn spawn_blocking_returns_its_value(cx: Cx) -> ScenarioFuture {
     Box::pin(async move {
         let mut handle = cx.spawn_blocking(|_cx| 41u32 + 1).expect("spawn_blocking");
         let joined = handle.join(&cx).await;
         observe([("join", outcome(&joined))])
     })
+}
+
+// ---------------------------------------------------------------------------
+// Lab-only invariants the differential runs surfaced
+// ---------------------------------------------------------------------------
+
+/// A task spawned just before its parent sleeps is polled before virtual time
+/// moves. `LabRuntimeTarget::block_on` used to jump to the parent's deadline
+/// while the spawn still awaited admission, so the child first ran after the
+/// parent's timer had fired; the production runtime does that only under a
+/// stall. Found by `scope_timeout_with_a_real_deadline`: the lab reported
+/// `TimedOut` in 4 of 6 seeds, the native runtime never.
+#[test]
+fn lab_time_does_not_advance_past_a_pending_spawn() {
+    for seed in 0..32u64 {
+        let config = TestConfig {
+            rng_seed: Some(seed),
+            ..TestConfig::default()
+        };
+        let mut runtime = LabRuntimeTarget::create_runtime(config);
+        let (spawned_at, first_polled_at) = LabRuntimeTarget::block_on(&mut runtime, async move {
+            let cx = Cx::current().expect("LabRuntimeTarget root task installs Cx");
+            let spawned_at = cx.now();
+            let mut child = cx.spawn(|task_cx| async move { task_cx.now() }).expect("spawn");
+            sleep(cx.now(), Duration::from_millis(50)).await;
+            let first_polled_at = child.join(&cx).await.expect("child finishes");
+            (spawned_at, first_polled_at)
+        });
+        assert_eq!(
+            first_polled_at.as_nanos(),
+            spawned_at.as_nanos(),
+            "seed {seed}: virtual time moved before the spawned task's first poll"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1222,5 +1340,16 @@ differential!(
     []
 );
 differential!(differential_spawn_blocking, spawn_blocking_returns_its_value, []);
+differential!(differential_sleeps_never_early, sleeps_never_end_early, []);
+differential!(
+    differential_time_timeout,
+    time_timeout_elapses_only_for_the_parked_future,
+    []
+);
+differential!(
+    differential_scope_timeout_real_deadline,
+    scope_timeout_with_a_real_deadline,
+    ["result"]
+);
 differential!(differential_abort_mpsc_receiver, abort_task_parked_on_mpsc_recv, []);
 differential!(differential_abort_semaphore_waiter, abort_task_parked_on_semaphore, []);

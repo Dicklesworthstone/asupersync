@@ -2860,7 +2860,7 @@ impl LabRuntime {
         self.scheduler.lock().has_runnable_work(now)
     }
 
-    fn has_pending_dispatch_commands(&self) -> bool {
+    pub(crate) fn has_pending_dispatch_commands(&self) -> bool {
         !self.spawn_mailbox.is_empty() || self.state.has_deferred_cancel_dispatches()
     }
 

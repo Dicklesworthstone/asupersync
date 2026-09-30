@@ -754,7 +754,12 @@ impl ConformanceTarget for LabRuntimeTarget {
             // scheduler is empty and step_for_test cannot make progress; jump
             // to the next timer deadline the same way run_with_auto_advance
             // does (br-asupersync-uvqpga). No-op when no timer is pending.
-            if runtime.scheduler.lock().is_empty() {
+            // A spawn awaiting admission, or a deferred cancel, is runnable
+            // work the scheduler does not show yet: step_for_test admits it
+            // first. Advancing here instead let a deadline fire before a task
+            // spawned just ahead of it was ever polled, which the production
+            // runtime does only under a stall.
+            if runtime.scheduler.lock().is_empty() && !runtime.has_pending_dispatch_commands() {
                 runtime.advance_to_next_timer();
             }
 
