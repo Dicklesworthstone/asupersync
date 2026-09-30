@@ -6,5 +6,7 @@
     "jsx": "react-jsx"
   },
   "include": ["src"],
-  "references": [{ "path": "../browser" }]
+  "references": [
+    { "path": "../browser" }
+  ]
 }
