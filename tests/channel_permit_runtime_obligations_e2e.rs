@@ -15,19 +15,30 @@
 //! outlive its holder without resolving. Ordinary drop is a supported abort
 //! path (asserted by the controls), not a leak.
 //!
+//! The `native_*` tests repeat the core claims on the production runtime,
+//! current-thread and two workers, through `Runtime::diagnostics()`. A
+//! reserved permit is a live obligation of its kind, held by the reserving
+//! task in its region. Send or drop resolves it. A forgotten permit becomes
+//! a confirmed leak once its holder finishes. A task cancelled while it
+//! holds a permit aborts the permit instead of leaking it.
+//!
 //! No-claim: `Mutex` / `RwLock` guards are not obligations and are not
-//! covered here; neither is the production three-lane scheduler (the
-//! completion sweep is shared, but this file runs the deterministic lab).
+//! covered here. Futurelock detection is a lab facility and is proved only
+//! on the lab.
 
 use std::future::Future;
+use std::sync::{Arc, Mutex};
 
 use asupersync::Cx;
 use asupersync::channel::{broadcast, mpsc, oneshot};
 use asupersync::lab::{LabConfig, LabRuntime};
+use asupersync::observability::{Diagnostics, ObligationLeak};
 use asupersync::record::ObligationKind;
+use asupersync::runtime::config::ObligationLeakResponse;
+use asupersync::runtime::{Runtime, RuntimeBuilder, yield_now};
 use asupersync::sync::Semaphore;
 use asupersync::trace::{TraceData, TraceEvent, TraceEventKind};
-use asupersync::types::{Budget, TaskId};
+use asupersync::types::{Budget, CancelReason, TaskId};
 
 fn lab(seed: u64) -> LabRuntime {
     LabRuntime::new(LabConfig::new(seed).max_steps(10_000).panic_on_leak(false))
@@ -371,4 +382,224 @@ fn semaphore_permit_released_before_parking_is_not_a_futurelock() {
         events.is_empty(),
         "a parked task holding nothing is not a futurelock: {events:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Native runtime: the same obligations on the production runtime
+// ---------------------------------------------------------------------------
+
+const MAX_YIELDS: usize = 10_000;
+
+/// The production runtime in both shapes. A leak is logged rather than
+/// panicking, so the leak scenarios can observe it.
+fn native_runtimes() -> Vec<(&'static str, Runtime)> {
+    [
+        ("current-thread", RuntimeBuilder::current_thread()),
+        (
+            "two-workers",
+            RuntimeBuilder::multi_thread().worker_threads(2),
+        ),
+    ]
+    .into_iter()
+    .map(|(flavor, builder)| {
+        let runtime = builder
+            .obligation_leak_response(ObligationLeakResponse::Log)
+            .build()
+            .expect("build native runtime");
+        (flavor, runtime)
+    })
+    .collect()
+}
+
+/// Yield to the runtime until `probe` holds; the mailbox resolves
+/// obligations asynchronously, so a state change needs a few polls to show.
+async fn yield_until(mut probe: impl FnMut() -> bool) -> bool {
+    for _ in 0..MAX_YIELDS {
+        if probe() {
+            return true;
+        }
+        yield_now().await;
+    }
+    probe()
+}
+
+/// Live (reserved, holder still running) obligations of `kind` held by `holder`.
+fn live(diagnostics: &Diagnostics, holder: TaskId, kind: ObligationKind) -> Vec<ObligationLeak> {
+    let kind = format!("{kind:?}");
+    diagnostics
+        .find_leaked_obligations()
+        .into_iter()
+        .filter(|record| record.holder_task == Some(holder) && record.obligation_type == kind)
+        .collect()
+}
+
+/// Confirmed leaks of `kind` held by `holder`.
+fn confirmed(
+    diagnostics: &Diagnostics,
+    holder: TaskId,
+    kind: ObligationKind,
+) -> Vec<ObligationLeak> {
+    let kind = format!("{kind:?}");
+    diagnostics
+        .find_confirmed_obligation_leaks()
+        .into_iter()
+        .filter(|record| record.holder_task == Some(holder) && record.obligation_type == kind)
+        .collect()
+}
+
+#[test]
+fn native_permits_are_live_obligations_until_sent_or_dropped() {
+    for (flavor, runtime) in native_runtimes() {
+        let diagnostics = runtime.diagnostics();
+        runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs a root Cx");
+            let holder = cx.task_id();
+            let (tx, mut rx) = mpsc::channel::<u8>(2);
+
+            // mpsc: reserve, observe the live SendPermit, then commit it.
+            let permit = tx.reserve(&cx).await.expect("reserve capacity");
+            assert!(
+                yield_until(|| live(&diagnostics, holder, ObligationKind::SendPermit).len() == 1)
+                    .await,
+                "{flavor}: a reserved permit is one live SendPermit obligation"
+            );
+            let record = live(&diagnostics, holder, ObligationKind::SendPermit)
+                .pop()
+                .expect("live SendPermit record");
+            assert_eq!(record.region_id, cx.region_id(), "{flavor}: held in the holder's region");
+            permit.try_send(7).expect("receiver is live");
+            assert_eq!(rx.recv(&cx).await.expect("receive"), 7);
+            assert!(
+                yield_until(|| live(&diagnostics, holder, ObligationKind::SendPermit).is_empty())
+                    .await,
+                "{flavor}: a sent permit resolves its obligation"
+            );
+
+            // mpsc: an unsent permit dropped aborts its obligation.
+            let permit = tx.reserve(&cx).await.expect("reserve capacity");
+            assert!(
+                yield_until(|| live(&diagnostics, holder, ObligationKind::SendPermit).len() == 1)
+                    .await,
+                "{flavor}: the second reservation is live"
+            );
+            drop(permit);
+            assert!(
+                yield_until(|| live(&diagnostics, holder, ObligationKind::SendPermit).is_empty())
+                    .await,
+                "{flavor}: a dropped permit aborts its obligation"
+            );
+
+            // Semaphore: an acquired permit is live until released.
+            let semaphore = Semaphore::new(1);
+            let permit = semaphore.acquire(&cx, 1).await.expect("acquire permit");
+            assert!(
+                yield_until(|| {
+                    live(&diagnostics, holder, ObligationKind::SemaphorePermit).len() == 1
+                })
+                .await,
+                "{flavor}: an acquired permit is one live SemaphorePermit obligation"
+            );
+            drop(permit);
+            assert!(
+                yield_until(|| {
+                    live(&diagnostics, holder, ObligationKind::SemaphorePermit).is_empty()
+                })
+                .await,
+                "{flavor}: a released permit discharges its obligation"
+            );
+
+            assert!(
+                confirmed(&diagnostics, holder, ObligationKind::SendPermit).is_empty()
+                    && confirmed(&diagnostics, holder, ObligationKind::SemaphorePermit).is_empty(),
+                "{flavor}: resolved permits are never confirmed leaks"
+            );
+        });
+    }
+}
+
+#[test]
+fn native_permits_forgotten_by_a_finished_task_are_confirmed_leaks_of_their_kind() {
+    for (flavor, runtime) in native_runtimes() {
+        let diagnostics = runtime.diagnostics();
+        runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs a root Cx");
+            let mut handle = cx
+                .spawn(|task_cx| async move {
+                    let (tx, _rx) = mpsc::channel::<u8>(1);
+                    let permit = tx.reserve(&task_cx).await.expect("reserve capacity");
+                    let semaphore = Semaphore::new(1);
+                    let held = semaphore.acquire(&task_cx, 1).await.expect("acquire permit");
+                    // The leaks: both permits escape without being resolved.
+                    std::mem::forget(permit);
+                    std::mem::forget(held);
+                    (task_cx.task_id(), task_cx.region_id())
+                })
+                .expect("spawn leaking task");
+            let (holder, region) = handle.join(&cx).await.expect("join leaking task");
+
+            assert!(
+                yield_until(|| {
+                    confirmed(&diagnostics, holder, ObligationKind::SendPermit).len() == 1
+                        && confirmed(&diagnostics, holder, ObligationKind::SemaphorePermit).len()
+                            == 1
+                })
+                .await,
+                "{flavor}: each forgotten permit is one confirmed leak of its kind; confirmed = {:?}",
+                diagnostics.find_confirmed_obligation_leaks()
+            );
+            for kind in [ObligationKind::SendPermit, ObligationKind::SemaphorePermit] {
+                let leak = confirmed(&diagnostics, holder, kind)
+                    .pop()
+                    .expect("confirmed leak record");
+                assert_eq!(leak.region_id, region, "{flavor}: {kind:?} leak names the holder's region");
+            }
+        });
+    }
+}
+
+#[test]
+fn native_task_cancelled_while_holding_a_permit_aborts_it_without_a_leak() {
+    for (flavor, runtime) in native_runtimes() {
+        let diagnostics = runtime.diagnostics();
+        runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs a root Cx");
+            let holder_slot = Arc::new(Mutex::new(None));
+            let slot = Arc::clone(&holder_slot);
+            let handle = cx
+                .spawn(move |task_cx| async move {
+                    let (tx, _rx) = mpsc::channel::<u8>(1);
+                    let _permit = tx.reserve(&task_cx).await.expect("reserve capacity");
+                    *slot.lock().expect("holder slot") = Some(task_cx.task_id());
+                    // Hold the permit until cancellation is observed; returning
+                    // then drops it on the cancellation path.
+                    while task_cx.checkpoint().is_ok() {
+                        yield_now().await;
+                    }
+                })
+                .expect("spawn holding task");
+
+            assert!(
+                yield_until(|| holder_slot.lock().expect("holder slot").is_some()).await,
+                "{flavor}: the task reserved its permit"
+            );
+            let holder = holder_slot.lock().expect("holder slot").expect("holder id");
+            assert!(
+                yield_until(|| live(&diagnostics, holder, ObligationKind::SendPermit).len() == 1)
+                    .await,
+                "{flavor}: the permit is live before cancellation (state witness)"
+            );
+
+            handle.abort_with_reason(CancelReason::user("cv5sqe native cancel"));
+            assert!(
+                yield_until(|| live(&diagnostics, holder, ObligationKind::SendPermit).is_empty())
+                    .await,
+                "{flavor}: cancellation aborts the held permit's obligation"
+            );
+            assert!(
+                confirmed(&diagnostics, holder, ObligationKind::SendPermit).is_empty(),
+                "{flavor}: a permit dropped on the cancellation path is not a leak; confirmed = {:?}",
+                diagnostics.find_confirmed_obligation_leaks()
+            );
+        });
+    }
 }
