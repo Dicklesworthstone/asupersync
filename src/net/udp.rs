@@ -48,6 +48,15 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::task::{Context, Poll};
 
+/// Linux launch-time sends and error-queue reads (GH #73).
+#[cfg(target_os = "linux")]
+mod txtime;
+#[cfg(target_os = "linux")]
+pub use txtime::{
+    UdpErrorOrigin, UdpErrorReport, UdpTxTimeClock, UdpTxTimeConfig, UdpTxTimeError,
+    UdpTxTimeErrorKind,
+};
+
 #[cfg(windows)]
 #[allow(unsafe_code)]
 fn suppress_windows_udp_connection_reset(socket: &StdUdpSocket) -> io::Result<()> {
@@ -2030,6 +2039,9 @@ pub struct UdpSocket {
     registration: ReactorRegistration,
     inner: Arc<StdUdpSocket>,
     gso_demoted: bool,
+    /// `SO_TXTIME` set through this handle: plain sends are refused (GH #73).
+    #[cfg(target_os = "linux")]
+    txtime: Option<UdpTxTimeConfig>,
 }
 
 impl UdpSocket {
@@ -2061,6 +2073,8 @@ impl UdpSocket {
                             inner: Arc::new(socket),
                             registration: ReactorRegistration::new(),
                             gso_demoted: false,
+                            #[cfg(target_os = "linux")]
+                            txtime: None,
                         });
                     }
                     Err(err) => last_err = Some(err),
@@ -2165,6 +2179,9 @@ impl UdpSocket {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
+            if let Err(err) = self.ensure_plain_send_allowed() {
+                return Poll::Ready(Err(err));
+            }
             let mut last_err = None;
             for addr in addrs {
                 if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
@@ -2260,6 +2277,9 @@ impl UdpSocket {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
+            if let Err(err) = self.ensure_plain_send_allowed() {
+                return Poll::Ready(Err(err));
+            }
             if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
             }
@@ -2566,6 +2586,7 @@ impl UdpSocket {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
+            self.ensure_plain_send_allowed()?;
             let strategy = strategy.clamped();
             loop {
                 match self.try_send_batch_to_native(packets, strategy)? {
@@ -2612,6 +2633,9 @@ impl UdpSocket {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
+            if let Err(err) = self.ensure_plain_send_allowed() {
+                return Poll::Ready(Err(err));
+            }
             if packets.len() > UDP_MAX_BATCH_SIZE {
                 return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -2676,6 +2700,7 @@ impl UdpSocket {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
+            self.ensure_plain_send_allowed()?;
             self.inner.peer_addr()?;
             let strategy = strategy.clamped();
             loop {
@@ -3471,6 +3496,8 @@ impl UdpSocket {
             inner: Arc::new(self.inner.try_clone()?),
             registration: ReactorRegistration::new(),
             gso_demoted: self.gso_demoted,
+            #[cfg(target_os = "linux")]
+            txtime: self.txtime,
         })
     }
 
@@ -3512,6 +3539,8 @@ impl UdpSocket {
                 inner: Arc::new(socket),
                 registration: ReactorRegistration::new(),
                 gso_demoted: false,
+                #[cfg(target_os = "linux")]
+                txtime: None,
             })
         }
     }
@@ -3521,6 +3550,22 @@ impl UdpSocket {
     fn register_interest(&self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
         let _ = (cx, interest);
         browser_udp_unsupported_result("UdpSocket::register_interest")
+    }
+
+    /// Refuses a send without a launch time once `SO_TXTIME` is on: the ETF
+    /// qdisc would drop that datagram while the send reports `Ok` (GH #73).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[inline]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(clippy::unused_self, clippy::unnecessary_wraps)
+    )]
+    fn ensure_plain_send_allowed(&self) -> io::Result<()> {
+        #[cfg(target_os = "linux")]
+        if self.txtime.is_some() {
+            return Err(txtime::plain_send_refused());
+        }
+        Ok(())
     }
 
     /// Register interest with the reactor.

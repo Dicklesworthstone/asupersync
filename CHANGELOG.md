@@ -234,6 +234,21 @@ cancelled `Cx` as `Cancelled` rather than as
   is not starved by a hot dispatch loop.
 - A V3 peer lease is bounded to 24 hours for expiry enforcement.
 
+### UDP launch-time sends and the socket error queue (Linux, GH #73)
+
+- `UdpSocket::set_txtime` turns on `SO_TXTIME` (`UdpTxTimeConfig`: clock,
+  deadline mode, error reports), and `send_to_with_txtime` /
+  `send_with_txtime` attach a per-datagram `SCM_TXTIME` launch time for the
+  ETF qdisc or NIC launch-time offload. They wait for writability like
+  `send_to`. Once `SO_TXTIME` is on, the plain send paths of that socket
+  (`send`, `send_to`, the batch sends, `SendSink`) return `InvalidInput`,
+  because ETF silently drops a datagram without a launch time.
+- `UdpSocket::recv_error` / `try_recv_error` read the socket error queue
+  (`MSG_ERRQUEUE`) as a `UdpErrorReport` (errno, origin, offender, destination,
+  and decoded launch-time errors). A pending read waits on `Interest::ERROR`
+  without disturbing readable/writable waits. `set_recverr` turns on
+  `IP_RECVERR` / `IPV6_RECVERR` so ICMP errors are queued too.
+
 ### Native QUIC key updates (RFC 9001 §6.3/§6.5/§6.6)
 
 - The ATP native QUIC 1-RTT data plane now rotates packet-protection keys
