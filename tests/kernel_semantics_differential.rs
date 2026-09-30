@@ -2134,8 +2134,7 @@ differential!(
 differential!(
     differential_region_poll_quota,
     region_poll_quota_stops_a_busy_task,
-    [],
-    ignore = "asupersync-r017wv: only the lab enforces poll quotas (lab stops at round 7, native runs 1000 rounds)"
+    []
 );
 differential!(
     differential_time_timeout,

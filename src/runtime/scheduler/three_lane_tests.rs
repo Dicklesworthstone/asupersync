@@ -12640,3 +12640,81 @@ fn stranded_local_task_set_is_pruned_of_retired_records() {
         worker.stranded_local_tasks.len()
     );
 }
+
+fn poll_quota_record(
+    task: TaskId,
+    budget: Budget,
+) -> (crate::record::TaskRecord, Arc<RwLock<CxInner>>) {
+    let region = RegionId::new_for_test(1, 0);
+    let inner = Arc::new(RwLock::new(CxInner::new(region, task, budget)));
+    let mut record = crate::record::TaskRecord::new(task, region, budget);
+    record.set_cx_inner(Arc::clone(&inner));
+    (record, inner)
+}
+
+#[test]
+fn production_poll_quota_is_spent_before_each_poll_then_cancels() {
+    let (mut record, inner) = poll_quota_record(
+        TaskId::new_for_test(900, 1),
+        Budget::new().with_poll_quota(2),
+    );
+    consume_budget_poll(&mut record);
+    consume_budget_poll(&mut record);
+    assert_eq!(record.polls_remaining, 0);
+    assert_eq!(inner.read().budget.poll_quota, 0);
+    assert!(
+        !inner.read().cancel_requested,
+        "spending the last poll is not yet exceeding the quota"
+    );
+
+    consume_budget_poll(&mut record);
+    let guard = inner.read();
+    assert!(guard.cancel_requested);
+    assert_eq!(
+        guard.cancel_reason.as_ref().map(|reason| reason.kind),
+        Some(CancelKind::PollQuota)
+    );
+}
+
+#[test]
+fn production_poll_quota_leaves_unbounded_and_cleanup_budgets_alone() {
+    let (mut record, inner) = poll_quota_record(TaskId::new_for_test(901, 1), Budget::INFINITE);
+    for _ in 0..10 {
+        consume_budget_poll(&mut record);
+    }
+    assert_eq!(record.polls_remaining, u32::MAX);
+    assert_eq!(inner.read().budget.poll_quota, u32::MAX);
+    assert!(!inner.read().cancel_requested);
+
+    // A cancelled task's cleanup budget stays advisory: a drain longer than
+    // its cleanup quota keeps the reason it was cancelled with.
+    let (mut record, inner) = poll_quota_record(TaskId::new_for_test(902, 1), Budget::INFINITE);
+    let (newly_cancelled, effects) = record
+        .request_cancel_with_budget(CancelReason::user("drain"), Budget::MINIMAL)
+        .into_parts();
+    assert!(newly_cancelled);
+    effects.dispatch();
+    // Acknowledgement enters the cleanup phase and installs the cleanup
+    // budget's finite quota on the record and in the task's Cx.
+    let acknowledged = record.acknowledge_cancel();
+    assert_eq!(
+        acknowledged.map(|reason| reason.kind),
+        Some(CancelKind::User)
+    );
+    assert!(record.state.is_cancelling());
+    assert_eq!(record.polls_remaining, Budget::MINIMAL.poll_quota);
+    assert_eq!(inner.read().budget.poll_quota, Budget::MINIMAL.poll_quota);
+    for _ in 0..500 {
+        consume_budget_poll(&mut record);
+    }
+    assert_eq!(record.polls_remaining, Budget::MINIMAL.poll_quota);
+    assert_eq!(inner.read().budget.poll_quota, Budget::MINIMAL.poll_quota);
+    assert_eq!(
+        inner
+            .read()
+            .cancel_reason
+            .as_ref()
+            .map(|reason| reason.kind),
+        Some(CancelKind::User)
+    );
+}

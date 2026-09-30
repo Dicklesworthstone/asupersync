@@ -507,6 +507,7 @@ impl Worker {
                 if let Some(record) = state.task_mut(task_id) {
                     record.start_running();
                     record.wake_state.begin_poll();
+                    super::three_lane::consume_budget_poll(record);
                     let task_cx = record.cx.clone();
                     let wake_state = Arc::clone(&record.wake_state);
                     let cached = record.cached_waker.take();
@@ -525,6 +526,7 @@ impl Worker {
                 if let Some(record) = state.task_mut(task_id) {
                     record.start_running();
                     record.wake_state.begin_poll();
+                    super::three_lane::consume_budget_poll(record);
                     let task_cx = record.cx.clone();
                     let wake_state = Arc::clone(&record.wake_state);
                     let cached = record.cached_waker.take();
