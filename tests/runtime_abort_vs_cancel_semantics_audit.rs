@@ -222,6 +222,21 @@ async fn drive_until_flag(flag: &AtomicBool, budget: Duration) -> bool {
     flag.load(Ordering::Acquire)
 }
 
+/// Waits until `mutex` has exactly `waiters` parked waiters. The bound is
+/// wall-clock time, not a yield count: on a multi-worker runtime the waiter
+/// runs on another worker thread, which a loaded host can keep descheduled
+/// for longer than hundreds of yields take.
+async fn drive_until_waiters(mutex: &Mutex<()>, waiters: usize, budget: Duration) -> bool {
+    let started = Instant::now();
+    while started.elapsed() < budget {
+        if mutex.waiters() == waiters {
+            return true;
+        }
+        yield_now().await;
+    }
+    mutex.waiters() == waiters
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum DownstreamTransportError {
     Cancelled,
@@ -1163,15 +1178,8 @@ fn cross_thread_abort_on_multi_worker_runtime_preserves_mutex_cancellation_and_w
             })
             .expect("runtime-backed Cx must admit waiter task");
 
-        for _ in 0..512 {
-            if mutex.waiters() == 1 {
-                break;
-            }
-            yield_now().await;
-        }
-        assert_eq!(
-            mutex.waiters(),
-            1,
+        assert!(
+            drive_until_waiters(&mutex, 1, Duration::from_secs(10)).await,
             "multi-worker-runtime waiter must be genuinely parked before cross-thread abort",
         );
 
