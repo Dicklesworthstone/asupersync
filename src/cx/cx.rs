@@ -5408,7 +5408,7 @@ impl Cx<cap::All> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```
     /// use asupersync::{Cx, Budget, Time};
     ///
     /// // Create a context with a 30-second deadline
@@ -5440,7 +5440,7 @@ impl Cx<cap::All> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```
     /// use asupersync::Cx;
     ///
     /// let cx = Cx::for_testing_with_io();

@@ -40,7 +40,7 @@
 //!
 //! For custom pool implementations, implement the [`Pool`] trait:
 //!
-//! ```ignore
+//! ```
 //! use asupersync::sync::{Pool, PooledResource, PoolStats, PoolFuture, PoolReturnSender};
 //! use asupersync::Cx;
 //! use std::sync::mpsc;

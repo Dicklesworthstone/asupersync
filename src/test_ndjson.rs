@@ -49,7 +49,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use asupersync::test_ndjson::{NdjsonLogger, write_artifact_bundle};
 //! use asupersync::test_logging::{TestLogLevel, TestEvent, TestContext, ReproManifest};
 //!

@@ -573,7 +573,7 @@ impl ScheduleExplorer {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```
     /// use asupersync::lab::explorer::{ExplorerConfig, ScheduleExplorer};
     /// use asupersync::types::Budget;
     ///

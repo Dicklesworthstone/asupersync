@@ -691,7 +691,7 @@ impl LabInjectionRunner {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use asupersync::lab::{lab, InjectionStrategy, InstrumentedFuture};
 ///
 /// let report = lab(42)

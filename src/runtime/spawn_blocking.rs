@@ -12,7 +12,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use asupersync::runtime::spawn_blocking;
 //! use std::io;
 //!

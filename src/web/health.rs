@@ -14,7 +14,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use asupersync::web::health::{HealthCheck, HealthStatus};
 //! use asupersync::web::{Router, get};
 //!

@@ -10,7 +10,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use asupersync::process::Command;
 //!
 //! fn run_command() -> std::io::Result<()> {

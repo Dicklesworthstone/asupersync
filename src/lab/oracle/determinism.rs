@@ -573,7 +573,7 @@ impl DeterminismOracle {
 ///
 /// This is the easiest way to check if a program is deterministic:
 ///
-/// ```rust,ignore
+/// ```rust
 /// use asupersync::lab::oracle::determinism::assert_deterministic;
 /// use asupersync::lab::LabConfig;
 ///

@@ -5,7 +5,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use asupersync::web::static_files::StaticFiles;
 //! use asupersync::web::{Router, get};
 //!

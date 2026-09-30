@@ -42,7 +42,7 @@
 //!
 //! The easiest way to enable chaos testing:
 //!
-//! ```ignore
+//! ```
 //! use asupersync::lab::{LabConfig, LabRuntime};
 //!
 //! // Light chaos for CI (low-probability, fast)
@@ -58,7 +58,7 @@
 //!
 //! For fine-grained control:
 //!
-//! ```ignore
+//! ```
 //! use asupersync::lab::{LabConfig, LabRuntime};
 //! use asupersync::lab::chaos::ChaosConfig;
 //! use std::time::Duration;

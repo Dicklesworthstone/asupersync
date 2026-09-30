@@ -5,7 +5,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use asupersync::net::unix::UnixListener;
 //!
 //! async fn server() -> std::io::Result<()> {

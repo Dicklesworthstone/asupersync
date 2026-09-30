@@ -19,7 +19,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use asupersync::time::{interval, MissedTickBehavior};
 //! use asupersync::types::Time;
 //! use std::time::Duration;

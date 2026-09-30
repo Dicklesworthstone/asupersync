@@ -25,7 +25,7 @@ const DEFAULT_BUF_CAPACITY: usize = 8192;
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use asupersync::io::{BufReader, AsyncBufRead};
 ///
 /// let reader: &[u8] = b"hello world";

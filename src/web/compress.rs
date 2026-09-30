@@ -122,7 +122,7 @@ impl CompressionPolicy {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use asupersync::web::compress::{CompressionMiddleware, CompressionPolicy};
 /// use asupersync::web::handler::FnHandler;
 ///

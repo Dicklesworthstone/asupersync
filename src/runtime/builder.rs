@@ -3104,7 +3104,7 @@ impl RuntimeBuilder {
     ///
     /// The provided closure can customize thresholds and warning handlers.
     ///
-    /// ```ignore
+    /// ```
     /// use asupersync::runtime::RuntimeBuilder;
     /// use std::time::Duration;
     ///

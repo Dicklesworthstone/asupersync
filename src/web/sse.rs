@@ -16,7 +16,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use asupersync::web::sse::{SseEvent, Sse};
 //!
 //! fn handler() -> Sse {
@@ -993,7 +993,7 @@ impl<S: StreamingSseSource> StreamingSse<S> {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use asupersync::web::sse::{SseEvent, Sse};
 ///
 /// fn handler() -> Sse {

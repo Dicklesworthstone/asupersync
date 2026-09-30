@@ -12,7 +12,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use asupersync::util::CachePadded;
 //!
 //! struct PerWorker {

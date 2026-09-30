@@ -11,7 +11,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use asupersync::net::unix::{UnixListener, UnixStream, UnixDatagram};
 //!
 //! async fn server() -> std::io::Result<()> {

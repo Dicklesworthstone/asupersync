@@ -7,7 +7,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use asupersync::web::multipart::Multipart;
 //! use asupersync::web::response::StatusCode;
 //!

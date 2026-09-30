@@ -51,7 +51,7 @@ impl From<CtrlCError> for io::Error {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use asupersync::signal::ctrl_c;
 ///
 /// async fn run_server() -> std::io::Result<()> {

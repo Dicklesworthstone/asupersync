@@ -487,7 +487,7 @@ pub trait StreamExt: Stream {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```
     /// use asupersync::stream::{iter, StreamExt};
     ///
     /// async fn drain_into(buf: Vec<i32>) -> Vec<i32> {

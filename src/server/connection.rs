@@ -77,7 +77,7 @@ pub struct ConnectionInfo {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use asupersync::server::{ConnectionManager, ShutdownSignal};
 /// use std::net::SocketAddr;
 ///

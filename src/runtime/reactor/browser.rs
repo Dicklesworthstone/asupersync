@@ -81,7 +81,7 @@ impl Default for BrowserReactorConfig {
 ///
 /// # Usage
 ///
-/// ```ignore
+/// ```
 /// use asupersync::runtime::reactor::browser::BrowserReactor;
 ///
 /// let reactor = BrowserReactor::new(Default::default());

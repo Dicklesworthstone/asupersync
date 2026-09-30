@@ -98,7 +98,7 @@ impl Ord for TimedEvent {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use asupersync::runtime::reactor::{LabReactor, FaultConfig, Token, Interest};
 /// use std::io;
 ///

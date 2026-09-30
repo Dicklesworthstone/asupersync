@@ -21,7 +21,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use asupersync::channel::clock_skew::*;
 //! use asupersync::time::{VirtualClock, TimeSource};
 //! use asupersync::evidence_sink::{CollectorSink, EvidenceSink};

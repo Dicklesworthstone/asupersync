@@ -10,7 +10,7 @@
 //!
 //! # Basic Usage
 //!
-//! ```ignore
+//! ```
 //! use asupersync::lab::{LabConfig, LabRuntime};
 //!
 //! // Default configuration (seed=42)
@@ -30,7 +30,7 @@
 //!
 //! Enable chaos injection to stress-test error handling paths:
 //!
-//! ```ignore
+//! ```
 //! use asupersync::lab::{LabConfig, LabRuntime};
 //! use asupersync::lab::chaos::ChaosConfig;
 //!
@@ -67,7 +67,7 @@
 //!
 //! ## Deterministic Multi-Worker Simulation
 //!
-//! ```ignore
+//! ```
 //! use asupersync::lab::{LabConfig, LabRuntime};
 //!
 //! let config = LabConfig::new(7)
@@ -79,7 +79,7 @@
 //!
 //! ## Replay Capture for Debugging
 //!
-//! ```ignore
+//! ```
 //! use asupersync::lab::{LabConfig, LabRuntime};
 //!
 //! let config = LabConfig::new(42).with_default_replay_recording();
@@ -89,7 +89,7 @@
 //!
 //! ## Entropy Decoupling
 //!
-//! ```ignore
+//! ```
 //! use asupersync::lab::LabConfig;
 //!
 //! // Keep scheduling deterministic but vary entropy-derived behavior.
@@ -98,7 +98,7 @@
 //!
 //! # Migration Guide (Struct Updates → Builder Style)
 //!
-//! ```ignore
+//! ```
 //! use asupersync::lab::LabConfig;
 //!
 //! // Old style: struct update

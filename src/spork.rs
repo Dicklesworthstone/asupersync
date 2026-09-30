@@ -1649,7 +1649,7 @@ pub mod crash {
 
 /// The SPORK prelude: import this for typical supervised application development.
 ///
-/// ```ignore
+/// ```
 /// use asupersync::spork::prelude::*;
 /// ```
 ///

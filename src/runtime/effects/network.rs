@@ -8,7 +8,7 @@
 //! Network streams should implement the `TwoPhaseNetworkSend` trait to ensure
 //! cancel-safe operation:
 //!
-//! ```ignore
+//! ```
 //! use asupersync::runtime::effects::SendPermit;
 //!
 //! trait TwoPhaseNetworkSend {

@@ -15,7 +15,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use asupersync::test_logging::{TestLogger, TestLogLevel, TestEvent};
 //!
 //! let logger = TestLogger::new(TestLogLevel::Debug);

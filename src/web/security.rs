@@ -120,7 +120,7 @@ impl SecurityPolicy {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use asupersync::web::security::{SecurityHeadersMiddleware, SecurityPolicy};
 /// use asupersync::web::handler::FnHandler;
 ///
