@@ -1817,6 +1817,159 @@ fn a_weaker_abort_does_not_weaken_the_reason(cx: Cx) -> ScenarioFuture {
     })
 }
 
+/// A region with a 50 ms deadline holds a child region that asks for 10 s.
+/// Budgets combine by taking the tighter deadline, so a checkpointing task in
+/// the inner region is cancelled with `Deadline` long before 10 s.
+fn nested_region_deadline_is_the_tighter_one(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let mut outer_spec = ChildRegionSpec::inherit();
+        outer_spec.budget = Some(Budget::new().with_timeout(cx.now(), Duration::from_millis(50)));
+        let outer = cx
+            .open_child_region(outer_spec)
+            .await
+            .expect("open outer region");
+        let mut inner_spec = ChildRegionSpec::inherit();
+        inner_spec.budget = Some(Budget::new().with_timeout(cx.now(), Duration::from_secs(10)));
+        let inner = outer
+            .cx()
+            .open_child_region(inner_spec)
+            .await
+            .expect("open inner region");
+        let start = cx.now();
+        let mut handle = inner
+            .cx()
+            .spawn(move |task_cx| async move {
+                for _ in 0..400u32 {
+                    if task_cx.checkpoint().is_err() {
+                        let early = task_cx.now().duration_since(start) < 5_000_000_000;
+                        let reason = task_cx.cancel_reason().map(|reason| format!("{:?}", reason.kind));
+                        return (reason, early);
+                    }
+                    sleep(task_cx.now(), Duration::from_millis(5)).await;
+                }
+                (None, false)
+            })
+            .expect("spawn inside the inner region");
+        let joined = handle.join(&cx).await;
+        let inner_closed = inner.close().await;
+        let outer_closed = outer.close().await;
+        observe([
+            ("join", outcome(&joined)),
+            ("inner_close", format!("{inner_closed:?}")),
+            ("outer_close", format!("{outer_closed:?}")),
+        ])
+    })
+}
+
+/// Cancelling a region reaches a task parked two levels down, and the task
+/// observes one well-defined reason on every runtime.
+fn cancelling_a_region_reaches_its_grandchild_task(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let outer = cx
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .expect("open outer region");
+        let inner = outer
+            .cx()
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .expect("open inner region");
+        let (started, _) = flags();
+        let s = Arc::clone(&started);
+        let mut handle = inner
+            .cx()
+            .spawn(move |task_cx| async move {
+                let (_hold, mut never) = mpsc::channel::<u32>(1);
+                s.store(true, Ordering::SeqCst);
+                let _ = never.recv(&task_cx).await;
+                task_cx.cancel_reason().map(|reason| format!("{:?}", reason.kind))
+            })
+            .expect("spawn inside the inner region");
+        wait_for(&started).await;
+        let cancelled = outer.cancel(CancelReason::shutdown());
+        let joined = handle.join(&cx).await;
+        let inner_closed = inner.close().await;
+        let outer_closed = outer.close().await;
+        observe([
+            ("cancel", format!("{cancelled:?}")),
+            ("join", outcome(&joined)),
+            ("inner_close", format!("{inner_closed:?}")),
+            ("outer_close", format!("{outer_closed:?}")),
+        ])
+    })
+}
+
+/// A task whose abort was requested can still spawn into its region (the
+/// region is not cancelled), and it joins what it spawned.
+fn a_task_spawns_after_its_own_abort_was_requested(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let (started, _) = flags();
+        let s = Arc::clone(&started);
+        let mut handle = cx
+            .spawn(move |task_cx| async move {
+                s.store(true, Ordering::SeqCst);
+                while !task_cx.is_cancel_requested() {
+                    yield_now().await;
+                }
+                match task_cx.spawn(|_cx| async { 7u32 }) {
+                    Ok(mut child) => format!("spawned:{}", outcome(&child.join(&task_cx).await)),
+                    Err(SpawnError::RegionClosed(_)) => "refused:region_closed".to_string(),
+                    Err(other) => format!("refused:{other:?}"),
+                }
+            })
+            .expect("spawn");
+        wait_for(&started).await;
+        handle.abort();
+        let joined = handle.join(&cx).await;
+        observe([("join", outcome(&joined))])
+    })
+}
+
+/// A 10 s `Scope::timeout` inside a region whose deadline is 50 ms: the
+/// region deadline, the tighter bound, stops the checkpointing operation.
+fn scope_timeout_inside_a_tighter_region_deadline(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let mut spec = ChildRegionSpec::inherit();
+        spec.budget = Some(Budget::new().with_timeout(cx.now(), Duration::from_millis(50)));
+        let child = cx
+            .open_child_region(spec)
+            .await
+            .expect("open child region with a deadline");
+        let mut handle = child
+            .cx()
+            .spawn(|task_cx| async move {
+                let result = task_cx
+                    .scope()
+                    .timeout(&task_cx, Duration::from_secs(10), |op_cx| async move {
+                        for _ in 0..400u32 {
+                            if op_cx.checkpoint().is_err() {
+                                return Err(op_cx
+                                    .cancel_reason()
+                                    .map_or_else(|| "cancelled".to_string(), |reason| {
+                                        format!("{:?}", reason.kind)
+                                    }));
+                            }
+                            sleep(op_cx.now(), Duration::from_millis(5)).await;
+                        }
+                        Ok::<u32, String>(0)
+                    })
+                    .await;
+                match &result {
+                    Ok(TimedResult::Completed(Outcome::Err(reason))) => {
+                        format!("completed:err:{reason}")
+                    }
+                    Ok(TimedResult::Completed(other)) => format!("completed:{}", outcome_kind(other)),
+                    Ok(TimedResult::TimedOut(_)) => "timed_out".to_string(),
+                    Err(error) => format!("spawn_error:{error:?}"),
+                }
+            })
+            .expect("spawn inside the child region");
+        let joined = handle.join(&cx).await;
+        let closed = child.close().await;
+        observe([("join", outcome(&joined)), ("close", format!("{closed:?}"))])
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Lab-only invariants the differential runs surfaced
 // ---------------------------------------------------------------------------
@@ -2070,5 +2223,25 @@ differential!(
 differential!(
     differential_abort_reason_strength,
     a_weaker_abort_does_not_weaken_the_reason,
+    []
+);
+differential!(
+    differential_nested_region_deadline,
+    nested_region_deadline_is_the_tighter_one,
+    []
+);
+differential!(
+    differential_region_cancel_grandchild,
+    cancelling_a_region_reaches_its_grandchild_task,
+    []
+);
+differential!(
+    differential_spawn_after_own_abort,
+    a_task_spawns_after_its_own_abort_was_requested,
+    []
+);
+differential!(
+    differential_scope_timeout_in_region_deadline,
+    scope_timeout_inside_a_tighter_region_deadline,
     []
 );
