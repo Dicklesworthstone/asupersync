@@ -1,0 +1,14 @@
+---
+source: tests/postgres_query_execution_golden.rs
+expression: log
+---
+=== PostgreSQL Query Execution Log ===
+Query ID: 12350
+SQL: UPDATE accounts SET balance = balance - $1 WHERE account_id = $2
+Execution Time: 156ms
+Status: ERROR
+Error: PostgreSQL error [40001]: could not serialize access due to concurrent update (hint: The transaction might succeed if retried.)
+SQL State: 40001
+Is Transient: true
+Is Retryable: true
+=====================================
