@@ -1889,6 +1889,9 @@ pub struct RuntimeState {
     leak_escalation: Option<LeakEscalation>,
     /// Cumulative count of obligation leaks (for escalation threshold).
     leak_count: u64,
+    /// Opt-in anytime-valid leak monitor, fed one age per resolved
+    /// obligation (br-asupersync-bi2462.150.2). `None` by default.
+    obligation_leak_monitor: Option<parking_lot::Mutex<crate::obligation::eprocess::LeakMonitor>>,
     /// Optional cached draining-region count for governor/diagnostic snapshots.
     read_biased_draining_region_snapshot: ReadBiasedDrainingRegionSnapshot,
     /// Leak-handling recursion depth for diagnostics.
@@ -2133,6 +2136,7 @@ impl RuntimeState {
             obligation_leak_response: ObligationLeakResponse::Panic,
             leak_escalation: None,
             leak_count: 0,
+            obligation_leak_monitor: None,
             read_biased_draining_region_snapshot: ReadBiasedDrainingRegionSnapshot::default(),
             handling_leaks: 0,
             in_flight_leak_ids: HashSet::new(),
@@ -2802,6 +2806,47 @@ impl RuntimeState {
     #[must_use]
     pub fn leak_count(&self) -> u64 {
         self.leak_count
+    }
+
+    /// Enables an anytime-valid obligation leak monitor
+    /// ([`LeakMonitor`](crate::obligation::eprocess::LeakMonitor)).
+    ///
+    /// From this call on, every obligation this state resolves feeds the
+    /// monitor its age at resolution, exactly once. That covers committed,
+    /// aborted and leaked obligations, so an obligation still reserved when its
+    /// holder completes counts once, at its final age. Obligations resolved
+    /// earlier are not observed, and a second call replaces the monitor and its
+    /// evidence. Live obligations are never rescanned: repeated observations of
+    /// one obligation would break the e-process's guarantee.
+    ///
+    /// # Panics
+    /// If `config` is invalid (see [`LeakMonitor::new`](crate::obligation::eprocess::LeakMonitor::new)).
+    pub fn enable_obligation_leak_monitor(
+        &mut self,
+        config: crate::obligation::eprocess::MonitorConfig,
+    ) {
+        self.obligation_leak_monitor = Some(parking_lot::Mutex::new(
+            crate::obligation::eprocess::LeakMonitor::new(config),
+        ));
+    }
+
+    /// The obligation leak monitor's current snapshot, or `None` when no
+    /// monitor is enabled.
+    #[must_use]
+    pub fn obligation_leak_monitor_snapshot(
+        &self,
+    ) -> Option<crate::obligation::eprocess::MonitorSnapshot> {
+        self.obligation_leak_monitor
+            .as_ref()
+            .map(|monitor| monitor.lock().snapshot())
+    }
+
+    /// Feeds an enabled leak monitor one resolved obligation's age. The
+    /// monitor's mutex is a leaf: nothing else is locked while it is held.
+    fn observe_obligation_age(&self, age_ns: u64) {
+        if let Some(monitor) = &self.obligation_leak_monitor {
+            monitor.lock().observe(age_ns);
+        }
     }
 
     /// Returns a handle to the trace buffer.
@@ -5930,6 +5975,7 @@ impl RuntimeState {
             )
         });
         self.metrics.obligation_discharged(info.region);
+        self.observe_obligation_age(info.duration);
 
         // Notify epoch tracker of obligation commit
         self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::ObligationTable);
@@ -6128,6 +6174,7 @@ impl RuntimeState {
             )
         });
         self.metrics.obligation_discharged(info.region);
+        self.observe_obligation_age(info.duration);
 
         // Track obligation settlement work in debt monitor
         let cancel_reason = CancelReason::new(CancelKind::User);
@@ -6556,6 +6603,7 @@ impl RuntimeState {
             )
         });
         self.metrics.obligation_leaked(info.region);
+        self.observe_obligation_age(info.duration);
         if self.obligation_leak_response != ObligationLeakResponse::Silent {
             let span = crate::tracing_compat::error_span!(
                 "obligation_leak",

@@ -5,8 +5,11 @@
 //! When the e-value exceeds 1/α, we reject the null with Type-I error ≤ α —
 //! regardless of when we choose to stop monitoring (Ville's inequality).
 //!
-//! The monitor is opt-in and caller-fed: the runtime does not create one or
-//! feed it obligation ages (`asupersync-bi2462.150.2` tracks that wire).
+//! The monitor is opt-in. `Runtime::enable_obligation_leak_monitor` (or
+//! `RuntimeState::enable_obligation_leak_monitor`, for example on a
+//! `LabRuntime`'s state) installs one that the runtime feeds with each resolved
+//! obligation's age at resolution, exactly once. Read it with
+//! `obligation_leak_monitor_snapshot`. A monitor can also be fed by hand.
 //!
 //! # Design
 //!
