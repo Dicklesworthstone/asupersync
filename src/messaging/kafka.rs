@@ -469,6 +469,34 @@ fn map_transaction_failure(error: RdKafkaError) -> KafkaError {
     }))
 }
 
+/// Further `commit_transaction` calls after a retriable commit failure.
+#[cfg(feature = "kafka")]
+const COMMIT_RESUME_ATTEMPTS: usize = 3;
+
+/// librdkafka reports a commit it could not finish within its timeout as a
+/// retriable error ("retry call to resume"). The only call it then accepts is
+/// `commit_transaction` again: an abort is refused while the commit is in
+/// progress. Resume the commit a bounded number of times, so a coordinator
+/// that recovers within that window yields a definitive outcome instead of a
+/// producer that can neither commit nor abort (br-asupersync-lde436).
+#[cfg(feature = "kafka")]
+fn commit_resuming_retriable_failures(
+    mut commit: impl FnMut() -> Result<(), RdKafkaError>,
+) -> Result<(), RdKafkaError> {
+    let mut result = commit();
+    for _ in 0..COMMIT_RESUME_ATTEMPTS {
+        match &result {
+            Err(RdKafkaError::Transaction(native))
+                if native.is_retriable() && !native.txn_requires_abort() && !native.is_fatal() =>
+            {
+                result = commit();
+            }
+            _ => break,
+        }
+    }
+    result
+}
+
 #[cfg(feature = "kafka")]
 pub(super) fn redacted_config_message(result: rdkafka::types::RDKafkaConfRes, key: &str) -> String {
     // Both the raw value and librdkafka's free-form description can contain
@@ -2792,6 +2820,12 @@ impl Transaction<'_> {
     /// Once the broker operation starts, dropping this future does not undo it.
     /// The producer remains occupied until background completion; cancellation
     /// is not evidence that the transaction was aborted.
+    ///
+    /// When librdkafka reports the commit as retriable (it did not finish
+    /// within `transaction_timeout`), the commit is resumed up to three more
+    /// times, each bounded by `transaction_timeout`, before the error is
+    /// returned. After a returned retriable error the commit outcome is
+    /// unknown.
     #[allow(unused_variables, clippy::unused_async)]
     pub async fn commit(mut self, cx: &Cx) -> Result<(), KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
@@ -2810,8 +2844,7 @@ impl Transaction<'_> {
                 let producer = self.producer.producer.clone();
                 let timeout = self.producer.config.transaction_timeout;
                 move || {
-                    producer
-                        .commit_transaction(timeout)
+                    commit_resuming_retriable_failures(|| producer.commit_transaction(timeout))
                         .map_err(|error| {
                             if enrolled_offsets {
                                 map_transaction_failure(error)
@@ -4252,6 +4285,66 @@ mod tests {
                 assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
             }
         }
+    }
+
+    /// A commit that librdkafka cannot finish within the transaction timeout
+    /// is reported as retriable, and from then on it accepts only another
+    /// commit_transaction: an abort is refused while the commit is in
+    /// progress. With retries pinned to 50 ms and a 1 s timeout, 30 queued
+    /// coordinator errors outlast one commit call (at least 1.5 s of backoff)
+    /// but not a resumed one. The commit used to fail, and every later
+    /// begin_transaction's abort recovery was refused as a conflicting commit
+    /// (br-asupersync-lde436).
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn a_commit_that_outlasts_its_timeout_is_resumed_to_a_definitive_outcome() {
+        use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
+        let cluster = rdkafka::mocking::MockCluster::new(1).unwrap();
+        let output = "transaction-commit-resume";
+        cluster.create_topic(output, 1, 1).unwrap();
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .blocking_threads(1, 2)
+            .build()
+            .unwrap();
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        runtime.block_on_with_cx(cx.clone(), async {
+            let producer = TransactionalProducer::new(
+                TransactionalConfig::new(
+                    ProducerConfig::new(vec![cluster.bootstrap_servers()])
+                        .with_property("retry.backoff.ms", "50")
+                        .with_property("retry.backoff.max.ms", "50"),
+                    "transaction-commit-resume".into(),
+                )
+                .transaction_timeout(Duration::from_secs(1)),
+            )
+            .unwrap();
+            let transaction = producer.begin_transaction(&cx).await.unwrap();
+            transaction
+                .send(&cx, output, None, b"resumed")
+                .await
+                .unwrap();
+            cluster.request_errors(
+                RDKafkaApiKey::EndTxn,
+                &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_COORDINATOR_LOAD_IN_PROGRESS; 30],
+            );
+            let started = std::time::Instant::now();
+            let committed = transaction.commit(&cx).await;
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "bead": "asupersync-lde436",
+                    "commit": format!("{committed:?}"),
+                    "elapsed_ms": started.elapsed().as_millis(),
+                })
+            );
+            committed.expect("a resumed commit reaches a definitive outcome");
+            assert_eq!(producer.state.lock().phase, TransactionPhase::Idle);
+            let next = producer
+                .begin_transaction(&cx)
+                .await
+                .expect("the producer is usable again");
+            next.abort(&cx).await.unwrap();
+        });
     }
 
     #[cfg(feature = "kafka")]
