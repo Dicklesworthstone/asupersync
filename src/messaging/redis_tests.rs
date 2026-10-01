@@ -3437,6 +3437,52 @@ mod tests {
         }
     }
 
+    /// A session dropped while it holds WATCH must not return its connection
+    /// to the pool, where the next caller would inherit the watch. Dropping
+    /// the session closes the connection instead.
+    #[test]
+    fn redis_session_dropped_while_watching_closes_its_connection() {
+        use crate::runtime::{RootDrainOutcome, RuntimeBuilder};
+
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            write_hello3_ok(&mut stream);
+            assert_resp_command(read_resp_frame(&mut stream), &[b"WATCH", b"key"]);
+            stream.write_all(b"+OK\r\n").unwrap();
+            let mut byte = [0];
+            assert_eq!(
+                stream.read(&mut byte).unwrap(),
+                0,
+                "a dropped watching session must close its socket"
+            );
+        });
+        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        let task = runtime.handle().spawn(async move {
+            let cx = Cx::current().unwrap();
+            let client = RedisClient::connect(&cx, &format!("redis://{address}"))
+                .await
+                .unwrap();
+            let mut session = client.session(&cx).await.unwrap();
+            session.watch(&cx, &["key"]).await.unwrap();
+            drop(session);
+            let stats = client.pool.stats();
+            assert_eq!(
+                (stats.active, stats.idle, stats.total),
+                (0, 0, 0),
+                "the watching connection must not return to the pool"
+            );
+        });
+        runtime.block_on(task);
+        server.join().unwrap();
+        let report = runtime.shutdown_drained(Duration::from_secs(2));
+        assert_eq!(report.outcome, RootDrainOutcome::Quiescent, "{report:?}");
+    }
+
     #[test]
     fn redis_session_native_terminal_failures_discard_and_allow_replacement() {
         use crate::runtime::{RootDrainOutcome, RuntimeBuilder};
