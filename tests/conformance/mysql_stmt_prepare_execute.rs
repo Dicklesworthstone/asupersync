@@ -1,39 +1,52 @@
 #![allow(warnings)]
 #![allow(clippy::all)]
-//! MySQL COM_STMT_PREPARE/EXECUTE Conformance Tests
+//! MySQL prepared-statement (COM_STMT_PREPARE / COM_STMT_EXECUTE) conformance,
+//! run against the binary-protocol client in `src/database/mysql.rs`.
 //!
-//! This module provides comprehensive conformance testing for MySQL prepared statement
-//! wire protocol per the MySQL Client/Server Protocol specification.
-//! The tests systematically validate:
+//! Each requirement is either decided by production code or reported as
+//! `TestVerdict::Skipped` with the reason. No verdict comes from a model in
+//! this file:
 //!
-//! - COM_STMT_PREPARE packet format and response parsing
-//! - Parameter type signaling with MYSQL_TYPE_* codes
-//! - NULL bitmap encoding per Section 16.6.4.2
-//! - Long data transmission via COM_STMT_SEND_LONG_DATA
-//! - Cursor type flags (CURSOR_TYPE_READ_ONLY, etc.)
-//! - Binary result set row format
+//! * COM_STMT_EXECUTE is built by production with
+//!   `fuzz_build_stmt_execute_packet`. The parameter block (NULL bitmap,
+//!   new_params_bound_flag, parameter types and values) comes from the
+//!   production `write_stmt_execute_params` and `ToSql` impls, and the packet
+//!   header from the production `PacketBuffer::build_packet`. The 10-byte
+//!   command prefix is written by the hook itself
+//!   (src/database/mysql.rs:7016-7021); it restates the same lines of
+//!   `query_prepared_inner_impl` and `execute_prepared_inner_impl`
+//!   (src/database/mysql.rs:5337-5342 and 5479-5484) instead of sharing a
+//!   function with them. The bytes are compared one for one with this file's
+//!   spec encoding, whose builders are pinned to hand-encoded bytes in the
+//!   tests at the bottom.
+//! * Server packets are encoded here from the spec and decoded by production:
+//!   `fuzz_parse_column_definition`, `fuzz_parse_binary_row`,
+//!   `fuzz_parse_text_row`, `fuzz_parse_data_row_or_terminator`,
+//!   `fuzz_parse_ok_packet_fields`, `fuzz_parse_error_packet` and
+//!   `fuzz_decode_packet_header`. Spec-valid and malformed bytes are both fed
+//!   in. Production's public `column_type` constants are checked against the
+//!   protocol's field-type table.
+//! * Production exposes no observable for the COM_STMT_PREPARE exchange,
+//!   COM_STMT_CLOSE, long data, cursors other than "no cursor", the
+//!   client-side parameter-count check, or the binary result-set terminator.
+//!   Those run inside async `MySqlConnection` methods against a live server,
+//!   or are never sent, so they are reported as Skipped with the source lines
+//!   that show why.
+//! * Without `--features mysql` every production-decided requirement reports
+//!   Skipped ("needs --features mysql"). The hooks need no other feature.
 //!
-//! # MySQL Prepared Statement Protocol
+//! Where the spec lets the client choose, the exact-byte fixtures encode one
+//! valid choice: text parameters are declared MYSQL_TYPE_VAR_STRING and byte
+//! parameters MYSQL_TYPE_BLOB (any string-class type is valid, and
+//! MYSQL-STMT-005 accepts the whole class), and a NULL parameter keeps its
+//! declared type, as libmysqlclient's `store_param_type` sends it.
 //!
-//! **COM_STMT_PREPARE Flow:**
-//! 1. Client sends COM_STMT_PREPARE (0x16) with SQL statement
-//! 2. Server responds with COM_STMT_PREPARE_OK or error
-//! 3. Client sends COM_STMT_EXECUTE (0x17) with parameters
-//! 4. Server responds with result set or OK packet
-//!
-//! **Parameter Types (MYSQL_TYPE_*):**
-//! - MYSQL_TYPE_TINY (0x01) - TINYINT
-//! - MYSQL_TYPE_SHORT (0x02) - SMALLINT
-//! - MYSQL_TYPE_LONG (0x03) - INT
-//! - MYSQL_TYPE_LONGLONG (0x08) - BIGINT
-//! - MYSQL_TYPE_STRING (0xFE) - CHAR, VARCHAR, TEXT
-//! - MYSQL_TYPE_VAR_STRING (0xFD) - VARCHAR, VARBINARY
-//!
-//! **NULL Bitmap Format:**
-//! ```
-//! null_bitmap_length = (parameter_count + 7) / 8
-//! For each parameter, bit N indicates if parameter N is NULL
-//! ```
+//! References, MySQL Client/Server Protocol
+//! (https://dev.mysql.com/doc/dev/mysql-server/latest/PAGE_PROTOCOL.html):
+//! "MySQL Packets", "Integer Types" (length-encoded integers),
+//! "COM_STMT_EXECUTE", "Binary Protocol Resultset", "Binary Protocol Value",
+//! "Text Resultset", "Column Definition", "OK_Packet", "EOF_Packet",
+//! "ERR_Packet" and the MYSQL_TYPE field-type table.
 
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
@@ -47,6 +60,7 @@ pub struct MySqlStmtConformanceResult {
     pub category: TestCategory,
     pub requirement_level: RequirementLevel,
     pub verdict: TestVerdict,
+    /// Why the requirement failed or was skipped; `None` on a pass.
     pub notes: Option<String>,
     pub elapsed_ms: u64,
 }
@@ -61,6 +75,7 @@ pub enum TestCategory {
     LongData,
     CursorFlags,
     BinaryResultSet,
+    TextResultSet,
     ErrorHandling,
 }
 
@@ -83,7 +98,8 @@ pub enum TestVerdict {
     ExpectedFailure,
 }
 
-/// MySQL parameter types per protocol specification.
+/// MySQL field types (MYSQL_TYPE_*) from the protocol's field-type table.
+/// This is the spec side of every type-code comparison.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -105,6 +121,7 @@ pub enum MySqlType {
     NewDate = 0x0E,
     VarChar = 0x0F,
     Bit = 0x10,
+    Json = 0xF5,
     NewDecimal = 0xF6,
     Enum = 0xF7,
     Set = 0xF8,
@@ -117,7 +134,7 @@ pub enum MySqlType {
     Geometry = 0xFF,
 }
 
-/// Cursor type flags.
+/// COM_STMT_EXECUTE cursor type flags.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -128,1445 +145,2925 @@ pub enum CursorType {
     Scrollable = 0x04,
 }
 
-/// MySQL COM_STMT_PREPARE/EXECUTE conformance harness.
-#[allow(dead_code)]
-pub struct MySqlStmtConformanceHarness {
-    results: Vec<MySqlStmtConformanceResult>,
-    last_result_at: Instant,
+/// Start of every Skipped note for a requirement production cannot show.
+const NO_OBSERVABLE: &str = "production exposes no observable for this";
+
+/// How a requirement was decided.
+#[derive(Debug)]
+enum Decision {
+    /// Production code ran and the spec assertions were evaluated on its output.
+    Decided(Result<(), String>),
+    /// Production could not be reached; the note says why.
+    Skipped(String),
 }
 
-#[allow(dead_code)]
+/// What decides a requirement, so the self-test can predict its verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Evidence {
+    /// `#[doc(hidden)]` hooks and public items of `asupersync::database::mysql`,
+    /// compiled only with `--features mysql`.
+    MysqlHook,
+    /// No production observable; always Skipped.
+    Unobservable,
+}
 
-impl MySqlStmtConformanceHarness {
-    /// Create a new conformance test harness.
-    #[allow(dead_code)]
-    pub fn new() -> Self {
+#[derive(Clone)]
+struct Requirement {
+    id: &'static str,
+    description: &'static str,
+    category: TestCategory,
+    level: RequirementLevel,
+    evidence: Evidence,
+    check: fn() -> Decision,
+}
+
+// ============================================================================
+// Spec oracle: packet encodings written from the protocol documentation
+// ============================================================================
+
+mod protocol_constants {
+    /// COM_STMT_EXECUTE command byte.
+    pub const COM_STMT_EXECUTE: u8 = 0x17;
+    /// new_params_bound_flag value saying the parameter types follow.
+    pub const NEW_PARAMS_BOUND: u8 = 0x01;
+    /// High byte of a parameter type field for an UNSIGNED integer.
+    pub const PARAM_UNSIGNED: u8 = 0x80;
+    pub const OK_HEADER: u8 = 0x00;
+    pub const EOF_HEADER: u8 = 0xFE;
+    pub const ERR_HEADER: u8 = 0xFF;
+    /// A NULL value in a text resultset row.
+    pub const TEXT_NULL: u8 = 0xFB;
+    /// The most payload one packet carries: 2^24 - 1 bytes.
+    pub const MAX_PAYLOAD: usize = 0xFF_FFFF;
+
+    // Column definition flags.
+    pub const NOT_NULL_FLAG: u16 = 0x0001;
+    pub const PRI_KEY_FLAG: u16 = 0x0002;
+    pub const BLOB_FLAG: u16 = 0x0010;
+    pub const UNSIGNED_FLAG: u16 = 0x0020;
+    pub const ZEROFILL_FLAG: u16 = 0x0040;
+    pub const BINARY_FLAG: u16 = 0x0080;
+    pub const AUTO_INCREMENT_FLAG: u16 = 0x0200;
+
+    // Server status flags.
+    pub const SERVER_STATUS_IN_TRANS: u16 = 0x0001;
+    pub const SERVER_STATUS_AUTOCOMMIT: u16 = 0x0002;
+
+    // Character set (collation) ids.
+    pub const CHARSET_BINARY: u16 = 63;
+    pub const CHARSET_UTF8MB4: u16 = 255;
+}
+
+/// Length-encoded integer: below 251 in one byte, then 0xFC + int<2>,
+/// 0xFD + int<3> and 0xFE + int<8>.
+fn encode_length_encoded_integer(value: u64) -> Vec<u8> {
+    if value < 251 {
+        vec![value as u8]
+    } else if value < 65536 {
+        let mut result = vec![0xFC];
+        result.extend_from_slice(&(value as u16).to_le_bytes());
+        result
+    } else if value < 16_777_216 {
+        let mut result = vec![0xFD];
+        result.extend_from_slice(&(value as u32).to_le_bytes()[0..3]);
+        result
+    } else {
+        let mut result = vec![0xFE];
+        result.extend_from_slice(&value.to_le_bytes());
+        result
+    }
+}
+
+/// Length-encoded string: a length-encoded integer, then that many bytes.
+fn encode_length_encoded_string(data: &[u8]) -> Vec<u8> {
+    let mut result = encode_length_encoded_integer(data.len() as u64);
+    result.extend_from_slice(data);
+    result
+}
+
+/// Frames a payload as MySQL packets: int<3> payload length, int<1> sequence
+/// id, then the payload. A payload of 2^24 - 1 bytes or more goes out in
+/// packets of 2^24 - 1 bytes with consecutive sequence ids, and one that is an
+/// exact multiple of that size ends with an empty packet.
+fn frame_packets(first_sequence: u8, payload: &[u8]) -> Vec<u8> {
+    let mut framed = Vec::with_capacity(payload.len() + 8);
+    let mut sequence = first_sequence;
+    let mut rest = payload;
+    loop {
+        let chunk = rest.len().min(protocol_constants::MAX_PAYLOAD);
+        framed.extend_from_slice(&[
+            (chunk & 0xFF) as u8,
+            ((chunk >> 8) & 0xFF) as u8,
+            ((chunk >> 16) & 0xFF) as u8,
+            sequence,
+        ]);
+        framed.extend_from_slice(&rest[..chunk]);
+        rest = &rest[chunk..];
+        sequence = sequence.wrapping_add(1);
+        if chunk < protocol_constants::MAX_PAYLOAD {
+            return framed;
+        }
+    }
+}
+
+/// One COM_STMT_EXECUTE parameter as the spec lays it out.
+#[derive(Debug, Clone)]
+struct SpecParam {
+    type_code: u8,
+    unsigned: bool,
+    /// The binary-protocol value bytes, or `None` for SQL NULL.
+    value: Option<Vec<u8>>,
+}
+
+impl SpecParam {
+    fn bound(type_code: MySqlType, unsigned: bool, value: Vec<u8>) -> Self {
         Self {
-            results: Vec::new(),
-            last_result_at: Instant::now(),
+            type_code: type_code as u8,
+            unsigned,
+            value: Some(value),
         }
     }
 
-    /// Execute all conformance tests.
-    #[allow(dead_code)]
-    pub fn run_all_tests(&mut self) -> Vec<MySqlStmtConformanceResult> {
-        // Packet Format Tests
-        self.test_stmt_prepare_packet_format();
-        self.test_stmt_prepare_ok_response();
-        self.test_stmt_execute_packet_format();
-        self.test_stmt_close_packet_format();
-
-        // Parameter Type Tests
-        self.test_parameter_type_signaling();
-        self.test_type_code_compliance();
-        self.test_unsigned_flag_handling();
-        self.test_parameter_length_encoding();
-
-        // NULL Bitmap Tests
-        self.test_null_bitmap_encoding();
-        self.test_null_bitmap_length_calculation();
-        self.test_null_bitmap_bit_ordering();
-        self.test_mixed_null_parameters();
-
-        // Long Data Tests
-        self.test_long_data_send_packet();
-        self.test_long_data_chunking();
-        self.test_long_data_parameter_reset();
-
-        // Cursor Flag Tests
-        self.test_cursor_type_flags();
-        self.test_cursor_read_only();
-        self.test_cursor_scrollable_behavior();
-
-        // Binary Result Set Tests
-        self.test_binary_result_set_format();
-        self.test_binary_row_null_bitmap();
-        self.test_binary_value_encoding();
-        self.test_length_encoded_values();
-
-        // Error Handling Tests
-        self.test_invalid_statement_id();
-        self.test_parameter_count_mismatch();
-        self.test_invalid_cursor_type();
-
-        self.results.clone()
+    /// A NULL parameter. The spec leaves its type field to the client; the
+    /// oracle keeps the declared type and unsigned flag, as libmysqlclient's
+    /// `store_param_type` does for a NULL bind.
+    fn null(type_code: MySqlType, unsigned: bool) -> Self {
+        Self {
+            type_code: type_code as u8,
+            unsigned,
+            value: None,
+        }
     }
+}
 
-    #[allow(dead_code)]
-
-    fn record_result(
-        &mut self,
-        test_id: &str,
-        description: &str,
-        category: TestCategory,
-        requirement: RequirementLevel,
-        verdict: TestVerdict,
-        notes: Option<String>,
-    ) {
-        let now = Instant::now();
-        let elapsed_ms = elapsed_millis_for_report(now.duration_since(self.last_result_at));
-        self.last_result_at = now;
-
-        self.results.push(MySqlStmtConformanceResult {
-            test_id: test_id.to_string(),
-            description: description.to_string(),
-            category,
-            requirement_level: requirement,
-            verdict,
-            notes,
-            elapsed_ms,
-        });
+/// COM_STMT_EXECUTE payload: int<1> 0x17, int<4> statement_id, int<1> flags,
+/// int<4> iteration_count (always 1), then, only when there are parameters:
+/// the NULL bitmap of (n + 7) / 8 bytes (parameter i is bit i % 8 of byte
+/// i / 8), int<1> new_params_bound_flag, n x int<2> parameter type (type code,
+/// then 0x80 for UNSIGNED), and the values of the non-NULL parameters in order.
+fn stmt_execute_payload(statement_id: u32, flags: u8, params: &[SpecParam]) -> Vec<u8> {
+    let mut payload = vec![protocol_constants::COM_STMT_EXECUTE];
+    payload.extend_from_slice(&statement_id.to_le_bytes());
+    payload.push(flags);
+    payload.extend_from_slice(&1u32.to_le_bytes());
+    if params.is_empty() {
+        return payload;
     }
-
-    // ===== Packet Format Tests =====
-
-    #[allow(dead_code)]
-
-    fn test_stmt_prepare_packet_format(&mut self) {
-        let result = std::panic::catch_unwind(|| {
-            // Test COM_STMT_PREPARE packet structure
-            let sql = "SELECT id, name FROM users WHERE age > ?";
-            let mut packet = Vec::new();
-
-            // Command byte
-            packet.push(0x16); // COM_STMT_PREPARE
-
-            // SQL statement (no null terminator in prepare)
-            packet.extend_from_slice(sql.as_bytes());
-
-            // Verify packet format
-            assert_eq!(
-                packet[0], 0x16,
-                "Command byte must be 0x16 for COM_STMT_PREPARE"
-            );
-
-            let stmt_text = std::str::from_utf8(&packet[1..]).unwrap();
-            assert_eq!(stmt_text, sql, "Statement text must match original SQL");
-
-            // Verify no null terminator (unlike COM_QUERY)
-            assert_ne!(
-                packet[packet.len() - 1],
-                0,
-                "COM_STMT_PREPARE should not null-terminate SQL"
-            );
-        });
-
-        let verdict = if result.is_ok() {
-            TestVerdict::Pass
+    let mut bitmap = vec![0u8; (params.len() + 7) / 8];
+    for (index, param) in params.iter().enumerate() {
+        if param.value.is_none() {
+            bitmap[index / 8] |= 1 << (index % 8);
+        }
+    }
+    payload.extend_from_slice(&bitmap);
+    payload.push(protocol_constants::NEW_PARAMS_BOUND);
+    for param in params {
+        payload.push(param.type_code);
+        payload.push(if param.unsigned {
+            protocol_constants::PARAM_UNSIGNED
         } else {
-            TestVerdict::Fail
-        };
-        self.record_result(
-            "MYSQL-STMT-001",
-            "COM_STMT_PREPARE packet format MUST follow wire protocol",
-            TestCategory::PacketFormat,
-            RequirementLevel::Must,
-            verdict,
-            None,
-        );
-    }
-
-    #[allow(dead_code)]
-
-    fn test_stmt_prepare_ok_response(&mut self) {
-        let result = std::panic::catch_unwind(|| {
-            // Test COM_STMT_PREPARE_OK response structure
-            let mut response = Vec::new();
-
-            response.push(0x00); // OK header
-
-            // Statement ID (4 bytes, little-endian)
-            let stmt_id = 1234u32;
-            response.extend_from_slice(&stmt_id.to_le_bytes());
-
-            // Number of columns (2 bytes, little-endian)
-            let num_columns = 2u16;
-            response.extend_from_slice(&num_columns.to_le_bytes());
-
-            // Number of parameters (2 bytes, little-endian)
-            let num_params = 1u16;
-            response.extend_from_slice(&num_params.to_le_bytes());
-
-            // Reserved byte (always 0x00)
-            response.push(0x00);
-
-            // Warning count (2 bytes, little-endian)
-            let warning_count = 0u16;
-            response.extend_from_slice(&warning_count.to_le_bytes());
-
-            // Verify response structure
-            assert_eq!(response[0], 0x00, "Prepare OK must start with 0x00");
-
-            let parsed_stmt_id =
-                u32::from_le_bytes([response[1], response[2], response[3], response[4]]);
-            assert_eq!(parsed_stmt_id, stmt_id, "Statement ID must match");
-
-            let parsed_cols = u16::from_le_bytes([response[5], response[6]]);
-            assert_eq!(parsed_cols, num_columns, "Column count must match");
-
-            let parsed_params = u16::from_le_bytes([response[7], response[8]]);
-            assert_eq!(parsed_params, num_params, "Parameter count must match");
-
-            assert_eq!(response[9], 0x00, "Reserved byte must be 0x00");
-
-            let parsed_warnings = u16::from_le_bytes([response[10], response[11]]);
-            assert_eq!(parsed_warnings, warning_count, "Warning count must match");
+            0x00
         });
-
-        let verdict = if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        };
-        self.record_result(
-            "MYSQL-STMT-002",
-            "COM_STMT_PREPARE_OK response MUST follow specification",
-            TestCategory::PacketFormat,
-            RequirementLevel::Must,
-            verdict,
-            None,
-        );
     }
-
-    #[allow(dead_code)]
-
-    fn test_stmt_execute_packet_format(&mut self) {
-        let result = std::panic::catch_unwind(|| {
-            // Test COM_STMT_EXECUTE packet structure
-            let mut packet = Vec::new();
-
-            packet.push(0x17); // COM_STMT_EXECUTE
-
-            // Statement ID (4 bytes, little-endian)
-            let stmt_id = 1234u32;
-            packet.extend_from_slice(&stmt_id.to_le_bytes());
-
-            // Flags (1 byte) - cursor type
-            packet.push(CursorType::ReadOnly as u8);
-
-            // Iteration count (4 bytes, little-endian) - always 1
-            let iteration_count = 1u32;
-            packet.extend_from_slice(&iteration_count.to_le_bytes());
-
-            // NULL bitmap (calculated based on parameter count)
-            let param_count = 2;
-            let _null_bitmap_len = (param_count + 7) / 8;
-            let null_bitmap = vec![0x01]; // First param is NULL, second is not
-            packet.extend_from_slice(&null_bitmap);
-
-            // New parameter types flag (1 byte)
-            packet.push(0x01); // Sending new parameter types
-
-            // Parameter types (2 bytes per parameter: type + flags)
-            packet.push(MySqlType::Long as u8); // Type for first param
-            packet.push(0x00); // Flags (not unsigned)
-            packet.push(MySqlType::VarString as u8); // Type for second param
-            packet.push(0x00); // Flags (not unsigned)
-
-            // Parameter values (only for non-NULL parameters)
-            // First param is NULL (skip), second param is string
-            let param2_value = b"test_value";
-            let param2_len = param2_value.len() as u8;
-            packet.push(param2_len); // Length-encoded string
-            packet.extend_from_slice(param2_value);
-
-            // Verify packet structure
-            assert_eq!(packet[0], 0x17, "Command must be COM_STMT_EXECUTE");
-
-            let parsed_stmt_id = u32::from_le_bytes([packet[1], packet[2], packet[3], packet[4]]);
-            assert_eq!(parsed_stmt_id, stmt_id, "Statement ID must match");
-
-            assert_eq!(
-                packet[5],
-                CursorType::ReadOnly as u8,
-                "Cursor flags must match"
-            );
-
-            let parsed_iterations =
-                u32::from_le_bytes([packet[6], packet[7], packet[8], packet[9]]);
-            assert_eq!(
-                parsed_iterations, iteration_count,
-                "Iteration count must be 1"
-            );
-
-            // Verify NULL bitmap
-            assert_eq!(
-                packet[10], 0x01,
-                "NULL bitmap must indicate first param is NULL"
-            );
-
-            // Verify new types flag
-            assert_eq!(packet[11], 0x01, "New parameter types flag must be set");
-        });
-
-        let verdict = if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        };
-        self.record_result(
-            "MYSQL-STMT-003",
-            "COM_STMT_EXECUTE packet format MUST be compliant",
-            TestCategory::PacketFormat,
-            RequirementLevel::Must,
-            verdict,
-            None,
-        );
+    for value in params.iter().filter_map(|param| param.value.as_ref()) {
+        payload.extend_from_slice(value);
     }
+    payload
+}
 
-    #[allow(dead_code)]
+/// A framed COM_STMT_EXECUTE: sequence id 0, CURSOR_TYPE_NO_CURSOR.
+fn stmt_execute_packet(statement_id: u32, params: &[SpecParam]) -> Vec<u8> {
+    frame_packets(
+        0,
+        &stmt_execute_payload(statement_id, CursorType::NoCursor as u8, params),
+    )
+}
 
-    fn test_stmt_close_packet_format(&mut self) {
-        let result = std::panic::catch_unwind(|| {
-            // Test COM_STMT_CLOSE packet structure
-            let mut packet = Vec::new();
+/// The fields of a Column Definition 41 packet. The catalog is always "def".
+#[derive(Debug, Clone)]
+struct ColumnSpec {
+    schema: &'static str,
+    table: &'static str,
+    org_table: &'static str,
+    name: String,
+    org_name: String,
+    charset: u16,
+    length: u32,
+    column_type: u8,
+    flags: u16,
+    decimals: u8,
+}
 
-            packet.push(0x19); // COM_STMT_CLOSE
-
-            // Statement ID (4 bytes, little-endian)
-            let stmt_id = 5678u32;
-            packet.extend_from_slice(&stmt_id.to_le_bytes());
-
-            // Verify packet structure
-            assert_eq!(packet[0], 0x19, "Command must be COM_STMT_CLOSE");
-            assert_eq!(
-                packet.len(),
-                5,
-                "COM_STMT_CLOSE packet must be exactly 5 bytes"
-            );
-
-            let parsed_stmt_id = u32::from_le_bytes([packet[1], packet[2], packet[3], packet[4]]);
-            assert_eq!(parsed_stmt_id, stmt_id, "Statement ID must match");
-        });
-
-        let verdict = if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        };
-        self.record_result(
-            "MYSQL-STMT-004",
-            "COM_STMT_CLOSE packet format MUST be correct",
-            TestCategory::PacketFormat,
-            RequirementLevel::Must,
-            verdict,
-            None,
-        );
+/// A column of table `test.t` whose name and original name are `name`.
+fn column_spec(
+    name: &str,
+    column_type: MySqlType,
+    charset: u16,
+    length: u32,
+    flags: u16,
+    decimals: u8,
+) -> ColumnSpec {
+    ColumnSpec {
+        schema: "test",
+        table: "t",
+        org_table: "t",
+        name: name.to_string(),
+        org_name: name.to_string(),
+        charset,
+        length,
+        column_type: column_type as u8,
+        flags,
+        decimals,
     }
+}
 
-    // ===== Parameter Type Tests =====
-
-    #[allow(dead_code)]
-
-    fn test_parameter_type_signaling(&mut self) {
-        let result = std::panic::catch_unwind(|| {
-            // Test parameter type signaling with MYSQL_TYPE codes
-            let type_tests = vec![
-                (MySqlType::Tiny, 0x00, "TINYINT"),
-                (MySqlType::Short, 0x00, "SMALLINT"),
-                (MySqlType::Long, 0x00, "INT"),
-                (MySqlType::LongLong, 0x00, "BIGINT"),
-                (MySqlType::String, 0x00, "CHAR/VARCHAR"),
-                (MySqlType::VarString, 0x00, "VARCHAR/VARBINARY"),
-                (MySqlType::Float, 0x00, "FLOAT"),
-                (MySqlType::Double, 0x00, "DOUBLE"),
-                (MySqlType::DateTime, 0x00, "DATETIME"),
-                (MySqlType::Blob, 0x00, "BLOB"),
-            ];
-
-            for (mysql_type, flags, description) in type_tests {
-                let type_byte = mysql_type as u8;
-                let flag_byte = flags;
-
-                // Verify type codes match MySQL specification
-                match mysql_type {
-                    MySqlType::Tiny => assert_eq!(type_byte, 0x01),
-                    MySqlType::Short => assert_eq!(type_byte, 0x02),
-                    MySqlType::Long => assert_eq!(type_byte, 0x03),
-                    MySqlType::LongLong => assert_eq!(type_byte, 0x08),
-                    MySqlType::String => assert_eq!(type_byte, 0xFE),
-                    MySqlType::VarString => assert_eq!(type_byte, 0xFD),
-                    MySqlType::Float => assert_eq!(type_byte, 0x04),
-                    MySqlType::Double => assert_eq!(type_byte, 0x05),
-                    MySqlType::DateTime => assert_eq!(type_byte, 0x0C),
-                    MySqlType::Blob => assert_eq!(type_byte, 0xFC),
-                    _ => {} // Other types handled elsewhere
-                }
-
-                // Verify flag byte is valid
-                assert!(flag_byte == 0x00 || flag_byte == 0x80); // 0x80 = unsigned flag
-
-                assert!(!description.is_empty(), "Type must have description");
-            }
-        });
-
-        let verdict = if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        };
-        self.record_result(
-            "MYSQL-STMT-005",
-            "Parameter type signaling MUST use correct MYSQL_TYPE codes",
-            TestCategory::ParameterTypes,
-            RequirementLevel::Must,
-            verdict,
-            None,
-        );
-    }
-
-    #[allow(dead_code)]
-
-    fn test_type_code_compliance(&mut self) {
-        let result = std::panic::catch_unwind(|| {
-            // Test that type codes match MySQL specification exactly
-            assert_eq!(MySqlType::Decimal as u8, 0x00);
-            assert_eq!(MySqlType::Tiny as u8, 0x01);
-            assert_eq!(MySqlType::Short as u8, 0x02);
-            assert_eq!(MySqlType::Long as u8, 0x03);
-            assert_eq!(MySqlType::Float as u8, 0x04);
-            assert_eq!(MySqlType::Double as u8, 0x05);
-            assert_eq!(MySqlType::Null as u8, 0x06);
-            assert_eq!(MySqlType::Timestamp as u8, 0x07);
-            assert_eq!(MySqlType::LongLong as u8, 0x08);
-            assert_eq!(MySqlType::Int24 as u8, 0x09);
-            assert_eq!(MySqlType::Date as u8, 0x0A);
-            assert_eq!(MySqlType::Time as u8, 0x0B);
-            assert_eq!(MySqlType::DateTime as u8, 0x0C);
-            assert_eq!(MySqlType::Year as u8, 0x0D);
-            assert_eq!(MySqlType::VarChar as u8, 0x0F);
-            assert_eq!(MySqlType::Bit as u8, 0x10);
-            assert_eq!(MySqlType::NewDecimal as u8, 0xF6);
-            assert_eq!(MySqlType::Enum as u8, 0xF7);
-            assert_eq!(MySqlType::Set as u8, 0xF8);
-            assert_eq!(MySqlType::TinyBlob as u8, 0xF9);
-            assert_eq!(MySqlType::MediumBlob as u8, 0xFA);
-            assert_eq!(MySqlType::LongBlob as u8, 0xFB);
-            assert_eq!(MySqlType::Blob as u8, 0xFC);
-            assert_eq!(MySqlType::VarString as u8, 0xFD);
-            assert_eq!(MySqlType::String as u8, 0xFE);
-            assert_eq!(MySqlType::Geometry as u8, 0xFF);
-        });
-
-        let verdict = if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        };
-        self.record_result(
-            "MYSQL-STMT-006",
-            "MYSQL_TYPE codes MUST match specification exactly",
-            TestCategory::ParameterTypes,
-            RequirementLevel::Must,
-            verdict,
-            None,
-        );
-    }
-
-    #[allow(dead_code)]
-
-    fn test_unsigned_flag_handling(&mut self) {
-        let result = std::panic::catch_unwind(|| {
-            // Test unsigned flag handling in parameter types
-            let unsigned_flag = 0x80u8;
-
-            // Test signed vs unsigned integer types
-            let signed_int_flags = 0x00u8;
-            let unsigned_int_flags = 0x80u8;
-
-            assert_eq!(signed_int_flags & unsigned_flag, 0x00);
-            assert_eq!(unsigned_int_flags & unsigned_flag, 0x80);
-
-            // Only integer types should use unsigned flag
-            let integer_types = vec![
-                MySqlType::Tiny,
-                MySqlType::Short,
+/// `count` signed INT columns named c0, c1, ...
+fn int_columns(count: usize) -> Vec<ColumnSpec> {
+    (0..count)
+        .map(|index| {
+            column_spec(
+                &format!("c{index}"),
                 MySqlType::Long,
-                MySqlType::LongLong,
-                MySqlType::Int24,
-            ];
+                protocol_constants::CHARSET_BINARY,
+                11,
+                0,
+                0,
+            )
+        })
+        .collect()
+}
 
-            let non_integer_types = vec![
-                MySqlType::String,
-                MySqlType::VarString,
-                MySqlType::Float,
-                MySqlType::Double,
-                MySqlType::DateTime,
-                MySqlType::Blob,
-            ];
+/// Column Definition 41: six length-encoded strings (catalog, schema, table,
+/// org_table, name, org_name), the length of the fixed fields (0x0C), int<2>
+/// character set, int<4> column length, int<1> type, int<2> flags, int<1>
+/// decimals and a 2-byte zero filler.
+fn column_definition_bytes(column: &ColumnSpec) -> Vec<u8> {
+    let mut packet = Vec::new();
+    for text in [
+        "def",
+        column.schema,
+        column.table,
+        column.org_table,
+        column.name.as_str(),
+        column.org_name.as_str(),
+    ] {
+        packet.extend_from_slice(&encode_length_encoded_string(text.as_bytes()));
+    }
+    packet.push(0x0C);
+    packet.extend_from_slice(&column.charset.to_le_bytes());
+    packet.extend_from_slice(&column.length.to_le_bytes());
+    packet.push(column.column_type);
+    packet.extend_from_slice(&column.flags.to_le_bytes());
+    packet.push(column.decimals);
+    packet.extend_from_slice(&[0x00, 0x00]);
+    packet
+}
 
-            for mysql_type in integer_types {
-                // Integer types can be unsigned
-                let type_code = mysql_type as u8;
-                assert!(type_code <= 0x10 || matches!(mysql_type, MySqlType::Int24));
+/// Binary Protocol Resultset Row: header 0x00, a NULL bitmap of
+/// (n + 7 + 2) / 8 bytes with column i at bit i + 2, then the values of the
+/// non-NULL columns.
+fn binary_row_bytes(values: &[Option<Vec<u8>>]) -> Vec<u8> {
+    let mut row = vec![0x00];
+    let mut bitmap = vec![0u8; (values.len() + 7 + 2) / 8];
+    for (index, value) in values.iter().enumerate() {
+        if value.is_none() {
+            let bit = index + 2;
+            bitmap[bit / 8] |= 1 << (bit % 8);
+        }
+    }
+    row.extend_from_slice(&bitmap);
+    for value in values.iter().flatten() {
+        row.extend_from_slice(value);
+    }
+    row
+}
+
+/// Text Resultset Row: each value a length-encoded string, or 0xFB for NULL.
+fn text_row_bytes(values: &[Option<&[u8]>]) -> Vec<u8> {
+    let mut row = Vec::new();
+    for value in values {
+        match value {
+            Some(bytes) => row.extend_from_slice(&encode_length_encoded_string(bytes)),
+            None => row.push(protocol_constants::TEXT_NULL),
+        }
+    }
+    row
+}
+
+/// OK_Packet with CLIENT_PROTOCOL_41: header, length-encoded affected_rows and
+/// last_insert_id, int<2> status flags, int<2> warnings, then the info text.
+fn ok_packet_bytes(
+    header: u8,
+    affected_rows: u64,
+    last_insert_id: u64,
+    status_flags: u16,
+    warnings: u16,
+    info: &[u8],
+) -> Vec<u8> {
+    let mut packet = vec![header];
+    packet.extend_from_slice(&encode_length_encoded_integer(affected_rows));
+    packet.extend_from_slice(&encode_length_encoded_integer(last_insert_id));
+    packet.extend_from_slice(&status_flags.to_le_bytes());
+    packet.extend_from_slice(&warnings.to_le_bytes());
+    packet.extend_from_slice(info);
+    packet
+}
+
+/// EOF_Packet with CLIENT_PROTOCOL_41: 0xFE, int<2> warnings, int<2> status flags.
+fn eof_packet_bytes(warnings: u16, status_flags: u16) -> Vec<u8> {
+    let mut packet = vec![protocol_constants::EOF_HEADER];
+    packet.extend_from_slice(&warnings.to_le_bytes());
+    packet.extend_from_slice(&status_flags.to_le_bytes());
+    packet
+}
+
+/// ERR_Packet: 0xFF, int<2> error code, with CLIENT_PROTOCOL_41 the '#' marker
+/// and the 5-character SQLSTATE, then the message.
+fn err_packet_bytes(code: u16, sql_state: Option<&str>, message: &str) -> Vec<u8> {
+    let mut packet = vec![protocol_constants::ERR_HEADER];
+    packet.extend_from_slice(&code.to_le_bytes());
+    if let Some(state) = sql_state {
+        packet.push(b'#');
+        packet.extend_from_slice(state.as_bytes());
+    }
+    packet.extend_from_slice(message.as_bytes());
+    packet
+}
+
+/// Checks that `frame` is exactly one packet with sequence id 0, as a command
+/// packet must be, and returns its payload.
+fn single_packet_payload<'a>(what: &str, frame: &'a [u8]) -> Result<&'a [u8], String> {
+    if frame.len() < 4 {
+        return Err(format!(
+            "{what}: {} bytes cannot hold the 4-byte packet header",
+            frame.len()
+        ));
+    }
+    let declared =
+        usize::from(frame[0]) | (usize::from(frame[1]) << 8) | (usize::from(frame[2]) << 16);
+    if declared != frame.len() - 4 || declared >= protocol_constants::MAX_PAYLOAD {
+        return Err(format!(
+            "{what}: the int<3> payload length is {declared}, but the frame carries {} payload bytes in one packet",
+            frame.len() - 4
+        ));
+    }
+    if frame[3] != 0 {
+        return Err(format!(
+            "{what}: sequence id {}, a command packet starts at 0",
+            frame[3]
+        ));
+    }
+    Ok(&frame[4..])
+}
+
+/// The parts of a one-parameter COM_STMT_EXECUTE payload.
+struct OneParam<'a> {
+    null_bit: bool,
+    type_code: u8,
+    type_flags: u8,
+    value: &'a [u8],
+}
+
+/// Splits a one-parameter COM_STMT_EXECUTE packet at the offsets the spec
+/// fixes: 10-byte prefix, 1-byte NULL bitmap, new_params_bound_flag, int<2>
+/// type, then the value.
+fn one_param<'a>(what: &str, frame: &'a [u8]) -> Result<OneParam<'a>, String> {
+    let payload = single_packet_payload(what, frame)?;
+    if payload.len() < 14 || payload[0] != protocol_constants::COM_STMT_EXECUTE {
+        return Err(format!(
+            "{what}: {payload:02x?} is not a one-parameter COM_STMT_EXECUTE payload"
+        ));
+    }
+    if payload[10] & 0xFE != 0 {
+        return Err(format!(
+            "{what}: NULL bitmap {:#04x} sets bits beyond the single parameter",
+            payload[10]
+        ));
+    }
+    if payload[11] != protocol_constants::NEW_PARAMS_BOUND {
+        return Err(format!(
+            "{what}: new_params_bound_flag is {:#04x}, but the parameter types follow it, which needs 0x01",
+            payload[11]
+        ));
+    }
+    Ok(OneParam {
+        null_bit: payload[10] & 0x01 != 0,
+        type_code: payload[12],
+        type_flags: payload[13],
+        value: &payload[14..],
+    })
+}
+
+/// Describes where two byte strings differ, without printing megabytes.
+fn describe_mismatch(produced: &[u8], spec: &[u8]) -> String {
+    const SHOWN: usize = 96;
+    if produced.len() <= SHOWN && spec.len() <= SHOWN {
+        return format!("production emitted {produced:02x?}, the spec encoding is {spec:02x?}");
+    }
+    let first = produced
+        .iter()
+        .zip(spec)
+        .position(|(left, right)| left != right)
+        .unwrap_or(produced.len().min(spec.len()));
+    let window = |bytes: &[u8]| {
+        let end = (first + 16).min(bytes.len());
+        let start = first.saturating_sub(8).min(end);
+        format!("{:02x?}", &bytes[start..end])
+    };
+    format!(
+        "production emitted {} bytes, the spec encoding is {} bytes; they first differ at byte {first}: production {} vs spec {}",
+        produced.len(),
+        spec.len(),
+        window(produced),
+        window(spec)
+    )
+}
+
+/// Compares production's bytes with the spec encoding.
+fn expect_bytes(what: &str, produced: &[u8], spec: &[u8]) -> Result<(), String> {
+    if produced == spec {
+        Ok(())
+    } else {
+        Err(format!("{what}: {}", describe_mismatch(produced, spec)))
+    }
+}
+
+/// `{:?}` cut to a readable length.
+fn short_debug<T: std::fmt::Debug>(value: &T) -> String {
+    const LIMIT: usize = 240;
+    let text = format!("{value:?}");
+    let chars = text.chars().count();
+    if chars <= LIMIT {
+        text
+    } else {
+        let head: String = text.chars().take(LIMIT).collect();
+        format!("{head}... ({chars} chars)")
+    }
+}
+
+// ============================================================================
+// Requirements production exposes no observable for
+// ============================================================================
+
+fn prepare_packet_unobservable() -> Decision {
+    Decision::Skipped(format!(
+        "{NO_OBSERVABLE}: MySqlConnection::prepare_inner builds COM_STMT_PREPARE inline \
+         (src/database/mysql.rs:5092-5097) and writes it to the socket inside an async fn; no \
+         hook returns those bytes"
+    ))
+}
+
+fn prepare_ok_unobservable() -> Decision {
+    Decision::Skipped(format!(
+        "{NO_OBSERVABLE}: the COM_STMT_PREPARE_OK header (status, statement_id, num_columns, \
+         num_params, reserved byte, warning_count) is decoded by a closure inside the async \
+         prepare_inner (src/database/mysql.rs:5127-5152), which reads it, and the parameter and \
+         column definitions after it (src/database/mysql.rs:5155-5201), from a live socket. The \
+         definitions themselves go through parse_column_definition, decided in MYSQL-STMT-026"
+    ))
+}
+
+fn close_packet_unobservable() -> Decision {
+    Decision::Skipped(format!(
+        "{NO_OBSERVABLE}: COM_STMT_CLOSE is built only in the async close_prepared_statement_id \
+         (src/database/mysql.rs:5228-5251), reached when prepare_inner evicts a cached statement \
+         (src/database/mysql.rs:5215-5223); no hook returns the bytes"
+    ))
+}
+
+fn long_data_packet_unobservable() -> Decision {
+    Decision::Skipped(format!(
+        "{NO_OBSERVABLE}: production never sends COM_STMT_SEND_LONG_DATA. \
+         command::COM_STMT_SEND_LONG_DATA (src/database/mysql.rs:336) has no use, and \
+         write_stmt_execute_params (src/database/mysql.rs:6213-6255) puts every value inline in \
+         COM_STMT_EXECUTE"
+    ))
+}
+
+fn long_data_chunking_unobservable() -> Decision {
+    Decision::Skipped(format!(
+        "{NO_OBSERVABLE}: production never sends COM_STMT_SEND_LONG_DATA \
+         (src/database/mysql.rs:336 is its only mention), so there are no long-data chunks. A \
+         large value goes inline in COM_STMT_EXECUTE and PacketBuffer::build_packet splits the \
+         packet at 2^24 - 1 bytes, which MYSQL-STMT-008 and MYSQL-STMT-031 decide"
+    ))
+}
+
+fn long_data_reset_unobservable() -> Decision {
+    Decision::Skipped(format!(
+        "{NO_OBSERVABLE}: production keeps no long-data state to reset. COM_STMT_SEND_LONG_DATA \
+         and COM_STMT_RESET (src/database/mysql.rs:336 and 338) are declared and never sent"
+    ))
+}
+
+fn read_only_cursor_unobservable() -> Decision {
+    Decision::Skipped(format!(
+        "{NO_OBSERVABLE}: production never requests CURSOR_TYPE_READ_ONLY. The COM_STMT_EXECUTE \
+         flags byte is the constant 0x00 in query_prepared_inner_impl and \
+         execute_prepared_inner_impl (src/database/mysql.rs:5341 and 5483), no API takes a cursor \
+         type, and COM_STMT_FETCH is not implemented. MYSQL-STMT-016 decides the 0x00 byte"
+    ))
+}
+
+fn scrollable_cursor_unobservable() -> Decision {
+    Decision::Skipped(format!(
+        "{NO_OBSERVABLE}: production never requests CURSOR_TYPE_SCROLLABLE. The flags byte is the \
+         constant 0x00 (src/database/mysql.rs:5341 and 5483), no API takes a cursor type, and \
+         COM_STMT_FETCH is not implemented"
+    ))
+}
+
+fn parameter_count_unobservable() -> Decision {
+    Decision::Skipped(format!(
+        "{NO_OBSERVABLE}: the check params.len() != stmt.param_count runs inside the async \
+         query_prepared_inner_impl and execute_prepared_inner_impl \
+         (src/database/mysql.rs:5317-5323 and 5459-5465) on a live connection. MySqlStatement's \
+         fields are private (src/database/mysql.rs:6292-6307), and fuzz_build_stmt_execute_packet \
+         takes no expected parameter count"
+    ))
+}
+
+fn invalid_cursor_unobservable() -> Decision {
+    Decision::Skipped(format!(
+        "{NO_OBSERVABLE}: no API accepts a cursor type, so production cannot send an invalid one \
+         or be seen handling it. The flags byte is the constant 0x00 \
+         (src/database/mysql.rs:5341 and 5483)"
+    ))
+}
+
+fn binary_terminator_unobservable() -> Decision {
+    Decision::Skipped(format!(
+        "{NO_OBSERVABLE}: binary result-set rows are told apart from their EOF/OK terminator by \
+         the private parse_binary_row_or_terminator (src/database/mysql.rs:3997-4017), called \
+         from the async read_binary_result_set (src/database/mysql.rs:3815-3871), which also \
+         routes an ERR packet to parse_error (src/database/mysql.rs:3855). fuzz_parse_binary_row \
+         calls parse_binary_row directly. The text-protocol terminator logic is decided in \
+         MYSQL-STMT-028"
+    ))
+}
+
+// ============================================================================
+// Requirements decided by production code
+// ============================================================================
+
+#[cfg(feature = "mysql")]
+mod production {
+    use super::protocol_constants::*;
+    use super::*;
+    use asupersync::database::mysql::{
+        MySqlColumn, MySqlError, MySqlValue, ToSql, column_type, fuzz_build_stmt_execute_packet,
+        fuzz_decode_packet_header, fuzz_parse_binary_row, fuzz_parse_column_definition,
+        fuzz_parse_data_row_or_terminator, fuzz_parse_error_packet, fuzz_parse_ok_packet_fields,
+        fuzz_parse_text_row,
+    };
+
+    pub(super) fn stmt_execute_packet_format() -> Decision {
+        Decision::Decided(check_stmt_execute_packet())
+    }
+
+    pub(super) fn parameter_type_codes() -> Decision {
+        Decision::Decided(check_parameter_type_codes())
+    }
+
+    pub(super) fn type_code_table() -> Decision {
+        Decision::Decided(check_type_code_table())
+    }
+
+    pub(super) fn unsigned_flag() -> Decision {
+        Decision::Decided(check_unsigned_flag())
+    }
+
+    pub(super) fn parameter_length_encoding() -> Decision {
+        Decision::Decided(check_parameter_length_encoding())
+    }
+
+    pub(super) fn null_bitmap_encoding() -> Decision {
+        Decision::Decided(check_null_bitmap_encoding())
+    }
+
+    pub(super) fn null_bitmap_length() -> Decision {
+        Decision::Decided(check_null_bitmap_length())
+    }
+
+    pub(super) fn null_bitmap_bit_order() -> Decision {
+        Decision::Decided(check_null_bitmap_bit_order())
+    }
+
+    pub(super) fn mixed_null_parameters() -> Decision {
+        Decision::Decided(check_mixed_null_parameters())
+    }
+
+    pub(super) fn cursor_flags_byte() -> Decision {
+        Decision::Decided(check_cursor_flags_byte())
+    }
+
+    pub(super) fn binary_result_row() -> Decision {
+        Decision::Decided(check_binary_result_row())
+    }
+
+    pub(super) fn binary_row_null_bitmap_offset() -> Decision {
+        Decision::Decided(check_binary_row_null_bitmap_offset())
+    }
+
+    pub(super) fn binary_value_encoding() -> Decision {
+        Decision::Decided(check_binary_value_encoding())
+    }
+
+    pub(super) fn length_encoded_values() -> Decision {
+        Decision::Decided(check_length_encoded_values())
+    }
+
+    pub(super) fn invalid_statement_id() -> Decision {
+        Decision::Decided(check_invalid_statement_id())
+    }
+
+    pub(super) fn column_definition() -> Decision {
+        Decision::Decided(check_column_definition())
+    }
+
+    pub(super) fn text_result_row() -> Decision {
+        Decision::Decided(check_text_result_row())
+    }
+
+    pub(super) fn text_result_terminators() -> Decision {
+        Decision::Decided(check_text_result_terminators())
+    }
+
+    pub(super) fn ok_packet() -> Decision {
+        Decision::Decided(check_ok_packet())
+    }
+
+    pub(super) fn err_packet() -> Decision {
+        Decision::Decided(check_err_packet())
+    }
+
+    pub(super) fn packet_framing() -> Decision {
+        Decision::Decided(check_packet_framing())
+    }
+
+    // ---- helpers ----------------------------------------------------------
+
+    /// Production's COM_STMT_EXECUTE packet, header included.
+    fn build(what: &str, statement_id: u32, params: &[&dyn ToSql]) -> Result<Vec<u8>, String> {
+        fuzz_build_stmt_execute_packet(statement_id, params)
+            .map_err(|err| format!("{what}: production refused to build it: {err:?}"))
+    }
+
+    fn expect_execute(
+        what: &str,
+        statement_id: u32,
+        params: &[&dyn ToSql],
+        spec: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let produced = build(what, statement_id, params)?;
+        expect_bytes(what, &produced, spec)?;
+        Ok(produced)
+    }
+
+    /// Decodes spec-encoded column definitions with production's decoder and
+    /// checks every field, so the rows below are parsed with metadata that
+    /// production itself produced.
+    fn decode_columns(what: &str, specs: &[ColumnSpec]) -> Result<Vec<MySqlColumn>, String> {
+        let mut columns = Vec::with_capacity(specs.len());
+        for spec in specs {
+            let bytes = column_definition_bytes(spec);
+            let column = fuzz_parse_column_definition(&bytes).map_err(|err| {
+                format!(
+                    "{what}: production rejected the spec-valid definition of column {:?} ({}): {err:?}",
+                    spec.name,
+                    short_debug(&bytes)
+                )
+            })?;
+            check_column(what, &column, spec)?;
+            columns.push(column);
+        }
+        Ok(columns)
+    }
+
+    fn check_column(what: &str, got: &MySqlColumn, want: &ColumnSpec) -> Result<(), String> {
+        let got_fields = (
+            got.catalog.as_str(),
+            got.schema.as_str(),
+            got.table.as_str(),
+            got.org_table.as_str(),
+            got.name.as_str(),
+            got.org_name.as_str(),
+            got.charset,
+            got.length,
+            got.column_type,
+            got.flags,
+            got.decimals,
+        );
+        let want_fields = (
+            "def",
+            want.schema,
+            want.table,
+            want.org_table,
+            want.name.as_str(),
+            want.org_name.as_str(),
+            want.charset,
+            want.length,
+            want.column_type,
+            want.flags,
+            want.decimals,
+        );
+        if got_fields == want_fields {
+            Ok(())
+        } else {
+            Err(format!(
+                "{what}: production decoded (catalog, schema, table, org_table, name, org_name, charset, length, type, flags, decimals) = {}, the spec bytes carry {}",
+                short_debug(&got_fields),
+                short_debug(&want_fields)
+            ))
+        }
+    }
+
+    fn expect_binary_row(
+        what: &str,
+        row: &[u8],
+        columns: &[MySqlColumn],
+        expected: &[MySqlValue],
+    ) -> Result<(), String> {
+        match fuzz_parse_binary_row(row, columns) {
+            Ok(values) if values.as_slice() == expected => Ok(()),
+            other => Err(format!(
+                "{what}: binary row {} carries {}, production returned {}",
+                short_debug(&row),
+                short_debug(&expected),
+                short_debug(&other)
+            )),
+        }
+    }
+
+    /// The decimal value of an integer, whatever lossless variant holds it.
+    fn integer_text(value: &MySqlValue) -> Option<String> {
+        match value {
+            MySqlValue::Tiny(v) => Some(v.to_string()),
+            MySqlValue::Short(v) => Some(v.to_string()),
+            MySqlValue::Long(v) => Some(v.to_string()),
+            MySqlValue::LongLong(v) => Some(v.to_string()),
+            MySqlValue::Text(text)
+                if !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()) =>
+            {
+                Some(text.clone())
             }
-
-            for mysql_type in non_integer_types {
-                // Non-integer types typically don't use unsigned flag
-                let type_code = mysql_type as u8;
-                assert!(type_code != 0x00); // Should have valid type code
-            }
-        });
-
-        let verdict = if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        };
-        self.record_result(
-            "MYSQL-STMT-007",
-            "Unsigned flag handling MUST be correct for integer types",
-            TestCategory::ParameterTypes,
-            RequirementLevel::Must,
-            verdict,
-            None,
-        );
+            _ => None,
+        }
     }
 
-    #[allow(dead_code)]
-
-    fn test_parameter_length_encoding(&mut self) {
-        let result = std::panic::catch_unwind(|| {
-            // Test length encoding for variable-length parameters
-            let test_cases = vec![
-                (250, vec![250]),             // Short length
-                (251, vec![252, 251, 0]),     // Medium length (3-byte)
-                (65535, vec![252, 255, 255]), // Medium length max
-                (65536, vec![253, 0, 0, 1]),  // 3-byte length
-            ];
-
-            for (length, expected_encoding) in test_cases {
-                let encoded = encode_length_encoded_integer(length);
-                assert_eq!(
-                    encoded, expected_encoding,
-                    "Length encoding failed for {}",
-                    length
-                );
-
-                let decoded = decode_length_encoded_integer(&encoded).0;
-                assert_eq!(decoded, length, "Length decoding failed for {}", length);
-            }
-        });
-
-        let verdict = if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        };
-        self.record_result(
-            "MYSQL-STMT-008",
-            "Parameter length encoding MUST follow MySQL specification",
-            TestCategory::ParameterTypes,
-            RequirementLevel::Must,
-            verdict,
-            None,
-        );
-    }
-
-    // ===== NULL Bitmap Tests =====
-
-    #[allow(dead_code)]
-
-    fn test_null_bitmap_encoding(&mut self) {
-        let result = std::panic::catch_unwind(|| {
-            // Test NULL bitmap encoding per Section 16.6.4.2
-            let test_cases = vec![
-                (1, vec![0b00000001]),              // 1 param, NULL
-                (1, vec![0b00000000]),              // 1 param, not NULL
-                (8, vec![0b11111111]),              // 8 params, all NULL
-                (9, vec![0b11111111, 0b00000001]),  // 9 params, all NULL
-                (16, vec![0b10101010, 0b01010101]), // 16 params, alternating
-            ];
-
-            for (param_count, expected_bitmap) in test_cases {
-                let bitmap_len = (param_count + 7) / 8;
-                assert_eq!(
-                    expected_bitmap.len(),
-                    bitmap_len,
-                    "Bitmap length calculation failed"
-                );
-
-                // Test bit setting/getting
-                for param_idx in 0..param_count {
-                    let byte_idx = param_idx / 8;
-                    let bit_idx = param_idx % 8;
-
-                    if byte_idx < expected_bitmap.len() {
-                        let bit_set = (expected_bitmap[byte_idx] & (1 << bit_idx)) != 0;
-                        assert!(bit_set || !bit_set); // Either set or not set, both valid
-                    }
-                }
-            }
-        });
-
-        let verdict = if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        };
-        self.record_result(
-            "MYSQL-STMT-009",
-            "NULL bitmap encoding MUST follow Section 16.6.4.2",
-            TestCategory::NullBitmap,
-            RequirementLevel::Must,
-            verdict,
-            None,
-        );
-    }
-
-    #[allow(dead_code)]
-
-    fn test_null_bitmap_length_calculation(&mut self) {
-        let result = std::panic::catch_unwind(|| {
-            // Test NULL bitmap length calculation formula
-            let test_cases = vec![
-                (0, 0),  // 0 parameters
-                (1, 1),  // 1 parameter
-                (7, 1),  // 7 parameters
-                (8, 1),  // 8 parameters
-                (9, 2),  // 9 parameters
-                (15, 2), // 15 parameters
-                (16, 2), // 16 parameters
-                (17, 3), // 17 parameters
-            ];
-
-            for (param_count, expected_len) in test_cases {
-                let calculated_len = if param_count == 0 {
-                    0
-                } else {
-                    (param_count + 7) / 8
-                };
-                assert_eq!(
-                    calculated_len, expected_len,
-                    "NULL bitmap length calculation failed for {} parameters",
-                    param_count
-                );
-            }
-        });
-
-        let verdict = if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        };
-        self.record_result(
-            "MYSQL-STMT-010",
-            "NULL bitmap length calculation MUST be correct",
-            TestCategory::NullBitmap,
-            RequirementLevel::Must,
-            verdict,
-            None,
-        );
-    }
-
-    #[allow(dead_code)]
-
-    fn test_null_bitmap_bit_ordering(&mut self) {
-        let result = std::panic::catch_unwind(|| {
-            // Test NULL bitmap bit ordering (LSB first)
-            let mut bitmap = vec![0u8; 2]; // Support up to 16 parameters
-
-            // Set parameter 0 (bit 0 in byte 0)
-            bitmap[0] |= 1 << 0;
-            assert_eq!(bitmap[0] & 0x01, 0x01);
-
-            // Set parameter 3 (bit 3 in byte 0)
-            bitmap[0] |= 1 << 3;
-            assert_eq!(bitmap[0] & 0x08, 0x08);
-
-            // Set parameter 8 (bit 0 in byte 1)
-            bitmap[1] |= 1 << 0;
-            assert_eq!(bitmap[1] & 0x01, 0x01);
-
-            // Set parameter 15 (bit 7 in byte 1)
-            bitmap[1] |= 1 << 7;
-            assert_eq!(bitmap[1] & 0x80, 0x80);
-
-            // Verify final bitmap
-            assert_eq!(bitmap[0], 0x09); // bits 0 and 3 set: 0b00001001 = 0x09
-            assert_eq!(bitmap[1], 0x81); // bits 0 and 7 set: 0b10000001 = 0x81
-        });
-
-        let verdict = if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        };
-        self.record_result(
-            "MYSQL-STMT-011",
-            "NULL bitmap bit ordering MUST follow LSB-first convention",
-            TestCategory::NullBitmap,
-            RequirementLevel::Must,
-            verdict,
-            None,
-        );
-    }
-
-    #[allow(dead_code)]
-
-    fn test_mixed_null_parameters(&mut self) {
-        let result = std::panic::catch_unwind(|| {
-            // Test mixed NULL and non-NULL parameters
-            let param_count = 5;
-            let null_pattern = vec![true, false, true, false, false]; // params 0,2 are NULL
-
-            let mut bitmap = vec![0u8; (param_count + 7) / 8];
-
-            for (param_idx, is_null) in null_pattern.iter().enumerate() {
-                if *is_null {
-                    let byte_idx = param_idx / 8;
-                    let bit_idx = param_idx % 8;
-                    bitmap[byte_idx] |= 1 << bit_idx;
-                }
-            }
-
-            // Expected bitmap: params 0,2 NULL = bits 0,2 set = 0b00000101 = 0x05
-            assert_eq!(bitmap[0], 0x05);
-
-            // Verify we can read back the NULL status correctly
-            for (param_idx, expected_null) in null_pattern.iter().enumerate() {
-                let byte_idx = param_idx / 8;
-                let bit_idx = param_idx % 8;
-                let is_null = (bitmap[byte_idx] & (1 << bit_idx)) != 0;
-                assert_eq!(
-                    is_null, *expected_null,
-                    "NULL status mismatch for parameter {}",
-                    param_idx
-                );
-            }
-        });
-
-        let verdict = if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        };
-        self.record_result(
-            "MYSQL-STMT-012",
-            "Mixed NULL/non-NULL parameters MUST be handled correctly",
-            TestCategory::NullBitmap,
-            RequirementLevel::Must,
-            verdict,
-            None,
-        );
-    }
-
-    // ===== Long Data Tests =====
-
-    #[allow(dead_code)]
-
-    fn test_long_data_send_packet(&mut self) {
-        let result = std::panic::catch_unwind(|| {
-            // Test COM_STMT_SEND_LONG_DATA packet format
-            let mut packet = Vec::new();
-
-            packet.push(0x18); // COM_STMT_SEND_LONG_DATA
-
-            // Statement ID (4 bytes, little-endian)
-            let stmt_id = 9999u32;
-            packet.extend_from_slice(&stmt_id.to_le_bytes());
-
-            // Parameter index (2 bytes, little-endian)
-            let param_index = 2u16;
-            packet.extend_from_slice(&param_index.to_le_bytes());
-
-            // Data chunk
-            let data_chunk =
-                b"This is a large text data chunk that exceeds normal parameter size limits";
-            packet.extend_from_slice(data_chunk);
-
-            // Verify packet structure
-            assert_eq!(packet[0], 0x18, "Command must be COM_STMT_SEND_LONG_DATA");
-
-            let parsed_stmt_id = u32::from_le_bytes([packet[1], packet[2], packet[3], packet[4]]);
-            assert_eq!(parsed_stmt_id, stmt_id, "Statement ID must match");
-
-            let parsed_param_idx = u16::from_le_bytes([packet[5], packet[6]]);
-            assert_eq!(parsed_param_idx, param_index, "Parameter index must match");
-
-            let data_start = 7;
-            let parsed_data = &packet[data_start..];
-            assert_eq!(parsed_data, data_chunk, "Data chunk must match");
-            assert!(parsed_data.len() > 60, "Should handle large data chunks");
-        });
-
-        let verdict = if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        };
-        self.record_result(
-            "MYSQL-STMT-013",
-            "COM_STMT_SEND_LONG_DATA packet format MUST be correct",
-            TestCategory::LongData,
-            RequirementLevel::Must,
-            verdict,
-            None,
-        );
-    }
-
-    #[allow(dead_code)]
-
-    fn test_long_data_chunking(&mut self) {
-        let result = std::panic::catch_unwind(|| {
-            // Test long data transmission in multiple chunks
-            let large_data = vec![0x42u8; 100_000]; // 100KB of data
-            let chunk_size = 8192; // 8KB chunks
-            let expected_chunks = (large_data.len() + chunk_size - 1) / chunk_size;
-
-            let mut chunks_sent = 0;
-            let mut offset = 0;
-
-            while offset < large_data.len() {
-                let end = std::cmp::min(offset + chunk_size, large_data.len());
-                let chunk = &large_data[offset..end];
-
-                // Create long data packet
-                let mut packet = Vec::new();
-                packet.push(0x18); // COM_STMT_SEND_LONG_DATA
-                packet.extend_from_slice(&1234u32.to_le_bytes()); // stmt_id
-                packet.extend_from_slice(&0u16.to_le_bytes()); // param_index
-                packet.extend_from_slice(chunk);
-
-                // Verify chunk
-                assert!(
-                    chunk.len() <= chunk_size,
-                    "Chunk size must not exceed limit"
-                );
-                assert!(!chunk.is_empty(), "Chunk must not be empty");
-
-                chunks_sent += 1;
-                offset = end;
-            }
-
-            assert_eq!(
-                chunks_sent, expected_chunks,
-                "Number of chunks must match calculation"
-            );
-            assert!(chunks_sent > 1, "Large data should require multiple chunks");
-        });
-
-        let verdict = if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        };
-        self.record_result(
-            "MYSQL-STMT-014",
-            "Long data chunking MUST handle large data correctly",
-            TestCategory::LongData,
-            RequirementLevel::Must,
-            verdict,
-            None,
-        );
-    }
-
-    #[allow(dead_code)]
-
-    fn test_long_data_parameter_reset(&mut self) {
-        let result = std::panic::catch_unwind(|| {
-            // Test that long data parameters are reset between executions
-            let stmt_id = 5555u32;
-            let param_index = 1u16;
-
-            // First execution: send long data
-            let data1 = b"First execution data";
-            let packet1 = create_long_data_packet(stmt_id, param_index, data1);
-            assert_eq!(packet1[0], 0x18);
-
-            // Execute statement
-            let execute_packet1 = create_execute_packet(stmt_id, CursorType::NoCursor);
-            assert_eq!(execute_packet1[0], 0x17);
-
-            // Second execution: send different long data
-            let data2 = b"Second execution data - completely different";
-            let packet2 = create_long_data_packet(stmt_id, param_index, data2);
-            assert_eq!(packet2[0], 0x18);
-
-            // Execute statement again
-            let execute_packet2 = create_execute_packet(stmt_id, CursorType::NoCursor);
-            assert_eq!(execute_packet2[0], 0x17);
-
-            // Verify data is different
-            assert_ne!(
-                data1.as_slice(),
-                data2.as_slice(),
-                "Data should be different between executions"
-            );
-
-            // Long data parameters should be reset after each execution
-            // This is implicit in the protocol - each execute resets long data
-            assert!(packet1 != packet2, "Packets should be different");
-        });
-
-        let verdict = if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        };
-        self.record_result(
-            "MYSQL-STMT-015",
-            "Long data parameters MUST be reset between executions",
-            TestCategory::LongData,
-            RequirementLevel::Must,
-            verdict,
-            None,
-        );
-    }
-
-    // ===== Cursor Flag Tests =====
-
-    #[allow(dead_code)]
-
-    fn test_cursor_type_flags(&mut self) {
-        let result = std::panic::catch_unwind(|| {
-            // Test cursor type flags in COM_STMT_EXECUTE
-            assert_eq!(CursorType::NoCursor as u8, 0x00);
-            assert_eq!(CursorType::ReadOnly as u8, 0x01);
-            assert_eq!(CursorType::ForUpdate as u8, 0x02);
-            assert_eq!(CursorType::Scrollable as u8, 0x04);
-
-            // Test flag combinations
-            let combined_flags = CursorType::ReadOnly as u8 | CursorType::Scrollable as u8;
-            assert_eq!(combined_flags, 0x05); // 0x01 | 0x04 = 0x05
-
-            // Create execute packet with different cursor types
-            let test_cases = vec![
-                (CursorType::NoCursor, "No cursor"),
-                (CursorType::ReadOnly, "Read-only cursor"),
-                (CursorType::ForUpdate, "For update cursor"),
-                (CursorType::Scrollable, "Scrollable cursor"),
-            ];
-
-            for (cursor_type, description) in test_cases {
-                let packet = create_execute_packet(1234, cursor_type);
-                assert_eq!(packet[0], 0x17, "Must be COM_STMT_EXECUTE");
-                assert_eq!(
-                    packet[5], cursor_type as u8,
-                    "Cursor type must match for {}",
-                    description
-                );
-            }
-        });
-
-        let verdict = if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        };
-        self.record_result(
-            "MYSQL-STMT-016",
-            "Cursor type flags MUST be correctly encoded",
-            TestCategory::CursorFlags,
-            RequirementLevel::Must,
-            verdict,
-            None,
-        );
-    }
-
-    #[allow(dead_code)]
-
-    fn test_cursor_read_only(&mut self) {
-        let result = std::panic::catch_unwind(|| {
-            // Test CURSOR_TYPE_READ_ONLY behavior
-            let stmt_id = 7777u32;
-            let cursor_type = CursorType::ReadOnly;
-
-            let packet = create_execute_packet(stmt_id, cursor_type);
-
-            // Verify read-only cursor flag is set
-            assert_eq!(packet[5], 0x01, "Read-only cursor flag must be 0x01");
-
-            // Read-only cursors should not allow modifications
-            // This is enforced by server behavior, client just sets flag
-            let flags = packet[5];
-            let is_read_only = (flags & CursorType::ReadOnly as u8) != 0;
-            let is_for_update = (flags & CursorType::ForUpdate as u8) != 0;
-
-            assert!(is_read_only, "Read-only flag must be set");
-            assert!(!is_for_update, "For-update flag must not be set");
-        });
-
-        let verdict = if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        };
-        self.record_result(
-            "MYSQL-STMT-017",
-            "CURSOR_TYPE_READ_ONLY MUST be handled correctly",
-            TestCategory::CursorFlags,
-            RequirementLevel::Must,
-            verdict,
-            None,
-        );
-    }
-
-    #[allow(dead_code)]
-
-    fn test_cursor_scrollable_behavior(&mut self) {
-        let result = std::panic::catch_unwind(|| {
-            // Test scrollable cursor behavior
-            let stmt_id = 8888u32;
-            let cursor_type = CursorType::Scrollable;
-
-            let packet = create_execute_packet(stmt_id, cursor_type);
-
-            // Verify scrollable cursor flag is set
-            assert_eq!(packet[5], 0x04, "Scrollable cursor flag must be 0x04");
-
-            // Test combined flags (read-only + scrollable)
-            let combined_cursor = CursorType::ReadOnly as u8 | CursorType::Scrollable as u8;
-            let combined_packet = create_execute_packet_with_flags(stmt_id, combined_cursor);
-            assert_eq!(combined_packet[5], 0x05, "Combined flags must be 0x05");
-
-            // Verify flag parsing
-            let flags = combined_packet[5];
-            let is_scrollable = (flags & CursorType::Scrollable as u8) != 0;
-            let is_read_only = (flags & CursorType::ReadOnly as u8) != 0;
-
-            assert!(is_scrollable, "Scrollable flag must be set");
-            assert!(is_read_only, "Read-only flag must also be set");
-        });
-
-        let verdict = if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        };
-        self.record_result(
-            "MYSQL-STMT-018",
-            "Scrollable cursor behavior MUST be correct",
-            TestCategory::CursorFlags,
-            RequirementLevel::Must,
-            verdict,
-            None,
-        );
-    }
-
-    // ===== Binary Result Set Tests =====
-
-    #[allow(dead_code)]
-
-    fn test_binary_result_set_format(&mut self) {
-        let result = std::panic::catch_unwind(|| {
-            // Test binary result set row format
-            let column_count = 3;
-            let mut row = Vec::new();
-
-            // Header byte (always 0x00 for binary rows)
-            row.push(0x00);
-
-            // NULL bitmap for columns (not parameters)
-            let null_bitmap_len = (column_count + 7 + 2) / 8; // +2 for offset
-            let null_bitmap = vec![0b00001000]; // Column 1 is NULL, others are not
-            row.extend_from_slice(&null_bitmap);
-
-            // Column values (only for non-NULL columns)
-            // Column 0: INT (4 bytes)
-            let col0_value = 12345i32;
-            row.extend_from_slice(&col0_value.to_le_bytes());
-
-            // Column 1: NULL (skip)
-
-            // Column 2: VARCHAR (length-encoded string)
-            let col2_value = b"test_string";
-            let col2_len = col2_value.len() as u8;
-            row.push(col2_len);
-            row.extend_from_slice(col2_value);
-
-            // Verify binary row format
-            assert_eq!(row[0], 0x00, "Binary row must start with 0x00");
-
-            // Verify NULL bitmap
-            let bitmap_start = 1;
-            let bitmap_byte = row[bitmap_start];
-            let col1_is_null = (bitmap_byte & (1 << (1 + 2))) != 0; // +2 offset for binary rows
-            assert!(col1_is_null, "Column 1 should be NULL according to bitmap");
-
-            // Verify non-NULL column values can be parsed
-            let values_start = bitmap_start + null_bitmap_len;
-            let parsed_col0 = i32::from_le_bytes([
-                row[values_start],
-                row[values_start + 1],
-                row[values_start + 2],
-                row[values_start + 3],
-            ]);
-            assert_eq!(parsed_col0, col0_value, "Column 0 value must match");
-        });
-
-        let verdict = if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        };
-        self.record_result(
-            "MYSQL-STMT-019",
-            "Binary result set format MUST follow specification",
-            TestCategory::BinaryResultSet,
-            RequirementLevel::Must,
-            verdict,
-            None,
-        );
-    }
-
-    #[allow(dead_code)]
-
-    fn test_binary_row_null_bitmap(&mut self) {
-        let result = std::panic::catch_unwind(|| {
-            // Test NULL bitmap in binary result rows
-            let column_count = 10;
-            let null_bitmap_len = (column_count + 7 + 2) / 8; // +2 offset for binary rows
-
-            assert_eq!(
-                null_bitmap_len, 2,
-                "Should need 2 bytes for 10 columns + 2 offset"
-            );
-
-            // Test various NULL patterns
-            let test_patterns = vec![
-                (vec![false; 10], vec![0x00, 0x00]), // No NULLs
-                (vec![true; 10], vec![0xFC, 0x0F]),  // All NULLs (bits 2-11 set)
-            ];
-
-            for (null_pattern, expected_bitmap) in test_patterns {
-                let mut bitmap = vec![0u8; null_bitmap_len];
-
-                for (col_idx, is_null) in null_pattern.iter().enumerate() {
-                    if *is_null {
-                        let bit_idx = col_idx + 2; // +2 offset for binary rows
-                        let byte_idx = bit_idx / 8;
-                        let bit_pos = bit_idx % 8;
-
-                        if byte_idx < bitmap.len() {
-                            bitmap[byte_idx] |= 1 << bit_pos;
-                        }
-                    }
-                }
-
-                assert_eq!(bitmap, expected_bitmap, "NULL bitmap pattern must match");
-
-                // Verify we can read back NULL status
-                for (col_idx, expected_null) in null_pattern.iter().enumerate() {
-                    let bit_idx = col_idx + 2;
-                    let byte_idx = bit_idx / 8;
-                    let bit_pos = bit_idx % 8;
-
-                    if byte_idx < bitmap.len() {
-                        let is_null = (bitmap[byte_idx] & (1 << bit_pos)) != 0;
-                        assert_eq!(
-                            is_null, *expected_null,
-                            "NULL status mismatch for column {}",
-                            col_idx
-                        );
-                    }
-                }
-            }
-        });
-
-        let verdict = if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        };
-        self.record_result(
-            "MYSQL-STMT-020",
-            "Binary row NULL bitmap MUST handle +2 offset correctly",
-            TestCategory::BinaryResultSet,
-            RequirementLevel::Must,
-            verdict,
-            None,
-        );
-    }
-
-    #[allow(dead_code)]
-
-    fn test_binary_value_encoding(&mut self) {
-        let result = std::panic::catch_unwind(|| {
-            // Test binary value encoding for different types
-            let test_values = vec![
-                (MySqlType::Tiny, i8::MAX.to_le_bytes().to_vec()),
-                (MySqlType::Short, i16::MAX.to_le_bytes().to_vec()),
-                (MySqlType::Long, i32::MAX.to_le_bytes().to_vec()),
-                (MySqlType::LongLong, i64::MAX.to_le_bytes().to_vec()),
-                (MySqlType::Float, 3.14f32.to_le_bytes().to_vec()),
-                (
-                    MySqlType::Double,
-                    3.141592653589793f64.to_le_bytes().to_vec(),
+    // ---- MYSQL-STMT-003 ---------------------------------------------------
+
+    fn check_stmt_execute_packet() -> Result<(), String> {
+        // Encoded by hand: statement 1234, a NULL INT and the string "test_value".
+        let null_int: Option<i32> = None;
+        let text: &str = "test_value";
+        let params: [&dyn ToSql; 2] = [&null_int, &text];
+        let mut spec = vec![
+            27, 0, 0, 0,    // payload length 27, sequence id 0
+            0x17, // COM_STMT_EXECUTE
+            0xD2, 0x04, 0x00, 0x00, // statement_id 1234
+            0x00, // flags: CURSOR_TYPE_NO_CURSOR
+            0x01, 0x00, 0x00, 0x00, // iteration_count 1
+            0x01, // NULL bitmap: parameter 0 is NULL
+            0x01, // new_params_bound_flag
+            0x03, 0x00, // parameter 0: MYSQL_TYPE_LONG, signed
+            0xFD, 0x00, // parameter 1: MYSQL_TYPE_VAR_STRING
+            0x0A, // parameter 1 value: length 10, then the bytes
+        ];
+        spec.extend_from_slice(b"test_value");
+        expect_execute(
+            "COM_STMT_EXECUTE(1234, [NULL INT, \"test_value\"])",
+            1234,
+            &params,
+            &spec,
+        )?;
+
+        // Encoded by hand: no parameters, so nothing follows the iteration count.
+        let none: [&dyn ToSql; 0] = [];
+        expect_execute(
+            "COM_STMT_EXECUTE(42, [])",
+            42,
+            &none,
+            &[10, 0, 0, 0, 0x17, 42, 0, 0, 0, 0x00, 0x01, 0x00, 0x00, 0x00],
+        )?;
+
+        let id: i64 = -1;
+        let port: u16 = 3306;
+        let blob: &[u8] = &[0x00, 0xFF, 0x7F];
+        let params: [&dyn ToSql; 3] = [&id, &port, &blob];
+        let spec = stmt_execute_packet(
+            0x0102_0304,
+            &[
+                SpecParam::bound(MySqlType::LongLong, false, (-1i64).to_le_bytes().to_vec()),
+                SpecParam::bound(MySqlType::Short, true, 3306u16.to_le_bytes().to_vec()),
+                SpecParam::bound(
+                    MySqlType::Blob,
+                    false,
+                    encode_length_encoded_string(&[0x00, 0xFF, 0x7F]),
                 ),
-            ];
+            ],
+        );
+        expect_execute(
+            "COM_STMT_EXECUTE(0x01020304, [-1i64, 3306u16, 3-byte blob])",
+            0x0102_0304,
+            &params,
+            &spec,
+        )?;
+        Ok(())
+    }
 
-            for (mysql_type, expected_bytes) in test_values {
-                // Verify encoding produces expected byte patterns
-                match mysql_type {
-                    MySqlType::Tiny => assert_eq!(expected_bytes.len(), 1),
-                    MySqlType::Short => assert_eq!(expected_bytes.len(), 2),
-                    MySqlType::Long => assert_eq!(expected_bytes.len(), 4),
-                    MySqlType::LongLong => assert_eq!(expected_bytes.len(), 8),
-                    MySqlType::Float => assert_eq!(expected_bytes.len(), 4),
-                    MySqlType::Double => assert_eq!(expected_bytes.len(), 8),
-                    _ => panic!("Unexpected type in test"),
+    // ---- MYSQL-STMT-005 ---------------------------------------------------
+
+    fn check_parameter_type_codes() -> Result<(), String> {
+        let tiny: i8 = -5;
+        let short: i16 = -2;
+        let long: i32 = 1_000_000;
+        let longlong: i64 = -9_000_000_000;
+        let float: f32 = 1.5;
+        let double: f64 = -2.25;
+        let flag: bool = true;
+        // A fixed-width value fixes its type code: the server reads as many
+        // bytes as the declared type has.
+        let fixed: [(&str, &dyn ToSql, MySqlType, Vec<u8>); 7] = [
+            (
+                "i8 -5",
+                &tiny,
+                MySqlType::Tiny,
+                (-5i8).to_le_bytes().to_vec(),
+            ),
+            (
+                "i16 -2",
+                &short,
+                MySqlType::Short,
+                (-2i16).to_le_bytes().to_vec(),
+            ),
+            (
+                "i32 1000000",
+                &long,
+                MySqlType::Long,
+                1_000_000i32.to_le_bytes().to_vec(),
+            ),
+            (
+                "i64 -9000000000",
+                &longlong,
+                MySqlType::LongLong,
+                (-9_000_000_000i64).to_le_bytes().to_vec(),
+            ),
+            (
+                "f32 1.5",
+                &float,
+                MySqlType::Float,
+                1.5f32.to_le_bytes().to_vec(),
+            ),
+            (
+                "f64 -2.25",
+                &double,
+                MySqlType::Double,
+                (-2.25f64).to_le_bytes().to_vec(),
+            ),
+            ("bool true", &flag, MySqlType::Tiny, vec![0x01]),
+        ];
+        for (label, param, code, value) in fixed {
+            let what = format!("COM_STMT_EXECUTE with one {label} parameter");
+            let produced = build(&what, 5, &[param])?;
+            let layout = one_param(&what, &produced)?;
+            if layout.null_bit || layout.type_code != code as u8 || layout.value != value.as_slice()
+            {
+                return Err(format!(
+                    "{what}: production sent type {:#04x} (NULL bit {}) with value {:02x?}; a {label} value is sent as {code:?} ({:#04x}) with value {value:02x?}",
+                    layout.type_code, layout.null_bit, layout.value, code as u8
+                ));
+            }
+        }
+
+        // A length-encoded value may be declared as any string-class type.
+        const STRING_CLASS: [MySqlType; 7] = [
+            MySqlType::VarChar,
+            MySqlType::TinyBlob,
+            MySqlType::MediumBlob,
+            MySqlType::LongBlob,
+            MySqlType::Blob,
+            MySqlType::VarString,
+            MySqlType::String,
+        ];
+        let text: &str = "h\u{e9}llo";
+        let owned = String::from("abc");
+        let bytes: &[u8] = &[0x00, 0x01, 0xFE];
+        let vec_bytes: Vec<u8> = vec![0xFF; 3];
+        let lenenc: [(&str, &dyn ToSql, Vec<u8>); 4] = [
+            (
+                "&str \"h\u{e9}llo\"",
+                &text,
+                encode_length_encoded_string("h\u{e9}llo".as_bytes()),
+            ),
+            (
+                "String \"abc\"",
+                &owned,
+                encode_length_encoded_string(b"abc"),
+            ),
+            (
+                "&[u8]",
+                &bytes,
+                encode_length_encoded_string(&[0x00, 0x01, 0xFE]),
+            ),
+            (
+                "Vec<u8>",
+                &vec_bytes,
+                encode_length_encoded_string(&[0xFF; 3]),
+            ),
+        ];
+        for (label, param, value) in lenenc {
+            let what = format!("COM_STMT_EXECUTE with one {label} parameter");
+            let produced = build(&what, 5, &[param])?;
+            let layout = one_param(&what, &produced)?;
+            let string_class = STRING_CLASS
+                .iter()
+                .any(|class| *class as u8 == layout.type_code);
+            if layout.null_bit || !string_class || layout.value != value.as_slice() {
+                return Err(format!(
+                    "{what}: production sent type {:#04x} (NULL bit {}) with value {:02x?}; a length-encoded value needs a string-class type ({STRING_CLASS:?}) and the value {value:02x?}",
+                    layout.type_code, layout.null_bit, layout.value
+                ));
+            }
+        }
+
+        // A NULL parameter is marked in the bitmap and has no value bytes; its
+        // 2-byte type field is still present.
+        let null_int: Option<u32> = None;
+        let what = "COM_STMT_EXECUTE with one NULL parameter";
+        let produced = build(what, 5, &[&null_int])?;
+        let layout = one_param(what, &produced)?;
+        if !layout.null_bit || !layout.value.is_empty() {
+            return Err(format!(
+                "{what}: production set the NULL bit to {} and sent value bytes {:02x?}; a NULL parameter has its bit set and no value",
+                layout.null_bit, layout.value
+            ));
+        }
+        Ok(())
+    }
+
+    // ---- MYSQL-STMT-006 ---------------------------------------------------
+
+    fn check_type_code_table() -> Result<(), String> {
+        // MYSQL_TYPE_NEWDATE is server-internal and never sent, and production
+        // has no constant for it.
+        let table: [(&str, u8, MySqlType); 27] = [
+            (
+                "MYSQL_TYPE_DECIMAL",
+                column_type::MYSQL_TYPE_DECIMAL,
+                MySqlType::Decimal,
+            ),
+            (
+                "MYSQL_TYPE_TINY",
+                column_type::MYSQL_TYPE_TINY,
+                MySqlType::Tiny,
+            ),
+            (
+                "MYSQL_TYPE_SHORT",
+                column_type::MYSQL_TYPE_SHORT,
+                MySqlType::Short,
+            ),
+            (
+                "MYSQL_TYPE_LONG",
+                column_type::MYSQL_TYPE_LONG,
+                MySqlType::Long,
+            ),
+            (
+                "MYSQL_TYPE_FLOAT",
+                column_type::MYSQL_TYPE_FLOAT,
+                MySqlType::Float,
+            ),
+            (
+                "MYSQL_TYPE_DOUBLE",
+                column_type::MYSQL_TYPE_DOUBLE,
+                MySqlType::Double,
+            ),
+            (
+                "MYSQL_TYPE_NULL",
+                column_type::MYSQL_TYPE_NULL,
+                MySqlType::Null,
+            ),
+            (
+                "MYSQL_TYPE_TIMESTAMP",
+                column_type::MYSQL_TYPE_TIMESTAMP,
+                MySqlType::Timestamp,
+            ),
+            (
+                "MYSQL_TYPE_LONGLONG",
+                column_type::MYSQL_TYPE_LONGLONG,
+                MySqlType::LongLong,
+            ),
+            (
+                "MYSQL_TYPE_INT24",
+                column_type::MYSQL_TYPE_INT24,
+                MySqlType::Int24,
+            ),
+            (
+                "MYSQL_TYPE_DATE",
+                column_type::MYSQL_TYPE_DATE,
+                MySqlType::Date,
+            ),
+            (
+                "MYSQL_TYPE_TIME",
+                column_type::MYSQL_TYPE_TIME,
+                MySqlType::Time,
+            ),
+            (
+                "MYSQL_TYPE_DATETIME",
+                column_type::MYSQL_TYPE_DATETIME,
+                MySqlType::DateTime,
+            ),
+            (
+                "MYSQL_TYPE_YEAR",
+                column_type::MYSQL_TYPE_YEAR,
+                MySqlType::Year,
+            ),
+            (
+                "MYSQL_TYPE_VARCHAR",
+                column_type::MYSQL_TYPE_VARCHAR,
+                MySqlType::VarChar,
+            ),
+            (
+                "MYSQL_TYPE_BIT",
+                column_type::MYSQL_TYPE_BIT,
+                MySqlType::Bit,
+            ),
+            (
+                "MYSQL_TYPE_JSON",
+                column_type::MYSQL_TYPE_JSON,
+                MySqlType::Json,
+            ),
+            (
+                "MYSQL_TYPE_NEWDECIMAL",
+                column_type::MYSQL_TYPE_NEWDECIMAL,
+                MySqlType::NewDecimal,
+            ),
+            (
+                "MYSQL_TYPE_ENUM",
+                column_type::MYSQL_TYPE_ENUM,
+                MySqlType::Enum,
+            ),
+            (
+                "MYSQL_TYPE_SET",
+                column_type::MYSQL_TYPE_SET,
+                MySqlType::Set,
+            ),
+            (
+                "MYSQL_TYPE_TINY_BLOB",
+                column_type::MYSQL_TYPE_TINY_BLOB,
+                MySqlType::TinyBlob,
+            ),
+            (
+                "MYSQL_TYPE_MEDIUM_BLOB",
+                column_type::MYSQL_TYPE_MEDIUM_BLOB,
+                MySqlType::MediumBlob,
+            ),
+            (
+                "MYSQL_TYPE_LONG_BLOB",
+                column_type::MYSQL_TYPE_LONG_BLOB,
+                MySqlType::LongBlob,
+            ),
+            (
+                "MYSQL_TYPE_BLOB",
+                column_type::MYSQL_TYPE_BLOB,
+                MySqlType::Blob,
+            ),
+            (
+                "MYSQL_TYPE_VAR_STRING",
+                column_type::MYSQL_TYPE_VAR_STRING,
+                MySqlType::VarString,
+            ),
+            (
+                "MYSQL_TYPE_STRING",
+                column_type::MYSQL_TYPE_STRING,
+                MySqlType::String,
+            ),
+            (
+                "MYSQL_TYPE_GEOMETRY",
+                column_type::MYSQL_TYPE_GEOMETRY,
+                MySqlType::Geometry,
+            ),
+        ];
+        let mismatches: Vec<String> = table
+            .iter()
+            .filter(|entry| entry.1 != entry.2 as u8)
+            .map(|entry| {
+                format!(
+                    "{} is {:#04x}, the spec value is {:#04x}",
+                    entry.0, entry.1, entry.2 as u8
+                )
+            })
+            .collect();
+        if mismatches.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "asupersync::database::mysql::column_type disagrees with the field-type table: {}",
+                mismatches.join("; ")
+            ))
+        }
+    }
+
+    // ---- MYSQL-STMT-007 ---------------------------------------------------
+
+    fn check_unsigned_flag() -> Result<(), String> {
+        // Execute: an unsigned integer carries 0x80 in the high byte of its
+        // type field; a signed one must not, or -1 would arrive as 2^n - 1.
+        let u8_value: u8 = 200;
+        let u16_value: u16 = 65_000;
+        let u32_value: u32 = u32::MAX;
+        let u64_value: u64 = u64::MAX;
+        let i8_value: i8 = -1;
+        let i16_value: i16 = -1;
+        let i32_value: i32 = -1;
+        let i64_value: i64 = -1;
+        let cases: [(&str, &dyn ToSql, MySqlType, bool, Vec<u8>); 8] = [
+            ("u8 200", &u8_value, MySqlType::Tiny, true, vec![200]),
+            (
+                "u16 65000",
+                &u16_value,
+                MySqlType::Short,
+                true,
+                65_000u16.to_le_bytes().to_vec(),
+            ),
+            ("u32::MAX", &u32_value, MySqlType::Long, true, vec![0xFF; 4]),
+            (
+                "u64::MAX",
+                &u64_value,
+                MySqlType::LongLong,
+                true,
+                vec![0xFF; 8],
+            ),
+            ("i8 -1", &i8_value, MySqlType::Tiny, false, vec![0xFF]),
+            ("i16 -1", &i16_value, MySqlType::Short, false, vec![0xFF; 2]),
+            ("i32 -1", &i32_value, MySqlType::Long, false, vec![0xFF; 4]),
+            (
+                "i64 -1",
+                &i64_value,
+                MySqlType::LongLong,
+                false,
+                vec![0xFF; 8],
+            ),
+        ];
+        for (label, param, code, unsigned, value) in cases {
+            let what = format!("COM_STMT_EXECUTE with one {label} parameter");
+            let spec = stmt_execute_packet(11, &[SpecParam::bound(code, unsigned, value)]);
+            expect_execute(&what, 11, &[param], &spec)?;
+        }
+
+        // Result rows: a column with UNSIGNED_FLAG holds the unsigned value of
+        // its bytes, in both protocols.
+        let columns = decode_columns(
+            "UNSIGNED and signed integer columns",
+            &[
+                column_spec(
+                    "tiny_u",
+                    MySqlType::Tiny,
+                    CHARSET_BINARY,
+                    3,
+                    UNSIGNED_FLAG,
+                    0,
+                ),
+                column_spec(
+                    "short_u",
+                    MySqlType::Short,
+                    CHARSET_BINARY,
+                    5,
+                    UNSIGNED_FLAG,
+                    0,
+                ),
+                column_spec(
+                    "long_u",
+                    MySqlType::Long,
+                    CHARSET_BINARY,
+                    10,
+                    UNSIGNED_FLAG,
+                    0,
+                ),
+                column_spec(
+                    "longlong_u_max",
+                    MySqlType::LongLong,
+                    CHARSET_BINARY,
+                    20,
+                    UNSIGNED_FLAG,
+                    0,
+                ),
+                column_spec(
+                    "longlong_u_small",
+                    MySqlType::LongLong,
+                    CHARSET_BINARY,
+                    20,
+                    UNSIGNED_FLAG,
+                    0,
+                ),
+                column_spec("tiny_signed", MySqlType::Tiny, CHARSET_BINARY, 4, 0, 0),
+            ],
+        )?;
+        let binary = binary_row_bytes(&[
+            Some(vec![0xFF]),
+            Some(vec![0xFF; 2]),
+            Some(vec![0xFF; 4]),
+            Some(vec![0xFF; 8]),
+            Some(5u64.to_le_bytes().to_vec()),
+            Some(vec![0xFF]),
+        ]);
+        let text = text_row_bytes(&[
+            Some(&b"255"[..]),
+            Some(&b"65535"[..]),
+            Some(&b"4294967295"[..]),
+            Some(&b"18446744073709551615"[..]),
+            Some(&b"5"[..]),
+            Some(&b"-1"[..]),
+        ]);
+        let want = [
+            "255",
+            "65535",
+            "4294967295",
+            "18446744073709551615",
+            "5",
+            "-1",
+        ];
+        let decoded = [
+            (
+                "binary",
+                binary.clone(),
+                fuzz_parse_binary_row(&binary, &columns),
+            ),
+            ("text", text.clone(), fuzz_parse_text_row(&text, &columns)),
+        ];
+        for (protocol, row, result) in decoded {
+            let values = result.map_err(|err| {
+                format!(
+                    "{protocol} row {row:02x?} of integer values: production rejected it: {err:?}"
+                )
+            })?;
+            let got: Vec<Option<String>> = values.iter().map(integer_text).collect();
+            let expected: Vec<Option<String>> =
+                want.iter().map(|value| Some(value.to_string())).collect();
+            if got != expected {
+                return Err(format!(
+                    "{protocol} row {row:02x?}: the columns hold {want:?}, production decoded {values:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    // ---- MYSQL-STMT-008 ---------------------------------------------------
+
+    fn check_parameter_length_encoding() -> Result<(), String> {
+        // Encoded by hand from the length-encoded integer table.
+        let cases: [(usize, &[u8]); 9] = [
+            (0, &[0x00]),
+            (1, &[0x01]),
+            (250, &[0xFA]),
+            (251, &[0xFC, 0xFB, 0x00]),
+            (252, &[0xFC, 0xFC, 0x00]),
+            (65_535, &[0xFC, 0xFF, 0xFF]),
+            (65_536, &[0xFD, 0x00, 0x00, 0x01]),
+            (70_000, &[0xFD, 0x70, 0x11, 0x01]),
+            // 0xFE + int<8> needs a 2^24-byte value, which also makes the
+            // packet longer than one packet can carry.
+            (
+                16_777_216,
+                &[0xFE, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00],
+            ),
+        ];
+        for (len, prefix) in cases {
+            let value = vec![b'x'; len];
+            let param: &[u8] = &value;
+            let what = format!("COM_STMT_EXECUTE with a {len}-byte value");
+            let produced = build(&what, 9, &[&param])?;
+            // The value starts at payload offset 14, inside the first packet.
+            let at = 4 + 14;
+            match produced.get(at..at + prefix.len()) {
+                Some(got) if got == prefix => {}
+                got => {
+                    return Err(format!(
+                        "{what}: production's length prefix is {got:02x?}, the length-encoded integer for {len} is {prefix:02x?}"
+                    ));
                 }
-
-                // All multi-byte values should use little-endian encoding
-                assert!(
-                    !expected_bytes.is_empty(),
-                    "Encoded value must not be empty"
-                );
             }
-
-            // Test string encoding (length-encoded)
-            let test_string = b"hello world";
-            let encoded_string = encode_length_encoded_string(test_string);
-
-            assert_eq!(encoded_string[0], test_string.len() as u8);
-            assert_eq!(&encoded_string[1..], test_string);
-        });
-
-        let verdict = if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        };
-        self.record_result(
-            "MYSQL-STMT-021",
-            "Binary value encoding MUST use correct formats",
-            TestCategory::BinaryResultSet,
-            RequirementLevel::Must,
-            verdict,
-            None,
-        );
+            let spec = stmt_execute_packet(
+                9,
+                &[SpecParam::bound(
+                    MySqlType::Blob,
+                    false,
+                    encode_length_encoded_string(&value),
+                )],
+            );
+            expect_bytes(&what, &produced, &spec)?;
+        }
+        Ok(())
     }
 
-    #[allow(dead_code)]
+    // ---- MYSQL-STMT-009..012 ----------------------------------------------
 
-    fn test_length_encoded_values(&mut self) {
-        let result = std::panic::catch_unwind(|| {
-            // Test length-encoded values in binary result sets
-            let test_cases: Vec<(&[u8], Vec<u8>)> = vec![
-                (&b""[..], vec![0x00]),                                    // Empty string
-                (&b"a"[..], vec![0x01, b'a']),                             // Single char
-                (&b"hello"[..], vec![0x05, b'h', b'e', b'l', b'l', b'o']), // Short string
-            ];
+    /// Production's packet for INT parameters, NULL where `nulls` says so,
+    /// compared whole with the spec encoding.
+    fn null_pattern_packet(what: &str, nulls: &[bool]) -> Result<Vec<u8>, String> {
+        let values: Vec<Option<i32>> = nulls
+            .iter()
+            .enumerate()
+            .map(|(index, null)| {
+                if *null {
+                    None
+                } else {
+                    Some(index as i32 * 3 + 1)
+                }
+            })
+            .collect();
+        let params: Vec<&dyn ToSql> = values.iter().map(|value| value as &dyn ToSql).collect();
+        let spec_params: Vec<SpecParam> = values
+            .iter()
+            .map(|value| match value {
+                Some(number) => {
+                    SpecParam::bound(MySqlType::Long, false, number.to_le_bytes().to_vec())
+                }
+                None => SpecParam::null(MySqlType::Long, false),
+            })
+            .collect();
+        expect_execute(what, 77, &params, &stmt_execute_packet(77, &spec_params))
+    }
 
-            for (input, expected) in test_cases {
-                let encoded = encode_length_encoded_string(input);
-                assert_eq!(
-                    encoded,
-                    expected,
-                    "Length-encoded string failed for: {:?}",
-                    std::str::from_utf8(input).unwrap_or("<invalid utf8>")
-                );
+    fn check_bitmap(what: &str, frame: &[u8], expected: &[u8]) -> Result<(), String> {
+        let payload = single_packet_payload(what, frame)?;
+        match payload.get(10..10 + expected.len()) {
+            Some(got) if got == expected => Ok(()),
+            got => Err(format!(
+                "{what}: production's NULL bitmap is {got:02x?}, the spec bitmap is {expected:02x?}"
+            )),
+        }
+    }
 
-                let (decoded, bytes_read) = decode_length_encoded_string(&encoded);
-                assert_eq!(
-                    decoded,
-                    input,
-                    "Decode failed for: {:?}",
-                    std::str::from_utf8(input).unwrap_or("<invalid utf8>")
-                );
-                assert_eq!(bytes_read, encoded.len(), "Bytes read mismatch");
+    fn check_null_bitmap_encoding() -> Result<(), String> {
+        let alternating: Vec<bool> = (0..16)
+            .map(|index| matches!(index, 1 | 3 | 5 | 7 | 8 | 10 | 12 | 14))
+            .collect();
+        let cases: [(&str, Vec<bool>, &[u8]); 5] = [
+            ("1 parameter, NULL", vec![true], &[0b0000_0001]),
+            ("1 parameter, not NULL", vec![false], &[0b0000_0000]),
+            ("8 parameters, all NULL", vec![true; 8], &[0b1111_1111]),
+            (
+                "9 parameters, all NULL",
+                vec![true; 9],
+                &[0b1111_1111, 0b0000_0001],
+            ),
+            (
+                "16 parameters, 1 3 5 7 8 10 12 14 NULL",
+                alternating,
+                &[0b1010_1010, 0b0101_0101],
+            ),
+        ];
+        for (label, nulls, bitmap) in cases {
+            let what = format!("COM_STMT_EXECUTE with {label}");
+            let produced = null_pattern_packet(&what, &nulls)?;
+            check_bitmap(&what, &produced, bitmap)?;
+        }
+        Ok(())
+    }
+
+    fn check_null_bitmap_length() -> Result<(), String> {
+        let cases: [(usize, usize); 8] = [
+            (0, 0),
+            (1, 1),
+            (7, 1),
+            (8, 1),
+            (9, 2),
+            (15, 2),
+            (16, 2),
+            (17, 3),
+        ];
+        for (count, bitmap_len) in cases {
+            let what = format!("COM_STMT_EXECUTE with {count} non-NULL INT parameters");
+            let produced = null_pattern_packet(&what, &vec![false; count])?;
+            let payload = single_packet_payload(&what, &produced)?;
+            // 10-byte prefix; then the bitmap, new_params_bound_flag and, per
+            // INT parameter, 2 type bytes and 4 value bytes.
+            let spec_len = if count == 0 {
+                10
+            } else {
+                10 + bitmap_len + 1 + 6 * count
+            };
+            if payload.len() != spec_len {
+                return Err(format!(
+                    "{what}: payload is {} bytes, the spec layout with a {bitmap_len}-byte bitmap is {spec_len}",
+                    payload.len()
+                ));
             }
-
-            // Test longer strings requiring multi-byte length encoding
-            let long_string = vec![b'x'; 300]; // 300 bytes
-            let encoded_long = encode_length_encoded_string(&long_string);
-
-            // Should use 3-byte length encoding: 252 + 2 bytes length + data
-            assert_eq!(
-                encoded_long[0], 252,
-                "Long string should use 3-byte length encoding"
-            );
-            assert_eq!(encoded_long[1], 44, "Length LSB should be 44 (300 & 0xFF)");
-            assert_eq!(encoded_long[2], 1, "Length MSB should be 1 (300 >> 8)");
-            assert_eq!(&encoded_long[3..], &long_string[..], "Data should match");
-        });
-
-        let verdict = if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        };
-        self.record_result(
-            "MYSQL-STMT-022",
-            "Length-encoded values MUST be handled correctly",
-            TestCategory::BinaryResultSet,
-            RequirementLevel::Must,
-            verdict,
-            None,
-        );
-    }
-
-    // ===== Error Handling Tests =====
-
-    #[allow(dead_code)]
-
-    fn test_invalid_statement_id(&mut self) {
-        let result = std::panic::catch_unwind(|| {
-            // Test error handling for invalid statement IDs
-            let invalid_stmt_id = 0xFFFFFFFF; // Maximum u32, likely invalid
-
-            let execute_packet = create_execute_packet(invalid_stmt_id, CursorType::NoCursor);
-            let close_packet = create_close_packet(invalid_stmt_id);
-
-            // Verify packets are formed correctly even with invalid ID
-            assert_eq!(
-                execute_packet[0], 0x17,
-                "Execute packet command must be correct"
-            );
-            assert_eq!(
-                close_packet[0], 0x19,
-                "Close packet command must be correct"
-            );
-
-            let parsed_exec_id = u32::from_le_bytes([
-                execute_packet[1],
-                execute_packet[2],
-                execute_packet[3],
-                execute_packet[4],
-            ]);
-            assert_eq!(
-                parsed_exec_id, invalid_stmt_id,
-                "Execute packet ID must match"
-            );
-
-            let parsed_close_id = u32::from_le_bytes([
-                close_packet[1],
-                close_packet[2],
-                close_packet[3],
-                close_packet[4],
-            ]);
-            assert_eq!(
-                parsed_close_id, invalid_stmt_id,
-                "Close packet ID must match"
-            );
-
-            // Server should respond with error for invalid statement ID
-            // This is server behavior, client just sends valid packet format
-        });
-
-        let verdict = if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        };
-        self.record_result(
-            "MYSQL-STMT-023",
-            "Invalid statement ID handling MUST follow protocol",
-            TestCategory::ErrorHandling,
-            RequirementLevel::Must,
-            verdict,
-            None,
-        );
-    }
-
-    #[allow(dead_code)]
-
-    fn test_parameter_count_mismatch(&mut self) {
-        let result = std::panic::catch_unwind(|| {
-            // Test parameter count mismatch detection
-            let stmt_id = 1111u32;
-            let expected_param_count = 3;
-            let provided_param_count = 2; // Mismatch
-
-            // Create execute packet with wrong parameter count
-            let mut packet = Vec::new();
-            packet.push(0x17); // COM_STMT_EXECUTE
-            packet.extend_from_slice(&stmt_id.to_le_bytes());
-            packet.push(CursorType::NoCursor as u8);
-            packet.extend_from_slice(&1u32.to_le_bytes()); // iteration count
-
-            // NULL bitmap sized for provided count, not expected count
-            let null_bitmap_len = (provided_param_count + 7) / 8;
-            let null_bitmap = vec![0x00; null_bitmap_len];
-            packet.extend_from_slice(&null_bitmap);
-
-            packet.push(0x01); // new types flag
-
-            // Provide types for fewer parameters than expected
-            for _ in 0..provided_param_count {
-                packet.push(MySqlType::Long as u8);
-                packet.push(0x00); // flags
+            if count > 0 {
+                check_bitmap(&what, &produced, &vec![0u8; bitmap_len])?;
+                if payload[10 + bitmap_len] != NEW_PARAMS_BOUND {
+                    return Err(format!(
+                        "{what}: the byte after a {bitmap_len}-byte bitmap is {:#04x}, not new_params_bound_flag 0x01",
+                        payload[10 + bitmap_len]
+                    ));
+                }
             }
-
-            // Packet is well-formed but has parameter count mismatch
-            assert_eq!(packet[0], 0x17, "Packet format must be valid");
-
-            // Calculate actual parameter count from packet structure
-            let null_bitmap_start = 10;
-            let types_start = null_bitmap_start + null_bitmap_len + 1; // +1 for new types flag
-            let types_end = packet.len();
-            let actual_param_count = (types_end - types_start) / 2; // 2 bytes per parameter
-
-            assert_eq!(actual_param_count, provided_param_count);
-            assert_ne!(
-                actual_param_count, expected_param_count,
-                "Should detect mismatch"
-            );
-        });
-
-        let verdict = if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        };
-        self.record_result(
-            "MYSQL-STMT-024",
-            "Parameter count mismatch MUST be detectable",
-            TestCategory::ErrorHandling,
-            RequirementLevel::Must,
-            verdict,
-            None,
-        );
+        }
+        Ok(())
     }
 
-    #[allow(dead_code)]
+    fn check_null_bitmap_bit_order() -> Result<(), String> {
+        // Parameter i is bit i % 8, least significant first, of byte i / 8.
+        let nulls: Vec<bool> = (0..16)
+            .map(|index| matches!(index, 0 | 3 | 8 | 15))
+            .collect();
+        let what = "COM_STMT_EXECUTE with parameters 0, 3, 8 and 15 of 16 NULL";
+        let produced = null_pattern_packet(what, &nulls)?;
+        check_bitmap(what, &produced, &[0x09, 0x81])
+    }
 
-    fn test_invalid_cursor_type(&mut self) {
-        let result = std::panic::catch_unwind(|| {
-            // Test invalid cursor type handling
-            let stmt_id = 2222u32;
-            let invalid_cursor_flags = 0xFF; // Invalid flags combination
+    fn check_mixed_null_parameters() -> Result<(), String> {
+        let p0: Option<i32> = None;
+        let p1: i64 = 7;
+        let p2: Option<&str> = None;
+        let p3: &str = "x";
+        let p4: f64 = 1.0;
+        let params: [&dyn ToSql; 5] = [&p0, &p1, &p2, &p3, &p4];
+        // Encoded by hand: every parameter has a type, only 1, 3 and 4 a value.
+        let mut payload = vec![
+            0x17, 0x05, 0x00, 0x00, 0x00, // COM_STMT_EXECUTE, statement_id 5
+            0x00, 0x01, 0x00, 0x00, 0x00, // no cursor, iteration_count 1
+            0x05, // NULL bitmap: parameters 0 and 2
+            0x01, // new_params_bound_flag
+            0x03, 0x00, // MYSQL_TYPE_LONG
+            0x08, 0x00, // MYSQL_TYPE_LONGLONG
+            0xFD, 0x00, // MYSQL_TYPE_VAR_STRING
+            0xFD, 0x00, // MYSQL_TYPE_VAR_STRING
+            0x05, 0x00, // MYSQL_TYPE_DOUBLE
+            0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // parameter 1
+            0x01, b'x', // parameter 3
+        ];
+        payload.extend_from_slice(&1.0f64.to_le_bytes()); // parameter 4
+        expect_execute(
+            "COM_STMT_EXECUTE(5, [NULL INT, 7i64, NULL VARCHAR, \"x\", 1.0f64])",
+            5,
+            &params,
+            &frame_packets(0, &payload),
+        )?;
+        Ok(())
+    }
 
-            let packet = create_execute_packet_with_flags(stmt_id, invalid_cursor_flags);
+    // ---- MYSQL-STMT-016 ---------------------------------------------------
 
-            // Verify packet structure is valid despite invalid flags
-            assert_eq!(packet[0], 0x17, "Command must be COM_STMT_EXECUTE");
-            assert_eq!(
-                packet[5], invalid_cursor_flags,
-                "Flags must be preserved in packet"
-            );
+    fn check_cursor_flags_byte() -> Result<(), String> {
+        let one: i32 = 1;
+        let null: Option<i64> = None;
+        let none: [&dyn ToSql; 0] = [];
+        let single: [&dyn ToSql; 1] = [&one];
+        let pair: [&dyn ToSql; 2] = [&null, &one];
+        let cases: [(&str, &[&dyn ToSql]); 3] = [
+            ("no parameters", &none),
+            ("one parameter", &single),
+            ("a NULL and an INT parameter", &pair),
+        ];
+        for (label, params) in cases {
+            let what = format!("COM_STMT_EXECUTE with {label}");
+            let produced = build(&what, 3, params)?;
+            let payload = single_packet_payload(&what, &produced)?;
+            if payload.get(5) != Some(&(CursorType::NoCursor as u8)) {
+                return Err(format!(
+                    "{what}: flags byte {:02x?}; production opens no cursor and sends no COM_STMT_FETCH, so it must send CURSOR_TYPE_NO_CURSOR (0x00)",
+                    payload.get(5)
+                ));
+            }
+            if payload.get(6..10) != Some(&[0x01, 0x00, 0x00, 0x00][..]) {
+                return Err(format!(
+                    "{what}: iteration_count bytes {:02x?}, the spec requires int<4> 1",
+                    payload.get(6..10)
+                ));
+            }
+        }
+        Ok(())
+    }
 
-            // Check individual flag bits
-            let flags = packet[5];
-            let has_no_cursor = (flags & CursorType::NoCursor as u8) == flags;
-            let has_read_only = (flags & CursorType::ReadOnly as u8) != 0;
-            let has_for_update = (flags & CursorType::ForUpdate as u8) != 0;
-            let has_scrollable = (flags & CursorType::Scrollable as u8) != 0;
+    // ---- MYSQL-STMT-019 ---------------------------------------------------
 
-            // Invalid combination: all bits set
-            assert!(has_read_only, "Read-only bit should be set in 0xFF");
-            assert!(has_for_update, "For-update bit should be set in 0xFF");
-            assert!(has_scrollable, "Scrollable bit should be set in 0xFF");
-            assert!(!has_no_cursor, "No-cursor check should fail for 0xFF");
+    fn result_columns() -> [ColumnSpec; 3] {
+        [
+            column_spec(
+                "id",
+                MySqlType::Long,
+                CHARSET_BINARY,
+                11,
+                NOT_NULL_FLAG | PRI_KEY_FLAG | AUTO_INCREMENT_FLAG,
+                0,
+            ),
+            column_spec("nickname", MySqlType::VarString, CHARSET_UTF8MB4, 256, 0, 0),
+            column_spec(
+                "name",
+                MySqlType::VarString,
+                CHARSET_UTF8MB4,
+                400,
+                NOT_NULL_FLAG,
+                0,
+            ),
+        ]
+    }
 
-            // Server should validate and reject invalid combinations
-            // Client responsibility is to send valid packet format only
-        });
+    fn check_binary_result_row() -> Result<(), String> {
+        let columns = decode_columns("binary result set", &result_columns())?;
+        // Encoded by hand: header 0x00, NULL bitmap 0b0000_1000 (column 1 is
+        // bit 1 + 2), INT 12345, then "test_string" with length 11.
+        let mut row = vec![0x00, 0b0000_1000, 0x39, 0x30, 0x00, 0x00, 0x0B];
+        row.extend_from_slice(b"test_string");
+        expect_binary_row(
+            "binary row [12345, NULL, \"test_string\"]",
+            &row,
+            &columns,
+            &[
+                MySqlValue::Long(12345),
+                MySqlValue::Null,
+                MySqlValue::Text("test_string".to_string()),
+            ],
+        )?;
 
-        let verdict = if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        };
-        self.record_result(
-            "MYSQL-STMT-025",
-            "Invalid cursor type MUST be handled properly",
-            TestCategory::ErrorHandling,
-            RequirementLevel::Must,
-            verdict,
-            None,
+        let mut wrong_header = row.clone();
+        wrong_header[0] = 0x01;
+        let mut overlong = vec![0x00, 0b0000_1000, 0x39, 0x30, 0x00, 0x00, 0x20];
+        overlong.extend_from_slice(b"test_string");
+        let mut trailing = row.clone();
+        trailing.push(0x00);
+        let malformed: [(&str, Vec<u8>); 7] = [
+            ("a header byte other than 0x00", wrong_header),
+            (
+                "an EOF packet in place of a row",
+                eof_packet_bytes(0, SERVER_STATUS_AUTOCOMMIT),
+            ),
+            ("no NULL bitmap", vec![0x00]),
+            (
+                "an INT value cut to 2 of its 4 bytes",
+                vec![0x00, 0b0000_1000, 0x39, 0x30],
+            ),
+            (
+                "fewer values than columns",
+                vec![0x00, 0b0000_1000, 0x39, 0x30, 0x00, 0x00],
+            ),
+            ("a string longer than the bytes left", overlong),
+            ("bytes after the last value", trailing),
+        ];
+        for (label, bad) in malformed {
+            if let Ok(values) = fuzz_parse_binary_row(&bad, &columns) {
+                return Err(format!(
+                    "binary row with {label}: production accepted {bad:02x?} as {values:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    // ---- MYSQL-STMT-020 ---------------------------------------------------
+
+    fn check_binary_row_null_bitmap_offset() -> Result<(), String> {
+        // 10 columns: (10 + 7 + 2) / 8 = 2 bytes, columns at bits 2..=11.
+        let ten = decode_columns("ten INT columns", &int_columns(10))?;
+        expect_binary_row(
+            "10 INT columns, all NULL",
+            &[0x00, 0xFC, 0x0F],
+            &ten,
+            &vec![MySqlValue::Null; 10],
+        )?;
+        let mut none_null = vec![0x00, 0x00, 0x00];
+        for index in 0..10i32 {
+            none_null.extend_from_slice(&(index * 100).to_le_bytes());
+        }
+        let values: Vec<MySqlValue> = (0..10).map(|index| MySqlValue::Long(index * 100)).collect();
+        expect_binary_row("10 INT columns, none NULL", &none_null, &ten, &values)?;
+
+        // Six columns fit bits 2..=7 of one byte; a seventh needs a second byte.
+        let six = decode_columns("six INT columns", &int_columns(6))?;
+        let mut last_of_six = vec![0x00, 0b1000_0000];
+        for index in 0..5i32 {
+            last_of_six.extend_from_slice(&index.to_le_bytes());
+        }
+        let mut want: Vec<MySqlValue> = (0..5).map(MySqlValue::Long).collect();
+        want.push(MySqlValue::Null);
+        expect_binary_row("6 INT columns, column 5 NULL", &last_of_six, &six, &want)?;
+
+        let seven = decode_columns("seven INT columns", &int_columns(7))?;
+        let mut last_of_seven = vec![0x00, 0x00, 0b0000_0001];
+        for index in 0..6i32 {
+            last_of_seven.extend_from_slice(&index.to_le_bytes());
+        }
+        let mut want: Vec<MySqlValue> = (0..6).map(MySqlValue::Long).collect();
+        want.push(MySqlValue::Null);
+        expect_binary_row(
+            "7 INT columns, column 6 NULL",
+            &last_of_seven,
+            &seven,
+            &want,
+        )?;
+
+        // Column 0 is bit 2, not bit 0.
+        let two = decode_columns("two INT columns", &int_columns(2))?;
+        let mut first_null = vec![0x00, 0b0000_0100];
+        first_null.extend_from_slice(&5i32.to_le_bytes());
+        expect_binary_row(
+            "2 INT columns, column 0 NULL",
+            &first_null,
+            &two,
+            &[MySqlValue::Null, MySqlValue::Long(5)],
+        )?;
+
+        // Bits 0 and 1 belong to no column. Rejecting a row that sets one is
+        // fine; reading it as column 0 being NULL is not.
+        let mut reserved = vec![0x00, 0b0000_0001];
+        reserved.extend_from_slice(&5i32.to_le_bytes());
+        reserved.extend_from_slice(&6i32.to_le_bytes());
+        match fuzz_parse_binary_row(&reserved, &two) {
+            Err(_) => {}
+            Ok(values) if values == [MySqlValue::Long(5), MySqlValue::Long(6)] => {}
+            Ok(values) => {
+                return Err(format!(
+                    "binary row {reserved:02x?} sets reserved bit 0, which is not a column; production decoded {values:?}"
+                ));
+            }
+        }
+
+        // Seven all-NULL columns need two bitmap bytes; one is a cut-off row.
+        let truncated: [u8; 2] = [0x00, 0xFC];
+        if let Ok(values) = fuzz_parse_binary_row(&truncated, &seven) {
+            return Err(format!(
+                "binary row {truncated:02x?} has a 1-byte NULL bitmap for 7 columns, which need 2; production accepted it as {values:?}"
+            ));
+        }
+        Ok(())
+    }
+
+    // ---- MYSQL-STMT-021 ---------------------------------------------------
+
+    fn check_binary_value_encoding() -> Result<(), String> {
+        // Decode: each value alone in a one-column binary row. Temporal values
+        // are rendered as text by production.
+        let micros = 123_456u32.to_le_bytes();
+        let mut datetime_micros = vec![11, 0xE8, 0x07, 1, 15, 10, 30, 45];
+        datetime_micros.extend_from_slice(&micros);
+        let column = |name: &str, kind: MySqlType| column_spec(name, kind, CHARSET_BINARY, 0, 0, 0);
+        let cases: Vec<(&str, ColumnSpec, Vec<u8>, MySqlValue)> = vec![
+            (
+                "TINY 127",
+                column("v", MySqlType::Tiny),
+                vec![0x7F],
+                MySqlValue::Tiny(127),
+            ),
+            (
+                "TINY -128",
+                column("v", MySqlType::Tiny),
+                vec![0x80],
+                MySqlValue::Tiny(-128),
+            ),
+            (
+                "SHORT 32767",
+                column("v", MySqlType::Short),
+                i16::MAX.to_le_bytes().to_vec(),
+                MySqlValue::Short(i16::MAX),
+            ),
+            (
+                "YEAR 2024 (int<2>)",
+                column_spec(
+                    "v",
+                    MySqlType::Year,
+                    CHARSET_BINARY,
+                    4,
+                    UNSIGNED_FLAG | ZEROFILL_FLAG,
+                    0,
+                ),
+                2024u16.to_le_bytes().to_vec(),
+                MySqlValue::Short(2024),
+            ),
+            (
+                "LONG 2147483647",
+                column("v", MySqlType::Long),
+                i32::MAX.to_le_bytes().to_vec(),
+                MySqlValue::Long(i32::MAX),
+            ),
+            (
+                "INT24 -8388608 (int<4>)",
+                column("v", MySqlType::Int24),
+                (-8_388_608i32).to_le_bytes().to_vec(),
+                MySqlValue::Long(-8_388_608),
+            ),
+            (
+                "LONGLONG i64::MIN",
+                column("v", MySqlType::LongLong),
+                i64::MIN.to_le_bytes().to_vec(),
+                MySqlValue::LongLong(i64::MIN),
+            ),
+            (
+                "FLOAT 3.14",
+                column("v", MySqlType::Float),
+                3.14f32.to_le_bytes().to_vec(),
+                MySqlValue::Float(3.14),
+            ),
+            (
+                "DOUBLE pi",
+                column("v", MySqlType::Double),
+                std::f64::consts::PI.to_le_bytes().to_vec(),
+                MySqlValue::Double(std::f64::consts::PI),
+            ),
+            (
+                "NEWDECIMAL -123.45 (a length-encoded string)",
+                column("v", MySqlType::NewDecimal),
+                encode_length_encoded_string(b"-123.45"),
+                MySqlValue::Text("-123.45".to_string()),
+            ),
+            (
+                "VAR_STRING in utf8mb4",
+                column_spec("v", MySqlType::VarString, CHARSET_UTF8MB4, 80, 0, 0),
+                encode_length_encoded_string("h\u{e9}llo".as_bytes()),
+                MySqlValue::Text("h\u{e9}llo".to_string()),
+            ),
+            (
+                "STRING in utf8mb4",
+                column_spec("v", MySqlType::String, CHARSET_UTF8MB4, 8, 0, 0),
+                encode_length_encoded_string(b"ab"),
+                MySqlValue::Text("ab".to_string()),
+            ),
+            (
+                "BLOB",
+                column_spec(
+                    "v",
+                    MySqlType::Blob,
+                    CHARSET_BINARY,
+                    65_535,
+                    BLOB_FLAG | BINARY_FLAG,
+                    0,
+                ),
+                encode_length_encoded_string(&[0x00, 0xFF, 0x10]),
+                MySqlValue::Bytes(vec![0x00, 0xFF, 0x10]),
+            ),
+            (
+                "VARBINARY (VAR_STRING, binary charset)",
+                column_spec(
+                    "v",
+                    MySqlType::VarString,
+                    CHARSET_BINARY,
+                    16,
+                    BINARY_FLAG,
+                    0,
+                ),
+                encode_length_encoded_string(&[0xC3, 0x28]),
+                MySqlValue::Bytes(vec![0xC3, 0x28]),
+            ),
+            (
+                "DATE 2024-01-15",
+                column("v", MySqlType::Date),
+                vec![4, 0xE8, 0x07, 1, 15],
+                MySqlValue::Text("2024-01-15".to_string()),
+            ),
+            (
+                "DATETIME 2024-01-15 10:30:45",
+                column("v", MySqlType::DateTime),
+                vec![7, 0xE8, 0x07, 1, 15, 10, 30, 45],
+                MySqlValue::Text("2024-01-15 10:30:45".to_string()),
+            ),
+            (
+                "DATETIME with microseconds",
+                column("v", MySqlType::DateTime),
+                datetime_micros,
+                MySqlValue::Text("2024-01-15 10:30:45.123456".to_string()),
+            ),
+            (
+                "TIMESTAMP of length 0 (all fields zero)",
+                column("v", MySqlType::Timestamp),
+                vec![0],
+                MySqlValue::Text("0000-00-00 00:00:00".to_string()),
+            ),
+            (
+                "TIME -1 day 02:03:04",
+                column("v", MySqlType::Time),
+                vec![8, 1, 1, 0, 0, 0, 2, 3, 4],
+                MySqlValue::Text("-1 02:03:04".to_string()),
+            ),
+            (
+                "TIME with microseconds",
+                column("v", MySqlType::Time),
+                vec![12, 0, 0, 0, 0, 0, 10, 20, 30, 5, 0, 0, 0],
+                MySqlValue::Text("0 10:20:30.000005".to_string()),
+            ),
+            (
+                "TIME of length 0 (all fields zero)",
+                column("v", MySqlType::Time),
+                vec![0],
+                MySqlValue::Text("00:00:00".to_string()),
+            ),
+        ];
+        for (label, spec, value, want) in cases {
+            let columns = decode_columns(label, std::slice::from_ref(&spec))?;
+            let row = binary_row_bytes(&[Some(value)]);
+            expect_binary_row(
+                &format!("binary {label}"),
+                &row,
+                &columns,
+                std::slice::from_ref(&want),
+            )?;
+        }
+
+        let malformed: Vec<(&str, ColumnSpec, Vec<u8>)> = vec![
+            (
+                "DATETIME with length 5 (only 0, 4, 7 and 11 exist)",
+                column("v", MySqlType::DateTime),
+                vec![5, 0xE8, 0x07, 1, 15, 10],
+            ),
+            (
+                "TIME with length 9 (only 0, 8 and 12 exist)",
+                column("v", MySqlType::Time),
+                vec![9, 0, 0, 0, 0, 0, 1, 2, 3, 0],
+            ),
+            (
+                "DATE whose length byte runs past the row",
+                column("v", MySqlType::Date),
+                vec![4, 0xE8, 0x07],
+            ),
+            (
+                "FLOAT cut to 3 bytes",
+                column("v", MySqlType::Float),
+                vec![0, 0, 0],
+            ),
+            (
+                "LONGLONG cut to 7 bytes",
+                column("v", MySqlType::LongLong),
+                vec![0; 7],
+            ),
+        ];
+        for (label, spec, value) in malformed {
+            let columns = decode_columns(label, std::slice::from_ref(&spec))?;
+            let row = binary_row_bytes(&[Some(value)]);
+            if let Ok(values) = fuzz_parse_binary_row(&row, &columns) {
+                return Err(format!(
+                    "binary row with {label}: production accepted {row:02x?} as {values:?}"
+                ));
+            }
+        }
+
+        // Encode: the same formats in a COM_STMT_EXECUTE.
+        let tiny = i8::MAX;
+        let short = i16::MAX;
+        let long = i32::MAX;
+        let longlong = i64::MAX;
+        let float = 3.14f32;
+        let double = std::f64::consts::PI;
+        let text: &str = "hello world";
+        let params: [&dyn ToSql; 7] = [&tiny, &short, &long, &longlong, &float, &double, &text];
+        let spec = stmt_execute_packet(
+            21,
+            &[
+                SpecParam::bound(MySqlType::Tiny, false, vec![0x7F]),
+                SpecParam::bound(MySqlType::Short, false, vec![0xFF, 0x7F]),
+                SpecParam::bound(MySqlType::Long, false, vec![0xFF, 0xFF, 0xFF, 0x7F]),
+                SpecParam::bound(
+                    MySqlType::LongLong,
+                    false,
+                    vec![0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F],
+                ),
+                SpecParam::bound(MySqlType::Float, false, 3.14f32.to_le_bytes().to_vec()),
+                SpecParam::bound(
+                    MySqlType::Double,
+                    false,
+                    std::f64::consts::PI.to_le_bytes().to_vec(),
+                ),
+                SpecParam::bound(
+                    MySqlType::VarString,
+                    false,
+                    encode_length_encoded_string(b"hello world"),
+                ),
+            ],
         );
+        expect_execute(
+            "COM_STMT_EXECUTE with the i8/i16/i32/i64 maxima, 3.14f32, pi and \"hello world\"",
+            21,
+            &params,
+            &spec,
+        )?;
+        Ok(())
+    }
+
+    // ---- MYSQL-STMT-022 ---------------------------------------------------
+
+    fn check_length_encoded_values() -> Result<(), String> {
+        let columns = decode_columns(
+            "one VARCHAR column",
+            &[column_spec(
+                "s",
+                MySqlType::VarString,
+                CHARSET_UTF8MB4,
+                262_140,
+                0,
+                0,
+            )],
+        )?;
+        // Encoded by hand: the length prefix for each value length.
+        let cases: [(usize, &[u8]); 8] = [
+            (0, &[0x00]),
+            (1, &[0x01]),
+            (250, &[0xFA]),
+            (251, &[0xFC, 0xFB, 0x00]),
+            (252, &[0xFC, 0xFC, 0x00]),
+            (300, &[0xFC, 0x2C, 0x01]),
+            (65_535, &[0xFC, 0xFF, 0xFF]),
+            (65_536, &[0xFD, 0x00, 0x00, 0x01]),
+        ];
+        for (len, prefix) in cases {
+            let text = "x".repeat(len);
+            let mut row = prefix.to_vec();
+            row.extend_from_slice(text.as_bytes());
+            match fuzz_parse_text_row(&row, &columns) {
+                Ok(values) if values == [MySqlValue::Text(text.clone())] => {}
+                other => {
+                    return Err(format!(
+                        "text row with a {len}-byte value behind the prefix {prefix:02x?}: production returned {}",
+                        short_debug(&other)
+                    ));
+                }
+            }
+        }
+
+        // In a text row 0xFB is NULL.
+        match fuzz_parse_text_row(&[TEXT_NULL], &columns) {
+            Ok(values) if values == [MySqlValue::Null] => {}
+            other => {
+                return Err(format!(
+                    "text row [0xfb]: 0xFB is a NULL value, production returned {other:?}"
+                ));
+            }
+        }
+
+        // 0xFE + int<8>, here in an OK packet's affected_rows.
+        let big = 1u64 << 40;
+        let ok = ok_packet_bytes(OK_HEADER, big, 0, SERVER_STATUS_AUTOCOMMIT, 0, b"");
+        match fuzz_parse_ok_packet_fields(&ok) {
+            Ok((rows, status)) if rows == big && status == SERVER_STATUS_AUTOCOMMIT => {}
+            other => {
+                return Err(format!(
+                    "OK packet {ok:02x?} with affected_rows 2^40 (0xFE + int<8>): production returned {other:?}"
+                ));
+            }
+        }
+
+        let malformed_rows: [(&str, &[u8]); 4] = [
+            ("the undefined prefix 0xFF", &[0xFF]),
+            (
+                "a 0xFC prefix with one of its two length bytes",
+                &[0xFC, 0x05],
+            ),
+            (
+                "a 0xFD prefix with two of its three length bytes",
+                &[0xFD, 0x01, 0x00],
+            ),
+            ("a length of 5 with 2 bytes left", &[0x05, b'a', b'b']),
+        ];
+        for (label, bad) in malformed_rows {
+            if let Ok(values) = fuzz_parse_text_row(bad, &columns) {
+                return Err(format!(
+                    "text row with {label}: production accepted {bad:02x?} as {values:?}"
+                ));
+            }
+        }
+
+        // NULL lives in a binary row's bitmap, so 0xFB cannot start a value there.
+        let binary = [0x00, 0x00, TEXT_NULL];
+        if let Ok(values) = fuzz_parse_binary_row(&binary, &columns) {
+            return Err(format!(
+                "binary row {binary:02x?}: 0xFB is not a length, production accepted it as {values:?}"
+            ));
+        }
+        // In an integer field neither 0xFB nor 0xFF is a length-encoded integer.
+        for prefix in [0xFBu8, 0xFF] {
+            let bad = [OK_HEADER, prefix, 0x00, 0x02, 0x00, 0x00, 0x00];
+            if let Ok(fields) = fuzz_parse_ok_packet_fields(&bad) {
+                return Err(format!(
+                    "OK packet {bad:02x?}: affected_rows starts with {prefix:#04x}, which is no length-encoded integer, yet production decoded {fields:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    // ---- MYSQL-STMT-023 ---------------------------------------------------
+
+    fn check_invalid_statement_id() -> Result<(), String> {
+        // The client sends whatever id it holds; the server judges it.
+        let none: [&dyn ToSql; 0] = [];
+        expect_execute(
+            "COM_STMT_EXECUTE(u32::MAX, [])",
+            u32::MAX,
+            &none,
+            &[
+                10, 0, 0, 0, 0x17, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x01, 0x00, 0x00, 0x00,
+            ],
+        )?;
+        let one: i32 = 1;
+        expect_execute(
+            "COM_STMT_EXECUTE(u32::MAX, [1i32])",
+            u32::MAX,
+            &[&one],
+            &stmt_execute_packet(
+                u32::MAX,
+                &[SpecParam::bound(
+                    MySqlType::Long,
+                    false,
+                    1i32.to_le_bytes().to_vec(),
+                )],
+            ),
+        )?;
+
+        // An unknown id draws ER_UNKNOWN_STMT_HANDLER (1243, SQLSTATE HY000).
+        let message =
+            "Unknown prepared statement handler (4294967295) given to mysqld_stmt_execute";
+        let err = err_packet_bytes(1243, Some("HY000"), message);
+        match fuzz_parse_error_packet(&err) {
+            MySqlError::Server {
+                code,
+                sql_state,
+                message: decoded,
+            } if code == 1243 && sql_state == "HY000" && decoded == message => Ok(()),
+            other => Err(format!(
+                "ERR packet {err:02x?}: the spec fields are code 1243, SQLSTATE HY000, message {message:?}; production decoded {other:?}"
+            )),
+        }
+    }
+
+    // ---- MYSQL-STMT-026 ---------------------------------------------------
+
+    fn check_column_definition() -> Result<(), String> {
+        let specs = vec![
+            ColumnSpec {
+                schema: "test",
+                table: "u",
+                org_table: "users",
+                name: "id".to_string(),
+                org_name: "id".to_string(),
+                charset: CHARSET_BINARY,
+                length: 11,
+                column_type: MySqlType::Long as u8,
+                flags: NOT_NULL_FLAG | PRI_KEY_FLAG | AUTO_INCREMENT_FLAG,
+                decimals: 0,
+            },
+            // An alias differs from the original name.
+            ColumnSpec {
+                schema: "test",
+                table: "u",
+                org_table: "users",
+                name: "full_name".to_string(),
+                org_name: "name".to_string(),
+                charset: CHARSET_UTF8MB4,
+                length: 1020,
+                column_type: MySqlType::VarString as u8,
+                flags: 0,
+                decimals: 0,
+            },
+            // A computed column has no schema, table or original name.
+            ColumnSpec {
+                schema: "",
+                table: "",
+                org_table: "",
+                name: "price*2".to_string(),
+                org_name: String::new(),
+                charset: CHARSET_BINARY,
+                length: 23,
+                column_type: MySqlType::NewDecimal as u8,
+                flags: BINARY_FLAG,
+                decimals: 2,
+            },
+            // A 251-byte alias needs the 0xFC length prefix.
+            ColumnSpec {
+                schema: "test",
+                table: "u",
+                org_table: "users",
+                name: "a".repeat(251),
+                org_name: "id".to_string(),
+                charset: CHARSET_BINARY,
+                length: 20,
+                column_type: MySqlType::LongLong as u8,
+                flags: UNSIGNED_FLAG,
+                decimals: 0,
+            },
+        ];
+        decode_columns("Column Definition 41", &specs)?;
+
+        // Offsets in the first definition: "def" (4 bytes), "test" (5), "u"
+        // (2), "users" (6), "id" (3) and "id" (3), then 0x0C at byte 23.
+        let valid = column_definition_bytes(&specs[0]);
+        let strings_len = 23;
+        let name_at = 4 + 5 + 2 + 6;
+        let mut null_name = valid.clone();
+        null_name[name_at] = 0xFB;
+        let mut bad_prefix = valid.clone();
+        bad_prefix[0] = 0xFF;
+        let malformed: [(&str, Vec<u8>); 6] = [
+            ("an empty packet", Vec::new()),
+            (
+                "a catalog cut off inside its string",
+                vec![0x03, b'd', b'e'],
+            ),
+            (
+                "the six strings and no fixed-length fields",
+                valid[..strings_len].to_vec(),
+            ),
+            (
+                "fixed-length fields cut before decimals",
+                valid[..strings_len + 10].to_vec(),
+            ),
+            (
+                "a name length of 0xFB, which no length-encoded string has",
+                null_name,
+            ),
+            ("the undefined length prefix 0xFF", bad_prefix),
+        ];
+        for (label, bad) in malformed {
+            if let Ok(column) = fuzz_parse_column_definition(&bad) {
+                return Err(format!(
+                    "column definition with {label}: production accepted {bad:02x?} as {column:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    // ---- MYSQL-STMT-027 ---------------------------------------------------
+
+    fn text_columns() -> [ColumnSpec; 5] {
+        [
+            column_spec("id", MySqlType::Long, CHARSET_BINARY, 11, NOT_NULL_FLAG, 0),
+            column_spec("name", MySqlType::VarString, CHARSET_UTF8MB4, 400, 0, 0),
+            column_spec("score", MySqlType::Double, CHARSET_BINARY, 22, 0, 31),
+            column_spec("born", MySqlType::Date, CHARSET_BINARY, 10, BINARY_FLAG, 0),
+            column_spec("note", MySqlType::VarString, CHARSET_UTF8MB4, 1020, 0, 0),
+        ]
+    }
+
+    fn check_text_result_row() -> Result<(), String> {
+        let columns = decode_columns("text result set", &text_columns())?;
+        // Encoded by hand: "42", "alice", "3.5", "2024-01-15", then 0xFB (NULL).
+        let mut first = vec![0x02, b'4', b'2', 0x05];
+        first.extend_from_slice(b"alice");
+        first.push(0x03);
+        first.extend_from_slice(b"3.5");
+        first.push(0x0A);
+        first.extend_from_slice(b"2024-01-15");
+        first.push(0xFB);
+        let second = text_row_bytes(&[
+            Some(&b"-7"[..]),
+            Some(&b""[..]),
+            Some(&b"0.25"[..]),
+            Some(&b"0000-00-00"[..]),
+            Some(&b""[..]),
+        ]);
+        let rows: [(&str, Vec<u8>, Vec<MySqlValue>); 2] = [
+            (
+                "values and a NULL",
+                first,
+                vec![
+                    MySqlValue::Long(42),
+                    MySqlValue::Text("alice".to_string()),
+                    MySqlValue::Double(3.5),
+                    MySqlValue::Text("2024-01-15".to_string()),
+                    MySqlValue::Null,
+                ],
+            ),
+            (
+                "empty strings, which are not NULL",
+                second,
+                vec![
+                    MySqlValue::Long(-7),
+                    MySqlValue::Text(String::new()),
+                    MySqlValue::Double(0.25),
+                    MySqlValue::Text("0000-00-00".to_string()),
+                    MySqlValue::Text(String::new()),
+                ],
+            ),
+        ];
+        for (label, row, expected) in rows {
+            match fuzz_parse_text_row(&row, &columns) {
+                Ok(values) if values == expected => {}
+                other => {
+                    return Err(format!(
+                        "text row with {label} {row:02x?}: the spec values are {expected:?}, production returned {other:?}"
+                    ));
+                }
+            }
+        }
+
+        let good: [Option<&[u8]>; 5] = [
+            Some(&b"1"[..]),
+            Some(&b"bob"[..]),
+            Some(&b"2.5"[..]),
+            Some(&b"2000-02-29"[..]),
+            None,
+        ];
+        let mut extra = text_row_bytes(&good);
+        extra.extend_from_slice(&[0x01, b'x']);
+        let mut overlong = text_row_bytes(&good[..4]);
+        overlong.extend_from_slice(&[0x09, b'a', b'b']);
+        let malformed: [(&str, Vec<u8>); 4] = [
+            ("fewer values than columns", text_row_bytes(&good[..4])),
+            ("a value after the last column", extra),
+            ("a value length past the end of the packet", overlong),
+            ("the undefined length prefix 0xFF", vec![0xFF, 0x01, b'1']),
+        ];
+        for (label, bad) in malformed {
+            if let Ok(values) = fuzz_parse_text_row(&bad, &columns) {
+                return Err(format!(
+                    "text row with {label}: production accepted {bad:02x?} as {values:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    // ---- MYSQL-STMT-028 ---------------------------------------------------
+
+    fn check_text_result_terminators() -> Result<(), String> {
+        let columns = decode_columns(
+            "terminator fixtures",
+            &[
+                column_spec("name", MySqlType::VarString, CHARSET_UTF8MB4, 400, 0, 0),
+                column_spec("id", MySqlType::Long, CHARSET_BINARY, 11, 0, 0),
+            ],
+        )?;
+        let row = text_row_bytes(&[Some(&b"bob"[..]), Some(&b"1"[..])]);
+        let row_values = vec![MySqlValue::Text("bob".to_string()), MySqlValue::Long(1)];
+        // A row whose first value is empty starts with 0x00, like an OK packet.
+        let empty_first = text_row_bytes(&[Some(&b""[..]), Some(&b"5"[..])]);
+        let empty_first_values = vec![MySqlValue::Text(String::new()), MySqlValue::Long(5)];
+        let eof = eof_packet_bytes(0, SERVER_STATUS_AUTOCOMMIT);
+        // Under CLIENT_DEPRECATE_EOF the set ends with an OK packet whose
+        // header is 0xFE, with or without info text.
+        let ok_fe = ok_packet_bytes(EOF_HEADER, 0, 0, SERVER_STATUS_AUTOCOMMIT, 0, b"");
+        let ok_fe_info = ok_packet_bytes(EOF_HEADER, 0, 0, SERVER_STATUS_AUTOCOMMIT, 0, b"done");
+        let cases: [(&str, bool, &[u8], Option<Vec<MySqlValue>>); 7] = [
+            ("an EOF packet", false, eof.as_slice(), None),
+            (
+                "a data row",
+                false,
+                row.as_slice(),
+                Some(row_values.clone()),
+            ),
+            (
+                "a row whose first value is empty",
+                false,
+                empty_first.as_slice(),
+                Some(empty_first_values.clone()),
+            ),
+            (
+                "a 7-byte OK packet with header 0xFE",
+                true,
+                ok_fe.as_slice(),
+                None,
+            ),
+            (
+                "an 11-byte OK packet with header 0xFE and info text",
+                true,
+                ok_fe_info.as_slice(),
+                None,
+            ),
+            ("a data row", true, row.as_slice(), Some(row_values)),
+            (
+                "a row whose first value is empty",
+                true,
+                empty_first.as_slice(),
+                Some(empty_first_values),
+            ),
+        ];
+        for (label, deprecate_eof, packet, want) in cases {
+            let mode = if deprecate_eof {
+                "CLIENT_DEPRECATE_EOF"
+            } else {
+                "classic EOF"
+            };
+            match (
+                fuzz_parse_data_row_or_terminator(packet, &columns, deprecate_eof),
+                &want,
+            ) {
+                (Ok(None), None) => {}
+                (Ok(Some(values)), Some(expected)) if &values == expected => {}
+                (other, _) => {
+                    let spec = match &want {
+                        None => "a result-set terminator".to_string(),
+                        Some(values) => format!("the row {values:?}"),
+                    };
+                    return Err(format!(
+                        "{label} ({mode}) {packet:02x?} is {spec}, production returned {other:?}"
+                    ));
+                }
+            }
+        }
+
+        // An ERR packet ends the set with an error: it is neither a row nor a
+        // successful end.
+        let err = err_packet_bytes(1064, Some("42000"), "You have an error in your SQL syntax");
+        for deprecate_eof in [false, true] {
+            if let Ok(outcome) = fuzz_parse_data_row_or_terminator(&err, &columns, deprecate_eof) {
+                return Err(format!(
+                    "ERR packet {err:02x?} (deprecate_eof = {deprecate_eof}): production returned Ok({outcome:?})"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    // ---- MYSQL-STMT-029 ---------------------------------------------------
+
+    fn check_ok_packet() -> Result<(), String> {
+        // Encoded by hand: header, affected_rows 3, last_insert_id 0, status
+        // SERVER_STATUS_AUTOCOMMIT, no warnings.
+        let simple: [u8; 7] = [0x00, 0x03, 0x00, 0x02, 0x00, 0x00, 0x00];
+        let detailed = ok_packet_bytes(
+            OK_HEADER,
+            300,
+            70_000,
+            SERVER_STATUS_IN_TRANS | SERVER_STATUS_AUTOCOMMIT,
+            1,
+            b"Rows matched: 300  Changed: 300  Warnings: 1",
+        );
+        let huge = ok_packet_bytes(
+            OK_HEADER,
+            16_777_221,
+            u64::MAX,
+            SERVER_STATUS_AUTOCOMMIT,
+            0,
+            b"",
+        );
+        let valid: [(&str, &[u8], (u64, u16)); 3] = [
+            (
+                "affected_rows 3",
+                &simple[..],
+                (3, SERVER_STATUS_AUTOCOMMIT),
+            ),
+            (
+                "affected_rows 300 (0xFC), last_insert_id 70000 (0xFD) and info text",
+                detailed.as_slice(),
+                (300, SERVER_STATUS_IN_TRANS | SERVER_STATUS_AUTOCOMMIT),
+            ),
+            (
+                "affected_rows 16777221 and last_insert_id u64::MAX (0xFE)",
+                huge.as_slice(),
+                (16_777_221, SERVER_STATUS_AUTOCOMMIT),
+            ),
+        ];
+        for (label, packet, expected) in valid {
+            match fuzz_parse_ok_packet_fields(packet) {
+                Ok(fields) if fields == expected => {}
+                other => {
+                    return Err(format!(
+                        "OK packet with {label} {packet:02x?}: the spec (affected_rows, status_flags) is {expected:?}, production returned {other:?}"
+                    ));
+                }
+            }
+        }
+
+        let mut bad_header = simple.to_vec();
+        bad_header[0] = 0x01;
+        let malformed: [(&str, Vec<u8>); 6] = [
+            ("an empty packet", Vec::new()),
+            ("a header byte of 0x01", bad_header),
+            (
+                "an ERR packet",
+                err_packet_bytes(1146, Some("42S02"), "Table 'test.t' doesn't exist"),
+            ),
+            ("status flags cut short", simple[..4].to_vec()),
+            ("no warning count", simple[..5].to_vec()),
+            (
+                "affected_rows cut inside its 0xFC length",
+                vec![0x00, 0xFC, 0x01],
+            ),
+        ];
+        for (label, bad) in malformed {
+            if let Ok(fields) = fuzz_parse_ok_packet_fields(&bad) {
+                return Err(format!(
+                    "OK packet with {label}: production accepted {bad:02x?} as {fields:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    // ---- MYSQL-STMT-030 ---------------------------------------------------
+
+    fn check_err_packet() -> Result<(), String> {
+        let cases: [(&str, u16, Option<&str>, &str); 4] = [
+            (
+                "ER_NO_SUCH_TABLE",
+                1146,
+                Some("42S02"),
+                "Table 'test.t' doesn't exist",
+            ),
+            (
+                "ER_PARSE_ERROR",
+                1064,
+                Some("42000"),
+                "You have an error in your SQL syntax",
+            ),
+            ("an empty message", 1213, Some("40001"), ""),
+            ("no SQLSTATE marker", 1040, None, "Too many connections"),
+        ];
+        for (label, code, sql_state, message) in cases {
+            let packet = err_packet_bytes(code, sql_state, message);
+            match fuzz_parse_error_packet(&packet) {
+                MySqlError::Server {
+                    code: got_code,
+                    sql_state: got_state,
+                    message: got_message,
+                } if got_code == code
+                    && got_message == message
+                    && sql_state.map_or(true, |state| got_state == state) => {}
+                other => {
+                    return Err(format!(
+                        "ERR packet with {label} {packet:02x?}: the spec fields are code {code}, SQLSTATE {sql_state:?}, message {message:?}; production decoded {other:?}"
+                    ));
+                }
+            }
+        }
+
+        let malformed: [(&str, Vec<u8>); 4] = [
+            ("an empty packet", Vec::new()),
+            (
+                "an OK packet",
+                ok_packet_bytes(OK_HEADER, 1, 0, SERVER_STATUS_AUTOCOMMIT, 0, b""),
+            ),
+            ("a lone 0xFF header", vec![ERR_HEADER]),
+            ("an error code cut to one byte", vec![ERR_HEADER, 0x7A]),
+        ];
+        for (label, packet) in malformed {
+            if let MySqlError::Server {
+                code,
+                sql_state,
+                message,
+            } = fuzz_parse_error_packet(&packet)
+            {
+                return Err(format!(
+                    "{label} {packet:02x?}: production reported a server error, code {code}, SQLSTATE {sql_state:?}, message {message:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    // ---- MYSQL-STMT-031 ---------------------------------------------------
+
+    fn check_packet_framing() -> Result<(), String> {
+        let valid: [([u8; 4], u8, (u32, u8)); 5] = [
+            ([0x05, 0x00, 0x00, 0x00], 0, (5, 0)),
+            ([0x2C, 0x01, 0x00, 0x01], 1, (300, 1)),
+            ([0x01, 0x02, 0x03, 0x07], 7, (0x03_0201, 7)),
+            ([0xFF, 0xFF, 0xFF, 0x02], 2, (0xFF_FFFF, 2)),
+            ([0x00, 0x00, 0x00, 0x03], 3, (0, 3)),
+        ];
+        for (header, expected_seq, want) in valid {
+            match fuzz_decode_packet_header(header, expected_seq) {
+                Ok(decoded) if decoded == want => {}
+                other => {
+                    return Err(format!(
+                        "packet header {header:02x?} expecting sequence id {expected_seq}: the spec (payload length, sequence id) is {want:?}, production returned {other:?}"
+                    ));
+                }
+            }
+        }
+        // Sequence ids count up by one per packet; any other id is out of order.
+        let out_of_order: [([u8; 4], u8); 3] = [
+            ([0x05, 0x00, 0x00, 0x02], 1),
+            ([0x05, 0x00, 0x00, 0x00], 1),
+            ([0x05, 0x00, 0x00, 0xFF], 0),
+        ];
+        for (header, expected_seq) in out_of_order {
+            if let Ok(decoded) = fuzz_decode_packet_header(header, expected_seq) {
+                return Err(format!(
+                    "packet header {header:02x?} while expecting sequence id {expected_seq}: production accepted it as {decoded:?}"
+                ));
+            }
+        }
+
+        // Outbound: a payload of exactly 2^24 - 1 bytes is followed by an
+        // empty packet. 18 bytes are prefix, bitmap, flag, type and the
+        // 0xFD + int<3> length.
+        let len = MAX_PAYLOAD - 18;
+        let value = vec![b'y'; len];
+        let param: &[u8] = &value;
+        let what = "COM_STMT_EXECUTE whose payload is exactly 2^24 - 1 bytes";
+        let produced = build(what, 31, &[&param])?;
+        if produced.get(..4) != Some(&[0xFF, 0xFF, 0xFF, 0x00][..]) {
+            return Err(format!(
+                "{what}: first packet header {:02x?}, the spec header is [ff, ff, ff, 00]",
+                produced.get(..4)
+            ));
+        }
+        if produced.len() != 4 + MAX_PAYLOAD + 4
+            || produced[4 + MAX_PAYLOAD..] != [0x00, 0x00, 0x00, 0x01]
+        {
+            return Err(format!(
+                "{what}: {} bytes ending in {:02x?}; the spec ends with the empty packet [00, 00, 00, 01] after one full packet",
+                produced.len(),
+                &produced[produced.len().saturating_sub(4)..]
+            ));
+        }
+        let spec = stmt_execute_packet(
+            31,
+            &[SpecParam::bound(
+                MySqlType::Blob,
+                false,
+                encode_length_encoded_string(&value),
+            )],
+        );
+        expect_bytes(what, &produced, &spec)
+    }
+}
+
+#[cfg(not(feature = "mysql"))]
+mod production {
+    use super::*;
+
+    fn needs_mysql(hook: &str) -> Decision {
+        Decision::Skipped(format!(
+            "needs --features mysql: {hook} lives in asupersync::database::mysql, which is \
+             compiled only with the mysql feature (src/database/mod.rs:53-54)"
+        ))
+    }
+
+    pub(super) fn stmt_execute_packet_format() -> Decision {
+        needs_mysql("fuzz_build_stmt_execute_packet")
+    }
+
+    pub(super) fn parameter_type_codes() -> Decision {
+        needs_mysql("fuzz_build_stmt_execute_packet")
+    }
+
+    pub(super) fn type_code_table() -> Decision {
+        needs_mysql("column_type")
+    }
+
+    pub(super) fn unsigned_flag() -> Decision {
+        needs_mysql("fuzz_build_stmt_execute_packet, fuzz_parse_binary_row and fuzz_parse_text_row")
+    }
+
+    pub(super) fn parameter_length_encoding() -> Decision {
+        needs_mysql("fuzz_build_stmt_execute_packet")
+    }
+
+    pub(super) fn null_bitmap_encoding() -> Decision {
+        needs_mysql("fuzz_build_stmt_execute_packet")
+    }
+
+    pub(super) fn null_bitmap_length() -> Decision {
+        needs_mysql("fuzz_build_stmt_execute_packet")
+    }
+
+    pub(super) fn null_bitmap_bit_order() -> Decision {
+        needs_mysql("fuzz_build_stmt_execute_packet")
+    }
+
+    pub(super) fn mixed_null_parameters() -> Decision {
+        needs_mysql("fuzz_build_stmt_execute_packet")
+    }
+
+    pub(super) fn cursor_flags_byte() -> Decision {
+        needs_mysql("fuzz_build_stmt_execute_packet")
+    }
+
+    pub(super) fn binary_result_row() -> Decision {
+        needs_mysql("fuzz_parse_column_definition and fuzz_parse_binary_row")
+    }
+
+    pub(super) fn binary_row_null_bitmap_offset() -> Decision {
+        needs_mysql("fuzz_parse_column_definition and fuzz_parse_binary_row")
+    }
+
+    pub(super) fn binary_value_encoding() -> Decision {
+        needs_mysql("fuzz_parse_binary_row and fuzz_build_stmt_execute_packet")
+    }
+
+    pub(super) fn length_encoded_values() -> Decision {
+        needs_mysql("fuzz_parse_text_row, fuzz_parse_binary_row and fuzz_parse_ok_packet_fields")
+    }
+
+    pub(super) fn invalid_statement_id() -> Decision {
+        needs_mysql("fuzz_build_stmt_execute_packet and fuzz_parse_error_packet")
+    }
+
+    pub(super) fn column_definition() -> Decision {
+        needs_mysql("fuzz_parse_column_definition")
+    }
+
+    pub(super) fn text_result_row() -> Decision {
+        needs_mysql("fuzz_parse_text_row")
+    }
+
+    pub(super) fn text_result_terminators() -> Decision {
+        needs_mysql("fuzz_parse_data_row_or_terminator")
+    }
+
+    pub(super) fn ok_packet() -> Decision {
+        needs_mysql("fuzz_parse_ok_packet_fields")
+    }
+
+    pub(super) fn err_packet() -> Decision {
+        needs_mysql("fuzz_parse_error_packet")
+    }
+
+    pub(super) fn packet_framing() -> Decision {
+        needs_mysql("fuzz_decode_packet_header and fuzz_build_stmt_execute_packet")
+    }
+}
+
+// ============================================================================
+// Requirement table and harness
+// ============================================================================
+
+fn requirements() -> Vec<Requirement> {
+    use Evidence::{MysqlHook, Unobservable};
+    vec![
+        Requirement {
+            id: "MYSQL-STMT-001",
+            description: "COM_STMT_PREPARE packet format MUST follow wire protocol",
+            category: TestCategory::PacketFormat,
+            level: RequirementLevel::Must,
+            evidence: Unobservable,
+            check: prepare_packet_unobservable,
+        },
+        Requirement {
+            id: "MYSQL-STMT-002",
+            description: "COM_STMT_PREPARE_OK response MUST follow specification",
+            category: TestCategory::PacketFormat,
+            level: RequirementLevel::Must,
+            evidence: Unobservable,
+            check: prepare_ok_unobservable,
+        },
+        Requirement {
+            id: "MYSQL-STMT-003",
+            description: "COM_STMT_EXECUTE packet format MUST be compliant: int<3> length and sequence id 0, then 0x17, int<4> statement_id, int<1> flags, int<4> iteration_count 1 and, with parameters, the NULL bitmap, new_params_bound_flag, int<2> types and binary values",
+            category: TestCategory::PacketFormat,
+            level: RequirementLevel::Must,
+            evidence: MysqlHook,
+            check: production::stmt_execute_packet_format,
+        },
+        Requirement {
+            id: "MYSQL-STMT-004",
+            description: "COM_STMT_CLOSE packet format MUST be correct",
+            category: TestCategory::PacketFormat,
+            level: RequirementLevel::Must,
+            evidence: Unobservable,
+            check: close_packet_unobservable,
+        },
+        Requirement {
+            id: "MYSQL-STMT-005",
+            description: "Parameter type signaling MUST use correct MYSQL_TYPE codes: a fixed-width value is declared with the type of its width, a length-encoded value with a string-class type, and a NULL value is marked in the bitmap",
+            category: TestCategory::ParameterTypes,
+            level: RequirementLevel::Must,
+            evidence: MysqlHook,
+            check: production::parameter_type_codes,
+        },
+        Requirement {
+            id: "MYSQL-STMT-006",
+            description: "MYSQL_TYPE codes MUST match specification exactly: production's column_type constants equal the protocol's field-type table",
+            category: TestCategory::ParameterTypes,
+            level: RequirementLevel::Must,
+            evidence: MysqlHook,
+            check: production::type_code_table,
+        },
+        Requirement {
+            id: "MYSQL-STMT-007",
+            description: "Unsigned flag handling MUST be correct for integer types: unsigned parameters carry 0x80 in the type field's high byte, signed ones do not, and UNSIGNED columns decode without sign extension",
+            category: TestCategory::ParameterTypes,
+            level: RequirementLevel::Must,
+            evidence: MysqlHook,
+            check: production::unsigned_flag,
+        },
+        Requirement {
+            id: "MYSQL-STMT-008",
+            description: "Parameter length encoding MUST follow MySQL specification: a string or blob value is prefixed with its length-encoded length (1 byte, 0xFC + int<2>, 0xFD + int<3> or 0xFE + int<8>)",
+            category: TestCategory::ParameterTypes,
+            level: RequirementLevel::Must,
+            evidence: MysqlHook,
+            check: production::parameter_length_encoding,
+        },
+        Requirement {
+            id: "MYSQL-STMT-009",
+            description: "NULL bitmap encoding MUST follow Section 16.6.4.2: bit i of the bitmap marks parameter i as NULL",
+            category: TestCategory::NullBitmap,
+            level: RequirementLevel::Must,
+            evidence: MysqlHook,
+            check: production::null_bitmap_encoding,
+        },
+        Requirement {
+            id: "MYSQL-STMT-010",
+            description: "NULL bitmap length calculation MUST be correct: (n + 7) / 8 bytes, and no bitmap for zero parameters",
+            category: TestCategory::NullBitmap,
+            level: RequirementLevel::Must,
+            evidence: MysqlHook,
+            check: production::null_bitmap_length,
+        },
+        Requirement {
+            id: "MYSQL-STMT-011",
+            description: "NULL bitmap bit ordering MUST follow LSB-first convention",
+            category: TestCategory::NullBitmap,
+            level: RequirementLevel::Must,
+            evidence: MysqlHook,
+            check: production::null_bitmap_bit_order,
+        },
+        Requirement {
+            id: "MYSQL-STMT-012",
+            description: "Mixed NULL/non-NULL parameters MUST be handled correctly: every parameter has a type, only the non-NULL ones have a value",
+            category: TestCategory::NullBitmap,
+            level: RequirementLevel::Must,
+            evidence: MysqlHook,
+            check: production::mixed_null_parameters,
+        },
+        Requirement {
+            id: "MYSQL-STMT-013",
+            description: "COM_STMT_SEND_LONG_DATA packet format MUST be correct",
+            category: TestCategory::LongData,
+            level: RequirementLevel::Must,
+            evidence: Unobservable,
+            check: long_data_packet_unobservable,
+        },
+        Requirement {
+            id: "MYSQL-STMT-014",
+            description: "Long data chunking MUST handle large data correctly",
+            category: TestCategory::LongData,
+            level: RequirementLevel::Must,
+            evidence: Unobservable,
+            check: long_data_chunking_unobservable,
+        },
+        Requirement {
+            id: "MYSQL-STMT-015",
+            description: "Long data parameters MUST be reset between executions",
+            category: TestCategory::LongData,
+            level: RequirementLevel::Must,
+            evidence: Unobservable,
+            check: long_data_reset_unobservable,
+        },
+        Requirement {
+            id: "MYSQL-STMT-016",
+            description: "Cursor type flags MUST be correctly encoded: production's flags byte is CURSOR_TYPE_NO_CURSOR (0x00), the only cursor type it sends",
+            category: TestCategory::CursorFlags,
+            level: RequirementLevel::Must,
+            evidence: MysqlHook,
+            check: production::cursor_flags_byte,
+        },
+        Requirement {
+            id: "MYSQL-STMT-017",
+            description: "CURSOR_TYPE_READ_ONLY MUST be handled correctly",
+            category: TestCategory::CursorFlags,
+            level: RequirementLevel::Must,
+            evidence: Unobservable,
+            check: read_only_cursor_unobservable,
+        },
+        Requirement {
+            id: "MYSQL-STMT-018",
+            description: "Scrollable cursor behavior MUST be correct",
+            category: TestCategory::CursorFlags,
+            level: RequirementLevel::Must,
+            evidence: Unobservable,
+            check: scrollable_cursor_unobservable,
+        },
+        Requirement {
+            id: "MYSQL-STMT-019",
+            description: "Binary result set format MUST follow specification: header 0x00, the NULL bitmap and the non-NULL values, decoded per column definition, with malformed rows rejected",
+            category: TestCategory::BinaryResultSet,
+            level: RequirementLevel::Must,
+            evidence: MysqlHook,
+            check: production::binary_result_row,
+        },
+        Requirement {
+            id: "MYSQL-STMT-020",
+            description: "Binary row NULL bitmap MUST handle +2 offset correctly: (n + 7 + 2) / 8 bytes, column i at bit i + 2",
+            category: TestCategory::BinaryResultSet,
+            level: RequirementLevel::Must,
+            evidence: MysqlHook,
+            check: production::binary_row_null_bitmap_offset,
+        },
+        Requirement {
+            id: "MYSQL-STMT-021",
+            description: "Binary value encoding MUST use correct formats: fixed-width integers and floats, length-encoded strings and DECIMAL, and length-prefixed DATE/DATETIME/TIME, in both directions",
+            category: TestCategory::BinaryResultSet,
+            level: RequirementLevel::Must,
+            evidence: MysqlHook,
+            check: production::binary_value_encoding,
+        },
+        Requirement {
+            id: "MYSQL-STMT-022",
+            description: "Length-encoded values MUST be handled correctly: every prefix form decoded, 0xFB read as NULL in text rows and refused where NULL cannot appear, malformed prefixes rejected",
+            category: TestCategory::BinaryResultSet,
+            level: RequirementLevel::Must,
+            evidence: MysqlHook,
+            check: production::length_encoded_values,
+        },
+        Requirement {
+            id: "MYSQL-STMT-023",
+            description: "Invalid statement ID handling MUST follow protocol: the id is sent verbatim and the server's ER_UNKNOWN_STMT_HANDLER ERR packet is decoded",
+            category: TestCategory::ErrorHandling,
+            level: RequirementLevel::Must,
+            evidence: MysqlHook,
+            check: production::invalid_statement_id,
+        },
+        Requirement {
+            id: "MYSQL-STMT-024",
+            description: "Parameter count mismatch MUST be detectable",
+            category: TestCategory::ErrorHandling,
+            level: RequirementLevel::Must,
+            evidence: Unobservable,
+            check: parameter_count_unobservable,
+        },
+        Requirement {
+            id: "MYSQL-STMT-025",
+            description: "Invalid cursor type MUST be handled properly",
+            category: TestCategory::ErrorHandling,
+            level: RequirementLevel::Must,
+            evidence: Unobservable,
+            check: invalid_cursor_unobservable,
+        },
+        Requirement {
+            id: "MYSQL-STMT-026",
+            description: "Column Definition 41 packets MUST decode catalog, schema, table, org_table, name, org_name, character set, length, type, flags and decimals, and truncated or ill-prefixed packets MUST be rejected",
+            category: TestCategory::BinaryResultSet,
+            level: RequirementLevel::Must,
+            evidence: MysqlHook,
+            check: production::column_definition,
+        },
+        Requirement {
+            id: "MYSQL-STMT-027",
+            description: "Text resultset rows MUST decode each value as a length-encoded string or 0xFB NULL per its column type, and rows whose value count or lengths disagree MUST be rejected",
+            category: TestCategory::TextResultSet,
+            level: RequirementLevel::Must,
+            evidence: MysqlHook,
+            check: production::text_result_row,
+        },
+        Requirement {
+            id: "MYSQL-STMT-028",
+            description: "Text result-set rows MUST be told apart from their terminator: an EOF packet (an 0xFE OK packet under CLIENT_DEPRECATE_EOF) ends the set, a row starting with an empty value stays a row, and an ERR packet is neither",
+            category: TestCategory::TextResultSet,
+            level: RequirementLevel::Must,
+            evidence: MysqlHook,
+            check: production::text_result_terminators,
+        },
+        Requirement {
+            id: "MYSQL-STMT-029",
+            description: "OK packets MUST decode the length-encoded affected_rows and last_insert_id and the status flags, and truncated or non-OK packets MUST be rejected",
+            category: TestCategory::PacketFormat,
+            level: RequirementLevel::Must,
+            evidence: MysqlHook,
+            check: production::ok_packet,
+        },
+        Requirement {
+            id: "MYSQL-STMT-030",
+            description: "ERR packets MUST decode the error code, the '#'-marked SQLSTATE and the message, and non-ERR or truncated packets MUST NOT be reported as server errors",
+            category: TestCategory::ErrorHandling,
+            level: RequirementLevel::Must,
+            evidence: MysqlHook,
+            check: production::err_packet,
+        },
+        Requirement {
+            id: "MYSQL-STMT-031",
+            description: "Packets MUST be framed as int<3> payload length and int<1> sequence id, out-of-order sequence ids MUST be rejected, and a payload of 2^24 - 1 bytes MUST be followed by an empty packet",
+            category: TestCategory::PacketFormat,
+            level: RequirementLevel::Must,
+            evidence: MysqlHook,
+            check: production::packet_framing,
+        },
+        Requirement {
+            id: "MYSQL-STMT-032",
+            description: "Binary result set rows MUST end at an EOF packet (an 0xFE OK packet under CLIENT_DEPRECATE_EOF), and an ERR packet MUST end the set with an error",
+            category: TestCategory::BinaryResultSet,
+            level: RequirementLevel::Must,
+            evidence: Unobservable,
+            check: binary_terminator_unobservable,
+        },
+    ]
+}
+
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        (*text).to_string()
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        text.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
+}
+
+fn run_requirement(requirement: &Requirement) -> MySqlStmtConformanceResult {
+    let start = Instant::now();
+    // A panic in production code fails that requirement, not the harness.
+    let decision = std::panic::catch_unwind(std::panic::AssertUnwindSafe(requirement.check))
+        .unwrap_or_else(|payload| {
+            Decision::Decided(Err(format!(
+                "production code panicked: {}",
+                panic_text(&*payload)
+            )))
+        });
+    let (verdict, notes) = match decision {
+        Decision::Decided(Ok(())) => (TestVerdict::Pass, None),
+        Decision::Decided(Err(reason)) => (TestVerdict::Fail, Some(reason)),
+        Decision::Skipped(note) => (TestVerdict::Skipped, Some(note)),
+    };
+    MySqlStmtConformanceResult {
+        test_id: requirement.id.to_string(),
+        description: requirement.description.to_string(),
+        category: requirement.category.clone(),
+        requirement_level: requirement.level.clone(),
+        verdict,
+        notes,
+        elapsed_ms: elapsed_millis_for_report(start.elapsed()),
     }
 }
 
@@ -1575,179 +3072,153 @@ fn elapsed_millis_for_report(elapsed: Duration) -> u64 {
     rounded.clamp(1, u128::from(u64::MAX)) as u64
 }
 
+/// MySQL COM_STMT_PREPARE/EXECUTE conformance harness.
+#[allow(dead_code)]
+pub struct MySqlStmtConformanceHarness {
+    requirements: Vec<Requirement>,
+}
+
+#[allow(dead_code)]
+impl MySqlStmtConformanceHarness {
+    /// Create a new conformance test harness.
+    pub fn new() -> Self {
+        Self {
+            requirements: requirements(),
+        }
+    }
+
+    /// Execute all conformance tests.
+    pub fn run_all_tests(&mut self) -> Vec<MySqlStmtConformanceResult> {
+        self.requirements.iter().map(run_requirement).collect()
+    }
+}
+
 impl Default for MySqlStmtConformanceHarness {
-    #[allow(dead_code)]
     fn default() -> Self {
         Self::new()
     }
 }
 
-// ===== Helper Functions =====
-
-/// Encode a length-encoded integer per MySQL protocol.
-#[allow(dead_code)]
-fn encode_length_encoded_integer(value: u64) -> Vec<u8> {
-    if value < 251 {
-        vec![value as u8]
-    } else if value < 65536 {
-        let mut result = vec![252];
-        result.extend_from_slice(&(value as u16).to_le_bytes());
-        result
-    } else if value < 16777216 {
-        let mut result = vec![253];
-        result.extend_from_slice(&(value as u32).to_le_bytes()[0..3]);
-        result
-    } else {
-        let mut result = vec![254];
-        result.extend_from_slice(&value.to_le_bytes());
-        result
-    }
-}
-
-/// Decode a length-encoded integer per MySQL protocol.
-#[allow(dead_code)]
-fn decode_length_encoded_integer(data: &[u8]) -> (u64, usize) {
-    if data.is_empty() {
-        return (0, 0);
-    }
-
-    match data[0] {
-        0..=250 => (data[0] as u64, 1),
-        251 => (0, 1), // NULL value
-        252 => {
-            if data.len() < 3 {
-                return (0, 1);
-            }
-            let value = u16::from_le_bytes([data[1], data[2]]) as u64;
-            (value, 3)
-        }
-        253 => {
-            if data.len() < 4 {
-                return (0, 1);
-            }
-            let value = u32::from_le_bytes([data[1], data[2], data[3], 0]) as u64;
-            (value, 4)
-        }
-        254 => {
-            if data.len() < 9 {
-                return (0, 1);
-            }
-            let value = u64::from_le_bytes([
-                data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8],
-            ]);
-            (value, 9)
-        }
-        255 => (0, 1), // Reserved
-    }
-}
-
-/// Encode a length-encoded string per MySQL protocol.
-#[allow(dead_code)]
-fn encode_length_encoded_string(data: &[u8]) -> Vec<u8> {
-    let mut result = encode_length_encoded_integer(data.len() as u64);
-    result.extend_from_slice(data);
-    result
-}
-
-/// Decode a length-encoded string per MySQL protocol.
-#[allow(dead_code)]
-fn decode_length_encoded_string(data: &[u8]) -> (Vec<u8>, usize) {
-    let (length, length_bytes) = decode_length_encoded_integer(data);
-    let start = length_bytes;
-    let end = start + length as usize;
-
-    if end > data.len() {
-        return (Vec::new(), length_bytes);
-    }
-
-    (data[start..end].to_vec(), end)
-}
-
-/// Create a COM_STMT_EXECUTE packet with specified parameters.
-#[allow(dead_code)]
-fn create_execute_packet(stmt_id: u32, cursor_type: CursorType) -> Vec<u8> {
-    create_execute_packet_with_flags(stmt_id, cursor_type as u8)
-}
-
-/// Create a COM_STMT_EXECUTE packet with custom flags.
-#[allow(dead_code)]
-fn create_execute_packet_with_flags(stmt_id: u32, flags: u8) -> Vec<u8> {
-    let mut packet = Vec::new();
-
-    packet.push(0x17); // COM_STMT_EXECUTE
-    packet.extend_from_slice(&stmt_id.to_le_bytes());
-    packet.push(flags);
-    packet.extend_from_slice(&1u32.to_le_bytes()); // iteration count
-
-    // Minimal NULL bitmap for 0 parameters
-    packet.push(0x00); // new types flag
-
-    packet
-}
-
-/// Create a COM_STMT_CLOSE packet.
-#[allow(dead_code)]
-fn create_close_packet(stmt_id: u32) -> Vec<u8> {
-    let mut packet = Vec::new();
-
-    packet.push(0x19); // COM_STMT_CLOSE
-    packet.extend_from_slice(&stmt_id.to_le_bytes());
-
-    packet
-}
-
-/// Create a COM_STMT_SEND_LONG_DATA packet.
-#[allow(dead_code)]
-fn create_long_data_packet(stmt_id: u32, param_index: u16, data: &[u8]) -> Vec<u8> {
-    let mut packet = Vec::new();
-
-    packet.push(0x18); // COM_STMT_SEND_LONG_DATA
-    packet.extend_from_slice(&stmt_id.to_le_bytes());
-    packet.extend_from_slice(&param_index.to_le_bytes());
-    packet.extend_from_slice(data);
-
-    packet
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{BTreeSet, HashSet};
+
+    /// The requirements no production hook can decide. Moving one out of
+    /// this set needs a production observable for it.
+    const UNOBSERVABLE: [&str; 11] = [
+        "MYSQL-STMT-001",
+        "MYSQL-STMT-002",
+        "MYSQL-STMT-004",
+        "MYSQL-STMT-013",
+        "MYSQL-STMT-014",
+        "MYSQL-STMT-015",
+        "MYSQL-STMT-017",
+        "MYSQL-STMT-018",
+        "MYSQL-STMT-024",
+        "MYSQL-STMT-025",
+        "MYSQL-STMT-032",
+    ];
+
+    fn expected_verdict(evidence: Evidence) -> TestVerdict {
+        match evidence {
+            Evidence::Unobservable => TestVerdict::Skipped,
+            Evidence::MysqlHook if cfg!(feature = "mysql") => TestVerdict::Pass,
+            Evidence::MysqlHook => TestVerdict::Skipped,
+        }
+    }
 
     #[test]
-    #[allow(dead_code)]
     fn test_mysql_stmt_conformance_suite_completeness() {
+        let requirements = requirements();
         let mut harness = MySqlStmtConformanceHarness::new();
         let results = harness.run_all_tests();
 
-        // Verify we have comprehensive coverage
-        assert!(!results.is_empty(), "Should have conformance test results");
-        assert!(
-            results.len() >= 25,
-            "Should have at least 25 tests for comprehensive coverage"
+        for result in &results {
+            println!(
+                "mysql_stmt_conformance id={} verdict={:?} elapsed_ms={} notes={:?}",
+                result.test_id, result.verdict, result.elapsed_ms, result.notes
+            );
+        }
+
+        assert_eq!(
+            results.len(),
+            32,
+            "expected 32 prepared-statement requirements"
+        );
+        let ids: BTreeSet<&str> = results.iter().map(|r| r.test_id.as_str()).collect();
+        assert_eq!(ids.len(), results.len(), "requirement ids must be unique");
+
+        let categories: HashSet<&TestCategory> = results.iter().map(|r| &r.category).collect();
+        for category in [
+            TestCategory::PacketFormat,
+            TestCategory::ParameterTypes,
+            TestCategory::NullBitmap,
+            TestCategory::LongData,
+            TestCategory::CursorFlags,
+            TestCategory::BinaryResultSet,
+            TestCategory::TextResultSet,
+            TestCategory::ErrorHandling,
+        ] {
+            assert!(
+                categories.contains(&category),
+                "category {category:?} has no requirement"
+            );
+        }
+
+        // Any spec violation fails the suite, whatever its requirement level.
+        let failures: Vec<_> = results
+            .iter()
+            .filter(|r| r.verdict == TestVerdict::Fail)
+            .collect();
+        assert!(failures.is_empty(), "spec violations: {failures:#?}");
+
+        let unobservable: BTreeSet<&str> = requirements
+            .iter()
+            .filter(|r| r.evidence == Evidence::Unobservable)
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(
+            unobservable,
+            UNOBSERVABLE.into_iter().collect::<BTreeSet<_>>()
         );
 
-        // Check categories are covered
-        let categories: std::collections::HashSet<_> =
-            results.iter().map(|r| &r.category).collect();
-
-        assert!(categories.contains(&TestCategory::PacketFormat));
-        assert!(categories.contains(&TestCategory::ParameterTypes));
-        assert!(categories.contains(&TestCategory::NullBitmap));
-        assert!(categories.contains(&TestCategory::LongData));
-        assert!(categories.contains(&TestCategory::CursorFlags));
-        assert!(categories.contains(&TestCategory::BinaryResultSet));
-        assert!(categories.contains(&TestCategory::ErrorHandling));
-
-        // All MUST requirements should pass
-        let must_failures: Vec<_> = results
+        // The Skipped set is pinned exactly: the unobservable requirements
+        // with --features mysql, every requirement without it.
+        let skipped: BTreeSet<&str> = results
             .iter()
-            .filter(|r| {
-                r.requirement_level == RequirementLevel::Must && r.verdict == TestVerdict::Fail
-            })
+            .filter(|r| r.verdict == TestVerdict::Skipped)
+            .map(|r| r.test_id.as_str())
             .collect();
+        let expected_skipped: BTreeSet<&str> = if cfg!(feature = "mysql") {
+            UNOBSERVABLE.into_iter().collect()
+        } else {
+            ids.clone()
+        };
+        assert_eq!(skipped, expected_skipped, "Skipped requirement ids");
 
-        if !must_failures.is_empty() {
-            panic!("MUST requirements failed: {:#?}", must_failures);
+        for (requirement, result) in requirements.iter().zip(&results) {
+            assert_eq!(result.test_id, requirement.id);
+            assert_eq!(
+                result.verdict,
+                expected_verdict(requirement.evidence),
+                "{}: {:?}",
+                result.test_id,
+                result.notes
+            );
+            if result.verdict == TestVerdict::Skipped {
+                let note = result.notes.as_deref().unwrap_or("");
+                let reason = if requirement.evidence == Evidence::Unobservable {
+                    NO_OBSERVABLE
+                } else {
+                    "needs --features mysql"
+                };
+                assert!(
+                    note.starts_with(reason),
+                    "{}: skip note {note:?} must start with {reason:?}",
+                    result.test_id
+                );
+            }
         }
 
         assert!(
@@ -1755,26 +3226,56 @@ mod tests {
             "all conformance results must record non-zero elapsed time"
         );
 
+        let passed = results
+            .iter()
+            .filter(|r| r.verdict == TestVerdict::Pass)
+            .count();
         println!(
-            "✅ MySQL prepared statement conformance: {} tests passed",
-            results.len()
+            "mysql_stmt_conformance summary: {} requirements, {passed} passed, {} skipped, 0 failed",
+            results.len(),
+            skipped.len()
         );
     }
 
+    /// Pins the spec type table this file compares production against.
     #[test]
-    #[allow(dead_code)]
     fn test_mysql_type_codes() {
-        // Verify MySQL type codes match specification
-        assert_eq!(MySqlType::Tiny as u8, 0x01);
-        assert_eq!(MySqlType::Short as u8, 0x02);
-        assert_eq!(MySqlType::Long as u8, 0x03);
-        assert_eq!(MySqlType::LongLong as u8, 0x08);
-        assert_eq!(MySqlType::String as u8, 0xFE);
-        assert_eq!(MySqlType::VarString as u8, 0xFD);
+        let table: [(MySqlType, u8); 28] = [
+            (MySqlType::Decimal, 0x00),
+            (MySqlType::Tiny, 0x01),
+            (MySqlType::Short, 0x02),
+            (MySqlType::Long, 0x03),
+            (MySqlType::Float, 0x04),
+            (MySqlType::Double, 0x05),
+            (MySqlType::Null, 0x06),
+            (MySqlType::Timestamp, 0x07),
+            (MySqlType::LongLong, 0x08),
+            (MySqlType::Int24, 0x09),
+            (MySqlType::Date, 0x0A),
+            (MySqlType::Time, 0x0B),
+            (MySqlType::DateTime, 0x0C),
+            (MySqlType::Year, 0x0D),
+            (MySqlType::NewDate, 0x0E),
+            (MySqlType::VarChar, 0x0F),
+            (MySqlType::Bit, 0x10),
+            (MySqlType::Json, 0xF5),
+            (MySqlType::NewDecimal, 0xF6),
+            (MySqlType::Enum, 0xF7),
+            (MySqlType::Set, 0xF8),
+            (MySqlType::TinyBlob, 0xF9),
+            (MySqlType::MediumBlob, 0xFA),
+            (MySqlType::LongBlob, 0xFB),
+            (MySqlType::Blob, 0xFC),
+            (MySqlType::VarString, 0xFD),
+            (MySqlType::String, 0xFE),
+            (MySqlType::Geometry, 0xFF),
+        ];
+        for (kind, code) in table {
+            assert_eq!(kind as u8, code, "{kind:?}");
+        }
     }
 
     #[test]
-    #[allow(dead_code)]
     fn test_cursor_type_values() {
         // Verify cursor type values match specification
         assert_eq!(CursorType::NoCursor as u8, 0x00);
@@ -1783,49 +3284,137 @@ mod tests {
         assert_eq!(CursorType::Scrollable as u8, 0x04);
     }
 
+    /// Pins the oracle builders to bytes encoded by hand from the protocol
+    /// documentation, so the oracle cannot drift along with production.
     #[test]
-    #[allow(dead_code)]
-    fn test_length_encoded_integer_roundtrip() {
-        let test_values = vec![0, 1, 250, 251, 255, 256, 65535, 65536, 16777215, 16777216];
+    fn oracle_builders_match_hand_encoded_spec_bytes() {
+        // Length-encoded integers and strings.
+        assert_eq!(encode_length_encoded_integer(0), vec![0x00]);
+        assert_eq!(encode_length_encoded_integer(250), vec![0xFA]);
+        assert_eq!(encode_length_encoded_integer(251), vec![0xFC, 0xFB, 0x00]);
+        assert_eq!(
+            encode_length_encoded_integer(65_535),
+            vec![0xFC, 0xFF, 0xFF]
+        );
+        assert_eq!(
+            encode_length_encoded_integer(65_536),
+            vec![0xFD, 0x00, 0x00, 0x01]
+        );
+        assert_eq!(
+            encode_length_encoded_integer(16_777_215),
+            vec![0xFD, 0xFF, 0xFF, 0xFF]
+        );
+        assert_eq!(
+            encode_length_encoded_integer(16_777_216),
+            vec![0xFE, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]
+        );
+        assert_eq!(
+            encode_length_encoded_string(b"hello"),
+            vec![0x05, b'h', b'e', b'l', b'l', b'o']
+        );
 
-        for value in test_values {
-            let encoded = encode_length_encoded_integer(value);
-            let (decoded, _) = decode_length_encoded_integer(&encoded);
-            assert_eq!(decoded, value, "Round-trip failed for value {}", value);
-        }
-    }
+        // Packet framing, including the split at 2^24 - 1 bytes.
+        assert_eq!(
+            frame_packets(0, &[0x17]),
+            vec![0x01, 0x00, 0x00, 0x00, 0x17]
+        );
+        assert_eq!(frame_packets(3, &[]), vec![0x00, 0x00, 0x00, 0x03]);
+        let exact = vec![0xAB; 0xFF_FFFF];
+        let framed = frame_packets(0, &exact);
+        assert_eq!(framed.len(), 4 + 0xFF_FFFF + 4);
+        assert_eq!(&framed[..4], &[0xFF, 0xFF, 0xFF, 0x00]);
+        assert_eq!(&framed[4 + 0xFF_FFFF..], &[0x00, 0x00, 0x00, 0x01]);
+        let over = vec![0xCD; 0xFF_FFFF + 2];
+        let framed = frame_packets(0, &over);
+        assert_eq!(framed.len(), 4 + 0xFF_FFFF + 4 + 2);
+        assert_eq!(
+            &framed[4 + 0xFF_FFFF..4 + 0xFF_FFFF + 4],
+            &[0x02, 0x00, 0x00, 0x01]
+        );
 
-    #[test]
-    #[allow(dead_code)]
-    fn test_null_bitmap_calculation() {
-        // Test NULL bitmap length calculation
-        assert_eq!(7 / 8, 0);
-        assert_eq!((1 + 7) / 8, 1);
-        assert_eq!((8 + 7) / 8, 1);
-        assert_eq!((9 + 7) / 8, 2);
-        assert_eq!((16 + 7) / 8, 2);
-        assert_eq!((17 + 7) / 8, 3);
-    }
+        // COM_STMT_EXECUTE.
+        let mut execute = vec![
+            27, 0, 0, 0, 0x17, 0xD2, 0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x01,
+            0x03, 0x00, 0xFD, 0x00, 0x0A,
+        ];
+        execute.extend_from_slice(b"test_value");
+        assert_eq!(
+            stmt_execute_packet(
+                1234,
+                &[
+                    SpecParam::null(MySqlType::Long, false),
+                    SpecParam::bound(
+                        MySqlType::VarString,
+                        false,
+                        encode_length_encoded_string(b"test_value"),
+                    ),
+                ],
+            ),
+            execute
+        );
+        assert_eq!(
+            stmt_execute_packet(42, &[]),
+            vec![10, 0, 0, 0, 0x17, 42, 0, 0, 0, 0x00, 0x01, 0x00, 0x00, 0x00]
+        );
+        let nine_nulls: Vec<SpecParam> = (0..9)
+            .map(|_| SpecParam::null(MySqlType::Tiny, true))
+            .collect();
+        let payload = stmt_execute_payload(1, 0x00, &nine_nulls);
+        assert_eq!(&payload[10..13], &[0xFF, 0x01, 0x01]);
+        assert_eq!(&payload[13..15], &[0x01, 0x80]);
+        assert_eq!(payload.len(), 10 + 2 + 1 + 18);
 
-    #[test]
-    #[allow(dead_code)]
-    fn test_packet_helpers() {
-        let stmt_id = 12345u32;
+        // Column Definition 41.
+        let column = column_spec("id", MySqlType::Long, 63, 11, 0x0003, 0);
+        assert_eq!(
+            column_definition_bytes(&column),
+            vec![
+                0x03, b'd', b'e', b'f', 0x04, b't', b'e', b's', b't', 0x01, b't', 0x01, b't', 0x02,
+                b'i', b'd', 0x02, b'i', b'd', 0x0C, 63, 0x00, 11, 0x00, 0x00, 0x00, 0x03, 0x03,
+                0x00, 0x00, 0x00, 0x00,
+            ]
+        );
 
-        // Test execute packet creation
-        let execute_packet = create_execute_packet(stmt_id, CursorType::ReadOnly);
-        assert_eq!(execute_packet[0], 0x17);
-        assert_eq!(execute_packet[5], 0x01); // Read-only cursor
+        // Rows.
+        let mut binary = vec![0x00, 0b0000_1000, 0x39, 0x30, 0x00, 0x00, 0x0B];
+        binary.extend_from_slice(b"test_string");
+        assert_eq!(
+            binary_row_bytes(&[
+                Some(12345i32.to_le_bytes().to_vec()),
+                None,
+                Some(encode_length_encoded_string(b"test_string")),
+            ]),
+            binary
+        );
+        let ten_nulls: Vec<Option<Vec<u8>>> = vec![None; 10];
+        assert_eq!(binary_row_bytes(&ten_nulls), vec![0x00, 0xFC, 0x0F]);
+        assert_eq!(
+            text_row_bytes(&[Some(&b"42"[..]), None, Some(&b""[..])]),
+            vec![0x02, b'4', b'2', 0xFB, 0x00]
+        );
 
-        // Test close packet creation
-        let close_packet = create_close_packet(stmt_id);
-        assert_eq!(close_packet[0], 0x19);
-        assert_eq!(close_packet.len(), 5);
-
-        // Test long data packet creation
-        let data = b"test data";
-        let long_data_packet = create_long_data_packet(stmt_id, 0, data);
-        assert_eq!(long_data_packet[0], 0x18);
-        assert_eq!(&long_data_packet[7..], data);
+        // OK, EOF and ERR packets.
+        assert_eq!(
+            ok_packet_bytes(0x00, 3, 0, 0x0002, 0, b""),
+            vec![0x00, 0x03, 0x00, 0x02, 0x00, 0x00, 0x00]
+        );
+        assert_eq!(
+            ok_packet_bytes(0xFE, 0, 0, 0x0002, 0, b"done"),
+            vec![
+                0xFE, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, b'd', b'o', b'n', b'e'
+            ]
+        );
+        assert_eq!(
+            eof_packet_bytes(0, 0x0002),
+            vec![0xFE, 0x00, 0x00, 0x02, 0x00]
+        );
+        assert_eq!(
+            err_packet_bytes(1146, Some("42S02"), "x"),
+            vec![0xFF, 0x7A, 0x04, b'#', b'4', b'2', b'S', b'0', b'2', b'x']
+        );
+        assert_eq!(
+            err_packet_bytes(1040, None, "y"),
+            vec![0xFF, 0x10, 0x04, b'y']
+        );
     }
 }
