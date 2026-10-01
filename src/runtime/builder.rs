@@ -13257,3 +13257,44 @@ worker_threads = 16
         );
     }
 }
+
+// Opt-in obligation leak monitoring (br-asupersync-bi2462.150.2). This block
+// follows the test module so that the unsafe-boundary ledger's line locators
+// in this file stay where they are.
+impl Runtime {
+    /// Enables an anytime-valid obligation leak monitor for this runtime.
+    ///
+    /// Every obligation the runtime resolves after this call (committed,
+    /// aborted or leaked) feeds the monitor its age at resolution, exactly
+    /// once. Calibrate `expected_lifetime_ns` from profiled obligation
+    /// durations or the containing budget's deadline; see
+    /// [`crate::obligation::eprocess`]. Monitoring is off by default, and a
+    /// runtime without a monitor pays one branch per resolved obligation. A
+    /// second call replaces the monitor and its evidence.
+    ///
+    /// # Panics
+    /// If `config` is invalid (see [`crate::obligation::eprocess::LeakMonitor::new`]).
+    pub fn enable_obligation_leak_monitor(
+        &self,
+        config: crate::obligation::eprocess::MonitorConfig,
+    ) {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .enable_obligation_leak_monitor(config);
+    }
+
+    /// The obligation leak monitor's current snapshot, or `None` when
+    /// [`Self::enable_obligation_leak_monitor`] has not been called.
+    #[must_use]
+    pub fn obligation_leak_monitor_snapshot(
+        &self,
+    ) -> Option<crate::obligation::eprocess::MonitorSnapshot> {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .obligation_leak_monitor_snapshot()
+    }
+}

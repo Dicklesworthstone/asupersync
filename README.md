@@ -1895,7 +1895,7 @@ Payoff: catches split-brain-style saga states that evade purely pairwise conflic
 
 ### Anytime-Valid Invariant Monitoring (E-Processes, Ville's Inequality)
 
-The lab runtime monitors invariants (task leaks, obligation leaks, region quiescence) with e-processes (`src/lab/oracle/eprocess.rs`), adding one observation per run that advances the lab. Separately, `src/obligation/eprocess.rs` provides an anytime-valid obligation-leak monitor as an opt-in, caller-fed API: the runtime does not create or feed one (`asupersync-bi2462.150.2` tracks that wire). Both use a supermartingale-based, anytime-valid testing framework that supports optional stopping without "peeking penalties".
+The lab runtime monitors invariants (task leaks, obligation leaks, region quiescence) with e-processes (`src/lab/oracle/eprocess.rs`), adding one observation per run that advances the lab. Separately, `src/obligation/eprocess.rs` provides an anytime-valid obligation-leak monitor. It is opt-in: `Runtime::enable_obligation_leak_monitor` installs one that the runtime feeds with each resolved obligation's age (committed, aborted or leaked, each counted once), and `Runtime::obligation_leak_monitor_snapshot` reads its e-value and alert state. Both use a supermartingale-based, anytime-valid testing framework that supports optional stopping without "peeking penalties".
 
 Payoff: turn long-running exploration into statistically sound monitoring, with deterministic, explainable rejection thresholds.
 

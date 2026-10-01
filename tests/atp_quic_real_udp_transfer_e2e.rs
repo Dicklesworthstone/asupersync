@@ -164,6 +164,9 @@ struct Configs {
 const TEST_TIMEOUT: Duration = Duration::from_secs(20);
 const DEFAULT_QUIC_SOURCE_SYMBOLS_PER_BLOCK: usize = 512;
 const LOSSY_PROXY_TIMEOUT: Duration = Duration::from_secs(75);
+/// Backstop lifetime of the lossy proxy in the 2000-member tree-manifest tests,
+/// which can legitimately run past `LOSSY_PROXY_TIMEOUT` on a loaded worker.
+const TREE_MANIFEST_PROXY_TIMEOUT: Duration = Duration::from_secs(300);
 
 fn tighten_timeouts(cfg: &mut QuicConfig) {
     cfg.idle_timeout = TEST_TIMEOUT;
@@ -1340,14 +1343,25 @@ fn real_udp_quic_tree_manifest_stall_pto_resends_stay_bounded() {
     cfg.send.handshake_timeout = Duration::from_secs(20);
     cfg.recv.handshake_timeout = Duration::from_secs(20);
     cfg.send.accept_timeout = Duration::from_secs(20);
-    cfg.recv.accept_timeout = Duration::from_secs(20);
+    // The receiver's accept clock starts before the sender has built its
+    // 2000-member manifest, and that build alone passed 20 s on a loaded
+    // worker; the receiver then stopped accepting and both sides timed out
+    // with no packet exchanged (asupersync-bi2462.147.70). A real receiver
+    // accepts indefinitely; only the lossy transfer is under test here.
+    cfg.recv.accept_timeout = Duration::from_secs(120);
+    // The proxy forwards nothing after its timeout. At 75 s it died mid-transfer
+    // on loaded workers (the manifest build plus the lossy transfer outlived
+    // it), and both sides then timed out in silence: the receiver after its
+    // last Proof retransmit, the sender in its proof wait
+    // (asupersync-bi2462.147.70). Drop stops the proxy at the end of the test
+    // anyway, so the timeout is only a backstop.
     let (send, recv, collector) = run_transfer_via_lossy_proxy_with_collector(
         cfg.send,
         cfg.recv,
         &root,
         dst.path(),
         0xDA_0B_2D_15,
-        Duration::from_secs(75),
+        TREE_MANIFEST_PROXY_TIMEOUT,
         65_536,
     );
     let resends = stall_pto_resends(&collector);
@@ -1435,7 +1449,9 @@ fn real_udp_quic_tree_manifest_survives_lossy_control_stream() {
     cfg.send.handshake_timeout = Duration::from_secs(20);
     cfg.recv.handshake_timeout = Duration::from_secs(20);
     cfg.send.accept_timeout = Duration::from_secs(20);
-    cfg.recv.accept_timeout = Duration::from_secs(20);
+    // Room for the sender's 2000-member manifest build before its first
+    // packet (asupersync-bi2462.147.70; see the stall-PTO test above).
+    cfg.recv.accept_timeout = Duration::from_secs(120);
 
     let (send, recv) = run_transfer_via_lossy_proxy(
         cfg.send,
@@ -1443,7 +1459,7 @@ fn real_udp_quic_tree_manifest_survives_lossy_control_stream() {
         &root,
         dst.path(),
         0xDA_0B_2D_15,
-        Duration::from_secs(75),
+        TREE_MANIFEST_PROXY_TIMEOUT,
     );
 
     let send = send.unwrap_or_else(|err| {
