@@ -3,7 +3,13 @@
 //! PostgreSQL Logical Replication (pgoutput) Conformance Tests
 //!
 //! This module provides comprehensive conformance testing for PostgreSQL logical
-//! replication protocol per the pgoutput plugin specification. The tests validate:
+//! replication protocol per the pgoutput plugin specification.
+//!
+//! Scope: asupersync's PostgreSQL client implements no logical replication
+//! (`src/database/postgres.rs` sends no `START_REPLICATION` and has no pgoutput
+//! decoder). The tests below check this module's own reference decoder against
+//! the specification. They are not evidence about asupersync code. The tests
+//! validate:
 //!
 //! - BEGIN/COMMIT transaction boundary message parsing
 //! - INSERT/UPDATE/DELETE change data capture with tuple encoding
