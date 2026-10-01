@@ -52,7 +52,7 @@ use crate::types::task_context::{
 };
 use crate::types::{
     Budget, CancelAttributionConfig, CancelKind, CancelReason, CapabilityBudget,
-    CapabilityBudgetRequirements, ObligationId, Outcome, RegionId, TaskId, Time,
+    CapabilityBudgetRequirements, ObligationId, Outcome, RegionId, Severity, TaskId, Time,
     id::{next_bootstrap_region_id, next_bootstrap_task_id},
 };
 use crate::util::det_hash::DetHashMap;
@@ -75,6 +75,13 @@ type BoxedAsyncFinalizer = std::pin::Pin<Box<dyn Future<Output = ()> + Send>>;
 
 fn nanos_saturating_u64(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
+fn stamp_logical_time(event: TraceEvent, logical_time: Option<LogicalTime>) -> TraceEvent {
+    match logical_time {
+        Some(logical_time) => event.with_logical_time(logical_time),
+        None => event,
+    }
 }
 
 /// Runs a legacy state-threaded task future and publishes its classified
@@ -4908,19 +4915,24 @@ impl RuntimeState {
         self.epoch_tracker.drain_telemetry()
     }
 
-    fn record_task_trace_event<F>(&self, task_id: TaskId, build: F)
+    /// Records a task's Complete event together with its terminal outcome,
+    /// which a schedule capture keeps (br-asupersync-bi2462.8). The logical
+    /// time is read from `self.tasks`, as the completion path always has.
+    fn record_task_completion_trace_event<F>(&self, task_id: TaskId, outcome: Severity, build: F)
     where
         F: FnOnce(u64) -> TraceEvent,
     {
-        self.record_task_trace_event_with_logical_time(self.logical_time_for_task(task_id), build);
+        let logical_time = self.logical_time_for_task(task_id);
+        self.trace.record_completion_event(outcome, move |seq| {
+            stamp_logical_time(build(seq), logical_time)
+        });
     }
 
-    /// Core of [`Self::record_task_trace_event`] with the task's logical time
-    /// supplied by the caller. Deferred-effect dispatch paths must read the
-    /// logical tick from the table that actually holds the task record
+    /// Records a task trace event with the task's logical time supplied by
+    /// the caller. Deferred-effect dispatch paths must read the logical tick
+    /// from the table that actually holds the task record
     /// (br-asupersync-m9wsza / E2 S3a), mirroring
-    /// [`Self::prepare_task_spawn_effects_with_logical_time`]; the wrapper
-    /// above preserves the historical read from `self.tasks`.
+    /// [`Self::prepare_task_spawn_effects_with_logical_time`].
     fn record_task_trace_event_with_logical_time<F>(
         &self,
         logical_time: Option<LogicalTime>,
@@ -4928,14 +4940,8 @@ impl RuntimeState {
     ) where
         F: FnOnce(u64) -> TraceEvent,
     {
-        self.trace.record_event(move |seq| {
-            let event = build(seq);
-            if let Some(logical_time) = logical_time {
-                event.with_logical_time(logical_time)
-            } else {
-                event
-            }
-        });
+        self.trace
+            .record_event(move |seq| stamp_logical_time(build(seq), logical_time));
     }
 
     pub(crate) fn prepare_task_spawn_effects(
@@ -5000,7 +5006,13 @@ impl RuntimeState {
         waiter_count: usize,
     ) -> TaskCompletionObserver {
         let now = self.current_runtime_time();
-        self.record_task_trace_event(task.id, |seq| {
+        // A schedule capture keeps this terminal outcome beside the Complete
+        // event, so a replay can check outcomes too (br-asupersync-bi2462.8).
+        let severity = match &task.state {
+            TaskState::Completed(outcome) => outcome.severity(),
+            _ => Severity::Err,
+        };
+        self.record_task_completion_trace_event(task.id, severity, |seq| {
             TraceEvent::complete(seq, now, task.id, task.owner)
         });
 

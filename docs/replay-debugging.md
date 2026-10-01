@@ -98,6 +98,19 @@ quiescence or the absence of pending admissions: another task may not have
 entered the recorded task set yet. Establish that boundary in the source
 workload before treating the capture as its complete execution.
 
+The capture also keeps each task's terminal outcome (Ok, Err, Cancelled or
+Panicked) beside its Complete event: `ScheduleCaptureSnapshot::terminal_outcomes()`
+lists them and `production_schedule()` carries them into the projected
+completions. `LabRuntime::run_production_schedule_strict` then compares each
+recorded task's outcome with the Lab's, and a reconstruction in which a task
+ends differently is reported as `OutcomeMismatch`, not `Matched`. The values
+tasks return are not compared; check them in the harness. An outcome is the
+runtime's record, which depends on the spawn API: `RuntimeHandle::spawn`
+catches a panic, re-raises it on the `JoinHandle` and records Ok, while a state
+task such as a Lab reconstruction records Panicked. Reconstruct a panicking
+handle-spawned task so that it ends the same way, for example by catching the
+panic inside the Lab task.
+
 Raw projection: a task that acts before its `Spawn` means the ring buffer
 truncated the trace (or it was filtered). `ProductionSchedule::from_runtime_trace`
 refuses with `ProjectionError::MissingSpawn { task, seq, kind }` rather than

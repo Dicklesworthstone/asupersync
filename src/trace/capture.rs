@@ -20,10 +20,10 @@
 
 use super::buffer::TraceBufferHandle;
 use super::event::{TraceData, TraceEvent, TraceEventKind};
-use super::replay::{ProductionSchedule, ProjectionError};
-use crate::types::TaskId;
+use super::replay::{CompactTaskId, ProductionSchedule, ProjectionError};
+use crate::types::{Severity, TaskId};
 use parking_lot::Mutex;
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Worker context attached to one canonical scheduler observation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +48,10 @@ pub struct ScheduleCaptureSnapshot {
     events: Vec<TraceEvent>,
     contexts: Vec<SchedulerEventContext>,
     caller_tasks: Vec<TaskId>,
+    /// Terminal outcome kept for each retained Complete event, by sequence.
+    completion_outcomes: BTreeMap<u64, Severity>,
+    /// [`Self::completion_outcomes`] by task, without caller tasks.
+    terminal_outcomes: Vec<(TaskId, Severity)>,
     total_events: u64,
     capacity: usize,
     worker_count: usize,
@@ -73,6 +77,26 @@ impl ScheduleCaptureSnapshot {
     #[must_use]
     pub fn caller_tasks(&self) -> &[TaskId] {
         &self.caller_tasks
+    }
+
+    /// Terminal outcome of every task whose completion is in [`Self::events`],
+    /// except [`Self::caller_tasks`], in ascending task order.
+    ///
+    /// The runtime keeps each outcome beside its Complete event while the
+    /// capture is enabled, and [`Self::production_schedule`] carries them into
+    /// the projected completions, so a strict replay can compare them
+    /// (br-asupersync-bi2462.8).
+    ///
+    /// An outcome is the runtime's record of how the task ended, which
+    /// depends on how it was spawned. `RuntimeHandle::spawn` catches a panic
+    /// in its future, re-raises it on the `JoinHandle` and records Ok. A
+    /// state task, such as a Lab reconstruction made with
+    /// `RuntimeState::create_task`, records Panicked. Reconstruct a panicking
+    /// handle-spawned task so that it ends the same way, for example by
+    /// catching the panic inside the Lab task's future.
+    #[must_use]
+    pub fn terminal_outcomes(&self) -> &[(TaskId, Severity)] {
+        &self.terminal_outcomes
     }
 
     /// Worker context for scheduler observations still present in `events`.
@@ -119,9 +143,14 @@ impl ScheduleCaptureSnapshot {
     /// checks and the projection: a `block_on` caller's root future is not
     /// scheduled work, and a live caller does not make the capture partial.
     ///
+    /// Each projected completion carries its task's kept terminal outcome
+    /// ([`Self::terminal_outcomes`]), and the strict replay driver compares
+    /// them.
+    ///
     /// # Errors
     /// Refuses truncated or malformed observations, absent worker context,
-    /// unfinished task lifecycles, or a trace without actual task polls.
+    /// unfinished task lifecycles, a completion without a kept outcome, or a
+    /// trace without actual task polls.
     pub fn production_schedule(&self) -> Result<ProductionSchedule, ScheduleCaptureError> {
         let dropped_events = self.dropped_events();
         if dropped_events != 0 {
@@ -148,8 +177,20 @@ impl ScheduleCaptureSnapshot {
             .collect();
         let mut live = BTreeSet::new();
         let mut seen = BTreeSet::new();
+        let mut outcomes = BTreeMap::new();
         let mut polls = 0usize;
         for event in &scheduled {
+            if event.kind == TraceEventKind::Complete
+                && let TraceData::Task { task, .. } = &event.data
+            {
+                let Some(outcome) = self.completion_outcomes.get(&event.seq) else {
+                    return Err(ScheduleCaptureError::MissingOutcome {
+                        seq: event.seq,
+                        task: *task,
+                    });
+                };
+                outcomes.insert(CompactTaskId::from(*task).0, *outcome);
+            }
             if is_scheduler_observation(event.kind)
                 && self
                     .contexts
@@ -185,7 +226,9 @@ impl ScheduleCaptureSnapshot {
         if !live.is_empty() {
             return Err(ScheduleCaptureError::UnfinishedTasks { count: live.len() });
         }
-        ProductionSchedule::from_runtime_trace(&scheduled).map_err(ScheduleCaptureError::Projection)
+        ProductionSchedule::from_runtime_trace(&scheduled)
+            .map(|schedule| schedule.with_completion_outcomes(&outcomes))
+            .map_err(ScheduleCaptureError::Projection)
     }
 }
 
@@ -230,6 +273,15 @@ pub enum ScheduleCaptureError {
         /// Number of tasks without a terminal observation.
         count: usize,
     },
+    /// A task completion has no kept terminal outcome, so its outcome would
+    /// be unverifiable rather than reported as success.
+    #[error("native task {task:?} completed at sequence {seq} without a kept outcome")]
+    MissingOutcome {
+        /// Sequence of the Complete observation.
+        seq: u64,
+        /// Affected task identity.
+        task: TaskId,
+    },
     /// The retained source cannot be projected into spawn/poll order.
     #[error(transparent)]
     Projection(#[from] ProjectionError),
@@ -269,6 +321,7 @@ pub(crate) struct ScheduleCaptureRecorder {
 
 impl ScheduleCaptureRecorder {
     pub(crate) fn new(trace: TraceBufferHandle, worker_count: usize) -> Self {
+        trace.enable_completion_outcomes();
         Self {
             capacity: trace.capacity(),
             trace,
@@ -321,7 +374,7 @@ impl ScheduleCaptureRecorder {
 
     pub(crate) fn snapshot(&self) -> ScheduleCaptureSnapshot {
         let context = self.context.lock();
-        let (events, total_events) = self.trace.snapshot_with_stats();
+        let (events, total_events, kept_outcomes) = self.trace.snapshot_with_outcomes();
         let contexts = context
             .events
             .iter()
@@ -341,11 +394,28 @@ impl ScheduleCaptureRecorder {
             })
             .collect::<BTreeSet<_>>()
             .into_iter()
-            .collect();
+            .collect::<Vec<_>>();
+        let kept: BTreeMap<u64, Severity> = kept_outcomes.into_iter().collect();
+        let mut completion_outcomes = BTreeMap::new();
+        let mut terminal_outcomes = Vec::new();
+        for event in &events {
+            if event.kind == TraceEventKind::Complete
+                && let TraceData::Task { task, .. } = &event.data
+                && let Some(outcome) = kept.get(&event.seq)
+            {
+                completion_outcomes.insert(event.seq, *outcome);
+                if caller_tasks.binary_search(task).is_err() {
+                    terminal_outcomes.push((*task, *outcome));
+                }
+            }
+        }
+        terminal_outcomes.sort_by_key(|(task, _)| *task);
         ScheduleCaptureSnapshot {
             events,
             contexts,
             caller_tasks,
+            completion_outcomes,
+            terminal_outcomes,
             total_events,
             capacity: self.capacity,
             worker_count: self.worker_count,
@@ -375,7 +445,9 @@ mod tests {
         recorder.record(Some(1), |seq| {
             TraceEvent::poll(seq, Time::ZERO, task, region)
         });
-        trace.record_event(|seq| TraceEvent::complete(seq, Time::ZERO, task, region));
+        trace.record_completion_event(Severity::Ok, |seq| {
+            TraceEvent::complete(seq, Time::ZERO, task, region)
+        });
         let snapshot = recorder.snapshot();
         assert_eq!(snapshot.total_events(), 4);
         assert_eq!(snapshot.dropped_events(), 0);
@@ -402,7 +474,9 @@ mod tests {
             TraceEvent::yield_task(seq, Time::ZERO, task, region)
         });
         recorder.record(None, |seq| TraceEvent::wake(seq, Time::ZERO, task, region));
-        trace.record_event(|seq| TraceEvent::complete(seq, Time::ZERO, task, region));
+        trace.record_completion_event(Severity::Ok, |seq| {
+            TraceEvent::complete(seq, Time::ZERO, task, region)
+        });
         let snapshot = recorder.snapshot();
         assert_eq!(snapshot.total_events(), 5);
         assert_eq!(snapshot.dropped_events(), 2);
@@ -427,7 +501,9 @@ mod tests {
         recorder.record(None, |seq| {
             TraceEvent::wake(seq, Time::ZERO, caller, region)
         });
-        trace.record_event(|seq| TraceEvent::complete(seq, Time::ZERO, task, region));
+        trace.record_completion_event(Severity::Ok, |seq| {
+            TraceEvent::complete(seq, Time::ZERO, task, region)
+        });
 
         // Unnoted, the caller's root looks like a scheduled task that never
         // finished: it is still inside block_on.
@@ -454,6 +530,60 @@ mod tests {
         );
     }
 
+    /// br-asupersync-bi2462.8: the kept terminal outcome reaches the
+    /// projected completion, a caller task's outcome is left out, and a
+    /// completion without a kept outcome is refused instead of reading as Ok.
+    #[test]
+    fn capture_projection_carries_terminal_outcomes_and_refuses_missing_ones() {
+        use crate::trace::replay::ReplayEvent;
+        let trace = TraceBufferHandle::new(16);
+        let recorder = ScheduleCaptureRecorder::new(trace.clone(), 1);
+        let (task, region) = ids();
+        let caller = TaskId::new_for_test(1, 1);
+        trace.record_event(|seq| TraceEvent::spawn(seq, Time::ZERO, task, region));
+        trace.record_event(|seq| TraceEvent::spawn(seq, Time::ZERO, caller, region));
+        recorder.record(Some(0), |seq| {
+            TraceEvent::poll(seq, Time::ZERO, task, region)
+        });
+        trace.record_completion_event(Severity::Cancelled, |seq| {
+            TraceEvent::complete(seq, Time::ZERO, task, region)
+        });
+        trace.record_completion_event(Severity::Panicked, |seq| {
+            TraceEvent::complete(seq, Time::ZERO, caller, region)
+        });
+        recorder.note_caller_task(caller);
+        let snapshot = recorder.snapshot();
+        assert_eq!(snapshot.terminal_outcomes(), &[(task, Severity::Cancelled)]);
+        let schedule = snapshot.production_schedule().unwrap();
+        assert!(schedule.carries_outcomes());
+        let compact = crate::trace::replay::CompactTaskId::from(task);
+        assert_eq!(
+            schedule.captured_outcome(compact),
+            Some(Severity::Cancelled)
+        );
+        assert!(schedule.trace().events.iter().any(|event| matches!(
+            event,
+            ReplayEvent::TaskCompleted { task: completed, outcome: 2 } if *completed == compact
+        )));
+
+        // A Complete written without its outcome cannot be projected.
+        let bare = TraceBufferHandle::new(16);
+        let recorder = ScheduleCaptureRecorder::new(bare.clone(), 1);
+        bare.record_event(|seq| TraceEvent::spawn(seq, Time::ZERO, task, region));
+        recorder.record(Some(0), |seq| {
+            TraceEvent::poll(seq, Time::ZERO, task, region)
+        });
+        bare.record_event(|seq| TraceEvent::complete(seq, Time::ZERO, task, region));
+        assert_eq!(
+            recorder.snapshot().production_schedule().unwrap_err(),
+            ScheduleCaptureError::MissingOutcome { seq: 2, task }
+        );
+        // A projection built from the trace alone claims no outcomes.
+        let plain = ProductionSchedule::from_runtime_trace(recorder.snapshot().events()).unwrap();
+        assert!(!plain.carries_outcomes());
+        assert_eq!(plain.captured_outcome(compact), None);
+    }
+
     #[test]
     fn capture_receipt_refuses_unbacked_poll_observations() {
         let trace = TraceBufferHandle::new(8);
@@ -461,7 +591,9 @@ mod tests {
         let (task, region) = ids();
         trace.record_event(|seq| TraceEvent::spawn(seq, Time::ZERO, task, region));
         trace.record_event(|seq| TraceEvent::poll(seq, Time::ZERO, task, region));
-        trace.record_event(|seq| TraceEvent::complete(seq, Time::ZERO, task, region));
+        trace.record_completion_event(Severity::Ok, |seq| {
+            TraceEvent::complete(seq, Time::ZERO, task, region)
+        });
         assert_eq!(
             recorder.snapshot().production_schedule().unwrap_err(),
             ScheduleCaptureError::MissingSchedulerContext { seq: 1 }

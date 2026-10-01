@@ -4,9 +4,11 @@
 //! allowing efficient capture without unbounded memory growth.
 
 use super::event::TraceEvent;
+use crate::types::Severity;
 use parking_lot::Mutex;
-use std::sync::Arc;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 /// A ring buffer for storing trace events.
 ///
@@ -141,6 +143,11 @@ struct TraceBufferInner {
     buffer: Mutex<TraceBuffer>,
     next_seq: AtomicU64,
     total_pushed: AtomicU64,
+    /// Terminal outcome of each task completion, keyed by its Complete
+    /// event's sequence. Set only while a schedule capture is enabled
+    /// (br-asupersync-bi2462.8), written under the `buffer` lock and bounded
+    /// like the ring.
+    completion_outcomes: OnceLock<Mutex<VecDeque<(u64, Severity)>>>,
 }
 
 impl TraceBufferHandle {
@@ -152,8 +159,54 @@ impl TraceBufferHandle {
                 buffer: Mutex::new(TraceBuffer::new(capacity)),
                 next_seq: AtomicU64::new(0),
                 total_pushed: AtomicU64::new(0),
+                completion_outcomes: OnceLock::new(),
             }),
         }
+    }
+
+    /// Keeps the terminal outcome of every later task completion, recorded
+    /// through [`Self::record_completion_event`], for schedule capture.
+    pub(crate) fn enable_completion_outcomes(&self) {
+        let _ = self.inner.completion_outcomes.get_or_init(Default::default);
+    }
+
+    /// [`Self::record_event`] for a task's Complete event. While completion
+    /// outcomes are kept, `outcome` is recorded under the same sequence and
+    /// the same lock, so a snapshot never sees one without the other.
+    pub(crate) fn record_completion_event<F>(&self, outcome: Severity, build: F)
+    where
+        F: FnOnce(u64) -> TraceEvent,
+    {
+        let mut buffer = self.inner.buffer.lock();
+        let seq = self.inner.next_seq.fetch_add(1, Ordering::Relaxed);
+        buffer.push(build(seq));
+        self.inner.total_pushed.fetch_add(1, Ordering::Relaxed);
+        if let Some(outcomes) = self.inner.completion_outcomes.get() {
+            let mut outcomes = outcomes.lock();
+            // Every kept outcome belongs to a Complete event, so the newest
+            // `capacity` outcomes cover every Complete event still retained.
+            if outcomes.len() >= buffer.capacity().max(1) {
+                outcomes.pop_front();
+            }
+            outcomes.push_back((seq, outcome));
+        }
+    }
+
+    /// [`Self::snapshot_with_stats`] plus the kept completion outcomes, all
+    /// sampled under one lock. The outcomes are empty unless enabled.
+    pub(crate) fn snapshot_with_outcomes(&self) -> (Vec<TraceEvent>, u64, Vec<(u64, Severity)>) {
+        let buffer = self.inner.buffer.lock();
+        let mut events: Vec<TraceEvent> = buffer.iter().cloned().collect();
+        let total_pushed = self.inner.total_pushed.load(Ordering::Relaxed);
+        let outcomes = self
+            .inner
+            .completion_outcomes
+            .get()
+            .map(|outcomes| outcomes.lock().iter().copied().collect())
+            .unwrap_or_default();
+        drop(buffer);
+        events.sort_by_key(|event| event.seq);
+        (events, total_pushed, outcomes)
     }
 
     /// Allocates and returns the next trace sequence number.
