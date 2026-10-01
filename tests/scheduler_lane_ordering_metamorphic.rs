@@ -580,12 +580,25 @@ mod scheduler_metamorphic_tests {
         // Note: In actual implementation, we'd need timer driver integration
         let dispatched = scheduler.run_worker_steps(0, 10);
 
-        // Extract timed tasks that were dispatched
-        let dispatched_timed: Vec<(TaskId, Time)> = dispatched
-            .into_iter()
-            .filter(|&task_id| task_id.as_u64() as u32 == 3)
+        // Pair each dispatched timed task with its own deadline. Zipping the
+        // dispatch order with the injection-order deadlines would compare a
+        // task against another task's deadline.
+        let deadline_of: HashMap<TaskId, Time> = tasks
+            .iter()
+            .copied()
             .zip(deadlines.iter().copied())
             .collect();
+        let dispatched_timed: Vec<(TaskId, Time)> = dispatched
+            .into_iter()
+            .filter_map(|task_id| deadline_of.get(&task_id).map(|&deadline| (task_id, deadline)))
+            .collect();
+        // All three deadlines are in the past, so every timed task must be
+        // dispatched; otherwise the ordering check below would pass vacuously.
+        assert_eq!(
+            dispatched_timed.len(),
+            deadlines.len(),
+            "every due timed task must be dispatched: {dispatched_timed:?}"
+        );
 
         let injection_order: Vec<(TaskId, Time)> = tasks.into_iter().zip(deadlines).collect();
 

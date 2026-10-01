@@ -855,8 +855,12 @@ impl TlsConnectorBuilder {
 
     /// Require that the peer negotiates an ALPN protocol.
     ///
-    /// If the peer does not negotiate any protocol (or negotiates something
-    /// unexpected), `connect()` returns `TlsError::AlpnNegotiationFailed`.
+    /// If the handshake completes but the peer negotiated no protocol (or
+    /// something unexpected), `connect()` returns
+    /// `TlsError::AlpnNegotiationFailed`. If the server offers ALPN with no
+    /// protocol in common, it aborts the handshake itself with a
+    /// `no_application_protocol` alert (RFC 7301), and `connect()` returns
+    /// `TlsError::Handshake`.
     pub fn require_alpn(mut self) -> Self {
         self.alpn_required = true;
         self

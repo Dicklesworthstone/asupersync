@@ -707,8 +707,20 @@ RLNNF5SAMOuWaoMVh8hVa/V8Fg==
 
         test_section!("handshake");
         let (client, server) = handshake_pair(connector, acceptor, 6270);
+        // With no protocol in common, the server aborts the handshake with a
+        // no_application_protocol alert (RFC 7301), so the client sees a
+        // handshake error rather than AlpnNegotiationFailed (which reports a
+        // completed handshake that negotiated the wrong protocol). See
+        // TlsConnectorBuilder::require_alpn and the acceptor unit test
+        // test_alpn_required_client_errors_on_no_overlap.
         let client_err = client.unwrap_err();
-        assert!(matches!(client_err, TlsError::AlpnNegotiationFailed { .. }));
+        assert!(
+            matches!(
+                client_err,
+                TlsError::Handshake(ref msg) if msg.contains("NoApplicationProtocol")
+            ),
+            "expected the no_application_protocol handshake failure, got {client_err:?}"
+        );
         assert!(server.is_err());
 
         test_complete!("tls_alpn_required_mismatch_fails");
@@ -877,13 +889,17 @@ RLNNF5SAMOuWaoMVh8hVa/V8Fg==
         init_test_logging();
         test_phase!("tls_self_signed_rejected_without_root");
 
-        let connector = TlsConnectorBuilder::new().build().unwrap();
-        let acceptor = make_acceptor();
-
-        let (client, server) = handshake_pair(connector, acceptor, 6250);
-        let client_err = client.unwrap_err();
-        assert!(matches!(client_err, TlsError::Handshake(_)));
-        assert!(server.is_err());
+        // A client with no trust anchors cannot verify any server, so the
+        // builder refuses it before a handshake can start (fail closed).
+        let err = TlsConnectorBuilder::new()
+            .build()
+            .expect_err("a connector without root certificates must not build");
+        match err {
+            TlsError::Certificate(msg) => {
+                assert!(msg.contains("no root certificates configured"), "{msg}");
+            }
+            other => panic!("expected the no-root-certificates error, got {other:?}"),
+        }
 
         test_complete!("tls_self_signed_rejected_without_root");
     }
@@ -897,7 +913,7 @@ RLNNF5SAMOuWaoMVh8hVa/V8Fg==
 
         match err {
             TlsError::Configuration(msg) => {
-                assert!(msg.contains("empty certificate chain"), "{msg}");
+                assert!(msg.contains("certificate chain is empty"), "{msg}");
             }
             other => panic!("expected empty-chain configuration error, got {other:?}"),
         }
