@@ -15,10 +15,10 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use asupersync::trace::streaming::{StreamingReplayer, ReplayProgress};
-//! use std::path::Path;
+//! ```no_run
+//! use asupersync::trace::streaming::{ReplayCheckpoint, StreamingReplayer};
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Open a large trace file for streaming replay
 //! let mut replayer = StreamingReplayer::open("large_trace.bin")?;
 //!
@@ -33,12 +33,15 @@
 //! }
 //!
 //! // For very long replays, checkpoint and resume later
-//! let checkpoint = replayer.checkpoint()?;
+//! let checkpoint = replayer.checkpoint();
 //! std::fs::write("checkpoint.bin", checkpoint.to_bytes()?)?;
 //!
 //! // Later: resume from checkpoint
 //! let checkpoint = ReplayCheckpoint::from_bytes(&std::fs::read("checkpoint.bin")?)?;
 //! let mut resumed = StreamingReplayer::resume("large_trace.bin", checkpoint)?;
+//! # let _ = resumed.next_event()?;
+//! # Ok(())
+//! # }
 //! ```
 
 use super::file::{TraceFileError, TraceReader};

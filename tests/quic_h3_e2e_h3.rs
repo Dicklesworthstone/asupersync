@@ -23,7 +23,7 @@ use asupersync::http::h3_native::{
 };
 #[cfg(feature = "http3")]
 use asupersync::http::h3_quic::{
-    H3_REQUEST_CANCELLED, NativeH3Event, NativeH3Session, NativeH3SessionError,
+    H3_REQUEST_CANCELLED, H3_REQUEST_REJECTED, NativeH3Event, NativeH3Session, NativeH3SessionError,
 };
 #[cfg(all(feature = "http3", feature = "test-internals"))]
 use asupersync::net::quic_native::drop_app_data_packet;
@@ -2299,11 +2299,12 @@ fn native_h3_router_dispatches_completed_streams_and_refuses_invalid_messages() 
                 event,
                 NativeH3Event::StreamReset {
                     stream_id,
-                    error_code: H3_REQUEST_CANCELLED,
+                    error_code: H3_REQUEST_REJECTED,
                     final_size: 0,
                 } if *stream_id == over_budget_stream
             )),
-        "in-flight body retention must fail closed before dispatching the next handler"
+        "in-flight body retention must fail closed before dispatching the next handler, \
+         with the code that tells the client a retry is safe"
     );
     let _ = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
 
@@ -3278,6 +3279,258 @@ fn native_h3_static_encoder_accepts_peer_capacity_but_advertises_zero_decoder_li
     );
 }
 
+/// A native QUIC pair whose static server session has read the client's
+/// SETTINGS, ready for raw bytes on peer-opened QPACK streams.
+#[cfg(feature = "http3")]
+fn static_h3_server_after_settings(cx: &Cx) -> (QuicConnection, QuicConnection, NativeH3Session) {
+    let config = NativeQuicConnectionConfig::default();
+    let mut client = QuicConnection::client(config);
+    let mut server = QuicConnection::server(config);
+    client.record_verified_server_identity();
+    establish_loopback(cx, &mut client, &mut server).expect("establish native QUIC pair");
+    let mut client_h3 = NativeH3Session::client();
+    let mut server_h3 = NativeH3Session::server();
+    client_h3
+        .initialize(cx, &mut client, H3Settings::default())
+        .expect("initialize static client H3");
+    server_h3
+        .initialize(cx, &mut server, H3Settings::default())
+        .expect("initialize static server H3");
+    let (events, _) = pump_h3_events(cx, &mut client, &mut server, &mut server_h3);
+    assert!(matches!(events.as_slice(), [NativeH3Event::Settings(_)]));
+    (client, server, server_h3)
+}
+
+#[test]
+#[cfg(feature = "http3")]
+fn native_h3_static_session_refuses_an_encoder_insert_on_its_first_byte() {
+    let cx = test_cx();
+    let (mut client, mut server, mut server_h3) = static_h3_server_after_settings(&cx);
+
+    // Insert Without Name Reference declaring a name about 2^35 bytes long.
+    // Waiting for the whole instruction would let one anonymous peer grow
+    // this buffer without bound, so it must fail before any string byte.
+    let qpack_encoder = client
+        .open_uni_stream(&cx)
+        .expect("open peer QPACK encoder stream");
+    client
+        .write_stream(
+            &cx,
+            qpack_encoder,
+            Bytes::from_static(&[0x02, 0x5F, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F]),
+            false,
+        )
+        .expect("queue QPACK encoder type and a partial insert");
+    assert!(
+        pump_app_data(&cx, &mut client, &mut server, 1200, 1)
+            .expect("deliver partial QPACK insert")
+            > 0
+    );
+    let error = server_h3
+        .next_event(&cx, &mut server)
+        .expect_err("a partial insert is refused, not buffered");
+    assert_eq!(
+        error,
+        NativeH3SessionError::Protocol(H3NativeError::QpackPolicy(
+            "static QPACK forbids dynamic encoder instructions"
+        ))
+    );
+}
+
+#[test]
+#[cfg(feature = "http3")]
+fn native_h3_static_session_ignores_stream_cancellations_and_refuses_acknowledgements() {
+    let cx = test_cx();
+    let (mut client, mut server, mut server_h3) = static_h3_server_after_settings(&cx);
+
+    // A peer with a non-zero table capacity cancels abandoned request streams
+    // on its decoder stream even though our encoder never used the table.
+    let qpack_decoder = client
+        .open_uni_stream(&cx)
+        .expect("open peer QPACK decoder stream");
+    client
+        .write_stream(
+            &cx,
+            qpack_decoder,
+            Bytes::from_static(&[0x03, 0x40, 0x7F]),
+            false,
+        )
+        .expect("queue decoder type, a cancellation and half of another");
+    let (events, _) = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    assert!(events.is_empty(), "stream cancellations are not H3 events");
+    client
+        .write_stream(&cx, qpack_decoder, Bytes::from_static(&[0x01]), false)
+        .expect("queue the rest of the split cancellation for stream 64");
+    let (events, _) = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    assert!(events.is_empty(), "a split cancellation is reassembled");
+
+    // Section Acknowledgement for stream 0: this encoder never sent a field
+    // section with a non-zero Required Insert Count (RFC 9204 section 4.4.1).
+    client
+        .write_stream(&cx, qpack_decoder, Bytes::from_static(&[0x80]), false)
+        .expect("queue an unexpected section acknowledgement");
+    assert!(
+        pump_app_data(&cx, &mut client, &mut server, 1200, 1)
+            .expect("deliver section acknowledgement")
+            > 0
+    );
+    let error = server_h3
+        .next_event(&cx, &mut server)
+        .expect_err("static encoder has no section to acknowledge");
+    assert_eq!(
+        error,
+        NativeH3SessionError::Protocol(H3NativeError::QpackPolicy(
+            "static QPACK never sends dynamic-table state to acknowledge"
+        ))
+    );
+}
+
+#[test]
+#[cfg(feature = "http3")]
+fn native_h3_session_tolerates_uni_streams_that_end_before_their_type() {
+    let cx = test_cx();
+    let (mut client, mut server, mut server_h3) = static_h3_server_after_settings(&cx);
+
+    // RFC 9114 section 6.2: a peer may end a unidirectional stream before
+    // sending its type, or partway through a multi-byte type varint.
+    let empty = client.open_uni_stream(&cx).expect("open empty uni stream");
+    client
+        .write_stream(&cx, empty, Bytes::new(), true)
+        .expect("finish the stream with no type");
+    let partial = client
+        .open_uni_stream(&cx)
+        .expect("open partial uni stream");
+    client
+        .write_stream(&cx, partial, Bytes::from_static(&[0x40]), true)
+        .expect("finish the stream inside a two-byte type");
+    let (events, _) = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    assert!(
+        events.is_empty(),
+        "a typeless stream is discarded, not an event"
+    );
+}
+
+#[test]
+#[cfg(feature = "http3")]
+fn native_h3_session_rejects_a_malformed_request_without_ending_its_siblings() {
+    let cx = test_cx();
+    let (mut client, mut server, mut server_h3) = static_h3_server_after_settings(&cx);
+
+    // A field section QPACK decodes but HTTP/3 forbids: static :method GET,
+    // :scheme https and :path /, then a literal with the uppercase name X-Bad.
+    let malformed_section = vec![
+        0x00, 0x00, 0xD1, 0xD7, 0xC1, 0x25, b'X', b'-', b'B', b'a', b'd', 0x01, b'v',
+    ];
+    let mut malformed = Vec::new();
+    H3Frame::Headers(malformed_section)
+        .encode(&mut malformed)
+        .expect("encode malformed HEADERS");
+    let first = client
+        .open_bidi_stream(&cx)
+        .expect("open malformed request stream");
+    client
+        .write_stream(&cx, first, Bytes::from(malformed), true)
+        .expect("send malformed request");
+
+    let head = H3RequestHead::new(
+        H3PseudoHeaders {
+            method: Some("GET".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("example.test".to_string()),
+            path: Some("/ok".to_string()),
+            ..H3PseudoHeaders::default()
+        },
+        vec![],
+    )
+    .expect("valid request head");
+    let mut valid = Vec::new();
+    H3Frame::Headers(qpack_encode_request_field_section(&head).expect("encode request head"))
+        .encode(&mut valid)
+        .expect("encode valid HEADERS");
+    let second = client
+        .open_bidi_stream(&cx)
+        .expect("open valid request stream");
+    client
+        .write_stream(&cx, second, Bytes::from(valid), true)
+        .expect("send valid request");
+
+    // RFC 9114 section 4.1.2: the malformed request is a stream error. The
+    // session resets only that stream and keeps serving the other one.
+    let (events, _) = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    assert_eq!(events.len(), 3, "{events:?}");
+    assert!(events.contains(&NativeH3Event::StreamReset {
+        stream_id: first,
+        error_code: 0x10e,
+        final_size: 0,
+    }));
+    assert!(events.contains(&NativeH3Event::RequestHeaders {
+        stream_id: second,
+        head,
+    }));
+    assert!(events.contains(&NativeH3Event::Finished { stream_id: second }));
+}
+
+#[test]
+#[cfg(feature = "http3")]
+fn native_h3_session_rejects_a_request_path_with_whitespace_as_malformed() {
+    let cx = test_cx();
+    let (mut client, mut server, mut server_h3) = static_h3_server_after_settings(&cx);
+
+    // Static :method GET and :scheme https, :authority example.test, then a
+    // literal :path "/a b". Forwarded to HTTP/1.1, the space would split the
+    // request line (RFC 9114 section 10.3).
+    let mut section = vec![0x00, 0x00, 0xD1, 0xD7, 0x50, 0x0C];
+    section.extend_from_slice(b"example.test");
+    section.extend_from_slice(&[0x51, 0x04, b'/', b'a', b' ', b'b']);
+    let mut smuggled = Vec::new();
+    H3Frame::Headers(section)
+        .encode(&mut smuggled)
+        .expect("encode HEADERS with a space in :path");
+    let first = client
+        .open_bidi_stream(&cx)
+        .expect("open the request stream with a space in :path");
+    client
+        .write_stream(&cx, first, Bytes::from(smuggled), true)
+        .expect("send the request with a space in :path");
+
+    let head = H3RequestHead::new(
+        H3PseudoHeaders {
+            method: Some("GET".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("example.test".to_string()),
+            path: Some("/a%20b".to_string()),
+            ..H3PseudoHeaders::default()
+        },
+        vec![],
+    )
+    .expect("valid request head");
+    let mut valid = Vec::new();
+    H3Frame::Headers(qpack_encode_request_field_section(&head).expect("encode request head"))
+        .encode(&mut valid)
+        .expect("encode valid HEADERS");
+    let second = client
+        .open_bidi_stream(&cx)
+        .expect("open valid request stream");
+    client
+        .write_stream(&cx, second, Bytes::from(valid), true)
+        .expect("send valid request");
+
+    // The request is malformed, so only its stream is reset with
+    // H3_MESSAGE_ERROR; the percent-encoded sibling is served.
+    let (events, _) = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    assert_eq!(events.len(), 3, "{events:?}");
+    assert!(events.contains(&NativeH3Event::StreamReset {
+        stream_id: first,
+        error_code: 0x10e,
+        final_size: 0,
+    }));
+    assert!(events.contains(&NativeH3Event::RequestHeaders {
+        stream_id: second,
+        head,
+    }));
+    assert!(events.contains(&NativeH3Event::Finished { stream_id: second }));
+}
+
 #[test]
 #[cfg(feature = "http3")]
 fn native_h3_client_accepts_informational_then_final_response_and_trailers() {
@@ -3866,6 +4119,28 @@ fn native_h3_router_produced_response_is_demand_driven_and_head_suppresses_facto
             if stream_id == cancelled_stream
     ));
     assert_eq!(bridge.in_flight_dispatch_count(), 0);
+
+    // The bridge answered the peer's reset with STOP_SENDING, and RFC 9000
+    // section 3.5 requires the client to answer that with its own
+    // RESET_STREAM. Deliver it before the next request, so it is not read as
+    // part of that request.
+    let answering_reset = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3).0;
+    assert!(
+        answering_reset.iter().any(|event| matches!(
+            event,
+            NativeH3Event::StreamReset {
+                stream_id,
+                error_code: H3_REQUEST_CANCELLED,
+                ..
+            } if *stream_id == cancelled_stream
+        )),
+        "the client answers STOP_SENDING with RESET_STREAM: {answering_reset:?}"
+    );
+    for event in answering_reset {
+        bridge
+            .ingest_event_with_cx(&cx, &mut server_h3, &mut server, event)
+            .expect("ingest the client's answering reset");
+    }
 
     let buffered_stream = client_h3
         .send_request(

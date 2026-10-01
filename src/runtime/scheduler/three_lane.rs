@@ -1107,6 +1107,37 @@ pub(crate) fn scheduler_drives_current_task() -> bool {
     current_worker_id().is_some() || SCHEDULER_DRIVEN.with(Cell::get)
 }
 
+/// Spends one poll from a task's budget before a worker polls it, so a
+/// `Budget::with_poll_quota` bound holds on the production runtime as it does
+/// in the lab. `polls_remaining` mirrors the budget's quota; a task without a
+/// quota (`u32::MAX`) pays only this comparison. When the quota is already
+/// spent, cancellation is requested with a `PollQuota` reason, as the lab
+/// does, so the task's next checkpoint or cancel-aware await observes it.
+///
+/// A task in its cancellation cleanup phase is not charged here. Its cleanup
+/// budget stays advisory on the production runtime, as before: enforcing it
+/// would rewrite the reason of a long graceful drain to `PollQuota`.
+#[inline]
+pub(crate) fn consume_budget_poll(record: &mut crate::record::TaskRecord) {
+    if record.polls_remaining == u32::MAX || record.state.is_cancelling() {
+        return;
+    }
+    let Some(inner) = record.cx_inner.as_ref() else {
+        return;
+    };
+    let mut guard = inner.write();
+    if guard.budget.consume_poll().is_none() {
+        guard.set_cancel_requested(true);
+        let quota = crate::types::CancelReason::poll_quota();
+        if let Some(existing) = &mut guard.cancel_reason {
+            existing.strengthen(&quota);
+        } else {
+            guard.cancel_reason = Some(quota);
+        }
+    }
+    record.polls_remaining = guard.budget.poll_quota;
+}
+
 /// Scoped setter for the thread-local scheduler pointer.
 ///
 /// When active, [`ThreeLaneScheduler::spawn`] will schedule onto this local
@@ -1763,6 +1794,14 @@ impl ThreeLaneScheduler {
         self.schedule_capture
             .get()
             .map(|capture| capture.snapshot())
+    }
+
+    /// Tells an enabled schedule capture that `task` owns a `block_on`
+    /// caller's root future, which no worker dispatches.
+    pub(crate) fn note_caller_task(&self, task: TaskId) {
+        if let Some(capture) = self.schedule_capture.get() {
+            capture.note_caller_task(task);
+        }
     }
 
     /// Process-unique key of this runtime's per-thread local-task stores
@@ -7857,6 +7896,7 @@ impl ThreeLaneWorker {
                 tt.update_task(task_id, |record| {
                     record.start_running();
                     record.wake_state.begin_poll();
+                    consume_budget_poll(record);
                     let priority = record.sched_priority;
                     let wake_state = Arc::clone(&record.wake_state);
                     // Preserve full Cx so scheduler sets CURRENT_CX during poll.
@@ -7913,6 +7953,7 @@ impl ThreeLaneWorker {
                     tt.update_task(task_id, |record| {
                         record.start_running();
                         record.wake_state.begin_poll();
+                        consume_budget_poll(record);
                         let priority = record.sched_priority;
                         let wake_state = Arc::clone(&record.wake_state);
                         // Preserve full Cx so scheduler sets CURRENT_CX during poll.

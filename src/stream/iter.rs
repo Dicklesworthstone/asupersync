@@ -47,7 +47,7 @@ impl<I: Iterator> Stream for Iter<I> {
 ///
 /// # Examples
 ///
-/// ```ignore
+/// ```
 /// use asupersync::stream::{iter, StreamExt};
 ///
 /// let stream = iter(vec![1, 2, 3]);

@@ -505,7 +505,7 @@ fn dispatcher_for(kind: SignalKind) -> Result<&'static SignalDispatcher, SignalE
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use asupersync::signal::{signal, SignalKind};
 ///
 /// async fn handle_signals() -> std::io::Result<()> {

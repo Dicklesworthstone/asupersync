@@ -6,17 +6,20 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use asupersync::lab::injection::{LabInjectionRunner, LabInjectionConfig};
-//! use asupersync::lab::{InjectionStrategy, OracleSuite};
+//! use asupersync::lab::{InjectionStrategy, InstrumentedFuture};
+//! use asupersync::runtime::yield_now;
 //!
 //! let config = LabInjectionConfig::new(42)
 //!     .with_strategy(InjectionStrategy::AllPoints)
 //!     .with_all_oracles();
 //!
 //! let mut runner = LabInjectionRunner::new(config);
-//! let report = runner.run(|injector| async move {
-//!     my_async_code(injector).await
+//! // The closure builds a fresh instrumented future for every run: one
+//! // recording run, then one run per injected await point.
+//! let report = runner.run_simple(|injector| {
+//!     InstrumentedFuture::new(async { yield_now().await; 42 }, injector)
 //! });
 //!
 //! assert!(report.all_passed(), "Cancellation handling failed: {:?}", report.failures());
@@ -688,7 +691,7 @@ impl LabInjectionRunner {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use asupersync::lab::{lab, InjectionStrategy, InstrumentedFuture};
 ///
 /// let report = lab(42)

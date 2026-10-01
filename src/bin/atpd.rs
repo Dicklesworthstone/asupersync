@@ -775,7 +775,7 @@ fn atpd_quic_config(
     let base = QuicConfig {
         symbol_size: QUIC_DEFAULT_SYMBOL_SIZE,
         max_transfer_bytes: config.transfers.max_transfer_size,
-        ..QuicConfig::default()
+        ..atpd_quic_config_defaults()
     };
     let mut quic_config = base.use_transport_authenticated_symbols();
     quic_config.server_tls = Some(QuicServerTls { config: tls_config });
@@ -1439,7 +1439,7 @@ fn init_logging(level: &str) -> Result<()> {
             tracing_subscriber::fmt::layer()
                 .with_target(false)
                 .with_level(true)
-                .with_thread_ids(false)
+                .with_ansi(atpd_log_colors())
                 .with_line_number(true),
         )
         .with(tracing_subscriber::filter::LevelFilter::from_level(level))
@@ -1621,7 +1621,7 @@ async fn run_daemon_service(
             info!(bind_addr = %local_addr, "ATP transfer listener bound and accepting");
             let cfg = TransferConfig {
                 max_transfer_bytes: max_bytes,
-                ..TransferConfig::default()
+                ..atpd_transfer_config_defaults()
             };
             let result = serve(
                 &cx,
@@ -2308,6 +2308,42 @@ fn manage_identity(cli: AtpdCli, args: IdentityArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The metadata the daemon's receivers accept: the policy `atp receive` uses,
+/// portable defaults plus timestamps. `MetadataPolicy::default()` denies
+/// timestamps, so the daemon refused every manifest `atp send` produces
+/// ("timestamps are denied by receiver metadata policy", br-asupersync-t1a9cf).
+// Defined after main's body so the unsafe-ledger line pins above stay put.
+fn atpd_receive_metadata_policy() -> asupersync::atp::object::MetadataPolicy {
+    asupersync::atp::object::MetadataPolicy {
+        preserve_timestamps: true,
+        ..asupersync::atp::object::MetadataPolicy::default()
+    }
+}
+
+fn atpd_transfer_config_defaults() -> asupersync::net::atp::transport_tcp::TransferConfig {
+    asupersync::net::atp::transport_tcp::TransferConfig {
+        metadata_policy: atpd_receive_metadata_policy(),
+        ..asupersync::net::atp::transport_tcp::TransferConfig::default()
+    }
+}
+
+/// Color the daemon's log only on a terminal, and never under NO_COLOR, as the
+/// CLI does (src/cli/output.rs). Escape codes in a pipe or a log file break
+/// line-oriented readers (br-asupersync-prcxmw).
+fn atpd_log_colors() -> bool {
+    use std::io::IsTerminal;
+
+    std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal()
+}
+
+#[cfg(feature = "tls")]
+fn atpd_quic_config_defaults() -> asupersync::net::atp::transport_quic::QuicConfig {
+    asupersync::net::atp::transport_quic::QuicConfig {
+        metadata_policy: atpd_receive_metadata_policy(),
+        ..asupersync::net::atp::transport_quic::QuicConfig::default()
+    }
 }
 
 #[cfg(test)]

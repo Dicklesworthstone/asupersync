@@ -1,70 +1,58 @@
+//! `race!` on the native runtime: the first branch to finish wins, and the
+//! losing branch is cancelled and drained before `race!` returns.
+//!
+//! Each branch is a factory that receives its own child `Cx`. The slow branch
+//! waits on a channel through that child context, so cancelling its task wakes
+//! it, and its cleanup runs before the race completes. A branch that waited on
+//! the caller's `cx` instead would never see the cancellation.
 #![allow(missing_docs)]
-#![allow(clippy::trivially_copy_pass_by_ref, clippy::unused_self)]
-
-#[cfg(feature = "proc-macros")]
-mod demo {
-    use asupersync::race;
-    use std::future::Future;
-    use std::pin::Pin;
-    use std::time::Duration;
-
-    type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
-    type NamedFuture<T> = (&'static str, BoxFuture<T>);
-
-    #[derive(Clone, Copy)]
-    struct RaceCx;
-
-    impl RaceCx {
-        async fn race_drained<T>(&self, mut futures: Vec<BoxFuture<T>>) -> T
-        where
-            T: Send + 'static,
-        {
-            futures.remove(0).await
-        }
-
-        async fn race_drained_named<T>(&self, mut futures: Vec<NamedFuture<T>>) -> T
-        where
-            T: Send + 'static,
-        {
-            let (_, fut) = futures.remove(0);
-            fut.await
-        }
-
-        async fn race_drained_timeout<T>(&self, _timeout: Duration, futures: Vec<BoxFuture<T>>) -> T
-        where
-            T: Send + 'static,
-        {
-            self.race_drained(futures).await
-        }
-
-        async fn race_drained_timeout_named<T>(
-            &self,
-            _timeout: Duration,
-            futures: Vec<NamedFuture<T>>,
-        ) -> T
-        where
-            T: Send + 'static,
-        {
-            self.race_drained_named(futures).await
-        }
-    }
-
-    pub async fn demo() {
-        let cx = RaceCx;
-
-        let _ = race!(cx, { async { 1 }, async { 2 } });
-        let _ = race!(cx, { "fast" => async { 10 }, "slow" => async { 20 } });
-        let _ = race!(cx, timeout: Duration::from_secs(1), { async { 3 }, async { 4 } });
-        let _ = race!(cx, timeout: Duration::from_secs(1), {
-            "fast" => async { 30 },
-            "slow" => async { 40 },
-        });
-    }
-}
 
 #[cfg(feature = "proc-macros")]
 fn main() {
-    std::mem::drop(demo::demo());
+    use asupersync::Cx;
+    use asupersync::channel::mpsc;
+    use asupersync::race;
+    use asupersync::runtime::RuntimeBuilder;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Records that the losing branch was torn down.
+    struct CleanedUp(Arc<AtomicBool>);
+
+    impl Drop for CleanedUp {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build a current-thread runtime");
+    let loser_cleaned_up = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&loser_cleaned_up);
+    let winner = runtime.block_on(runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("a runtime task has a Cx");
+        // Nothing is ever sent, so only cancellation ends the slow branch.
+        let (_sender, mut receiver) = mpsc::channel::<()>(1);
+        race!(cx, {
+            move |_child| async move { "fast" },
+            move |child| async move {
+                let _cleanup = CleanedUp(observed);
+                let _ = receiver.recv(&child).await;
+                "slow"
+            },
+        })
+    }));
+
+    let winner = winner.expect("race! resolves to the winning branch");
+    assert_eq!(winner, "fast");
+    assert!(
+        loser_cleaned_up.load(Ordering::SeqCst),
+        "the losing branch was drained before race! returned"
+    );
+    println!(
+        "race!: {winner:?} won; the slow branch was cancelled and drained before race! returned"
+    );
 }
 
 #[cfg(not(feature = "proc-macros"))]

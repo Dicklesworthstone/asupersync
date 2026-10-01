@@ -35,6 +35,8 @@ ENABLE_BEAD_CREATION="${ATP_DOGFOOD_CREATE_BEADS:-true}"
 
 usage() {
     cat <<'USAGE'
+ATP-M2: dogfood ATP for Asupersync artifacts and workflows.
+
 Usage: scripts/atp_dogfood_coordinator.sh [options] <mode>
 
 Modes:

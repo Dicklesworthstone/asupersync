@@ -6,7 +6,7 @@
 //!
 //! # Usage
 //!
-//! ```ignore
+//! ```
 //! use asupersync::sync::ContendedMutex;
 //!
 //! let m = ContendedMutex::new("tasks", 42);

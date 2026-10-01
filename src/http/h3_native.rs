@@ -608,6 +608,23 @@ impl H3ControlState {
     }
 }
 
+/// RFC 9114 §7.2.8: the frame types HTTP/2 used without an HTTP/3 equivalent
+/// (PRIORITY 0x02, PING 0x06, WINDOW_UPDATE 0x08, CONTINUATION 0x09) are
+/// reserved, and receiving one is a connection error (H3_FRAME_UNEXPECTED).
+/// Other unknown frame types are still ignored (section 9).
+fn reject_http2_reserved_frame(frame: &H3Frame) -> Result<(), H3NativeError> {
+    if let H3Frame::Unknown {
+        frame_type: 0x02 | 0x06 | 0x08 | 0x09,
+        ..
+    } = frame
+    {
+        return Err(H3NativeError::ControlProtocol(
+            "HTTP/2 frame type is reserved in HTTP/3",
+        ));
+    }
+    Ok(())
+}
+
 /// Validate that a frame is allowed on bidirectional request/response streams.
 ///
 /// Per RFC 9114 §6.1, bidirectional streams are used for request/response
@@ -2768,7 +2785,7 @@ fn qpack_absolute_to_relative(base: u64, absolute_index: u64) -> Result<u64, H3N
     ))
 }
 
-fn qpack_decode_field_section_with_context(
+pub(crate) fn qpack_decode_field_section_with_context(
     input: &[u8],
     mode: H3QpackMode,
     qpack_context: Option<&QpackContext>,
@@ -3278,12 +3295,20 @@ fn validate_header_name(name: &str) -> Result<(), H3NativeError> {
     Ok(())
 }
 
-/// Validate that a header field value does not contain null bytes, CR, or LF.
+/// Validate a header field value against RFC 9114 §10.3: every character must
+/// be allowed by the field-content rule of RFC 9110 §5.5. Control characters
+/// other than HTAB, and DEL, make the message malformed; forwarded to
+/// HTTP/1.1 they could split or smuggle a request.
 fn validate_header_value(value: &str) -> Result<(), H3NativeError> {
     for &b in value.as_bytes() {
         if b == 0 || b == b'\r' || b == b'\n' {
             return Err(H3NativeError::InvalidFrame(
                 "header field value contains forbidden character (NUL, CR, or LF)",
+            ));
+        }
+        if (b < 0x20 && b != b'\t') || b == 0x7f {
+            return Err(H3NativeError::InvalidFrame(
+                "header field value contains a control character (RFC 9114 §10.3)",
             ));
         }
     }
@@ -3419,6 +3444,14 @@ fn validate_request_path(method: &str, path: &str) -> Result<(), H3NativeError> 
             ":path must start with /",
         ));
     }
+    // RFC 9114 §4.3.1: :path carries only the path and query of the target
+    // URI. Whitespace would split the request line if the request were
+    // forwarded to HTTP/1.1, and a fragment is never sent.
+    if path.bytes().any(|b| b.is_ascii_whitespace() || b == b'#') {
+        return Err(H3NativeError::InvalidRequestPseudoHeader(
+            ":path must not contain whitespace or a fragment",
+        ));
+    }
     Ok(())
 }
 
@@ -3434,7 +3467,7 @@ fn parse_status_code(value: &str) -> Result<u16, H3NativeError> {
         .map_err(|_| H3NativeError::InvalidResponsePseudoHeader("invalid :status value"))
 }
 
-fn header_fields_to_request_head(
+pub(crate) fn header_fields_to_request_head(
     fields: &[(String, String)],
 ) -> Result<H3RequestHead, H3NativeError> {
     let mut pseudo = H3PseudoHeaders::default();
@@ -3976,6 +4009,7 @@ pub struct H3ConnectionState {
     qpack_encoder_stream_id: Option<u64>,
     qpack_decoder_stream_id: Option<u64>,
     goaway_id: Option<u64>,
+    max_push_id_received: Option<u64>,
 }
 
 impl H3ConnectionState {
@@ -4016,6 +4050,7 @@ impl H3ConnectionState {
             qpack_encoder_stream_id: None,
             qpack_decoder_stream_id: None,
             goaway_id: None,
+            max_push_id_received: None,
         }
     }
 
@@ -4031,12 +4066,23 @@ impl H3ConnectionState {
     /// Process a control-stream frame.
     pub fn on_control_frame(&mut self, frame: &H3Frame) -> Result<(), H3NativeError> {
         self.control.on_remote_control_frame(frame)?;
+        reject_http2_reserved_frame(frame)?;
         if self.config.endpoint_role == H3EndpointRole::Client
             && matches!(frame, H3Frame::MaxPushId(_))
         {
             return Err(H3NativeError::ControlProtocol(
                 "client must not receive MAX_PUSH_ID",
             ));
+        }
+        if let H3Frame::MaxPushId(id) = frame {
+            // RFC 9114 §7.2.7: a MAX_PUSH_ID frame cannot reduce the maximum
+            // push ID (H3_ID_ERROR).
+            if self.max_push_id_received.is_some_and(|prev| *id < prev) {
+                return Err(H3NativeError::ControlProtocol(
+                    "MAX_PUSH_ID must not decrease",
+                ));
+            }
+            self.max_push_id_received = Some(*id);
         }
         if let H3Frame::Goaway(id) = frame {
             if self.config.endpoint_role == H3EndpointRole::Client
@@ -4070,6 +4116,16 @@ impl H3ConnectionState {
         if self.uni_stream_types.contains_key(&stream_id) {
             return Err(H3NativeError::StreamProtocol(
                 "request stream id is registered as unidirectional",
+            ));
+        }
+        reject_http2_reserved_frame(frame)?;
+        // RFC 9114 §7.2.5: a client MUST NOT send PUSH_PROMISE; a server
+        // treats one as a connection error (H3_FRAME_UNEXPECTED).
+        if self.config.endpoint_role == H3EndpointRole::Server
+            && matches!(frame, H3Frame::PushPromise { .. })
+        {
+            return Err(H3NativeError::ControlProtocol(
+                "client must not send PUSH_PROMISE",
             ));
         }
         if self.is_request_stream_finished(stream_id) {

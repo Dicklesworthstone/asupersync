@@ -13,7 +13,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use asupersync::combinator::circuit_breaker::*;
 //! use asupersync::types::Time;
 //! use std::time::Duration;

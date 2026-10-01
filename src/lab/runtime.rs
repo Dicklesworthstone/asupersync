@@ -2860,8 +2860,20 @@ impl LabRuntime {
         self.scheduler.lock().has_runnable_work(now)
     }
 
-    fn has_pending_dispatch_commands(&self) -> bool {
+    pub(crate) fn has_pending_dispatch_commands(&self) -> bool {
         !self.spawn_mailbox.is_empty() || self.state.has_deferred_cancel_dispatches()
+    }
+
+    /// True when nothing inside the lab can make progress, yet it is not quiescent:
+    /// no runnable task, no pending dispatch command or obligation post, and no
+    /// timer to fire. Only a wake from outside the lab (a real thread, such as a
+    /// blocking pool finishing work) can move it forward.
+    pub(crate) fn awaits_external_wake(&self) -> bool {
+        self.scheduler.lock().is_empty()
+            && !self.has_pending_dispatch_commands()
+            && !self.state.has_pending_obligation_posts()
+            && self.next_timer_deadline().is_none()
+            && !self.is_quiescent()
     }
 
     fn validate_forced_schedule_candidate(
@@ -3737,7 +3749,14 @@ impl LabRuntime {
         certificate.set_schedule_hash(schedule_hash);
 
         self.oracles.hydrate_temporal_from_state(&self.state, now);
-        let oracle_report = self.oracles.report(now);
+        // Feed the anytime-valid e-process monitor once per run that advanced
+        // the lab. `report()` does not advance execution, so re-reporting the
+        // same state must not count as fresh evidence.
+        let oracle_report = if steps_delta > 0 {
+            self.oracles.report_and_observe(now)
+        } else {
+            self.oracles.report(now)
+        };
         let oracle_invariant_failures = oracle_report
             .failures()
             .into_iter()
@@ -12550,6 +12569,56 @@ mod tests {
             assert!(
                 !source.contains(&stdout_call),
                 "non-test LabRuntime debug print regressed: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn report_feeds_the_oracle_eprocess_monitor() {
+        let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(10_000));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let (task_id, _handle) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async {
+                crate::runtime::yield_now::yield_now().await;
+            })
+            .expect("create task");
+        lab.scheduler.lock().schedule(task_id, 0);
+
+        let run = lab.run_until_quiescent_with_report();
+        assert!(run.steps_delta > 0, "the run advanced the lab");
+        let reported: Vec<&str> = ["task_leak", "obligation_leak", "quiescence"]
+            .into_iter()
+            .filter(|name| run.oracle_report.entry(name).is_some())
+            .collect();
+        assert!(
+            !reported.is_empty(),
+            "the report covers a monitored invariant"
+        );
+        let observations = |lab: &LabRuntime, name: &str| {
+            lab.oracles
+                .eprocess_monitor
+                .as_ref()
+                .expect("the standard oracle suite has an e-process monitor")
+                .process(name)
+                .expect("monitored invariant")
+                .observations
+        };
+        for name in &reported {
+            assert_eq!(
+                observations(&lab, name),
+                1,
+                "{name}: the run is observed once"
+            );
+        }
+
+        // A plain report does not advance the lab, so it adds no evidence.
+        let _ = lab.report();
+        for name in &reported {
+            assert_eq!(
+                observations(&lab, name),
+                1,
+                "{name}: re-reporting the same state is not a new observation"
             );
         }
     }

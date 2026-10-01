@@ -233,6 +233,28 @@ cancelled `Cx` as `Cancelled` rather than as
 - The scheduler polls the I/O driver every 64 busy dispatches, so I/O readiness
   is not starved by a hot dispatch loop.
 - A V3 peer lease is bounded to 24 hours for expiry enforcement.
+- A Redis read or write parked on a silent server ends with `Cancelled` at the
+  budget deadline of the caller's `Cx` or of the task driving it; before, the
+  deadline went unnoticed until the server answered or TCP gave up. A transport
+  `Interrupted` error is no longer reported as `Cancelled` unless a context was
+  actually cancelled. The Redis module docs now describe the two-context
+  cancellation rule (a cancelled task cannot run cleanup commands by passing a
+  fresh `Cx`).
+
+### UDP launch-time sends and the socket error queue (Linux, GH #73)
+
+- `UdpSocket::set_txtime` turns on `SO_TXTIME` (`UdpTxTimeConfig`: clock,
+  deadline mode, error reports), and `send_to_with_txtime` /
+  `send_with_txtime` attach a per-datagram `SCM_TXTIME` launch time for the
+  ETF qdisc or NIC launch-time offload. They wait for writability like
+  `send_to`. Once `SO_TXTIME` is on, the plain send paths of that socket
+  (`send`, `send_to`, the batch sends, `SendSink`) return `InvalidInput`,
+  because ETF silently drops a datagram without a launch time.
+- `UdpSocket::recv_error` / `try_recv_error` read the socket error queue
+  (`MSG_ERRQUEUE`) as a `UdpErrorReport` (errno, origin, offender, destination,
+  and decoded launch-time errors). A pending read waits on `Interest::ERROR`
+  without disturbing readable/writable waits. `set_recverr` turns on
+  `IP_RECVERR` / `IPV6_RECVERR` so ICMP errors are queued too.
 
 ### Native QUIC key updates (RFC 9001 §6.3/§6.5/§6.6)
 

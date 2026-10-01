@@ -27,7 +27,9 @@
   },
   "proof_runner": {
     "status": "ok",
-    "suggested_lanes": ["rustfmt-check"]
+    "suggested_lanes": [
+      "rustfmt-check"
+    ]
   },
   "rch": {
     "available": true,

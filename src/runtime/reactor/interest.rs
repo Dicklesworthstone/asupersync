@@ -17,7 +17,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use asupersync::runtime::reactor::Interest;
 //!
 //! let interest = Interest::READABLE | Interest::WRITABLE;

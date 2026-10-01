@@ -702,9 +702,27 @@ pub enum NativeH3RouterRefusal {
     InvalidContentLength,
     /// TE contained a value other than the sole HTTP/3-permitted `trailers`.
     InvalidTransferEncoding,
+    /// `:authority` and Host named different targets, Host was repeated or
+    /// empty, or an `http`/`https` request named neither (RFC 9114 section
+    /// 4.3.1).
+    InvalidAuthority,
     /// The caller cancelled an admitted handler scope before it produced a
     /// response.
     DispatchCancelled,
+    /// The listener is draining after GOAWAY and admits no new request. No
+    /// handler saw it, so the stream is reset with H3_REQUEST_REJECTED.
+    Draining,
+    /// The connection is retiring and admits no new request. No handler saw
+    /// it, so the stream is reset with H3_REQUEST_REJECTED.
+    ConnectionRetiring,
+    /// The listener's concurrent-request limit is reached. No handler saw the
+    /// request, so the stream is reset with H3_REQUEST_REJECTED.
+    TooManyConcurrentRequests {
+        /// Configured maximum number of concurrent requests.
+        limit: usize,
+    },
+    /// The request did not finish arriving before its assembly deadline.
+    RequestAssemblyTimeout,
     /// The session emitted a request event in an order the bridge cannot
     /// safely represent.
     InvalidRequestProgression(&'static str),
@@ -1355,7 +1373,8 @@ impl NativeH3Router {
             Ok(admitted) => admitted,
             Err(
                 reason @ (NativeH3RouterRefusal::InvalidContentLength
-                | NativeH3RouterRefusal::InvalidTransferEncoding),
+                | NativeH3RouterRefusal::InvalidTransferEncoding
+                | NativeH3RouterRefusal::InvalidAuthority),
             ) => {
                 // RFC 9114 section 4.1.2 distinguishes malformed HTTP
                 // messages from an application's voluntary cancellation.
@@ -1942,6 +1961,25 @@ impl NativeH3Router {
         self.cancel_dispatch_with_optional_reason(cx, session, connection, token, None)
     }
 
+    /// Refuses an admitted dispatch before any handler has run, resetting its
+    /// stream with the code for `reason`. Load and lifecycle reasons such as
+    /// [`NativeH3RouterRefusal::TooManyConcurrentRequests`] and
+    /// [`NativeH3RouterRefusal::Draining`] reset with H3_REQUEST_REJECTED, which
+    /// tells the client a retry is safe (RFC 9114 section 4.1.1). Ownership
+    /// checks and stream cleanup are identical to [`Self::cancel_dispatch_with_cx`];
+    /// a dispatch that already produced a response is cancelled as that method
+    /// would cancel it, since its handler has run.
+    pub fn refuse_dispatch_with_cx(
+        &mut self,
+        cx: &Cx,
+        session: &mut NativeH3Session,
+        connection: &mut QuicConnection,
+        token: &NativeH3RouterDispatchToken,
+        reason: NativeH3RouterRefusal,
+    ) -> Result<NativeH3RouterEvent, crate::http::h3::NativeH3SessionError> {
+        self.terminate_dispatch(cx, session, connection, token, None, reason)
+    }
+
     /// Cancels a dispatch while retaining the request owner's cancellation cause.
     ///
     /// Produced responses observe `ParentCancelled` with `cause` attached, so a
@@ -1967,6 +2005,27 @@ impl NativeH3Router {
         connection: &mut QuicConnection,
         token: &NativeH3RouterDispatchToken,
         cause: Option<CancelReason>,
+    ) -> Result<NativeH3RouterEvent, crate::http::h3::NativeH3SessionError> {
+        self.terminate_dispatch(
+            cx,
+            session,
+            connection,
+            token,
+            cause,
+            NativeH3RouterRefusal::DispatchCancelled,
+        )
+    }
+
+    /// Terminates an in-flight dispatch. `refusal` is the reason, and so the
+    /// reset code, used when no response has been produced yet.
+    fn terminate_dispatch(
+        &mut self,
+        cx: &Cx,
+        session: &mut NativeH3Session,
+        connection: &mut QuicConnection,
+        token: &NativeH3RouterDispatchToken,
+        cause: Option<CancelReason>,
+        refusal: NativeH3RouterRefusal,
     ) -> Result<NativeH3RouterEvent, crate::http::h3::NativeH3SessionError> {
         if !Arc::ptr_eq(&self.identity, &token.bridge_identity) {
             return Err(crate::http::h3::NativeH3SessionError::InvalidState(
@@ -2002,7 +2061,7 @@ impl NativeH3Router {
             self.release_in_flight(stream_id);
             return Ok(NativeH3RouterEvent::RequestRefused {
                 stream_id,
-                reason: NativeH3RouterRefusal::DispatchCancelled,
+                reason: refusal,
             });
         }
         if let Some(state) = self.produced.get_mut(&stream_id) {
@@ -2019,14 +2078,7 @@ impl NativeH3Router {
                 reason: NativeH3RouterRefusal::DispatchCancelled,
             });
         }
-        let event = self.refuse_request(
-            cx,
-            session,
-            connection,
-            stream_id,
-            NativeH3RouterRefusal::DispatchCancelled,
-            false,
-        )?;
+        let event = self.refuse_request(cx, session, connection, stream_id, refusal, false)?;
         self.release_in_flight(stream_id);
         Ok(event)
     }
@@ -2084,7 +2136,7 @@ impl NativeH3Router {
         discard_until_terminal: bool,
     ) -> Result<NativeH3RouterEvent, crate::http::h3::NativeH3SessionError> {
         self.take_pending_request(stream_id);
-        session.cancel_request(cx, connection, stream_id)?;
+        session.reset_request(cx, connection, stream_id, refusal_reset_code(&reason))?;
         if discard_until_terminal {
             self.remember_discarding(stream_id);
         }
@@ -4170,13 +4222,49 @@ fn web_request_from_h3(head: H3RequestHead, body: Vec<u8>) -> Request {
     request
 }
 
+/// The RFC 9114 reset code for a refused request. Load and lifecycle
+/// refusals come before any handler runs, so H3_REQUEST_REJECTED tells the
+/// client a retry is safe (section 4.1.1). A malformed request is
+/// H3_MESSAGE_ERROR (section 4.1.2). Anything else, including a request a
+/// handler may have seen or that would fail again, is H3_REQUEST_CANCELLED.
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+fn refusal_reset_code(reason: &NativeH3RouterRefusal) -> u64 {
+    use crate::http::h3_quic::{H3_REQUEST_CANCELLED, H3_REQUEST_REJECTED};
+    const H3_MESSAGE_ERROR: u64 = 0x010e;
+    match reason {
+        NativeH3RouterRefusal::TooManyPendingRequests { .. }
+        | NativeH3RouterRefusal::TooManyInFlightDispatches { .. }
+        | NativeH3RouterRefusal::ConnectionBodyBudgetExhausted { .. }
+        | NativeH3RouterRefusal::Draining
+        | NativeH3RouterRefusal::ConnectionRetiring
+        | NativeH3RouterRefusal::TooManyConcurrentRequests { .. } => H3_REQUEST_REJECTED,
+        NativeH3RouterRefusal::InvalidContentLength
+        | NativeH3RouterRefusal::InvalidTransferEncoding
+        | NativeH3RouterRefusal::InvalidAuthority => H3_MESSAGE_ERROR,
+        NativeH3RouterRefusal::ConnectUnsupported
+        | NativeH3RouterRefusal::RequestTrailersUnsupported
+        | NativeH3RouterRefusal::RequestBodyTooLarge { .. }
+        | NativeH3RouterRefusal::DispatchCancelled
+        | NativeH3RouterRefusal::RequestAssemblyTimeout
+        | NativeH3RouterRefusal::InvalidRequestProgression(_)
+        | NativeH3RouterRefusal::InvalidResponse(_) => H3_REQUEST_CANCELLED,
+    }
+}
+
 #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
 fn validate_h3_request_head_semantics(
     head: &H3RequestHead,
 ) -> Result<Option<usize>, NativeH3RouterRefusal> {
     let mut content_length = None;
+    let mut host = None;
     for (name, value) in &head.headers {
-        if name == "content-length" {
+        if name == "host" {
+            // One non-empty Host at most: the handler sees a single value, so
+            // a repeated field would let a later copy override the checked one.
+            if value.is_empty() || host.replace(value.as_str()).is_some() {
+                return Err(NativeH3RouterRefusal::InvalidAuthority);
+            }
+        } else if name == "content-length" {
             if content_length.is_some()
                 || value.is_empty()
                 || !value.bytes().all(|byte| byte.is_ascii_digit())
@@ -4191,6 +4279,17 @@ fn validate_h3_request_head_semantics(
         } else if name == "te" && !value.trim().eq_ignore_ascii_case("trailers") {
             return Err(NativeH3RouterRefusal::InvalidTransferEncoding);
         }
+    }
+    // Host takes precedence over :authority for the handler, so a mismatch
+    // would let it route on a target that TLS SNI or an upstream check never
+    // saw. Host names compare case-insensitively.
+    let consistent = match (head.pseudo.authority.as_deref(), host) {
+        (Some(authority), Some(host)) => authority.eq_ignore_ascii_case(host),
+        (None, None) => !matches!(head.pseudo.scheme.as_deref(), Some("http" | "https")),
+        _ => true,
+    };
+    if !consistent {
+        return Err(NativeH3RouterRefusal::InvalidAuthority);
     }
     Ok(content_length)
 }
@@ -5584,6 +5683,104 @@ mod tests {
             validate_h3_request_semantics(&head(Some("8")), 0),
             Err(NativeH3RouterRefusal::InvalidContentLength)
         );
+    }
+
+    #[test]
+    #[cfg(feature = "http3")]
+    fn h3_request_semantics_reject_inconsistent_authority_and_host() {
+        use crate::http::h3::H3PseudoHeaders;
+
+        let head = |authority: Option<&str>, hosts: &[&str]| {
+            H3RequestHead::new(
+                H3PseudoHeaders {
+                    method: Some("GET".to_string()),
+                    scheme: Some("https".to_string()),
+                    authority: authority.map(str::to_string),
+                    path: Some("/".to_string()),
+                    ..H3PseudoHeaders::default()
+                },
+                hosts
+                    .iter()
+                    .map(|host| ("host".to_string(), (*host).to_string()))
+                    .collect(),
+            )
+            .expect("syntactically valid H3 request head")
+        };
+
+        // Host wins over :authority in the handler's view, so any of these
+        // would let it route on a target nothing upstream checked.
+        for (authority, hosts) in [
+            (Some("api.example"), &["admin.internal"][..]),
+            (Some("api.example"), &["api.example", "admin.internal"][..]),
+            (None, &["api.example", "api.example"][..]),
+            (None, &[""][..]),
+            (None, &[][..]),
+        ] {
+            assert_eq!(
+                validate_h3_request_head_semantics(&head(authority, hosts)),
+                Err(NativeH3RouterRefusal::InvalidAuthority),
+                ":authority {authority:?} with Host {hosts:?}"
+            );
+        }
+        for (authority, hosts) in [
+            (Some("api.example"), &[][..]),
+            (Some("api.example"), &["API.Example"][..]),
+            (None, &["api.example"][..]),
+        ] {
+            assert_eq!(
+                validate_h3_request_head_semantics(&head(authority, hosts)),
+                Ok(None),
+                ":authority {authority:?} with Host {hosts:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "http3")]
+    fn h3_refusals_reset_with_the_code_that_says_whether_a_retry_is_safe() {
+        use crate::http::h3_quic::{H3_REQUEST_CANCELLED, H3_REQUEST_REJECTED};
+
+        // RFC 9114 section 4.1.1: a request no handler has seen, refused for
+        // load or lifecycle, is REJECTED so the client may retry it.
+        for reason in [
+            NativeH3RouterRefusal::TooManyPendingRequests { limit: 1 },
+            NativeH3RouterRefusal::TooManyInFlightDispatches { limit: 1 },
+            NativeH3RouterRefusal::ConnectionBodyBudgetExhausted { limit: 1 },
+            NativeH3RouterRefusal::Draining,
+            NativeH3RouterRefusal::ConnectionRetiring,
+            NativeH3RouterRefusal::TooManyConcurrentRequests { limit: 1 },
+        ] {
+            assert_eq!(
+                refusal_reset_code(&reason),
+                H3_REQUEST_REJECTED,
+                "{reason:?}"
+            );
+        }
+        // Section 4.1.2: a malformed request is H3_MESSAGE_ERROR.
+        for reason in [
+            NativeH3RouterRefusal::InvalidContentLength,
+            NativeH3RouterRefusal::InvalidTransferEncoding,
+            NativeH3RouterRefusal::InvalidAuthority,
+        ] {
+            assert_eq!(refusal_reset_code(&reason), 0x010e, "{reason:?}");
+        }
+        // A request a handler may have seen, or one that would fail again,
+        // stays CANCELLED.
+        for reason in [
+            NativeH3RouterRefusal::ConnectUnsupported,
+            NativeH3RouterRefusal::RequestTrailersUnsupported,
+            NativeH3RouterRefusal::RequestBodyTooLarge { limit: 1 },
+            NativeH3RouterRefusal::DispatchCancelled,
+            NativeH3RouterRefusal::RequestAssemblyTimeout,
+            NativeH3RouterRefusal::InvalidRequestProgression("test"),
+            NativeH3RouterRefusal::InvalidResponse(H3Error::InvalidFrame("test")),
+        ] {
+            assert_eq!(
+                refusal_reset_code(&reason),
+                H3_REQUEST_CANCELLED,
+                "{reason:?}"
+            );
+        }
     }
 
     #[test]

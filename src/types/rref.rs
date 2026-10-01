@@ -165,9 +165,9 @@ impl<T: Send + Sync + 'static> RRef<T> {
     /// surfaces fixed earlier this session.
     ///
     /// The constructor is now crate-internal: only the runtime's
-    /// region heap-allocator can mint an RRef as the return value of
-    /// a successful `heap_alloc`. Production code reaches an RRef
-    /// through that path; never via direct construction.
+    /// runtime can mint an RRef, for a `HeapIndex` that a successful
+    /// `heap_alloc` returned. No production path does so yet: there
+    /// is no public region-heap allocation API (`asupersync-bi2462.39`).
     ///
     /// Tests that need to construct an RRef (e.g., for table-lookup
     /// fixtures) opt in via the `test-internals` feature gate, which

@@ -565,8 +565,16 @@ fn allowed_unranked_reason(name: &str) -> Option<&'static str> {
         // `lock-metrics` the constructor fails closed on undocumented names,
         // which turned these tests red on every OS once CI ran the lib suite
         // with that feature (2026-09-02).
+        // The second group turned 15 lib tests red when the suite first ran with the
+        // production feature set, which includes `lock-metrics` (2026-09-29,
+        // asupersync-kh02d2).
         "test_abandon_read" | "test_abandon_write" | "external-tasks" | "reader_fanout"
-        | "close_fanout" => Some(LOCK_ORDER_REASON_TEST_HELPER),
+        | "close_fanout" | "worker_retirement" | "request_race" | "queued_local_handoff"
+        | "dispatch_tasks" | "external_task_table" | "checked_external_state"
+        | "checked_external_tasks" | "transfer_state" | "transfer_external_tasks"
+        | "confirmed_leak_tasks" | "confirmed_leak_obligations" | "confirmed_leak_state" => {
+            Some(LOCK_ORDER_REASON_TEST_HELPER)
+        }
         _ => None,
     }
 }

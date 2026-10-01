@@ -171,7 +171,7 @@ where
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust
 /// use asupersync::types::CancelAttributionConfig;
 ///
 /// let config = CancelAttributionConfig::default();

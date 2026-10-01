@@ -1301,6 +1301,9 @@ impl CompiledSupervisor {
     /// - This computation is deterministic and does not require any global locks.
     /// - It does not consult per-child restartability (that is handled by per-child
     ///   [`SupervisionStrategy`] in the runtime wiring).
+    /// - No runtime path calls it: the live controller from
+    ///   [`CompiledSupervisor::bind_managed`] computes its restart set itself. Use
+    ///   this planner to inspect or test a topology's restart order.
     #[must_use]
     pub fn restart_plan_for(&self, failed_child: &str) -> Option<SupervisorRestartPlan> {
         let failed_idx = self

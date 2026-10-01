@@ -3187,6 +3187,147 @@ mod tests {
     }
 
     #[test]
+    fn pooled_cmd_refuses_protocol_state_openers_before_acquiring_a_connection() {
+        let client = pooled_client_without_acquire();
+        run_test_with_cx(move |cx| async move {
+            let openers: &[&[&str]] = &[
+                &["MULTI"],
+                &["multi"],
+                &["WATCH", "k"],
+                &["SUBSCRIBE", "channel"],
+                &["PSUBSCRIBE", "channel*"],
+                &["SSUBSCRIBE", "channel"],
+                &["MONITOR"],
+                &["SYNC"],
+                &["PSYNC", "?", "-1"],
+                &["QUIT"],
+                &["CLIENT", "reply", "OFF"],
+            ];
+            for args in openers {
+                let result = client.cmd(&cx, args).await;
+                assert!(
+                    matches!(&result, Err(RedisError::Protocol(message))
+                        if message.contains("pooled RedisClient")),
+                    "{args:?} must be refused before a pooled connection is used: {result:?}"
+                );
+            }
+        });
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum PooledStateChange {
+        Command,
+        Pipeline,
+        Transaction,
+    }
+
+    #[test]
+    fn pooled_state_changes_close_their_connection_instead_of_reusing_it() {
+        for scenario in [
+            PooledStateChange::Command,
+            PooledStateChange::Pipeline,
+            PooledStateChange::Transaction,
+        ] {
+            let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
+            let addr = listener.local_addr().expect("listener addr");
+            let server = thread::spawn(move || {
+                let (mut first, _) = listener.accept().expect("accept first connection");
+                first
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .expect("set read timeout");
+                write_hello3_ok(&mut first);
+                let mut buf = Vec::new();
+                match scenario {
+                    PooledStateChange::Command => {
+                        let select = read_resp_frame_from_buffer(&mut first, &mut buf);
+                        assert_resp_command(select, &[b"SELECT", b"5"]);
+                        first.write_all(b"+OK\r\n").expect("write SELECT reply");
+                    }
+                    PooledStateChange::Pipeline => {
+                        let select = read_resp_frame_from_buffer(&mut first, &mut buf);
+                        assert_resp_command(select, &[b"SELECT", b"5"]);
+                        let get = read_resp_frame_from_buffer(&mut first, &mut buf);
+                        assert_resp_command(get, &[b"GET", b"k"]);
+                        first
+                            .write_all(b"+OK\r\n$1\r\nv\r\n")
+                            .expect("write pipeline replies");
+                    }
+                    PooledStateChange::Transaction => {
+                        let multi = read_resp_frame_from_buffer(&mut first, &mut buf);
+                        assert_resp_command(multi, &[b"MULTI"]);
+                        first.write_all(b"+OK\r\n").expect("write MULTI reply");
+                        let select = read_resp_frame_from_buffer(&mut first, &mut buf);
+                        assert_resp_command(select, &[b"SELECT", b"5"]);
+                        first.write_all(b"+QUEUED\r\n").expect("write QUEUED reply");
+                        let exec = read_resp_frame_from_buffer(&mut first, &mut buf);
+                        assert_resp_command(exec, &[b"EXEC"]);
+                        first.write_all(b"*1\r\n+OK\r\n").expect("write EXEC reply");
+                    }
+                }
+                first.flush().expect("flush first connection");
+                // The client must close the connection whose database changed
+                // rather than send its next command on it.
+                let mut byte = [0u8; 1];
+                match first.read(&mut byte) {
+                    Ok(0) => {}
+                    Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {}
+                    Ok(_) => panic!("{scenario:?}: connection reused after SELECT 5"),
+                    Err(error) => {
+                        panic!("{scenario:?}: connection neither closed nor reused: {error}")
+                    }
+                }
+                let (mut second, _) = listener.accept().expect("accept replacement connection");
+                second
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .expect("set read timeout");
+                write_hello3_ok(&mut second);
+                let ping = read_resp_frame(&mut second);
+                assert_resp_command(ping, &[b"PING"]);
+                second.write_all(b"+PONG\r\n").expect("write PING reply");
+                second.flush().expect("flush PING reply");
+            });
+
+            run_test_with_cx(move |cx| async move {
+                let url = format!("redis://{}:{}", addr.ip(), addr.port());
+                let client = RedisClient::connect(&cx, &url)
+                    .await
+                    .expect("connect redis client");
+                match scenario {
+                    PooledStateChange::Command => {
+                        let reply = client.cmd(&cx, &["SELECT", "5"]).await.expect("SELECT");
+                        assert!(reply.is_ok(), "SELECT reply: {reply:?}");
+                    }
+                    PooledStateChange::Pipeline => {
+                        let mut pipeline = client.pipeline();
+                        pipeline.cmd(&["SELECT", "5"]).cmd(&["GET", "k"]);
+                        let results = pipeline.exec(&cx).await.expect("pipeline");
+                        assert_eq!(results.len(), 2, "{results:?}");
+                    }
+                    PooledStateChange::Transaction => {
+                        let mut transaction = client.transaction(&cx).await.expect("MULTI");
+                        transaction
+                            .cmd(&cx, &["SELECT", "5"])
+                            .await
+                            .expect("queue SELECT");
+                        let replies = transaction.exec(&cx).await.expect("EXEC");
+                        assert_eq!(replies.len(), 1, "{replies:?}");
+                    }
+                }
+                let pong = client
+                    .cmd(&cx, &["PING"])
+                    .await
+                    .expect("PING must run on a fresh connection");
+                assert_eq!(
+                    pong,
+                    RespValue::SimpleString("PONG".to_string()),
+                    "{scenario:?}"
+                );
+            });
+            server.join().expect("server join");
+        }
+    }
+
+    #[test]
     fn redis_session_native_watch_results_and_discard_reuse_one_connection() {
         use crate::runtime::{RootDrainOutcome, RuntimeBuilder};
 
@@ -7265,6 +7406,49 @@ mod tests {
             assert!(
                 elapsed < Duration::from_secs(5),
                 "cancel must wake the parked read promptly, took {elapsed:?}"
+            );
+        });
+
+        server.join().ok();
+    }
+
+    #[test]
+    fn redis_budget_deadline_wakes_a_read_parked_on_a_silent_server() {
+        // br-asupersync-798g1k: an expired budget deadline is observed only by a
+        // checkpoint, and a read parked on a silent server is never re-polled on
+        // its own. redis_io arms a timer for the deadline, so the read fails
+        // with Cancelled at the deadline. Without it the read stays parked
+        // until the server closes the socket (5 s here).
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            let (_stream, _peer) = listener.accept().expect("accept client");
+            thread::sleep(Duration::from_secs(5));
+        });
+
+        run_test_with_cx(|_cx| async move {
+            let config = RedisConfig {
+                host: addr.ip().to_string(),
+                port: addr.port(),
+                ..Default::default()
+            };
+            let mut conn = RedisConnection::connect(config, None)
+                .await
+                .expect("connect to the silent server (TCP only, no handshake read)");
+
+            let deadline = crate::time::wall_now() + Duration::from_millis(200);
+            let cx =
+                Cx::for_testing_with_budget(crate::types::Budget::new().with_deadline(deadline));
+            let started = std::time::Instant::now();
+            let result = conn.read_response(&cx).await;
+            let elapsed = started.elapsed();
+            assert!(
+                matches!(result, Err(RedisError::Cancelled)),
+                "expected Cancelled at the budget deadline, got {result:?}"
+            );
+            assert!(
+                elapsed >= Duration::from_millis(150) && elapsed < Duration::from_millis(2500),
+                "the read must end at its budget deadline (200 ms), took {elapsed:?}"
             );
         });
 

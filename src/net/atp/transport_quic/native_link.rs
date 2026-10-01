@@ -133,8 +133,8 @@ macro_rules! quic_rqtrace {
 }
 
 const ATP_QUIC_INITIAL_DCID: &[u8] = &[0xA7, 0x9C, 0x10, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6];
-/// Client source connection ID carried in the client's handshake long headers.
-const ATP_QUIC_CLIENT_SCID: &[u8] = &[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+/// Length of the client's per-connection random source connection ID.
+const ATP_QUIC_CLIENT_SCID_LEN: usize = 8;
 /// Server source connection ID carried in the server's handshake long headers.
 const ATP_QUIC_SERVER_SCID: &[u8] = &[0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00];
 /// Process-unique counter for QUIC receive staging directories.
@@ -1464,6 +1464,98 @@ async fn send_native_proof_until_close<T: serde::Serialize + Sync>(
         link.retransmit_stream_frames(cx, &proof_frames, "terminal_proof_pto")
             .await?;
     }
+}
+
+/// Longest refusal reason sent back to the sender, in bytes.
+const MANIFEST_REFUSAL_REASON_MAX_BYTES: usize = 512;
+/// Rounds a refusing receiver spends waiting for the sender's Close, each one
+/// PTO (`NEEDMORE_PTO`) long, counted whether or not packets arrive.
+const REFUSAL_CLOSE_WAIT_ROUNDS: u32 = 4;
+
+/// The reason sent for a manifest the receiver cannot accept. The detail comes
+/// from the sender's own manifest (entry names, sizes, metadata), never from
+/// the receiver's filesystem.
+fn manifest_refusal_reason(error: &QuicTransportError) -> String {
+    let detail = match error {
+        QuicTransportError::Source(message) => message.clone(),
+        other => other.to_string(),
+    };
+    format!("receiver refused the manifest: {detail}")
+}
+
+/// Tells the sender why the receiver will not take the transfer, with the
+/// failed-commit Proof it already understands (`committed: false` plus a
+/// reason), then Close. Before this the receiver returned the error and
+/// dropped the connection, and the sender saw only silence until its idle
+/// timeout (360 s by default, br-asupersync-nnm3gw). Best effort: the refusal
+/// is still the error the caller returns, whether or not the Proof gets through.
+async fn refuse_transfer_in_band(
+    cx: &Cx,
+    link: &mut QuicLink,
+    control: &mut NativeQuicFrameTransport,
+    mut reason: String,
+) {
+    if reason.len() > MANIFEST_REFUSAL_REASON_MAX_BYTES {
+        let mut end = MANIFEST_REFUSAL_REASON_MAX_BYTES;
+        while !reason.is_char_boundary(end) {
+            end -= 1;
+        }
+        reason.truncate(end);
+    }
+    super::quic_progress(format_args!("receiver: transfer refused: {reason}"));
+    let receipt = ReceiveReceipt {
+        committed: false,
+        bytes_received: 0,
+        files: 0,
+        sha_ok: false,
+        merkle_ok: false,
+        symbols_accepted: 0,
+        feedback_rounds: 0,
+        decode_count: 0,
+        decode_micros: 0,
+        reason: Some(reason),
+        committed_paths: Vec::new(),
+    };
+    let Ok(proof_frame) = super::json_frame(FrameType::Proof, &receipt) else {
+        return;
+    };
+    if control.send(cx, &mut link.conn, &proof_frame).is_err() || link.flush(cx).await.is_err() {
+        return;
+    }
+    let proof_frames = link.last_flushed_stream_frames();
+    // Bounded, unlike the terminal-proof wait of a completed transfer: that
+    // wait restarts whenever packets arrive, and a sender still streaming (or
+    // credit-blocked and sending keep-alives) never reads the Proof, so a
+    // refusal would hold the receiver, and a listener serving transfers one at
+    // a time, until the sender's own idle timeout.
+    for _ in 0..REFUSAL_CLOSE_WAIT_ROUNDS {
+        if cx.checkpoint().is_err() {
+            return;
+        }
+        loop {
+            match control.try_recv(cx, &mut link.conn) {
+                Ok(Some(frame)) if frame.frame_type() == FrameType::Close => {
+                    let _ = link.flush(cx).await;
+                    return;
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(_) => return,
+            }
+        }
+        if link.pump_inbound_for(cx, NEEDMORE_PTO).await.is_err() {
+            return;
+        }
+        if link
+            .retransmit_stream_frames(cx, &proof_frames, "refusal_proof_pto")
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
+    let _ = super::send_native_close(cx, &mut link.conn, control);
+    let _ = link.flush(cx).await;
 }
 
 fn same_need_more_request_shape(left: &QuicNeedMore, right: &QuicNeedMore) -> bool {
@@ -6453,7 +6545,14 @@ async fn connect(
     .map_err(map_tls_error)?;
     let dcid = ConnectionId::new(ATP_QUIC_INITIAL_DCID)
         .map_err(|err| QuicTransportError::Quic(format!("initial dcid: {err}")))?;
-    let scid = ConnectionId::new(ATP_QUIC_CLIENT_SCID)
+    // RFC 9000 §7.2: an unpredictable source CID. Forged server packets
+    // (a Retry, stale-key long headers) must carry it as their destination,
+    // so an off-path sender can no longer aim them at this client
+    // (br-asupersync-18hhdp). The Initial DCID stays the protocol constant:
+    // servers derive Initial keys from it.
+    let mut scid_bytes = [0_u8; ATP_QUIC_CLIENT_SCID_LEN];
+    cx.random_bytes(&mut scid_bytes);
+    let scid = ConnectionId::new(&scid_bytes)
         .map_err(|err| QuicTransportError::Quic(format!("client scid: {err}")))?;
     match crate::time::timeout(
         cx.now(),
@@ -6585,6 +6684,10 @@ async fn accept(
     let accept_started = Instant::now();
     let mut flights = 0usize;
     let mut last_early_data_resend: Option<Instant> = None;
+    // A stale-key long-header packet is unauthenticated: it re-offers the
+    // flight at most once per recovery PTO, so a spoofer cannot amplify every
+    // datagram or burn the flight budget.
+    let mut stale_resend_at = None;
 
     while flights < HANDSHAKE_MAX_FLIGHTS {
         if driver.is_complete() {
@@ -6626,7 +6729,9 @@ async fn accept(
                 let client_cid = match driver.recv_handshake_packet(&packet.data) {
                     Ok(client_cid) => client_cid,
                     Err(err) if is_stale_handshake_packet_error(&err) => {
-                        if !last_flight.is_empty() {
+                        let now = cx.now();
+                        if !last_flight.is_empty() && stale_resend_at.is_none_or(|at| now >= at) {
+                            stale_resend_at = Some(now + HANDSHAKE_RECOVERY_RESEND_PTO);
                             flights = flights.saturating_add(1);
                             endpoint
                                 .send_batch(cx, &last_flight)
@@ -7978,6 +8083,45 @@ async fn drive_native_source_stream_flush(
     }
 }
 
+/// Read control frames the receiver sent while the source stream is still
+/// queueing. The sender otherwise reads control only after its last byte, so
+/// a refusal that arrived mid-stream went unheard until the sender's own
+/// timeout (asupersync-nnm3gw). A refusal (an uncommitted Proof) ends the
+/// transfer here, exactly as the proof wait after the stream would end it.
+/// KeepAlive is skipped. Any other frame is kept in `early` for that proof
+/// wait, which handles it unchanged.
+async fn check_source_stream_control(
+    cx: &Cx,
+    link: &mut QuicLink,
+    control: &mut NativeQuicFrameTransport,
+    early: &mut Option<Frame>,
+) -> Result<(), QuicTransportError> {
+    while early.is_none() {
+        let Some(frame) = control.try_recv(cx, &mut link.conn)? else {
+            break;
+        };
+        match frame.frame_type() {
+            FrameType::KeepAlive => {}
+            FrameType::Proof => {
+                let receipt = super::parse_json::<ReceiveReceipt>(&frame)?;
+                if receipt.committed {
+                    *early = Some(frame);
+                } else {
+                    super::send_native_close(cx, &mut link.conn, control)?;
+                    link.flush(cx).await?;
+                    return Err(QuicTransportError::Integrity(
+                        receipt
+                            .reason
+                            .unwrap_or_else(|| "receiver did not commit".to_string()),
+                    ));
+                }
+            }
+            _ => *early = Some(frame),
+        }
+    }
+    Ok(())
+}
+
 /// Wait until the paced source stream may admit new payload bytes: the
 /// send queue is flushed below its cap, sent-but-unacked bytes are back under
 /// the runaway guard, and (when the receiver negotiated a bounded window) at
@@ -7989,6 +8133,8 @@ async fn drive_native_source_stream_flush(
 async fn wait_source_stream_send_admission(
     cx: &Cx,
     link: &mut QuicLink,
+    control: &mut NativeQuicFrameTransport,
+    early: &mut Option<Frame>,
     stream: StreamId,
     min_credit: u64,
     config: &QuicConfig,
@@ -8073,6 +8219,13 @@ async fn wait_source_stream_send_admission(
         }
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
         let pumped = link.pump_inbound_for(cx, SOURCE_STREAM_PTO).await?;
+        // A receiver that refused the transfer grants no more credit, so a
+        // credit-blocked sender is where a refusal would otherwise go unheard
+        // until the idle timeout. Only that case reads control here; a
+        // transfer that never waits on credit is untouched.
+        if !credit_ok {
+            check_source_stream_control(cx, link, control, early).await?;
+        }
         // Give never-yet-sent pending frames (e.g. a tree manifest's tail on
         // the control stream) a shot at whatever cwnd the latest ACKs freed:
         // the gate's non-stall path otherwise never flushes, so pending
@@ -8116,6 +8269,8 @@ async fn wait_source_stream_send_admission(
 async fn send_native_source_stream_entries_pumped(
     cx: &Cx,
     link: &mut QuicLink,
+    control: &mut NativeQuicFrameTransport,
+    early: &mut Option<Frame>,
     stream: StreamId,
     prepared: &QuicPreparedSource,
     config: &QuicConfig,
@@ -8165,7 +8320,8 @@ async fn send_native_source_stream_entries_pumped(
             if link.conn.stream_send_credit_remaining(stream) < n_u64 {
                 drive_native_source_stream_flush(cx, link, config.idle_timeout, false).await?;
                 queued_since_flush = 0;
-                wait_source_stream_send_admission(cx, link, stream, n_u64, config).await?;
+                wait_source_stream_send_admission(cx, link, control, early, stream, n_u64, config)
+                    .await?;
             }
             link.conn
                 .write_stream_bytes(cx, stream, Bytes::copy_from_slice(&buf[..n]), false)?;
@@ -8187,7 +8343,8 @@ async fn send_native_source_stream_entries_pumped(
                 // window of credit here quantized the transfer into one
                 // window per RTT); this wait only enforces the queue and
                 // unacked ceilings.
-                wait_source_stream_send_admission(cx, link, stream, 0, config).await?;
+                wait_source_stream_send_admission(cx, link, control, early, stream, 0, config)
+                    .await?;
             }
         }
         if read != entry.size {
@@ -8462,9 +8619,19 @@ async fn run_sender_session(
             source_stream_max_frame_bytes(),
         );
         let source_result: Result<SendReport, QuicTransportError> = erase_send(async {
-            let bytes_streamed =
-                send_native_source_stream_entries_pumped(cx, link, source_stream, prepared, config)
-                    .await?;
+            // A control frame read while the stream was still queueing, other
+            // than a refusal, which ends the send at once.
+            let mut early_control: Option<Frame> = None;
+            let bytes_streamed = send_native_source_stream_entries_pumped(
+                cx,
+                link,
+                &mut control,
+                &mut early_control,
+                source_stream,
+                prepared,
+                config,
+            )
+            .await?;
             if bytes_streamed != manifest.total_bytes {
                 return Err(QuicTransportError::Integrity(format!(
                     "source stream sent {bytes_streamed} bytes, expected {}",
@@ -8486,13 +8653,17 @@ async fn run_sender_session(
             // under NewReno cwnd after the initial source send returns.
             loop {
                 cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-                let reply_frame = link
-                    .next_control_frame_with_source_stream_recovery(
-                        cx,
-                        &mut control,
-                        "receive stream-source proof",
-                    )
-                    .await?;
+                let reply_frame = match early_control.take() {
+                    Some(frame) => frame,
+                    None => {
+                        link.next_control_frame_with_source_stream_recovery(
+                            cx,
+                            &mut control,
+                            "receive stream-source proof",
+                        )
+                        .await?
+                    }
+                };
                 match reply_frame.frame_type() {
                     FrameType::Proof => {
                         let receipt = super::parse_json::<ReceiveReceipt>(&reply_frame)?;
@@ -10729,7 +10900,10 @@ async fn run_receiver_session(
     } else {
         let manifest: TransferManifest =
             super::parse_json_frame(&manifest_frame, FrameType::ObjectManifest, "ObjectManifest")?;
-        super::validate_quic_manifest(&manifest, config)?;
+        if let Err(error) = super::validate_quic_manifest(&manifest, config) {
+            refuse_transfer_in_band(cx, link, &mut control, manifest_refusal_reason(&error)).await;
+            return Err(error);
+        }
         (manifest, None)
     };
     super::quic_progress(format_args!(
@@ -10741,6 +10915,9 @@ async fn run_receiver_session(
         config.max_block_size
     ));
     link.flush(cx).await?;
+    // A delta sender expects a delta proof, so only a plain transfer gets the
+    // in-band refusal below.
+    let plain_transfer = delta_session.is_none();
 
     let mut delta_full_request_frame = None;
     if let Some(session) = delta_session {
@@ -10855,8 +11032,25 @@ async fn run_receiver_session(
         }
     }
 
-    let mut decoders = super::decoders_from_manifest(&manifest, config)?;
-    super::prepare_quic_destination_root(dest_dir).await?;
+    let mut decoders = match super::decoders_from_manifest(&manifest, config) {
+        Ok(decoders) => decoders,
+        Err(error) => {
+            if plain_transfer {
+                let reason = manifest_refusal_reason(&error);
+                refuse_transfer_in_band(cx, link, &mut control, reason).await;
+            }
+            return Err(error);
+        }
+    };
+    if let Err(error) = super::prepare_quic_destination_root(dest_dir).await {
+        // The error names receiver-side paths; the sender only learns that the
+        // destination was unusable.
+        if plain_transfer {
+            let reason = "receiver could not prepare its destination".to_string();
+            refuse_transfer_in_band(cx, link, &mut control, reason).await;
+        }
+        return Err(error);
+    }
     let mut staging_guard = None;
     for _ in 0..32 {
         let staging_seq = QUIC_STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -11649,6 +11843,65 @@ mod gh67_liveness_tests {
         let (mut server, early) = server.expect("server link");
         server.ingest_packets(cx, early).expect("early packets");
         (client, server)
+    }
+
+    // asupersync-18hhdp: the client's handshake source CID is per connection,
+    // not the former protocol constant, so an off-path sender cannot aim a
+    // forged Retry or stale-key long header at it.
+    #[test]
+    fn client_handshake_source_connection_id_is_per_connection() {
+        const FORMER_CONSTANT: [u8; 8] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        let server = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind raw server");
+        server
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("raw server read timeout");
+        let address = server.local_addr().expect("raw server address");
+        let client_tls = QuicClientTls {
+            server_name: ServerName::try_from("localhost").unwrap(),
+            config: client_config(
+                vec![parse_one_cert(CA_CERT_PEM)],
+                vec![ATP_QUIC_ALPN.to_vec()],
+            )
+            .unwrap(),
+        };
+        let config = QuicConfig {
+            handshake_timeout: Duration::from_millis(300),
+            ..QuicConfig::default()
+        };
+        let cx = Cx::for_testing();
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            let result = block_on(connect(&cx, address, &client_tls, &config));
+            assert!(
+                matches!(result, Err(QuicTransportError::Timeout { .. })),
+                "no server answers: {:?}",
+                result.as_ref().err()
+            );
+            let mut datagram = vec![0_u8; 65_536];
+            let (len, _) = server.recv_from(&mut datagram).expect("client Initial");
+            // Long header: flags, version (4), DCID length + DCID, SCID length + SCID.
+            let dcid_len = usize::from(datagram[5]);
+            let scid_len = usize::from(datagram[6 + dcid_len]);
+            assert!(len > 7 + dcid_len + scid_len, "truncated client Initial");
+            assert_eq!(&datagram[6..6 + dcid_len], ATP_QUIC_INITIAL_DCID);
+            seen.push(datagram[7 + dcid_len..7 + dcid_len + scid_len].to_vec());
+            // Discard anything else this attempt sent before the next one.
+            server.set_nonblocking(true).expect("drain mode");
+            while server.recv_from(&mut datagram).is_ok() {}
+            server.set_nonblocking(false).expect("blocking mode");
+        }
+        for scid in &seen {
+            assert_eq!(scid.len(), ATP_QUIC_CLIENT_SCID_LEN);
+            assert_ne!(
+                scid.as_slice(),
+                FORMER_CONSTANT,
+                "client SCID must not be a protocol constant"
+            );
+        }
+        assert_ne!(
+            seen[0], seen[1],
+            "each connection draws a fresh client SCID"
+        );
     }
 
     // asupersync-gsnci5: RFC 9001 §6.6 — the send path must not protect beyond

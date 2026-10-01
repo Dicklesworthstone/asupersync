@@ -13,7 +13,7 @@ use asupersync::codec::Decoder;
 use asupersync::cx::Cx;
 use asupersync::http::h1::server::HostPolicy;
 use asupersync::http::h2::connection::{CLIENT_PREFACE, ReceivedFrame};
-use asupersync::http::h2::frame::GoAwayFrame;
+use asupersync::http::h2::frame::{GoAwayFrame, Setting, SettingsFrame};
 use asupersync::http::h2::listener::{Http2Listener, Http2ListenerConfig};
 use asupersync::http::h2::{
     Connection, ErrorCode, Frame, FrameCodec, Header, Http2Client, Http2ClientError, Settings,
@@ -515,4 +515,108 @@ fn https_client_uses_trusted_h2_and_rejects_wrong_alpn_or_roots() {
         });
         quiescent(&runtime);
     }
+}
+
+#[test]
+fn a_server_declaring_enable_push_zero_is_served() {
+    for workers in [1, 2] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = std::thread::spawn(move || {
+            let mut peer = Peer::accept(listener, 65_535);
+            // RFC 9113 §6.5.2: a server may include SETTINGS_ENABLE_PUSH with
+            // the value 0. The peer's own state machine ignores the extra ACK.
+            peer.frame(Frame::Settings(SettingsFrame::new(vec![
+                Setting::EnablePush(false),
+            ])));
+            peer.io.flush().unwrap();
+            let id = peer.request();
+            peer.connection
+                .send_headers(
+                    id,
+                    vec![
+                        Header::new(":status", "200"),
+                        Header::new("content-length", "2"),
+                    ],
+                    false,
+                )
+                .unwrap();
+            peer.connection
+                .send_data(id, Bytes::from_static(b"ok"), true)
+                .unwrap();
+            peer.flush();
+            peer.eof();
+        });
+        let runtime = runtime(workers);
+        runtime.block_on(async move {
+            let cx = Cx::current().unwrap();
+            let response = Http2Client::new()
+                .timeout(Duration::from_secs(3))
+                .post(format!("http://{address}/push-disabled"))
+                .body(vec![1; 16])
+                .send(&cx)
+                .await
+                .expect("a server may send SETTINGS_ENABLE_PUSH=0");
+            assert_eq!(response.status, 200);
+            assert_eq!(response.text().unwrap(), "ok");
+        });
+        peer.join().unwrap();
+        quiescent(&runtime);
+    }
+}
+
+#[test]
+fn client_receive_windows_track_the_response_body_limit() {
+    const LIMIT: usize = 4 * 1024 * 1024;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let peer = std::thread::spawn(move || {
+        let mut peer = Peer::accept(listener, 65_535);
+        let id = peer.request();
+        // The client's SETTINGS and connection WINDOW_UPDATE precede HEADERS,
+        // so the peer's view of its send credit is final here.
+        let credit = (
+            peer.connection.remote_settings().initial_window_size,
+            peer.connection.send_window(),
+            peer.connection
+                .stream(id)
+                .map(|stream| stream.send_window()),
+        );
+        peer.connection
+            .send_headers(id, vec![Header::new(":status", "204")], true)
+            .unwrap();
+        peer.flush();
+        peer.eof();
+        credit
+    });
+    let runtime = runtime(1);
+    runtime.block_on(async move {
+        let cx = Cx::current().unwrap();
+        let response = Http2Client::new()
+            .timeout(Duration::from_secs(3))
+            .max_response_body(LIMIT)
+            .post(format!("http://{address}/windows"))
+            .body(vec![1; 16])
+            .send(&cx)
+            .await
+            .unwrap();
+        assert_eq!(response.status, 204);
+    });
+    let (initial, connection, stream) = peer.join().unwrap();
+    let limit = u32::try_from(LIMIT).unwrap();
+    let credit = i32::try_from(LIMIT).unwrap();
+    assert_eq!(
+        initial, limit,
+        "SETTINGS_INITIAL_WINDOW_SIZE must track max_response_body"
+    );
+    assert_eq!(
+        connection, credit,
+        "connection window must track max_response_body"
+    );
+    assert_eq!(
+        stream,
+        Some(credit),
+        "stream window must track max_response_body"
+    );
+    quiescent(&runtime);
 }

@@ -172,15 +172,40 @@ fn parse_bonded_listen_line(line: &str) -> Option<SocketAddr> {
     addr.parse().ok()
 }
 
+/// atpd's tracing output carries ANSI color escapes even on a pipe, so a
+/// field arrives as `ESC[3mbind_addr ESC[0m ESC[2m= ESC[0m127.0.0.1:…` (without
+/// the spaces). Strip CSI sequences before looking for `bind_addr=`.
 #[cfg(feature = "atpd-daemon")]
 fn parse_tracing_bind_addr(line: &str, marker: &str) -> Option<SocketAddr> {
-    if !line.contains(marker) {
+    let plain = strip_ansi_escapes(line);
+    if !plain.contains(marker) {
         return None;
     }
-    line.split_whitespace().find_map(|part| {
+    plain.split_whitespace().find_map(|part| {
         let value = part.strip_prefix("bind_addr=")?;
         value.trim_end_matches(',').parse().ok()
     })
+}
+
+#[cfg(feature = "atpd-daemon")]
+fn strip_ansi_escapes(line: &str) -> String {
+    let mut plain = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            plain.push(c);
+            continue;
+        }
+        // CSI: ESC '[' parameters, then one final byte in '@'..='~'.
+        if chars.next() == Some('[') {
+            for c in chars.by_ref() {
+                if ('@'..='~').contains(&c) {
+                    break;
+                }
+            }
+        }
+    }
+    plain
 }
 
 fn wait_for_quic_listen_addr(rx: &mpsc::Receiver<String>) -> SocketAddr {
@@ -305,6 +330,12 @@ fn wait_for_atpd_quic_and_diagnostics_addrs(
         let wait = (deadline - now).min(Duration::from_millis(250));
         match rx.recv_timeout(wait) {
             Ok(line) => {
+                // stdout is a pipe here, so atpd must not color its log
+                // (br-asupersync-prcxmw).
+                assert!(
+                    !line.contains('\u{1b}'),
+                    "atpd wrote ANSI escapes to a pipe: {line:?}"
+                );
                 if quic_addr.is_none() {
                     quic_addr = parse_tracing_bind_addr(
                         &line,
@@ -3520,8 +3551,14 @@ fn atpd_quic_listener_accepts_atp_send_and_reports_diagnostics() {
     if !sender.status.success() {
         let _ = daemon.kill();
         let _ = daemon.wait();
+        // atpd logs why it refused or dropped the transfer; the sender only
+        // sees silence (br-asupersync-t1a9cf).
+        let mut daemon_lines = Vec::new();
+        while let Ok(line) = daemon_output.recv_timeout(Duration::from_secs(2)) {
+            daemon_lines.push(strip_ansi_escapes(&line));
+        }
         panic!(
-            "atp quic sender to atpd failed; stdout: {}; stderr: {}",
+            "atp quic sender to atpd failed; stdout: {}; stderr: {}; atpd output after readiness: {daemon_lines:#?}",
             String::from_utf8_lossy(&sender.stdout),
             String::from_utf8_lossy(&sender.stderr)
         );

@@ -102,7 +102,7 @@ If you already know tokio, this section maps the primitives you use daily to the
 | `tokio::time::sleep(dur)` | `sleep(now, dur)` | Takes current `Time` instead of reading the clock implicitly. Works with virtual time in lab runtime. |
 | `tokio::time::timeout(dur, fut)` | `timeout(now, dur, fut)` or `cx.scope().timeout(&cx, dur, \|cx\| op)` | `time::timeout` returns `Result<T, Elapsed>` and drops the inner future when the clock wins; `Scope::timeout` spawns the operation as a region task and cancels **and drains** it on expiry, reporting a late terminal outcome instead of losing it. |
 | `tokio::time::interval(dur)` | `interval(now, dur)` | Same `MissedTickBehavior` options (Burst, Delay, Skip). |
-| `tokio::sync::mpsc::channel(n)` | `channel::mpsc::channel::<T>(n)` | Two-phase send: `tx.reserve(&cx).await?.send(val)`. Reserve is cancel-safe; commit cannot fail. |
+| `tokio::sync::mpsc::channel(n)` | `channel::mpsc::channel::<T>(n)` | Two-phase send: `tx.reserve(&cx).await?.send(val)`. Reserve is cancel-safe; the commit returns an `Outcome`, which is `Err` with the value back if the receiver is gone. |
 | `tokio::sync::oneshot::channel()` | `channel::oneshot::channel::<T>()` | Two-phase: `tx.reserve(&cx)` then `permit.send(val)`. |
 | `tokio::sync::broadcast::channel(n)` | `channel::broadcast::channel::<T>(n)` | Two-phase send. Lagging receivers get `RecvError::Lagged`. |
 | `tokio::sync::watch::channel(init)` | `channel::watch::channel(init)` | `rx.changed(&cx).await?` then `rx.borrow_and_clone()`. |
@@ -119,7 +119,8 @@ If you already know tokio, this section maps the primitives you use daily to the
 **1. Every async operation takes `&Cx`.**
 Where tokio reads ambient runtime state from thread-locals, asupersync passes an explicit capability context. This means cancellation and budgets compose structurally -- you can see exactly what a function can do from its signature.
 
-```rust
+<!-- Illustrative fragment: `tx` and `cx` come from the surrounding code. -->
+```rust,ignore
 // tokio
 let permit = tx.reserve().await?;
 
@@ -206,32 +207,25 @@ accounting, and runtime/oracle checks rather than by discipline. It is not a
 claim that Rust's type system alone proves every adapter or host-boundary path.
 
 ```rust
-// Typical executors: what happens when this scope exits?
-spawn(async { /* orphaned? cancelled? who knows */ });
+use asupersync::{main, prelude::*};
 
-// Asupersync: scope guarantees quiescence
-scope
-    .region(
-        &mut state,
-        &cx,
-        asupersync::types::policy::FailFast,
-        |sub, state| async move {
-            sub.spawn_registered(state, &cx, |task_cx| async move {
-                task_cx.checkpoint()?;
-                Outcome::ok(())
-            })
-                .expect("spawn task_a");
-            sub.spawn_registered(state, &cx, |task_cx| async move {
-                task_cx.checkpoint()?;
-                Outcome::ok(())
-            })
-                .expect("spawn task_b");
-            Outcome::ok(())
-        },
-    )
-    .await
-    .expect("create child region");
-// ← guaranteed: nothing from inside is still running once the child region closes
+// Typical executors: `spawn(async { ... })` detaches the task; nothing waits
+// for it, and nothing cancels it, when the caller returns.
+
+// Asupersync: the tasks belong to a region of this scope.
+#[main]
+async fn main(cx: &Cx) {
+    let scope = cx.scope_with_budget(Budget::new().with_poll_quota(64));
+    let mut tasks = JoinSet::new(&scope);
+    for value in 1..=2_u32 {
+        tasks
+            .spawn(cx, move |_| async move { Ok::<_, Error>(value) })
+            .expect("spawn region-owned task");
+    }
+    let results = tasks.join_all(cx).await;
+    // ← guaranteed: nothing spawned into the set is still running here
+    assert_eq!(results.len(), 2);
+}
 ```
 
 ### 2. Cancellation as a First-Class Protocol
@@ -239,7 +233,7 @@ scope
 Cancellation is request, acknowledgement, drain, and finalization—not a silent
 `drop`. It operates as a multi-phase protocol:
 
-```
+```text
 Running → CancelRequested → Cancelling → Finalizing → Completed(Cancelled)
             ↓                    ↓             ↓
          (bounded)          (cleanup)    (finalizers)
@@ -285,7 +279,8 @@ Cancellation progress is observable through `ProgressCertificate` where the runt
 
 For covered two-phase communication surfaces where cancellation could otherwise lose a message, Asupersync uses reserve/commit:
 
-```rust
+<!-- Illustrative fragment: `tx`, `cx` and `message` come from the surrounding code. -->
+```rust,ignore
 let permit = tx.reserve(cx).await?; // nothing committed yet
 let outcome = permit.send(message);
 // Inspect outcome: success publishes; disconnect returns the original value.
@@ -300,11 +295,12 @@ This is not a blanket claim for every effect. Inherently partial I/O and adapter
 
 Runtime-managed effects flow through explicit capability tokens:
 
-```rust
-async fn my_task(cx: &mut Cx) {
-    cx.spawn(...);        // ← need spawn capability
-    cx.sleep_until(...);  // ← need time capability
-    cx.trace(...);        // ← need trace capability
+<!-- Illustrative sketch: `...` stands for a task factory. -->
+```rust,ignore
+async fn my_task(cx: &Cx) {
+    cx.spawn(...);                          // ← spawn capability
+    sleep(cx.now(), Duration::from_millis(10)).await; // ← time, read through the Cx
+    cx.trace("checkpoint reached");         // ← trace capability
 }
 ```
 
@@ -453,6 +449,8 @@ P_H0(∃ t : E_t ≥ 1/α) ≤ α
 
 So you can "peek" after every scheduling step and still control type-I error, which is exactly what you want in a deterministic scheduler + oracle setting.
 
+`LabRuntime` feeds the monitor one observation per run that advances the lab (`run_until_quiescent_with_report`); a plain `report()` re-reads the same state and adds no evidence. The rejected invariants are available from `runtime.oracles.eprocess_rejected_invariants()`.
+
 ### Distribution-Free Conformal Calibration for Lab Metrics
 
 For lab metrics that benefit from calibrated prediction sets, Asupersync uses split conformal calibration (`src/lab/conformal.rs`) with finite-sample, distribution-free guarantees (under exchangeability):
@@ -461,11 +459,11 @@ For lab metrics that benefit from calibrated prediction sets, Asupersync uses sp
 P(Y ∈ C(X)) ≥ 1 − α
 ```
 
-This is used to keep alerting and invariant diagnostics robust without baking in fragile distributional assumptions.
+The calibrator is opt-in: `ScheduleExplorer::with_conformal_calibration` feeds it every explored run's oracle report and `conformal_anomaly_seeds()` lists the seeds whose metrics fall outside the prediction set, even when no invariant failed. You can also feed it reports yourself (`ConformalCalibrator::calibrate`, then `predict`). No lab oracle consults it on its own, so no default verdict depends on it.
 
 ### Explainable Evidence Ledgers (Bayes Factors, Galaxy-Brain Diagnostics)
 
-When a run violates an invariant (or conspicuously does not), Asupersync can produce a structured evidence ledger (`src/lab/oracle/evidence.rs`) using Bayes factors and log-likelihood contributions. This enables agent-friendly debugging: equations, substitutions, and one-line intuitions, so you can see *exactly why* the system believes "task leak" (or "clean close") is happening.
+When a run violates an invariant (or conspicuously does not), Asupersync can produce a structured evidence ledger (`src/lab/oracle/evidence.rs`) using Bayes factors and log-likelihood contributions. This enables agent-friendly debugging: equations, substitutions, and one-line intuitions, so you can see *exactly why* the system believes "task leak" (or "clean close") is happening. Build one on request with `EvidenceLedger::from_report(&report.oracle_report)`; no lab path emits it automatically.
 
 ### Deterministic Algorithms in the Hot Path (Not Just in Tests)
 
@@ -821,7 +819,8 @@ consumer-profile contracts.
 
 ### Outcome — Four-Valued Result
 
-```rust
+<!-- Type shape, not a program: see src/types/outcome.rs. -->
+```rust,ignore
 pub enum Outcome<T, E> {
     Ok(T),                    // Success
     Err(E),                   // Application error
@@ -835,7 +834,8 @@ pub enum Outcome<T, E> {
 
 ### Budget — Resource Constraints
 
-```rust
+<!-- Type shape, not a program: see src/types/budget.rs. -->
+```rust,ignore
 pub struct Budget {
     pub deadline: Option<Time>,   // Absolute deadline
     pub poll_quota: u32,          // Max poll calls
@@ -851,30 +851,38 @@ let effective = outer_budget.meet(inner_budget);
 
 ```rust
 pub enum CancelKind {
-    User,             // Explicit cancellation
-    Timeout,          // Deadline exceeded
-    FailFast,         // Sibling failed
-    RaceLost,         // Lost a race
-    ParentCancelled,  // Parent region cancelled
-    Shutdown,         // Runtime shutdown
+    User,                 // Explicit cancellation
+    Timeout,              // Timeout exceeded
+    Deadline,             // Deadline passed
+    PollQuota,            // Poll budget exhausted
+    CostBudget,           // Cost budget exhausted
+    FailFast,             // Sibling failed
+    RaceLost,             // Lost a race
+    ParentCancelled,      // Parent region cancelled
+    ResourceUnavailable,  // A required resource is unavailable
+    Shutdown,             // Runtime shutdown
+    LinkedExit,           // A linked task exited
 }
 
-// Severity: User < Timeout < FailFast < ParentCancelled < Shutdown
+// Severity (CancelKind::severity):
+//   User < Timeout = Deadline < PollQuota = CostBudget
+//   < FailFast = RaceLost = LinkedExit < ParentCancelled = ResourceUnavailable < Shutdown
 // Cleanup budgets scale inversely with severity
 ```
 
 ### Cx — Capability Context
 
-```rust
+<!-- Signature sketch, not a program: see src/cx/cx.rs. -->
+```rust,ignore
 pub struct Cx { /* ... */ }
 
 impl Cx {
     pub fn spawn<F, Fut>(&self, f: F) -> Result<TaskHandle<Fut::Output>, SpawnError>;
     pub fn spawn_in<F, Fut, P>(&self, scope: &Scope<'_, P>, f: F)
         -> Result<TaskHandle<Fut::Output>, SpawnError>;
-    pub fn checkpoint(&self) -> Result<(), Cancelled>;
+    pub fn checkpoint(&self) -> Result<(), Error>; // Err once cancellation is requested
     pub fn masked<F, R>(&self, f: F) -> R; // Run a synchronous closure with cancellation deferred
-    pub fn trace(&self, event: TraceEvent);
+    pub fn trace(&self, message: &str);
     pub fn budget(&self) -> Budget;
     pub fn is_cancel_requested(&self) -> bool;
 }
@@ -884,7 +892,7 @@ impl Cx {
 
 ## Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                               EXECUTION TIERS                               │
 ├─────────────────────────────────────────────────────────────────────────────┤
@@ -996,6 +1004,7 @@ Region memory uses stable handles (`HeapIndex`) with slot index, generation, and
 - Generation increments on slot reuse, so stale handles fail closed and ABA-style reuse bugs are blocked (`src/runtime/region_heap.rs`).
 - Reuse order is deterministic for identical allocation/deallocation sequences, which keeps trace behavior stable across runs (`src/runtime/region_heap.rs`).
 - Heap reclamation is wired to region close/quiescence, not opportunistic frees, and stats track live vs. reclaimed objects for runtime auditing (`src/runtime/region_heap.rs`).
+- There is no public allocation API yet: every region carries a heap and reclaims it on close, but nothing outside the crate's tests allocates in it, and `RRef` handles cannot be minted (`asupersync-bi2462.39` tracks safe opt-in placement).
 
 ### Runtime Control Surfaces: Causal Time, Cancel Attribution, and Deadline Signals
 
@@ -1219,7 +1228,7 @@ or establish general WAN reliability.
 | Named remote spawn | `src/remote.rs` | `spawn_remote` creates a region-owned `RemoteHandle`; attached runtimes send protocol messages, while missing runtimes fail closed to an explicit deterministic fallback |
 | Lease obligations | `src/remote.rs` | Leases are obligation-backed and participate in region close/quiescence |
 | Idempotency store | `src/remote.rs` | Deduplicates spawn retries for the in-flight operation lifetime plus a bounded terminal-result retention window, with conflict detection |
-| Session-typed protocol | `src/remote.rs` | Origin/remote state machines validate legal spawn/ack/cancel/result/renewal transitions |
+| Session-typed protocol | `src/remote.rs` | Typestate model (`OriginSession`/`RemoteSession`) of the legal spawn/ack/cancel/result/renewal transitions; `NativeRemoteRuntime` does not drive it yet |
 | Logical-time envelopes | `src/remote.rs` | Protocol messages carry logical clock metadata for causal correlation |
 | Saga compensations | `src/remote.rs` | Forward steps and compensations are tracked as a structured rollback flow for distributed workflows |
 | Native V3 runtime | `src/remote.rs` | `NativeRemoteRuntime` maps region-owned remote handles onto bounded TCP+mTLS sessions, supports ordered static pre-delivery bootstrap failover plus caller-owned single-destination discovery refresh, propagates cancel/lease traffic, and drains owned operations during close |
@@ -1591,25 +1600,27 @@ atp bond-pull /srv/payload /dest --donors alice@h1,bob@h2 \
 
 **Programmatic use** — the `BondedTransfer` SDK builder drives a real bonded transfer over the same data path, cancel-correctly:
 
-```rust
+<!-- Illustrative fragment: `dest`, `local_src`, `key_hex` and `cx` come from the caller. -->
+```rust,ignore
 use asupersync::net::atp::sdk::BondedTransfer;
 
-// Blocking receive with a final report:
+// Receive to completion and get the final report:
 let report = BondedTransfer::receive(dest, local_src)
     .expect_donors(2)
     .listen("0.0.0.0:8473".parse()?)
     .auth_key_hex(key_hex)
-    .run(&cx);
+    .run(&cx)
+    .await;
 
 // Or spawn as an owned child and stream live progress:
-let handle = BondedTransfer::receive(dest, local_src)
+let mut handle = BondedTransfer::receive(dest, local_src)
     .expect_donors(2)
     .spawn(&cx)?;
-let addr = handle.control_addr();            // bound control endpoint for donors
-while let Some(p) = handle.next_progress() { // per-donor ingress, blocks remaining, feedback rounds
+let addr = handle.control_addr().await;            // bound control endpoint for donors
+while let Some(p) = handle.next_progress().await { // per-donor ingress, blocks remaining, feedback rounds
     println!("{:.0}% ({}/{} blocks)", p.progress_percent(), p.blocks_total - p.blocks_remaining, p.blocks_total);
 }
-let outcome = handle.wait_for_completion();  // AtpOutcome: Ok / Err / Cancelled / Panicked
+let outcome = handle.wait_for_completion().await;  // AtpOutcome: Ok / Err / Cancelled / Panicked
 ```
 
 `spawn` runs the receiver as an owned child of the `Cx`'s region; `handle.cancel()` aborts it and the child unwinds to quiescence committing nothing (a final `cx.checkpoint()` guards even the last instant before the irreversible commit). The progress stream emits a terminal `Completed` on success or `Failed` on a verification failure; cancellation and other terminal errors are observed as the stream closes plus the join outcome.
@@ -1653,15 +1664,21 @@ For structural runtime risk, diagnostics also maintain a spectral health monitor
 
 `asupersync-macros/` provides proc macros for ergonomic structured concurrency:
 
-```rust
+<!-- Illustrative: `worker_a`, `worker_b`, `task_a` and `task_b` are user code, and
+     `scope!` needs the `&mut RuntimeState` that lab and custom runtimes expose.
+     See docs/macro-dsl.md. -->
+```rust,ignore
 use asupersync::{join, race, scope, spawn, Cx};
 use asupersync::runtime::RuntimeState;
 
 async fn macro_example(cx: &Cx, state: &mut RuntimeState) {
+    // `join!` awaits futures side by side and returns all their outputs.
+    let (a, b) = join!(worker_a(), worker_b());
+
+    // `spawn!` inside `scope!` creates region-owned tasks; the scope does not
+    // return until they are done. A `TaskHandle` is not a future to `join!`.
     scope!(cx, state: state, {
-        let a = spawn!(async { worker_a().await });
-        let b = spawn!(async { worker_b().await });
-        join!(a, b)
+        let _task = spawn!(async { worker_a().await });
     });
 
     // Each branch gets its own child `Cx`, so a losing branch observes its
@@ -1768,7 +1785,7 @@ deterministic lab runtime.
 | OTP Concept | Spork / Asupersync Interpretation |
 |------------|-----------------------------------|
 | Process | A region-owned task/actor (cannot orphan) |
-| Supervisor | A compiled, deterministic restart *topology* over regions — boot ordering + restart-plan computation; tree-level live restart-on-failure is pending (`asupersync-8y37kz.2`), so today live restart is per-actor (`src/actor.rs`) |
+| Supervisor | A compiled, deterministic restart *topology* over regions (boot ordering, dependencies, shutdown budgets). `CompiledSupervisor::bind_managed` runs it live: a failed child is cancelled, drained and restarted one-for-one, one-for-all or rest-for-one under a shared intensity/backoff policy (`src/supervision.rs`, used by `src/app.rs`). Actors also restart on failure individually (`src/actor.rs`) |
 | Link | Failure propagation rule (sibling/parent coupling; deterministic) |
 | Monitor + DOWN | Observation without coupling: deterministic notifications |
 | Registry | Names as lease obligations: reserve/commit or abort (no stale names) |
@@ -1822,7 +1839,7 @@ Asupersync is intentionally "math-forward": it uses advanced math and theory-gra
 | Spectral wait-graph health | Implemented observability diagnostic; advisory early warning, not a standalone deadlock proof |
 | Mazurkiewicz/Foata trace canonicalization and DPOR | Implemented lab/trace exploration machinery |
 | Persistent homology trace scoring | Implemented lab exploration prototype; used to prioritize interesting schedules, not a production runtime gate |
-| Sheaf-style saga consistency and TLA+ export | Implemented analysis/export surfaces for verification workflows |
+| Sheaf-style saga consistency and TLA+ export | Implemented analysis/export APIs for verification workflows; the in-process saga executor does not run the sheaf check |
 
 ### Online Control of Cancel Preemption (Discounted UCB1)
 
@@ -1872,23 +1889,29 @@ Payoff: an evidence-ledger, structure-aware notion of "interesting schedules" th
 
 In distributed obligation tracking, pairwise lattice merges can hide *global* inconsistency (phantom commits). Asupersync models this as a sheaf-style gluing problem and detects obstructions where no global assignment explains all local observations. See `src/trace/distributed/sheaf.rs`.
 
+Status: an API you call on saga observations (`SagaConsistencyChecker`); nothing in the runtime runs it automatically.
+
 Payoff: catches split-brain-style saga states that evade purely pairwise conflict checks.
 
 ### Anytime-Valid Invariant Monitoring (E-Processes, Ville's Inequality)
 
-The lab runtime can continuously monitor invariants (task leaks, obligation leaks, region quiescence) using e-processes (`src/lab/oracle/eprocess.rs`). Separately, the production runtime provides an anytime-valid obligation-only leak monitor (`src/obligation/eprocess.rs`). Both use a supermartingale-based, anytime-valid testing framework that supports optional stopping without "peeking penalties".
+The lab runtime monitors invariants (task leaks, obligation leaks, region quiescence) with e-processes (`src/lab/oracle/eprocess.rs`), adding one observation per run that advances the lab. Separately, `src/obligation/eprocess.rs` provides an anytime-valid obligation-leak monitor as an opt-in, caller-fed API: the runtime does not create or feed one (`asupersync-bi2462.150.2` tracks that wire). Both use a supermartingale-based, anytime-valid testing framework that supports optional stopping without "peeking penalties".
 
 Payoff: turn long-running exploration into statistically sound monitoring, with deterministic, explainable rejection thresholds.
 
 ### Distribution-Free Conformal Calibration for Oracle Metrics
 
-Oracle anomaly thresholds are calibrated using split conformal prediction, giving finite-sample, distribution-free coverage guarantees under exchangeability assumptions across deterministic schedule seeds. See `src/lab/conformal.rs`.
+`src/lab/conformal.rs` calibrates oracle-metric thresholds with split conformal prediction, giving finite-sample, distribution-free coverage guarantees under exchangeability assumptions across deterministic schedule seeds.
 
-Payoff: stable false-alarm behavior under workload drift, without hand-tuned magic constants.
+Status: opt-in. `ScheduleExplorer::with_conformal_calibration` calibrates across explored seeds and reports the anomalous ones; no lab oracle consults the calibrator on its own.
+
+Payoff when enabled: stable false-alarm behavior under workload drift, without hand-tuned magic constants.
 
 ### Algebraic Law Sheets + Rewrite Engines With Side-Condition Lattices
 
 Asupersync's concurrency combinators come with an explicit law sheet (severity lattices, budget semirings, race/join laws, etc.) and a rewrite engine guarded by conservative static analyses (obligation-safety and cancel-safety lattices; deadline min-plus reasoning). See `src/combinator/laws.rs`, `src/plan/rewrite.rs`, and `src/plan/analysis.rs`.
+
+Status: the rewrite engine is opt-in through `plan::execute::capture_optimized`; no runtime path invokes it, and an executed plan race drops its losers the way `Cx::race` does (use `Scope::race` when losers must be drained).
 
 Payoff: principled plan optimization without silently breaking cancel/drain/quiescence invariants.
 
@@ -1994,6 +2017,37 @@ Asupersync is feature-light by default; the lab runtime is available without fla
 | `wasm-browser-dev` | Browser WASM: development profile with browser I/O | No |
 | `wasm-browser-prod` | Browser WASM: production profile with browser I/O | No |
 | `wasm-browser-deterministic` | Browser WASM: replay-safe with browser trace | No |
+| `wasm-runtime` | Browser runtime capability slices for WASM profile composition (implies `wasm-browser-preview`) | No |
+| `wasm-browser-preview` | Opt-in guard for experimental browser-targeted builds; not full WASM parity | No |
+| `browser-io` | Browser I/O capability slice for the `wasm-browser-*` profiles; not allowed with `wasm-browser-minimal` | No |
+| `browser-trace` | Browser trace capability slice; not allowed with `wasm-browser-minimal` | No |
+| `deterministic-mode` | Replay-safe deterministic timestamps for lab oracles and the deterministic browser profile | No |
+| `desktop-runtime-profile` | Bounded runtime configuration for native desktop hosts | No |
+| `quic` | Native, Tokio-free QUIC transport surfaces | No |
+| `http3` | Native HTTP/3 (`http::h3`, `http::h3_quic`); implies `quic` | No |
+| `http2-streaming` | Live HTTP/2 request ingress with bounded body queues and consumption-based receive credit | No |
+| `compression` | HTTP response compression (gzip, deflate, Brotli) | No |
+| `atp-cli` | The standalone `atp` file-transfer binary (bundles `tls`) | No |
+| `atpd-daemon` | The unpublished `atpd` ATP daemon binary (`cli`) | No |
+| `tailscale-path-provider` | ATP Tailscale candidate-provider integration points; no Tailscale dependency | No |
+| `messaging-fabric` | Reserved name for the native FABRIC messaging lane; its module wiring is not fully gated yet | No |
+| `tokio-compat` | Tokio compatibility layer for ATP transfer actors; the general wrappers live in the separate `asupersync-tokio-compat` crate | No |
+| `runtime-metrics` | Scheduler and timer instrumentation counters; zero cost when disabled | No |
+| `obligation-leak-detection` | Real-time obligation leak detection with stack traces and region-boundary checks | No |
+| `lab-stack-traces` | Stack-trace capture for lab oracle violations | No |
+| `cancel-correctness-oracle` | Cancel-correctness property oracle for the cancellation protocol | No |
+| `waker-profiling` | Waker allocation hot-path profiling hooks | No |
+| `fuzz` | Fuzzing support (`arbitrary` derives, OTLP request helpers); outside the no-Tokio guarantee | No |
+| `criterion-benches` | Criterion-powered benchmark targets | No |
+| `benchmark-adapters` | Tokio-backed benchmark adapters; a benchmark-only quarantine lane | No |
+| `dependency-ledger` | Dependency marginal-ledger generator; build tooling, not a production graph | No |
+
+The remaining features select internal proof lanes and CI umbrellas and are not
+meant for applications: `channel-mpsc-select-e2e`, `cross-subsystem-recovery-e2e`,
+`distributed-hash-snapshot-recovery-e2e`, `h3-websocket-e2e`,
+`obligation-cleanup-e2e`, `raptorq-roundtrip-e2e`, `real-service-e2e`,
+`serialization-golden-harnesses`, `legacy-internal-test-harnesses` and
+`ci-cross-platform`.
 
 ### Minimum Supported Rust Version
 
@@ -2048,6 +2102,8 @@ use asupersync::{
 Framework authors (e.g., HTTP servers) should wrap `Cx`:
 
 ```rust
+use asupersync::{Budget, Cx};
+
 /// Framework-specific request context
 pub struct RequestContext<'a> {
     cx: &'a Cx,
@@ -2086,18 +2142,18 @@ impl<'a> RequestContext<'a> {
 ### Lab Runtime Configuration
 
 ```rust
-let config = LabConfig::default()
-    // Seed for deterministic scheduling (same seed = same execution)
-    .seed(42)
+use asupersync::lab::{LabConfig, LabRuntime};
 
+// Seed for deterministic scheduling (same seed = same execution)
+let config = LabConfig::new(42)
     // Maximum steps before timeout (prevents infinite loops)
     .max_steps(100_000)
 
-    // Enable futurelock detection (tasks holding obligations without progress)
+    // Futurelock detection: tasks holding obligations without being polled
     .futurelock_max_idle_steps(1000)
 
-    // Enable trace capture for replay
-    .capture_trace(true);
+    // Record the execution for replay
+    .with_default_replay_recording();
 
 let lab = LabRuntime::new(config);
 ```
@@ -2112,13 +2168,16 @@ If a leak is detected while the thread is already unwinding, a `Panic` response 
 ### Budget Configuration
 
 ```rust
+use asupersync::{Budget, Time};
+use std::time::Duration;
+
 let now = Time::from_secs(1_000); // current logical time from the runtime or lab clock
 
 // Request timeout with poll budget
 let request_budget = Budget::new()
     .with_timeout(now, Duration::from_secs(30))
     .with_poll_quota(10_000)      // Max 10k polls
-    .with_priority(100);          // Normal priority
+    .with_priority(192);          // Above the default priority (128)
 
 // Cleanup budget (tighter for faster shutdown)
 let cleanup_budget = Budget::new()
@@ -2137,7 +2196,8 @@ and terminal transition to locate the owner or adapter that lost it. Ordinary
 MPSC permit destruction aborts and resolves the reservation; dropping that
 permit is a supported path, not itself a leak.
 
-```rust
+<!-- Illustrative fragment: `tx`, `cx` and `message` come from the surrounding code. -->
+```rust,ignore
 // Abort an unused reservation and release its capacity.
 let permit = tx.reserve(cx).await?;
 drop(permit);
@@ -2152,7 +2212,8 @@ let outcome = permit.send(message);
 
 A region is stuck waiting for children that won't complete.
 
-```rust
+<!-- Illustrative fragment: runs inside a task that has a `cx`. -->
+```rust,ignore
 // Check for: infinite loops without checkpoints
 loop {
     cx.checkpoint()?;  // Add checkpoints in loops
@@ -2164,7 +2225,8 @@ loop {
 
 A task is holding obligations but not making progress.
 
-```rust
+<!-- Illustrative fragment: `tx`, `cx`, `other_thing` and `msg` come from the surrounding code. -->
+```rust,ignore
 // Check for: awaiting something that will never resolve
 // while holding a permit/lock
 let permit = tx.reserve(cx).await?;
@@ -2177,7 +2239,8 @@ let outcome = permit.send(msg);
 
 Same seed should give same execution. If not:
 
-```rust
+<!-- Illustrative fragment: runs inside a task that has a `cx`. -->
+```rust,ignore
 // Check for: time-based operations
 // WRONG: uses wall-clock time
 let now = std::time::Instant::now();
@@ -2188,7 +2251,8 @@ let now = cx.now();
 
 Also check for ambient randomness:
 
-```rust
+<!-- Illustrative fragment: the WRONG line names a crate asupersync does not depend on. -->
+```rust,ignore
 // WRONG: ambient entropy breaks determinism
 let id = rand::random::<u64>();
 
@@ -2388,6 +2452,8 @@ For the preview Rust lane, inspect the truthful execution ladder before and
 after requesting a lane:
 
 ```rust
+use asupersync::runtime::RuntimeBuilder;
+
 let ladder = RuntimeBuilder::new().inspect_browser_execution_ladder();
 let selection = RuntimeBuilder::browser().build_selection();
 ```
@@ -2468,7 +2534,7 @@ GA.
 | **Phase 0** | Single-thread deterministic kernel | ✅ Complete |
 | **Phase 1** | Parallel scheduler + region heap | ✅ Complete |
 | **Phase 2** | I/O integration (Linux epoll, optional io_uring, TCP, HTTP/1.1-2, TLS, HTTP/3 native core with default static-only QPACK plus opt-in dynamic field-section context; BSD/Windows reactors currently expose narrower interest support) | ⚠️ Partial |
-| **Phase 3** | Actors + supervision (GenServer, links, monitors) | ✅ Complete for live per-actor supervision (`src/actor.rs` drives restart-on-failure with backoff/intensity); the Spork `CompiledSupervisor` tree computes restart *plans* but its tree-level live restart loop is pending (`asupersync-dist-otp-completeness-8y37kz.2`, blocked as of 2026-09-01) |
+| **Phase 3** | Actors + supervision (GenServer, links, monitors) | ✅ Live supervision: actors restart on failure with backoff/intensity (`src/actor.rs`), and `CompiledSupervisor::bind_managed` runs Spork supervision trees live with one-for-one, one-for-all and rest-for-one restarts (`src/supervision.rs`, used by `src/app.rs`) |
 | **Phase 4** | Distributed structured concurrency | ✅ Core primitives complete; production remote network adapters remain support-class scoped |
 | **Phase 5** | Schedule exploration + formal tooling | ⚠️ Partial (DPOR-style race-guided seed exploration, TLA+ export, and Lean-checked model invariants exist; exact-prefix DPOR and a production-Rust-to-model refinement proof do not) |
 | **Phase 6** | Hardening, policy gates, and adapter surface expansion | ✅ Continuous (see [Policy Gates](#phase-6-policy-gates)) |

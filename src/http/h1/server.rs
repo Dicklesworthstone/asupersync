@@ -2444,6 +2444,12 @@ where
                     {
                         producer_result = Some(normalize_producer_result(result, &response.body));
                     }
+                    // A producer that returned a finished sender has queued
+                    // every frame: its context's cancellation no longer decides
+                    // where the body ends (br-asupersync-9c8r2c).
+                    if matches!(producer_result, Some(Ok(_))) {
+                        return Poll::Ready(response.body.take_frame_after_producer_returned());
+                    }
                     // Frames the producer committed, including terminal
                     // trailers, precede a later cancellation of its context
                     // (br-asupersync-fy5kwg).
@@ -2514,6 +2520,27 @@ where
 
         let frame = match frame {
             Ok(frame) => frame,
+            Err(HttpError::BodyCancelled) if producer_result.is_none() => {
+                // The receive saw the producer's cancellation. Its outcome
+                // decides the end: a finished sender means the queued frames
+                // are the whole body, and an unfinished one keeps the error.
+                producer_result = Some(
+                    finish_producer_within_idle(
+                        cx,
+                        producer.as_mut(),
+                        &response.body,
+                        response_write,
+                        drain_grace,
+                    )
+                    .await,
+                );
+                if matches!(producer_result, Some(Ok(_))) {
+                    continue;
+                }
+                let error = HttpError::BodyCancelled;
+                record_h1_produced_error(cx, &error, "response body yielded an error frame");
+                return Err(error);
+            }
             Err(error) => {
                 record_h1_produced_error(cx, &error, "response body yielded an error frame");
                 return Err(error);
@@ -5478,6 +5505,79 @@ mod tests {
         let mut expected = ChunkedEncoder::encode_chunk(b"payload").into_vec();
         expected.extend_from_slice(b"0\r\nx-checksum: verified\r\n\r\n");
         assert_eq!(response_body_bytes(&written), expected);
+    }
+
+    fn serve_produced_then_cancel(
+        content_length: bool,
+        finish: bool,
+    ) -> (Result<ConnectionState, HttpError>, Vec<u8>) {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let produce = move |producer_cx: Cx, mut sender: OutgoingBodySender| async move {
+            sender.send_chunk(&producer_cx, b"payload").await?;
+            if finish {
+                sender.finish(&producer_cx)?;
+            }
+            producer_cx.cancel_with(CancelKind::User, Some("producer cancelled after its body"));
+            Ok::<_, HttpError>(sender)
+        };
+        let server = Http1StreamingServer::with_config_produced(
+            move |_cx, _request| async move {
+                if content_length {
+                    Http1ProducedResponse::with_content_length(
+                        NonZeroUsize::new(2).unwrap(),
+                        200,
+                        "OK",
+                        7,
+                        produce,
+                    )
+                } else {
+                    Http1ProducedResponse::chunked(
+                        NonZeroUsize::new(2).unwrap(),
+                        200,
+                        "OK",
+                        produce,
+                    )
+                }
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+        let result = runtime.block_on(async {
+            let cx = Cx::current().expect("runtime connection context");
+            server.serve_produced(&cx, io).await
+        });
+        let written = written.lock().unwrap().clone();
+        (result, response_body_bytes(&written).to_vec())
+    }
+
+    #[test]
+    fn produced_response_finished_before_producer_cancellation_is_complete() {
+        // A body the producer finished is whole even if its context is
+        // cancelled before the transport reads the end (br-asupersync-9c8r2c).
+        let (result, body) = serve_produced_then_cancel(false, true);
+        result.expect("a finished chunked body completes");
+        let mut expected = ChunkedEncoder::encode_chunk(b"payload").into_vec();
+        expected.extend_from_slice(b"0\r\n\r\n");
+        assert_eq!(body, expected);
+
+        let (result, body) = serve_produced_then_cancel(true, true);
+        result.expect("a finished Content-Length body completes");
+        assert_eq!(body, b"payload");
+    }
+
+    #[test]
+    fn produced_response_abandoned_before_producer_cancellation_is_not_terminated() {
+        // Without finish() the same bytes are a truncated body: no terminal
+        // chunk may present it as complete.
+        let (result, body) = serve_produced_then_cancel(false, false);
+        assert!(result.is_err(), "an unfinished body must fail: {result:?}");
+        assert_eq!(body, ChunkedEncoder::encode_chunk(b"payload").into_vec());
     }
 
     #[test]

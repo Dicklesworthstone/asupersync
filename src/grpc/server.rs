@@ -2654,7 +2654,7 @@ impl Default for CallContext {
 /// This wrapper is intended for framework integrations that need to thread
 /// `Cx` through gRPC handlers while retaining the base call metadata.
 ///
-/// ```ignore
+/// ```
 /// use asupersync::cx::cap::CapSet;
 /// use asupersync::grpc::CallContext;
 ///

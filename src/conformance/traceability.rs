@@ -6,7 +6,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use conformance::traceability::{TraceabilityMatrix, TraceabilityEntry, SpecRequirement};
 //!
 //! // Define specification requirements

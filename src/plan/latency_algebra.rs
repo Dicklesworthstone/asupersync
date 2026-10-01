@@ -1154,7 +1154,7 @@ impl fmt::Display for LatencyAnalysis {
 /// 2. Annotate leaf nodes with arrival/service curves via [`annotate`].
 /// 3. Call [`analyze`] to compute bounds for the entire DAG.
 ///
-/// ```ignore
+/// ```
 /// use asupersync::plan::{PlanDag, latency_algebra::*};
 ///
 /// let mut dag = PlanDag::new();

@@ -1,0 +1,13 @@
+---
+source: tests/golden_doctor_health_report.rs
+expression: soak_report
+---
+{
+  "schema_version": "1.0.0",
+  "profile_mode": "fast",
+  "requested_by": "golden-test",
+  "seed": "0",
+  "pass_criteria": "all checkpoints within budget",
+  "runs": [],
+  "failing_scenarios": []
+}

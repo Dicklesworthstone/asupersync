@@ -1,0 +1,21 @@
+---
+source: tests/golden_doctor_health_report.rs
+expression: contract
+---
+{
+  "contract_version": "1.0.0",
+  "personas": [],
+  "decision_loops": [],
+  "global_evidence_requirements": [
+    "system_health_check",
+    "performance_baseline"
+  ],
+  "navigation_topology": {
+    "version": "1.0.0",
+    "entry_points": [],
+    "screens": [],
+    "routes": [],
+    "keyboard_bindings": [],
+    "route_events": []
+  }
+}

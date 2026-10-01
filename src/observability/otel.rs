@@ -11269,7 +11269,7 @@ pub mod span_semantics {
     //!
     //! # Example
     //!
-    //! ```ignore
+    //! ```
     //! use asupersync::observability::otel::span_semantics::run_span_conformance_tests;
     //!
     //! // Run all span semantic conformance tests

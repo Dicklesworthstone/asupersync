@@ -5,7 +5,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use asupersync::net::unix::UnixDatagram;
 //!
 //! async fn example() -> std::io::Result<()> {

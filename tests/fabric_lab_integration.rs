@@ -830,7 +830,11 @@ fn run_packet_plane_scenario(seed: u64) -> (PacketPlaneScenarioSummary, Vec<Fabr
                 grant_subscribe(&cx, "service.lookup");
 
                 yield_now().await;
-                let fabric = Fabric::connect(&cx, "lab://fabric").await.expect("connect");
+                // Endpoints name a process-wide in-memory fabric, and tests
+                // run in parallel: a shared name lets another scenario's
+                // publishes reach these subscribers.
+                let endpoint = format!("lab://fabric-{seed:016x}");
+                let fabric = Fabric::connect(&cx, &endpoint).await.expect("connect");
                 push_log(
                     &log,
                     &seq,
@@ -960,9 +964,8 @@ fn run_certified_request_scenario(
                 grant_subscribe(&cx, "service.>");
 
                 yield_now().await;
-                let fabric = Fabric::connect(&cx, "lab://fabric-certified")
-                    .await
-                    .expect("connect");
+                let endpoint = format!("lab://fabric-certified-{seed:016x}");
+                let fabric = Fabric::connect(&cx, &endpoint).await.expect("connect");
                 let mut subscription = fabric.subscribe(&cx, "service.>").await.expect("subscribe");
                 push_log(
                     &log,

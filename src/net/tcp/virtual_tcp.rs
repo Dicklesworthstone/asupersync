@@ -6,21 +6,27 @@
 //!
 //! # Usage
 //!
-//! ```rust,ignore
+//! ```rust
+//! use asupersync::net::tcp::traits::TcpListenerApi;
 //! use asupersync::net::tcp::virtual_tcp::{VirtualTcpListener, VirtualTcpStream};
 //!
-//! // Create a listener
-//! let listener = VirtualTcpListener::new("127.0.0.1:8080".parse().unwrap());
+//! async fn accept_injected() -> std::io::Result<()> {
+//!     // Create a listener
+//!     let listener = VirtualTcpListener::new("127.0.0.1:8080".parse().unwrap());
 //!
-//! // Inject a connection (simulating an incoming client)
-//! let (client_stream, server_stream) = VirtualTcpStream::pair(
-//!     "127.0.0.1:9000".parse().unwrap(),
-//!     "127.0.0.1:8080".parse().unwrap(),
-//! );
-//! listener.inject_connection(server_stream, "127.0.0.1:9000".parse().unwrap());
+//!     // Inject a connection (simulating an incoming client)
+//!     let (client_stream, server_stream) = VirtualTcpStream::pair(
+//!         "127.0.0.1:9000".parse().unwrap(),
+//!         "127.0.0.1:8080".parse().unwrap(),
+//!     );
+//!     listener.inject_connection(server_stream, "127.0.0.1:9000".parse().unwrap());
 //!
-//! // Accept the connection
-//! let (stream, addr) = listener.accept().await?;
+//!     // Accept the connection (`accept` is the `TcpListenerApi` trait method)
+//!     let (stream, addr) = listener.accept().await?;
+//!     assert_eq!(addr.port(), 9000);
+//!     # let _ = (client_stream, stream);
+//!     Ok(())
+//! }
 //! ```
 
 use super::traits::{TcpListenerApi, TcpStreamApi};

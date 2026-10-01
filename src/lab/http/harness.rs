@@ -81,7 +81,7 @@ impl TestHarnessClient<'_> {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use asupersync::lab::http::TestHarness;
 /// use asupersync::lab::LabConfig;
 /// use asupersync::web::{Router, get};

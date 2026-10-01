@@ -1227,18 +1227,28 @@ impl std::error::Error for LeaseError {}
 ///
 /// # Example
 ///
-/// ```ignore
-/// use asupersync::remote::{Lease, LeaseId};
+/// ```
+/// use asupersync::remote::{Lease, LeaseError};
+/// use asupersync::types::{ObligationId, RegionId, TaskId, Time};
 /// use std::time::Duration;
 ///
-/// let lease = Lease::new(obligation_id, region, task, Duration::from_secs(30), now);
-/// assert!(lease.is_active(now));
+/// fn hold_lease(
+///     obligation_id: ObligationId,
+///     region: RegionId,
+///     task: TaskId,
+///     now: Time,
+/// ) -> Result<(), LeaseError> {
+///     let mut lease = Lease::new(obligation_id, region, task, Duration::from_secs(30), now);
+///     assert!(lease.is_active(now));
 ///
-/// // Renew before expiry
-/// lease.renew(Duration::from_secs(30), later);
+///     // Renew before expiry.
+///     let later = now + Duration::from_secs(20);
+///     lease.renew(Duration::from_secs(30), later)?;
 ///
-/// // Release when done
-/// lease.release(even_later);
+///     // Release when done. The caller then commits the lease obligation.
+///     let even_later = later + Duration::from_secs(10);
+///     lease.release(even_later)
+/// }
 /// ```
 #[derive(Debug)]
 pub struct Lease {

@@ -444,13 +444,16 @@ pub trait StreamExt: Stream {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// use asupersync::stream::{iter, StreamExt};
+    /// Each buffered future must be `Unpin`, so an `async fn` future is boxed
+    /// with `Box::pin`.
     ///
-    /// async fn first_four(jobs: Vec<Job>) -> Result<Vec<Out>, Error> {
+    /// ```
+    /// use asupersync::stream::{iter, StreamExt, TryStreamError};
+    ///
+    /// async fn first_four(jobs: Vec<Job>) -> Result<Vec<Out>, TryStreamError<Error>> {
     ///     // 4 jobs run at once; results arrive in job order, and the first
-    ///     // failing job in that order ends the stream.
-    ///     iter(jobs).map(run).try_buffered(4).try_collect().await
+    ///     // failing job in that order ends the stream (`TryStreamError::Inner`).
+    ///     iter(jobs).map(|job| Box::pin(run(job))).try_buffered(4).try_collect().await
     /// }
     /// # struct Job; struct Out; struct Error;
     /// # async fn run(_j: Job) -> Result<Out, Error> { std::future::pending().await }
@@ -484,7 +487,7 @@ pub trait StreamExt: Stream {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```
     /// use asupersync::stream::{iter, StreamExt};
     ///
     /// async fn drain_into(buf: Vec<i32>) -> Vec<i32> {

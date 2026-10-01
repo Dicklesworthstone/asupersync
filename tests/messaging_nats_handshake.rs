@@ -37,7 +37,13 @@
 //! deviations either side would surface as a panic / timeout.
 //! The supervisor scenarios also cover idle server PING handling, ordered
 //! subscription delivery without an explicit `process()` call, reconnect
-//! replay, graceful close, and drop-triggered supervisor cancellation.
+//! replay, graceful close, and drop-triggered supervisor cancellation. They
+//! also cover a permissions violation (the connection stays open), a server
+//! that refuses each connection after CONNECT (backoff and the attempt limit
+//! hold across reconnections), and a PING cancelled before its PONG (the
+//! connection is replaced instead of left failing every command). A dropped
+//! subscription is unsubscribed on the wire, and a command whose caller gave
+//! up before the supervisor reached it is not sent.
 
 use asupersync::cx::{ChildRegionSpec, Cx};
 use asupersync::messaging::nats::{NatsClient, NatsConfig, NatsError};
@@ -469,6 +475,13 @@ fn nats_cancelled_request_releases_supervisor_for_next_command() {
             // Withhold the reply. A cancelled caller must release the
             // supervisor so a different live owner can put PING on this same
             // socket, without waiting for request_timeout or another frame.
+            // The abandoned inbox is unsubscribed first, or the server would
+            // keep routing replies to it for the life of the connection.
+            assert_eq!(
+                read_nats_line(&mut reader),
+                "UNSUB 2",
+                "the cancelled request's inbox is unsubscribed before the next command"
+            );
             let next = read_nats_line(&mut reader);
             assert_eq!(next, "PING", "next command after caller cancellation");
             reader
@@ -571,4 +584,519 @@ fn nats_cancelled_request_releases_supervisor_for_next_command() {
         assert_eq!(peer_result.expect("caller-cancel peer joined"), 0);
         assert!(drained, "caller-cancel runtime did not drain");
     }
+}
+
+/// Accepts one client within `window`, or returns `None`.
+fn accept_within(listener: &TcpListener, window: Duration) -> Option<std::net::TcpStream> {
+    listener
+        .set_nonblocking(true)
+        .expect("poll listener without blocking");
+    let deadline = std::time::Instant::now() + window;
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream.set_nonblocking(false).expect("blocking peer socket");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .expect("set read timeout");
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(5)))
+                    .expect("set write timeout");
+                return Some(stream);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if std::time::Instant::now() >= deadline {
+                    return None;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => panic!("accept NATS client: {error}"),
+        }
+    }
+}
+
+fn send_info(stream: &mut std::net::TcpStream, server_id: &str) {
+    let info = format!(
+        "INFO {{\"server_id\":\"{server_id}\",\"version\":\"2.10.0\",\"proto\":1,\"max_payload\":1048576}}\r\n"
+    );
+    stream.write_all(info.as_bytes()).expect("write INFO");
+    stream.flush().expect("flush INFO");
+}
+
+/// Reads until the client closes the connection. Returns false if it is
+/// still open after `within`.
+fn closed_by_client(reader: &mut BufReader<std::net::TcpStream>, within: Duration) -> bool {
+    reader
+        .get_mut()
+        .set_read_timeout(Some(within))
+        .expect("set close timeout");
+    let mut sink = [0_u8; 256];
+    loop {
+        match reader.read(&mut sink) {
+            Ok(0) => return true,
+            Ok(_) => {}
+            Err(error) => {
+                return matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn nats_supervisor_keeps_the_connection_after_a_permissions_violation() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind permissions listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = thread::spawn(move || {
+        let mut stream =
+            accept_within(&listener, Duration::from_secs(5)).expect("accept permissions client");
+        send_info(&mut stream, "permissions");
+        let mut reader = BufReader::new(stream);
+        assert!(read_nats_line(&mut reader).starts_with("CONNECT "));
+        assert_eq!(read_nats_line(&mut reader), "SUB events.allowed 1");
+        assert_eq!(read_nats_line(&mut reader), "SUB events.denied 2");
+        // A real server refuses the second SUB this way and keeps the
+        // connection open, so the message behind the refusal still arrives.
+        reader
+            .get_mut()
+            .write_all(
+                b"-ERR 'Permissions Violation for Subscription to \"events.denied\"'\r\nMSG events.allowed 1 5\r\nfirst\r\n",
+            )
+            .expect("write refusal and message");
+        reader.get_mut().flush().expect("flush refusal and message");
+        let closed = closed_by_client(&mut reader, Duration::from_secs(5));
+        let reconnected = accept_within(&listener, Duration::from_millis(300)).is_some();
+        (closed, reconnected)
+    });
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let (done_tx, done_rx) = mpsc::channel();
+    let task = runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("runtime task context");
+        let mut config =
+            NatsConfig::from_url(&format!("nats://{addr}")).expect("parse permissions URL");
+        config.reconnect_delay = Duration::ZERO;
+        config.max_reconnect_delay = Duration::ZERO;
+        let mut client = NatsClient::connect_with_config(&cx, config)
+            .await
+            .expect("connect supervised client");
+        let mut allowed = client
+            .subscribe(&cx, "events.allowed")
+            .await
+            .expect("subscribe allowed");
+        let _denied = client
+            .subscribe(&cx, "events.denied")
+            .await
+            .expect("the SUB is written before the server refuses it");
+        let message = allowed
+            .next(&cx)
+            .await
+            .expect("receive behind the refusal")
+            .expect("message behind the refusal");
+        assert_eq!(message.payload, b"first");
+        client.close(&cx).await.expect("close supervised client");
+        let _ = done_tx.send(());
+    });
+
+    let completed = done_rx.recv_timeout(Duration::from_secs(5));
+    let peer = server.join();
+    drop(task);
+    let drained = runtime.shutdown_timeout(Duration::from_secs(3));
+    assert!(
+        completed.is_ok(),
+        "the message behind a permissions violation was not delivered"
+    );
+    assert_eq!(
+        peer.expect("permissions peer joined"),
+        (true, false),
+        "(closed only by the client's close, reconnected)"
+    );
+    assert!(drained, "permissions runtime did not drain");
+}
+
+#[test]
+fn nats_supervisor_backs_off_across_connections_the_server_refuses_after_connect() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind refusing listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = thread::spawn(move || {
+        // Each connection completes the handshake and is then refused, as a
+        // server refuses bad credentials. Accept for a fixed window.
+        let started = std::time::Instant::now();
+        let mut accepted = Vec::new();
+        while accepted.len() < 64 {
+            let remaining = Duration::from_millis(2_500).saturating_sub(started.elapsed());
+            let Some(mut stream) = accept_within(&listener, remaining) else {
+                break;
+            };
+            accepted.push(started.elapsed());
+            send_info(&mut stream, "refusing");
+            let mut reader = BufReader::new(stream);
+            assert!(read_nats_line(&mut reader).starts_with("CONNECT "));
+            let _ = reader
+                .get_mut()
+                .write_all(b"-ERR 'Authorization Violation'\r\n");
+            let _ = reader.get_mut().flush();
+        }
+        accepted
+    });
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let (done_tx, done_rx) = mpsc::channel();
+    let task = runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("runtime task context");
+        let mut config =
+            NatsConfig::from_url(&format!("nats://{addr}")).expect("parse refusing URL");
+        config.reconnect_delay = Duration::from_millis(200);
+        config.max_reconnect_delay = Duration::from_secs(2);
+        config.max_reconnect_attempts = 3;
+        let client = NatsClient::connect_with_config(&cx, config)
+            .await
+            .expect("the first handshake completes before the refusal");
+        // Hold the client while the server refuses its reconnections.
+        asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(2_800)).await;
+        drop(client);
+        let _ = done_tx.send(());
+    });
+
+    let accepted = server.join().expect("refusing peer joined");
+    let completed = done_rx.recv_timeout(Duration::from_secs(5));
+    drop(task);
+    let drained = runtime.shutdown_timeout(Duration::from_secs(3));
+    assert_eq!(
+        accepted.len(),
+        4,
+        "the first connection plus max_reconnect_attempts=3 reconnections, accepted at {accepted:?}"
+    );
+    assert!(
+        accepted[2].saturating_sub(accepted[1]) >= Duration::from_millis(150),
+        "a reconnection refused right away delays the next one: {accepted:?}"
+    );
+    assert!(
+        accepted[3].saturating_sub(accepted[2]) >= Duration::from_millis(350),
+        "the delay doubles across refused reconnections: {accepted:?}"
+    );
+    assert!(completed.is_ok(), "refused client task did not finish");
+    assert!(drained, "refusing runtime did not drain");
+}
+
+#[test]
+fn nats_supervisor_keeps_reconnecting_a_flapping_connection_at_a_bounded_rate() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind flapping listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = thread::spawn(move || {
+        // Each connection completes the handshake and is then dropped without
+        // an error, as a flapping network or a restarting proxy drops it.
+        let started = std::time::Instant::now();
+        let mut accepted = Vec::new();
+        while accepted.len() < 64 {
+            let remaining = Duration::from_millis(2_000).saturating_sub(started.elapsed());
+            let Some(mut stream) = accept_within(&listener, remaining) else {
+                break;
+            };
+            accepted.push(started.elapsed());
+            send_info(&mut stream, "flapping");
+            let mut reader = BufReader::new(stream);
+            assert!(read_nats_line(&mut reader).starts_with("CONNECT "));
+        }
+        accepted
+    });
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let (done_tx, done_rx) = mpsc::channel();
+    let task = runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("runtime task context");
+        let mut config =
+            NatsConfig::from_url(&format!("nats://{addr}")).expect("parse flapping URL");
+        config.reconnect_delay = Duration::from_millis(100);
+        config.max_reconnect_delay = Duration::from_secs(2);
+        config.max_reconnect_attempts = 2;
+        let client = NatsClient::connect_with_config(&cx, config)
+            .await
+            .expect("connect supervised client");
+        asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(2_300)).await;
+        drop(client);
+        let _ = done_tx.send(());
+    });
+
+    let accepted = server.join().expect("flapping peer joined");
+    let completed = done_rx.recv_timeout(Duration::from_secs(5));
+    drop(task);
+    let drained = runtime.shutdown_timeout(Duration::from_secs(3));
+    // Drops without a server error never exhaust max_reconnect_attempts=2:
+    // every reconnection that succeeds starts a new budget.
+    assert!(
+        accepted.len() >= 5,
+        "a dropped connection is reconnected each time: {accepted:?}"
+    );
+    for pair in accepted[1..].windows(2) {
+        assert!(
+            pair[1].saturating_sub(pair[0]) >= Duration::from_millis(80),
+            "a connection dropped right after reconnecting waits reconnect_delay: {accepted:?}"
+        );
+    }
+    assert!(completed.is_ok(), "flapping client task did not finish");
+    assert!(drained, "flapping runtime did not drain");
+}
+
+#[test]
+fn nats_supervisor_replaces_a_connection_a_cancelled_ping_left_unusable() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ping listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let (ping_seen_tx, ping_seen_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let mut first =
+            accept_within(&listener, Duration::from_secs(5)).expect("accept ping client");
+        send_info(&mut first, "ping-cut");
+        let mut first = BufReader::new(first);
+        assert!(read_nats_line(&mut first).starts_with("CONNECT "));
+        assert_eq!(read_nats_line(&mut first), "SUB events.kept 1");
+        assert_eq!(read_nats_line(&mut first), "PING");
+        ping_seen_tx.send(()).expect("publish PING witness");
+        // Withhold the PONG. The cancelled PING leaves this connection
+        // marked unusable, so the client must close it and reconnect.
+        let first_closed = closed_by_client(&mut first, Duration::from_secs(5));
+        let Some(mut second) = accept_within(&listener, Duration::from_secs(5)) else {
+            return (first_closed, Vec::new());
+        };
+        send_info(&mut second, "ping-cut");
+        let mut second = BufReader::new(second);
+        let lines = vec![
+            read_nats_line(&mut second),
+            read_nats_line(&mut second),
+            read_nats_line(&mut second),
+        ];
+        second
+            .get_mut()
+            .write_all(b"MSG events.after 2 5\r\nfresh\r\n")
+            .expect("write message on the replacement connection");
+        second.get_mut().flush().expect("flush message");
+        assert!(closed_by_client(&mut second, Duration::from_secs(5)));
+        (first_closed, lines)
+    });
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let (owner_tx, owner_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let task = runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("runtime task context");
+        let mut config = NatsConfig::from_url(&format!("nats://{addr}")).expect("parse ping URL");
+        config.reconnect_delay = Duration::ZERO;
+        config.max_reconnect_delay = Duration::ZERO;
+        let mut client = NatsClient::connect_with_config(&cx, config)
+            .await
+            .expect("connect supervised client");
+        let _kept = client
+            .subscribe(&cx, "events.kept")
+            .await
+            .expect("subscribe before the PING");
+        let owner = cx
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .expect("open PING owner");
+        owner_tx
+            .send(owner.cx().clone())
+            .expect("publish PING owner");
+        let cancelled = client.ping(owner.cx()).await;
+        assert!(
+            matches!(cancelled, Err(NatsError::Cancelled)),
+            "{cancelled:?}"
+        );
+        let mut after = client
+            .subscribe(&cx, "events.after")
+            .await
+            .expect("a command after a cancelled PING");
+        let message = after
+            .next(&cx)
+            .await
+            .expect("receive on the replacement connection")
+            .expect("message on the replacement connection");
+        assert_eq!(message.payload, b"fresh");
+        client.close(&cx).await.expect("close supervised client");
+        owner.close().await.expect("PING owner reaches quiescence");
+        let _ = done_tx.send(());
+    });
+
+    let owner = owner_rx.recv_timeout(Duration::from_secs(3));
+    let ping_seen = ping_seen_rx.recv_timeout(Duration::from_secs(3));
+    if let (Ok(owner), Ok(())) = (&owner, &ping_seen) {
+        owner.cancel_with(
+            asupersync::types::CancelKind::User,
+            Some("cancel NATS ping"),
+        );
+    }
+    let completed = done_rx.recv_timeout(Duration::from_secs(10));
+    let peer = server.join();
+    drop(task);
+    let drained = runtime.shutdown_timeout(Duration::from_secs(3));
+    assert!(owner.is_ok(), "PING owner was not admitted: {owner:?}");
+    assert!(ping_seen.is_ok(), "PING never reached the peer");
+    assert!(
+        completed.is_ok(),
+        "a command after a cancelled PING must succeed on a replacement connection"
+    );
+    let (first_closed, lines) = peer.expect("ping peer joined");
+    assert!(
+        first_closed,
+        "the connection the PING was cut off on stays open"
+    );
+    assert!(lines[0].starts_with("CONNECT "), "{lines:?}");
+    assert_eq!(
+        &lines[1..],
+        &[
+            "SUB events.kept 1".to_string(),
+            "SUB events.after 2".to_string()
+        ],
+        "replay, then the new SUB, on the replacement connection"
+    );
+    assert!(drained, "ping runtime did not drain");
+}
+
+#[test]
+fn nats_supervisor_unsubscribes_a_dropped_subscription() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind drop-unsub listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = thread::spawn(move || {
+        let mut stream =
+            accept_within(&listener, Duration::from_secs(5)).expect("accept drop-unsub client");
+        send_info(&mut stream, "drop-unsub");
+        let mut reader = BufReader::new(stream);
+        assert!(read_nats_line(&mut reader).starts_with("CONNECT "));
+        let mut lines = vec![read_nats_line(&mut reader), read_nats_line(&mut reader)];
+        let next = read_nats_line(&mut reader);
+        if next == "PING" {
+            reader
+                .get_mut()
+                .write_all(b"PONG\r\n")
+                .expect("answer PING");
+        }
+        lines.push(next);
+        (lines, closed_by_client(&mut reader, Duration::from_secs(5)))
+    });
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let (done_tx, done_rx) = mpsc::channel();
+    let task = runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("runtime task context");
+        let mut client = NatsClient::connect(&cx, &format!("nats://{addr}"))
+            .await
+            .expect("connect supervised client");
+        let subscription = client
+            .subscribe(&cx, "events.dropped")
+            .await
+            .expect("subscribe");
+        drop(subscription);
+        client.ping(&cx).await.expect("ping after the drop");
+        client.close(&cx).await.expect("close supervised client");
+        let _ = done_tx.send(());
+    });
+
+    let completed = done_rx.recv_timeout(Duration::from_secs(10));
+    let peer = server.join();
+    drop(task);
+    let drained = runtime.shutdown_timeout(Duration::from_secs(3));
+    let (lines, closed) = peer.expect("drop-unsub peer joined");
+    assert_eq!(
+        lines,
+        ["SUB events.dropped 1", "UNSUB 1", "PING"],
+        "a dropped subscription is unsubscribed before the next command"
+    );
+    assert!(closed, "client did not close");
+    assert!(completed.is_ok(), "drop-unsub client task did not finish");
+    assert!(drained, "drop-unsub runtime did not drain");
+}
+
+#[test]
+fn nats_supervisor_skips_a_publish_whose_caller_gave_up() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind abandoned listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let (abandoned_tx, abandoned_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let mut stream =
+            accept_within(&listener, Duration::from_secs(5)).expect("accept abandoned client");
+        send_info(&mut stream, "abandoned");
+        let mut reader = BufReader::new(stream);
+        assert!(read_nats_line(&mut reader).starts_with("CONNECT "));
+        // Hold the supervisor inside the first PING until the client has also
+        // queued and abandoned a publish behind it.
+        let first = read_nats_line(&mut reader);
+        let abandoned = abandoned_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+        reader
+            .get_mut()
+            .write_all(b"PONG\r\n")
+            .expect("answer the abandoned PING");
+        let next = read_nats_line(&mut reader);
+        if next == "PING" {
+            reader
+                .get_mut()
+                .write_all(b"PONG\r\n")
+                .expect("answer the live PING");
+        }
+        let closed = closed_by_client(&mut reader, Duration::from_secs(5));
+        (first, abandoned, next, closed)
+    });
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let (done_tx, done_rx) = mpsc::channel();
+    let task = runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("runtime task context");
+        let mut client = NatsClient::connect(&cx, &format!("nats://{addr}"))
+            .await
+            .expect("connect supervised client");
+        let ping = asupersync::time::timeout(
+            asupersync::time::wall_now(),
+            Duration::from_secs(1),
+            client.ping(&cx),
+        )
+        .await;
+        assert!(ping.is_err(), "the first PING is held: {ping:?}");
+        let publish = asupersync::time::timeout(
+            asupersync::time::wall_now(),
+            Duration::from_millis(200),
+            client.publish(&cx, "events.late", b"late"),
+        )
+        .await;
+        assert!(
+            publish.is_err(),
+            "the publish waits behind the PING: {publish:?}"
+        );
+        abandoned_tx.send(()).expect("report the abandoned publish");
+        client.ping(&cx).await.expect("live ping");
+        client.close(&cx).await.expect("close supervised client");
+        let _ = done_tx.send(());
+    });
+
+    let completed = done_rx.recv_timeout(Duration::from_secs(10));
+    let peer = server.join();
+    drop(task);
+    let drained = runtime.shutdown_timeout(Duration::from_secs(3));
+    let (first, abandoned, next, closed) = peer.expect("abandoned peer joined");
+    assert_eq!(first, "PING");
+    assert!(abandoned, "client did not abandon its publish");
+    assert_eq!(
+        next, "PING",
+        "a publish whose caller gave up before the supervisor reached it is not sent"
+    );
+    assert!(closed, "client did not close");
+    assert!(completed.is_ok(), "abandoned client task did not finish");
+    assert!(drained, "abandoned runtime did not drain");
 }

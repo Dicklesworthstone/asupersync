@@ -1030,7 +1030,7 @@ mod tower_adapter_tests {
     use asupersync::runtime::yield_now;
     use asupersync::service::{
         AdapterConfig, AsupersyncAdapter, AsupersyncService, AsupersyncServiceExt,
-        CancellationMode, TowerAdapterError,
+        CancellationMode, CxProvider, TowerAdapterError, TowerAdapterWithProvider,
     };
     use asupersync::{Budget, Cx};
     use std::convert::Infallible;
@@ -1095,6 +1095,36 @@ mod tower_adapter_tests {
         }
 
         test_complete!("tower_adapter_with_provider_no_cx_error");
+    }
+
+    /// A caller outside the crate can supply its own Cx source: `CxProvider` is
+    /// exported, so `with_provider` accepts a user type (the "custom runtime
+    /// integration" case its docs describe).
+    #[test]
+    fn tower_adapter_with_a_caller_defined_cx_provider() {
+        init_test("tower_adapter_with_a_caller_defined_cx_provider");
+
+        struct CallerProvider(Cx);
+
+        impl CxProvider for CallerProvider {
+            fn current_cx(&self) -> Option<Cx> {
+                Some(self.0.clone())
+            }
+        }
+
+        let mut adapter = TowerAdapterWithProvider::with_provider(
+            AddOneService,
+            CallerProvider(Cx::for_testing()),
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let future = adapter.call(41);
+        let mut pinned = Box::pin(future);
+        let result = Pin::new(&mut pinned).poll(&mut cx);
+
+        assert!(matches!(result, Poll::Ready(Ok(42))));
+        test_complete!("tower_adapter_with_a_caller_defined_cx_provider");
     }
 
     #[cfg(feature = "test-internals")]
@@ -1168,12 +1198,25 @@ mod tower_adapter_tests {
     fn tower_adapter_overloaded_on_low_budget() {
         init_test("tower_adapter_overloaded_on_low_budget");
 
-        let cx: Cx = Cx::for_testing_with_budget(Budget::new().with_poll_quota(0));
+        // A quota below the default floor of 10 polls, but not zero, is
+        // overload. A zero quota is budget exhaustion: the adapter's first
+        // checkpoint reports it as cancellation (PollQuota), as it has since
+        // v0.4.3, before the budget floor is consulted.
+        let low: Cx = Cx::for_testing_with_budget(Budget::new().with_poll_quota(5));
+        let exhausted: Cx = Cx::for_testing_with_budget(Budget::new().with_poll_quota(0));
         let adapter = AsupersyncAdapter::new(TowerAddOne);
 
         run_test_with_cx(|_| async move {
-            let err = adapter.call(&cx, 1).await.expect_err("expected overload");
-            assert!(matches!(err, TowerAdapterError::Overloaded));
+            let err = adapter.call(&low, 1).await.expect_err("expected overload");
+            assert!(
+                matches!(err, TowerAdapterError::Overloaded),
+                "quota 5 < floor 10 must be Overloaded, got {err:?}"
+            );
+            let err = adapter.call(&exhausted, 1).await.expect_err("expected cancel");
+            assert!(
+                matches!(err, TowerAdapterError::Cancelled),
+                "an exhausted poll quota must be Cancelled, got {err:?}"
+            );
         });
 
         test_complete!("tower_adapter_overloaded_on_low_budget");

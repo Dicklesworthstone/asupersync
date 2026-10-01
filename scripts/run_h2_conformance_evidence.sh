@@ -161,7 +161,8 @@ def stage(name, test_args, extra_environment=()):
     selected = re.findall(r"Selected worker: ([A-Za-z0-9_.-]+) at ", text)
     terminal = re.findall(r"^\[RCH\] remote ([A-Za-z0-9_.-]+) \([^)]*\)$", text, re.M)
     require(selected == [worker] and terminal == [worker], f"{name} lacks exact selected-worker and terminal evidence")
-    sources = re.findall(r"^\[RCH\] clean-overlay receipt: base=([0-9a-f]{40}) overlay-fingerprint=([0-9a-f]{64})$", text, re.M)
+    # RCH 2.1.5+ appends the overlaid tree id to the receipt line.
+    sources = re.findall(r"^\[RCH\] clean-overlay receipt: base=([0-9a-f]{40}) overlay-fingerprint=([0-9a-f]{64})(?: tree=[0-9a-f]{40})?$", text, re.M)
     require(len(sources) == 1 and sources[0][0] == args.base, f"{name} lacks exact clean-overlay admission")
     if fingerprint is None:
         fingerprint = sources[0][1]

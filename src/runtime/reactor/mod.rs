@@ -186,7 +186,7 @@ impl Token {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use asupersync::runtime::reactor::{Event, Interest, Token};
 ///
 /// let event = Event::new(Token::new(1), Interest::READABLE | Interest::WRITABLE);
@@ -275,7 +275,7 @@ impl Event {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use asupersync::runtime::reactor::Events;
 ///
 /// let mut events = Events::with_capacity(64);

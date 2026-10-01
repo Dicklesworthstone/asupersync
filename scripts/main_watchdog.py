@@ -124,24 +124,55 @@ EXECUTED_TEST_RE = re.compile(r"^test (\S+) \.\.\. (?:ok|FAILED)$")
 TEST_RESULT_RE = re.compile(
     r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out"
 )
-RUNNING_TARGET_RE = re.compile(r"^\s*Running (?:tests|benches|examples)/([A-Za-z0-9_\-/]+)\.rs\b")
+# The binary in parentheses carries the target's name; a target at a nested path
+# (tests/atp/per_module/logging_redaction_contract.rs) is not named by its file stem.
+RUNNING_TARGET_RE = re.compile(
+    r"^\s*Running (?:tests|benches|examples)/([A-Za-z0-9_\-/]+)\.rs\b(?: \((?:[^()\s]*/)?([A-Za-z0-9_]+)-[0-9a-f]+\))?"
+)
 RUNNING_UNITTESTS_RE = re.compile(r"^\s*Running unittests (\S+)")
+DOC_TESTS_RE = re.compile(r"^\s*Doc-tests (\S+)")
+LIBTEST_BLOCK_RE = re.compile(r"^running \d+ tests?$")
+# cargo names each failed test binary: "error: test failed, to rerun pass `-p asupersync
+# --test x`", and under --no-fail-fast a closing "N targets failed:" list of the same form.
+CARGO_FAILED_TARGET_RE = re.compile(
+    r"^(?:error: (?:test|doctest) failed, to rerun pass |\s+)`(?:-p \S+ )?--(?:(lib|doc)|(?:test|bench|example|bin) ([A-Za-z0-9_\-]+))`\s*$",
+    re.MULTILINE,
+)
 COULD_NOT_COMPILE_RE = re.compile(r"error: could not compile `([^`]+)`(?: \(([^)]*)\))?")
 FIRST_ERROR_RE = re.compile(r"^(?:\S+\.rs:\d+:\d+: error(?:\[E\d+\])?:.*|error(?:\[E\d+\])?: (?!could not compile|aborting).*)$")
-FAILED_TEST_RE = re.compile(r"^test (\S+) \.\.\. FAILED$")
+# A doctest's name has spaces: `src/x.rs - item (line 3)`.
+FAILED_TEST_RE = re.compile(r"^test (.+?) \.\.\. FAILED$")
 NO_TARGET_RE = re.compile(r"error: no (?:test|bin|example|bench) target named `([^`]+)`")
 # rustc itself was killed (the worker ran out of memory): it never reached a verdict.
-COMPILER_KILLED_RE = re.compile(r"process didn't exit successfully: `(?:[^`\s]*/)?rustc [^`]*` \(signal: 9, SIGKILL: kill\)")
+# Under clippy the killed command is `clippy-driver <path>/rustc ...` (bi2462.147.65).
+COMPILER_KILLED_RE = re.compile(
+    r"process didn't exit successfully: `(?:[^`\s]*/)?(?:clippy-driver\s+(?:[^`\s]*/)?)?rustc [^`]*` "
+    r"\(signal: 9, SIGKILL: kill\)"
+)
 # The worker lost files a dependency build needed (a registry cache pruned mid-build,
-# a rustc it could not start, a failed download). No commit here can cause these.
+# a rustc it could not start, a failed download), or lacks the rustup target a
+# cross-target lane builds for. No commit here can cause these.
 WORKER_FAULT_RE = re.compile(
     r"could not execute process `[^`]*rustc"
     r"|could not parse/generate dep info"
     r"|failed to download `"
     r"|couldn't read `[^`]*/registry/src/[^`]*`: No such file or directory"
+    r"|target may not be installed"
 )
+# A crate built from a local path ("Checking franken-kernel v0.1.0 (/…/franken_kernel)")
+# belongs to this repository; registry and git dependencies carry no absolute path.
+LOCAL_CRATE_RE = re.compile(r"^\s*(?:Compiling|Checking) (\S+) v\S+ \(/", re.MULTILINE)
 COMPILE_TARGET_RE = re.compile(r'\((?:test|bin|example|bench) "([^"]+)"\)')
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+# The browser SDK's Node suites read the TypeScript sources through Node's own type
+# stripping: no install, no build, and no Cargo, so they run on the watchdog host.
+NODE_SUITE_RE = re.compile(r"^scripts/test_browser_[A-Za-z0-9_]+\.mjs$")
+NODE_TRIGGER_PREFIXES = ("packages/browser/", "packages/browser-core/", "scripts/test_browser_")
+NODE_MARKER_RE = re.compile(r"^=== node-suite (\S+) exit=(\S+)$", re.MULTILINE)
+NODE_STAT_RE = re.compile(r"^ℹ (tests|pass|fail) (\d+)$", re.MULTILINE)
+NODE_FAILED_TEST_RE = re.compile(r"^\s*✖ (.+?) \(\d[\d.]*m?s\)$", re.MULTILINE)
+# The artifact-transaction suite fails closed without its pinned reference implementation.
+NODE_REFERENCE_MISSING = "require fake-indexeddb"
 
 
 # ---------------------------------------------------------------------------
@@ -511,11 +542,66 @@ def compress_lib_filters(filters: list[str], limit: int = MAX_LIB_FILTERS) -> li
     return kept
 
 
+def classify_node_suites(clean: str, result: dict[str, Any]) -> dict[str, Any]:
+    """Fail-closed verdict for a node lane (node_suites_run output).
+
+    A failing test is keyed `<suite>::<test>`; a suite that failed without naming a
+    test (an import error, a timeout) is keyed `<suite>::(suite failed)`. A missing
+    fake-indexeddb reference is the host's gap, not the code's: that suite proves
+    nothing, and the lane is undecided unless another suite is red.
+    """
+    counts = result["counts"]
+    failing: list[str] = []
+    seen: list[str] = []
+    executed: list[str] = []
+    unproven: list[str] = []
+    start = 0
+    for marker in NODE_MARKER_RE.finditer(clean):
+        suite, code = marker.group(1), marker.group(2)
+        section = clean[start : marker.start()]
+        start = marker.end()
+        if code == "absent":
+            continue  # not at this commit (a bisect probe before the suite existed)
+        seen.append(suite)
+        if code == "no-node":
+            unproven.append(f"{suite} (no node binary: set WATCHDOG_NODE to Node 24 or later)")
+            continue
+        if NODE_REFERENCE_MISSING in section:
+            unproven.append(f"{suite} (fake-indexeddb reference missing: set WATCHDOG_FAKE_INDEXEDDB_SOURCE)")
+            continue
+        stats = {key: int(value) for key, value in NODE_STAT_RE.findall(section)}
+        counts["results"] += 1
+        counts["passed"] += stats.get("pass", 0)
+        counts["failed"] += stats.get("fail", 0)
+        if stats.get("pass", 0) + stats.get("fail", 0) > 0:
+            executed.append(suite)
+        # The file-level entry names the suite by its absolute path in a per-run temporary
+        # snapshot: keying on it would make a persisting red look new on every run.
+        named = sorted({f"{suite}::{name}" for name in NODE_FAILED_TEST_RE.findall(section) if not name.endswith(".mjs")})
+        if code != "0" or stats.get("fail", 0):
+            failing += named or [f"{suite}::(suite failed, exit {code})"]
+        elif not stats.get("pass", 0):
+            unproven.append(f"{suite} (zero tests passed)")
+    result.update(targets_seen=sorted(seen), targets_executed=sorted(executed))
+    if failing:
+        result.update(
+            verdict=VERDICT_RED, failing_targets=sorted(set(failing)), first_error=failing[0], reason="node suite failure"
+        )
+    elif not seen:
+        result["reason"] = "no node suite ran"
+    elif unproven:
+        result["reason"] = "node suites proved nothing: " + "; ".join(unproven)
+    else:
+        result.update(verdict=VERDICT_GREEN, reason="every node suite passed")
+    return result
+
+
 def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> dict[str, Any]:
     """Fail-closed verdict for one lane log.
 
-    `lane["kind"]` is "build" (check/clippy) or "test". Test lanes carry
-    `expected_targets` (integration target names) and may set `lib_filters`.
+    `lane["kind"]` is "build" (check/clippy), "test", or "node" (classify_node_suites).
+    Test lanes carry `expected_targets` (integration target names) and may set
+    `lib_filters`.
     """
     clean = ANSI_RE.sub("", text)
     lines = clean.splitlines()
@@ -535,6 +621,8 @@ def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> d
         "targets_executed": [],
         "env_gated_targets": list(lane.get("env_gated_targets", [])),
     }
+    if lane["kind"] == "node":
+        return classify_node_suites(clean, result)
     if remote_exit is None and DEPENDENCY_PREFLIGHT_RE.search(clean):
         result["reason"] = DEPENDENCY_PREFLIGHT_REASON
         return result
@@ -566,16 +654,19 @@ def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> d
     killed_reason = "rustc was killed on the worker (signal 9, out of memory): nothing was compiled or tested"
     # Likewise a worker fault while only third-party crates failed: such reds were
     # bisected across innocent commits on hz4 (2026-09-28). A workspace crate that
-    # failed beside it is still red.
+    # failed beside it is still red, including a member not named asupersync-*. A
+    # dep-info fault can also stop cargo before any crate reports `could not compile`
+    # (a syn build script on hz4, 2026-09-29, filed as false P0 bi2462.147.66): with no
+    # failing crate at all, nothing of this repository ran either.
     failing_crates = [match.group(1) for match in COULD_NOT_COMPILE_RE.finditer(clean)]
-    worker_fault = (
-        bool(WORKER_FAULT_RE.search(clean))
-        and bool(failing_crates)
-        and not any(name.startswith("asupersync") for name in failing_crates)
+    local_crates = set(LOCAL_CRATE_RE.findall(clean))
+    worker_fault = bool(WORKER_FAULT_RE.search(clean)) and not any(
+        name.startswith("asupersync") or name in local_crates for name in failing_crates
     )
     fault_reason = (
         "the worker could not build a third-party dependency (missing registry files, "
-        "an unexecutable rustc, or a failed download): nothing of this repository was compiled or tested"
+        "an unexecutable rustc, a failed download, or a missing rustup target): "
+        "nothing of this repository was compiled or tested"
     )
 
     if lane["kind"] == "build":
@@ -597,25 +688,46 @@ def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> d
 
     # Test lane. Failing tests are named `<target>::<test>` so a known red can later be
     # healed only by a run that actually executed its target.
-    seen: list[str] = []
+    #
+    # cargo prints a binary's `Running` header on stderr and libtest prints its `running N
+    # tests` block on stdout. RCH delivers the two streams separately (the runner even
+    # concatenates them), so a header need not sit above its block. Reading "the last
+    # header seen" filed failures under the wrong target and recorded the failing one as
+    # green (rotation, 2026-09-29). Each stream keeps its own order and cargo runs one
+    # binary at a time, so the k-th block belongs to the k-th header.
+    headers: list[str] = []
+    for line in lines:
+        if running := RUNNING_TARGET_RE.match(line):
+            headers.append(running.group(2) or running.group(1).split("/")[-1])
+        elif RUNNING_UNITTESTS_RE.match(line):
+            headers.append("lib")
+        elif DOC_TESTS_RE.match(line):
+            headers.append("doc")
+    aligned = sum(1 for line in lines if LIBTEST_BLOCK_RE.match(line.strip())) == len(headers)
+    # When blocks and headers do not pair up, only cargo's own list of failed binaries
+    # names a target, and only when it names exactly one.
+    cargo_failed = sorted({m.group(1) or m.group(2) for m in CARGO_FAILED_TARGET_RE.finditer(clean)})
+    fallback = cargo_failed[0] if len(cargo_failed) == 1 else "?"
+    seen: list[str] = headers
     failed_tests: list[str] = []
     lib_tests: list[str] = []
     executed_targets: set[str] = set()
-    current = "?"
+    block = -1
     for line in lines:
-        running = RUNNING_TARGET_RE.match(line)
-        if running:
-            current = running.group(1).split("/")[-1]
-            seen.append(current)
-        elif RUNNING_UNITTESTS_RE.match(line):
-            current = "lib"
-            seen.append("lib")
-        elif failed := FAILED_TEST_RE.match(line.strip()):
+        stripped = line.strip()
+        if LIBTEST_BLOCK_RE.match(stripped):
+            block += 1
+            continue
+        current = (headers[block] if 0 <= block < len(headers) else "?") if aligned else fallback
+        if failed := FAILED_TEST_RE.match(stripped):
             failed_tests.append(f"{current}::{failed.group(1)}")
-        if current == "lib" and (executed := EXECUTED_TEST_RE.match(line.strip())):
+        if current == "lib" and (executed := EXECUTED_TEST_RE.match(stripped)):
             lib_tests.append(executed.group(1))
-        if (tr := TEST_RESULT_RE.match(line.strip())) and int(tr.group(2)) + int(tr.group(3)) > 0:
+        if (tr := TEST_RESULT_RE.match(stripped)) and int(tr.group(2)) + int(tr.group(3)) > 0:
             executed_targets.add(current)
+    # A binary that died without a FAILED line (killed, aborted) is still named by cargo.
+    named = {key.split("::", 1)[0] for key in failed_tests}
+    failed_tests += [f"{name}::(test binary failed)" for name in cargo_failed if name not in named]
     result["targets_executed"] = sorted(executed_targets - {"?"})
     counts = result["counts"]
     for line in lines:
@@ -903,6 +1015,8 @@ def heal_candidates(lane: dict[str, Any], lane_known: dict[str, Any], failing: s
     """
     if lane["kind"] == "build":
         return sorted(set(lane_known) - failing)
+    if any(target_of(key) in (None, "?") for key in failing):
+        return []  # a failure no target owns could be any known red's: none is healed
     seen = set(outcome.get("targets_seen") or [])
     return sorted(t for t in lane_known if t not in failing and target_of(t) in seen)
 
@@ -1184,6 +1298,12 @@ def touches_test_registration(paths: list[str]) -> bool:
     return any(path == "Cargo.toml" or re.fullmatch(r"tests/[^/]+\.rs", path) for path in paths)
 
 
+def touches_rustdoc(paths: list[str]) -> bool:
+    """A change to crate source or the README can break a rustdoc example (the README
+    compiles as a doctest, ReadmeDoctests), and no other lane runs them (asupersync-69l7je)."""
+    return any(path == "README.md" or (path.startswith("src/") and path.endswith(".rs")) for path in paths)
+
+
 def targeted_tests(head: str, paths: list[str]) -> dict[str, Any]:
     """Map changed paths to integration targets grouped by feature set, lib filters, unmapped
     paths, the features gating the touched `src/` modules, and touched workspace member crates."""
@@ -1297,6 +1417,22 @@ def build_lanes(head: str, paths: list[str], jobs: int, with_all_features: bool)
             ],
             "expected_targets": ["runtime_abort_vs_cancel_semantics_audit"],
         },
+        {
+            # The workspace has no default-members, so check-default builds the root package
+            # alone: a root change that breaks another member stayed invisible unless the
+            # batch also touched that member (asupersync-kh02d2).
+            "id": "check-members",
+            "kind": "build",
+            "argv": ["cargo", "check", "-j", str(jobs), "--workspace", "--exclude", "asupersync", "--all-targets", "--keep-going", "--message-format=short"],
+        },
+        {
+            # Nothing else builds for the browser. The core crate stopped compiling for wasm32
+            # (listener-only h2 items are dead there) and no lane saw it (bi2462.86.6).
+            # Browser-core's default profile builds the core crate with wasm-browser-prod.
+            "id": "check-wasm32",
+            "kind": "build",
+            "argv": ["cargo", "check", "-j", str(jobs), "-p", "asupersync-browser-core", "--target", "wasm32-unknown-unknown", "--keep-going", "--message-format=short"],
+        },
     ]
     if with_all_features:
         lanes.insert(1, {"id": "check-all-features", "kind": "build", "argv": ["cargo", "check", "-j", str(jobs), "--all-targets", "--all-features", "--keep-going", "--message-format=short"]})
@@ -1337,6 +1473,17 @@ def build_lanes(head: str, paths: list[str], jobs: int, with_all_features: bool)
                 "lib_filters": lib_filters,
             }
         )
+    if touches_rustdoc(paths):
+        # One `Doc-tests` header can own two libtest blocks (merged and standalone
+        # doctests); the classifier then keys a failure by cargo's `--doc`.
+        lanes.append(
+            {
+                "id": "doctests",
+                "kind": "test",
+                "argv": [*LEAN_TEST_ENV, "cargo", "test", "-j", str(jobs), "-p", "asupersync", *feature_args, "--doc"],
+                "expected_targets": ["doc"],
+            }
+        )
     for crate in mapped["crates"]:
         lanes.append(
             {
@@ -1346,6 +1493,18 @@ def build_lanes(head: str, paths: list[str], jobs: int, with_all_features: bool)
                 "expected_targets": [],
             }
         )
+    if any(path.startswith(NODE_TRIGGER_PREFIXES) for path in paths):
+        # The browser SDK changes often, and no lane ran its Node suites (bi2462.135).
+        suites = sorted(p for p in git("ls-tree", "--name-only", head, "scripts/").split() if NODE_SUITE_RE.match(p))
+        if suites:
+            lanes.append(
+                {
+                    "id": "node-browser-suites",
+                    "kind": "node",
+                    "argv": ["node", "--unhandled-rejections=strict", "--experimental-vm-modules", "--test", *suites],
+                    "suites": suites,
+                }
+            )
     for lane in lanes:
         lane["display_command"] = " ".join(lane["argv"])
     return lanes, unmapped
@@ -1404,8 +1563,53 @@ def make_plan(since: str | None, until: str, max_batch: int, jobs: int, with_all
 # ---------------------------------------------------------------------------
 
 
+def node_suites_run(lane: dict[str, Any], sha: str) -> tuple[str, int]:
+    """Run a node lane's suites on an exported snapshot of `sha` (Node, not Cargo: no RCH).
+
+    Each suite's output is followed by `=== node-suite <path> exit=<code|absent|timeout>`;
+    a suite that does not exist at `sha` is `absent`. The suites need Node 24 or later
+    (WATCHDOG_NODE, default `node` on PATH). The artifact-transaction suite needs its
+    pinned fake-indexeddb reference: WATCHDOG_FAKE_INDEXEDDB_SOURCE names its src/index.ts.
+    """
+    node = os.environ.get("WATCHDOG_NODE", "node")
+    parts: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="asupersync_watchdog_node_") as root:
+        archive = subprocess.run(["git", "archive", sha, "scripts", "packages"], capture_output=True, check=False)
+        if archive.returncode != 0:
+            return f"git archive {sha} failed: {archive.stderr.decode(errors='replace')}\n", archive.returncode
+        subprocess.run(["tar", "-x", "-C", root], input=archive.stdout, check=True)
+        env = dict(os.environ)
+        if os.environ.get("WATCHDOG_FAKE_INDEXEDDB_SOURCE"):
+            env["ASUPERSYNC_FAKE_INDEXEDDB_SOURCE"] = os.environ["WATCHDOG_FAKE_INDEXEDDB_SOURCE"]
+        for suite in lane["suites"]:
+            if not (Path(root) / suite).exists():
+                parts.append(f"=== node-suite {suite} exit=absent")
+                continue
+            try:
+                proc = subprocess.run(
+                    [node, "--unhandled-rejections=strict", "--experimental-vm-modules", "--test", suite],
+                    cwd=root, capture_output=True, text=True, env=env, timeout=900, check=False,
+                )
+                parts += [proc.stdout + proc.stderr, f"=== node-suite {suite} exit={proc.returncode}"]
+            except subprocess.TimeoutExpired:
+                parts.append(f"=== node-suite {suite} exit=timeout")
+            except FileNotFoundError:
+                parts.append(f"=== node-suite {suite} exit=no-node")
+    return "\n".join(parts) + "\n", 0
+
+
 def rch_runner(target_dir: str, admission_attempts: int, admission_sleep: int, log_dir: Path) -> Runner:
     def run(lane: dict[str, Any], sha: str) -> tuple[str, int]:
+        if lane["kind"] == "node":
+            text, code = node_suites_run(lane, sha)
+        else:
+            text, code = rch_run(lane, sha)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        with open(log_dir / f"{sha[:12]}_{re.sub(r'[^A-Za-z0-9_.+-]', '_', lane['id'])}.log", "a", encoding="utf-8") as log:
+            log.write(text)
+        return text, code
+
+    def rch_run(lane: dict[str, Any], sha: str) -> tuple[str, int]:
         env = dict(os.environ)
         env.update(
             RCH_REQUIRE_REMOTE="1",
@@ -1425,9 +1629,6 @@ def rch_runner(target_dir: str, admission_attempts: int, admission_sleep: int, l
             if not (code == 103 and not REMOTE_EXIT_RE.search(text)) or DEPENDENCY_PREFLIGHT_RE.search(text):
                 break
             subprocess.run(["sleep", str(admission_sleep)], check=False)
-        log_dir.mkdir(parents=True, exist_ok=True)
-        with open(log_dir / f"{sha[:12]}_{re.sub(r'[^A-Za-z0-9_.+-]', '_', lane['id'])}.log", "a", encoding="utf-8") as log:
-            log.write(text)
         return text, code
 
     return run
@@ -1616,6 +1817,135 @@ def rotation_pick(names: list[str], cursor: int, count: int) -> tuple[list[str],
     return picked, (start + len(picked)) % len(names)
 
 
+# Feature-gated rotation (asupersync-kh02d2.1): the default rotation above never runs a
+# target that needs a feature the test build lacks, and the feature lanes only check them.
+
+FEATURE_ROTATION_LANE = "rotation[features]"
+CFG_OPEN_RE = re.compile(r"\bcfg(?:_attr)?!?\s*\(")
+FEATURE_NAME_RE = re.compile(r'\bfeature\s*=\s*"([^"]+)"')
+# Features the fleet cannot run a plain `cargo test` under.
+FEATURE_ROTATION_EXEMPT = {"loom-tests": "needs RUSTFLAGS=--cfg loom"}
+
+
+def code_and_mask(source: str) -> tuple[str, str]:
+    """`source` without `//` and `/* */` comments, and a same-length copy of that with
+    every string literal's contents blanked, so a match in the mask is in code."""
+    out: list[str] = []
+    mask: list[str] = []
+    i, n, in_string = 0, len(source), False
+    while i < n:
+        c = source[i]
+        if in_string:
+            if c == "\\" and i + 1 < n:
+                out.append(source[i : i + 2])
+                mask.append("  ")
+                i += 2
+                continue
+            in_string = c != '"'
+            out.append(c)
+            mask.append(c if c == '"' else " ")
+        elif source.startswith("//", i):
+            i = source.find("\n", i)
+            if i < 0:
+                break
+            continue
+        elif source.startswith("/*", i):
+            end = source.find("*/", i + 2)
+            i = n if end < 0 else end + 2
+            continue
+        elif literal := next((q for q in ("'\"'", "'\\\"'") if source.startswith(q, i)), None):
+            out.append(literal)  # a quote char literal must not open a string
+            mask.append(" " * len(literal))
+            i += len(literal)
+            continue
+        else:
+            in_string = c == '"'
+            out.append(c)
+            mask.append(c)
+        i += 1
+    return "".join(out), "".join(mask)
+
+
+def cfg_feature_mentions(source: str) -> set[str]:
+    """Features named inside any `cfg(..)`, `cfg_attr(..)` or `cfg!(..)` in a source
+    file's code (a `cfg(` inside a comment or a string literal does not count)."""
+    found: set[str] = set()
+    code, mask = code_and_mask(source)
+    for match in CFG_OPEN_RE.finditer(mask):
+        end = _balanced_end(code, match.end() - 1)
+        if end > 0:
+            found.update(FEATURE_NAME_RE.findall(code[match.end() : end - 1]))
+    return found
+
+
+def feature_closure(features: dict[str, list[str]], wanted: set[str]) -> frozenset[str]:
+    """`wanted` plus every feature they turn on (`dep:` and `crate/feature` entries aside)."""
+    out: set[str] = set()
+    stack = list(wanted)
+    while stack:
+        name = stack.pop()
+        if name in out:
+            continue
+        out.add(name)
+        stack.extend(d for d in features.get(name, []) if "/" not in d and not d.startswith("dep:"))
+    return frozenset(out)
+
+
+def test_build_features(manifest: dict[str, Any], member_manifest: Callable[[str], dict[str, Any]]) -> frozenset[str]:
+    """Features every integration-test build of the root package already has.
+
+    Cargo unifies the features that path dev-dependencies ask of this package, so a test
+    build carries the defaults plus those: the conformance dev-dependency adds
+    test-internals, metrics, tracing-integration and fuzz (asupersync-z2kt29).
+    """
+    package = manifest.get("package", {}).get("name", "asupersync")
+    wanted = set(manifest.get("features", {}).get("default", []))
+    for spec in manifest.get("dev-dependencies", {}).values():
+        if not (isinstance(spec, dict) and "path" in spec):
+            continue
+        for name, dep in member_manifest(spec["path"]).get("dependencies", {}).items():
+            if isinstance(dep, dict) and dep.get("package", name) == package:
+                wanted.update(dep.get("features", []))
+    return feature_closure(manifest.get("features", {}), wanted)
+
+
+def feature_rotation_rows(
+    registry: dict[str, dict[str, Any]], sources: dict[str, str], test_build: frozenset[str], known: frozenset[str]
+) -> list[tuple[str, str, str]]:
+    """(feature set, target, required-features) for every integration target (registered,
+    or a top-level `tests/*.rs`) with code the test build compiles out, sorted so each
+    feature set's targets are adjacent.
+
+    The set is what the target needs beyond the test build: its required-features plus
+    every feature of the manifest (`known`) its code names in a cfg; `--features` with an
+    undefined name would fail the whole run. Targets whose sets match build the same
+    library. A target whose set holds an exempt feature is left out.
+    """
+    rows = set()
+    for path in set(registry) | {p for p in sources if re.fullmatch(r"tests/[^/]+\.rs", p)}:
+        entry = registry.get(path, {"name": path[len("tests/") : -len(".rs")], "features": []})
+        required = set(entry["features"])
+        extra = (required | (cfg_feature_mentions(sources.get(path, "")) & known)) - test_build
+        if not extra or extra & FEATURE_ROTATION_EXEMPT.keys():
+            continue
+        rows.add((",".join(sorted(extra)), entry["name"], ",".join(sorted(required))))
+    return sorted(rows)
+
+
+def feature_rotation_pick(rows: list[tuple[str, str, str]], cursor: int, count: int) -> tuple[str, list[str], int]:
+    """The `--features` value, up to `count` targets of the feature set at `cursor`, and the
+    cursor after them. A run never mixes sets, so it builds the library once; the value
+    also names every picked target's required-features, which cargo checks as written."""
+    if not rows or count <= 0:
+        return "", [], 0
+    start = cursor % len(rows)
+    end = start
+    while end < len(rows) and end - start < count and rows[end][0] == rows[start][0]:
+        end += 1
+    features = {f for row in rows[start:end] for csv in (row[0], row[2]) for f in csv.split(",") if f}
+    return ",".join(sorted(features)), [row[1] for row in rows[start:end]], end % len(rows)
+
+
 def rotation_fold(
     results: dict[str, Any], picked: list[str], outcome: dict[str, Any], head: str, now: str
 ) -> dict[str, list[str]]:
@@ -1627,12 +1957,16 @@ def rotation_fold(
     that are newly red and those that healed.
     """
     red_keys: dict[str, list[str]] = {}
+    unattributed = False
     for key in outcome.get("failing_targets") or []:
         target = target_of(key)
         if target in picked:
             red_keys.setdefault(target, []).append(key)
+        else:
+            unattributed = True
     decisive = outcome["verdict"] in (VERDICT_GREEN, VERDICT_RED)
-    ran = set(outcome.get("targets_seen") or []) | set(outcome.get("targets_executed") or [])
+    # A failure no picked target owns could be any of them: nothing is green this run.
+    ran = set() if unattributed else set(outcome.get("targets_seen") or []) | set(outcome.get("targets_executed") or [])
     new_red: list[str] = []
     healed: list[str] = []
     for name in picked:
@@ -1663,9 +1997,11 @@ def rotation_payload(lane: dict[str, Any], head: str, outcome: dict[str, Any], n
     description = "\n".join(
         [
             "## What the rotation saw",
-            "The watchdog's rotation runs the default-feature integration targets in turn, whatever a batch",
-            "touched, so a target no batch lane selects still runs (execution debt, asupersync-kh02d2). It does",
-            "not bisect: a rotation red is not attributed to a commit.",
+            "The watchdog's rotation runs integration targets in turn, whatever a batch touched, so a target",
+            "no batch lane selects still runs (execution debt, asupersync-kh02d2). `rotation[default]` walks the",
+            "default-feature targets; `rotation[features]` walks those with code the test build compiles out,",
+            "under the features that code needs (asupersync-kh02d2.1). It does not bisect: a rotation red is",
+            "not attributed to a commit.",
             f"- Head: `{head}`",
             f"- Lane: `{lane['id']}`: `{lane['display_command']}`",
             f"- Worker: {outcome.get('worker') or 'unknown'}",
@@ -1719,6 +2055,18 @@ def rotation_file(
                 entry["bead"] = found
     rotation["pending"] = still_pending
     return beads
+
+
+def feature_rotation_probe(case: dict[str, Any]) -> dict[str, Any]:
+    """Evaluate helper: the test-build feature set, the feature-gated rows, and successive picks."""
+    build = test_build_features(case["manifest"], lambda path: case.get("members", {}).get(path, {}))
+    known = frozenset(case["manifest"].get("features", {}))
+    rows = feature_rotation_rows(case.get("registry", {}), case.get("sources", {}), build, known)
+    picks, cursor = [], case.get("cursor", 0)
+    for _ in range(case.get("picks", 1)):
+        feature_set, picked, cursor = feature_rotation_pick(rows, cursor, case["count"])
+        picks.append({"features": feature_set, "picked": picked, "cursor": cursor})
+    return {"test_build": sorted(build), "rows": [list(row[:2]) for row in rows], "picks": picks}
 
 
 def rotation_probe(case: dict[str, Any]) -> dict[str, Any]:
@@ -2277,21 +2625,45 @@ def rotate(args: argparse.Namespace, now: dt.datetime) -> int:
     Each run advances a cursor over every default target, so the whole suite runs
     in turn whatever the batches touch. Per-target results live in
     `state["rotation"]`, receipts in `rotation.jsonl`. A failing test is keyed by
-    the `Running` line before it; RCH can interleave stdout and stderr, so a
-    rotation bead names the failing tests themselves.
+    the target whose `Running` header pairs with its libtest block
+    (classify_lane_output); a failure no picked target owns marks nothing green.
+
+    `--feature-gated` walks instead the targets with code the test build compiles
+    out (feature_rotation_rows), one feature set per run, in `state["rotation_features"]`.
     """
     state_path = args.state_dir / "state.json"
     state = load_state(state_path)
     if not args.no_fetch:
         git("fetch", "-q", "origin", check=False)
     head = git("rev-parse", args.until).strip()
-    rotation = state.setdefault("rotation", {"cursor": 0, "results": {}})
-    names = default_test_targets(git("ls-tree", "--name-only", head, "tests/").split(), cargo_test_registry(head))
-    picked, cursor = rotation_pick(names, rotation.get("cursor", 0), args.count)
+    registry = cargo_test_registry(head)
+    features: list[str] = []
+    if args.feature_gated:
+        lane_id = FEATURE_ROTATION_LANE
+        rotation = state.setdefault("rotation_features", {"cursor": 0, "results": {}})
+        manifest = manifest_at(head)
+        build = test_build_features(
+            manifest, lambda path: tomllib.loads(git("show", f"{head}:{path}/Cargo.toml", check=False) or "")
+        )
+        known = frozenset(manifest.get("features", {}))
+        rows = feature_rotation_rows(registry, tree_sources(head, "tests/"), build, known)
+        feature_set, picked, cursor = feature_rotation_pick(rows, rotation.get("cursor", 0), args.count)
+        features, total = ["--features", feature_set], len(rows)
+    else:
+        lane_id = ROTATION_LANE
+        rotation = state.setdefault("rotation", {"cursor": 0, "results": {}})
+        names = default_test_targets(git("ls-tree", "--name-only", head, "tests/").split(), registry)
+        picked, cursor = rotation_pick(names, rotation.get("cursor", 0), args.count)
+        total = len(names)
+    if not picked:
+        # Nothing to run; a `cargo test` without `--test` would run the whole suite.
+        json.dump({"lane": lane_id, "sha": head, "picked": [], "of": total}, sys.stdout, sort_keys=True)
+        sys.stdout.write("\n")
+        return 0
     lane: dict[str, Any] = {
-        "id": ROTATION_LANE,
+        "id": lane_id,
         "kind": "test",
-        "argv": [*LEAN_TEST_ENV, "cargo", "test", "-j", str(args.jobs), "-p", "asupersync", "--no-fail-fast"]
+        "argv": [*LEAN_TEST_ENV, "cargo", "test", "-j", str(args.jobs), "-p", "asupersync", "--no-fail-fast", *features]
         + [arg for name in picked for arg in ("--test", name)],
         "expected_targets": picked,
     }
@@ -2311,10 +2683,10 @@ def rotate(args: argparse.Namespace, now: dt.datetime) -> int:
     receipt = {
         "schema": SCHEMA_VERSION,
         "recorded_at": now.isoformat(),
-        "lane": ROTATION_LANE,
+        "lane": lane_id,
         "sha": head,
         "picked": picked,
-        "of": len(names),
+        "of": total,
         "filed_beads": filed,
         **fold,
         **{k: outcome[k] for k in ("verdict", "reason", "worker", "failing_targets", "first_error", "counts", "targets_seen")},
@@ -2370,6 +2742,11 @@ def main(argv: list[str]) -> int:
     o.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
     o.add_argument("--no-fetch", action="store_true", help="skip `git fetch origin` before selecting")
     o.add_argument("--file-beads", action="store_true", help="file a P1 bead per rotation run with new reds")
+    o.add_argument(
+        "--feature-gated",
+        action="store_true",
+        help="walk the targets with code the test build compiles out, one feature set per run",
+    )
     o.add_argument("--admission-attempts", type=int, default=40)
     o.add_argument("--admission-sleep", type=int, default=90)
     args = parser.parse_args(argv)
@@ -2430,6 +2807,7 @@ def main(argv: list[str]) -> int:
             "touches_test_registration": [
                 touches_test_registration(paths) for paths in probes.get("touches_test_registration", [])
             ],
+            "touches_rustdoc": [touches_rustdoc(paths) for paths in probes.get("touches_rustdoc", [])],
             "receipt_ledger": [
                 {
                     "ledger": (ledger := receipt_ledger(case["commits"], case["receipts"], dt.datetime.fromisoformat(case["now"]))),
@@ -2457,6 +2835,7 @@ def main(argv: list[str]) -> int:
                 select_batch(case["shas"], case["max_batch"], case["state"]) for case in probes.get("select_batch", [])
             ],
             "rotation": [rotation_probe(case) for case in probes.get("rotation", [])],
+            "feature_rotation": [feature_rotation_probe(case) for case in probes.get("feature_rotation", [])],
         }
         json.dump(result, sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")

@@ -200,14 +200,14 @@ impl MySqlError {
 
     /// Returns `true` if this error is transient and may succeed on retry.
     ///
-    /// Transient errors: deadlock (1213), lock wait timeout (1205),
-    /// server gone (2006), lost connection (2013), and I/O errors.
+    /// Transient errors: deadlock (1213), lock wait timeout (1205), server
+    /// gone (2006), lost connection (2013), idle disconnect (4031), and I/O.
     #[must_use]
     pub fn is_transient(&self) -> bool {
         if matches!(self, Self::Io(_) | Self::ConnectionClosed) {
             return true;
         }
-        matches!(self.server_code(), Some(1205 | 1213 | 2006 | 2013))
+        matches!(self.server_code(), Some(1205 | 1213 | 2006 | 2013 | 4031))
     }
 
     /// Returns `true` if this error is safe to retry automatically.
@@ -828,7 +828,7 @@ impl MySqlConnection {
         self.inner
             .query_in_flight
             .store(true, std::sync::atomic::Ordering::Release);
-        match self.query_stream_start(cx, sql).await {
+        match self.query_stream_start_after_setup(cx, sql).await {
             Outcome::Ok(header) => {
                 if header.finished {
                     self.inner
@@ -919,7 +919,7 @@ impl MySqlConnection {
                 Outcome::Err(Self::parse_error(&first_packet))
             }
             0x00 => {
-                // OK packet (no result set)
+                self.inner.status_flags = Self::ok_flags(&first_packet, self.inner.status_flags);
                 Outcome::Ok(MySqlStreamHeader {
                     columns: None,
                     column_indices: None,
@@ -1919,6 +1919,10 @@ struct MySqlConnectionInner {
     /// is disabled for the rest of the connection's life; client-side
     /// budget checkpoints remain the enforcement mechanism.
     max_execution_time_unsupported: bool,
+    /// Whether autocommit was on once the connection was established. The
+    /// pool does not hand a connection whose mode has since changed (for
+    /// example by `SET autocommit = 0`) to the next borrower.
+    connect_autocommit: bool,
 }
 
 impl Drop for MySqlConnectionInner {
@@ -2479,6 +2483,7 @@ impl MySqlConnection {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                connect_autocommit: true,
             },
             // Stash options so cancel_in_flight_query can reopen a fresh
             // connection to issue KILL QUERY <connection_id>
@@ -2524,6 +2529,7 @@ impl MySqlConnection {
             return outcome_from_error(e);
         }
 
+        conn.inner.connect_autocommit = conn.autocommit_enabled();
         Outcome::Ok(conn)
     }
 
@@ -2772,6 +2778,38 @@ impl MySqlConnection {
     /// when the effective value is unchanged; see
     /// [`Self::set_statement_timeout_override`] for delivery semantics and
     /// the graceful-degradation path on servers without the variable.
+    /// Starts a streaming query after the setup every other command performs:
+    /// reconciling the session statement timeout, and rolling back a
+    /// transaction that was dropped without commit or rollback. Without it a
+    /// stream ran inside the abandoned transaction, or under a stale
+    /// `max_execution_time` from an earlier nearly exhausted budget.
+    async fn query_stream_start_after_setup(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+    ) -> Outcome<MySqlStreamHeader, MySqlError> {
+        if !Self::is_session_control_statement(sql) {
+            match self.apply_statement_timeout(cx).await {
+                Outcome::Ok(()) => {}
+                Outcome::Err(error) => return Outcome::Err(error),
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+            }
+        }
+        if let Err(error) = self.drain_abandoned_transaction(cx).await {
+            return outcome_from_error(error);
+        }
+        self.query_stream_start(cx, sql).await
+    }
+
+    /// The server status flags of an OK packet, or `current` if it does not
+    /// parse. A statement answered with OK (START TRANSACTION, or DML under
+    /// autocommit=0) changes whether a transaction is open, and the pool
+    /// checks that before reusing the connection.
+    fn ok_flags(packet: &[u8], current: u16) -> u16 {
+        Self::parse_ok_packet(packet).map_or(current, |ok| ok.status_flags)
+    }
+
     async fn apply_statement_timeout(&mut self, cx: &Cx) -> Outcome<(), MySqlError> {
         if self.inner.max_execution_time_unsupported {
             return Outcome::Ok(());
@@ -4020,10 +4058,72 @@ impl MySqlConnection {
         Ok(values)
     }
 
+    /// Column-definition flag marking an UNSIGNED numeric column.
+    const COLUMN_FLAG_UNSIGNED: u16 = 0x0020;
+
+    /// The value of an UNSIGNED integer column.
+    ///
+    /// A value that fits the column's signed variant keeps it. A larger one
+    /// moves to the next wider variant, and one above `i64::MAX` is returned
+    /// as decimal text, so no unsigned value is reinterpreted as negative.
+    fn unsigned_int_value(value: u64, column_type: u8) -> MySqlValue {
+        let width = match column_type {
+            column_type::MYSQL_TYPE_TINY => 1,
+            column_type::MYSQL_TYPE_SHORT | column_type::MYSQL_TYPE_YEAR => 2,
+            column_type::MYSQL_TYPE_LONG | column_type::MYSQL_TYPE_INT24 => 4,
+            _ => 8,
+        };
+        if width <= 1
+            && let Ok(value) = i8::try_from(value)
+        {
+            return MySqlValue::Tiny(value);
+        }
+        if width <= 2
+            && let Ok(value) = i16::try_from(value)
+        {
+            return MySqlValue::Short(value);
+        }
+        if width <= 4
+            && let Ok(value) = i32::try_from(value)
+        {
+            return MySqlValue::Long(value);
+        }
+        i64::try_from(value).map_or_else(
+            |_| MySqlValue::Text(value.to_string()),
+            MySqlValue::LongLong,
+        )
+    }
+
+    fn is_unsigned_int_column(col: &MySqlColumn) -> bool {
+        col.flags & Self::COLUMN_FLAG_UNSIGNED != 0
+            && matches!(
+                col.column_type,
+                column_type::MYSQL_TYPE_TINY
+                    | column_type::MYSQL_TYPE_SHORT
+                    | column_type::MYSQL_TYPE_YEAR
+                    | column_type::MYSQL_TYPE_LONG
+                    | column_type::MYSQL_TYPE_INT24
+                    | column_type::MYSQL_TYPE_LONGLONG
+            )
+    }
+
     fn parse_binary_value(
         reader: &mut PacketReader<'_>,
         col: &MySqlColumn,
     ) -> Result<MySqlValue, MySqlError> {
+        if Self::is_unsigned_int_column(col) {
+            let value = match col.column_type {
+                column_type::MYSQL_TYPE_TINY => u64::from(reader.read_byte()?),
+                column_type::MYSQL_TYPE_SHORT | column_type::MYSQL_TYPE_YEAR => {
+                    u64::from(reader.read_u16_le()?)
+                }
+                column_type::MYSQL_TYPE_LONG | column_type::MYSQL_TYPE_INT24 => {
+                    u64::from(reader.read_u32_le()?)
+                }
+                _ => reader.read_u64_le()?,
+            };
+            return Ok(Self::unsigned_int_value(value, col.column_type));
+        }
         Ok(match col.column_type {
             column_type::MYSQL_TYPE_TINY => {
                 MySqlValue::Tiny(i8::from_le_bytes([reader.read_byte()?]))
@@ -4298,6 +4398,10 @@ impl MySqlConnection {
         let parse_err = |typ: &str| {
             MySqlError::Protocol(format!("cannot parse {typ} from text value: {text:?}"))
         };
+        if Self::is_unsigned_int_column(col) {
+            let value = text.parse().map_err(|_| parse_err("UNSIGNED"))?;
+            return Ok(Self::unsigned_int_value(value, col.column_type));
+        }
         Ok(match col.column_type {
             column_type::MYSQL_TYPE_TINY => {
                 MySqlValue::Tiny(text.parse().map_err(|_| parse_err("TINY"))?)
@@ -4885,6 +4989,19 @@ impl MySqlConnection {
     #[must_use]
     pub fn in_transaction(&self) -> bool {
         self.inner.status_flags & 0x0001 != 0 // SERVER_STATUS_IN_TRANS
+    }
+
+    fn autocommit_enabled(&self) -> bool {
+        self.inner.status_flags & 0x0002 != 0 // SERVER_STATUS_AUTOCOMMIT
+    }
+
+    /// Whether the session's autocommit mode differs from the one it had when
+    /// the connection was established. A borrower that ran
+    /// `SET autocommit = 0` would otherwise leave the next borrower's
+    /// acknowledged writes in an implicit transaction, rolled back when that
+    /// connection is discarded.
+    fn autocommit_changed(&self) -> bool {
+        self.autocommit_enabled() != self.inner.connect_autocommit
     }
 
     /// Advance the logical prepared-statement epoch for pooled reuse.
@@ -5532,7 +5649,12 @@ impl MySqlConnection {
             let mut header = [0u8; 4];
             self.read_exact(cx, &mut header).await?;
 
-            let (len, seq) = Self::decode_packet_header(header, expected_seq)?;
+            let (len, seq) = match Self::decode_packet_header(header, expected_seq) {
+                Ok(decoded) => decoded,
+                Err(mismatch) => {
+                    return Err(self.unsolicited_server_error(cx, header, mismatch).await);
+                }
+            };
             last_seq = seq;
 
             if len > 0 {
@@ -5553,6 +5675,44 @@ impl MySqlConnection {
                 return Ok((data, last_seq));
             }
         }
+    }
+
+    /// A server that drops a connection first sends an unsolicited ERR packet
+    /// with sequence 0. MySQL 8.0.24 and later do this for an idle connection
+    /// (error 4031, "disconnected by the server because of inactivity"). The
+    /// next command then reads that packet out of sequence. Mark the
+    /// connection closed and report the server's reason as a transient
+    /// ConnectionAborted I/O error, instead of a protocol desync, so callers
+    /// retry on a fresh connection. It is deliberately not a `Server` error,
+    /// because callers treat those as answers on a live connection and reopen
+    /// it. Anything else stays the original `mismatch`.
+    async fn unsolicited_server_error(
+        &mut self,
+        cx: Option<&Cx>,
+        header: [u8; 4],
+        mismatch: MySqlError,
+    ) -> MySqlError {
+        let len = u32::from(header[0]) | (u32::from(header[1]) << 8) | (u32::from(header[2]) << 16);
+        if header[3] != 0 || len == 0 || len >= MAX_PACKET_SIZE {
+            return mismatch;
+        }
+        let mut payload = vec![0u8; len as usize];
+        if self.read_exact(cx, &mut payload).await.is_err() || payload.first() != Some(&0xFF) {
+            return mismatch;
+        }
+        self.inner.closed = true;
+        // Server error Display is sanitized, so name the error by code and
+        // SQLSTATE rather than repeating the server's text.
+        let detail = match Self::parse_error(&payload) {
+            MySqlError::Server {
+                code, sql_state, ..
+            } => format!("MySQL error {code}, SQLSTATE {sql_state}"),
+            other => other.to_string(),
+        };
+        MySqlError::Io(io::Error::new(
+            io::ErrorKind::ConnectionAborted,
+            format!("server closed the connection: {detail}"),
+        ))
     }
 
     #[inline]
@@ -6421,11 +6581,18 @@ impl crate::database::pool::AsyncConnectionManager for MySqlConnectionManager {
     }
 
     async fn is_valid(&self, _cx: &Cx, conn: &mut Self::Connection) -> bool {
-        !conn.inner.closed && !conn.in_transaction() && !conn.inner.needs_rollback
+        !conn.inner.closed
+            && !conn.in_transaction()
+            && !conn.inner.needs_rollback
+            && !conn.autocommit_changed()
     }
 
     fn release_check(&self, conn: &mut Self::Connection) -> bool {
-        if conn.inner.closed || conn.in_transaction() || conn.inner.needs_rollback {
+        if conn.inner.closed
+            || conn.in_transaction()
+            || conn.inner.needs_rollback
+            || conn.autocommit_changed()
+        {
             return false;
         }
 
@@ -6498,11 +6665,39 @@ impl MySqlTransaction<'_> {
         self.conn.inner.needs_rollback = true;
     }
 
+    /// Refuses statements on a finished transaction, and on one that must roll
+    /// back.
+    ///
+    /// Inside a live transaction the connection owes a ROLLBACK only after a
+    /// savepoint was dropped without release or rollback. The work since that
+    /// savepoint is still applied, so the transaction can only roll back. Left
+    /// to the connection, the next statement would send that ROLLBACK, discard
+    /// the whole transaction, and run itself in autocommit mode.
+    fn check_open(&self) -> Result<(), MySqlError> {
+        if self.finished {
+            return Err(MySqlError::TransactionFinished);
+        }
+        if self.conn.inner.needs_rollback {
+            return Err(MySqlError::Protocol(
+                "transaction must roll back: a savepoint was dropped without release or rollback"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Commit the transaction.
+    ///
+    /// Fails without sending COMMIT when a savepoint was dropped without
+    /// release or rollback; dropping the transaction then rolls it back.
     pub async fn commit(mut self, cx: &Cx) -> Outcome<(), MySqlError> {
         if self.finished {
             trace_database_transaction(cx, "mysql", "commit", "already_finished");
             return Outcome::Err(MySqlError::TransactionFinished);
+        }
+        if let Err(error) = self.check_open() {
+            trace_database_transaction(cx, "mysql", "commit", "rollback_required");
+            return Outcome::Err(error);
         }
         trace_database_transaction(cx, "mysql", "commit", "start");
         match self.conn.execute_unchecked_internal(cx, "COMMIT").await {
@@ -6583,8 +6778,8 @@ impl MySqlTransaction<'_> {
         cx: &Cx,
         sql: &str,
     ) -> Outcome<Vec<MySqlRow>, MySqlError> {
-        if self.finished {
-            return Outcome::Err(MySqlError::TransactionFinished);
+        if let Err(error) = self.check_open() {
+            return Outcome::Err(error);
         }
         self.conn.query_unchecked_internal(cx, sql).await
     }
@@ -6604,8 +6799,8 @@ impl MySqlTransaction<'_> {
     /// **Security:** Made private to prevent SQL injection. Use prepared statements
     /// for dynamic queries or specific safe wrapper methods for static literals.
     async fn execute_unchecked_internal(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, MySqlError> {
-        if self.finished {
-            return Outcome::Err(MySqlError::TransactionFinished);
+        if let Err(error) = self.check_open() {
+            return Outcome::Err(error);
         }
         self.conn.execute_unchecked_internal(cx, sql).await
     }
@@ -6628,8 +6823,8 @@ impl MySqlTransaction<'_> {
 
     /// Prepare a statement within this transaction.
     pub async fn prepare(&mut self, cx: &Cx, sql: &str) -> Outcome<MySqlStatement, MySqlError> {
-        if self.finished {
-            return Outcome::Err(MySqlError::TransactionFinished);
+        if let Err(error) = self.check_open() {
+            return Outcome::Err(error);
         }
         self.conn.prepare(cx, sql).await
     }
@@ -6641,8 +6836,8 @@ impl MySqlTransaction<'_> {
         stmt: &MySqlStatement,
         params: &[&dyn ToSql],
     ) -> Outcome<u64, MySqlError> {
-        if self.finished {
-            return Outcome::Err(MySqlError::TransactionFinished);
+        if let Err(error) = self.check_open() {
+            return Outcome::Err(error);
         }
         self.conn.execute_prepared(cx, stmt, params).await
     }
@@ -6654,8 +6849,8 @@ impl MySqlTransaction<'_> {
         stmt: &MySqlStatement,
         params: &[&dyn ToSql],
     ) -> Outcome<Vec<MySqlRow>, MySqlError> {
-        if self.finished {
-            return Outcome::Err(MySqlError::TransactionFinished);
+        if let Err(error) = self.check_open() {
+            return Outcome::Err(error);
         }
         self.conn.query_prepared(cx, stmt, params).await
     }

@@ -8,6 +8,11 @@
 //!
 //! for **any** joint distribution of (X, Y), with no parametric assumptions.
 //!
+//! The calibrator is opt-in. `ScheduleExplorer::with_conformal_calibration`
+//! feeds it every explored run's oracle report and lists the seeds whose
+//! metrics fall outside the prediction set; callers can also feed it reports
+//! themselves. No lab oracle consults it on its own.
+//!
 //! # Algorithm: Split Conformal Prediction
 //!
 //! 1. **Calibration phase**: Accumulate conformity scores `s_1, ..., s_n` from

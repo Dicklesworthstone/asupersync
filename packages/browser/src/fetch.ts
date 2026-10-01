@@ -10,6 +10,7 @@ export const BROWSER_FETCH_LIMITS = Object.freeze({
   maxRequestsPerRuntime: 64, maxRequestBytes: 1_048_576,
   maxResponseBytes: 16_777_216, maxChunkBytes: 1_048_576,
   maxResponseHeaders: 128, maxHeaderBytes: 65_536,
+  maxTimeoutMs: 2_147_483_647,
 });
 
 export interface BrowserFetchOptions {
@@ -20,6 +21,13 @@ export interface BrowserFetchOptions {
   body?: ArrayBuffer | ArrayBufferView;
   /** Actual decoded response bytes, independent of Content-Length. */
   maxResponseBytes?: number;
+  /**
+   * Host-side deadline from admission through body EOF, in integer milliseconds.
+   * Omit for no additional deadline; zero cancels before starting host I/O.
+   * Expiry requests task cancellation and aborts fetch, but `closed` still waits
+   * for host cleanup. Browser timer throttling can delay expiry delivery.
+   */
+  timeoutMs?: number;
 }
 
 export interface BrowserFetchResponse {
@@ -158,12 +166,14 @@ interface Prepared {
   headers: [string, string][];
   body?: Uint8Array;
   maxResponseBytes: number;
+  timeoutMs?: number;
 }
 
 function prepare(options: BrowserFetchOptions, grant: FetchAuthority): Prepared {
   if (!options || typeof options !== "object") throw new TypeError("fetch options must be an object");
   const { url: suppliedUrl, method: suppliedMethod = "GET", credentials = false,
-    headers: suppliedHeaders = [], body, maxResponseBytes = BROWSER_FETCH_LIMITS.maxResponseBytes } = options;
+    headers: suppliedHeaders = [], body, maxResponseBytes = BROWSER_FETCH_LIMITS.maxResponseBytes,
+    timeoutMs } = options;
   if (typeof suppliedUrl !== "string" || suppliedUrl.length * 2 > BROWSER_FETCH_LIMITS.maxHeaderBytes) throw new RangeError("fetch request URL exceeds limit");
   const url = httpUrl(suppliedUrl);
   if (typeof suppliedMethod !== "string") throw new TypeError("fetch method must be a string");
@@ -171,6 +181,10 @@ function prepare(options: BrowserFetchOptions, grant: FetchAuthority): Prepared 
   if (!METHODS.has(method)) throw new TypeError("unsupported fetch method");
   if (typeof credentials !== "boolean") throw new TypeError("fetch credentials must be a boolean");
   if (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes < 0) throw new TypeError("maxResponseBytes must be a non-negative safe integer");
+  if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs < 0
+      || timeoutMs > BROWSER_FETCH_LIMITS.maxTimeoutMs)) {
+    throw failure("fetch timeoutMs must be an integer between 0 and maxTimeoutMs");
+  }
   if (!(grant.allowedOrigins?.includes("*") || grant.allowedOrigins?.includes(url.origin))
       || !grant.allowedMethods?.includes(method as FetchMethod)
       || (credentials && !grant.allowCredentials)) {
@@ -202,7 +216,7 @@ function prepare(options: BrowserFetchOptions, grant: FetchAuthority): Prepared 
     if (view.byteLength > BROWSER_FETCH_LIMITS.maxRequestBytes) throw new RangeError("fetch request body exceeds limit");
     copied = view.slice();
   }
-  return { url: url.href, method, credentials, headers, body: copied, maxResponseBytes };
+  return { url: url.href, method, credentials, headers, body: copied, maxResponseBytes, timeoutMs };
 }
 
 function asFailure(error: unknown): Failure {
@@ -260,6 +274,7 @@ export function createBrowserFetchManager(dependencies: {
     terminalFailure: Failure | null = null;
     creditHeld = true;
     cancelling: Promise<Outcome<void>> | null = null;
+    clearDeadline: (() => void) | null = null;
     readonly taskKey: string;
 
     constructor(readonly scopeKey: string, readonly grant: BrowserFetchGrant,
@@ -275,6 +290,7 @@ export function createBrowserFetchManager(dependencies: {
     finish(outcome: Outcome<void>): void {
       if (this.completed) return;
       this.completed = true;
+      this.disarmDeadline();
       let publicationFailed = false;
       if (!this.ownerReleased) {
         try {
@@ -313,7 +329,13 @@ export function createBrowserFetchManager(dependencies: {
 
     stop(outcome: Failure): void {
       if (this.stopped || this.completed) return;
+      // response() can publish this envelope before asynchronous cleanup ends.
+      // An ABI refusal must be just as immutable as our local cancellations.
+      if (outcome.outcome === "cancelled") Object.freeze(outcome.cancellation);
+      if (outcome.outcome === "err") Object.freeze(outcome.failure);
+      Object.freeze(outcome);
       this.stopped = outcome;
+      this.disarmDeadline();
       this.head.resolve(outcome);
       const reader = this.reader;
       const reading = this.reading;
@@ -332,10 +354,72 @@ export function createBrowserFetchManager(dependencies: {
       await attempt(() => response.body?.cancel(this.stopped));
     }
 
+    disarmDeadline(): void {
+      const clear = this.clearDeadline;
+      this.clearDeadline = null;
+      clear?.();
+    }
+
+    expireDeadline(): void {
+      if (this.stopped || this.completed) return;
+      void this.requestCancel("deadline", `fetch deadline exceeded after ${this.request.timeoutMs} ms`)
+        .then((receipt) => {
+          // An implicit cancellation has no direct caller to observe refusal.
+          // Fail the operation with that receipt rather than silently running
+          // past its deadline or claiming an admitted cancellation. Publication
+          // refusal still retains its task/credit through the ordinary path.
+          if (receipt.outcome !== "ok" && !this.stopped && !this.completed) this.stop(receipt);
+        });
+    }
+
+    armDeadline(host: Record<string, unknown> | undefined): void {
+      const duration = this.request.timeoutMs;
+      if (duration === undefined || this.stopped) return;
+      const schedule = host?.setTimeout;
+      if (this.stopped) return;
+      const clear = host?.clearTimeout;
+      if (this.stopped) return;
+      if (typeof schedule !== "function" || typeof clear !== "function") {
+        throw failure("fetch deadlines require host setTimeout and clearTimeout");
+      }
+      const timer: { fire: (() => void) | null; handle: unknown; armed: boolean; disposed: boolean; cleared: boolean } = {
+        fire: () => this.expireDeadline(), handle: undefined, armed: false, disposed: false, cleared: false,
+      };
+      const disarm = () => {
+        // Invalidate the callback even if a host clear throws or a queued
+        // callback arrives late. Do not retain the operation through a timer
+        // that can no longer affect it.
+        timer.fire = null;
+        timer.disposed = true;
+        if (timer.armed && !timer.cleared) {
+          timer.cleared = true;
+          try { Reflect.apply(clear, host, [timer.handle]); } catch { /* Preserve the terminal outcome. */ }
+        }
+      };
+      // Publish ownership before calling the host, which may reenter or invoke
+      // the callback synchronously before returning its timer handle.
+      this.clearDeadline = disarm;
+      try {
+        timer.handle = Reflect.apply(schedule, host, [() => {
+          const fire = timer.fire;
+          timer.fire = null;
+          fire?.();
+        }, duration]);
+        timer.armed = true;
+        if (timer.disposed) disarm();
+      } catch (error) {
+        this.disarmDeadline();
+        throw error;
+      }
+    }
+
     async launch(): Promise<void> {
       let response: Response | undefined;
       try {
+        if (this.request.timeoutMs === 0) { this.expireDeadline(); return; }
         const host = dependencies.globalObject();
+        this.armDeadline(host);
+        if (this.stopped) return;
         const Controller = host?.AbortController;
         if (this.stopped) return;
         if (typeof Controller !== "function") throw new TypeError("AbortController is unavailable");

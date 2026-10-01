@@ -14,27 +14,32 @@
 //! - Natural method chaining: `Builder::new().option1(x).option2(y).build()`
 //! - Prevents partial configuration state from escaping
 //!
-//! ```ignore
+//! ```no_run
+//! use asupersync::runtime::RuntimeBuilder;
+//!
 //! // Preferred pattern
 //! let runtime = RuntimeBuilder::new()
 //!     .worker_threads(4)
 //!     .poll_budget(128)
 //!     .build()?;
+//! # Ok::<(), asupersync::error::Error>(())
 //! ```
 //!
 //! ## Sub-Builder Pattern
 //!
 //! For complex nested configuration, use closures that receive sub-builders:
 //!
-//! ```ignore
+//! ```no_run
+//! use asupersync::runtime::RuntimeBuilder;
+//! use std::time::Duration;
+//!
 //! let runtime = RuntimeBuilder::new()
-//!     .scheduler(|s| s
-//!         .steal_batch_size(16)
-//!         .parking_enabled(true))
+//!     .steal_batch_size(16)
 //!     .deadline_monitoring(|m| m
 //!         .check_interval(Duration::from_secs(1))
 //!         .enabled(true))
 //!     .build()?;
+//! # Ok::<(), asupersync::error::Error>(())
 //! ```
 //!
 //! This keeps the main builder API clean while allowing deep customization.
@@ -60,8 +65,13 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use asupersync::types::builder::{BuildError, BuildResult};
+//!
+//! struct MyConfig {
+//!     name: String,
+//!     threads: usize,
+//! }
 //!
 //! struct MyBuilder {
 //!     name: Option<String>,
@@ -119,28 +129,44 @@ use core::fmt;
 ///
 /// # Usage
 ///
-/// ```ignore
-/// fn build(self) -> BuildResult<Config> {
-///     // Check required fields
-///     let name = self.name.ok_or_else(||
-///         BuildError::missing_required("name")
-///     )?;
+/// ```
+/// use asupersync::types::{BuildError, BuildResult};
 ///
-///     // Validate values
-///     if self.threads == 0 {
-///         return Err(BuildError::invalid_value("threads", "must be >= 1"));
+/// struct Config {
+///     name: String,
+///     threads: usize,
+/// }
+///
+/// struct ConfigBuilder {
+///     name: Option<String>,
+///     threads: usize,
+///     min_connections: u64,
+///     max_connections: u64,
+/// }
+///
+/// impl ConfigBuilder {
+///     fn build(self) -> BuildResult<Config> {
+///         // Check required fields
+///         let name = self.name.ok_or_else(||
+///             BuildError::missing_required("name")
+///         )?;
+///
+///         // Validate values
+///         if self.threads == 0 {
+///             return Err(BuildError::invalid_value("threads", "must be >= 1"));
+///         }
+///
+///         // Check ranges
+///         if self.min_connections > self.max_connections {
+///             return Err(BuildError::invalid_range(
+///                 "connections",
+///                 self.min_connections,
+///                 self.max_connections,
+///             ));
+///         }
+///
+///         Ok(Config { name, threads: self.threads })
 ///     }
-///
-///     // Check ranges
-///     if self.min_connections > self.max_connections {
-///         return Err(BuildError::invalid_range(
-///             "connections",
-///             self.min_connections,
-///             self.max_connections,
-///         ));
-///     }
-///
-///     Ok(Config { name, threads: self.threads, ... })
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq)]
@@ -442,8 +468,12 @@ pub mod validate {
     /// Validates that a probability is in [0.0, 1.0].
     ///
     /// # Example
-    /// ```ignore
-    /// validate::probability("cancel_rate", self.cancel_rate)?;
+    /// ```
+    /// use asupersync::types::builder::validate;
+    ///
+    /// validate::probability("cancel_rate", 0.25)?;
+    /// assert!(validate::probability("cancel_rate", 1.5).is_err());
+    /// # Ok::<(), asupersync::types::BuildError>(())
     /// ```
     #[inline]
     pub fn probability(field: &'static str, value: f64) -> BuildResult<()> {
@@ -457,8 +487,12 @@ pub mod validate {
     /// Validates that a value is > 0.
     ///
     /// # Example
-    /// ```ignore
-    /// validate::positive("worker_threads", self.threads)?;
+    /// ```
+    /// use asupersync::types::builder::validate;
+    ///
+    /// validate::positive("worker_threads", 4)?;
+    /// assert!(validate::positive("worker_threads", 0).is_err());
+    /// # Ok::<(), asupersync::types::BuildError>(())
     /// ```
     #[inline]
     pub fn positive(field: &'static str, value: usize) -> BuildResult<()> {
@@ -472,8 +506,12 @@ pub mod validate {
     /// Validates that a value is >= 1.
     ///
     /// # Example
-    /// ```ignore
-    /// validate::at_least_one("replicas", self.replicas)?;
+    /// ```
+    /// use asupersync::types::builder::validate;
+    ///
+    /// validate::at_least_one("replicas", 3)?;
+    /// assert!(validate::at_least_one("replicas", 0).is_err());
+    /// # Ok::<(), asupersync::types::BuildError>(())
     /// ```
     #[inline]
     pub fn at_least_one(field: &'static str, value: usize) -> BuildResult<()> {
@@ -487,8 +525,12 @@ pub mod validate {
     /// Validates that min <= max.
     ///
     /// # Example
-    /// ```ignore
-    /// validate::range("connections", self.min_conn, self.max_conn)?;
+    /// ```
+    /// use asupersync::types::builder::validate;
+    ///
+    /// validate::range("connections", 2, 16)?;
+    /// assert!(validate::range("connections", 16, 2).is_err());
+    /// # Ok::<(), asupersync::types::BuildError>(())
     /// ```
     #[inline]
     pub fn range(field: &'static str, min: u64, max: u64) -> BuildResult<()> {
@@ -502,8 +544,13 @@ pub mod validate {
     /// Validates that a duration is non-zero.
     ///
     /// # Example
-    /// ```ignore
-    /// validate::nonzero_duration("timeout", self.timeout)?;
+    /// ```
+    /// use asupersync::types::builder::validate;
+    /// use std::time::Duration;
+    ///
+    /// validate::nonzero_duration("timeout", Duration::from_secs(5))?;
+    /// assert!(validate::nonzero_duration("timeout", Duration::ZERO).is_err());
+    /// # Ok::<(), asupersync::types::BuildError>(())
     /// ```
     #[inline]
     pub fn nonzero_duration(field: &'static str, duration: Duration) -> BuildResult<()> {
@@ -517,8 +564,12 @@ pub mod validate {
     /// Validates that a string is not empty.
     ///
     /// # Example
-    /// ```ignore
-    /// validate::non_empty_string("name", &self.name)?;
+    /// ```
+    /// use asupersync::types::builder::validate;
+    ///
+    /// validate::non_empty_string("name", "worker")?;
+    /// assert!(validate::non_empty_string("name", "").is_err());
+    /// # Ok::<(), asupersync::types::BuildError>(())
     /// ```
     #[inline]
     pub fn non_empty_string(field: &'static str, value: &str) -> BuildResult<()> {
@@ -532,8 +583,13 @@ pub mod validate {
     /// Validates that an option is Some, returning the inner value.
     ///
     /// # Example
-    /// ```ignore
-    /// let name = validate::required("name", self.name)?;
+    /// ```
+    /// use asupersync::types::builder::validate;
+    ///
+    /// let name = validate::required("name", Some("worker"))?;
+    /// assert_eq!(name, "worker");
+    /// assert!(validate::required::<&str>("name", None).is_err());
+    /// # Ok::<(), asupersync::types::BuildError>(())
     /// ```
     #[inline]
     pub fn required<T>(field: &'static str, value: Option<T>) -> BuildResult<T> {

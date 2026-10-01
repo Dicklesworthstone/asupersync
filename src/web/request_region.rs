@@ -24,8 +24,10 @@
 //!     let cx = ctx.cx_narrow::<cap::CapSet<true, true, false, false, false>>();
 //!     cx.checkpoint().ok();
 //!
-//!     // Spawn a background task — owned by this request's region.
-//!     ctx.cx().spawn_task(audit_log(ctx.request()));
+//!     // Spawn a background task, owned by this request's region. The factory
+//!     // receives the task's own Cx.
+//!     let summary = audit_summary(ctx.request());
+//!     let _audit = ctx.cx().spawn(move |task_cx| audit_log(task_cx, summary));
 //!
 //!     // If this handler panics or is cancelled, the audit task is
 //!     // automatically drained and finalizers run.

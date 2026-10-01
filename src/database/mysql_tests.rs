@@ -485,6 +485,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                connect_autocommit: false,
             },
             options: None,
         };
@@ -864,6 +865,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                connect_autocommit: false,
             },
             options: None,
         }
@@ -897,6 +899,7 @@ mod tests {
                     statement_timeout_override: None,
                     applied_max_execution_time_ms: None,
                     max_execution_time_unsupported: false,
+                    connect_autocommit: false,
                 },
                 options: None,
             },
@@ -962,6 +965,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                connect_autocommit: false,
             },
             options: None,
         };
@@ -1013,6 +1017,7 @@ mod tests {
                     statement_timeout_override: None,
                     applied_max_execution_time_ms: None,
                     max_execution_time_unsupported: false,
+                    connect_autocommit: false,
                 },
                 options: None,
             };
@@ -1189,6 +1194,223 @@ mod tests {
         assert!(
             !conn.inner.closed,
             "completed savepoint exchanges must leave the mysql connection open"
+        );
+    }
+
+    /// A savepoint dropped without release or rollback leaves the transaction
+    /// able only to roll back. Its later statements and its commit must fail
+    /// without reaching the wire. Before, the next statement sent an implicit
+    /// ROLLBACK (discarding the whole transaction), ran in autocommit mode,
+    /// and commit() returned Ok.
+    #[test]
+    fn dropped_savepoint_refuses_further_statements_and_commit() {
+        use crate::database::transaction::MySqlSavepoint;
+
+        const SERVER_STATUS_IN_TRANS: u16 = 0x0001;
+
+        init_test("mysql_dropped_savepoint_refuses_further_statements_and_commit");
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        conn.inner.status_flags = SERVER_STATUS_IN_TRANS;
+        let cx = Cx::for_testing();
+
+        let server = std::thread::spawn(move || {
+            peer.set_read_timeout(Some(Duration::from_millis(500)))
+                .expect("set read timeout");
+            let mut seen = Vec::new();
+            loop {
+                let mut header = [0u8; 4];
+                if std::io::Read::read_exact(&mut peer, &mut header).is_err() {
+                    return seen;
+                }
+                let len = usize::from(header[0])
+                    | (usize::from(header[1]) << 8)
+                    | (usize::from(header[2]) << 16);
+                let mut payload = vec![0u8; len];
+                std::io::Read::read_exact(&mut peer, &mut payload).expect("read command payload");
+                seen.push(command_sql(&payload));
+                write_response_packet(&mut peer, 1, ok_packet_payload(0, SERVER_STATUS_IN_TRANS));
+            }
+        });
+
+        let (statement, commit) = run(async {
+            let mut tx = MySqlTransaction {
+                conn: &mut conn,
+                finished: false,
+                isolation_level: None,
+                read_only: false,
+                obligation: None,
+            };
+            match MySqlSavepoint::new(&mut tx, &cx, "sp1").await {
+                Outcome::Ok(savepoint) => drop(savepoint),
+                other => panic!("expected sp1 savepoint, got {other:?}"),
+            }
+            let statement = tx.execute_static_sql(&cx, "SAVEPOINT sp2").await;
+            let commit = tx.commit(&cx).await;
+            (statement, commit)
+        });
+
+        let seen = server.join().expect("mysql server thread should finish");
+        for (what, outcome) in [("statement", statement.map(drop)), ("commit", commit)] {
+            match outcome {
+                Outcome::Err(MySqlError::Protocol(message)) => {
+                    assert!(message.contains("must roll back"), "{what}: {message}");
+                }
+                other => panic!("{what} after a dropped savepoint must fail, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            seen,
+            ["SAVEPOINT sp1"],
+            "nothing after the dropped savepoint may reach the server"
+        );
+        assert!(
+            conn.inner.needs_rollback,
+            "the connection still owes the rollback"
+        );
+    }
+
+    /// query_stream performs the setup every other command does: it rolls
+    /// back an abandoned transaction first, and it records the status flags
+    /// of an OK answer, so a transaction it opens is seen by the pool. Before,
+    /// the stream ran inside the abandoned transaction, and
+    /// `query_stream("START TRANSACTION")` left `in_transaction()` false.
+    #[test]
+    fn query_stream_rolls_back_an_abandoned_transaction_and_tracks_ok_status() {
+        const SERVER_STATUS_IN_TRANS: u16 = 0x0001;
+        const SERVER_STATUS_AUTOCOMMIT: u16 = 0x0002;
+
+        init_test("mysql_query_stream_rolls_back_an_abandoned_transaction_and_tracks_ok_status");
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        conn.inner.status_flags = SERVER_STATUS_IN_TRANS | SERVER_STATUS_AUTOCOMMIT;
+        conn.inner.needs_rollback = true;
+        let cx = Cx::for_testing();
+
+        let server = std::thread::spawn(move || {
+            peer.set_read_timeout(Some(Duration::from_millis(500)))
+                .expect("set read timeout");
+            let mut seen = Vec::new();
+            loop {
+                let mut header = [0u8; 4];
+                if std::io::Read::read_exact(&mut peer, &mut header).is_err() {
+                    return seen;
+                }
+                let len = usize::from(header[0])
+                    | (usize::from(header[1]) << 8)
+                    | (usize::from(header[2]) << 16);
+                let mut payload = vec![0u8; len];
+                std::io::Read::read_exact(&mut peer, &mut payload).expect("read command payload");
+                let sql = command_sql(&payload);
+                let status = if sql == "START TRANSACTION" {
+                    SERVER_STATUS_IN_TRANS | SERVER_STATUS_AUTOCOMMIT
+                } else {
+                    SERVER_STATUS_AUTOCOMMIT
+                };
+                seen.push(sql);
+                write_response_packet(&mut peer, 1, ok_packet_payload(0, status));
+            }
+        });
+
+        run(async {
+            match conn.query_stream(&cx, "START TRANSACTION").await {
+                Outcome::Ok(stream) => drop(stream),
+                Outcome::Err(error) => panic!("expected a finished stream, got {error:?}"),
+                Outcome::Cancelled(_) | Outcome::Panicked(_) => {
+                    panic!("expected a finished stream")
+                }
+            }
+        });
+
+        let seen = server.join().expect("mysql server thread should finish");
+        assert_eq!(
+            seen,
+            ["ROLLBACK", "START TRANSACTION"],
+            "the abandoned transaction is rolled back before the stream"
+        );
+        assert!(!conn.inner.needs_rollback);
+        assert!(!conn.inner.closed);
+        assert!(
+            conn.in_transaction(),
+            "the transaction the stream opened is visible to the pool"
+        );
+    }
+
+    /// A pooled connection whose autocommit mode changed since it was
+    /// established (for example `SET autocommit = 0`) is not reused: the next
+    /// borrower's acknowledged writes would sit in an implicit transaction,
+    /// rolled back when that connection is later discarded. Servers whose
+    /// default is autocommit off keep their connections as long as the mode
+    /// is unchanged.
+    #[test]
+    fn pool_refuses_a_connection_whose_autocommit_mode_changed() {
+        use crate::database::pool::AsyncConnectionManager;
+
+        const SERVER_STATUS_AUTOCOMMIT: u16 = 0x0002;
+
+        let manager = MySqlConnectionManager::new(
+            MySqlConnectOptions::parse("mysql://user:pw@localhost/db").expect("parse options"),
+        );
+        let cx = Cx::for_testing();
+        for (connect_autocommit, status_flags, reusable) in [
+            (true, SERVER_STATUS_AUTOCOMMIT, true),
+            (true, 0, false),
+            (false, 0, true),
+            (false, SERVER_STATUS_AUTOCOMMIT, false),
+        ] {
+            let mut conn = make_test_connection();
+            conn.inner.connect_autocommit = connect_autocommit;
+            conn.inner.status_flags = status_flags;
+            assert_eq!(
+                run(manager.is_valid(&cx, &mut conn)),
+                reusable,
+                "is_valid connect_autocommit={connect_autocommit} status={status_flags:#06x}"
+            );
+            assert_eq!(
+                manager.release_check(&mut conn),
+                reusable,
+                "release_check connect_autocommit={connect_autocommit} status={status_flags:#06x}"
+            );
+        }
+    }
+
+    /// MySQL 8.0.24+ closes an idle connection after an unsolicited ERR packet
+    /// (error 4031) with sequence 0. The next command reads it out of
+    /// sequence. That must surface as a transient loss of the connection, not
+    /// a protocol desync, and leave the connection closed.
+    #[test]
+    fn idle_disconnect_notice_read_out_of_sequence_is_a_transient_connection_loss() {
+        init_test("mysql_idle_disconnect_notice_read_out_of_sequence");
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let cx = Cx::for_testing();
+        write_response_packet(
+            &mut peer,
+            0,
+            error_packet_payload(
+                4031,
+                "HY000",
+                "The client was disconnected by the server because of inactivity.",
+            ),
+        );
+        let server = std::thread::spawn(move || {
+            peer.set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+            let command = read_client_command(&mut peer);
+            command_sql(&command)
+        });
+
+        let outcome = run(conn.query_static_sql(&cx, "SELECT 1"));
+        let sent = server.join().expect("mysql server thread should finish");
+        assert_eq!(sent, "SELECT 1");
+        match outcome {
+            Outcome::Err(error) => {
+                assert!(error.is_transient(), "{error:?}");
+                assert!(error.to_string().contains("MySQL error 4031"), "{error}");
+            }
+            Outcome::Ok(_) => panic!("an idle-disconnected connection cannot answer"),
+            Outcome::Cancelled(_) | Outcome::Panicked(_) => panic!("unexpected outcome"),
+        }
+        assert!(
+            conn.inner.closed,
+            "the connection the server dropped stays closed"
         );
     }
 
@@ -2129,6 +2351,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                connect_autocommit: false,
             },
             options: None,
         };
@@ -2218,6 +2441,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                connect_autocommit: false,
             },
             options: None,
         };
@@ -2283,6 +2507,68 @@ mod tests {
 
         let err = MySqlConnection::parse_text_row(&[0x00, 0x00], &columns).unwrap_err();
         assert!(matches!(err, MySqlError::Protocol(_)));
+    }
+
+    /// UNSIGNED integer columns are decoded as unsigned in both protocols. A
+    /// value in range for the column's signed variant keeps it; a larger one
+    /// moves to a wider variant, and one above `i64::MAX` becomes decimal
+    /// text. Before, the binary protocol reinterpreted the bits as negative
+    /// numbers and the text protocol failed on them.
+    #[test]
+    fn unsigned_integer_columns_never_decode_as_negative() {
+        let unsigned = |name: &str, code: u8| MySqlColumn {
+            column_type: code,
+            charset: MYSQL_BINARY_CHARSET_ID,
+            flags: MySqlConnection::COLUMN_FLAG_UNSIGNED,
+            ..test_var_string_column(name)
+        };
+        let columns = vec![
+            unsigned("tiny", column_type::MYSQL_TYPE_TINY),
+            unsigned("short", column_type::MYSQL_TYPE_SHORT),
+            unsigned("long", column_type::MYSQL_TYPE_LONG),
+            unsigned("longlong", column_type::MYSQL_TYPE_LONGLONG),
+            unsigned("small", column_type::MYSQL_TYPE_LONG),
+            MySqlColumn {
+                flags: 0,
+                ..unsigned("signed", column_type::MYSQL_TYPE_TINY)
+            },
+        ];
+        let expected = vec![
+            MySqlValue::Short(200),
+            MySqlValue::Long(65_535),
+            MySqlValue::LongLong(3_000_000_000),
+            MySqlValue::Text(u64::MAX.to_string()),
+            MySqlValue::Long(7),
+            MySqlValue::Tiny(-5),
+        ];
+
+        let mut binary = vec![0x00, 0x00, 200];
+        binary.extend_from_slice(&u16::MAX.to_le_bytes());
+        binary.extend_from_slice(&3_000_000_000_u32.to_le_bytes());
+        binary.extend_from_slice(&u64::MAX.to_le_bytes());
+        binary.extend_from_slice(&7_u32.to_le_bytes());
+        binary.extend_from_slice(&(-5_i8).to_le_bytes());
+        assert_eq!(
+            MySqlConnection::parse_binary_row(&binary, &columns).expect("parse binary row"),
+            expected
+        );
+
+        let mut text = Vec::new();
+        for value in [
+            "200",
+            "65535",
+            "3000000000",
+            "18446744073709551615",
+            "7",
+            "-5",
+        ] {
+            text.push(u8::try_from(value.len()).expect("short text value"));
+            text.extend_from_slice(value.as_bytes());
+        }
+        assert_eq!(
+            MySqlConnection::parse_text_row(&text, &columns).expect("parse text row"),
+            expected
+        );
     }
 
     #[test]
@@ -2862,6 +3148,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                connect_autocommit: false,
             },
             options: None,
         };
@@ -2945,6 +3232,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                connect_autocommit: false,
             },
             options: None,
         };
@@ -3156,6 +3444,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                connect_autocommit: false,
             },
             options: None,
         };
@@ -3272,6 +3561,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                connect_autocommit: false,
             },
             options: None,
         };
@@ -3350,6 +3640,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                connect_autocommit: false,
             },
             options: None,
         };
@@ -3483,6 +3774,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                connect_autocommit: false,
             },
             options: None,
         };
@@ -3596,6 +3888,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                connect_autocommit: false,
             },
             options: None,
         };
@@ -3700,6 +3993,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                connect_autocommit: false,
             },
             options: None,
         };
@@ -3799,6 +4093,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                connect_autocommit: false,
             },
             options: None,
         };
@@ -3919,6 +4214,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                connect_autocommit: false,
             },
             options: None,
         };
@@ -4112,6 +4408,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                connect_autocommit: false,
             },
             options: None,
         };
@@ -4200,6 +4497,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                connect_autocommit: false,
             },
             options: None,
         };
@@ -4731,6 +5029,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                connect_autocommit: false,
             },
             options: None,
         };
@@ -4990,6 +5289,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                connect_autocommit: false,
             },
             options: None,
         };
@@ -5074,6 +5374,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                connect_autocommit: false,
             },
             options: None,
         };

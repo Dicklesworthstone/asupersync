@@ -12,7 +12,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use asupersync::runtime::spawn_blocking;
 //! use std::io;
 //!
@@ -312,9 +312,11 @@ pub(crate) async fn drive_drained_blocking<Caps, F, T>(
         result: None,
     };
     if control.checkpoint().is_err() {
+        // Close the claim gate, but still hand the envelope to the pool: its
+        // captures may block when destroyed, and this is an executor thread.
+        // A worker skips or declines the closure and destroys them, and the
+        // wait below then reports any capture panic (br-asupersync-q1pr9n).
         state.cancel(control.cancel_reason().unwrap_or_else(crate::types::CancelReason::shutdown));
-        drop(envelope);
-        return;
     }
     let task = pool.spawn(move || envelope.run());
     let mut wait = DrainedBlockingWait {

@@ -202,8 +202,10 @@ impl NatsError {
 /// existing legacy user/password/token path.
 ///
 /// Subject-permission enforcement is correctly delegated to the
-/// server; the client propagates server `-ERR 'Permissions Violation'`
-/// as `NatsError::Server` (see test `server_err_propagates_as_nats_error`).
+/// server; an operation that waits on the server returns its
+/// `-ERR 'Permissions Violation ...'` as `NatsError::Server` (see test
+/// `handle_pending_messages_propagates_server_error`). The server keeps the
+/// connection open after such an error, and so does a supervised client.
 #[derive(Clone)]
 pub struct NatsConfig {
     /// Host address.
@@ -276,6 +278,11 @@ pub struct NatsConfig {
     /// Enable automatic reconnection on TCP failures.
     pub auto_reconnect: bool,
     /// Maximum number of reconnection attempts (0 = infinite).
+    ///
+    /// A supervised client keeps counting across reconnections that the server
+    /// refuses with an error before they have stayed up for
+    /// `max_reconnect_delay`, so a server that accepts the handshake and then
+    /// refuses the client is not retried forever.
     pub max_reconnect_attempts: u32,
     /// Initial reconnection delay.
     pub reconnect_delay: Duration,
@@ -1417,6 +1424,12 @@ struct SharedState {
     closed: std::sync::atomic::AtomicBool,
     connected: std::sync::atomic::AtomicBool,
     processed_epoch: AtomicU64,
+    /// Set once a supervisor owns the connection. Only a supervised client
+    /// unsubscribes dropped subscriptions.
+    supervised: std::sync::atomic::AtomicBool,
+    /// SIDs of subscriptions dropped without an unsubscribe, awaiting their
+    /// UNSUB. Lock order: `subscriptions`, then `dropped_sids`.
+    dropped_sids: Mutex<Vec<u64>>,
 }
 
 impl SharedState {
@@ -1427,6 +1440,8 @@ impl SharedState {
             closed: std::sync::atomic::AtomicBool::new(false),
             connected: std::sync::atomic::AtomicBool::new(false),
             processed_epoch: AtomicU64::new(0),
+            supervised: std::sync::atomic::AtomicBool::new(false),
+            dropped_sids: Mutex::new(Vec::new()),
         }
     }
 }
@@ -1601,6 +1616,23 @@ struct NatsConnection {
     /// Once TLS is determined to be required (by client config OR initial
     /// server INFO), it remains required for all subsequent reconnections.
     tls_required_on_connect: bool,
+}
+
+/// Reconnect progress a supervised client carries from one recovery to the
+/// next.
+///
+/// A connection that fails before it has stayed up for `max_reconnect_delay`
+/// waits `reconnect_delay` before the next attempt instead of reconnecting at
+/// once. When the server refused it with an `-ERR` (an authorization
+/// violation, for example), the backoff keeps growing and the attempts count
+/// toward `max_reconnect_attempts`. Without this, a server that completed the
+/// handshake and then refused the client was reconnected at once,
+/// indefinitely.
+#[derive(Debug, Default)]
+struct ReconnectStreak {
+    attempts: u32,
+    next_delay: Option<Duration>,
+    reconnected_at: Option<Time>,
 }
 
 impl fmt::Debug for NatsConnection {
@@ -1944,16 +1976,39 @@ impl NatsConnection {
         Ok(())
     }
 
-    /// Attempt to reconnect when the TCP connection is lost.
-    async fn try_reconnect(&mut self, cx: &Cx) -> Result<(), NatsError> {
+    /// Attempt to reconnect when the TCP connection is lost, continuing
+    /// `streak` when the connection it last produced failed before it was
+    /// stable. `refused` says the server ended that connection with an
+    /// `-ERR`. A caller outside the supervisor passes a fresh streak.
+    ///
+    /// This stays a single async fn on purpose: every wrapper layer deepens
+    /// the future type that callers' `Send` checks walk, and JetStream's
+    /// futures already sit near the compiler's recursion limit.
+    async fn try_reconnect(
+        &mut self,
+        cx: &Cx,
+        streak: &mut ReconnectStreak,
+        refused: bool,
+    ) -> Result<(), NatsError> {
         if !self.config.auto_reconnect {
             return Err(NatsError::NotConnected);
         }
 
         cx.trace("nats: connection lost, attempting to reconnect");
 
-        let mut attempt = 0;
-        let mut delay = self.config.reconnect_delay;
+        let stable_after = self.config.max_reconnect_delay;
+        let failed_quickly = streak.reconnected_at.is_some_and(|reconnected_at| {
+            Duration::from_nanos(timeout_now(cx).duration_since(reconnected_at)) < stable_after
+        });
+        let (mut attempt, mut delay) = if failed_quickly && refused {
+            (
+                streak.attempts,
+                streak.next_delay.unwrap_or(self.config.reconnect_delay),
+            )
+        } else {
+            (0, self.config.reconnect_delay)
+        };
+        let mut wait_first = failed_quickly;
 
         loop {
             cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
@@ -1967,7 +2022,8 @@ impl NatsConnection {
                 return Err(NatsError::NotConnected);
             }
 
-            if attempt > 0 {
+            if attempt > 0 || wait_first {
+                wait_first = false;
                 cx.trace(&format!(
                     "nats: reconnect attempt {} after {}ms delay",
                     attempt + 1,
@@ -1982,7 +2038,7 @@ impl NatsConnection {
                 .await?;
 
                 // Exponential backoff with max cap
-                delay = std::cmp::min(delay * 2, self.config.max_reconnect_delay);
+                delay = std::cmp::min(delay.saturating_mul(2), self.config.max_reconnect_delay);
             }
 
             attempt += 1;
@@ -2008,6 +2064,11 @@ impl NatsConnection {
                     match self.complete_reconnect_handshake(cx).await {
                         Ok(()) => {
                             cx.trace("nats: reconnection successful");
+                            *streak = ReconnectStreak {
+                                attempts: attempt,
+                                next_delay: Some(delay),
+                                reconnected_at: Some(timeout_now(cx)),
+                            };
                             return Ok(());
                         }
                         Err(NatsError::Cancelled) => return Err(NatsError::Cancelled),
@@ -2075,6 +2136,8 @@ impl NatsConnection {
     async fn replay_subscriptions_after_reconnect(&mut self, cx: &Cx) -> Result<usize, NatsError> {
         let mut subscriptions = {
             let subscriptions = self.state.subscriptions.lock();
+            // The new connection carries none of the dropped subscriptions.
+            self.state.dropped_sids.lock().clear();
             subscriptions
                 .iter()
                 .map(|(&sid, state)| SubscriptionReplay {
@@ -2208,6 +2271,26 @@ impl NatsConnection {
             self.connected = true;
         }
 
+        Ok(())
+    }
+
+    /// Send UNSUB for subscriptions dropped without an unsubscribe.
+    ///
+    /// Like every multi-part write, the connection stays marked unusable
+    /// until the whole batch is flushed.
+    async fn flush_dropped_subscriptions(&mut self, cx: &Cx) -> Result<(), NatsError> {
+        let sids = std::mem::take(&mut *self.state.dropped_sids.lock());
+        if sids.is_empty() || !self.connected {
+            return Ok(());
+        }
+        let mut cmd = String::new();
+        for sid in sids {
+            cmd.push_str(&format!("UNSUB {sid}\r\n"));
+        }
+        self.connected = false;
+        nats_io(cx, self.stream.write_all(cmd.as_bytes())).await?;
+        nats_io(cx, self.stream.flush()).await?;
+        self.connected = true;
         Ok(())
     }
 
@@ -2513,7 +2596,8 @@ impl NatsConnection {
 
         if !self.connected {
             // Try to reconnect if auto-reconnect is enabled
-            self.try_reconnect(cx).await?;
+            self.try_reconnect(cx, &mut ReconnectStreak::default(), false)
+                .await?;
         }
         validate_nats_publish_subject(subject, "subject")?;
 
@@ -3256,6 +3340,27 @@ enum NatsSupervisorCommand {
     },
 }
 
+impl NatsSupervisorCommand {
+    /// Whether the caller stopped waiting before the supervisor reached this
+    /// command, for example because a timeout dropped its future. Such a
+    /// command is skipped, so a publish the caller saw fail is not sent later.
+    /// Unsubscribe and close still run: they release server state.
+    fn caller_gave_up(&self) -> bool {
+        match self {
+            Self::Publish { reply, .. }
+            | Self::PublishRequest { reply, .. }
+            | Self::PublishRequestWithHeaders { reply, .. }
+            | Self::Ping { reply, .. }
+            | Self::Process { reply, .. } => reply.is_closed(),
+            Self::Request { reply, .. } | Self::RequestWithHeaders { reply, .. } => {
+                reply.is_closed()
+            }
+            Self::Subscribe { reply, .. } => reply.is_closed(),
+            Self::Unsubscribe { .. } | Self::Close { .. } => false,
+        }
+    }
+}
+
 impl fmt::Debug for NatsClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let connected = match &self.mode {
@@ -3631,8 +3736,14 @@ async fn run_nats_supervisor(
     mut connection: NatsConnection,
     mut commands: mpsc::Receiver<NatsSupervisorCommand>,
 ) {
+    let mut streak = ReconnectStreak::default();
+    connection.state.supervised.store(true, Ordering::Release);
     loop {
-        match drain_supervisor_frames(supervisor_cx, &mut connection).await {
+        let pumped = match connection.flush_dropped_subscriptions(supervisor_cx).await {
+            Ok(()) => drain_supervisor_frames(supervisor_cx, &mut connection).await,
+            Err(error) => Err(error),
+        };
+        match pumped {
             Ok(processed) => {
                 if processed > 0 {
                     connection
@@ -3643,7 +3754,14 @@ async fn run_nats_supervisor(
                 }
             }
             Err(error) => {
-                if !recover_supervisor_connection(supervisor_cx, &mut connection, error).await {
+                if !recover_supervisor_connection(
+                    supervisor_cx,
+                    &mut connection,
+                    &mut streak,
+                    error,
+                )
+                .await
+                {
                     break;
                 }
                 continue;
@@ -3663,12 +3781,47 @@ async fn run_nats_supervisor(
         match selected {
             Ok(Either::Left(Ok(()))) => {}
             Ok(Either::Left(Err(error))) => {
-                if !recover_supervisor_connection(supervisor_cx, &mut connection, error).await {
+                if !recover_supervisor_connection(
+                    supervisor_cx,
+                    &mut connection,
+                    &mut streak,
+                    error,
+                )
+                .await
+                {
                     break;
                 }
             }
             Ok(Either::Right(Ok(command))) => {
+                // A subscription dropped while the supervisor waited is
+                // unsubscribed before the command writes anything.
+                if let Err(error) = connection.flush_dropped_subscriptions(supervisor_cx).await
+                    && !recover_supervisor_connection(
+                        supervisor_cx,
+                        &mut connection,
+                        &mut streak,
+                        error,
+                    )
+                    .await
+                {
+                    break;
+                }
                 if !handle_supervisor_command(&mut connection, command).await {
+                    break;
+                }
+                // A command cut off mid-exchange (a cancelled or failed write,
+                // or a PING whose PONG never came) leaves the connection marked
+                // unusable. The stream may end in a partial frame that the next
+                // PONG would complete, so replace it instead of reading on.
+                if !connection.connected
+                    && !recover_supervisor_connection(
+                        supervisor_cx,
+                        &mut connection,
+                        &mut streak,
+                        NatsError::NotConnected,
+                    )
+                    .await
+                {
                     break;
                 }
             }
@@ -3692,6 +3845,11 @@ async fn drain_supervisor_frames(
         match connection.try_parse_message()? {
             Some(NatsMessage::Ping) => connection.send_server_pong(cx).await?,
             Some(NatsMessage::Msg(message)) => connection.dispatch_message(message),
+            Some(NatsMessage::Err(error)) if server_error_keeps_connection(&error) => {
+                cx.trace(&format!(
+                    "nats: server reported {error:?}; the connection stays open"
+                ));
+            }
             Some(NatsMessage::Err(error)) => return Err(NatsError::Server(error)),
             Some(NatsMessage::Info(info)) => {
                 *connection.state.server_info.lock() = Some(info);
@@ -3703,9 +3861,24 @@ async fn drain_supervisor_frames(
     }
 }
 
+/// Whether the server keeps the connection open after sending `error`.
+///
+/// The server keeps it after a permissions violation, an invalid subject or
+/// the subscription limit, and closes it after every other `-ERR`
+/// (<https://docs.nats.io/reference/reference-protocols/nats-protocol#-err>).
+/// Any other message is treated as fatal.
+fn server_error_keeps_connection(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.starts_with("permissions violation for ")
+        || error.starts_with("maximum subscriptions exceeded")
+        || error == "invalid subject"
+        || error == "invalid publish subject"
+}
+
 async fn recover_supervisor_connection(
     cx: &Cx,
     connection: &mut NatsConnection,
+    streak: &mut ReconnectStreak,
     error: NatsError,
 ) -> bool {
     cx.trace(&format!(
@@ -3714,7 +3887,8 @@ async fn recover_supervisor_connection(
     connection.connected = false;
     connection.state.connected.store(false, Ordering::Release);
     let _ = connection.stream.shutdown(std::net::Shutdown::Both);
-    let reconnected = connection.try_reconnect(cx).await.is_ok();
+    let refused = matches!(error, NatsError::Server(_));
+    let reconnected = connection.try_reconnect(cx, streak, refused).await.is_ok();
     connection
         .state
         .connected
@@ -3726,6 +3900,9 @@ async fn handle_supervisor_command(
     connection: &mut NatsConnection,
     command: NatsSupervisorCommand,
 ) -> bool {
+    if command.caller_gave_up() {
+        return true;
+    }
     match command {
         NatsSupervisorCommand::Publish {
             cx,
@@ -4036,9 +4213,16 @@ impl Subscription {
 
 impl Drop for Subscription {
     fn drop(&mut self) {
-        // Remove from shared state
+        // Remove from shared state. A subscription still registered here was
+        // never unsubscribed, and the server keeps routing to it until told
+        // otherwise, so a supervised client queues its UNSUB.
         let mut subs = self.state.subscriptions.lock();
-        subs.remove(&self.sid);
+        if subs.remove(&self.sid).is_some()
+            && self.state.supervised.load(Ordering::Acquire)
+            && !self.state.closed.load(Ordering::Acquire)
+        {
+            self.state.dropped_sids.lock().push(self.sid);
+        }
     }
 }
 
@@ -6613,6 +6797,37 @@ mod tests {
         });
 
         server.join().expect("server join");
+    }
+
+    #[test]
+    fn server_errors_that_keep_the_connection_are_anchored_and_unknown_ones_are_fatal() {
+        for kept in [
+            "Permissions Violation for Subscription to \"events.denied\"",
+            "Permissions Violation for Subscription to \"orders.*\" using queue \"workers\"",
+            "Permissions Violation for Publish to \"events.denied\"",
+            "Permissions Violation for Publish with Reply of \"_INBOX.x\"",
+            "permissions violation for subscription to foo",
+            "Maximum Subscriptions Exceeded",
+            "Invalid Subject",
+            "Invalid Publish Subject",
+        ] {
+            assert!(server_error_keeps_connection(kept), "{kept}");
+        }
+        for fatal in [
+            "Authorization Violation",
+            "Authentication Timeout",
+            "Stale Connection",
+            "Maximum Connections Exceeded",
+            "Maximum Payload Violation",
+            "Unknown Protocol Operation",
+            "Slow Consumer",
+            "Permissions Violation",
+            "Expected Permissions Violation for Publish to \"x\"",
+            "Invalid Subject Foo",
+            "",
+        ] {
+            assert!(!server_error_keeps_connection(fatal), "{fatal}");
+        }
     }
 
     #[test]

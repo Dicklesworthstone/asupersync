@@ -9,21 +9,27 @@
 //!
 //! # Usage
 //!
-//! ```ignore
-//! use asupersync::trace::replayer::{TraceReplayer, ReplayMode};
-//! use asupersync::trace::file::TraceReader;
+//! ```no_run
+//! use asupersync::trace::{ReplayMode, ReplayTrace, TraceReplayer, read_trace};
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Load a trace file
-//! let reader = TraceReader::open("trace.bin")?;
+//! let (metadata, events) = read_trace("trace.bin")?;
+//! let mut trace = ReplayTrace::new(metadata);
+//! for event in events {
+//!     trace.push(event);
+//! }
 //!
 //! // Create a replayer
-//! let mut replayer = TraceReplayer::new(reader)?;
+//! let mut replayer = TraceReplayer::new(trace);
 //!
 //! // Replay step by step
 //! replayer.set_mode(ReplayMode::Step);
 //! while let Some(event) = replayer.step()? {
 //!     println!("Replayed: {:?}", event);
 //! }
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Divergence Detection

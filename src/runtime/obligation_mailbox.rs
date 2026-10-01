@@ -4551,11 +4551,15 @@ mod tests {
             .build()
             .unwrap();
         runtime.block_on(async {
+            // Since d8e81f2cd (3dridc) the block_on caller is registered as a
+            // live task, so its checked obligations are admitted and tracked
+            // like any holder's and must be resolved.
             let cx = Cx::current().expect("block_on installs its request context");
-            assert!(matches!(
-                cx.try_register_obligation_checked(ObligationKind::SendPermit, cx.task_id()),
-                Err(ObligationAdmissionError::HolderNotLive)
-            ));
+            let token = cx
+                .try_register_obligation_checked(ObligationKind::SendPermit, cx.task_id())
+                .expect("the block_on caller is a live checked holder")
+                .expect("a runtime request context returns a tracked token");
+            assert!(token.commit(), "the live runtime accepts the resolution");
         });
         let mut lab = lab();
         let region = lab.state.create_root_region(Budget::INFINITE);

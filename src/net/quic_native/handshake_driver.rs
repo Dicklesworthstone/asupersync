@@ -271,25 +271,29 @@ fn validate_retry_transport_parameters(
 /// and CRYPTO frame. Normally Initials fit 1200 bytes. A Retry token already
 /// carried in a larger peer datagram can require a larger Initial; cap that
 /// case at the configured datagram limit and the IPv4 UDP payload maximum.
-/// Prefer room for 128 CRYPTO bytes when the configured limit permits it.
+/// Prefer room for 128 CRYPTO bytes when the configured limit permits it, and
+/// refuse a token that leaves less: a near-maximum Retry token would otherwise
+/// split every retransmitted ClientHello into hundreds of datagrams.
 fn initial_crypto_chunk_size(
     token_len: usize,
     dst_cid: ConnectionId,
     src_cid: ConnectionId,
     max_packet_size: usize,
 ) -> Option<usize> {
+    const MIN_INITIAL_CRYPTO_CHUNK: usize = 128;
     let overhead = token_len
         .checked_add(dst_cid.len())?
         .checked_add(src_cid.len())?
         .checked_add(64)?;
     let datagram_budget = MIN_INITIAL_DATAGRAM_BYTES
-        .max(overhead.checked_add(128)?)
+        .max(overhead.checked_add(MIN_INITIAL_CRYPTO_CHUNK)?)
         .min(max_packet_size)
         .min(65_507);
-    if datagram_budget < MIN_INITIAL_DATAGRAM_BYTES || datagram_budget <= overhead {
+    let chunk = datagram_budget.checked_sub(overhead)?;
+    if datagram_budget < MIN_INITIAL_DATAGRAM_BYTES || chunk < MIN_INITIAL_CRYPTO_CHUNK {
         return None;
     }
-    Some(datagram_budget - overhead)
+    Some(chunk)
 }
 
 fn invalid_certificate(error: CertificateError) -> RustlsError {
@@ -1673,6 +1677,10 @@ pub async fn client_handshake_over_udp(
     let mut accepted_retry = None;
     let mut flights = 0usize;
     let mut receive_deadline = cx.now() + HANDSHAKE_PTO;
+    // A packet for a key space without keys cannot be authenticated. It may
+    // mean our flight was lost, or it may be spoofed, so it earns at most one
+    // extra flight per PTO instead of amplifying every datagram.
+    let mut stale_resend_at = None;
 
     while flights < HANDSHAKE_MAX_FLIGHTS {
         if driver.is_complete() {
@@ -1786,9 +1794,13 @@ pub async fn client_handshake_over_udp(
                     res
                 }
                 Err(err) if is_stale_handshake_packet_error(&err) => {
-                    let _ = driver
-                        .retransmit_flight(cx, endpoint, &mut last_flight, &mut packet_number)
-                        .await?;
+                    let now = cx.now();
+                    if stale_resend_at.is_none_or(|at| now >= at) {
+                        stale_resend_at = Some(now + HANDSHAKE_PTO);
+                        let _ = driver
+                            .retransmit_flight(cx, endpoint, &mut last_flight, &mut packet_number)
+                            .await?;
+                    }
                     continue;
                 }
                 // A forged, corrupted or stray datagram is discarded (RFC
@@ -1882,6 +1894,8 @@ pub(crate) async fn server_handshake_over_udp_with_early_data(
     let mut last_flight = SentHandshakeFlight::default();
     let mut early_one_rtt = Vec::new();
     let mut last_early_data_resend: Option<Instant> = None;
+    // Unauthenticated stale-key packets earn at most one flight per PTO.
+    let mut stale_resend_at = None;
     let mut no_peer_idle_timeouts = 0usize;
 
     for _ in 0..HANDSHAKE_MAX_FLIGHTS {
@@ -1945,7 +1959,9 @@ pub(crate) async fn server_handshake_over_udp_with_early_data(
             let (peer_scid, consumed) = match driver.recv_handshake_packet_with_consumed(&packet.data) {
                 Ok(res) => res,
                 Err(err) if is_stale_handshake_packet_error(&err) => {
-                    if peer.is_some() {
+                    let now = cx.now();
+                    if peer.is_some() && stale_resend_at.is_none_or(|at| now >= at) {
+                        stale_resend_at = Some(now + HANDSHAKE_PTO);
                         let _ = driver
                             .retransmit_flight(cx, endpoint, &mut last_flight, &mut packet_number)
                             .await?;
@@ -2541,11 +2557,22 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
         server
             .provider
             .install_retry_initial_keys(retry_cid.as_bytes(), &server.transcript);
-        let chunk_size = initial_crypto_chunk_size(1110, retry_cid, client_cid, 1200).unwrap();
+        // Accepting this Retry would leave 10 CRYPTO bytes per Initial, so the
+        // driver refuses it, as it does the 1-byte case of a 1427-byte token
+        // at a 1500-byte limit. Assembly must still pad a tiny payload beneath
+        // a large token correctly.
+        assert!(initial_crypto_chunk_size(1110, retry_cid, client_cid, 1200).is_none());
+        let empty = ConnectionId::new(&[]).unwrap();
+        assert!(initial_crypto_chunk_size(1427, empty, client_cid, 1500).is_none());
         assert_eq!(
-            chunk_size, 10,
-            "exercise tiny payload beneath a large Retry token"
+            initial_crypto_chunk_size(1000, retry_cid, client_cid, 16_384),
+            Some(128)
         );
+        assert_eq!(
+            initial_crypto_chunk_size(0, retry_cid, client_cid, 1200),
+            Some(1120)
+        );
+        let chunk_size = 10;
         let segment = HandshakeSegment {
             level: HandshakeLevel::Initial,
             data: initial[0].data[..chunk_size].to_vec(),

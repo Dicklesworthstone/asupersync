@@ -216,7 +216,10 @@ impl<T> WatchInner<T> {
     }
 
     fn current_version(&self) -> u64 {
-        self.value.read().1
+        // Recursive: the caller may already hold a `Ref`. The lock is fair, so
+        // a plain read queues behind a waiting writer that is itself waiting
+        // for that `Ref`, and both threads deadlock.
+        self.value.read_recursive().1
     }
 
     fn insert_receiver_version(&self, version: u64) -> ArenaIndex {
@@ -306,10 +309,7 @@ impl<T> WatchInner<T> {
             let mut w = self.waiters.lock();
             std::mem::take(&mut *w)
         };
-        for w in waiters {
-            w.queued.store(false, Ordering::Release);
-            w.waker.wake();
-        }
+        wake_waiters(waiters);
     }
 
     fn register_waker(&self, waiter: WatchWaiter) {
@@ -539,25 +539,29 @@ impl<T> Sender<T> {
         // `send_modify` cannot commit between our read and write and be lost
         // (the closure still runs WITHOUT the value `RwLock` held, so the
         // no-reentrancy-deadlock / no-reader-stall contract is preserved).
-        let _write_serialize = self.inner.send_lock.lock();
-
-        // Clone current value while holding read lock to avoid calling user code under write lock
-        let mut value = {
-            let guard = self.inner.value.read();
-            guard.0.clone()
-        };
-
-        // Call user closure without holding the value lock to prevent deadlocks
-        f(&mut value);
-
-        // Write back under the value lock, but drop the PREVIOUS value only
-        // after releasing the guard — a `T::Drop` that reentrantly reads this
-        // channel (`borrow`/`current_version`/…) would otherwise self-deadlock
-        // on the non-reentrant `RwLock`, and a slow drop would stall every
-        // reader. This mirrors `send()`'s `mem::replace` discipline (see above);
-        // the wholesale `guard.0 = value` it replaced dropped the old value
-        // while the write lock was held.
+        // The lock is released before the waiters are woken and the previous
+        // value is dropped, as in `send()`: a waker that polls inline, or a
+        // `T::Drop` that sends on this channel, would otherwise deadlock on it.
         let _old_value = {
+            let _write_serialize = self.inner.send_lock.lock();
+
+            // Clone current value while holding read lock to avoid calling
+            // user code under write lock
+            let mut value = {
+                let guard = self.inner.value.read();
+                guard.0.clone()
+            };
+
+            // Call user closure without holding the value lock to prevent deadlocks
+            f(&mut value);
+
+            // Write back under the value lock, but drop the PREVIOUS value only
+            // after releasing the guard — a `T::Drop` that reentrantly reads this
+            // channel (`borrow`/`current_version`/…) would otherwise self-deadlock
+            // on the non-reentrant `RwLock`, and a slow drop would stall every
+            // reader. This mirrors `send()`'s `mem::replace` discipline (see above);
+            // the wholesale `guard.0 = value` it replaced dropped the old value
+            // while the write lock was held.
             let mut guard = self.inner.value.write();
             let old = std::mem::replace(&mut guard.0, value);
             guard.1 = guard.1.wrapping_add(1);
@@ -574,7 +578,8 @@ impl<T> Sender<T> {
     /// Returns a reference to the current value.
     ///
     /// This acquires a read lock on the value. The returned `Ref` holds
-    /// the lock and provides access to the value.
+    /// the lock and provides access to the value. Keep it short-lived: a send
+    /// waits for it, and another `borrow` queues behind that waiting send.
     #[inline]
     #[must_use]
     pub fn borrow(&self) -> Ref<'_, T> {
@@ -596,7 +601,8 @@ impl<T> Sender<T> {
         // receivers (the same TOCTOU class fixed in broadcast subscribe
         // by commit e9314df5).
         let (current_version, receiver_token) = {
-            let guard = self.inner.value.read();
+            // Recursive for the same reason as `current_version`.
+            let guard = self.inner.value.read_recursive();
             self.inner.receiver_count.fetch_add(1, Ordering::Relaxed);
             let receiver_token = self.inner.insert_receiver_version(guard.1);
             (guard.1, receiver_token)
@@ -644,10 +650,39 @@ impl<T> Drop for Sender<T> {
             let mut w = self.inner.waiters.lock();
             std::mem::take(&mut *w)
         };
-        for w in waiters {
-            w.queued.store(false, Ordering::Release);
-            w.waker.wake();
+        wake_waiters(waiters);
+    }
+}
+
+/// Wakes every drained waiter behind its own unwind boundary, so one panicking
+/// waker, or its destructor, cannot strand the rest parked forever. Every
+/// `queued` flag is cleared first. The first panic resumes afterwards; during
+/// an existing unwind the later payloads are forgotten, never dropped.
+fn wake_waiters(waiters: SmallVec<[WatchWaiter; 4]>) {
+    for waiter in &waiters {
+        waiter.queued.store(false, Ordering::Release);
+    }
+    let already_panicking = std::thread::panicking();
+    let mut first_panic = None;
+    let mut record = |result: std::thread::Result<()>| {
+        if let Err(payload) = result {
+            if already_panicking || first_panic.is_some() {
+                std::mem::forget(payload);
+            } else {
+                first_panic = Some(payload);
+            }
         }
+    };
+    for waiter in waiters {
+        record(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            || waiter.waker.wake_by_ref(),
+        )));
+        record(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            move || drop(waiter),
+        )));
+    }
+    if let Some(payload) = first_panic {
+        std::panic::resume_unwind(payload);
     }
 }
 
@@ -785,6 +820,10 @@ impl<T> Receiver<T> {
     /// the same version, use [`Receiver::borrow_and_update`] instead.
     /// Calling [`Receiver::mark_seen`] later acknowledges whatever version is
     /// current at that later instant and can therefore skip an intervening send.
+    ///
+    /// The `Ref` holds the value's read lock. Keep it short-lived: a send
+    /// waits for it, and another `borrow` queues behind that waiting send.
+    /// [`Receiver::has_changed`] is safe to call while it is held.
     #[inline]
     #[must_use]
     pub fn borrow(&self) -> Ref<'_, T> {
@@ -1046,6 +1085,93 @@ mod tests {
                 Poll::Pending => std::thread::yield_now(),
             }
         }
+    }
+
+    /// One panicking waker must not strand the other parked receivers: the
+    /// sender's drop wakes every one of them, then resumes the first panic.
+    #[test]
+    fn sender_drop_wakes_every_parked_receiver_despite_a_panicking_waker() {
+        struct PanickingWaker {
+            wakes: Arc<AtomicUsize>,
+        }
+        impl std::task::Wake for PanickingWaker {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.wakes.fetch_add(1, Ordering::SeqCst);
+                panic!("planted watch receiver wake panic");
+            }
+        }
+
+        init_test("sender_drop_wakes_every_parked_receiver_despite_a_panicking_waker");
+        let cx = test_cx();
+        let (tx, mut first) = channel(0_u32);
+        let mut second = tx.subscribe();
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(PanickingWaker {
+            wakes: Arc::clone(&wakes),
+        }));
+        let mut task_cx = Context::from_waker(&waker);
+        let mut first_changed = Box::pin(first.changed(&cx));
+        let mut second_changed = Box::pin(second.changed(&cx));
+        assert!(first_changed.as_mut().poll(&mut task_cx).is_pending());
+        assert!(second_changed.as_mut().poll(&mut task_cx).is_pending());
+
+        let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(tx)));
+        assert!(dropped.is_err(), "the first wake panic resumes afterwards");
+        assert_eq!(
+            wakes.load(Ordering::SeqCst),
+            2,
+            "every parked receiver is woken"
+        );
+        crate::test_complete!("sender_drop_wakes_every_parked_receiver_despite_a_panicking_waker");
+    }
+
+    /// `has_changed()` under a held `borrow()` must not queue behind a sender
+    /// that is waiting for that borrow: the lock is fair, so a plain read
+    /// would, and neither thread could proceed.
+    #[test]
+    fn has_changed_under_a_held_borrow_does_not_wait_for_a_blocked_sender() {
+        init_test("has_changed_under_a_held_borrow_does_not_wait_for_a_blocked_sender");
+        let (tx, rx) = channel(0_u32);
+        let rx_ref = &rx;
+        let answered = std::thread::scope(|scope| {
+            let held = rx.borrow();
+            let sender = scope.spawn(|| tx.send(1));
+            // The sender claims the writer bit before it waits for readers;
+            // from then on only recursive reads get in.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while tx.inner.value.try_read().is_some() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the sender never queued for the write lock"
+                );
+                std::thread::yield_now();
+            }
+            let (answer_tx, answer_rx) = std::sync::mpsc::channel();
+            scope.spawn(move || {
+                let _ = answer_tx.send(rx_ref.has_changed());
+            });
+            let answered = answer_rx.recv_timeout(std::time::Duration::from_secs(5));
+            // Release the sender either way, so the scope can join.
+            drop(held);
+            sender
+                .join()
+                .expect("sender thread")
+                .expect("send succeeds");
+            answered
+        });
+        assert_eq!(
+            answered,
+            Ok(false),
+            "has_changed answered while the sender waited"
+        );
+        assert!(
+            rx.has_changed(),
+            "the send lands once the borrow is released"
+        );
+        crate::test_complete!("has_changed_under_a_held_borrow_does_not_wait_for_a_blocked_sender");
     }
 
     #[test]

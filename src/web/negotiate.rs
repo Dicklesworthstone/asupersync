@@ -361,7 +361,7 @@ impl ErrorHandlerConfig {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use asupersync::web::negotiate::{ErrorHandlerMiddleware, ErrorHandlerConfig};
 /// use asupersync::web::handler::FnHandler;
 ///

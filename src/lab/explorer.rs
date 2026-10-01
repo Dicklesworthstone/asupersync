@@ -39,6 +39,7 @@
 //! ```
 
 use crate::lab::config::LabConfig;
+use crate::lab::conformal::{CalibrationReport, ConformalCalibrator, ConformalConfig};
 use crate::lab::exploration_budget::{
     ExplorationBudget, ExplorationBudgetConfig, ExplorationBudgetEstimate,
 };
@@ -501,6 +502,8 @@ pub struct ScheduleExplorer {
     results: Vec<RunResult>,
     violations: Vec<ViolationReport>,
     new_class_count: usize,
+    conformal: Option<ConformalCalibrator>,
+    conformal_reports: Vec<(u64, CalibrationReport)>,
 }
 
 impl ScheduleExplorer {
@@ -515,7 +518,51 @@ impl ScheduleExplorer {
             results: Vec::new(),
             violations: Vec::new(),
             new_class_count: 0,
+            conformal: None,
+            conformal_reports: Vec::new(),
         }
+    }
+
+    /// Calibrate each run's oracle metrics with split conformal prediction.
+    ///
+    /// Off by default. When enabled, every explored run's oracle report
+    /// (from [`LabRuntime::report`]) feeds a [`ConformalCalibrator`]. The first
+    /// `min_calibration_samples` runs build the calibration set. Each later run
+    /// is scored against the runs before it, and its [`CalibrationReport`] is
+    /// kept with its seed in [`Self::conformal_reports`]. A run whose oracle
+    /// metrics fall outside the prediction set is listed by
+    /// [`Self::conformal_anomaly_seeds`] even when no invariant failed.
+    ///
+    /// The coverage guarantee assumes the runs are exchangeable, which holds
+    /// for runs of one test that differ only in their seed.
+    #[must_use]
+    pub fn with_conformal_calibration(mut self, config: ConformalConfig) -> Self {
+        self.conformal = Some(ConformalCalibrator::new(config));
+        self
+    }
+
+    /// The calibrator fed by [`Self::with_conformal_calibration`], if enabled.
+    #[must_use]
+    pub fn conformal_calibrator(&self) -> Option<&ConformalCalibrator> {
+        self.conformal.as_ref()
+    }
+
+    /// The seed and calibration report of every run scored after the
+    /// calibration set filled, in run order. Empty unless calibration is
+    /// enabled.
+    #[must_use]
+    pub fn conformal_reports(&self) -> &[(u64, CalibrationReport)] {
+        &self.conformal_reports
+    }
+
+    /// Seeds whose oracle metrics fell outside a conformal prediction set.
+    #[must_use]
+    pub fn conformal_anomaly_seeds(&self) -> Vec<u64> {
+        self.conformal_reports
+            .iter()
+            .filter(|(_, report)| report.prediction_sets.iter().any(|set| !set.conforming))
+            .map(|(seed, _)| *seed)
+            .collect()
     }
 
     /// Explore the test under multiple schedules.
@@ -526,7 +573,7 @@ impl ScheduleExplorer {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```
     /// use asupersync::lab::explorer::{ExplorerConfig, ScheduleExplorer};
     /// use asupersync::types::Budget;
     ///
@@ -615,6 +662,15 @@ impl ScheduleExplorer {
             violations,
             certificate_hash,
         });
+
+        if let Some(calibrator) = self.conformal.as_mut() {
+            // `report` does not advance the run, so this reads the state
+            // the test left behind.
+            let run_report = runtime.report();
+            if let Some(calibration) = calibrator.predict(&run_report.oracle_report) {
+                self.conformal_reports.push((seed, calibration));
+            }
+        }
     }
 
     /// Build the final report.
@@ -2339,5 +2395,45 @@ mod tests {
         let s2 = s;
         assert_eq!(s2.window, 10);
         assert!(!s2.saturated);
+    }
+
+    #[test]
+    fn conformal_calibration_flags_only_the_anomalous_seed() {
+        // Every seed builds the same two tasks except the last, which builds
+        // forty. Its oracle metrics deviate from the calibration set although
+        // no seed differs in anything else. It is last so that it never
+        // joins the calibration set of another scored run.
+        const RUNS: usize = 24;
+        const CALIBRATION: usize = 8;
+        let anomalous = u64::try_from(RUNS - 1).unwrap();
+        let mut explorer = ScheduleExplorer::new(ExplorerConfig::new(0, RUNS))
+            .with_conformal_calibration(ConformalConfig::new(0.2).min_samples(CALIBRATION));
+        explorer.explore(|runtime| {
+            let root = runtime.state.create_root_region(Budget::INFINITE);
+            let tasks = if runtime.config().seed == anomalous { 40 } else { 2 };
+            for _ in 0..tasks {
+                let _task = runtime
+                    .state
+                    .create_task(root, Budget::INFINITE, async {})
+                    .expect("create task");
+            }
+        });
+
+        let calibrator = explorer
+            .conformal_calibrator()
+            .expect("calibration was enabled");
+        assert_eq!(calibrator.calibration_samples(), RUNS);
+        assert_eq!(explorer.conformal_reports().len(), RUNS - CALIBRATION);
+        assert_eq!(explorer.conformal_anomaly_seeds(), vec![anomalous]);
+    }
+
+    #[test]
+    fn conformal_calibration_is_off_by_default() {
+        let mut explorer = ScheduleExplorer::new(ExplorerConfig::new(0, 4));
+        explorer.explore(|runtime| {
+            let _root = runtime.state.create_root_region(Budget::INFINITE);
+        });
+        assert!(explorer.conformal_calibrator().is_none());
+        assert!(explorer.conformal_reports().is_empty());
     }
 }

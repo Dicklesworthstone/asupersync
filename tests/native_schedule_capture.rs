@@ -2,15 +2,21 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use asupersync::Cx;
+use asupersync::channel::mpsc as ring;
 use asupersync::channel::oneshot;
+use asupersync::lab::runtime::ReplayDivergenceReason;
 use asupersync::lab::runtime::production_strict::{
-    StrictProductionReplayLimits, StrictProductionReplayTermination,
+    StrictProductionReplayError, StrictProductionReplayLimits, StrictProductionReplayReport,
+    StrictProductionReplayTermination,
 };
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::runtime::{Runtime, RuntimeBuilder};
-use asupersync::trace::{ScheduleCaptureError, ScheduleCaptureSnapshot, TraceData, TraceEventKind};
+use asupersync::trace::{
+    CompactTaskId, ProductionSchedule, ProjectionError, ProjectionOptions, ScheduleCaptureError,
+    ScheduleCaptureSnapshot, TraceData, TraceEvent, TraceEventKind,
+};
 use asupersync::types::{Budget, CancelKind, TaskId};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::{Future, poll_fn};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -40,6 +46,33 @@ fn completed_capture(runtime: &Runtime) -> ScheduleCaptureSnapshot {
             }
             Err(error) => panic!("capture did not reach a complete boundary: {error:?}"),
         }
+    }
+}
+
+/// Each `join_native` call runs one `block_on`, whose caller-polled root is
+/// registered as a task. The capture must report exactly those tasks, none of
+/// which a worker ever polled, and leave them out of the projection.
+fn assert_caller_tasks_left_out(snapshot: &ScheduleCaptureSnapshot, block_on_calls: usize) {
+    let callers = snapshot.caller_tasks();
+    assert_eq!(
+        callers.len(),
+        block_on_calls,
+        "one caller task per block_on"
+    );
+    for caller in callers {
+        let spawned = snapshot.events().iter().any(|event| {
+            event.kind == TraceEventKind::Spawn
+                && matches!(event.data, TraceData::Task { task, .. } if task == *caller)
+        });
+        let polled = snapshot.events().iter().any(|event| {
+            event.kind == TraceEventKind::Poll
+                && matches!(event.data, TraceData::Task { task, .. } if task == *caller)
+        });
+        assert!(
+            spawned,
+            "caller task {caller:?} has its Spawn in the capture"
+        );
+        assert!(!polled, "no worker polled caller task {caller:?}");
     }
 }
 
@@ -114,6 +147,7 @@ fn native_parked_wakes_replay_with_identical_terminal_values() {
             let snapshot = completed_capture(&runtime);
             assert_eq!(snapshot.dropped_events(), 0);
             assert_eq!(snapshot.worker_count(), workers);
+            assert_caller_tasks_left_out(&snapshot, values.len());
             let schedule = snapshot.production_schedule().unwrap();
             assert_eq!(schedule.summary().spawned, 2);
             assert!(schedule.summary().steps >= 4);
@@ -305,4 +339,494 @@ fn native_capture_overflow_is_bounded_and_rejected() {
         serde_json::json!({"bead": "asupersync-bi2462.95", "case": "overflow", "total": snapshot.total_events(), "dropped": snapshot.dropped_events(), "capacity": snapshot.capacity()})
     );
     assert!(runtime.shutdown_timeout(WATCHDOG));
+}
+
+/// Stages in the token ring, the hops its single token travels, and the
+/// external value that starts it.
+const RING_STAGES: usize = 4;
+const RING_HOPS: u64 = 12;
+const RING_KICK: u32 = 7;
+
+/// A ring token: (hop, payload).
+type Token = (u64, u64);
+
+/// What each ring stage received in the Lab, indexed by spawn order.
+type RingValues = Vec<Option<Vec<Token>>>;
+
+/// Receives the next ring token, publishing `parked` the first time the
+/// receive returns Pending: a real parked-state witness, not a sleep.
+async fn next_token(
+    cx: &Cx,
+    inbox: &mut ring::Receiver<Token>,
+    parked: &mut Option<mpsc::Sender<TaskId>>,
+) -> Option<Token> {
+    let mut receive = std::pin::pin!(inbox.recv(cx));
+    poll_fn(|task| {
+        let result = receive.as_mut().poll(task);
+        if result.is_pending()
+            && let Some(parked) = parked.take()
+        {
+            parked
+                .send(cx.task_id())
+                .expect("publish real Pending witness");
+        }
+        result
+    })
+    .await
+    .ok()
+}
+
+/// One stage of the token ring. Stage 0 takes the first token from an
+/// external oneshot kick. Every stage records each token it receives, yields
+/// once, and forwards the next token until the final hop; then it drops its
+/// sender, so the other stages see the ring close one after another. Only
+/// the token holder is runnable, so the poll order depends on the data, and
+/// no two polls can race on the same channel, even on two workers.
+async fn ring_stage(
+    stage: u64,
+    kick: Option<(oneshot::Receiver<u32>, Option<(oneshot::Sender<u32>, u32)>)>,
+    mut inbox: ring::Receiver<Token>,
+    next: ring::Sender<Token>,
+    parked: Option<mpsc::Sender<TaskId>>,
+) -> Vec<Token> {
+    let cx = Cx::current().expect("actual admitted task context");
+    let mut parked = parked;
+    let mut token = match kick {
+        Some((receiver, replay_input)) => Some((
+            0,
+            u64::from(receive_input(receiver, parked.take(), replay_input).await),
+        )),
+        None => next_token(&cx, &mut inbox, &mut parked).await,
+    };
+    let mut seen = Vec::new();
+    while let Some((hop, payload)) = token {
+        seen.push((hop, payload));
+        if hop == RING_HOPS {
+            break;
+        }
+        asupersync::runtime::yield_now().await;
+        next.send(&cx, (hop + 1, payload.wrapping_mul(31).wrapping_add(stage)))
+            .await
+            .expect("ring successor is parked on its inbox");
+        token = next_token(&cx, &mut inbox, &mut parked).await;
+    }
+    drop(next);
+    seen
+}
+
+/// One capacity-1 channel per stage: stage `i` reads inbox `i` and forwards
+/// into inbox `i + 1`, wrapping around.
+fn ring_links() -> Vec<(ring::Receiver<Token>, ring::Sender<Token>)> {
+    let (mut senders, receivers): (Vec<_>, Vec<_>) =
+        (0..RING_STAGES).map(|_| ring::channel::<Token>(1)).unzip();
+    senders.rotate_left(1);
+    receivers.into_iter().zip(senders).collect()
+}
+
+/// The tokens each stage must receive, computed without any runtime.
+fn expected_ring_tokens(kick: u32) -> Vec<Vec<Token>> {
+    let mut seen = vec![Vec::new(); RING_STAGES];
+    let mut payload = u64::from(kick);
+    for (hop, stage) in (0..=RING_HOPS).zip((0..RING_STAGES).cycle()) {
+        seen[stage].push((hop, payload));
+        payload = payload.wrapping_mul(31).wrapping_add(stage as u64);
+    }
+    seen
+}
+
+/// Runs the ring on a native runtime with schedule capture on. Every stage
+/// genuinely parks before the main thread sends the kick.
+fn capture_ring(workers: usize, sharded: bool) -> (ScheduleCaptureSnapshot, Vec<Vec<Token>>) {
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(workers)
+        .with_sharded_state(sharded)
+        .capture_schedules(true)
+        .build()
+        .unwrap();
+    let (parked_tx, parked_rx) = mpsc::channel();
+    let (kick_tx, kick_rx) = oneshot::channel();
+    let mut kick_rx = Some(kick_rx);
+    let joins: Vec<_> = ring_links()
+        .into_iter()
+        .enumerate()
+        .map(|(stage, (inbox, next))| {
+            let kick = (stage == 0).then(|| (kick_rx.take().expect("one kick receiver"), None));
+            runtime.handle().spawn(ring_stage(
+                stage as u64,
+                kick,
+                inbox,
+                next,
+                Some(parked_tx.clone()),
+            ))
+        })
+        .collect();
+    drop(parked_tx);
+    let parked: BTreeSet<_> = (0..RING_STAGES)
+        .map(|_| {
+            parked_rx
+                .recv_timeout(WATCHDOG)
+                .expect("ring stage parked before the kick")
+        })
+        .collect();
+    assert_eq!(parked.len(), RING_STAGES);
+    kick_tx.send_blocking(RING_KICK).expect("kick the ring");
+    let native: Vec<_> = joins
+        .into_iter()
+        .map(|join| join_native(&runtime, join))
+        .collect();
+    let snapshot = completed_capture(&runtime);
+    assert_caller_tasks_left_out(&snapshot, RING_STAGES);
+    assert!(runtime.shutdown_timeout(WATCHDOG));
+    (snapshot, native)
+}
+
+/// Rebuilds the ring in a fresh Lab, with the same stage bodies in the same
+/// spawn order, and drives it strictly by `schedule`. Stage 0 injects the
+/// kick when it first parks, as the native main thread did once every stage
+/// had parked. The schedule still decides when stage 0 runs again.
+/// `extra_task` admits one task that the capture never saw, after the ring.
+fn replay_ring(
+    schedule: &ProductionSchedule,
+    kick: u32,
+    extra_task: bool,
+) -> (
+    Result<StrictProductionReplayReport, StrictProductionReplayError>,
+    RingValues,
+    Vec<bool>,
+) {
+    let mut lab = LabRuntime::new(LabConfig::new(0x80B3).max_steps(4_096));
+    let region = lab.state.create_root_region(Budget::INFINITE);
+    let observed = Arc::new(Mutex::new(vec![None; RING_STAGES]));
+    let (kick_tx, kick_rx) = oneshot::channel();
+    let mut kick_input = Some((kick_rx, Some((kick_tx, kick))));
+    let mut joins = Vec::new();
+    for (stage, (inbox, next)) in ring_links().into_iter().enumerate() {
+        let stage_kick = if stage == 0 { kick_input.take() } else { None };
+        let observed = Arc::clone(&observed);
+        let (task, join) = lab
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                let seen = ring_stage(stage as u64, stage_kick, inbox, next, None).await;
+                observed.lock().unwrap()[stage] = Some(seen);
+            })
+            .unwrap();
+        lab.scheduler.lock().schedule(task, 0);
+        joins.push(join);
+    }
+    if extra_task {
+        let (task, join) = lab
+            .state
+            .create_task(region, Budget::INFINITE, async {})
+            .unwrap();
+        lab.scheduler.lock().schedule(task, 0);
+        joins.push(join);
+    }
+    let report = lab.run_production_schedule_strict(
+        schedule,
+        StrictProductionReplayLimits::new(4_096, 8, 1_024, 4_096, 8),
+    );
+    let finished = joins
+        .iter()
+        .map(asupersync::runtime::TaskHandle::is_finished)
+        .collect();
+    let values = observed.lock().unwrap().clone();
+    // The observations above are the replay boundary. Then leave replay mode
+    // and let ordinary scheduling finish what the replay retained, so no case
+    // abandons live work.
+    let _ = lab.discard_production_replay();
+    lab.run_until_quiescent();
+    assert!(
+        lab.is_quiescent(),
+        "the Lab drains what the replay retained"
+    );
+    (report, values, finished)
+}
+
+fn spawned_tasks(events: &[TraceEvent]) -> Vec<TaskId> {
+    events
+        .iter()
+        .filter_map(|event| match (&event.kind, &event.data) {
+            (TraceEventKind::Spawn, TraceData::Task { task, .. }) => Some(*task),
+            _ => None,
+        })
+        .collect()
+}
+
+fn poll_positions(events: &[TraceEvent], task: Option<TaskId>) -> Vec<usize> {
+    events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| {
+            event.kind == TraceEventKind::Poll
+                && matches!(event.data, TraceData::Task { task: polled, .. }
+                    if task.is_none_or(|task| task == polled))
+        })
+        .map(|(position, _)| position)
+        .collect()
+}
+
+/// Asserts that a refused or stopped replay ran no stage to completion.
+fn assert_no_stage_completed(case: &str, values: &RingValues, finished: &[bool]) {
+    assert!(
+        values.iter().all(Option::is_none),
+        "{case}: no stage may complete, got {values:?}"
+    );
+    assert!(
+        finished.iter().all(|done| !*done),
+        "{case}: no task may finish, got {finished:?}"
+    );
+}
+
+/// br-asupersync-bi2462.8: a real multi-task capture from the production
+/// scheduler replays in the Lab with the recorded poll order, the same
+/// channel values in every task, and every task finished. Four stages pass
+/// one token around a ring of capacity-1 channels, so each stage's polls
+/// depend on its neighbours' progress. Runs on one and two workers, with
+/// and without sharded state.
+#[test]
+fn native_ring_capture_replays_poll_order_and_channel_values() {
+    let expected = expected_ring_tokens(RING_KICK);
+    for workers in [1, 2] {
+        for sharded in [false, true] {
+            let (snapshot, native) = capture_ring(workers, sharded);
+            assert_eq!(native, expected, "native stages received the ring tokens");
+            assert_eq!(snapshot.dropped_events(), 0);
+            assert_eq!(snapshot.worker_count(), workers);
+            let schedule = snapshot.production_schedule().unwrap();
+            assert_eq!(schedule.summary().spawned, RING_STAGES);
+            // Every stage parks once before the kick, and each forwarded hop
+            // takes two polls: receive then yield, forward then park.
+            assert!(schedule.summary().steps >= RING_STAGES + 2 * RING_HOPS as usize);
+            let (report, lab, finished) = replay_ring(&schedule, RING_KICK, false);
+            let report = report.expect("the real capture is admitted");
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "bead": "asupersync-bi2462.8",
+                    "case": "ring_replay",
+                    "workers": workers,
+                    "sharded": sharded,
+                    "events": snapshot.total_events(),
+                    "steps": schedule.summary().steps,
+                    "replay": format!("{report:?}"),
+                    "native": format!("{native:?}"),
+                    "lab": format!("{lab:?}"),
+                })
+            );
+            assert_eq!(
+                report.termination,
+                StrictProductionReplayTermination::Matched
+            );
+            assert!(report.passed());
+            assert_eq!(report.observed_spawns, RING_STAGES);
+            assert_eq!(report.replay.steps_matched, schedule.summary().steps);
+            assert!(finished.iter().all(|done| *done), "every Lab task finished");
+            let lab: Vec<_> = lab
+                .into_iter()
+                .map(|seen| seen.expect("Lab stage completed"))
+                .collect();
+            assert_eq!(lab, native, "Lab replay reproduces every stage's values");
+        }
+    }
+}
+
+/// br-asupersync-bi2462.8: copies of a real capture, each with one defect,
+/// are refused before the Lab runs work the capture did not record. Only
+/// the lost-interior-poll copy runs any recorded polls, and it stops at the
+/// first recorded choice it cannot honour.
+#[test]
+fn real_ring_capture_copies_with_defects_are_refused() {
+    let (snapshot, native) = capture_ring(1, false);
+    // The scheduled observations, as production_schedule() projects them:
+    // the block_on callers' own events are left out.
+    let callers = snapshot.caller_tasks();
+    let events: Vec<TraceEvent> = snapshot
+        .events()
+        .iter()
+        .filter(
+            |event| !matches!(event.data, TraceData::Task { task, .. } if callers.contains(&task)),
+        )
+        .cloned()
+        .collect();
+    let spawns = spawned_tasks(&events);
+    assert_eq!(spawns.len(), RING_STAGES);
+    let log = |case: &str, detail: String| {
+        eprintln!(
+            "{}",
+            serde_json::json!({"bead": "asupersync-bi2462.8", "case": case, "detail": detail})
+        );
+    };
+
+    // Control: the unmodified copy replays completely.
+    let schedule = ProductionSchedule::from_runtime_trace(&events).unwrap();
+    let (report, values, finished) = replay_ring(&schedule, RING_KICK, false);
+    let report = report.expect("the unmodified copy is admitted");
+    log("unmodified", format!("{report:?}"));
+    assert!(report.passed());
+    assert!(finished.iter().all(|done| *done));
+    assert_eq!(
+        values.into_iter().map(Option::unwrap).collect::<Vec<_>>(),
+        native
+    );
+
+    // Stage 2's first poll after it parked: the one that takes its first token.
+    let stage2_polls = poll_positions(&events, Some(spawns[2]));
+    let taking = stage2_polls[1];
+
+    // Missing birth: stage 0's spawn is gone. Strict projection refuses it;
+    // admitted as an orphan, the strict driver still refuses it.
+    let mut unborn = events.clone();
+    let birth = unborn
+        .iter()
+        .position(|event| event.kind == TraceEventKind::Spawn)
+        .unwrap();
+    unborn.remove(birth);
+    let projected = ProductionSchedule::from_runtime_trace(&unborn);
+    log("missing_birth", format!("{:?}", projected.as_ref().err()));
+    assert!(matches!(
+        projected,
+        Err(ProjectionError::MissingSpawn { task, .. }) if task == CompactTaskId::from(spawns[0])
+    ));
+    let orphaned = ProductionSchedule::from_runtime_trace_with(
+        &unborn,
+        ProjectionOptions {
+            allow_orphans: true,
+        },
+    )
+    .unwrap();
+    let (report, values, finished) = replay_ring(&orphaned, RING_KICK, false);
+    log("orphan_birth", format!("{report:?}"));
+    assert!(matches!(
+        report,
+        Err(StrictProductionReplayError::OrphanSpawns { count: 1 })
+    ));
+    assert_no_stage_completed("orphan_birth", &values, &finished);
+
+    // Altered generation: one poll names a task identity that was never born.
+    let mut altered = events.clone();
+    if let TraceData::Task { task, .. } = &mut altered[taking].data {
+        let mut id = serde_json::to_value(*task).unwrap();
+        id["generation"] = serde_json::json!(id["generation"].as_u64().unwrap() + 1);
+        *task = serde_json::from_value(id).unwrap();
+    }
+    let projected = ProductionSchedule::from_runtime_trace(&altered);
+    log(
+        "altered_generation",
+        format!("{:?}", projected.as_ref().err()),
+    );
+    assert!(matches!(
+        projected,
+        Err(ProjectionError::MissingSpawn { seq, kind: TraceEventKind::Poll, .. })
+            if seq == events[taking].seq
+    ));
+
+    // Duplicated observation: the same poll recorded twice.
+    let mut duplicated = events.clone();
+    duplicated.insert(taking + 1, events[taking].clone());
+    let (report, values, finished) = replay_ring(
+        &ProductionSchedule::from_runtime_trace(&duplicated).unwrap(),
+        RING_KICK,
+        false,
+    );
+    log("duplicated_poll", format!("{report:?}"));
+    let seq = events[taking].seq;
+    assert!(matches!(
+        report,
+        Err(StrictProductionReplayError::SourceOrder { previous, next })
+            if previous == seq && next == seq
+    ));
+    assert_no_stage_completed("duplicated_poll", &values, &finished);
+
+    // Reordered observations: that poll swapped with the event after it.
+    let mut reordered = events.clone();
+    reordered.swap(taking, taking + 1);
+    let (report, values, finished) = replay_ring(
+        &ProductionSchedule::from_runtime_trace(&reordered).unwrap(),
+        RING_KICK,
+        false,
+    );
+    log("reordered_events", format!("{report:?}"));
+    assert!(matches!(
+        report,
+        Err(StrictProductionReplayError::SourceOrder { previous, next })
+            if previous == events[taking + 1].seq && next == seq
+    ));
+    assert_no_stage_completed("reordered_events", &values, &finished);
+
+    // Interior poll loss: that poll is missing. The Lab spends stage 2's next
+    // recorded poll on the receive, and then stage 3, the recorded next
+    // task, cannot run without an unrecorded poll of stage 2. The replay
+    // stops there.
+    let mut lost = events.clone();
+    lost.remove(taking);
+    let (report, values, finished) = replay_ring(
+        &ProductionSchedule::from_runtime_trace(&lost).unwrap(),
+        RING_KICK,
+        false,
+    );
+    let report = report.expect("a copy with a lost poll is admitted");
+    log("interior_poll_loss", format!("{report:?}"));
+    assert_eq!(
+        report.termination,
+        StrictProductionReplayTermination::Diverged
+    );
+    let divergence = report
+        .replay
+        .divergence
+        .as_ref()
+        .expect("the divergence is named");
+    assert_eq!(divergence.expected_ordinal, 3);
+    assert!(matches!(
+        divergence.reason,
+        ReplayDivergenceReason::TaskNotRunnable { .. }
+    ));
+    assert!(!report.passed());
+    assert_no_stage_completed("interior_poll_loss", &values, &finished);
+
+    // Suffix loss after every birth: the copy ends halfway through the polls.
+    // The Lab consumes exactly the retained choices and reports the live
+    // remainder instead of scheduling it.
+    let all_polls = poll_positions(&events, None);
+    let suffix_lost = events[..all_polls[all_polls.len() / 2]].to_vec();
+    assert_eq!(spawned_tasks(&suffix_lost).len(), RING_STAGES);
+    let truncated = ProductionSchedule::from_runtime_trace(&suffix_lost).unwrap();
+    let (report, values, finished) = replay_ring(&truncated, RING_KICK, false);
+    let report = report.expect("a truncated copy is admitted");
+    log("suffix_loss", format!("{report:?}"));
+    assert_eq!(
+        report.termination,
+        StrictProductionReplayTermination::SourceExhausted
+    );
+    assert_eq!(report.replay.steps_matched, truncated.summary().steps);
+    assert!(report.replay.divergence.is_none());
+    assert!(!report.passed());
+    assert_no_stage_completed("suffix_loss", &values, &finished);
+
+    // Extra replay work: the Lab admits a task that the capture never saw.
+    // The strict driver refuses it before its first step.
+    let (report, values, finished) = replay_ring(&schedule, RING_KICK, true);
+    let report = report.expect("the schedule is admitted");
+    log("extra_task", format!("{report:?}"));
+    assert_eq!(
+        report.termination,
+        StrictProductionReplayTermination::SpawnCountMismatch {
+            expected: RING_STAGES,
+            observed: RING_STAGES + 1,
+        }
+    );
+    assert_eq!(report.work_units, 0);
+    assert_no_stage_completed("extra_task", &values, &finished);
+
+    // Terminal outcome drift is outside the strict receipt. The projection
+    // records task order, not values: completions carry outcome 0. The same
+    // schedule drives a ring kicked with a different value to a Matched
+    // receipt, so comparing the values, as the tests above do, is the
+    // harness's oracle for outcomes.
+    let (report, values, _) = replay_ring(&schedule, RING_KICK + 1, false);
+    let report = report.expect("the schedule is admitted");
+    log("outcome_drift", format!("{report:?}"));
+    assert!(report.passed());
+    let drifted: Vec<_> = values.into_iter().map(Option::unwrap).collect();
+    assert_ne!(drifted, native);
+    assert_eq!(drifted, expected_ring_tokens(RING_KICK + 1));
 }

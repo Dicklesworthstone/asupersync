@@ -2211,12 +2211,21 @@ impl RuntimeState {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// use asupersync::runtime::{RuntimeState, EpollReactor};
+    /// ```no_run
+    /// # #[cfg(target_os = "linux")]
+    /// # fn main() -> std::io::Result<()> {
+    /// use asupersync::observability::NoOpMetrics;
+    /// use asupersync::runtime::RuntimeState;
+    /// use asupersync::runtime::reactor::EpollReactor;
     /// use std::sync::Arc;
     ///
     /// let reactor = Arc::new(EpollReactor::new()?);
     /// let state = RuntimeState::with_reactor_and_metrics(reactor, Arc::new(NoOpMetrics));
+    /// # let _ = state;
+    /// # Ok(())
+    /// # }
+    /// # #[cfg(not(target_os = "linux"))]
+    /// # fn main() {}
     /// ```
     #[must_use]
     pub fn with_reactor_and_metrics(

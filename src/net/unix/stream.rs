@@ -5,7 +5,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use asupersync::net::unix::UnixStream;
 //! use asupersync::io::AsyncWriteExt;
 //!

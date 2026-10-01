@@ -5063,4 +5063,40 @@ mod tests {
 
         crate::test_complete!("cancelling_dispatcher_after_return_redispatches_to_next_waiter");
     }
+
+    #[test]
+    fn pool_close_destroys_resources_already_waiting_in_the_return_channel() {
+        init_test("pool_close_destroys_resources_already_waiting_in_the_return_channel");
+
+        let pool = Arc::new(GenericPool::with_time_getter(
+            pool_resource_probe_factory,
+            PoolConfig::with_max_size(1),
+            test_pool_time_now,
+        ));
+        {
+            let mut state = pool.state.lock();
+            state.active = 1;
+        }
+        let (resource, drop_rx) = pool_resource_lock_probe(&pool);
+        let sent = pool
+            .return_tx
+            .send(PoolReturn::Return {
+                resource,
+                hold_duration: Duration::ZERO,
+                created_at: test_pool_time_now(),
+            })
+            .is_ok();
+        assert!(sent, "the return is queued before the close");
+
+        futures_lite::future::block_on(pool.close());
+        assert_eq!(
+            pool.state.lock().active,
+            0,
+            "close settles returns that arrived before it"
+        );
+        assert_pool_resource_dropped_outside_locks(&drop_rx, "pool close with a queued return");
+        crate::test_complete!(
+            "pool_close_destroys_resources_already_waiting_in_the_return_channel"
+        );
+    }
 }

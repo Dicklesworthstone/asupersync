@@ -10,6 +10,13 @@
 //! and neither I/O results nor arbitrary user effects are reproduced by this
 //! projection. Reconstruct the workload and external inputs before driving it
 //! with the Lab's strict production replay API.
+//!
+//! `Runtime::block_on` registers its caller's root future as a task, for
+//! ownership and cancellation, but the caller's thread polls that future
+//! itself. No worker ever dispatches it, so the Lab cannot recreate it as a
+//! scheduled task. The recorder notes these caller tasks, and the checked
+//! projection leaves their observations out: in a replay, the harness plays
+//! the caller's part, as it supplies any other external input.
 
 use super::buffer::TraceBufferHandle;
 use super::event::{TraceData, TraceEvent, TraceEventKind};
@@ -40,6 +47,7 @@ pub struct SchedulerEventContext {
 pub struct ScheduleCaptureSnapshot {
     events: Vec<TraceEvent>,
     contexts: Vec<SchedulerEventContext>,
+    caller_tasks: Vec<TaskId>,
     total_events: u64,
     capacity: usize,
     worker_count: usize,
@@ -47,9 +55,24 @@ pub struct ScheduleCaptureSnapshot {
 
 impl ScheduleCaptureSnapshot {
     /// Canonical events retained at the snapshot boundary, ordered by sequence.
+    ///
+    /// This includes the observations of [`Self::caller_tasks`], which the
+    /// checked projection leaves out.
     #[must_use]
     pub fn events(&self) -> &[TraceEvent] {
         &self.events
+    }
+
+    /// Tasks that own a `Runtime::block_on` caller's root future and appear
+    /// in [`Self::events`], in ascending order.
+    ///
+    /// The caller's thread polls such a future itself; no worker dispatches
+    /// it. [`Self::production_schedule`] therefore leaves these tasks'
+    /// observations out, and a replay harness supplies the caller's effects
+    /// as external input.
+    #[must_use]
+    pub fn caller_tasks(&self) -> &[TaskId] {
+        &self.caller_tasks
     }
 
     /// Worker context for scheduler observations still present in `events`.
@@ -92,6 +115,10 @@ impl ScheduleCaptureSnapshot {
     /// the next task's admission. Runtime quiescence and effects must still be
     /// checked by the strict replay driver after reconstruction.
     ///
+    /// Observations of [`Self::caller_tasks`] are left out of the lifecycle
+    /// checks and the projection: a `block_on` caller's root future is not
+    /// scheduled work, and a live caller does not make the capture partial.
+    ///
     /// # Errors
     /// Refuses truncated or malformed observations, absent worker context,
     /// unfinished task lifecycles, or a trace without actual task polls.
@@ -110,10 +137,19 @@ impl ScheduleCaptureSnapshot {
                 next: pair[1].seq,
             });
         }
+        let scheduled: Vec<TraceEvent> = self
+            .events
+            .iter()
+            .filter(|event| {
+                !matches!(&event.data, TraceData::Task { task, .. }
+                    if self.caller_tasks.binary_search(task).is_ok())
+            })
+            .cloned()
+            .collect();
         let mut live = BTreeSet::new();
         let mut seen = BTreeSet::new();
         let mut polls = 0usize;
-        for event in &self.events {
+        for event in &scheduled {
             if is_scheduler_observation(event.kind)
                 && self
                     .contexts
@@ -149,8 +185,7 @@ impl ScheduleCaptureSnapshot {
         if !live.is_empty() {
             return Err(ScheduleCaptureError::UnfinishedTasks { count: live.len() });
         }
-        ProductionSchedule::from_runtime_trace(&self.events)
-            .map_err(ScheduleCaptureError::Projection)
+        ProductionSchedule::from_runtime_trace(&scheduled).map_err(ScheduleCaptureError::Projection)
     }
 }
 
@@ -216,6 +251,10 @@ struct CaptureContext {
     events: VecDeque<SchedulerEventContext>,
     worker_sequences: Vec<u64>,
     external_sequence: u64,
+    /// Registered `block_on` caller tasks, oldest first. Every caller task has
+    /// a Spawn in the ring, so at most `capacity` of them can still be
+    /// visible; the queue keeps that many.
+    caller_tasks: VecDeque<TaskId>,
 }
 
 /// One recorder is installed before the builder returns any runtime handles.
@@ -238,8 +277,19 @@ impl ScheduleCaptureRecorder {
                 events: VecDeque::new(),
                 worker_sequences: vec![0; worker_count],
                 external_sequence: 0,
+                caller_tasks: VecDeque::new(),
             }),
         }
+    }
+
+    /// Notes that `task` owns a `block_on` caller's root future, which the
+    /// caller's thread polls itself.
+    pub(crate) fn note_caller_task(&self, task: TaskId) {
+        let mut context = self.context.lock();
+        if context.caller_tasks.len() == self.capacity {
+            context.caller_tasks.pop_front();
+        }
+        context.caller_tasks.push_back(task);
     }
 
     pub(crate) fn record(&self, worker: Option<usize>, build: impl FnOnce(u64) -> TraceEvent) {
@@ -282,9 +332,20 @@ impl ScheduleCaptureRecorder {
             })
             .copied()
             .collect();
+        let noted: BTreeSet<TaskId> = context.caller_tasks.iter().copied().collect();
+        let caller_tasks = events
+            .iter()
+            .filter_map(|event| match &event.data {
+                TraceData::Task { task, .. } if noted.contains(task) => Some(*task),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
         ScheduleCaptureSnapshot {
             events,
             contexts,
+            caller_tasks,
             total_events,
             capacity: self.capacity,
             worker_count: self.worker_count,
@@ -349,6 +410,47 @@ mod tests {
         assert_eq!(
             snapshot.production_schedule().unwrap_err(),
             ScheduleCaptureError::Truncated { dropped_events: 2 }
+        );
+    }
+
+    #[test]
+    fn capture_projection_leaves_out_block_on_caller_tasks() {
+        let trace = TraceBufferHandle::new(16);
+        let recorder = ScheduleCaptureRecorder::new(trace.clone(), 1);
+        let (task, region) = ids();
+        let caller = TaskId::new_for_test(1, 1);
+        trace.record_event(|seq| TraceEvent::spawn(seq, Time::ZERO, task, region));
+        trace.record_event(|seq| TraceEvent::spawn(seq, Time::ZERO, caller, region));
+        recorder.record(Some(0), |seq| {
+            TraceEvent::poll(seq, Time::ZERO, task, region)
+        });
+        recorder.record(None, |seq| {
+            TraceEvent::wake(seq, Time::ZERO, caller, region)
+        });
+        trace.record_event(|seq| TraceEvent::complete(seq, Time::ZERO, task, region));
+
+        // Unnoted, the caller's root looks like a scheduled task that never
+        // finished: it is still inside block_on.
+        let unnoted = recorder.snapshot();
+        assert!(unnoted.caller_tasks().is_empty());
+        assert_eq!(
+            unnoted.production_schedule().unwrap_err(),
+            ScheduleCaptureError::UnfinishedTasks { count: 1 }
+        );
+
+        // Noted, it is left out of the projection; a noted task without
+        // retained observations is not reported.
+        recorder.note_caller_task(caller);
+        recorder.note_caller_task(TaskId::new_for_test(9, 1));
+        let snapshot = recorder.snapshot();
+        assert_eq!(snapshot.caller_tasks(), &[caller]);
+        assert_eq!(snapshot.events().len(), 5);
+        let schedule = snapshot.production_schedule().unwrap();
+        assert_eq!(schedule.summary().spawned, 1);
+        assert_eq!(schedule.summary().steps, 1);
+        assert_eq!(
+            schedule.spawn_order(),
+            &[crate::trace::replay::CompactTaskId::from(task)]
         );
     }
 

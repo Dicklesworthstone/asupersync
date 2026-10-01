@@ -424,6 +424,31 @@ fn a_preflight_refused_head_moves_the_next_batch_past_it() {
     assert_eq!(released["state"]["last_covered"], head, "{released:#}");
 }
 
+/// Under clippy the kernel kills `clippy-driver <path>/rustc ...`. That OOM was
+/// once read as red and bisected onto an innocent commit (bi2462.147.65).
+#[test]
+fn a_clippy_driver_killed_on_the_worker_is_undecided() {
+    let head = sha(9);
+    let log = "  INFO rch::hook: Selected worker: vmi1264463 at root@host\nerror: could not compile `asupersync` (lib test)\n\nCaused by:\n  process didn't exit successfully: `/root/.rustup/toolchains/nightly-2026-08-31-x86_64-unknown-linux-gnu/bin/clippy-driver /root/.rustup/toolchains/nightly-2026-08-31-x86_64-unknown-linux-gnu/bin/rustc --crate-name asupersync --edition=2024 src/lib.rs --test` (signal: 9, SIGKILL: kill)\n  Remote command finished: exit=101 in 1363895ms\n";
+    let scenario = json!({
+        "plan": {
+            "commits": [commit(9, "dev@example.com", "nine")],
+            "lanes": [{"id": "clippy-default", "kind": "build", "argv": ["cargo"], "expected_targets": []}],
+        },
+        "lane_logs": {"clippy-default": {head.clone(): {"log": log}}},
+    });
+    let result = evaluate(&scenario);
+    let outcome = receipt(&result, "clippy-default");
+    assert_eq!(outcome["verdict"], "no-evidence", "{result:#}");
+    assert!(
+        result["bead_payloads"]
+            .as_array()
+            .expect("array")
+            .is_empty(),
+        "a killed clippy-driver must never file a bead: {result:#}"
+    );
+}
+
 #[test]
 fn a_compiler_killed_on_the_worker_is_undecided_unless_a_real_failure_sits_beside_it() {
     let head = sha(9);
@@ -507,6 +532,12 @@ fn a_dependency_the_worker_could_not_build_is_undecided_unless_a_workspace_crate
     // A dependency that fails on its own diagnostics can be caused by a manifest or
     // lockfile change in the commit under test.
     let dependency_error = "  INFO rch::hook: Selected worker: hz3 at ubuntu@host\nerror[E0277]: the trait bound `T: Send` is not satisfied\nerror: could not compile `serde` (lib) due to 1 previous error\n  Remote command finished: exit=101 in 1000ms\n";
+    // The check-wasm32 lane on a worker without the rustup target: every crate fails
+    // on a missing `core` before any code of this repository is reached.
+    let missing_target = "  INFO rch::hook: Selected worker: hz2 at ubuntu@host\n    Checking cfg-if v1.0.4\nerror[E0463]: can't find crate for `core`\n  |\n  = note: the `wasm32-unknown-unknown` target may not be installed\n  = help: consider downloading the target with `rustup target add wasm32-unknown-unknown`\nerror: could not compile `cfg-if` (lib) due to 1 previous error\n  Remote command finished: exit=101 in 900ms\n";
+    // A dep-info fault can stop cargo before any crate reports `could not compile`
+    // (hz4, 2026-09-29: filed as the false P0 bi2462.147.66).
+    let dep_info_only = "  INFO rch::hook: Selected worker: hz4 at ubuntu@host\n   Compiling syn v2.0.119\nerror: could not parse/generate dep info at: /data/tmp/rch/asupersync/08eb264dca0e0e69/.rch-target-hz4-job-1/debug/build/syn/0f39f05953ee3969/out/syn-0f39f05953ee3969.d\n\nCaused by:\n  No such file or directory (os error 2)\n  Remote command finished: exit=101 in 7561ms\n";
     let scenario = json!({
         "plan": {
             "commits": [commit(9, "dev@example.com", "nine")],
@@ -514,7 +545,10 @@ fn a_dependency_the_worker_could_not_build_is_undecided_unless_a_workspace_crate
                 one("fault-build", "build"),
                 one("fault-test", "test"),
                 one("fault-missing-source", "build"),
+                one("fault-missing-target", "build"),
+                one("fault-dep-info-only", "test"),
                 one("fault-beside-workspace-error", "build"),
+                one("fault-beside-member-error", "build"),
                 one("dependency-error", "build"),
             ],
         },
@@ -522,14 +556,21 @@ fn a_dependency_the_worker_could_not_build_is_undecided_unless_a_workspace_crate
             "fault-build": {head.clone(): {"log": dependency_fault("")}},
             "fault-test": {head.clone(): {"log": dependency_fault("")}},
             "fault-missing-source": {head.clone(): {"log": missing_source}},
+            "fault-missing-target": {head.clone(): {"log": missing_target}},
+            "fault-dep-info-only": {head.clone(): {"log": dep_info_only}},
             "fault-beside-workspace-error": {head.clone(): {"log": dependency_fault(
                 "src/lib.rs:10:5: error[E0599]: no method named `frob` found\nerror: could not compile `asupersync` (lib) due to 1 previous error\n"
+            )}},
+            // A workspace member whose package name is not asupersync-*: its local path
+            // on the Checking line marks it as this repository's code.
+            "fault-beside-member-error": {head.clone(): {"log": dependency_fault(
+                "    Checking franken-kernel v0.1.0 (/data/tmp/rch/asupersync/0123abcd/franken_kernel)\nfranken_kernel/src/lib.rs:3:5: error[E0425]: cannot find value `x` in this scope\nerror: could not compile `franken-kernel` (lib) due to 1 previous error\n"
             )}},
             "dependency-error": {head.clone(): {"log": dependency_error}},
         },
     });
     let result = evaluate(&scenario);
-    for lane in ["fault-build", "fault-test", "fault-missing-source"] {
+    for lane in ["fault-build", "fault-test", "fault-missing-source", "fault-missing-target", "fault-dep-info-only"] {
         let outcome = receipt(&result, lane);
         assert_eq!(outcome["verdict"], "no-evidence", "{lane}: {result:#}");
         assert!(
@@ -540,7 +581,7 @@ fn a_dependency_the_worker_could_not_build_is_undecided_unless_a_workspace_crate
             "{lane}: {outcome:#}"
         );
     }
-    for lane in ["fault-beside-workspace-error", "dependency-error"] {
+    for lane in ["fault-beside-workspace-error", "fault-beside-member-error", "dependency-error"] {
         assert_eq!(
             receipt(&result, lane)["verdict"],
             "red",
@@ -553,7 +594,7 @@ fn a_dependency_the_worker_could_not_build_is_undecided_unless_a_workspace_crate
         .iter()
         .filter_map(|payload| payload["lane"].as_str())
         .collect();
-    for lane in ["fault-build", "fault-test", "fault-missing-source"] {
+    for lane in ["fault-build", "fault-test", "fault-missing-source", "fault-missing-target", "fault-dep-info-only"] {
         assert!(!filed.contains(&lane), "a worker fault must never file a bead: {filed:?}");
     }
     assert!(
@@ -781,6 +822,54 @@ fn a_lib_filter_that_ran_no_test_is_reported_not_hidden() {
     assert_eq!(lib["unexercised_filters"], json!(["database::postgres"]));
 }
 
+/// Only this lane runs the rustdoc examples, the README's included (br-asupersync-69l7je).
+/// It runs when a batch touches crate source or the README. One `Doc-tests` header owns
+/// two libtest blocks (merged, then standalone doctests), so a failure is keyed by cargo's
+/// `--doc` and names the doctest, spaces and all.
+#[test]
+fn doctests_run_for_source_or_readme_changes_and_a_failure_names_the_doctest() {
+    let probed = evaluate(&json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {"touches_rustdoc": [
+            ["src/lib.rs"], ["README.md"], ["src/net/tcp/mod.rs", "docs/x.md"],
+            ["tests/a.rs", "Cargo.toml"], ["docs/README.md", "scripts/x.py"],
+        ]},
+    }));
+    assert_eq!(
+        probed["probe_results"]["touches_rustdoc"],
+        json!([true, true, true, false, false]),
+        "{probed:#}"
+    );
+
+    let lane = json!({
+        "id": "doctests", "kind": "test", "argv": ["cargo", "test", "--doc"],
+        "expected_targets": ["doc"],
+    });
+    let green = "   Doc-tests asupersync\nrunning 3 tests\ntest src/a.rs - a (line 3) ... ok\ntest src/b.rs - b (line 9) - compile ... ok\ntest src/c.rs - c (line 1) ... ignored\ntest result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s\n\nrunning 1 test\ntest src/d.rs - d (line 5) ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s\n  Remote command finished: exit=0 in 1000ms\n";
+    let red = "   Doc-tests asupersync\nrunning 2 tests\ntest src/a.rs - a (line 3) ... ok\ntest src/stream/mod.rs - stream::StreamExt::try_buffered (line 450) ... FAILED\n\nfailures:\n\nfailures:\n    src/stream/mod.rs - stream::StreamExt::try_buffered (line 450)\n\ntest result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n\nerror: doctest failed, to rerun pass `-p asupersync --doc`\n  Remote command finished: exit=101 in 1000ms\n";
+    for (log, verdict, failing) in [
+        (green, "green", json!([])),
+        (
+            red,
+            "red",
+            json!(["doc::src/stream/mod.rs - stream::StreamExt::try_buffered (line 450)"]),
+        ),
+    ] {
+        let result = evaluate(&json!({
+            "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": [lane.clone()]},
+            "lane_logs": {"doctests": {sha(1): {"log": log, "client_exit": if verdict == "red" { 101 } else { 0 }}}},
+        }));
+        let doc = receipt(&result, "doctests");
+        assert_eq!(doc["verdict"], verdict, "{doc:#}");
+        assert_eq!(
+            doc["failing_targets"].as_array().cloned().unwrap_or_default(),
+            failing.as_array().cloned().unwrap_or_default(),
+            "{doc:#}"
+        );
+    }
+}
+
 /// A batch that touches Cargo.toml or a top-level integration test runs the test
 /// registration contract (bi2462.87): a commit that never ran `cargo test` can
 /// still add a feature-gated test without its `[[test]]` required-features.
@@ -901,6 +990,235 @@ fn rotation_walks_default_targets_and_files_each_new_red_once() {
         assert_eq!(filing["priority"], 1);
         assert_eq!(filing["new_targets"], json!(["beta::pins"]));
     }
+}
+
+/// RCH delivers cargo's stderr (the `Running` headers) apart from libtest's stdout
+/// (the result blocks); the runner concatenates them. Reading "the last header
+/// seen" filed rotation failures under the wrong target and recorded the failing
+/// ones green (2026-09-29: api_surface_map_contract and
+/// artifact_governance_scanner_contract). The k-th libtest block belongs to the
+/// k-th header. A target at a nested path is named by its binary, not its file stem
+/// (atp_per_module_logging_redaction_contract kept the rotation cursor stuck). When
+/// blocks and headers do not pair up, only cargo's own list of failed binaries
+/// names a target, and nothing is recorded green.
+#[test]
+fn rotation_attributes_each_failure_to_the_binary_that_printed_it() {
+    let nested = "atp_per_module_logging_redaction_contract";
+    let ok = |n: usize| {
+        format!("running {n} tests\ntest result: ok. {n} passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n")
+    };
+    let headers = format!(
+        "     Running tests/alpha.rs (target/debug/deps/alpha-0123abcd)\n     Running tests/atp/per_module/logging_redaction_contract.rs (target/debug/deps/{nested}-4567ef01)\n     Running tests/beta.rs (target/debug/deps/beta-89abcdef)\n"
+    );
+    // stdout first, then stderr: every header sits below every block.
+    let paired = ok(3)
+        + "running 1 test\ntest pins ... FAILED\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n"
+        + &ok(2)
+        + &headers
+        + &format!("error: 1 target failed:\n    `-p asupersync --test {nested}`\n  Remote command finished: exit=101 in 1ms\n");
+    // A failing test's captured output echoes a libtest header: four blocks, three
+    // headers. cargo names two failed binaries, so neither test can be placed.
+    let unpaired = String::from(
+        "running 1 test\ntest one ... FAILED\n\nfailures:\n\n---- one stdout ----\nrunning 1 test\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n",
+    ) + &ok(3)
+        + "running 2 tests\ntest two ... FAILED\ntest result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n"
+        + &headers
+        + "error: 2 targets failed:\n    `-p asupersync --test alpha`\n    `-p asupersync --test beta`\n  Remote command finished: exit=101 in 1ms\n";
+    let probed = evaluate(&json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {"rotation": [{
+            "root_paths": ["tests/alpha.rs", "tests/beta.rs", "tests/atp"],
+            "registry": {
+                "tests/atp/per_module/logging_redaction_contract.rs": {"name": nested, "features": []},
+            },
+            "count": 3,
+            "runs": [
+                {"sha": "b1", "log": paired, "client_exit": 101, "file_as": "asupersync-rota"},
+                {"sha": "b2", "log": unpaired, "client_exit": 101, "file_as": "asupersync-rotb"},
+            ],
+        }]},
+    }));
+    let rotation = &probed["probe_results"]["rotation"][0];
+    let rounds = rotation["rounds"].as_array().expect("rounds");
+    assert_eq!(rounds[0]["verdict"], "red", "{probed:#}");
+    assert_eq!(rounds[0]["new_red"], json!([nested]), "{probed:#}");
+    assert_eq!(
+        rounds[0]["results"],
+        json!({"alpha": ["green", null], nested: ["red", "asupersync-rota"], "beta": ["green", null]}),
+        "{probed:#}"
+    );
+    assert_eq!(
+        rotation["filings"][0]["new_targets"],
+        json!([format!("{nested}::pins")]),
+        "{probed:#}"
+    );
+    // Unpaired: cargo's list still marks alpha and beta red; the nested target, which
+    // may well have passed, is not healed on this evidence.
+    assert_eq!(rounds[1]["new_red"], json!(["alpha", "beta"]), "{probed:#}");
+    assert_eq!(rounds[1]["healed"], json!([]), "{probed:#}");
+    assert_eq!(
+        rounds[1]["results"][nested],
+        json!(["red", "asupersync-rota"]),
+        "{probed:#}"
+    );
+}
+
+/// The browser SDK's Node suites run on the watchdog host (Node, not Cargo), one
+/// `=== node-suite <path> exit=<code>` marker after each suite's output (bi2462.135).
+/// A failing test is keyed by suite and test name. The file-level entry, which names
+/// the suite by its path in a per-run temporary snapshot, never becomes a key, so a
+/// persisting red is not refiled every run. A missing fake-indexeddb reference is the
+/// host's gap: undecided, never green and never red.
+#[test]
+fn node_suites_are_keyed_by_suite_and_test_and_a_missing_reference_proves_nothing() {
+    let head = sha(9);
+    let node = |id: &str| json!({"id": id, "kind": "node", "argv": ["node"], "suites": ["scripts/test_browser_a.mjs", "scripts/test_browser_b.mjs"]});
+    let stats = |pass: u32, fail: u32| format!("ℹ tests {}\nℹ pass {pass}\nℹ fail {fail}\n", pass + fail);
+    let green = format!(
+        "✔ one (1.0ms)\n{}=== node-suite scripts/test_browser_a.mjs exit=0\n{}=== node-suite scripts/test_browser_b.mjs exit=0\n",
+        stats(3, 0),
+        stats(2, 0)
+    );
+    let red = format!(
+        "{}=== node-suite scripts/test_browser_a.mjs exit=0\n✖ fails on purpose (1.04ms)\n{}✖ failing tests:\n✖ fails on purpose (1.04ms)\n✖ /tmp/asupersync_watchdog_node_x1/scripts/test_browser_b.mjs (5.1ms)\n=== node-suite scripts/test_browser_b.mjs exit=1\n",
+        stats(3, 0),
+        stats(1, 1)
+    );
+    let timed_out = format!("{}=== node-suite scripts/test_browser_a.mjs exit=0\n=== node-suite scripts/test_browser_b.mjs exit=timeout\n", stats(3, 0));
+    let no_reference = format!(
+        "{}=== node-suite scripts/test_browser_a.mjs exit=0\nError: Artifact transaction tests require fake-indexeddb 6.2.5.\n{}=== node-suite scripts/test_browser_b.mjs exit=1\n",
+        stats(3, 0),
+        stats(0, 1)
+    );
+    let absent = "=== node-suite scripts/test_browser_a.mjs exit=absent\n=== node-suite scripts/test_browser_b.mjs exit=absent\n";
+    let no_node = "=== node-suite scripts/test_browser_a.mjs exit=no-node\n=== node-suite scripts/test_browser_b.mjs exit=no-node\n";
+    let scenario = json!({
+        "plan": {
+            "commits": [commit(9, "dev@example.com", "nine")],
+            "lanes": [node("green"), node("red"), node("timed-out"), node("no-reference"), node("absent"), node("no-node")],
+        },
+        "lane_logs": {
+            "green": {head.clone(): {"log": green}},
+            "red": {head.clone(): {"log": red}},
+            "timed-out": {head.clone(): {"log": timed_out}},
+            "no-reference": {head.clone(): {"log": no_reference}},
+            "absent": {head.clone(): {"log": absent}},
+            "no-node": {head.clone(): {"log": no_node}},
+        },
+    });
+    let result = evaluate(&scenario);
+    let green = receipt(&result, "green");
+    assert_eq!(green["verdict"], "green", "{result:#}");
+    assert_eq!(green["counts"]["passed"], 5);
+    let red = receipt(&result, "red");
+    assert_eq!(red["verdict"], "red", "{result:#}");
+    assert_eq!(
+        red["failing_targets"],
+        json!(["scripts/test_browser_b.mjs::fails on purpose"]),
+        "{result:#}"
+    );
+    assert_eq!(
+        receipt(&result, "timed-out")["failing_targets"],
+        json!(["scripts/test_browser_b.mjs::(suite failed, exit timeout)"]),
+        "{result:#}"
+    );
+    for lane in ["no-reference", "absent", "no-node"] {
+        assert_eq!(
+            receipt(&result, lane)["verdict"],
+            "no-evidence",
+            "{lane}: {result:#}"
+        );
+    }
+    assert!(
+        receipt(&result, "no-reference")["reason"]
+            .as_str()
+            .expect("reason")
+            .contains("WATCHDOG_FAKE_INDEXEDDB_SOURCE"),
+        "{result:#}"
+    );
+}
+
+/// The feature-gated rotation (br-asupersync-kh02d2.1) runs what the test build compiles
+/// out. The test build has the defaults plus what a path dev-dependency unifies in (here
+/// `extra`, which turns on `implied`), so a target that needs only those belongs to the
+/// default rotation. Any other target is a row keyed by the features its code needs:
+/// its required-features plus every manifest feature a cfg names (not a comment or a
+/// string; an undefined name would make `--features` fail the run). An exempt feature
+/// drops the target, and one pick never spans two feature sets.
+#[test]
+fn feature_rotation_runs_what_the_test_build_compiles_out_one_feature_set_at_a_time() {
+    let probed = evaluate(&json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {"feature_rotation": [{
+            "manifest": {
+                "package": {"name": "asupersync"},
+                "features": {
+                    "default": ["core"], "core": [], "extra": ["implied", "dep:serde"],
+                    "implied": [], "tls": ["dep:rustls"], "cli": ["tls"], "tower": [],
+                    "loom-tests": [],
+                },
+                "dev-dependencies": {
+                    "conformance": {"package": "asupersync-conformance", "path": "conformance"},
+                    "serde_json": "1",
+                },
+            },
+            "members": {"conformance": {"dependencies": {
+                "asupersync": {"path": "..", "default-features": false, "features": ["extra"]},
+            }}},
+            "registry": {
+                "tests/cli_a.rs": {"name": "cli_a", "features": ["cli"]},
+                "tests/nested/tls_b.rs": {"name": "tls_b", "features": ["tls"]},
+                "tests/tls_d.rs": {"name": "tls_d", "features": ["implied", "tls"]},
+                "tests/implied_only.rs": {"name": "implied_only", "features": ["implied"]},
+                "tests/loom.rs": {"name": "loom", "features": ["loom-tests"]},
+            },
+            "sources": {
+                "tests/cli_a.rs": "",
+                "tests/nested/tls_b.rs": "",
+                "tests/tls_d.rs": "",
+                "tests/implied_only.rs": "",
+                "tests/loom.rs": "",
+                "tests/plain.rs": "#[test]\nfn t() {}\n",
+                "tests/inner.rs": "#[cfg(feature = \"tower\")]\nmod tower_tests {}\n#[cfg(all(feature = \"extra\", not(feature = \"tls\")))]\nmod x {}\n#[cfg(feature = \"no-such-feature\")]\nmod y {}\n",
+                "tests/mentions.rs": "// cfg(feature = \"tls\") in a comment\nconst S: &str = \"#[cfg(feature = \\\"cli\\\")]\";\nconst Q: char = '\"';\n",
+                "tests/tls_c.rs": "#[cfg_attr(feature = \"tls\", ignore)]\n#[test]\nfn t() {}\n",
+                "tests/common/mod.rs": "#[cfg(feature = \"tls\")]\npub fn helper() {}\n",
+            },
+            "count": 2,
+            "picks": 4,
+        }]},
+    }));
+    let result = &probed["probe_results"]["feature_rotation"][0];
+    assert_eq!(
+        result["test_build"],
+        json!(["core", "extra", "implied"]),
+        "{probed:#}"
+    );
+    assert_eq!(
+        result["rows"],
+        json!([
+            ["cli", "cli_a"],
+            ["tls", "tls_b"],
+            ["tls", "tls_c"],
+            ["tls", "tls_d"],
+            ["tls,tower", "inner"]
+        ]),
+        "{probed:#}"
+    );
+    // `tls_d` shares the `tls` build (it needs `implied` too, which the test build has),
+    // and its pick still names `implied`: cargo checks required-features as written.
+    assert_eq!(
+        result["picks"],
+        json!([
+            {"features": "cli", "picked": ["cli_a"], "cursor": 1},
+            {"features": "tls", "picked": ["tls_b", "tls_c"], "cursor": 3},
+            {"features": "implied,tls", "picked": ["tls_d"], "cursor": 4},
+            {"features": "tls,tower", "picked": ["inner"], "cursor": 0},
+        ]),
+        "{probed:#}"
+    );
 }
 
 fn hedge_log(with_newer: bool) -> String {

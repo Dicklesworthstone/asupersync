@@ -20,21 +20,39 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
-//! // Establish a monitor
-//! let mon_ref = monitor_set.establish(watcher_id, watcher_region, target_id);
+//! ```rust
+//! use asupersync::error::Error;
+//! use asupersync::monitor::{DownBatch, DownNotification, DownReason, MonitorRef, MonitorSet};
+//! use asupersync::types::{Outcome, RegionId, TaskId, Time};
 //!
-//! // When target terminates, generate notifications
-//! let watchers = monitor_set.watchers_of(target_id);
-//! let mut batch = DownBatch::new();
-//! for (mref, watcher) in &watchers {
-//!     batch.push(completion_vt, DownNotification {
-//!         monitored: target_id,
-//!         reason: DownReason::from_task_outcome(&outcome),
-//!         monitor_ref: *mref,
-//!     });
+//! // Establish a monitor.
+//! fn watch(
+//!     monitor_set: &mut MonitorSet,
+//!     watcher_id: TaskId,
+//!     watcher_region: RegionId,
+//!     target_id: TaskId,
+//! ) -> MonitorRef {
+//!     monitor_set.establish(watcher_id, watcher_region, target_id)
 //! }
-//! let ordered = batch.into_sorted();
+//!
+//! // When the target terminates, generate its notifications in delivery order.
+//! fn down_notifications(
+//!     monitor_set: &MonitorSet,
+//!     target_id: TaskId,
+//!     outcome: &Outcome<(), Error>,
+//!     completion_vt: Time,
+//! ) -> Vec<DownNotification> {
+//!     let watchers = monitor_set.watchers_of(target_id);
+//!     let mut batch = DownBatch::new();
+//!     for (mref, _watcher) in &watchers {
+//!         batch.push(completion_vt, DownNotification {
+//!             monitored: target_id,
+//!             reason: DownReason::from_task_outcome(outcome),
+//!             monitor_ref: *mref,
+//!         });
+//!     }
+//!     batch.into_sorted()
+//! }
 //! ```
 
 use std::collections::BTreeMap;

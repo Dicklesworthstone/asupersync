@@ -901,8 +901,8 @@ mod imp {
                 }
                 Ok(())
             }
-            libc::S_IFSOCK => Ok(()), // Sockets are generally safe
-            libc::S_IFIFO => Ok(()),  // Pipes are generally safe
+            libc::S_IFSOCK => Ok(()),    // Sockets are generally safe
+            libc::S_IFIFO | 0 => Ok(()), // Pipes; anonymous inodes (eventfd, timerfd, epoll)
             libc::S_IFCHR => {
                 // Character devices: check for dangerous ones
                 let major = libc::major(stat_buf.st_rdev);

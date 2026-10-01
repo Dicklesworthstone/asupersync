@@ -15,7 +15,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use asupersync::test_logging::{TestLogger, TestLogLevel, TestEvent};
 //!
 //! let logger = TestLogger::new(TestLogLevel::Debug);
@@ -3409,13 +3409,13 @@ pub struct EventStats {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use asupersync::test_logging::TestHarness;
-///
+/// # let port: u16 = 8080; // the listener's bound port
 /// let mut harness = TestHarness::new("my_e2e_test");
 /// harness.enter_phase("setup");
 ///   harness.enter_phase("create_listener");
-///   harness.assert_eq("port bound", 8080, listener.port());
+///   harness.assert_eq("port bound", &8080, &port);
 ///   harness.exit_phase();
 /// harness.exit_phase();
 ///

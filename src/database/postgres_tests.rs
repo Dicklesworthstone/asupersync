@@ -2082,6 +2082,50 @@ mod tests {
     }
 
     #[test]
+    fn copy_out_fatal_error_before_eof_keeps_its_sqlstate() {
+        use std::io::Write;
+
+        run_copy_out_test(async {
+            for after_start in [false, true] {
+                let (mut conn, mut peer) = make_test_connection_with_peer();
+                let cx = Cx::for_testing();
+                if after_start {
+                    peer.write_all(&copy_out_response_message(Format::Text, &[Format::Text]))
+                        .unwrap();
+                    peer.write_all(&backend_message(b'd', b"partial\n")).unwrap();
+                }
+                // A FATAL error (e.g. pg_terminate_backend) is followed by the
+                // server closing the socket, never by ReadyForQuery.
+                peer.write_all(&error_response_message("57P01", "terminating connection"))
+                    .unwrap();
+                peer.shutdown(std::net::Shutdown::Write).unwrap();
+
+                let result = if after_start {
+                    let mut copy = match conn.copy_out(&cx, "COPY terminated TO STDOUT").await {
+                        Outcome::Ok(copy) => copy,
+                        other => panic!("expected initial COPY metadata: {other:?}"),
+                    };
+                    assert!(matches!(
+                        copy.next_chunk(&cx).await,
+                        Outcome::Ok(Some(chunk)) if chunk == b"partial\n"
+                    ));
+                    copy.next_chunk(&cx).await.map(drop)
+                } else {
+                    conn.copy_out(&cx, "COPY terminated TO STDOUT")
+                        .await
+                        .map(drop)
+                };
+                assert!(
+                    matches!(&result, Outcome::Err(PgError::Server { code, .. }) if code == "57P01"),
+                    "after_start={after_start}: the server's SQLSTATE, not the EOF, must be reported: {result:?}"
+                );
+                assert!(conn.inner.closed, "a terminated session is never reused");
+                drop(peer);
+            }
+        });
+    }
+
+    #[test]
     fn copy_out_drop_and_explicit_cancellation_close_unfinished_stream() {
         use std::future::Future;
         use std::io::Write;
@@ -11351,6 +11395,9 @@ mod tests {
             conn.inner.options = options.clone();
             conn.inner.cancel_target = CancelTarget::from_options(&conn.inner.options);
             conn.inner.max_result_rows = 17;
+            let timeout = std::time::Duration::from_millis(500);
+            conn.set_statement_timeout_override(Some(timeout));
+            conn.inner.applied_statement_timeout_ms = Some(500);
             let cx = crate::cx::Cx::for_testing();
             conn.inner.closed = true;
 
@@ -11362,6 +11409,10 @@ mod tests {
             assert_eq!(conn.inner.options.host, options.host);
             assert_eq!(conn.inner.options.port, options.port);
             assert_eq!(conn.inner.max_result_rows, 17);
+            // The caller's statement-timeout bound survives the new socket,
+            // which has not applied it yet (br-asupersync-8f74f1).
+            assert_eq!(conn.statement_timeout_override(), Some(timeout));
+            assert_eq!(conn.inner.applied_statement_timeout_ms, None);
 
             server.join().expect("deterministic postgres server exits");
             test_complete!("idle_remote_close_reconnects_with_original_options");

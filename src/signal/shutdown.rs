@@ -31,7 +31,7 @@ struct ShutdownState {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use asupersync::signal::ShutdownController;
 ///
 /// async fn run_server() {

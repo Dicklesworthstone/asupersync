@@ -54,16 +54,25 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
+//! use asupersync::bytes::Bytes;
 //! use asupersync::grpc::interceptor::{InterceptorLayer, trace_interceptor, auth_bearer_interceptor};
+//! use asupersync::grpc::{Interceptor, MetadataValue, Request, Status};
 //!
 //! // Create a layered interceptor chain
 //! let interceptor = InterceptorLayer::new()
 //!     .layer(trace_interceptor())
 //!     .layer(auth_bearer_interceptor("my-token"));
 //!
-//! // Apply to requests
-//! let request = interceptor.intercept_request(request)?;
+//! // Apply it to an outgoing request. `intercept_request` is the
+//! // `Interceptor` trait method and edits the request in place.
+//! let mut request = Request::new(Bytes::new());
+//! interceptor.intercept_request(&mut request)?;
+//! assert!(matches!(
+//!     request.metadata().get("authorization"),
+//!     Some(MetadataValue::Ascii(value)) if value == "Bearer my-token"
+//! ));
+//! # Ok::<(), Status>(())
 //! ```
 
 use std::collections::HashMap;

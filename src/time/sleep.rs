@@ -351,17 +351,19 @@ fn readiness_waker(ready: Arc<AtomicBool>, inner: Waker) -> Waker {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use asupersync::time::sleep;
+/// ```no_run
+/// use asupersync::Cx;
+/// use asupersync::time::{sleep, sleep_until};
+/// use asupersync::types::Time;
 /// use std::time::Duration;
 ///
-/// // Sleep for 100 milliseconds
-/// sleep(Duration::from_millis(100)).await;
+/// async fn pause(cx: &Cx) {
+///     // Sleep for 100 milliseconds, measured from the task's current time
+///     sleep(cx.now(), Duration::from_millis(100)).await;
 ///
-/// // Sleep until a specific time
-/// use asupersync::time::sleep_until;
-/// use asupersync::types::Time;
-/// sleep_until(Time::from_secs(5)).await;
+///     // Sleep until a specific time
+///     sleep_until(Time::from_secs(5)).await;
+/// }
 /// ```
 #[derive(Debug)]
 pub struct Sleep {

@@ -13,17 +13,29 @@
 //!
 //! # Usage
 //!
-//! ```ignore
-//! use asupersync::observability::w3c_trace_context::{W3CTraceContext, extract_from_http, inject_to_grpc};
+//! ```
+//! use asupersync::observability::w3c_trace_context::{
+//!     TraceContextError, W3CTraceContext, extract_from_http, inject_to_grpc,
+//! };
+//! use std::collections::HashMap;
 //!
-//! // Extract from incoming HTTP request
-//! let ctx = extract_from_http(request.headers())?;
+//! // Headers of an incoming HTTP request (lower-case names).
+//! let upstream = W3CTraceContext::new_root();
+//! let mut headers = HashMap::new();
+//! headers.insert("traceparent".to_string(), upstream.to_traceparent());
+//!
+//! // Extract from incoming HTTP request (`None` when it carries no context)
+//! let ctx = extract_from_http(&headers)?.unwrap_or_else(W3CTraceContext::new_root);
 //!
 //! // Create child span for downstream operation
 //! let child_ctx = ctx.create_child();
+//! assert_eq!(child_ctx.trace_id, upstream.trace_id);
 //!
-//! // Inject into outbound gRPC call
-//! inject_to_grpc(&child_ctx, &mut grpc_request.metadata_mut());
+//! // Inject into outbound gRPC metadata
+//! let mut metadata = HashMap::new();
+//! inject_to_grpc(&child_ctx, &mut metadata);
+//! assert!(metadata.contains_key("traceparent"));
+//! # Ok::<(), TraceContextError>(())
 //! ```
 
 use std::collections::{BTreeMap, HashMap};

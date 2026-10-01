@@ -30,7 +30,9 @@ use receive_frame::{DataFrameCursor, FrameHeader, FrameHeaderError};
 use super::h3_native::{
     H3ConnectionConfig, H3ConnectionState, H3ControlState, H3EndpointRole, H3Frame, H3NativeError,
     H3QpackMode, H3RequestHead, H3ResponseHead, H3Settings, H3UniStreamType,
-    QpackEncoderInstruction, qpack_decode_encoder_instruction, qpack_decode_request_field_section,
+    QpackDecoderInstruction, QpackEncoderInstruction, header_fields_to_request_head,
+    qpack_decode_decoder_instruction, qpack_decode_encoder_instruction,
+    qpack_decode_field_section_with_context, qpack_plan_to_header_fields,
     qpack_decode_response_field_section, qpack_decode_trailer_field_section,
     qpack_encode_request_field_section, qpack_encode_response_field_section,
     qpack_encode_trailer_field_section,
@@ -39,9 +41,16 @@ use super::h3_native::{
 /// RFC 9114 application error code `H3_REQUEST_CANCELLED`.
 pub const H3_REQUEST_CANCELLED: u64 = 0x010c;
 
+/// RFC 9114 application error code `H3_REQUEST_REJECTED`: the request was
+/// not processed, so the client may retry it.
+pub const H3_REQUEST_REJECTED: u64 = 0x010b;
+
+/// RFC 9114 application error code `H3_MESSAGE_ERROR`.
+const H3_MESSAGE_ERROR: u64 = 0x010e;
+
 const H3_CONTROL_STREAM_TYPE: u64 = 0x00;
 const FRAME_HEADER_MAX_BYTES: usize = 16;
-const MAX_SPARSE_TERMINAL_STREAMS: usize = 4096;
+const MAX_OPEN_STREAM_RUNS: usize = 4096;
 const STREAMING_READINESS_BATCH: usize = 32;
 const STREAMING_POLL_STEPS: usize = 32;
 
@@ -162,6 +171,10 @@ pub enum NativeH3Event {
         stream_id: StreamId,
     },
     /// Peer reset one request/response stream.
+    ///
+    /// A server session also reports a request it rejected as malformed this
+    /// way, with `error_code` H3_MESSAGE_ERROR (0x10e) and `final_size` 0,
+    /// after resetting that stream itself. Other requests are unaffected.
     StreamReset {
         /// Reset QUIC stream.
         stream_id: StreamId,
@@ -201,10 +214,19 @@ struct StreamingReceive {
     waker: Option<Waker>,
 }
 
+/// Remembers which streams have terminated, in memory bounded by how many
+/// streams are open at once rather than by the connection's history.
+///
+/// Per stream-id class (`id & 0x03`), every id at or below the class
+/// watermark (the highest terminated id) has terminated, except the ids in
+/// that class's open runs. A run `start..=end` holds ids of the class that are
+/// still open or not yet seen; QUIC opens every lower id of a class
+/// implicitly. So a long-lived stream, such as a control stream or a streaming
+/// request, costs one run however many later streams finish.
 #[derive(Debug, Clone, Default)]
 struct TerminalStreamTracker {
-    contiguous: [Option<u64>; 4],
-    sparse: BTreeSet<StreamId>,
+    watermark: [Option<u64>; 4],
+    open_runs: [BTreeMap<u64, u64>; 4],
     overflowed: bool,
 }
 
@@ -221,8 +243,29 @@ impl TerminalStreamTracker {
 
     fn contains(&self, stream_id: StreamId) -> bool {
         let class = usize::try_from(stream_id.0 & 0x03).expect("stream-id class fits usize");
-        self.contiguous[class].is_some_and(|high| stream_id.0 <= high)
-            || self.sparse.contains(&stream_id)
+        self.watermark[class].is_some_and(|high| stream_id.0 <= high)
+            && self.open_run(class, stream_id.0).is_none()
+    }
+
+    /// The open run of `class` holding `id`, as `(start, end)`.
+    fn open_run(&self, class: usize, id: u64) -> Option<(u64, u64)> {
+        self.open_runs[class]
+            .range(..=id)
+            .next_back()
+            .filter(|&(_, &end)| id <= end)
+            .map(|(&start, &end)| (start, end))
+    }
+
+    fn add_open_run(&mut self, class: usize, start: u64, end: u64) -> Result<(), H3NativeError> {
+        let runs: usize = self.open_runs.iter().map(BTreeMap::len).sum();
+        if runs >= MAX_OPEN_STREAM_RUNS {
+            self.overflowed = true;
+            return Err(H3NativeError::ControlProtocol(
+                "terminal stream tracking window exceeded",
+            ));
+        }
+        self.open_runs[class].insert(start, end);
+        Ok(())
     }
 
     fn insert(&mut self, stream_id: StreamId) -> Result<(), H3NativeError> {
@@ -230,24 +273,33 @@ impl TerminalStreamTracker {
         if self.contains(stream_id) {
             return Ok(());
         }
-        let class_id = stream_id.0 & 0x03;
+        let id = stream_id.0;
+        let class_id = id & 0x03;
         let class = usize::try_from(class_id).expect("stream-id class fits usize");
-        let next_contiguous =
-            self.contiguous[class].map_or(class_id, |high| high.saturating_add(4));
-        if self.sparse.len() >= MAX_SPARSE_TERMINAL_STREAMS && stream_id.0 != next_contiguous {
-            self.overflowed = true;
-            return Err(H3NativeError::ControlProtocol(
-                "terminal stream tracking window exceeded",
-            ));
-        }
-        self.sparse.insert(stream_id);
-        let mut next = next_contiguous;
-        while self.sparse.remove(&StreamId(next)) {
-            self.contiguous[class] = Some(next);
-            let Some(successor) = next.checked_add(4) else {
-                break;
-            };
-            next = successor;
+        match self.watermark[class] {
+            Some(high) if id <= high => {
+                // Below the watermark and not terminated, so `id` is in an
+                // open run: split the run around it.
+                let (start, end) = self
+                    .open_run(class, id)
+                    .expect("an unterminated id below the watermark is in an open run");
+                self.open_runs[class].remove(&start);
+                if id < end {
+                    self.open_runs[class].insert(id + 4, end);
+                }
+                if start < id {
+                    self.add_open_run(class, start, id - 4)?;
+                }
+            }
+            high => {
+                // Every id of the class between the old watermark and `id` is
+                // open or not yet seen.
+                let first = high.map_or(class_id, |high| high.saturating_add(4));
+                if first < id {
+                    self.add_open_run(class, first, id - 4)?;
+                }
+                self.watermark[class] = Some(id);
+            }
         }
         Ok(())
     }
@@ -511,6 +563,9 @@ pub struct NativeH3Session {
     closing: bool,
     next_local_request_stream_id: u64,
     streaming_receive: Option<StreamingReceive>,
+    /// Malformed requests already reported, whose RESET_STREAM and
+    /// STOP_SENDING are still to be queued on the connection.
+    rejected_requests: Vec<StreamId>,
 }
 
 impl NativeH3Session {
@@ -549,6 +604,7 @@ impl NativeH3Session {
             closing: false,
             next_local_request_stream_id: 0,
             streaming_receive: None,
+            rejected_requests: Vec::new(),
         }
     }
 
@@ -848,14 +904,27 @@ impl NativeH3Session {
         connection: &mut QuicConnection,
         stream_id: StreamId,
     ) -> Result<(), NativeH3SessionError> {
+        self.reset_request(cx, connection, stream_id, H3_REQUEST_CANCELLED)
+    }
+
+    /// Reset a request stream in both directions with `error_code`, for
+    /// callers that must say more than [`H3_REQUEST_CANCELLED`]: for example
+    /// [`H3_REQUEST_REJECTED`] for a request no handler has seen.
+    pub(crate) fn reset_request(
+        &mut self,
+        cx: &Cx,
+        connection: &mut QuicConnection,
+        stream_id: StreamId,
+        error_code: u64,
+    ) -> Result<(), NativeH3SessionError> {
         self.ensure_ready_for_messages(connection)?;
         if !is_client_bidi(stream_id) {
             return Err(NativeH3SessionError::InvalidState(
                 "request cancellation requires a client bidirectional stream",
             ));
         }
-        connection.reset_stream(cx, stream_id, H3_REQUEST_CANCELLED)?;
-        connection.stop_stream_receiving(cx, stream_id, H3_REQUEST_CANCELLED)?;
+        connection.reset_stream(cx, stream_id, error_code)?;
+        connection.stop_stream_receiving(cx, stream_id, error_code)?;
         Ok(())
     }
 
@@ -1098,6 +1167,9 @@ impl NativeH3Session {
                 .extend_from_slice(&bytes);
             self.decode_stream(stream_id)?;
         }
+        if self.reset_rejected_requests(cx, connection)? {
+            return Ok(true);
+        }
 
         let emitted = !self.events.is_empty();
         let eof = readiness.fin_received && connection.is_stream_eof(stream_id)?;
@@ -1209,11 +1281,50 @@ impl NativeH3Session {
             incoming.bytes.extend_from_slice(&bytes);
         }
         self.decode_stream(stream_id)?;
+        if self.reset_rejected_requests(cx, connection)? {
+            return Ok(());
+        }
 
         if readiness.fin_received && connection.is_stream_eof(stream_id)? {
             self.finish_stream(stream_id)?;
         }
         Ok(())
+    }
+
+    /// Reject a request whose field section decoded but is malformed: it ends
+    /// only its own stream, with `H3_MESSAGE_ERROR`. The stream is reported as
+    /// a [`NativeH3Event::StreamReset`] so owners release its per-stream
+    /// state, and its later bytes are discarded.
+    fn reject_malformed_request(&mut self, stream_id: StreamId) -> Result<(), NativeH3SessionError> {
+        self.state.abort_request_stream(stream_id.0)?;
+        self.incoming.remove(&stream_id);
+        self.forget_streaming_readiness(stream_id);
+        self.terminal_streams.insert(stream_id)?;
+        self.rejected_requests.push(stream_id);
+        self.events.push_back(NativeH3Event::StreamReset {
+            stream_id,
+            error_code: H3_MESSAGE_ERROR,
+            final_size: 0,
+        });
+        Ok(())
+    }
+
+    /// Queue RESET_STREAM and STOP_SENDING for every request rejected as
+    /// malformed. Returns true when any was rejected, so the caller stops
+    /// processing a stream it may no longer own.
+    fn reset_rejected_requests(
+        &mut self,
+        cx: &Cx,
+        connection: &mut QuicConnection,
+    ) -> Result<bool, NativeH3SessionError> {
+        if self.rejected_requests.is_empty() {
+            return Ok(false);
+        }
+        for stream_id in std::mem::take(&mut self.rejected_requests) {
+            connection.reset_stream(cx, stream_id, H3_MESSAGE_ERROR)?;
+            connection.stop_stream_receiving(cx, stream_id, H3_MESSAGE_ERROR)?;
+        }
+        Ok(true)
     }
 
     fn classify_reset_stream(
@@ -1302,7 +1413,17 @@ impl NativeH3Session {
                     .incoming
                     .get_mut(&stream_id)
                     .expect("stream checked above");
-                while !stream.bytes.is_empty() {
+                while let Some(&first) = stream.bytes.first() {
+                    // Only Set Dynamic Table Capacity (`001xxxxx`) is legal here.
+                    // Refuse anything else on its first byte: waiting for a
+                    // complete insert would buffer a peer-declared string
+                    // length without bound. The capacity integer is itself
+                    // bounded, so a partial one stays a few bytes long.
+                    if first & 0b1110_0000 != 0b0010_0000 {
+                        return Err(NativeH3SessionError::Protocol(H3NativeError::QpackPolicy(
+                            "static QPACK forbids dynamic encoder instructions",
+                        )));
+                    }
                     match qpack_decode_encoder_instruction(&stream.bytes) {
                         Ok((
                             QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 0 },
@@ -1324,16 +1445,30 @@ impl NativeH3Session {
                 return Ok(());
             }
             if kind == IncomingStreamKind::QpackDecoder {
-                if !self
+                // A peer whose own table capacity is non-zero sends Stream
+                // Cancellation whenever it resets or abandons a request stream
+                // (RFC 9204 section 4.4.2), whether or not our encoder used the
+                // table. The other two instructions acknowledge dynamic-table
+                // state that a static encoder never creates.
+                let stream = self
                     .incoming
-                    .get(&stream_id)
-                    .expect("stream checked above")
-                    .bytes
-                    .is_empty()
-                {
-                    return Err(NativeH3SessionError::Protocol(H3NativeError::QpackPolicy(
-                        "static QPACK forbids decoder instructions",
-                    )));
+                    .get_mut(&stream_id)
+                    .expect("stream checked above");
+                while !stream.bytes.is_empty() {
+                    match qpack_decode_decoder_instruction(&stream.bytes) {
+                        Ok((QpackDecoderInstruction::StreamCancellation { .. }, n)) => {
+                            stream.bytes.drain(..n);
+                        }
+                        Ok(_) => {
+                            return Err(NativeH3SessionError::Protocol(
+                                H3NativeError::QpackPolicy(
+                                    "static QPACK never sends dynamic-table state to acknowledge",
+                                ),
+                            ));
+                        }
+                        Err(H3NativeError::UnexpectedEof) => return Ok(()),
+                        Err(error) => return Err(NativeH3SessionError::Protocol(error)),
+                    }
                 }
                 return Ok(());
             }
@@ -1413,6 +1548,10 @@ impl NativeH3Session {
                 frame
             };
             self.on_frame(stream_id, kind, frame)?;
+            if !self.incoming.contains_key(&stream_id) {
+                // The frame rejected this stream as a malformed request.
+                return Ok(());
+            }
         }
     }
 
@@ -1444,11 +1583,20 @@ impl NativeH3Session {
                         .expect("request stream exists while decoding")
                         .header_blocks_seen;
                     if header_block_index == 0 {
-                        let head = qpack_decode_request_field_section(
+                        // A field section QPACK cannot decode stays a
+                        // connection error. One that decodes but is not a
+                        // valid request is malformed, a stream error (RFC 9114
+                        // section 4.1.2): reject it without ending the other
+                        // requests on this connection.
+                        let plan = qpack_decode_field_section_with_context(
                             &field_section,
                             H3QpackMode::StaticOnly,
                             None,
                         )?;
+                        let fields = qpack_plan_to_header_fields(&plan, None)?;
+                        let Ok(head) = header_fields_to_request_head(&fields) else {
+                            return self.reject_malformed_request(stream_id);
+                        };
                         self.state.on_request_stream_frame(
                             stream_id.0,
                             &H3Frame::Headers(field_section),
@@ -1559,10 +1707,13 @@ impl NativeH3Session {
                 .ok_or(NativeH3SessionError::InvalidState(
                     "FIN arrived for an unknown HTTP/3 stream",
                 ))?;
-        if !incoming.bytes.is_empty()
-            || incoming.data_frame.is_some()
-            || incoming.kind == IncomingStreamKind::AwaitingUniType
-        {
+        if incoming.kind == IncomingStreamKind::AwaitingUniType {
+            // RFC 9114 section 6.2: receivers MUST tolerate a unidirectional
+            // stream that ends before its type is known. Its bytes, if any,
+            // are an incomplete type prefix; discard them.
+            return Ok(());
+        }
+        if !incoming.bytes.is_empty() || incoming.data_frame.is_some() {
             return Err(NativeH3SessionError::TruncatedStream {
                 stream_id,
                 buffered_bytes: incoming.bytes.len(),
@@ -1878,35 +2029,71 @@ mod tests {
     }
 
     #[test]
-    fn native_h3_adapter_terminal_stream_tracker_compacts_contiguous_classes() {
+    fn native_h3_adapter_terminal_stream_tracker_tracks_out_of_order_classes() {
         let mut tracker = TerminalStreamTracker::default();
         tracker.insert(StreamId(8)).expect("track stream 8");
-        assert_eq!(tracker.sparse.len(), 1);
+        assert!(tracker.contains(StreamId(8)));
+        for open in [0, 4, 12] {
+            assert!(!tracker.contains(StreamId(open)));
+        }
         tracker.insert(StreamId(0)).expect("track stream 0");
-        assert_eq!(tracker.sparse.len(), 1);
+        assert!(!tracker.contains(StreamId(4)));
         tracker.insert(StreamId(4)).expect("track stream 4");
-        assert!(tracker.sparse.is_empty());
-        assert_eq!(tracker.contiguous[0], Some(8));
         for stream_id in [0, 4, 8] {
             assert!(tracker.contains(StreamId(stream_id)));
         }
 
-        tracker.insert(StreamId(3)).expect("track stream 3");
         tracker.insert(StreamId(7)).expect("track stream 7");
-        assert_eq!(tracker.contiguous[3], Some(7));
-        assert!(tracker.sparse.is_empty());
+        assert!(!tracker.contains(StreamId(3)));
+        tracker.insert(StreamId(3)).expect("track stream 3");
+        assert!(tracker.contains(StreamId(3)) && tracker.contains(StreamId(7)));
+        for untouched_class in [1, 2] {
+            assert!(!tracker.contains(StreamId(untouched_class)));
+        }
     }
 
     #[test]
-    fn native_h3_adapter_terminal_stream_tracker_fails_closed_at_sparse_budget() {
+    fn native_h3_adapter_terminal_stream_tracker_survives_a_long_lived_stream() {
+        // Stream 0 stays open, like a control stream or a streaming request,
+        // while many later streams finish. That must not exhaust the tracker.
         let mut tracker = TerminalStreamTracker::default();
-        for ordinal in 1..=MAX_SPARSE_TERMINAL_STREAMS {
+        let finished = 3 * u64::try_from(MAX_OPEN_STREAM_RUNS).unwrap();
+        for ordinal in 1..=finished {
             tracker
-                .insert(StreamId((ordinal as u64) * 4))
-                .expect("within sparse terminal budget");
+                .insert(StreamId(ordinal * 4))
+                .expect("a long-lived stream must not pin the tracking window");
+        }
+        assert_eq!(tracker.ensure_healthy(), Ok(()));
+        assert!(!tracker.contains(StreamId(0)));
+        assert!(tracker.contains(StreamId(4)) && tracker.contains(StreamId(finished * 4)));
+        tracker
+            .insert(StreamId(0))
+            .expect("the long-lived stream finishes");
+        assert!(tracker.contains(StreamId(0)));
+
+        // A peer may open a high stream first; every lower id is implicitly
+        // open, and that costs one run rather than one entry per id.
+        let mut tracker = TerminalStreamTracker::default();
+        tracker
+            .insert(StreamId(4 * 1_000_000))
+            .expect("a far jump is one open run");
+        assert!(tracker.contains(StreamId(4 * 1_000_000)));
+        assert!(!tracker.contains(StreamId(4 * 500_000)));
+    }
+
+    #[test]
+    fn native_h3_adapter_terminal_stream_tracker_fails_closed_at_open_run_budget() {
+        // Finishing every other stream leaves one open run per unfinished
+        // stream; the tracker refuses past its bound instead of growing.
+        let mut tracker = TerminalStreamTracker::default();
+        let budget = u64::try_from(MAX_OPEN_STREAM_RUNS).unwrap();
+        for ordinal in 0..budget {
+            tracker
+                .insert(StreamId((2 * ordinal + 1) * 4))
+                .expect("within the open-run budget");
         }
         let error = tracker
-            .insert(StreamId(((MAX_SPARSE_TERMINAL_STREAMS as u64) + 1) * 4))
+            .insert(StreamId((2 * budget + 1) * 4))
             .expect_err("terminal tracker must fail closed at its hard bound");
         assert_eq!(
             error,

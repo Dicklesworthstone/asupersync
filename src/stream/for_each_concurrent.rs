@@ -78,7 +78,7 @@ use std::future::Future;
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use asupersync::stream::{for_each_concurrent, iter};
 ///
 /// async fn fetch_all(cx: &asupersync::Cx, urls: Vec<String>) {
@@ -143,7 +143,7 @@ where
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use asupersync::stream::{iter, try_for_each_concurrent};
 /// use asupersync::Outcome;
 ///

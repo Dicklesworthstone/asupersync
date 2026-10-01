@@ -5,16 +5,20 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use asupersync::runtime::reactor::{Source, SourceWrapper};
+//! ```no_run
+//! use asupersync::runtime::reactor::{SourceId, SourceWrapper};
 //! use std::net::TcpStream;
 //!
+//! # fn main() -> std::io::Result<()> {
 //! // Any AsRawFd type automatically implements Source
 //! let stream = TcpStream::connect("127.0.0.1:8080")?;
 //!
 //! // For debugging/tracing, wrap in SourceWrapper to get a unique ID
 //! let wrapped = SourceWrapper::new(stream);
 //! let id = wrapped.source_id(); // Unique ID for debugging
+//! # let _ = id;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Safety Requirements
@@ -100,11 +104,13 @@ mod platform {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
     /// use asupersync::runtime::reactor::{SourceWrapper, SourceId};
     /// use std::net::TcpListener;
+    /// use std::os::fd::AsRawFd;
     ///
-    /// let mut listener = TcpListener::bind("127.0.0.1:0")?;
+    /// # fn main() -> std::io::Result<()> {
+    /// let listener = TcpListener::bind("127.0.0.1:0")?;
     /// let wrapped = SourceWrapper::new(listener);
     ///
     /// // Get the unique ID for tracing
@@ -113,6 +119,9 @@ mod platform {
     ///
     /// // Still access the inner fd
     /// let fd = wrapped.as_raw_fd();
+    /// # let _ = fd;
+    /// # Ok(())
+    /// # }
     /// ```
     #[derive(Debug)]
     pub struct SourceWrapper<T> {

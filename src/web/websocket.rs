@@ -7,15 +7,27 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use asupersync::web::websocket::{Message, ServerWebSocket, WebSocketUpgrade};
+//! ```
+//! use asupersync::web::Response;
+//! use asupersync::web::websocket::{Message, WebSocketUpgrade};
 //!
-//! async fn ws_handler(upgrade: WebSocketUpgrade) -> Response {
-//!     upgrade.protocols(["chat"]).into_response()
+//! fn ws_handler(upgrade: WebSocketUpgrade) -> Response {
+//!     // Answers 101; the callback runs once the response is flushed, with the
+//!     // connection's `Cx` and a `ServerWebSocket`.
+//!     upgrade.protocols(["chat"]).on_upgrade(|cx, mut ws| async move {
+//!         while let Ok(Some(msg)) = ws.recv(&cx).await {
+//!             match msg {
+//!                 Message::Text(text) => {
+//!                     if ws.send(&cx, Message::text(format!("echo: {text}"))).await.is_err() {
+//!                         break;
+//!                     }
+//!                 }
+//!                 Message::Close(_) => break,
+//!                 _ => {}
+//!             }
+//!         }
+//!     })
 //! }
-//!
-//! // After upgrade, use the ServerWebSocket:
-//! // while let Some(msg) = ws.recv(&cx).await? { ... }
 //! ```
 //!
 //! # Design
@@ -172,6 +184,12 @@ pub struct WebSocketUpgrade {
     /// `SameOrigin` so any caller that forgets to call `.allow_origins()`
     /// or `.skip_origin_check()` still gets CSWSH defense.
     origin_policy: OriginPolicy,
+    /// Decoded message limit for the accepted connection; `None` keeps the
+    /// acceptor default.
+    max_message_size: Option<usize>,
+    /// Frame payload limit for the accepted connection; `None` keeps the
+    /// acceptor default.
+    max_frame_size: Option<usize>,
     #[cfg(not(target_arch = "wasm32"))]
     http1_upgrade_slot: Option<Http1UpgradeSlot>,
 }
@@ -275,6 +293,8 @@ impl FromRequest for WebSocketUpgrade {
             origin,
             host,
             origin_policy: OriginPolicy::default(),
+            max_message_size: None,
+            max_frame_size: None,
             #[cfg(not(target_arch = "wasm32"))]
             http1_upgrade_slot,
         })
@@ -394,6 +414,27 @@ impl WebSocketUpgrade {
     #[must_use]
     pub fn skip_origin_check(mut self) -> Self {
         self.origin_policy = OriginPolicy::Disabled;
+        self
+    }
+
+    /// Bound each decoded message of the accepted connection, in bytes.
+    ///
+    /// Defaults to the acceptor's limit (64 MiB). With permessage-deflate a
+    /// peer can send a few kilobytes that inflate up to this limit, so a
+    /// server facing untrusted peers should set it to the largest message it
+    /// actually expects (br-asupersync-ydis91).
+    #[must_use]
+    pub fn max_message_size(mut self, bytes: usize) -> Self {
+        self.max_message_size = Some(bytes);
+        self
+    }
+
+    /// Bound each frame payload of the accepted connection, in bytes.
+    ///
+    /// Defaults to the acceptor's limit.
+    #[must_use]
+    pub fn max_frame_size(mut self, bytes: usize) -> Self {
+        self.max_frame_size = Some(bytes);
         self
     }
 
@@ -540,6 +581,12 @@ impl WebSocketUpgrade {
         }
         for ext in &self.selected_extensions {
             acceptor = acceptor.extension(ext.clone());
+        }
+        if let Some(bytes) = self.max_message_size {
+            acceptor = acceptor.max_message_size(bytes);
+        }
+        if let Some(bytes) = self.max_frame_size {
+            acceptor = acceptor.max_frame_size(bytes);
         }
         acceptor
     }

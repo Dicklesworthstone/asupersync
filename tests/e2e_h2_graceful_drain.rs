@@ -164,6 +164,10 @@ fn h2_blocking_client(
             match stream.read(&mut chunk) {
                 Ok(0) => return outcome,
                 Ok(n) => read_buf.extend_from_slice(&chunk[..n]),
+                // `Read::read` asks callers to retry Interrupted. A socket with
+                // a read timeout is never restarted after a signal or a
+                // stop/continue, so a loaded host surfaces EINTR here.
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(_) => return outcome,
             }
         }
@@ -1004,7 +1008,12 @@ mod request_ownership {
                     }
                 } else {
                     let mut chunk = [0u8; 4096];
-                    let count = self.socket.read(&mut chunk).expect("read response frame");
+                    let count = loop {
+                        match self.socket.read(&mut chunk) {
+                            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                            result => break result.expect("read response frame"),
+                        }
+                    };
                     assert_ne!(count, 0, "peer closed before stream {stream_id} terminated");
                     self.buffered.extend_from_slice(&chunk[..count]);
                 }
@@ -1536,6 +1545,7 @@ print(json.dumps(summary,sort_keys=True))
                     break;
                 }
                 Ok(count) => buffer.extend_from_slice(&chunk[..count]),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(error) => {
                     panic!("native H2 response did not reach its terminal: {error}; {frames:?}")
                 }
@@ -1867,6 +1877,7 @@ print(json.dumps(summary,sort_keys=True))
                     match socket.read(&mut chunk) {
                         Ok(0) => break,
                         Ok(count) => buffer.extend_from_slice(&chunk[..count]),
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                         Err(error) => {
                             panic!("negative peer did not reach client close: {error}; {wire:?}")
                         }

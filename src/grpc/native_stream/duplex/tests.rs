@@ -433,7 +433,19 @@ mod keepalive {
     use crate::runtime::RootDrainOutcome;
 
     #[derive(Clone, Copy, Debug)]
-    enum Mode { Ack, Silent, WrongAck, Cancel, SlowUpload }
+    enum Mode {
+        Ack,
+        Silent,
+        WrongAck,
+        Cancel,
+        SlowUpload,
+        EchoingUpload,
+    }
+
+    /// Response frames an EchoingUpload peer queues ahead of each PING ACK:
+    /// more than the uploads that fit in one keepalive timeout at one frame
+    /// per flush (br-asupersync-sm29gx).
+    const ECHOES_PER_PROBE: usize = 16;
 
     fn write_ping(socket: &mut std::net::TcpStream, ping: PingFrame) {
         let mut encoded = BytesMut::new();
@@ -484,6 +496,7 @@ mod keepalive {
             let mut peer_acks = 0;
             let mut uploads = 0;
             let mut previous_probe = None;
+            let mut terminated = false;
             loop {
                 let mut bytes = [0; FRAME_BYTES];
                 let read = socket.read(&mut bytes).expect("keepalive peer read or retirement EOF");
@@ -524,6 +537,19 @@ mod keepalive {
                                 Mode::SlowUpload => {
                                     write_ping(&mut socket, PingFrame::ack(ping.opaque_data));
                                 }
+                                Mode::EchoingUpload => {
+                                    // Queue response DATA ahead of the ACK. The
+                                    // client must read past all of it before the
+                                    // probe deadline (br-asupersync-sm29gx).
+                                    for _ in 0..ECHOES_PER_PROBE {
+                                        if terminated {
+                                            break;
+                                        }
+                                        reply(&mut connection, &mut codec, b"echo");
+                                    }
+                                    write_pending(&mut socket, &mut connection);
+                                    write_ping(&mut socket, PingFrame::ack(ping.opaque_data));
+                                }
                                 Mode::Cancel => {
                                     let owner = witnessed.recv_timeout(LIMIT)
                                         .expect("actual parked native owner witness");
@@ -545,9 +571,12 @@ mod keepalive {
                             body.extend_from_slice(&data);
                             while let Some(message) = codec.decode_message(&mut body).unwrap() {
                                 assert_eq!(message.as_ref(), b"upload");
-                                if matches!(mode, Mode::SlowUpload) {
-                                    // Count only: no response DATA gives the
-                                    // client a reason to read.
+                                if matches!(mode, Mode::SlowUpload | Mode::EchoingUpload) {
+                                    // No response DATA between probes, so the
+                                    // client stays idle long enough to probe,
+                                    // and nothing gives it a reason to read.
+                                    // EchoingUpload answers each probe with
+                                    // response DATA queued ahead of its ACK.
                                     uploads += 1;
                                     received_data = true;
                                     continue;
@@ -557,11 +586,12 @@ mod keepalive {
                                 reply(&mut connection, &mut codec, b"echo");
                             }
                             if end_stream && !watch {
-                                if !matches!(mode, Mode::SlowUpload) {
+                                if !matches!(mode, Mode::SlowUpload | Mode::EchoingUpload) {
                                     assert!(matches!(mode, Mode::Ack));
                                     assert_eq!(probes, 2);
                                 }
                                 terminal(&mut connection);
+                                terminated = true;
                             }
                         }
                         _ => {}
@@ -676,7 +706,9 @@ mod keepalive {
                 assert!(status.message().contains("keepalive"));
             }
             Mode::Cancel => assert_eq!(result.unwrap_err().code(), Code::Cancelled),
-            Mode::SlowUpload => unreachable!("slow uploads run through slow_upload"),
+            Mode::SlowUpload | Mode::EchoingUpload => {
+                unreachable!("slow uploads run through slow_upload")
+            }
         }
         let (probes, peer_acks, _) = peer.join().expect("peer observed transport retirement EOF");
         assert_eq!(probes, if matches!(mode, Mode::Ack) { 2 } else { 1 });
@@ -694,13 +726,13 @@ mod keepalive {
     /// send boundaries and never read the acknowledgement. The call must
     /// outlive several interval + timeout periods instead of failing with a
     /// false keepalive UNAVAILABLE (br-asupersync-ymueix).
-    fn slow_upload(workers: usize) {
+    fn slow_upload(workers: usize, mode: Mode) {
         const UPLOADS: usize = 40;
         let (_witness, witnessed) = mpsc::channel();
-        let (address, peer) = heartbeat_peer(Mode::SlowUpload, false, witnessed);
+        let (address, peer) = heartbeat_peer(mode, false, witnessed);
         let runtime = if workers == 1 { RuntimeBuilder::current_thread() }
             else { RuntimeBuilder::new().worker_threads(workers) }.build().unwrap();
-        let (result, sent) = runtime.block_on(runtime.handle().spawn_checked(async move {
+        let (result, sent, echoes) = runtime.block_on(runtime.handle().spawn_checked(async move {
             let cx = Cx::current().unwrap();
             let channel = Channel::builder(format!("http://{address}"))
                 .keepalive_interval(Duration::from_millis(100))
@@ -711,6 +743,7 @@ mod keepalive {
                 &cx, "/svc/Upload", Request::new(()),
             ).await.unwrap();
             let mut sent = 0;
+            let mut echoes = 0;
             let mut closed = false;
             let result = loop {
                 match stream.next_event().await {
@@ -727,6 +760,12 @@ mod keepalive {
                             closed = true;
                         }
                     }
+                    Ok(Some(NativeDuplexEvent::Message(message)))
+                        if matches!(mode, Mode::EchoingUpload) =>
+                    {
+                        assert_eq!(message.as_ref(), b"echo");
+                        echoes += 1;
+                    }
                     Ok(Some(NativeDuplexEvent::Message(message))) => {
                         panic!("the slow-upload peer sends no messages: {message:?}");
                     }
@@ -734,13 +773,22 @@ mod keepalive {
                     Err(status) => break Err(status),
                 }
             };
-            (result, sent)
+            (result, sent, echoes)
         })).expect("slow upload owner completes");
         let (probes, _, uploads) = peer.join().expect("slow-upload peer observed retirement EOF");
-        let outcome = format!("workers={workers} sent={sent} uploads={uploads} probes={probes} result={:?}",
+        let outcome = format!("workers={workers} mode={mode:?} sent={sent} uploads={uploads} echoes={echoes} probes={probes} result={:?}",
             result.as_ref().map_err(Status::code));
         assert!(result.is_ok(), "a healthy acknowledging peer must not fail the upload: {outcome}");
         assert_eq!((sent, uploads), (UPLOADS, UPLOADS), "{outcome}");
+        if matches!(mode, Mode::EchoingUpload) {
+            // Every burst ahead of an ACK arrived whole, over several probes.
+            assert!(
+                echoes >= 2 * ECHOES_PER_PROBE && echoes % ECHOES_PER_PROBE == 0,
+                "{outcome}"
+            );
+        } else {
+            assert_eq!(echoes, 0, "{outcome}");
+        }
         assert!(probes >= 2, "the upload outlived several acknowledged probes: {outcome}");
         let report = runtime.shutdown_drained(LIMIT);
         assert_eq!(report.outcome, RootDrainOutcome::Quiescent);
@@ -750,8 +798,8 @@ mod keepalive {
     fn checked(workers: usize, mode: Mode, watch: bool) {
         let (done, finished) = mpsc::channel();
         let thread = std::thread::spawn(move || {
-            if matches!(mode, Mode::SlowUpload) {
-                slow_upload(workers);
+            if matches!(mode, Mode::SlowUpload | Mode::EchoingUpload) {
+                slow_upload(workers, mode);
             } else {
                 scenario(workers, mode, watch);
             }
@@ -781,6 +829,13 @@ mod keepalive {
     fn native_channel_keepalive_reads_acks_while_a_slow_upload_keeps_flushing() {
         for workers in [1, 2] {
             checked(workers, Mode::SlowUpload, false);
+        }
+    }
+
+    #[test]
+    fn native_channel_keepalive_reads_acks_behind_echoed_response_frames() {
+        for workers in [1, 2] {
+            checked(workers, Mode::EchoingUpload, false);
         }
     }
 }

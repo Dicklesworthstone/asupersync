@@ -6,9 +6,10 @@
 //! from [`crate::record::distributed_region`] and the symbol types
 //! from [`crate::types::symbol`].
 //!
-//! Additionally provides Byzantine fault tolerant consensus algorithms
-//! for distributed coordination with safety guarantees even under
-//! malicious replica behavior.
+//! Additionally provides an experimental PBFT consensus implementation.
+//! Only its normal-case path exists: view changes, stable checkpoints and
+//! log pruning are unfinished, so it is not yet Byzantine-fault-tolerant.
+//! See [`consensus`] for the supported boundary.
 //!
 //! # Modules
 //!
@@ -19,7 +20,7 @@
 //! - [`distribution`]: Quorum-based symbol distribution
 //! - [`recovery`]: Region recovery protocol
 //! - [`bridge`]: Local-to-distributed region bridge
-//! - [`consensus`]: Byzantine fault tolerant consensus algorithms
+//! - [`consensus`]: Experimental PBFT consensus (normal-case path only)
 //! - [`membership`]: SWIM-style cluster membership and failure detection
 
 pub mod adaptive_layout;

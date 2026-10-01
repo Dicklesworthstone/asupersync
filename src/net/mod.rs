@@ -115,6 +115,12 @@ pub use udp::{
     UdpSendBatchPath, UdpSendBatchPlan, UdpSendBatchStrategy, UdpSocket, UdpSocketCapabilities,
     classify_udp_nat, validate_udp_rendezvous_candidates,
 };
+/// Linux-only UDP launch-time (`SO_TXTIME`) and error-queue types (GH #73).
+#[cfg(target_os = "linux")]
+pub use udp::{
+    UdpErrorOrigin, UdpErrorReport, UdpTxTimeClock, UdpTxTimeConfig, UdpTxTimeError,
+    UdpTxTimeErrorKind,
+};
 #[cfg(unix)]
 pub use unix::{
     Incoming as UnixIncoming, OwnedReadHalf as UnixOwnedReadHalf,

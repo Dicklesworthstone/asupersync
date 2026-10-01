@@ -170,10 +170,39 @@ fn sse_module_has_no_async_or_stream_imports() {
     // but the production module must not pull these imports in.
     let source = read_sse_production_source();
 
+    // The one reviewed exception (07eb18163, br-asupersync-sse7kp2): the
+    // pull-based `poll_next_event` interface for idle-open live sources needs
+    // exactly `Context` and `Poll`. The transport still pulls, and every poll
+    // is preceded by a request-cancellation checkpoint (pinned below).
+    let allowed_task_import = "use std::task::{Context, Poll};";
+    let task_imports: Vec<&str> = source
+        .lines()
+        .filter(|line| line.trim_start().starts_with("use std::task::"))
+        .collect();
+    assert!(
+        task_imports
+            .iter()
+            .all(|line| line.trim() == allowed_task_import),
+        "REGRESSION: sse.rs imports {task_imports:?} — async / channel \
+         machinery beyond the reviewed `{allowed_task_import}` appeared. \
+         Verify the code is request-region owned and cancel-aware before \
+         allowing this dependency.",
+    );
+    let poll = source
+        .find("fn poll_prepare_next_event_chunk(")
+        .expect("the poll driver exists");
+    let source_poll = source[poll..]
+        .find("self.source.poll_next_event(cx, task_cx)")
+        .expect("the poll driver pulls the source");
+    assert!(
+        source[poll..poll + source_poll].contains("self.checkpoint(cx)"),
+        "REGRESSION: the SSE poll driver pulls the source without first \
+         checkpointing request cancellation.",
+    );
+
     let suspect_imports = [
         "use std::future::",
         "use std::pin::",
-        "use std::task::",
         "use crate::channel::",
         "use crate::sync::watch",
         "use crate::sync::broadcast",

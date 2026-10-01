@@ -195,20 +195,26 @@ const WINDOW: usize = 32 * 1024;
 /// and the two results differ exactly when a reference reached the fill.
 #[cfg(feature = "compression")]
 fn inflate(payload: &[u8], max: usize) -> Result<Bytes, WsError> {
-    let zero_filled = inflate_over(payload, max, 0x00)?;
+    let zero_filled = inflate_over(payload, max, 0x00, None)?;
     if !zero_filled.contains(&0) {
         return Ok(zero_filled);
     }
-    if inflate_over(payload, max, 0xff)? != zero_filled {
-        return Err(WsError::ProtocolViolation(
-            "WebSocket DEFLATE references data before the message",
-        ));
-    }
+    // Compare the 0xFF-fill decode against the first one as it is produced,
+    // instead of buffering a second copy: peak memory stays one decoded
+    // message, and a divergence stops at its first chunk (br-asupersync-ydis91).
+    inflate_over(payload, max, 0xff, Some(&zero_filled))?;
     Ok(zero_filled)
 }
 
+/// Decode `payload` over a `fill` window. With `reference`, output is compared
+/// against it chunk by chunk and not retained; the result is then empty.
 #[cfg(feature = "compression")]
-fn inflate_over(payload: &[u8], max: usize, fill: u8) -> Result<Bytes, WsError> {
+fn inflate_over(
+    payload: &[u8],
+    max: usize,
+    fill: u8,
+    reference: Option<&[u8]>,
+) -> Result<Bytes, WsError> {
     use flate2::{Decompress, FlushDecompress, Status};
     // Complete the removed sync-flush block, then append a final empty block.
     // Requiring StreamEnd at this exact boundary rejects truncated streams;
@@ -221,7 +227,12 @@ fn inflate_over(payload: &[u8], max: usize, fill: u8) -> Result<Bytes, WsError> 
     input.extend_from_slice(&SUFFIX);
     let mut decoder = Decompress::new(false);
     prime_dictionary(&mut decoder, fill, &[])?;
+    let references_before_message =
+        || WsError::ProtocolViolation("WebSocket DEFLATE references data before the message");
     let mut output = Vec::new();
+    // Decoded length so far. With a reference, the verified prefix
+    // `reference[..produced]` stands in for `output`, which stays empty.
+    let mut produced = 0usize;
     let mut offset = 0;
     let mut section_start = 0;
     let mut sections = 0;
@@ -234,18 +245,36 @@ fn inflate_over(payload: &[u8], max: usize, fill: u8) -> Result<Bytes, WsError> 
         let read = (decoder.total_in() - before_in) as usize;
         let written = (decoder.total_out() - before_out) as usize;
         offset += read;
-        append_bounded(&mut output, &chunk[..written], max)?;
+        match reference {
+            Some(reference) => {
+                let expected = produced
+                    .checked_add(written)
+                    .and_then(|end| reference.get(produced..end))
+                    .ok_or_else(references_before_message)?;
+                if expected != &chunk[..written] {
+                    return Err(references_before_message());
+                }
+            }
+            None => append_bounded(&mut output, &chunk[..written], max)?,
+        }
+        produced += written;
         if status == Status::StreamEnd {
             sections += 1;
             // Includes the synthetic final section. This explicit resource cap
             // bounds window priming to about 8 MiB per decode.
             if sections > 256 { return Err(WsError::PayloadTooLarge { size: sections, max: 256 }); }
             if offset == section_start { return Err(WsError::ProtocolViolation("empty WebSocket DEFLATE progress")); }
-            if offset == input.len() { return Ok(Bytes::from(output)); }
+            if offset == input.len() {
+                if reference.is_some_and(|reference| reference.len() != produced) {
+                    return Err(references_before_message());
+                }
+                return Ok(Bytes::from(output));
+            }
             // RFC 7692 section 7.2.1 permits byte-aligned BFINAL sections in
             // one message. reset alone would lose that message's history.
             decoder.reset(false);
-            prime_dictionary(&mut decoder, fill, &output)?;
+            let history = reference.map_or(output.as_slice(), |reference| &reference[..produced]);
+            prime_dictionary(&mut decoder, fill, history)?;
             section_start = offset;
             continue;
         }

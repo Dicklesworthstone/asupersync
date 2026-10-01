@@ -14,7 +14,9 @@
         "task_description": ""
       }
     ],
-    "assignees": ["CopperSpring"],
+    "assignees": [
+      "CopperSpring"
+    ],
     "counts": {
       "active_agents": 1,
       "inactive_agents": 0,

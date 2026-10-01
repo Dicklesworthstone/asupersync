@@ -10,19 +10,18 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use asupersync::conformance::{ConformanceTarget, TestConfig, conformance_test};
+//! ```
+//! use asupersync::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
+//! use asupersync::conformance_test;
 //!
-//! // Define a conformance test
-//! conformance_test!(test_basic_spawn, |target, config| {
-//!     let runtime = target.create_runtime(config);
-//!     target.block_on(&runtime, async {
-//!         // Test that basic spawning works
-//!         let cx = Cx::current().unwrap();
-//!         let handle = target.spawn(&cx, async { 42 });
-//!         assert_eq!(handle.await, 42);
-//!     });
+//! // Define a conformance test. The macro emits a `#[test]` that runs the body
+//! // with `TestConfig::default()`; the body picks the target it runs against.
+//! conformance_test!(test_basic_block_on, |config: &TestConfig| {
+//!     let mut runtime = LabRuntimeTarget::create_runtime(config.clone());
+//!     let value = LabRuntimeTarget::block_on(&mut runtime, async { 42 });
+//!     assert_eq!(value, 42);
 //! });
+//! # fn main() {}
 //! ```
 
 // Vendored in-crate (was `#[path = "../../conformance/src/traceability.rs"]`, which
@@ -477,12 +476,12 @@ pub fn render_conformance_report_markdown(
 ///
 /// # Example
 ///
-/// ```ignore
-/// use asupersync::conformance::{conformance_test, TestConfig};
+/// ```
+/// use asupersync::conformance::TestConfig;
+/// use asupersync::conformance_test;
 ///
 /// conformance_test!(test_spawn_completes, |config: &TestConfig| {
-///     use asupersync::conformance::ConformanceTarget;
-///     use asupersync::lab::LabRuntime;
+///     use asupersync::conformance::{ConformanceTarget, LabRuntimeTarget};
 ///
 ///     // Create runtime and run test
 ///     let mut runtime = LabRuntimeTarget::create_runtime(config.clone());
@@ -490,6 +489,7 @@ pub fn render_conformance_report_markdown(
 ///         // Test implementation
 ///     });
 /// });
+/// # fn main() {}
 /// ```
 #[macro_export]
 macro_rules! conformance_test {
@@ -502,6 +502,12 @@ macro_rules! conformance_test {
         }
     };
 }
+
+/// How long [`LabRuntimeTarget::block_on`] waits, per stretch, for a wake from
+/// outside the lab before it resumes stepping (asupersync-a95wv9).
+const LAB_EXTERNAL_WAKE_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+/// Poll interval of that wait.
+const LAB_EXTERNAL_WAKE_POLL: std::time::Duration = std::time::Duration::from_micros(100);
 
 /// Implementation of `ConformanceTarget` for the Lab runtime.
 ///
@@ -728,6 +734,9 @@ impl ConformanceTarget for LabRuntimeTarget {
         let session = LabConformanceSession::new();
         let _session_guard = session.enter();
 
+        // Wall-clock time spent in the current stretch of waiting for a wake from
+        // outside the lab.
+        let mut external_wait = std::time::Duration::ZERO;
         loop {
             session.drain(runtime);
 
@@ -745,8 +754,35 @@ impl ConformanceTarget for LabRuntimeTarget {
             // scheduler is empty and step_for_test cannot make progress; jump
             // to the next timer deadline the same way run_with_auto_advance
             // does (br-asupersync-uvqpga). No-op when no timer is pending.
-            if runtime.scheduler.lock().is_empty() {
+            // A spawn awaiting admission, or a deferred cancel, is runnable
+            // work the scheduler does not show yet: step_for_test admits it
+            // first. Advancing here instead let a deadline fire before a task
+            // spawned just ahead of it was ever polled, which the production
+            // runtime does only under a stall.
+            if runtime.scheduler.lock().is_empty() && !runtime.has_pending_dispatch_commands() {
                 runtime.advance_to_next_timer();
+            }
+
+            // Nothing runnable, no timer and no pending command: only a real thread
+            // outside the lab (SQLite's blocking pool, for one) can wake the parked
+            // task. Stepping here would count each iteration as an idle step of that
+            // task, and one holding an obligation (a permit it handed to the thread)
+            // trips the futurelock oracle after 10k steps, about a millisecond
+            // (asupersync-a95wv9). No virtual time passes while the lab waits, so wait
+            // in wall-clock time. The wait is bounded per stretch; past the bound the
+            // loop steps as before, so a genuine futurelock is still reported. A
+            // wasm32 page has no other thread to wait for (and cannot sleep).
+            if cfg!(not(target_arch = "wasm32"))
+                && !session.has_pending()
+                && runtime.awaits_external_wake()
+            {
+                if external_wait < LAB_EXTERNAL_WAKE_BUDGET {
+                    std::thread::sleep(LAB_EXTERNAL_WAKE_POLL);
+                    external_wait += LAB_EXTERNAL_WAKE_POLL;
+                    continue;
+                }
+            } else {
+                external_wait = std::time::Duration::ZERO;
             }
 
             runtime.step_for_test();
@@ -1043,6 +1079,35 @@ mod tests {
         let result = LabRuntimeTarget::block_on(&mut runtime, async { 42 });
 
         assert_eq!(result, 42);
+    }
+
+    /// A task that reserves a oneshot permit (a SendPermit obligation it holds)
+    /// and hands it to a real thread is parked on work outside the lab. The
+    /// harness must wait for that thread instead of counting idle steps: those
+    /// tripped the futurelock oracle whenever the thread was slower than the
+    /// threshold's worth of steps (asupersync-a95wv9). A 64-step threshold makes
+    /// the old loop trip it on every run; the thread answers after 50 ms.
+    #[test]
+    fn lab_runtime_target_waits_for_a_permit_sent_from_a_real_thread() {
+        let config = crate::lab::LabConfig::new(7)
+            .max_steps(20_000)
+            .futurelock_max_idle_steps(64);
+        let mut runtime = crate::lab::LabRuntime::new(config);
+
+        let value = LabRuntimeTarget::block_on(&mut runtime, async {
+            let cx = Cx::current().expect("lab root task installs a Cx");
+            let (tx, mut rx) = crate::channel::oneshot::channel::<u32>();
+            let permit = tx.reserve(&cx).expect("reserve before the hand-off");
+            let sender = std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                permit.send(7).expect("the receiver is still waiting");
+            });
+            let value = rx.recv(&cx).await.expect("the thread sends");
+            sender.join().expect("sender thread");
+            value
+        });
+
+        assert_eq!(value, 7);
     }
 
     #[test]

@@ -446,7 +446,13 @@ async fn acquire_on_lifetime(
         let mut state = lifetime.state.lock();
         if acquisition.cancelled {
             if state.phase == Phase::Finished {
-                return Poll::Ready(Err(KafkaError::Cancelled));
+                // After construction, the worker's cleanup result is this
+                // acquisition's only receipt: a failure there outranks the
+                // cancellation that requested it.
+                return Poll::Ready(match state.finished.take() {
+                    Some(Err(error)) => Err(error),
+                    _ => Err(KafkaError::Cancelled),
+                });
             }
         } else if let Some(result) = state.acquired.take() {
             return Poll::Ready(result.map(|consumer| {
@@ -687,7 +693,9 @@ mod tests {
 
     #[test]
     fn scoped_kafka_cancelled_unclaimed_publication_waits_for_native_destruction() {
-        for multithread in [false, true] {
+        for (multithread, fail_cleanup) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
             bounded(move || {
                 let builder = if multithread {
                     RuntimeBuilder::new().worker_threads(2)
@@ -728,8 +736,19 @@ mod tests {
                     assert!(counters.native_drop_thread.lock().is_none());
                     let mut sibling = control.spawn(|_| async { 41 }).unwrap();
                     assert_eq!(sibling.join(&control).await.unwrap(), 41);
-                    allow_cleanup.send(()).unwrap();
-                    assert!(matches!(acquiring.await, Err(KafkaError::Cancelled)));
+                    let result = if fail_cleanup {
+                        // The worker's cleanup then panics: that failure, not
+                        // the cancellation, is the acquisition's receipt.
+                        drop(allow_cleanup);
+                        let result = acquiring.await;
+                        assert!(matches!(&result, Err(KafkaError::Config(message)) if message.contains("panicked")),
+                            "cleanup failure must not read as a plain cancellation: {result:?}");
+                        result
+                    } else {
+                        allow_cleanup.send(()).unwrap();
+                        acquiring.await
+                    };
+                    assert!(fail_cleanup || matches!(result, Err(KafkaError::Cancelled)));
                     assert!(caller.inner.read().cancel_waker_registrations.is_empty());
                     assert!(native.upgrade().is_none());
                     let destruction = counters.native_drop_thread.lock().clone().unwrap();
@@ -779,6 +798,52 @@ mod tests {
                     assert!(report.unreleased.is_none());
                 });
                 assert!(!observed.load(Ordering::Acquire));
+            });
+        }
+    }
+
+    #[test]
+    fn scoped_kafka_group_metadata_does_not_queue_behind_its_lifetime_worker() {
+        for multithread in [false, true] {
+            bounded(move || {
+                let builder = if multithread {
+                    RuntimeBuilder::new().worker_threads(2)
+                } else {
+                    RuntimeBuilder::current_thread()
+                };
+                // One live scoped consumer on a pool sized for exactly one: its
+                // lifetime job holds the sole worker until release.
+                let runtime = builder.blocking_threads(1, 1).build().unwrap();
+                let owner = runtime.request_cx_with_budget(Budget::INFINITE);
+                let pool = runtime.blocking_handle().unwrap();
+                runtime.block_on_with_cx(owner.clone(), async move {
+                    let enclosing = owner.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+                    let mut handle = KafkaConsumer::spawn_scoped(
+                        enclosing.cx(), config(), BracketConfig::new(u32::MAX),
+                        move |body_cx, consumer| -> BracketUseFuture<'_, String, KafkaError> {
+                            Box::pin(async move {
+                                assert!(body_cx.blocking_pool_handle().is_some(), "body must see the runtime pool");
+                                assert_eq!((pool.busy_threads(), pool.pending_count()), (1, 0),
+                                    "the lifetime worker must hold the sole pool thread before the call");
+                                match consumer.group_metadata(&body_cx).await {
+                                    Err(KafkaError::Transaction(message)) => Outcome::Ok(message),
+                                    other => Outcome::Err(KafkaError::Broker(format!(
+                                        "unexpected group_metadata outcome: {:?}", other.err(),
+                                    ))),
+                                }
+                            })
+                        },
+                    ).unwrap();
+                    let report = handle.join().await.unwrap();
+                    let outcome = &report.usage.as_ref().unwrap().outcome;
+                    assert!(matches!(outcome, Outcome::Ok(message)
+                        if message.contains("no assigned partitions") || message.contains("no broker group metadata")),
+                        "group_metadata must answer without a pool worker (multithread={multithread}): {outcome:?}");
+                    assert!(report.release.as_ref().unwrap().is_success());
+                    assert!(report.unreleased.is_none());
+                    enclosing.close().await.unwrap();
+                });
+                assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
             });
         }
     }

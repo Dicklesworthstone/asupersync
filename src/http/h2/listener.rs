@@ -1706,6 +1706,19 @@ struct ActiveProducedBody {
     body_eof: bool,
     pending_trailers: Option<HeaderMap>,
     failure_drain_deadline: Option<Time>,
+    receive: ProducedReceive,
+}
+
+/// How the listener reads a produced body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProducedReceive {
+    /// Committed frames, then the producer's cancellation, while it runs.
+    Live,
+    /// A receive observed the producer's cancellation. The producer can still
+    /// commit terminal frames under a mask before it returns.
+    Cancelled,
+    /// The producer returned: drain what it queued, then end the body.
+    Queued,
 }
 
 struct ProducedCancellationGuard {
@@ -1849,6 +1862,7 @@ fn finalize_produced_body_if_ready(
         },
         EmptyEof,
         Trailers(Vec<Header>),
+        Redrain,
     }
 
     let action = {
@@ -1857,6 +1871,14 @@ fn finalize_produced_body_if_ready(
         };
         match state.producer_outcome {
             None => FinalizeAction::Wait,
+            // The body saw the cancellation before the producer committed its
+            // terminal frames under a mask (br-asupersync-o3oqer). The producer
+            // has returned, so everything it sent is queued: read it again.
+            Some(Http2ProducerOutcome::Finished { .. })
+                if state.receive == ProducedReceive::Cancelled =>
+            {
+                FinalizeAction::Redrain
+            }
             Some(
                 Http2ProducerOutcome::Failed
                 | Http2ProducerOutcome::DeadlineExceeded
@@ -1901,6 +1923,13 @@ fn finalize_produced_body_if_ready(
                     },
                     FinalizeAction::Trailers,
                 ),
+                // The queue ended without the trailers the producer reported.
+                None if state.body_eof => FinalizeAction::Reset {
+                    diagnostic: Some((
+                        WebBodyDiagnostic::ResponseProducerFailure.code(),
+                        "producer reported trailers it never committed",
+                    )),
+                },
                 None => FinalizeAction::Wait,
             },
             Some(Http2ProducerOutcome::Finished {
@@ -1918,6 +1947,12 @@ fn finalize_produced_body_if_ready(
 
     match action {
         FinalizeAction::Wait => {}
+        FinalizeAction::Redrain => {
+            if let Some(state) = produced_bodies.get_mut(&stream_id) {
+                state.body_eof = false;
+                state.receive = ProducedReceive::Queued;
+            }
+        }
         FinalizeAction::Reset { diagnostic } => {
             if let Some((code, cause)) = diagnostic {
                 record_h2_body_diagnostic_code(stream_id, code, cause);
@@ -1938,7 +1973,9 @@ fn finalize_produced_body_if_ready(
                     conn.send_data(stream_id, crate::bytes::Bytes::new(), true)
                 }
                 FinalizeAction::Trailers(trailers) => conn.send_headers(stream_id, trailers, true),
-                FinalizeAction::Wait | FinalizeAction::Reset { .. } => unreachable!(),
+                FinalizeAction::Wait | FinalizeAction::Redrain | FinalizeAction::Reset { .. } => {
+                    unreachable!()
+                }
             };
             if result.is_ok() {
                 state.cancellation.disarm();
@@ -2286,8 +2323,14 @@ fn poll_produced_body_event(
         // A producer whose context was cancelled can still have committed its
         // terminal trailers under a mask. Drain committed frames before the
         // cancellation, or the stream waits forever for trailers it discarded
-        // (br-asupersync-bi2462.105).
-        match state.body.poll_committed_frame(task_cx) {
+        // (br-asupersync-bi2462.105). Once the producer has returned, read
+        // only what it queued (br-asupersync-o3oqer).
+        let polled = if state.receive == ProducedReceive::Queued {
+            Poll::Ready(state.body.take_frame_after_producer_returned())
+        } else {
+            state.body.poll_committed_frame(task_cx)
+        };
+        match polled {
             Poll::Ready(Some(frame)) => {
                 Poll::Ready(Some(ProducedBodyEvent::Frame { stream_id, frame }))
             }
@@ -4019,6 +4062,7 @@ where
                         // deadline or peer-reset acknowledgement with E510.
                         if let Some(state) = produced_bodies.get_mut(&stream_id) {
                             state.body_eof = true;
+                            state.receive = ProducedReceive::Cancelled;
                         }
                         finalize_produced_body_if_ready(
                             &mut conn,
@@ -4168,6 +4212,7 @@ where
                                 body_eof: false,
                                 pending_trailers: None,
                                 failure_drain_deadline: None,
+                                receive: ProducedReceive::Live,
                             },
                         );
                         debug_assert!(previous.is_none());
@@ -4967,6 +5012,21 @@ impl<F> Http2Listener<F> {
         M: Fn(Arc<F>, Request) -> MFut + Clone + Send + Sync + 'static,
         MFut: Future<Output = H2DispatchResponse> + Send + 'static,
     {
+        // An acceptor that cannot negotiate h2 would complete a full handshake
+        // with every client and then reject it: refuse it at startup instead.
+        #[cfg(feature = "tls")]
+        if let Some(acceptor) = &self.tls_acceptor
+            && !acceptor
+                .config()
+                .alpn_protocols
+                .iter()
+                .any(|protocol| protocol.as_slice() == b"h2")
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Http2Listener::with_tls needs an acceptor that advertises the h2 ALPN protocol",
+            ));
+        }
         let mut tasks: Vec<JoinHandle<()>> = Vec::new();
         // Independent push counter so finished connection tasks are reaped
         // periodically instead of accumulating for the listener's lifetime
@@ -6153,6 +6213,7 @@ mod tests {
                 body_eof: false,
                 pending_trailers: None,
                 failure_drain_deadline: None,
+                receive: ProducedReceive::Live,
             },
         )]);
         assert_eq!(in_flight.load(Ordering::Acquire), 1);
@@ -6358,6 +6419,7 @@ mod tests {
                     body_eof: false,
                     pending_trailers: None,
                     failure_drain_deadline: None,
+                    receive: ProducedReceive::Live,
                 },
             )]);
             let mut poll_after = None;
@@ -6460,6 +6522,7 @@ mod tests {
                     body_eof: false,
                     pending_trailers: None,
                     failure_drain_deadline: None,
+                    receive: ProducedReceive::Live,
                 },
             )]);
             let mut poll_after = None;
@@ -6549,6 +6612,7 @@ mod tests {
                     body_eof: false,
                     pending_trailers: None,
                     failure_drain_deadline: None,
+                    receive: ProducedReceive::Live,
                 },
             )]);
             let mut poll_after = None;
@@ -6596,6 +6660,218 @@ mod tests {
                 conn.next_frame().is_none(),
                 "trailers terminalize exactly once"
             );
+        });
+    }
+
+    #[test]
+    fn produced_trailers_committed_after_an_observed_cancellation_terminate_the_stream() {
+        crate::test_utils::run_test(|| async {
+            let mut conn = Connection::server(Settings::default());
+            conn.process_frame(Frame::Settings(crate::http::h2::frame::SettingsFrame::new(
+                Vec::new(),
+            )))
+            .expect("peer settings accepted");
+            expect_settings_ack(&mut conn);
+            establish_h2_response_stream(&mut conn, 1, "/cancelled-then-trailers");
+            conn.send_headers(1, vec![Header::new(":status", "200")], false)
+                .expect("produced response head queues");
+            assert!(matches!(conn.next_frame(), Some(Frame::Headers(_))));
+
+            let producer_cx: Cx = Cx::for_testing();
+            let (inner, body) =
+                OutgoingBody::channel_with_capacity(&producer_cx, BodyKind::Chunked, 1);
+            let mut sender = Http2BodySender {
+                inner,
+                max_frame_bytes: NonZeroUsize::new(64).expect("non-zero limit"),
+                terminal: Http2ProducerTerminal::Open,
+            };
+            let in_flight = Arc::new(AtomicUsize::new(0));
+            let mut produced_bodies = BTreeMap::from([(
+                1,
+                ActiveProducedBody {
+                    body,
+                    cancellation: ProducedCancellationGuard::new(Cx::for_testing()),
+                    guard: Some(Arc::new(InFlightRequestGuard::acquire(Some(&in_flight)))),
+                    producer_outcome: None,
+                    emitted_bytes: 0,
+                    body_eof: false,
+                    pending_trailers: None,
+                    failure_drain_deadline: None,
+                    receive: ProducedReceive::Live,
+                },
+            )]);
+            let mut poll_after = None;
+            let mut response_guards = HashMap::new();
+
+            // The listener polls between the producer's cancellation and its
+            // masked terminal commit, as a gRPC status write does after the
+            // service unwinds.
+            producer_cx.cancel_fast(CancelKind::User);
+            let event = std::future::poll_fn(|task_cx| {
+                poll_produced_body_event(&conn, &mut produced_bodies, &mut poll_after, task_cx)
+            })
+            .await;
+            assert!(matches!(
+                event,
+                ProducedBodyEvent::Frame {
+                    stream_id: 1,
+                    frame: Err(HttpError::BodyCancelled),
+                }
+            ));
+            let state = produced_bodies.get_mut(&1).expect("body remains active");
+            state.body_eof = true;
+            state.receive = ProducedReceive::Cancelled;
+            finalize_produced_body_if_ready(
+                &mut conn,
+                1,
+                &mut produced_bodies,
+                &mut response_guards,
+            );
+            assert!(
+                produced_bodies.contains_key(&1),
+                "no outcome yet: keep waiting"
+            );
+
+            let mut trailers = HeaderMap::new();
+            trailers.insert(
+                crate::http::body::HeaderName::from_static("grpc-status"),
+                crate::http::body::HeaderValue::from_static("1"),
+            );
+            {
+                let mut send = std::pin::pin!(sender.send_trailers(&producer_cx, trailers));
+                let committed = std::future::poll_fn(|task| {
+                    Poll::Ready(producer_cx.masked(|| send.as_mut().poll(task)))
+                })
+                .await;
+                assert!(
+                    matches!(committed, Poll::Ready(Ok(()))),
+                    "masked trailers commit"
+                );
+            }
+            produced_bodies
+                .get_mut(&1)
+                .expect("body remains active")
+                .producer_outcome = Some(Http2ProducerOutcome::Finished {
+                total_bytes: 0,
+                terminal: sender.terminal,
+            });
+            finalize_produced_body_if_ready(
+                &mut conn,
+                1,
+                &mut produced_bodies,
+                &mut response_guards,
+            );
+            assert!(
+                produced_bodies.contains_key(&1),
+                "the stream stays open until its committed trailers are read"
+            );
+
+            let event = std::future::poll_fn(|task_cx| {
+                poll_produced_body_event(&conn, &mut produced_bodies, &mut poll_after, task_cx)
+            })
+            .await;
+            let ProducedBodyEvent::Frame {
+                stream_id: 1,
+                frame: Ok(BodyFrame::Trailers(trailers)),
+            } = event
+            else {
+                panic!("the committed trailers must be read after the producer returned");
+            };
+            produced_bodies
+                .get_mut(&1)
+                .expect("body remains active until trailers queue")
+                .pending_trailers = Some(trailers);
+            finalize_produced_body_if_ready(
+                &mut conn,
+                1,
+                &mut produced_bodies,
+                &mut response_guards,
+            );
+            assert!(produced_bodies.is_empty());
+            match conn.next_frame().expect("terminal trailing HEADERS queue") {
+                Frame::Headers(headers) => {
+                    assert!(headers.end_stream);
+                    let mut block = headers.header_block;
+                    let decoded = crate::http::h2::HpackDecoder::new()
+                        .decode(&mut block)
+                        .expect("produced trailers decode");
+                    assert_eq!(decoded, vec![Header::new("grpc-status", "1")]);
+                }
+                other => panic!("expected terminal trailing HEADERS, got {other:?}"),
+            }
+            release_flushed_response_guards(&conn, &mut response_guards);
+            assert_eq!(in_flight.load(Ordering::Acquire), 0);
+        });
+    }
+
+    #[test]
+    fn produced_trailers_the_producer_never_committed_reset_instead_of_waiting() {
+        crate::test_utils::run_test(|| async {
+            let mut conn = Connection::server(Settings::default());
+            conn.process_frame(Frame::Settings(crate::http::h2::frame::SettingsFrame::new(
+                Vec::new(),
+            )))
+            .expect("peer settings accepted");
+            expect_settings_ack(&mut conn);
+            establish_h2_response_stream(&mut conn, 1, "/claimed-trailers");
+            conn.send_headers(1, vec![Header::new(":status", "200")], false)
+                .expect("produced response head queues");
+            assert!(matches!(conn.next_frame(), Some(Frame::Headers(_))));
+
+            let producer_cx: Cx = Cx::for_testing();
+            let (_sender, body) =
+                OutgoingBody::channel_with_capacity(&producer_cx, BodyKind::Chunked, 1);
+            producer_cx.cancel_fast(CancelKind::User);
+            let in_flight = Arc::new(AtomicUsize::new(0));
+            let mut produced_bodies = BTreeMap::from([(
+                1,
+                ActiveProducedBody {
+                    body,
+                    cancellation: ProducedCancellationGuard::new(Cx::for_testing()),
+                    guard: Some(Arc::new(InFlightRequestGuard::acquire(Some(&in_flight)))),
+                    producer_outcome: Some(Http2ProducerOutcome::Finished {
+                        total_bytes: 0,
+                        terminal: Http2ProducerTerminal::Trailers,
+                    }),
+                    emitted_bytes: 0,
+                    body_eof: true,
+                    pending_trailers: None,
+                    failure_drain_deadline: None,
+                    receive: ProducedReceive::Cancelled,
+                },
+            )]);
+            let mut poll_after = None;
+            let mut response_guards = HashMap::new();
+            finalize_produced_body_if_ready(
+                &mut conn,
+                1,
+                &mut produced_bodies,
+                &mut response_guards,
+            );
+            let event = std::future::poll_fn(|task_cx| {
+                poll_produced_body_event(&conn, &mut produced_bodies, &mut poll_after, task_cx)
+            })
+            .await;
+            assert!(matches!(event, ProducedBodyEvent::Eof { stream_id: 1 }));
+            produced_bodies
+                .get_mut(&1)
+                .expect("body remains active")
+                .body_eof = true;
+            finalize_produced_body_if_ready(
+                &mut conn,
+                1,
+                &mut produced_bodies,
+                &mut response_guards,
+            );
+            assert!(
+                produced_bodies.is_empty(),
+                "a missing terminal frame must not wait forever"
+            );
+            assert!(
+                matches!(conn.next_frame(), Some(Frame::RstStream(reset)) if reset.error_code == ErrorCode::InternalError),
+                "the stream resets with INTERNAL_ERROR"
+            );
+            assert_eq!(in_flight.load(Ordering::Acquire), 0);
         });
     }
 

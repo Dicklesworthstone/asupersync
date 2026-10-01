@@ -2667,7 +2667,9 @@ impl Transaction<'_> {
     /// Repeated calls may advance offsets or add assigned partitions using the
     /// same metadata snapshot (or a clone). They cannot regress an enrolled
     /// offset, switch groups, or replace the membership snapshot mid-transaction.
-    /// Capture a new snapshot after a rebalance and begin a new transaction.
+    /// Capture a new snapshot after a rebalance and begin a new transaction. A
+    /// refused replacement after the enrolled snapshot went stale requires
+    /// abort recovery, like enrolling a stale snapshot directly.
     ///
     /// The bounded native call runs on the existing blocking executor. A dropped
     /// waiter does not stop librdkafka: the producer remains occupied until the
@@ -2710,11 +2712,32 @@ impl Transaction<'_> {
                     return Err(error);
                 }
             };
-            let operation = TransactionOperationGuard::claim_offsets(
+            let operation = match TransactionOperationGuard::claim_offsets(
                 &self.producer.state,
                 self.generation,
                 offsets,
-            )?;
+            ) {
+                Ok(operation) => operation,
+                Err(error) => {
+                    // A refused enrollment, such as a switch to a fresh snapshot
+                    // after a rebalance, leaves only the already-enrolled offsets.
+                    // If that snapshot has gone stale they can never be completed,
+                    // so committing would publish output without its input
+                    // offsets (br-asupersync-y603m5). Read the snapshot outside
+                    // the producer lock before checking the consumer's state.
+                    let enrolled = self
+                        .producer
+                        .state
+                        .lock()
+                        .pending_offsets
+                        .as_ref()
+                        .map(|pending| pending.metadata.clone());
+                    if enrolled.is_some_and(|enrolled| enrolled.check_membership().is_err()) {
+                        self.producer.mark_transaction_dropped(self.generation);
+                    }
+                    return Err(error);
+                }
+            };
             let offsets = operation.offsets.as_ref().expect("claimed offset enrollment").clone();
             let producer = self.producer.producer.clone();
             let timeout = self.producer.config.transaction_timeout;
@@ -4309,7 +4332,42 @@ mod tests {
             assert_eq!(producer.state.lock().phase, TransactionPhase::NeedsAbortRecovery);
             assert_eq!(consumer.committed_offset(input, 0), Some(2));
             assert!(producer.begin_transaction(&cx).await.is_err(), "fatal producer must remain fenced");
+
+            // Switching to a fresh snapshot after the enrolled one went stale is
+            // refused, and must not leave the transaction committable with only
+            // the stale snapshot's offsets (br-asupersync-y603m5).
+            let second = KafkaConsumer::new(
+                ConsumerConfig::new(brokers.clone(), "transaction-offset-group-b")
+                    .force_real_kafka(true)
+                    .enable_auto_commit(false)
+                    .auto_offset_reset(AutoOffsetReset::Earliest)
+                    .with_property("group.protocol", "classic"),
+            ).unwrap();
+            second.subscribe(&cx, &[input]).await.unwrap();
+            let started = std::time::Instant::now();
+            let mut second_consumed = 0;
+            while second_consumed < 3 && started.elapsed() < Duration::from_secs(30) {
+                if second.poll(&cx, Duration::from_millis(100)).await.unwrap().is_some() {
+                    second_consumed += 1;
+                }
+            }
+            assert_eq!(second_consumed, 3, "second consumer input witness");
+            let fresh = second.group_metadata(&cx).await.unwrap();
+            let switching = TransactionalProducer::new(
+                TransactionalConfig::new(ProducerConfig::new(brokers.clone()), "offset-switch-test".into())
+                    .transaction_timeout(Duration::from_secs(10)),
+            ).unwrap();
+            let transaction = switching.begin_transaction(&cx).await.unwrap();
+            transaction.send(&cx, output, Some(b"same-partition"), b"switched").await.unwrap();
+            transaction.send_offsets_to_transaction(&cx, &offsets(3), &metadata).await.unwrap();
             consumer.close(&cx).await.unwrap();
+            let error = transaction.send_offsets_to_transaction(&cx, &offsets(3), &fresh)
+                .await.unwrap_err();
+            assert!(error.to_string().contains("same consumer group metadata snapshot"), "{error}");
+            assert_eq!(switching.state.lock().phase, TransactionPhase::NeedsAbortRecovery);
+            assert!(switching.state.lock().pending_offsets.is_none());
+            assert!(transaction.commit(&cx).await.is_err(), "output must not commit without its offsets");
+            second.close(&cx).await.unwrap();
 
             // A snapshot whose consumer has closed can never enroll offsets.
             // The transaction must not stay committable without them, or its

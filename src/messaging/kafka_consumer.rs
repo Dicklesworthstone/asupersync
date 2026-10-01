@@ -2093,10 +2093,12 @@ impl KafkaConsumer {
     /// the producer transaction. Do not also call [`Self::commit_offsets`].
     /// Capture a new snapshot for each transaction, and after every rebalance.
     ///
-    /// The native metadata copy is made on a blocking worker under the same
-    /// operation lease as other consumer calls. Its lifetime is independent of
-    /// the native consumer. The no-`kafka` and model-only test backends return
-    /// [`KafkaError::FeatureDisabled`]; they cannot attest broker atomicity.
+    /// The native metadata copy is made on a dedicated blocking thread under the
+    /// same operation lease as other consumer calls, never on the runtime pool,
+    /// where a scoped consumer's lifetime job holds a worker until release. Its
+    /// lifetime is independent of the native consumer. The no-`kafka` and
+    /// model-only test backends return [`KafkaError::FeatureDisabled`]; they
+    /// cannot attest broker atomicity.
     #[allow(unused_variables)]
     pub async fn group_metadata(&self, cx: &Cx) -> Result<ConsumerGroupMetadata, KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
@@ -2113,7 +2115,7 @@ impl KafkaConsumer {
             let state = Arc::clone(&self.state);
             let closed = Arc::clone(&self.closed);
             let group_id = self.config.group_id.clone();
-            super::kafka::run_kafka_blocking(cx, move || {
+            crate::runtime::spawn_blocking::spawn_blocking_on_thread(move || {
                 let _guard = broker_ops.lock();
                 if closed.load(Ordering::Acquire) {
                     return Err(KafkaError::Config("consumer is closed".into()));

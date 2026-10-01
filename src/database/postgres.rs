@@ -4045,6 +4045,7 @@ impl PgConnection {
         let options = self.inner.options.clone();
         let tls_options = self.inner.tls_options.clone();
         let max_result_rows = self.inner.max_result_rows;
+        let statement_timeout_override = self.inner.statement_timeout_override;
         let subscribed_channels = self.inner.subscribed_channels.clone();
 
         let mut fresh = match Self::connect_with_tls_options(cx, options, tls_options).await {
@@ -4054,6 +4055,9 @@ impl PgConnection {
             Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         };
         fresh.inner.max_result_rows = max_result_rows;
+        // A caller's statement-timeout bound outlives the socket. The fresh
+        // session has applied none, so the next request re-sends the SET.
+        fresh.inner.statement_timeout_override = statement_timeout_override;
         fresh.inner.subscribed_channels = subscribed_channels.clone();
 
         for channel in &subscribed_channels {
@@ -5708,7 +5712,14 @@ impl PgConnection {
                 Ok(message) => message,
                 Err(error) => {
                     self.abort_in_flight_exchange();
-                    return error;
+                    // A FATAL error is followed by EOF, not ReadyForQuery: keep
+                    // the server's diagnostic rather than the transport's end.
+                    // A protocol violation or cancellation is still reported.
+                    return if matches!(error, PgError::Io(_)) {
+                        server_error
+                    } else {
+                        error
+                    };
                 }
             };
             if message_type == b'Z' {
@@ -8041,7 +8052,18 @@ impl PgCopyOut<'_> {
                 .await
             {
                 Ok(message) => message,
-                Err(error) => return self.fail(error),
+                Err(error) => {
+                    // A FATAL server error is followed by EOF, not
+                    // ReadyForQuery: when the transport ends, report the
+                    // drained diagnostic. Protocol violations stay reported.
+                    if self.state == PgCopyOutState::ErrorDrain
+                        && matches!(error, PgError::Io(_))
+                        && let Some(server_error) = self.pending_error.take()
+                    {
+                        return self.fail(server_error);
+                    }
+                    return self.fail(error);
+                }
             };
 
             match message_type {

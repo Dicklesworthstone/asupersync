@@ -318,6 +318,20 @@ impl<T> OnceCell<T> {
     /// If the cell is uninitialized, `f` is called to create the value.
     /// If multiple threads call this concurrently, only one will run the
     /// initialization function; others will block waiting for the result.
+    ///
+    /// # Blocking — do not call from async context that shares a thread with the initializer
+    ///
+    /// This has the same hazard as [`set`](Self::set). While another
+    /// initialization is in flight, it parks the calling OS thread on a condvar
+    /// until that initializer finishes. If the in-flight initializer is an
+    /// **async** task (`get_or_init(async { ... }).await` suspended
+    /// mid-`await`) running on the **same** OS thread as this call — always the
+    /// case on a current-thread runtime — the condvar wait blocks the only
+    /// thread that could ever resume that initializer, and **both deadlock
+    /// permanently**.
+    ///
+    /// From async code, use [`get_or_init`](Self::get_or_init), which yields
+    /// rather than blocks.
     #[inline]
     pub fn get_or_init_blocking<F>(&self, f: F) -> &T
     where
@@ -524,6 +538,89 @@ impl<T> OnceCell<T> {
         }
     }
 
+    /// Gets the value, initializing it if necessary, and stops waiting when
+    /// `cx` is cancelled.
+    ///
+    /// This is [`get_or_init`](Self::get_or_init) for callers that must
+    /// honor cancellation. While another task's initializer is in flight,
+    /// `get_or_init` stays parked until that initializer finishes, however
+    /// long it takes, so a cancelled region cannot drain. This method returns
+    /// `Err(OnceCellError::Cancelled)` as soon as `cx` is cancelled instead.
+    ///
+    /// A caller that is already cancelled when it would start initializing
+    /// returns the same error without calling `f`. A caller that becomes the
+    /// initializer runs `f` as `get_or_init` does; `f` observes `cx` itself.
+    /// If another initializer is cancelled, this caller retries and may
+    /// become the initializer.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(OnceCellError::Cancelled)` if `cx` is cancelled before a
+    /// value is available.
+    #[inline]
+    #[allow(clippy::future_not_send)]
+    pub async fn get_or_init_cx<Caps, F, Fut>(
+        &self,
+        cx: &crate::cx::Cx<Caps>,
+        f: F,
+    ) -> Result<&T, OnceCellError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = T>,
+    {
+        if self.is_initialized() {
+            return Ok(self.value.get().expect("value should be set"));
+        }
+
+        let mut init_fn = Some(f);
+
+        loop {
+            if cx.checkpoint().is_err() {
+                return Err(OnceCellError::Cancelled);
+            }
+            match self.state.compare_exchange_weak(
+                UNINIT,
+                INITIALIZING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    let f = init_fn.take().expect("init closure available");
+                    let mut guard = InitGuard {
+                        cell: self,
+                        completed: false,
+                    };
+
+                    let value = f().await;
+
+                    let _ = self.value.set(value);
+                    guard.completed = true;
+                    drop(guard);
+                    self.transition_out_of_initializing(INITIALIZED);
+                    return Ok(self.value.get().expect("just initialized"));
+                }
+                Err(INITIALIZED) => {
+                    return Ok(self.value.get().expect("already initialized"));
+                }
+                Err(UNINIT) => {} // Spurious failure, try again
+                Err(_) => {
+                    CancelAwareWaitInit {
+                        cell: self,
+                        cx,
+                        waiter_id: None,
+                        cancel_waker: None,
+                        settle_when_uninit: true,
+                    }
+                    .await?;
+                    if self.is_initialized() {
+                        return Ok(self.value.get().expect("should be initialized after wait"));
+                    }
+                    // The initializer was cancelled. Retry the CAS.
+                }
+            }
+        }
+    }
+
     /// Takes the value out of the cell, leaving it uninitialized.
     ///
     /// Returns `None` if the cell is not initialized.
@@ -573,6 +670,7 @@ impl<T> OnceCell<T> {
             cx,
             waiter_id: None,
             cancel_waker: None,
+            settle_when_uninit: false,
         }
         .await
     }
@@ -855,6 +953,10 @@ struct CancelAwareWaitInit<'a, T, Caps = crate::cx::cap::All> {
     waiter_id: Option<u64>,
     /// Tracks the task waker registered with the cancellation context.
     cancel_waker: Option<OnceCellCancelWaker>,
+    /// Also settle when an in-flight initializer is cancelled and the cell is
+    /// uninitialized again, so the caller can retry and become the
+    /// initializer. `wait` keeps waiting for a value instead.
+    settle_when_uninit: bool,
 }
 
 impl<T, Caps> CancelAwareWaitInit<'_, T, Caps> {
@@ -898,8 +1000,11 @@ impl<T, Caps> std::future::Future for CancelAwareWaitInit<'_, T, Caps> {
 
     fn poll(self: Pin<&mut Self>, task_cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        let settle_when_uninit = this.settle_when_uninit;
+        let settled =
+            move |state: u8| state == INITIALIZED || (settle_when_uninit && state == UNINIT);
 
-        if this.cell.state.load(Ordering::Acquire) == INITIALIZED {
+        if settled(this.cell.state.load(Ordering::Acquire)) {
             this.clear_cancel_waker();
             return Poll::Ready(Ok(()));
         }
@@ -914,10 +1019,10 @@ impl<T, Caps> std::future::Future for CancelAwareWaitInit<'_, T, Caps> {
         let registered =
             this.cell
                 .register_waker_while(task_cx.waker(), &mut this.waiter_id, |state| {
-                    state != INITIALIZED
+                    !settled(state)
                 });
 
-        if !registered || this.cell.state.load(Ordering::Acquire) == INITIALIZED {
+        if !registered || settled(this.cell.state.load(Ordering::Acquire)) {
             this.clear_cancel_waker();
             return Poll::Ready(Ok(()));
         }
@@ -1467,6 +1572,7 @@ mod tests {
             cx: &cx,
             waiter_id: None,
             cancel_waker: None,
+            settle_when_uninit: false,
         };
         {
             let mut task_cx = Context::from_waker(&waker);
@@ -1691,6 +1797,7 @@ mod tests {
             cx: &cx,
             waiter_id: None,
             cancel_waker: None,
+            settle_when_uninit: false,
         };
 
         {
@@ -2753,6 +2860,92 @@ mod tests {
             "cell should be initialized by waiter"
         );
         crate::test_complete!("get_or_init_waiter_retries_after_cancelled_init");
+    }
+
+    /// A `get_or_init_cx` waiter returns `Cancelled` when its `Cx` is
+    /// cancelled, instead of staying parked behind an initializer it does not
+    /// own, which would keep its region from draining.
+    #[test]
+    fn get_or_init_cx_waiter_returns_cancelled_while_another_initializer_runs() {
+        init_test("get_or_init_cx_waiter_returns_cancelled_while_another_initializer_runs");
+        let cell: OnceCell<u32> = OnceCell::new();
+        let mut init_fut = Box::pin(cell.get_or_init(|| async { pending::<u32>().await }));
+        let noop = noop_waker();
+        let mut noop_cx = Context::from_waker(&noop);
+        assert!(Future::poll(init_fut.as_mut(), &mut noop_cx).is_pending());
+
+        let cx = crate::cx::Cx::for_testing();
+        let mut waiter = Box::pin(cell.get_or_init_cx(&cx, || async { 99u32 }));
+        let wakes = Arc::new(CountWaker::default());
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut task_cx = Context::from_waker(&waker);
+        assert!(Future::poll(waiter.as_mut(), &mut task_cx).is_pending());
+
+        cx.cancel_fast(crate::types::CancelKind::User);
+        assert!(wakes.count() > 0, "cancellation wakes the parked waiter");
+        assert!(matches!(
+            Future::poll(waiter.as_mut(), &mut task_cx),
+            Poll::Ready(Err(OnceCellError::Cancelled))
+        ));
+        assert!(
+            !cell.is_initialized(),
+            "the other initializer still owns the cell"
+        );
+        drop(waiter);
+        drop(init_fut);
+        crate::test_complete!(
+            "get_or_init_cx_waiter_returns_cancelled_while_another_initializer_runs"
+        );
+    }
+
+    #[test]
+    fn get_or_init_cx_waiter_retries_after_the_initializer_is_cancelled() {
+        init_test("get_or_init_cx_waiter_retries_after_the_initializer_is_cancelled");
+        let cell: OnceCell<u32> = OnceCell::new();
+        let mut init_fut = Box::pin(cell.get_or_init(|| async { pending::<u32>().await }));
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+        assert!(Future::poll(init_fut.as_mut(), &mut task_cx).is_pending());
+
+        let cx = crate::cx::Cx::for_testing();
+        let mut waiter = Box::pin(cell.get_or_init_cx(&cx, || async { 99u32 }));
+        assert!(Future::poll(waiter.as_mut(), &mut task_cx).is_pending());
+
+        // The initializer is dropped: the cell is uninitialized again, and the
+        // waiter becomes the initializer instead of waiting for a value.
+        drop(init_fut);
+        assert!(matches!(
+            Future::poll(waiter.as_mut(), &mut task_cx),
+            Poll::Ready(Ok(&99))
+        ));
+        assert_eq!(cell.get(), Some(&99));
+        crate::test_complete!("get_or_init_cx_waiter_retries_after_the_initializer_is_cancelled");
+    }
+
+    #[test]
+    fn get_or_init_cx_honors_a_cancelled_cx_only_while_no_value_exists() {
+        init_test("get_or_init_cx_honors_a_cancelled_cx_only_while_no_value_exists");
+        let cx = crate::cx::Cx::for_testing();
+        cx.cancel_fast(crate::types::CancelKind::User);
+
+        let ready = OnceCell::with_value(5u32);
+        assert_eq!(
+            block_on(ready.get_or_init_cx(&cx, || async { 6u32 })),
+            Ok(&5)
+        );
+
+        let empty: OnceCell<u32> = OnceCell::new();
+        let called = AtomicBool::new(false);
+        assert_eq!(
+            block_on(empty.get_or_init_cx(&cx, || async {
+                called.store(true, Ordering::SeqCst);
+                6u32
+            })),
+            Err(OnceCellError::Cancelled)
+        );
+        assert!(!called.load(Ordering::SeqCst), "no initializer starts");
+        assert!(!empty.is_initialized());
+        crate::test_complete!("get_or_init_cx_honors_a_cancelled_cx_only_while_no_value_exists");
     }
 
     #[test]

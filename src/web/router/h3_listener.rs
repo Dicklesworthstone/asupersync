@@ -435,10 +435,31 @@ type RequestBodySource = (Cx, FramedIncomingRequestBodyWriter);
 const STREAMING_REQUEST_FRAME_CAPACITY: usize = 8;
 const MAX_STREAMING_REQUEST_CHUNK_BYTES: usize = 16 * 1024;
 const H3_NO_ERROR: u64 = 0x100;
+const H3_GENERAL_PROTOCOL_ERROR: u64 = 0x101;
 const H3_INTERNAL_ERROR: u64 = 0x102;
+const H3_CLOSED_CRITICAL_STREAM: u64 = 0x104;
 const H3_FRAME_ERROR: u64 = 0x106;
+const H3_SETTINGS_ERROR: u64 = 0x109;
 const H3_REQUEST_CANCELLED: u64 = 0x10c;
 const H3_MESSAGE_ERROR: u64 = 0x10e;
+
+/// RFC 9114 section 8.1 code for a session error that ends the connection.
+/// The protocol error variants are coarse, so only unambiguous ones get a
+/// specific code; the rest use H3_GENERAL_PROTOCOL_ERROR, which section 8.1
+/// allows whenever an endpoint declines a more specific one. Transport and
+/// local state failures have no HTTP/3 code: those connections are removed.
+fn h3_connection_error_code(error: &NativeH3SessionError) -> Option<u64> {
+    match error {
+        NativeH3SessionError::CriticalStreamClosed { .. } => Some(H3_CLOSED_CRITICAL_STREAM),
+        // A clean FIN inside an HTTP/3 frame.
+        NativeH3SessionError::TruncatedStream { .. } => Some(H3_FRAME_ERROR),
+        NativeH3SessionError::Protocol(
+            H3Error::DuplicateSetting(_) | H3Error::InvalidSettingValue(_),
+        ) => Some(H3_SETTINGS_ERROR),
+        NativeH3SessionError::Protocol(_) => Some(H3_GENERAL_PROTOCOL_ERROR),
+        NativeH3SessionError::Transport(_) | NativeH3SessionError::InvalidState(_) => None,
+    }
+}
 
 fn streaming_chunk_bytes(queue_bytes: NonZeroUsize) -> usize {
     queue_bytes.get().min(MAX_STREAMING_REQUEST_CHUNK_BYTES)
@@ -1313,11 +1334,10 @@ impl ListenerState {
                         task_cx,
                     )
                 });
-                let frame_error_close = self.config.streaming_request_body_buffer_bytes.is_some()
-                    && matches!(
-                        &result,
-                        Ok(Err(NativeH3SessionError::TruncatedStream { .. }))
-                    );
+                let close_code = match &result {
+                    Ok(Err(error)) => h3_connection_error_code(error),
+                    _ => None,
+                };
                 match result {
                     Ok(Ok(made_progress)) => progress |= made_progress,
                     _ => {
@@ -1326,18 +1346,15 @@ impl ListenerState {
                         connection.retirement_deadline = None;
                         self.report.failed_connections =
                             self.report.failed_connections.saturating_add(1);
-                        let protected_close = frame_error_close
-                            && endpoint
-                                .request_authenticated_close(
-                                    cx,
-                                    connection.id,
-                                    H3_FRAME_ERROR,
-                                    true,
-                                )
-                                .unwrap_or(false);
+                        let protected_close = close_code.is_some_and(|code| {
+                            endpoint
+                                .request_authenticated_close(cx, connection.id, code, true)
+                                .unwrap_or(false)
+                        });
                         if protected_close {
-                            // A clean FIN inside an H3 frame is a connection
-                            // H3_FRAME_ERROR. The endpoint retains the
+                            // An HTTP/3 connection error is sent to the peer
+                            // with its RFC 9114 code, so it does not wait out
+                            // its idle timeout. The endpoint retains the
                             // authenticated route and sends its protected
                             // close while owned request regions drain here.
                             retired_connection = true;
@@ -1553,8 +1570,10 @@ impl ListenerConnection {
                 || self.retiring
                 || self.assembly.len() >= config.router.max_pending_requests
             {
-                let reason = if draining || self.retiring {
-                    NativeH3RouterRefusal::DispatchCancelled
+                let reason = if draining {
+                    NativeH3RouterRefusal::Draining
+                } else if self.retiring {
+                    NativeH3RouterRefusal::ConnectionRetiring
                 } else {
                     NativeH3RouterRefusal::TooManyPendingRequests {
                         limit: config.router.max_pending_requests,
@@ -1658,7 +1677,7 @@ impl ListenerConnection {
                 &mut self.session,
                 connection,
                 id,
-                NativeH3RouterRefusal::DispatchCancelled,
+                NativeH3RouterRefusal::RequestAssemblyTimeout,
                 true,
             )?;
             report.refused_requests = report.refused_requests.saturating_add(1);
@@ -1683,7 +1702,7 @@ impl ListenerConnection {
                     &mut self.session,
                     connection,
                     id,
-                    NativeH3RouterRefusal::DispatchCancelled,
+                    NativeH3RouterRefusal::ConnectionRetiring,
                     true,
                 )?;
                 report.refused_requests = report.refused_requests.saturating_add(1);
@@ -1714,7 +1733,7 @@ impl ListenerConnection {
                             &mut self.session,
                             connection,
                             id,
-                            NativeH3RouterRefusal::DispatchCancelled,
+                            NativeH3RouterRefusal::Draining,
                             true,
                         )?;
                         report.refused_requests = report.refused_requests.saturating_add(1);
@@ -1738,12 +1757,17 @@ impl ListenerConnection {
                     // Raw-stream admission may already have refused this
                     // stream before its buffered HEADERS were decoded.
                     if !self.bridge.discarding.contains(stream_id) {
+                        let reason = if draining {
+                            NativeH3RouterRefusal::Draining
+                        } else {
+                            NativeH3RouterRefusal::ConnectionRetiring
+                        };
                         self.bridge.refuse_request(
                             cx,
                             &mut self.session,
                             connection,
                             *stream_id,
-                            NativeH3RouterRefusal::DispatchCancelled,
+                            reason,
                             true,
                         )?;
                         report.refused_requests = report.refused_requests.saturating_add(1);
@@ -1904,11 +1928,21 @@ impl ListenerConnection {
                         .remove(&dispatch.stream_id())
                         .map(|(deadline, _)| deadline);
                     if draining || *active >= config.max_concurrent_requests {
-                        self.bridge.cancel_dispatch_with_cx(
+                        // No handler has seen the request, so the client may
+                        // retry it: H3_REQUEST_REJECTED (RFC 9114 section 4.1.1).
+                        let reason = if draining {
+                            NativeH3RouterRefusal::Draining
+                        } else {
+                            NativeH3RouterRefusal::TooManyConcurrentRequests {
+                                limit: config.max_concurrent_requests,
+                            }
+                        };
+                        self.bridge.refuse_dispatch_with_cx(
                             cx,
                             &mut self.session,
                             connection,
                             &dispatch.cancellation_token(),
+                            reason,
                         )?;
                         if config.streaming_request_body_buffer_bytes.is_some() {
                             // HEADERS reserved credit, but the global owner

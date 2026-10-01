@@ -423,7 +423,8 @@ path, base, worker, fingerprint = sys.argv[1:]
 log = re.sub(r"\x1b\[[0-9;]*m", "", pathlib.Path(path).read_text())
 selected = re.findall(r"Selected worker: ([A-Za-z0-9_.-]+) at ", log)
 terminal = re.findall(r"^\[RCH\] remote ([A-Za-z0-9_.-]+) \([^\n]+\)$", log, re.M)
-sources = re.findall(r"^\[RCH\] clean-overlay receipt: base=([0-9a-f]{40}) overlay-fingerprint=([0-9a-f]{64})$", log, re.M)
+# RCH 2.1.5+ appends the overlaid tree id to the receipt line.
+sources = re.findall(r"^\[RCH\] clean-overlay receipt: base=([0-9a-f]{40}) overlay-fingerprint=([0-9a-f]{64})(?: tree=[0-9a-f]{40})?$", log, re.M)
 assert len(selected) == 1 and terminal == selected, "actual unique remote terminal worker required"
 assert not worker or selected == [worker], "worker changed between required stages"
 assert len(sources) == 1 and sources[0][0] == base, "selected source receipt required"

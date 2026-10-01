@@ -24,7 +24,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use asupersync::channel::{mpsc, fault::*};
 //! use asupersync::evidence_sink::{CollectorSink, EvidenceSink};
 //! use std::sync::Arc;

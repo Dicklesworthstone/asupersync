@@ -12,14 +12,18 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use asupersync::runtime::reactor::{LabReactor, Interest, Event, Token};
+//! ```
+//! # #[cfg(unix)]
+//! # fn main() -> std::io::Result<()> {
+//! use asupersync::runtime::reactor::{Event, Events, Interest, LabReactor, Reactor, Token};
 //! use std::time::Duration;
 //!
 //! let reactor = LabReactor::new();
 //! let token = Token::new(1);
 //!
-//! // Register a virtual source
+//! // Register a source. The lab reactor never touches the descriptor, so any
+//! // `Source` (stdin here) only names the registration.
+//! let source = std::io::stdin();
 //! reactor.register(&source, token, Interest::READABLE)?;
 //!
 //! // Inject an event 10ms in the future
@@ -29,6 +33,10 @@
 //! let mut events = Events::with_capacity(10);
 //! reactor.poll(&mut events, Some(Duration::from_millis(15)))?;
 //! assert_eq!(events.len(), 1);
+//! # Ok(())
+//! # }
+//! # #[cfg(not(unix))]
+//! # fn main() {}
 //! ```
 
 use super::{Event, Interest, Reactor, Source, Token};
@@ -90,7 +98,7 @@ impl Ord for TimedEvent {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use asupersync::runtime::reactor::{LabReactor, FaultConfig, Token, Interest};
 /// use std::io;
 ///
@@ -621,13 +629,15 @@ impl LabReactor {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// use asupersync::runtime::reactor::{LabReactor, Token, Interest, Event};
+    /// ```
+    /// # #[cfg(unix)]
+    /// # fn main() -> std::io::Result<()> {
+    /// use asupersync::runtime::reactor::{Event, Events, Interest, LabReactor, Reactor, Token};
     /// use std::time::Duration;
     ///
     /// let reactor = LabReactor::new();
     /// let token = Token::new(1);
-    /// // ... register token ...
+    /// reactor.register(&std::io::stdin(), token, Interest::READABLE)?;
     ///
     /// // Simulate network partition
     /// reactor.partition(token, true)?;
@@ -640,6 +650,10 @@ impl LabReactor {
     ///
     /// // Restore connectivity
     /// reactor.partition(token, false)?;
+    /// # Ok(())
+    /// # }
+    /// # #[cfg(not(unix))]
+    /// # fn main() {}
     /// ```
     pub fn partition(&self, token: Token, partitioned: bool) -> io::Result<()> {
         let mut inner = self.inner.lock();

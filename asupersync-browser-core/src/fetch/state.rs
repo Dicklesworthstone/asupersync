@@ -2,7 +2,7 @@
 use super::{FetchBytesError, FetchBytesLimits};
 use asupersync::types::{
     WasmAbiOutcomeEnvelope, WasmAbiRecoverability, WasmAbiVersion, WasmBoundaryState,
-    WasmDispatchError, WasmFetchRequest, WasmHandleRef,
+    WasmDispatchError, WasmFetchRequest, WasmHandleKind, WasmHandleRef,
 };
 use std::marker::PhantomData;
 use std::ops::Range;
@@ -29,6 +29,12 @@ pub(super) fn prepare(
     }
     let request = crate::normalize_fetch_request(request)
         .map_err(|_| FetchBytesError::InvalidRequest)?;
+    // Only a runtime or region handle can own a fetch. The dispatcher reports
+    // any other kind as an invalid request; this API documents it as
+    // `OwnerUnavailable` ("wrong handle kind").
+    if !matches!(request.scope.kind, WasmHandleKind::Region | WasmHandleKind::Runtime) {
+        return Err(FetchBytesError::OwnerUnavailable);
+    }
     let handle = crate::DISPATCHER.with(|dispatcher| {
         dispatcher.borrow_mut().fetch_request(&request, consumer_version)
     }).map_err(admission_error)?;

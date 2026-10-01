@@ -5,6 +5,9 @@
 //! When the e-value exceeds 1/α, we reject the null with Type-I error ≤ α —
 //! regardless of when we choose to stop monitoring (Ville's inequality).
 //!
+//! The monitor is opt-in and caller-fed: the runtime does not create one or
+//! feed it obligation ages (`asupersync-bi2462.150.2` tracks that wire).
+//!
 //! # Design
 //!
 //! Each monitored obligation contributes to the e-value based on how long
