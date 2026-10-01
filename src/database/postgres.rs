@@ -6248,15 +6248,15 @@ impl PgConnection {
     /// Parameters use `$1`, `$2`, ... bind slots in SQL. This prevents
     /// SQL injection and enables type-safe binary parameter encoding.
     ///
-    /// ```ignore
-    /// let rows = conn.query_params(cx,
-    ///     "SELECT id, name FROM users WHERE active = $1 AND age > $2",
-    ///     &[&true, &21i32],
-    /// ).await?;
+    /// ```no_run
+    /// # async fn f(conn: &mut asupersync::database::PgConnection, cx: &asupersync::Cx) -> asupersync::Outcome<(), asupersync::database::PgError> {
+    /// let sql = "SELECT id, name FROM users WHERE active = $1 AND age > $2";
+    /// let rows = conn.query_params(cx, sql, &[&true, &21i32]).await?;
     /// for row in &rows {
     ///     let id: i32 = row.get_typed("id")?;
     ///     let name: String = row.get_typed("name")?;
     /// }
+    /// # asupersync::Outcome::Ok(()) }
     /// ```
     pub async fn query_params(
         &mut self,
@@ -6370,11 +6370,11 @@ impl PgConnection {
     /// Execute a parameterized command (INSERT, UPDATE, DELETE) using the
     /// Extended Query Protocol. Returns the number of affected rows.
     ///
-    /// ```ignore
-    /// let affected = conn.execute_params(cx,
-    ///     "UPDATE users SET active = $1 WHERE id = $2",
-    ///     &[&false, &42i32],
-    /// ).await?;
+    /// ```no_run
+    /// # async fn f(conn: &mut asupersync::database::PgConnection, cx: &asupersync::Cx) -> asupersync::Outcome<u64, asupersync::database::PgError> {
+    /// let sql = "UPDATE users SET active = $1 WHERE id = $2";
+    /// let affected = conn.execute_params(cx, sql, &[&false, &42i32]).await?;
+    /// # asupersync::Outcome::Ok(affected) }
     /// ```
     pub async fn execute_params(
         &mut self,

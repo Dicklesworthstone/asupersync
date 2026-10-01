@@ -924,6 +924,7 @@ fn e2e_dp_13_messaging_error_variants() {
 
 #[cfg(feature = "kafka")]
 #[test]
+#[ignore = "needs a live Kafka broker at localhost:9092 (asupersync-w6qog5); run with -- --ignored"]
 fn e2e_dp_14_kafka_producer_consumer_data_path() {
     common::init_test_logging();
     common::run_test_with_cx(|cx| async move {

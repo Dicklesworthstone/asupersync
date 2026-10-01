@@ -11,7 +11,11 @@
 //!
 //! A simple request-response protocol:
 //!
-//! ```ignore
+//! ```no_run
+//! use asupersync::session::{Dual, End, Recv, Send};
+//! # struct Request;
+//! # struct Response;
+//!
 //! // Client side: send a request, receive a response
 //! type ClientProtocol = Send<Request, Recv<Response, End>>;
 //!
@@ -280,7 +284,11 @@ impl<A: Session, B: Session> Session for Offer<A, B> {
 ///
 /// # Examples
 ///
-/// ```ignore
+/// ```no_run
+/// use asupersync::session::{Dual, End, Recv, Send};
+/// # struct Request;
+/// # struct Response;
+///
 /// type Client = Send<Request, Recv<Response, End>>;
 /// type Server = Dual<Client>;
 /// // Server = Recv<Request, Send<Response, End>>
@@ -323,7 +331,9 @@ pub enum SessionError {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// use asupersync::session::{self, End, Send};
+///
 /// type Client = Send<String, End>;
 /// let (client, server) = session::channel::<Client>();
 /// // client: Endpoint<Send<String, End>>

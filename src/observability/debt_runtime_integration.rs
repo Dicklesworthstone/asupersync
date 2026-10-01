@@ -509,50 +509,33 @@ pub mod integration_examples {
 
     /// Example of how TaskRecord cancellation would be instrumented.
     ///
-    /// ```rust,ignore
-    /// impl TaskRecord {
-    ///     pub fn request_cancel_with_budget(
-    ///         &mut self,
-    ///         reason: CancelReason,
-    ///         cleanup_budget: Budget,
-    ///         debt_integration: Option<&DebtRuntimeIntegration>,
-    ///     ) -> bool {
-    ///         // ... existing logic ...
+    /// ```rust,no_run
+    /// use asupersync::observability::DebtRuntimeIntegration;
+    /// use asupersync::record::TaskRecord;
+    /// use asupersync::types::{Budget, CancelReason, RegionId, TaskId};
     ///
-    ///         match &mut self.state {
-    ///             TaskState::Created | TaskState::Running => {
-    ///                 // NEW: Track cleanup work debt
-    ///                 if let Some(debt) = debt_integration {
-    ///                     let work_id = debt.on_task_cleanup_started(
-    ///                         self.id,
-    ///                         &reason,
-    ///                         reason.kind,
-    ///                         cleanup_budget.estimate_cleanup_work(),
-    ///                     );
-    ///                     self.debt_work_id = Some(work_id);
-    ///                 }
+    /// let debt = DebtRuntimeIntegration::default();
+    /// let mut record = TaskRecord::new(
+    ///     TaskId::testing_default(),
+    ///     RegionId::testing_default(),
+    ///     Budget::INFINITE,
+    /// );
     ///
-    ///                 // ... continue with cancellation ...
-    ///             }
-    ///             // ... other states ...
-    ///         }
-    ///     }
+    /// // `TaskRecord` has no debt hook of its own: the code that drives the
+    /// // cancellation reports cleanup work once the task is newly cancelled.
+    /// let reason = CancelReason::user("shutdown");
+    /// let (newly_cancelled, wakes) = record
+    ///     .request_cancel_with_budget(reason.clone(), Budget::INFINITE)
+    ///     .into_parts();
+    /// wakes.dispatch();
+    /// let debt_work_id = newly_cancelled
+    ///     .then(|| debt.on_task_cleanup_started(record.id, &reason, reason.kind, 50));
     ///
-    ///     pub fn complete(
-    ///         &mut self,
-    ///         outcome: TaskOutcome,
-    ///         debt_integration: Option<&DebtRuntimeIntegration>,
-    ///     ) {
-    ///         // ... existing logic ...
-    ///
-    ///         // NEW: Mark cleanup debt as resolved
-    ///         if let Some(work_id) = self.debt_work_id.take() {
-    ///             if let Some(debt) = debt_integration {
-    ///                 debt.on_cleanup_completed(work_id);
-    ///             }
-    ///         }
-    ///     }
+    /// // ... cleanup runs; once the task completes, mark its cleanup debt as resolved.
+    /// if let Some(work_id) = debt_work_id {
+    ///     debt.on_cleanup_completed(work_id);
     /// }
+    /// assert_eq!(debt.get_debt_status().total_pending, 0);
     /// ```
     pub fn example_task_integration() {
         // Documentation only

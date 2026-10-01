@@ -331,7 +331,9 @@ impl<T: FromRequestParts> FromRequest for T {
 /// (for example `Path<u64>` or `Path<String>`). For named parameters, extract
 /// into a `Deserialize` type (for example a struct or `HashMap<String, String>`).
 ///
-/// ```ignore
+/// ```no_run
+/// use asupersync::web::extract::Path;
+///
 /// async fn get_user(Path(id): Path<String>) -> String {
 ///     format!("User {id}")
 /// }
@@ -365,7 +367,10 @@ where
 ///
 /// Deserializes query pairs into typed values.
 ///
-/// ```ignore
+/// ```no_run
+/// use asupersync::web::extract::Query;
+/// use serde::Deserialize;
+///
 /// #[derive(Deserialize)]
 /// struct Pagination { page: u32, per_page: u32 }
 ///

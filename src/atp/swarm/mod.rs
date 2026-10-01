@@ -16,30 +16,67 @@
 //!
 //! # Usage Example
 //!
-//! ```rust,ignore
-//! use asupersync::atp::swarm::{SwarmCoordinator, SwarmConfig};
-//!
-//! let config = SwarmConfig {
-//!     max_peers: 8,
-//!     piece_selection_strategy: PieceSelectionStrategy::RarestFirst,
-//!     peer_quality_threshold: 0.7,
+//! ```rust,no_run
+//! use asupersync::atp::swarm::{
+//!     PieceMap, PieceSelectionStrategy, SwarmConfig, SwarmCoordinator, SwarmPeer, SwarmResult,
 //! };
+//! use asupersync::Cx;
 //!
-//! let mut coordinator = SwarmCoordinator::new(config);
+//! async fn swarm_fetch(
+//!     cx: &Cx,
+//!     object_id: String,
+//!     total_size: u64,
+//!     available_peers: Vec<SwarmPeer>,
+//!     piece_map: PieceMap,
+//! ) -> SwarmResult<()> {
+//!     let config = SwarmConfig {
+//!         max_peers: 8,
+//!         piece_selection_strategy: PieceSelectionStrategy::RarestFirst,
+//!         peer_quality_threshold: 0.7,
+//!         ..SwarmConfig::default()
+//!     };
 //!
-//! // Start transfer with swarm coordination
-//! let transfer = coordinator.start_swarm_transfer(
-//!     object_id,
-//!     available_peers,
-//!     piece_map
-//! ).await?;
+//!     let mut coordinator = SwarmCoordinator::new(config);
 //!
-//! // Coordinate piece requests across peers
-//! while !transfer.is_complete() {
-//!     let assignments = coordinator.assign_pieces(&transfer).await?;
-//!     for assignment in assignments {
-//!         coordinator.request_piece(assignment.peer, assignment.piece).await?;
+//!     // Start transfer with swarm coordination
+//!     let piece_count = piece_map.total_pieces;
+//!     let transfer_id = coordinator
+//!         .start_swarm_transfer(
+//!             cx,
+//!             object_id,
+//!             total_size,
+//!             piece_count,
+//!             available_peers,
+//!             piece_map,
+//!         )
+//!         .await?;
+//!
+//!     // Coordinate piece requests across peers
+//!     while coordinator
+//!         .get_transfer_status(&transfer_id)
+//!         .is_some_and(|status| status.remaining_pieces > 0)
+//!     {
+//!         let assignments = coordinator.assign_pieces(cx, &transfer_id).await?;
+//!         if assignments.is_empty() {
+//!             break; // no peer can serve the remaining pieces right now
+//!         }
+//!         for assignment in assignments {
+//!             // The coordinator schedules requests but does not move bytes:
+//!             // fetch `assignment.piece_id` from `assignment.peer_id` over your
+//!             // transport, verify it, then report the outcome (on a failed
+//!             // check, call `handle_piece_verification_failed` instead).
+//!             coordinator
+//!                 .mark_piece_received(
+//!                     cx,
+//!                     &transfer_id,
+//!                     assignment.piece_id,
+//!                     &assignment.peer_id,
+//!                     "verified".to_string(),
+//!                 )
+//!                 .await?;
+//!         }
 //!     }
+//!     Ok(())
 //! }
 //! ```
 

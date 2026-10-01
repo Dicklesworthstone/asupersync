@@ -5,7 +5,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use asupersync::lab::{LabConfig, SporkAppHarness};
 //! use asupersync::app::AppSpec;
 //! use asupersync::types::Budget;
@@ -13,10 +13,10 @@
 //! let app = AppSpec::new("my_app")
 //!     .with_budget(Budget::new().with_poll_quota(50_000));
 //!
-//! let mut harness = SporkAppHarness::new(LabConfig::new(42), app).unwrap();
+//! let harness = SporkAppHarness::new(LabConfig::new(42), app).unwrap();
 //!
-//! // Drive the app to quiescence and collect a report.
-//! let report = harness.run_to_report();
+//! // Drive the app to quiescence, stop it, and collect a report.
+//! let report = harness.run_to_report().expect("app should stop cleanly");
 //!
 //! assert!(report.run.oracle_report.all_passed());
 //! ```

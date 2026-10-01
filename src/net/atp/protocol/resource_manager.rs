@@ -6,9 +6,12 @@
 //!
 //! # Usage Example
 //!
-//! ```ignore
-//! use crate::net::atp::protocol::{ResourceManager, ResourceLimits, PeerId};
+//! ```no_run
+//! use asupersync::net::atp::protocol::{ResourceManager, ResourceLimits, PeerId};
+//! use std::time::Duration;
 //!
+//! # fn main() -> Result<(), &'static str> {
+//! # let frame_size: u64 = 4 * 1024;
 //! // Create resource manager with custom limits
 //! let limits = ResourceLimits {
 //!     max_memory_per_peer: 32 * 1024 * 1024,  // 32 MB per peer
@@ -36,6 +39,8 @@
 //!
 //! // Periodically clean up inactive peers
 //! manager.cleanup_inactive_peers(Duration::from_secs(300));
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Integration Notes
