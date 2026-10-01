@@ -148,6 +148,25 @@ pub const ALL_REPORTED_ORACLE_NAMES: &[&str] = &[
     INVARIANT_FABRIC_REDELIVERY,
 ];
 
+/// Reported oracles that `LabRuntime` feeds from runtime state.
+///
+/// `LabRuntime::report` hydrates these from the runtime state and its
+/// histories (`OracleSuite::hydrate_temporal_from_state`), and the lab
+/// scheduler also drives `cancellation_protocol` live. No runtime code path
+/// sends events to the other entries of [`ALL_REPORTED_ORACLE_NAMES`]. They
+/// observe only what a caller feeds them by hand, so in a `LabRuntime`
+/// report they pass without having checked anything (br-asupersync-52hxjz).
+pub const LAB_RUNTIME_FED_ORACLE_NAMES: &[&str] = &[
+    INVARIANT_TASK_LEAK,
+    INVARIANT_OBLIGATION_LEAK,
+    INVARIANT_QUIESCENCE,
+    INVARIANT_LOSER_DRAIN,
+    INVARIANT_FINALIZER,
+    INVARIANT_REGION_TREE,
+    INVARIANT_DEADLINE_MONOTONE,
+    INVARIANT_CANCELLATION_PROTOCOL,
+];
+
 /// Function pointer for oracles that can be constructed behind the common
 /// [`Oracle`] trait today.
 pub type OracleConstructor = fn() -> Box<dyn Oracle>;
@@ -603,6 +622,20 @@ impl OracleRegistry {
     #[must_use]
     pub const fn reported_names() -> &'static [&'static str] {
         ALL_REPORTED_ORACLE_NAMES
+    }
+
+    /// Return the reported oracle names that `LabRuntime` feeds (see
+    /// [`LAB_RUNTIME_FED_ORACLE_NAMES`]).
+    #[must_use]
+    pub const fn lab_runtime_fed_names() -> &'static [&'static str] {
+        LAB_RUNTIME_FED_ORACLE_NAMES
+    }
+
+    /// Whether `LabRuntime` feeds the reported oracle `name`. A `false`
+    /// entry in a `LabRuntime` report passed without observing anything.
+    #[must_use]
+    pub fn is_fed_by_lab_runtime(name: &str) -> bool {
+        LAB_RUNTIME_FED_ORACLE_NAMES.contains(&name)
     }
 
     /// Return descriptors that are emitted by `OracleSuite::report`.

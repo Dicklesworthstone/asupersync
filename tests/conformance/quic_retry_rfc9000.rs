@@ -7,10 +7,18 @@
 //!
 //! - Retry packet format and encoding/decoding correctness
 //! - Connection ID and token field handling
-//! - Integrity tag validation and authentication
+//! - Integrity tag framing (16 bytes, round-tripped; not authenticated here)
 //! - Client response requirements for Retry processing
 //! - Server-side Retry generation and validation
 //! - Error conditions and boundary cases
+//!
+//! Scope: every check runs through the `asupersync::net::quic_core` Retry
+//! header codec (`PacketHeader` encode/decode). The client and server rows
+//! check the fields a client or server reads or writes; no connection
+//! processes a Retry here. The Retry Integrity Tag is carried as 16 opaque
+//! bytes and is never computed or verified here. The tag computation (RFC 9001
+//! §5.8) is proven by the lib test
+//! `net::quic_native::handshake_driver::tests::retry_integrity_tag_matches_rfc_9001_appendix_a4`.
 //!
 //! # QUIC Retry Packet Format (RFC 9000 Section 17.2.5)
 //!

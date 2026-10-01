@@ -133,13 +133,50 @@ pub(super) fn outgoing(frame: Frame, enabled: bool, max_message: usize, max_enco
     }
 }
 
-pub(super) fn incoming(payload: Bytes, compressed: bool, max_message: usize) -> Result<Bytes, WsError> {
-    if !compressed { return Ok(payload); }
+/// A complete received data message: its payload, or the decode of a
+/// compressed one, which the receiver advances one bounded step per poll.
+pub(super) enum Incoming {
+    Ready(Bytes),
+    // Without `compression`, Inflation is uninhabited and this is never built.
+    #[cfg_attr(not(feature = "compression"), allow(dead_code))]
+    Inflating(Inflation),
+}
+
+/// Output chunks of 4 KiB that one [`Inflation::step`] decodes before the
+/// receiver yields: 256 KiB of decoded output per poll.
+pub(super) const INFLATE_STEP_CHUNKS: usize = 64;
+
+pub(super) fn incoming(
+    payload: Bytes,
+    compressed: bool,
+    max_message: usize,
+) -> Result<Incoming, WsError> {
+    if !compressed {
+        return Ok(Incoming::Ready(payload));
+    }
     #[cfg(feature = "compression")]
-    { inflate(&payload, max_message) }
+    {
+        Inflation::new(&payload, max_message).map(Incoming::Inflating)
+    }
     #[cfg(not(feature = "compression"))]
     {
         let _ = max_message;
+        Err(WsError::ReservedBitsSet)
+    }
+}
+
+/// Without the `compression` feature no message is ever compressed, so an
+/// Inflation is never created; its `Infallible` field makes that explicit.
+#[cfg(not(feature = "compression"))]
+#[derive(Debug)]
+#[allow(dead_code)] // never constructed without `compression`
+pub(super) struct Inflation {
+    _never: std::convert::Infallible,
+}
+
+#[cfg(not(feature = "compression"))]
+impl Inflation {
+    pub(super) fn step(&mut self, _chunks: usize) -> Result<Option<Bytes>, WsError> {
         Err(WsError::ReservedBitsSet)
     }
 }
@@ -198,99 +235,191 @@ const WINDOW: usize = 32 * 1024;
 /// at most `WINDOW` bytes back, so it can reach the fill only from an earlier
 /// position. Every later byte is copied from message bytes, which both decodes
 /// share once their first `WINDOW` bytes agree.
+///
+/// The 0x00-fill decode is resumable: [`Inflation::step`] decodes a bounded
+/// number of output chunks, so a large message spans polls instead of
+/// blocking a worker for its whole decode (br-asupersync-ydis91).
 #[cfg(feature = "compression")]
-fn inflate(payload: &[u8], max: usize) -> Result<Bytes, WsError> {
-    let zero_filled = inflate_over(payload, max, 0x00, None)?;
-    let head = &zero_filled[..zero_filled.len().min(WINDOW)];
-    if !head.contains(&0) {
-        return Ok(zero_filled);
-    }
-    // Compare the 0xFF-fill decode against the first one as it is produced,
-    // instead of buffering a second copy, and stop after the head: a 64 MiB
-    // message no longer pays a second 64 MiB decode (br-asupersync-ydis91).
-    inflate_over(payload, max, 0xff, Some(head))?;
-    Ok(zero_filled)
+pub(super) struct Inflation {
+    pass: Pass,
+    max: usize,
 }
 
-/// Decode `payload` over a `fill` window. With `reference`, output is compared
-/// against it chunk by chunk and not retained, and decoding stops at the end
-/// of `reference`; the result is then empty.
 #[cfg(feature = "compression")]
-fn inflate_over(
-    payload: &[u8],
-    max: usize,
+impl Inflation {
+    fn new(payload: &[u8], max: usize) -> Result<Self, WsError> {
+        Ok(Self {
+            pass: Pass::new(payload, max, 0x00)?,
+            max,
+        })
+    }
+
+    /// Decode at most `chunks` more output chunks. Returns the message once
+    /// it is decoded and has passed the reference check.
+    pub(super) fn step(&mut self, chunks: usize) -> Result<Option<Bytes>, WsError> {
+        if !self.pass.run(self.max, None, chunks)? {
+            return Ok(None);
+        }
+        let output = std::mem::take(&mut self.pass.output);
+        let head = &output[..output.len().min(WINDOW)];
+        if head.contains(&0) {
+            // Compare the 0xFF-fill decode against the first one as it is
+            // produced, instead of buffering a second copy, and stop after
+            // the head: a 64 MiB message never pays a second 64 MiB decode.
+            let mut verify = Pass::over(std::mem::take(&mut self.pass.input), 0xff)?;
+            while !verify.run(self.max, Some(head), usize::MAX)? {}
+        }
+        Ok(Some(Bytes::from(output)))
+    }
+}
+
+#[cfg(feature = "compression")]
+impl std::fmt::Debug for Inflation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Inflation")
+            .field("decoded", &self.pass.produced)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One decode of a message over a `fill` window.
+#[cfg(feature = "compression")]
+struct Pass {
+    /// The message, then the restored flush tail and a final empty block.
+    input: Vec<u8>,
+    decoder: flate2::Decompress,
     fill: u8,
-    reference: Option<&[u8]>,
-) -> Result<Bytes, WsError> {
-    use flate2::{Decompress, FlushDecompress, Status};
-    // Complete the removed sync-flush block, then append a final empty block.
-    // Requiring StreamEnd at this exact boundary rejects truncated streams;
-    // a successful partial flush alone does not prove a complete message.
-    const SUFFIX: [u8; 9] = [0, 0, 255, 255, 1, 0, 0, 255, 255];
-    let mut input = Vec::new();
-    input.try_reserve_exact(payload.len().checked_add(SUFFIX.len()).ok_or(WsError::PayloadTooLarge { size: u64::MAX, max })?)
-        .map_err(|_| WsError::Io(std::io::Error::other("WebSocket decompression allocation failed")))?;
-    input.extend_from_slice(payload);
-    input.extend_from_slice(&SUFFIX);
-    let mut decoder = Decompress::new(false);
-    prime_dictionary(&mut decoder, fill, &[])?;
-    let references_before_message =
-        || WsError::ProtocolViolation("WebSocket DEFLATE references data before the message");
-    let mut output = Vec::new();
-    // Decoded length so far. With a reference, the verified prefix
-    // `reference[..produced]` stands in for `output`, which stays empty.
-    let mut produced = 0usize;
-    let mut offset = 0;
-    let mut section_start = 0;
-    let mut sections = 0;
-    loop {
-        let mut chunk = [0; 4096];
-        let before_in = decoder.total_in();
-        let before_out = decoder.total_out();
-        let status = decoder.decompress(&input[offset..], &mut chunk, FlushDecompress::None)
-            .map_err(|_| WsError::ProtocolViolation("invalid WebSocket DEFLATE message"))?;
-        let read = (decoder.total_in() - before_in) as usize;
-        let written = (decoder.total_out() - before_out) as usize;
-        offset += read;
-        match reference {
-            Some(reference) => {
-                let end = produced.saturating_add(written).min(reference.len());
-                let expected = reference
-                    .get(produced..end)
-                    .ok_or_else(references_before_message)?;
-                if expected != &chunk[..end - produced] {
-                    return Err(references_before_message());
+    output: Vec<u8>,
+    /// Decoded length so far. With a reference, the verified prefix
+    /// `reference[..produced]` stands in for `output`, which stays empty.
+    produced: usize,
+    offset: usize,
+    section_start: usize,
+    sections: u64,
+}
+
+#[cfg(feature = "compression")]
+impl Pass {
+    fn new(payload: &[u8], max: usize, fill: u8) -> Result<Self, WsError> {
+        // Complete the removed sync-flush block, then append a final empty block.
+        // Requiring StreamEnd at this exact boundary rejects truncated streams;
+        // a successful partial flush alone does not prove a complete message.
+        const SUFFIX: [u8; 9] = [0, 0, 255, 255, 1, 0, 0, 255, 255];
+        let mut input = Vec::new();
+        input
+            .try_reserve_exact(payload.len().checked_add(SUFFIX.len()).ok_or(
+                WsError::PayloadTooLarge {
+                    size: u64::MAX,
+                    max,
+                },
+            )?)
+            .map_err(|_| {
+                WsError::Io(std::io::Error::other(
+                    "WebSocket decompression allocation failed",
+                ))
+            })?;
+        input.extend_from_slice(payload);
+        input.extend_from_slice(&SUFFIX);
+        Self::over(input, fill)
+    }
+
+    fn over(input: Vec<u8>, fill: u8) -> Result<Self, WsError> {
+        let mut decoder = flate2::Decompress::new(false);
+        prime_dictionary(&mut decoder, fill, &[])?;
+        Ok(Self {
+            input,
+            decoder,
+            fill,
+            output: Vec::new(),
+            produced: 0,
+            offset: 0,
+            section_start: 0,
+            sections: 0,
+        })
+    }
+
+    /// Decode at most `chunks` output chunks. Returns true at the end of the
+    /// message or, with `reference`, at the end of `reference`. With
+    /// `reference`, output is compared against it chunk by chunk and not
+    /// retained.
+    fn run(
+        &mut self,
+        max: usize,
+        reference: Option<&[u8]>,
+        chunks: usize,
+    ) -> Result<bool, WsError> {
+        use flate2::{FlushDecompress, Status};
+        let references_before_message =
+            || WsError::ProtocolViolation("WebSocket DEFLATE references data before the message");
+        for _ in 0..chunks {
+            let mut chunk = [0; 4096];
+            let before_in = self.decoder.total_in();
+            let before_out = self.decoder.total_out();
+            let status = self
+                .decoder
+                .decompress(
+                    &self.input[self.offset..],
+                    &mut chunk,
+                    FlushDecompress::None,
+                )
+                .map_err(|_| WsError::ProtocolViolation("invalid WebSocket DEFLATE message"))?;
+            let read = (self.decoder.total_in() - before_in) as usize;
+            let written = (self.decoder.total_out() - before_out) as usize;
+            self.offset += read;
+            match reference {
+                Some(reference) => {
+                    let end = self.produced.saturating_add(written).min(reference.len());
+                    let expected = reference
+                        .get(self.produced..end)
+                        .ok_or_else(references_before_message)?;
+                    if expected != &chunk[..end - self.produced] {
+                        return Err(references_before_message());
+                    }
+                    if end == reference.len() {
+                        return Ok(true);
+                    }
                 }
-                if end == reference.len() {
-                    return Ok(Bytes::new());
-                }
+                None => append_bounded(&mut self.output, &chunk[..written], max)?,
             }
-            None => append_bounded(&mut output, &chunk[..written], max)?,
-        }
-        produced += written;
-        if status == Status::StreamEnd {
-            sections += 1;
-            // Includes the synthetic final section. This explicit resource cap
-            // bounds window priming to about 8 MiB per decode.
-            if sections > 256 { return Err(WsError::PayloadTooLarge { size: sections, max: 256 }); }
-            if offset == section_start { return Err(WsError::ProtocolViolation("empty WebSocket DEFLATE progress")); }
-            if offset == input.len() {
-                if reference.is_some_and(|reference| reference.len() != produced) {
-                    return Err(references_before_message());
+            self.produced += written;
+            if status == Status::StreamEnd {
+                self.sections += 1;
+                // Includes the synthetic final section. This explicit resource cap
+                // bounds window priming to about 8 MiB per decode.
+                if self.sections > 256 {
+                    return Err(WsError::PayloadTooLarge {
+                        size: self.sections,
+                        max: 256,
+                    });
                 }
-                return Ok(Bytes::from(output));
+                if self.offset == self.section_start {
+                    return Err(WsError::ProtocolViolation(
+                        "empty WebSocket DEFLATE progress",
+                    ));
+                }
+                if self.offset == self.input.len() {
+                    if reference.is_some_and(|reference| reference.len() != self.produced) {
+                        return Err(references_before_message());
+                    }
+                    return Ok(true);
+                }
+                // RFC 7692 section 7.2.1 permits byte-aligned BFINAL sections in
+                // one message. reset alone would lose that message's history.
+                self.decoder.reset(false);
+                let history = reference.map_or(self.output.as_slice(), |reference| {
+                    &reference[..self.produced]
+                });
+                prime_dictionary(&mut self.decoder, self.fill, history)?;
+                self.section_start = self.offset;
+                continue;
             }
-            // RFC 7692 section 7.2.1 permits byte-aligned BFINAL sections in
-            // one message. reset alone would lose that message's history.
-            decoder.reset(false);
-            let history = reference.map_or(output.as_slice(), |reference| &reference[..produced]);
-            prime_dictionary(&mut decoder, fill, history)?;
-            section_start = offset;
-            continue;
+            if read == 0 && written == 0 {
+                return Err(WsError::ProtocolViolation(
+                    "truncated WebSocket DEFLATE message",
+                ));
+            }
         }
-        if read == 0 && written == 0 {
-            return Err(WsError::ProtocolViolation("truncated WebSocket DEFLATE message"));
-        }
+        Ok(false)
     }
 }
 
@@ -328,6 +457,17 @@ fn prime_dictionary(decoder: &mut flate2::Decompress, fill: u8, history: &[u8]) 
 #[cfg(all(test, feature = "compression"))]
 mod tests {
     use super::*;
+
+    /// Decode a whole message one output chunk per step, so every vector
+    /// below also proves that a decode resumes correctly between steps.
+    fn inflate(payload: &[u8], max: usize) -> Result<Bytes, WsError> {
+        let mut inflation = Inflation::new(payload, max)?;
+        loop {
+            if let Some(message) = inflation.step(1)? {
+                return Ok(message);
+            }
+        }
+    }
 
     #[test]
     fn permessage_deflate_negotiates_only_supported_parameters() {
@@ -472,7 +612,38 @@ mod tests {
         // the first window is never compared again (br-asupersync-ydis91).
         let mut tail_differs = decoded.to_vec();
         *tail_differs.last_mut().unwrap() = 1;
-        assert!(inflate_over(&zeros, 1 << 20, 0xff, Some(&tail_differs[..WINDOW])).is_ok());
-        assert!(inflate_over(&zeros, 1 << 20, 0xff, Some(&tail_differs)).is_err());
+        let verify = |reference: &[u8]| {
+            let mut pass = Pass::new(&zeros, 1 << 20, 0xff)?;
+            while !pass.run(1 << 20, Some(reference), usize::MAX)? {}
+            Ok::<(), WsError>(())
+        };
+        assert!(verify(&tail_differs[..WINDOW]).is_ok());
+        assert!(verify(&tail_differs).is_err());
+    }
+
+    #[test]
+    fn permessage_deflate_inflation_decodes_a_bounded_amount_per_step() {
+        // A 251-byte cycle that includes NUL, so the reference check runs too.
+        let input: Vec<u8> = (0..1024 * 1024).map(|index| (index % 251) as u8).collect();
+        let packed = deflate(&input, input.len()).unwrap();
+        let Incoming::Inflating(mut inflation) = incoming(packed, true, input.len()).unwrap()
+        else {
+            panic!("a compressed message is decoded in steps");
+        };
+        let mut steps = 0;
+        let message = loop {
+            let before = inflation.pass.produced;
+            let step = inflation.step(INFLATE_STEP_CHUNKS).unwrap();
+            steps += 1;
+            assert!(inflation.pass.produced - before <= INFLATE_STEP_CHUNKS * 4096);
+            if let Some(message) = step {
+                break message;
+            }
+        };
+        assert_eq!(message.as_ref(), input.as_slice());
+        // 1 MiB at no more than 256 KiB per step.
+        assert!(steps >= 4, "{steps} steps");
+        let raw = incoming(Bytes::from_static(b"raw"), false, 3);
+        assert!(matches!(raw, Ok(Incoming::Ready(raw)) if raw.as_ref() == b"raw"));
     }
 }

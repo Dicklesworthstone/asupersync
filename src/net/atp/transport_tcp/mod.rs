@@ -4350,6 +4350,9 @@ async fn reject_existing_link_or_reparse(path: &Path) -> Result<(), TransportErr
 /// Run a persistent accept loop, handling each connection as a receive. Returns
 /// when the capability context is cancelled. Connection-level errors are
 /// reported via `on_result` and do not stop the loop.
+///
+/// A finished receive is reported within about 100 ms, without waiting for
+/// another client to connect.
 pub async fn serve<F>(
     cx: &Cx,
     listener: TcpListener,
@@ -4388,7 +4391,17 @@ where
             crate::time::sleep(cx.now(), accept_wait.min(Duration::from_millis(25))).await;
             continue;
         }
-        let accept = with_transport_timeout(cx, accept_wait, "accept", listener.accept()).await;
+        // Finished receives are reported only by the drain above, which runs
+        // between accepts. While a receive is in flight, bound the accept wait
+        // so its result reaches `on_result` promptly instead of after the full
+        // accept timeout (normally 60s) or the next client's connection. An
+        // idle loop keeps the full wait as its cancellation checkpoint cadence.
+        let wait = if active.is_empty() {
+            accept_wait
+        } else {
+            accept_wait.min(Duration::from_millis(100))
+        };
+        let accept = with_transport_timeout(cx, wait, "accept", listener.accept()).await;
         match accept {
             Ok((stream, peer)) => {
                 consecutive_failures = 0;
@@ -4411,6 +4424,11 @@ where
                 // No pending connection. Keep the listener alive while giving
                 // the loop a bounded cancellation checkpoint.
                 consecutive_failures = 0;
+            }
+            Err(_) if cx.is_cancel_requested() => {
+                // Cancellation interrupts the pending accept. That is shutdown,
+                // not an accept failure: the check at the top of the loop
+                // drains the receive tasks and returns without reporting it.
             }
             Err(err) => {
                 // A transient accept error (e.g. ECONNABORTED, EMFILE) must not

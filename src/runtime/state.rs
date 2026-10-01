@@ -52,7 +52,7 @@ use crate::types::task_context::{
 };
 use crate::types::{
     Budget, CancelAttributionConfig, CancelKind, CancelReason, CapabilityBudget,
-    CapabilityBudgetRequirements, ObligationId, Outcome, RegionId, TaskId, Time,
+    CapabilityBudgetRequirements, ObligationId, Outcome, RegionId, Severity, TaskId, Time,
     id::{next_bootstrap_region_id, next_bootstrap_task_id},
 };
 use crate::util::det_hash::DetHashMap;
@@ -75,6 +75,13 @@ type BoxedAsyncFinalizer = std::pin::Pin<Box<dyn Future<Output = ()> + Send>>;
 
 fn nanos_saturating_u64(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
+fn stamp_logical_time(event: TraceEvent, logical_time: Option<LogicalTime>) -> TraceEvent {
+    match logical_time {
+        Some(logical_time) => event.with_logical_time(logical_time),
+        None => event,
+    }
 }
 
 /// Runs a legacy state-threaded task future and publishes its classified
@@ -2808,16 +2815,19 @@ impl RuntimeState {
         self.leak_count
     }
 
-    /// Enables an anytime-valid obligation leak monitor
-    /// ([`LeakMonitor`](crate::obligation::eprocess::LeakMonitor)).
+    /// Enables an obligation leak monitor, a
+    /// [`LeakMonitor::change_detector`](crate::obligation::eprocess::LeakMonitor::change_detector):
+    /// its expected number of observations before a false alarm is at least
+    /// `1/alpha`, and its alarm latches.
     ///
-    /// From this call on, every obligation this state resolves feeds the
-    /// monitor its age at resolution, exactly once. That covers committed,
-    /// aborted and leaked obligations, so an obligation still reserved when its
-    /// holder completes counts once, at its final age. Obligations resolved
-    /// earlier are not observed, and a second call replaces the monitor and its
-    /// evidence. Live obligations are never rescanned: repeated observations of
-    /// one obligation would break the e-process's guarantee.
+    /// From this call on, every obligation this state commits or aborts feeds
+    /// the monitor its age at resolution, exactly once, and every leaked
+    /// obligation (still reserved when its holder completes) raises the alarm
+    /// through `observe_leak`. The first alarm is reported as a warning event.
+    /// Obligations resolved earlier are not observed, and a second call
+    /// replaces the monitor and its evidence. Live obligations are never
+    /// rescanned, so one held indefinitely is not observed; bound that with a
+    /// budget deadline.
     ///
     /// # Panics
     /// If `config` is invalid (see [`LeakMonitor::new`](crate::obligation::eprocess::LeakMonitor::new)).
@@ -2826,7 +2836,7 @@ impl RuntimeState {
         config: crate::obligation::eprocess::MonitorConfig,
     ) {
         self.obligation_leak_monitor = Some(parking_lot::Mutex::new(
-            crate::obligation::eprocess::LeakMonitor::new(config),
+            crate::obligation::eprocess::LeakMonitor::change_detector(config),
         ));
     }
 
@@ -2841,12 +2851,44 @@ impl RuntimeState {
             .map(|monitor| monitor.lock().snapshot())
     }
 
-    /// Feeds an enabled leak monitor one resolved obligation's age. The
-    /// monitor's mutex is a leaf: nothing else is locked while it is held.
+    /// Feeds an enabled leak monitor one committed or aborted obligation's
+    /// age. The monitor's mutex is a leaf: nothing else is locked while it is
+    /// held, and the alarm event is emitted after it is released.
     fn observe_obligation_age(&self, age_ns: u64) {
-        if let Some(monitor) = &self.obligation_leak_monitor {
-            monitor.lock().observe(age_ns);
+        self.feed_obligation_leak_monitor(|monitor| monitor.observe(age_ns));
+    }
+
+    /// Reports a leaked obligation to an enabled leak monitor. A leak is
+    /// conclusive evidence, not an age: feeding a fast leak's age would count
+    /// it as on time.
+    fn observe_obligation_leak(&self) {
+        self.feed_obligation_leak_monitor(crate::obligation::eprocess::LeakMonitor::observe_leak);
+    }
+
+    fn feed_obligation_leak_monitor(
+        &self,
+        feed: impl FnOnce(&mut crate::obligation::eprocess::LeakMonitor),
+    ) {
+        let Some(monitor) = &self.obligation_leak_monitor else {
+            return;
+        };
+        let alarm = {
+            let mut monitor = monitor.lock();
+            let before = monitor.alert_count();
+            feed(&mut monitor);
+            (monitor.alert_count() != before).then(|| monitor.snapshot())
+        };
+        #[cfg(feature = "tracing-integration")]
+        if let Some(snapshot) = alarm {
+            crate::tracing_compat::warn!(
+                e_value = snapshot.e_value,
+                threshold = snapshot.threshold,
+                observations = snapshot.observations,
+                "obligation leak monitor alarm: {snapshot}"
+            );
         }
+        #[cfg(not(feature = "tracing-integration"))]
+        let _ = alarm;
     }
 
     /// Returns a handle to the trace buffer.
@@ -4908,19 +4950,24 @@ impl RuntimeState {
         self.epoch_tracker.drain_telemetry()
     }
 
-    fn record_task_trace_event<F>(&self, task_id: TaskId, build: F)
+    /// Records a task's Complete event together with its terminal outcome,
+    /// which a schedule capture keeps (br-asupersync-bi2462.8). The logical
+    /// time is read from `self.tasks`, as the completion path always has.
+    fn record_task_completion_trace_event<F>(&self, task_id: TaskId, outcome: Severity, build: F)
     where
         F: FnOnce(u64) -> TraceEvent,
     {
-        self.record_task_trace_event_with_logical_time(self.logical_time_for_task(task_id), build);
+        let logical_time = self.logical_time_for_task(task_id);
+        self.trace.record_completion_event(outcome, move |seq| {
+            stamp_logical_time(build(seq), logical_time)
+        });
     }
 
-    /// Core of [`Self::record_task_trace_event`] with the task's logical time
-    /// supplied by the caller. Deferred-effect dispatch paths must read the
-    /// logical tick from the table that actually holds the task record
+    /// Records a task trace event with the task's logical time supplied by
+    /// the caller. Deferred-effect dispatch paths must read the logical tick
+    /// from the table that actually holds the task record
     /// (br-asupersync-m9wsza / E2 S3a), mirroring
-    /// [`Self::prepare_task_spawn_effects_with_logical_time`]; the wrapper
-    /// above preserves the historical read from `self.tasks`.
+    /// [`Self::prepare_task_spawn_effects_with_logical_time`].
     fn record_task_trace_event_with_logical_time<F>(
         &self,
         logical_time: Option<LogicalTime>,
@@ -4928,14 +4975,8 @@ impl RuntimeState {
     ) where
         F: FnOnce(u64) -> TraceEvent,
     {
-        self.trace.record_event(move |seq| {
-            let event = build(seq);
-            if let Some(logical_time) = logical_time {
-                event.with_logical_time(logical_time)
-            } else {
-                event
-            }
-        });
+        self.trace
+            .record_event(move |seq| stamp_logical_time(build(seq), logical_time));
     }
 
     pub(crate) fn prepare_task_spawn_effects(
@@ -5000,7 +5041,13 @@ impl RuntimeState {
         waiter_count: usize,
     ) -> TaskCompletionObserver {
         let now = self.current_runtime_time();
-        self.record_task_trace_event(task.id, |seq| {
+        // A schedule capture keeps this terminal outcome beside the Complete
+        // event, so a replay can check outcomes too (br-asupersync-bi2462.8).
+        let severity = match &task.state {
+            TaskState::Completed(outcome) => outcome.severity(),
+            _ => Severity::Err,
+        };
+        self.record_task_completion_trace_event(task.id, severity, |seq| {
             TraceEvent::complete(seq, now, task.id, task.owner)
         });
 
@@ -6603,7 +6650,7 @@ impl RuntimeState {
             )
         });
         self.metrics.obligation_leaked(info.region);
-        self.observe_obligation_age(info.duration);
+        self.observe_obligation_leak();
         if self.obligation_leak_response != ObligationLeakResponse::Silent {
             let span = crate::tracing_compat::error_span!(
                 "obligation_leak",

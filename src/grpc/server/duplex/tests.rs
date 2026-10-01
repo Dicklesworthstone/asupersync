@@ -909,6 +909,88 @@ fn native_registered_duplex_interruptions_join_actual_service_descendants_before
     }
 }
 
+/// A service parked reading its next request message when the call deadline
+/// fires reports DEADLINE_EXCEEDED in its trailers, and the connection stays
+/// usable. The deadline drops the parked read without polling it again.
+#[test]
+fn native_registered_duplex_deadline_while_reading_input_reports_deadline_exceeded() {
+    for workers in [1, 2] {
+        for path in ["/native.Duplex/Aggregate", "/native.Duplex/Echo"] {
+            bounded_case(move || {
+                raw_case(
+                    workers,
+                    |_| {},
+                    move |address, _starts, probe, count| {
+                        let mut peer = RawPeer::new(address, 65535);
+                        peer.request(1, path, Some("500m"));
+                        let first = message(b"first");
+                        peer.send(0, 0, 1, &first);
+                        // The service took the first message and is reading
+                        // the next one; the upload stays open.
+                        until(|| probe.messages.load(Ordering::SeqCst) == 1);
+                        peer.finish();
+                        assert_eq!(peer.reset, None, "the status trailers end the stream");
+                        assert_eq!(peer.field("grpc-status"), Some("4"));
+                        if path.ends_with("Echo") {
+                            assert_eq!(peer.body, first);
+                        }
+                        until(|| count.load(Ordering::SeqCst) == 0);
+                        // The connection and its HPACK state stay usable.
+                        peer.request(3, "/native.Duplex/Aggregate", None);
+                        peer.send(0, 1, 3, &message(b"reuse"));
+                        peer.finish();
+                        assert_eq!(peer.field("grpc-status"), Some("0"));
+                    },
+                )
+            });
+        }
+    }
+}
+
+/// The deadline fires while request input is still in the listener: a full
+/// window of DATA the service has not read fills the body queue, so the
+/// request trailers wait in the writer. The call still ends with its
+/// DEADLINE_EXCEEDED trailers and no reset, and the connection stays usable.
+#[test]
+fn native_registered_duplex_deadline_with_input_in_flight_reports_deadline_exceeded() {
+    for workers in [1, 2] {
+        bounded_case(move || {
+            raw_case(
+                workers,
+                |_| {},
+                move |address, starts, probe, count| {
+                    let mut peer = RawPeer::new(address, 65535);
+                    peer.request(1, "/native.Duplex/Park", Some("500m"));
+                    let _owner = starts
+                        .recv_timeout(LIMIT)
+                        .expect("actual never-waking response poll");
+                    // One gRPC message spends the whole 65,535-byte window,
+                    // which is also the body queue's size.
+                    let wire = message(&vec![7_u8; 65_535 - 5]);
+                    for chunk in wire.chunks(16 * 1024) {
+                        peer.send(0, 0, 1, chunk);
+                    }
+                    let mut block = Vec::new();
+                    literal(&mut block, "x-proof", "in-flight");
+                    peer.send(1, 5, 1, &block);
+                    until(|| probe.child_cancelled.load(Ordering::Acquire));
+                    assert!(!probe.child_retired.load(Ordering::Acquire));
+                    release(&probe);
+                    until(|| probe.child_retired.load(Ordering::Acquire));
+                    peer.finish();
+                    assert_eq!(peer.reset, None, "the status trailers end the stream");
+                    assert_eq!(peer.field("grpc-status"), Some("4"));
+                    until(|| count.load(Ordering::SeqCst) == 0);
+                    peer.request(3, "/native.Duplex/Aggregate", None);
+                    peer.send(0, 1, 3, &message(b"reuse"));
+                    peer.finish();
+                    assert_eq!(peer.field("grpc-status"), Some("0"));
+                },
+            )
+        });
+    }
+}
+
 #[test]
 fn native_registered_duplex_validates_request_trailers_and_refuses_swallowed_input_errors() {
     for (wire, trailer, expected) in [

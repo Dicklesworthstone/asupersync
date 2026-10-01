@@ -18,7 +18,7 @@ use asupersync::bytes::{Buf, Bytes};
 use asupersync::channel::{mpsc, oneshot};
 use asupersync::codec::Framed;
 use asupersync::cx::Cx;
-use asupersync::http::body::{Body, Frame as BodyFrame};
+use asupersync::http::body::{Body, Frame as BodyFrame, HeaderMap, HeaderName, HeaderValue};
 use asupersync::http::h1::server::HostPolicy;
 use asupersync::http::h1::codec::HttpError;
 use asupersync::http::h1::stream::{IncomingBodyError, StreamingServerRequest};
@@ -34,6 +34,7 @@ use asupersync::io::AsyncWriteExt;
 use asupersync::net::TcpStream;
 use asupersync::runtime::{Runtime, RuntimeBuilder};
 use asupersync::stream::StreamExt;
+use asupersync::types::CancelKind;
 use asupersync::web::{
     AsyncCxFnHandler1, FnHandler, RequestBodyPolicy, Response, Router, StatusCode,
     StreamingRawBody, get, post,
@@ -657,6 +658,166 @@ fn h2_live_produced_failure_during_unfinished_upload_resets_the_stream_once() {
             .await;
         });
     }
+}
+
+/// Cancelling the request Cx, as a gRPC deadline or service cancel does,
+/// stops request input but not the stream. A producer that then commits its
+/// terminal trailers under a mask still ends the stream with them, whether
+/// its own body read observed the cancellation or the listener was still
+/// delivering upload input when it arrived. Before, the input side reset the
+/// stream with CANCEL and the committed trailers were discarded.
+#[test]
+fn h2_live_produced_trailers_after_request_cancellation_still_end_the_stream() {
+    for workers in [1, 2] {
+        for read_after_cancel in [true, false] {
+            produced_trailers_after_cancellation_case(workers, read_after_cancel);
+        }
+    }
+}
+
+fn produced_trailers_after_cancellation_case(workers: usize, read_after_cancel: bool) {
+    run(workers, async move {
+        let cx = Cx::current().unwrap();
+        let (sent_tx, sent_rx) = oneshot::channel::<()>();
+        let sent = Arc::new(Mutex::new(Some(sent_rx)));
+        let handler = move |request: StreamingServerRequest| {
+            let sent = Arc::clone(&sent);
+            async move {
+                if request.head.uri == "/survivor" {
+                    return Http2ProducedResponse::buffered(H1Response::new(
+                        200,
+                        "OK",
+                        b"survived".to_vec(),
+                    ));
+                }
+                let mut input_sent = sent.lock().unwrap().take().unwrap();
+                Http2ProducedResponse::streaming(
+                    H1Response::new(200, "OK", Vec::new()),
+                    NonZeroUsize::new(1).unwrap(),
+                    NonZeroUsize::new(INITIAL_WINDOW).unwrap(),
+                    move |producer_cx, mut sender| async move {
+                        let mut body = request.body;
+                        input_sent.recv(&producer_cx).await.unwrap();
+                        if read_after_cancel {
+                            let first =
+                                poll_fn(|poll_cx| Pin::new(&mut body).poll_frame(poll_cx)).await;
+                            assert!(matches!(first, Some(Ok(BodyFrame::Data(_)))), "{first:?}");
+                        }
+                        producer_cx.cancel_with(CancelKind::Timeout, Some("request deadline"));
+                        if read_after_cancel {
+                            let read =
+                                poll_fn(|poll_cx| Pin::new(&mut body).poll_frame(poll_cx)).await;
+                            assert!(
+                                matches!(
+                                    read,
+                                    Some(Err(IncomingBodyError::Cancelled {
+                                        kind: CancelKind::Timeout
+                                    }))
+                                ),
+                                "{read:?}"
+                            );
+                        }
+                        let mut trailers = HeaderMap::new();
+                        trailers.insert(
+                            HeaderName::from_static("grpc-status"),
+                            HeaderValue::from_static("4"),
+                        );
+                        {
+                            let mut commit =
+                                std::pin::pin!(sender.send_trailers(&producer_cx, trailers));
+                            poll_fn(|poll_cx| producer_cx.masked(|| commit.as_mut().poll(poll_cx)))
+                                .await?;
+                        }
+                        drop(body);
+                        Ok(sender)
+                    },
+                )
+            }
+        };
+        exercise_produced(handler, Settings::client(), move |mut client, in_flight| async move {
+            let stream = client.open("POST", "/deadline", None, false).await;
+            if read_after_cancel {
+                client.data(stream, Bytes::from_static(b"message"), false).await;
+            } else {
+                // The window's worth of DATA fills the unread body queue, so
+                // the request trailers are still in the listener when the
+                // cancellation arrives.
+                client.data(stream, vec![0_u8; INITIAL_WINDOW], false).await;
+                client
+                    .connection
+                    .send_headers(stream, vec![Header::new("x-upload-sum", "0")], true)
+                    .unwrap();
+                client.flush().await;
+            }
+            sent_tx.send(&cx, ()).unwrap();
+            let mut head_seen = false;
+            loop {
+                match client.receive().await.0 {
+                    Some(ReceivedFrame::Headers {
+                        stream_id,
+                        headers,
+                        end_stream,
+                    }) => {
+                        assert_eq!(stream_id, stream);
+                        let field = |name: &str| {
+                            headers
+                                .iter()
+                                .find(|header| header.name == name)
+                                .map(|header| header.value.clone())
+                        };
+                        if !head_seen {
+                            assert!(!end_stream);
+                            assert_eq!(field(":status").as_deref(), Some("200"));
+                            head_seen = true;
+                            continue;
+                        }
+                        assert!(end_stream, "the trailers end the stream");
+                        assert_eq!(field("grpc-status").as_deref(), Some("4"));
+                        break;
+                    }
+                    None => {}
+                    event => panic!("the committed trailers must end the stream: {event:?}"),
+                }
+            }
+            eprintln!(
+                "{{\"scenario\":\"produced_trailers_after_request_cancellation\",\"workers\":{workers},\"read_after_cancel\":{read_after_cancel},\"trailers\":\"grpc-status: 4\"}}"
+            );
+            // The unfinished upload is stopped with NO_ERROR once the
+            // response has flushed. Nothing else may follow on the stream.
+            let survivor = client.open("GET", "/survivor", None, true).await;
+            let mut body = Vec::new();
+            loop {
+                match client.receive().await.0 {
+                    Some(ReceivedFrame::Reset {
+                        stream_id,
+                        error_code,
+                    }) if stream_id == stream => {
+                        assert_eq!(error_code, ErrorCode::NoError);
+                    }
+                    Some(ReceivedFrame::Headers { stream_id, .. }) => {
+                        assert_eq!(stream_id, survivor);
+                    }
+                    Some(ReceivedFrame::Data {
+                        stream_id,
+                        data,
+                        end_stream,
+                    }) => {
+                        assert_eq!(stream_id, survivor);
+                        body.extend_from_slice(&data);
+                        if end_stream {
+                            break;
+                        }
+                    }
+                    None => {}
+                    event => panic!("only the survivor's response may follow: {event:?}"),
+                }
+            }
+            assert_eq!(body, b"survived");
+            wait_requests_drained(&in_flight).await;
+            client
+        })
+        .await;
+    });
 }
 
 #[test]

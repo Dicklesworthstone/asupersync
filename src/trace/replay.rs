@@ -795,8 +795,10 @@ pub struct ProjectionSummary {
     pub steps: usize,
     /// `Yield` events projected.
     pub yielded: usize,
-    /// `Complete` events projected (outcome is not recorded by the
-    /// production trace and is projected as 0).
+    /// `Complete` events projected. The trace events carry no outcome, so
+    /// [`ProductionSchedule::from_runtime_trace`] projects 0; a schedule from
+    /// a native capture carries the captured outcomes instead
+    /// ([`ProductionSchedule::carries_outcomes`]).
     pub completed: usize,
     /// `TimeAdvance` events projected.
     pub time_advances: usize,
@@ -846,6 +848,8 @@ pub struct ProductionSchedule {
     spawn_order: Vec<CompactTaskId>,
     summary: ProjectionSummary,
     source_sequence_disorder: Option<(u64, u64)>,
+    /// Whether the projected completions carry captured terminal outcomes.
+    outcomes_captured: bool,
 }
 
 impl ProductionSchedule {
@@ -1024,6 +1028,49 @@ impl ProductionSchedule {
                 .windows(2)
                 .find(|pair| pair[1].seq <= pair[0].seq)
                 .map(|pair| (pair[0].seq, pair[1].seq)),
+            outcomes_captured: false,
+        })
+    }
+
+    /// Replace each projected completion's outcome with the captured one,
+    /// keyed by the raw compact task id (br-asupersync-bi2462.8). The caller
+    /// guarantees an outcome for every projected completion.
+    pub(crate) fn with_completion_outcomes(
+        mut self,
+        outcomes: &std::collections::BTreeMap<u64, Severity>,
+    ) -> Self {
+        for event in &mut self.trace.events {
+            if let ReplayEvent::TaskCompleted { task, outcome } = event
+                && let Some(captured) = outcomes.get(&task.0)
+            {
+                *outcome = captured.as_u8();
+            }
+        }
+        self.outcomes_captured = true;
+        self
+    }
+
+    /// Whether the projected completions carry outcomes captured beside the
+    /// production trace. A projection made from trace events alone carries
+    /// none: its completions all read as outcome 0.
+    #[must_use]
+    pub const fn carries_outcomes(&self) -> bool {
+        self.outcomes_captured
+    }
+
+    /// The captured terminal outcome of a recorded task, or `None` when the
+    /// projection carries no outcomes or the task has no completion.
+    #[must_use]
+    pub fn captured_outcome(&self, task: CompactTaskId) -> Option<Severity> {
+        if !self.outcomes_captured {
+            return None;
+        }
+        self.trace.events.iter().find_map(|event| match event {
+            ReplayEvent::TaskCompleted {
+                task: completed,
+                outcome,
+            } if *completed == task => Severity::from_u8(*outcome),
+            _ => None,
         })
     }
 

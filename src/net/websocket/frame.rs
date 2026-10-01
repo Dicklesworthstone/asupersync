@@ -575,6 +575,13 @@ impl Decoder for FrameCodec {
 }
 
 impl FrameCodec {
+    /// Refuses all further decoding, as a decode error does. Called when a
+    /// connection is failed above the codec (message assembly), because
+    /// RFC 6455 §7.1.7 forbids processing more peer data after that.
+    pub(crate) fn poison(&mut self) {
+        self.state = DecodeState::Poisoned;
+    }
+
     #[allow(clippy::too_many_lines)] // Single, explicit RFC 6455 decode state machine.
     fn decode_inner(&mut self, src: &mut BytesMut) -> Result<Option<Frame>, WsError> {
         loop {

@@ -33,7 +33,10 @@ fn wait_for_mysql(container_id: &str, user: &str, password: &str) -> Result<(), 
     let password_arg = format!("-p{password}");
     let mut last_error = "mysqladmin ping was not attempted".to_string();
 
-    for _ in 0..30 {
+    // A fresh MariaDB container initializes its system tables before it
+    // listens on TCP. With this file's containers starting in parallel on a
+    // loaded worker that took over 30 s (hz4, 2026-10-01), so allow 90 s.
+    for _ in 0..90 {
         let Some(output) = docker(&[
             "exec",
             container_id,

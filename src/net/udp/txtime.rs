@@ -568,6 +568,11 @@ impl UdpSocket {
     /// those other waits, so drain the queue promptly (for example with
     /// [`try_recv_error`](Self::try_recv_error) in a loop).
     ///
+    /// When the queue is empty but the socket holds a pending error (the
+    /// kernel signals `POLLERR` for it too, for example an ICMP port
+    /// unreachable on a connected socket without `set_recverr`), that error is
+    /// returned and cleared instead of waiting.
+    ///
     /// Cancel-safe: a report is only dequeued by the call that returns it.
     pub async fn recv_error(&mut self, buf: &mut [u8]) -> io::Result<UdpErrorReport> {
         std::future::poll_fn(|cx| self.poll_recv_error(cx, buf)).await
@@ -585,6 +590,17 @@ impl UdpSocket {
         match recv_error_once(self.inner.as_raw_fd(), buf) {
             Ok(report) => Poll::Ready(Ok(report)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                // An empty queue can still leave POLLERR raised: a pending
+                // socket error (for example an ICMP port unreachable on a
+                // connected socket without IP_RECVERR) sits in the socket's
+                // error field, which MSG_ERRQUEUE does not clear. Re-arming on
+                // it would spin, so read and clear it with SO_ERROR and
+                // return it.
+                match socket::getsockopt(&*self.inner, sockopt::SocketError) {
+                    Ok(0) => {}
+                    Ok(code) => return Poll::Ready(Err(io::Error::from_raw_os_error(code))),
+                    Err(errno) => return Poll::Ready(Err(io::Error::from(errno))),
+                }
                 if let Err(err) = self.register_interest(cx, Interest::ERROR) {
                     return Poll::Ready(Err(err));
                 }

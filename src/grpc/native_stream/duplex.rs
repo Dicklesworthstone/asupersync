@@ -331,7 +331,13 @@ where
                             // ACK past its deadline (br-asupersync-sm29gx).
                             if inner.keepalive.is_some() {
                                 for _ in 0..POLL_STEPS {
-                                    if inner.response.ended {
+                                    // Messages are decoded only at the top of
+                                    // the next poll. Stop before another DATA
+                                    // frame could pass the retention bound.
+                                    if inner.response.ended
+                                        || inner.body.len().saturating_add(FRAME_BYTES)
+                                            > inner.body_limit
+                                    {
                                         break;
                                     }
                                     match inner.poll_received(task) {
@@ -344,6 +350,12 @@ where
                                 }
                             }
                             self.request_pending = false;
+                            if inner.response.ended {
+                                // The peer ended the call: report its
+                                // messages and status, not a send boundary
+                                // the next queue_message cannot use.
+                                continue;
+                            }
                             inner.ready_messages += 1;
                             return Poll::Ready(Some(Ok(NativeDuplexEvent::RequestFlushed)));
                         }

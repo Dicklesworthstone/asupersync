@@ -7,9 +7,21 @@
 //!
 //! The monitor is opt-in. `Runtime::enable_obligation_leak_monitor` (or
 //! `RuntimeState::enable_obligation_leak_monitor`, for example on a
-//! `LabRuntime`'s state) installs one that the runtime feeds with each resolved
-//! obligation's age at resolution, exactly once. Read it with
+//! `LabRuntime`'s state) installs a [`LeakMonitor::change_detector`]. The
+//! runtime feeds it each committed or aborted obligation's age at resolution,
+//! exactly once, and reports each leaked obligation through
+//! [`LeakMonitor::observe_leak`]. Read it with
 //! `obligation_leak_monitor_snapshot`. A monitor can also be fed by hand.
+//!
+//! An obligation is observed only when it resolves or leaks. One that its
+//! holder keeps reserved indefinitely is never observed; bound that case with
+//! a budget deadline.
+//!
+//! The null hypothesis the likelihood ratio below is valid for is
+//! `E[(age/μ − 1)⁺] ≤ 1/e`, with `μ = expected_lifetime_ns`. Exponential ages
+//! with mean `μ` sit exactly on that boundary. Heavier-tailed healthy ages, or
+//! `μ` set to the median, violate it and raise the false-alarm rate. For
+//! exponential ages `μ` must be at least about 1.44× the median.
 //!
 //! # Design
 //!
@@ -34,7 +46,8 @@
 //! The `expected_lifetime_ns` parameter should be set based on:
 //! - Empirical profiling of obligation durations
 //! - Budget deadlines for the containing region
-//! - A conservative multiple of the median observed duration
+//! - A conservative multiple of the median observed duration: at least
+//!   1.44× for exponential ages, more for heavier tails (see above)
 //!
 //! # Usage
 //!
@@ -130,6 +143,11 @@ pub struct LeakMonitor {
     peak_e_value: f64,
     /// Number of times alert was triggered.
     alert_count: u64,
+    /// A [`Self::change_detector`]: a Shiryaev–Roberts e-detector whose
+    /// alarm latches.
+    change_detector: bool,
+    /// Leaked obligations reported through [`Self::observe_leak`].
+    leaks: u64,
 }
 
 impl LeakMonitor {
@@ -160,7 +178,40 @@ impl LeakMonitor {
             log_e_value: 0.0,
             peak_e_value: 1.0,
             alert_count: 0,
+            change_detector: false,
+            leaks: 0,
         }
+    }
+
+    /// Creates a change detector for monitoring a long-running runtime.
+    ///
+    /// [`Self::new`] tests "no obligation has ever been late" from its first
+    /// observation, so every on-time resolution lowers its e-value without
+    /// bound. After many healthy resolutions it needs overwhelming evidence
+    /// to alarm. This detector looks instead for obligations *starting* to
+    /// resolve late at an unknown time. Its statistic is the Shiryaev–Roberts
+    /// e-detector `R_n = (R_{n-1} + 1) · LR_n`, with `R_0 = 0` and the
+    /// likelihood ratio `LR_n` of [`Self::observe`]: the sum of the e-processes
+    /// started at every observation. Under the null, `R_n − n` is a
+    /// supermartingale, so `R_n` stays bounded on healthy data, and the
+    /// guarantee is an average run length: the expected number of
+    /// observations before a false alarm is at least `1/alpha`.
+    ///
+    /// The detector alarms once `R_n ≥ 1/alpha` with at least
+    /// `min_observations` observations, and the alarm latches until
+    /// [`Self::reset`]. Below the threshold its state is
+    /// [`AlertState::Clear`]: an elevated `R_n` is not evidence by itself.
+    /// [`Self::e_value`] reports `R_n`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `alpha` is not in (0, 1) or `expected_lifetime_ns` is 0.
+    #[must_use]
+    pub fn change_detector(config: MonitorConfig) -> Self {
+        let mut monitor = Self::new(config);
+        monitor.change_detector = true;
+        monitor.reset();
+        monitor
     }
 
     /// Observes an obligation's age (time since reservation, in nanoseconds).
@@ -203,8 +254,14 @@ impl LeakMonitor {
         let normalizer = 1.0 + (-1.0_f64).exp(); // 1 + 1/e ≈ 1.3679
         let lr = ratio.max(1.0) / normalizer;
 
-        self.log_e_value += lr.ln();
-        self.e_value = self.log_e_value.exp();
+        if self.change_detector {
+            // Shiryaev–Roberts: R_n = (R_{n-1} + 1) · LR_n.
+            self.e_value = (self.e_value + 1.0) * lr;
+            self.log_e_value = self.e_value.ln();
+        } else {
+            self.log_e_value += lr.ln();
+            self.e_value = self.log_e_value.exp();
+        }
 
         if self.e_value > self.peak_e_value {
             self.peak_e_value = self.e_value;
@@ -215,15 +272,44 @@ impl LeakMonitor {
         }
     }
 
+    /// Records a leaked obligation: one dropped or abandoned without being
+    /// committed or aborted.
+    ///
+    /// Under the null hypothesis no obligation ever leaks, so a single leak is
+    /// conclusive. The monitor alarms at once, whatever `min_observations`
+    /// says, and stays in [`AlertState::Alert`] until [`Self::reset`]. Passing
+    /// a leaked obligation's age to [`Self::observe`] instead would count a
+    /// fast leak as an on-time resolution.
+    pub fn observe_leak(&mut self) {
+        let was_alert = self.is_alert();
+        self.observations += 1;
+        self.leaks += 1;
+        self.e_value = f64::INFINITY;
+        self.log_e_value = f64::INFINITY;
+        self.peak_e_value = f64::INFINITY;
+        if !was_alert {
+            self.alert_count += 1;
+        }
+    }
+
+    /// Returns the number of leaks reported through [`Self::observe_leak`].
+    #[must_use]
+    pub fn leaks(&self) -> u64 {
+        self.leaks
+    }
+
     /// Returns the current alert state.
     #[must_use]
     pub fn alert_state(&self) -> AlertState {
+        if self.leaks > 0 || (self.change_detector && self.alert_count > 0) {
+            return AlertState::Alert;
+        }
         if self.observations < self.config.min_observations {
             return AlertState::Clear;
         }
         if self.e_value >= self.threshold {
             AlertState::Alert
-        } else if self.e_value > 1.0 {
+        } else if self.e_value > 1.0 && !self.change_detector {
             AlertState::Watching
         } else {
             AlertState::Clear
@@ -274,11 +360,18 @@ impl LeakMonitor {
 
     /// Resets the monitor to its initial state, preserving configuration.
     pub fn reset(&mut self) {
-        self.e_value = 1.0;
-        self.log_e_value = 0.0;
-        self.peak_e_value = 1.0;
+        if self.change_detector {
+            self.e_value = 0.0;
+            self.log_e_value = f64::NEG_INFINITY;
+            self.peak_e_value = 0.0;
+        } else {
+            self.e_value = 1.0;
+            self.log_e_value = 0.0;
+            self.peak_e_value = 1.0;
+        }
         self.observations = 0;
         self.alert_count = 0;
+        self.leaks = 0;
     }
 
     /// Returns a snapshot of the monitor state for diagnostics.
@@ -629,6 +722,82 @@ mod tests {
             monitor.is_alert()
         );
         crate::test_complete!("supermartingale_property_under_null");
+    }
+
+    /// After many on-time resolutions the test-mode e-value has decayed so
+    /// far that a late obligation cannot alarm. The change detector's
+    /// statistic stays bounded (by e, the fixed point of `(R + 1) · L` for
+    /// `L = 1/(1 + 1/e)`), so the same late obligation alarms, and the alarm
+    /// latches until reset.
+    #[test]
+    fn change_detector_stays_bounded_on_healthy_data_and_latches_its_alarm() {
+        init_test("change_detector_stays_bounded_on_healthy_data_and_latches_its_alarm");
+        let mut test_mode = LeakMonitor::new(default_config());
+        let mut detector = LeakMonitor::change_detector(default_config());
+        assert_eq!(detector.e_value(), 0.0);
+        for i in 0u64..10_000 {
+            let age = (i % 10) * 100_000; // 0 to 0.9 ms against 1 ms
+            test_mode.observe(age);
+            detector.observe(age);
+        }
+        assert!(detector.e_value() <= std::f64::consts::E + 1e-9);
+        assert_eq!(detector.alert_state(), AlertState::Clear);
+        assert!(test_mode.e_value() < 1e-100, "{}", test_mode.e_value());
+
+        // One obligation held 1 s against 1 ms.
+        test_mode.observe(1_000_000_000);
+        detector.observe(1_000_000_000);
+        assert!(!test_mode.is_alert(), "decayed evidence cannot alarm");
+        assert_eq!(detector.alert_state(), AlertState::Alert);
+        assert_eq!(detector.alert_count(), 1);
+
+        for _ in 0..100 {
+            detector.observe(100_000);
+        }
+        assert_eq!(
+            detector.alert_state(),
+            AlertState::Alert,
+            "the alarm latches"
+        );
+        assert_eq!(detector.alert_count(), 1);
+
+        detector.reset();
+        assert_eq!(detector.alert_state(), AlertState::Clear);
+        assert_eq!(detector.e_value(), 0.0);
+        assert_eq!(detector.observations(), 0);
+        crate::test_complete!(
+            "change_detector_stays_bounded_on_healthy_data_and_latches_its_alarm"
+        );
+    }
+
+    /// A leak never happens under the null, so one is conclusive: the monitor
+    /// alarms before `min_observations`, stays alarmed through later on-time
+    /// observations, and clears only on reset. Both monitor kinds.
+    #[test]
+    fn observe_leak_is_conclusive_and_latches() {
+        init_test("observe_leak_is_conclusive_and_latches");
+        for mut monitor in [
+            LeakMonitor::new(default_config()),
+            LeakMonitor::change_detector(default_config()),
+        ] {
+            monitor.observe_leak();
+            assert_eq!(monitor.alert_state(), AlertState::Alert);
+            assert_eq!(monitor.observations(), 1);
+            assert_eq!(monitor.leaks(), 1);
+            assert_eq!(monitor.alert_count(), 1);
+            assert!(monitor.e_value().is_infinite());
+            for _ in 0..10 {
+                monitor.observe(10_000);
+            }
+            monitor.observe_leak();
+            assert_eq!(monitor.alert_state(), AlertState::Alert);
+            assert_eq!(monitor.alert_count(), 1, "one alarm, not one per leak");
+            assert_eq!(monitor.leaks(), 2);
+            monitor.reset();
+            assert_eq!(monitor.alert_state(), AlertState::Clear);
+            assert_eq!(monitor.leaks(), 0);
+        }
+        crate::test_complete!("observe_leak_is_conclusive_and_latches");
     }
 
     // ---- Deterministic ---------------------------------------------------

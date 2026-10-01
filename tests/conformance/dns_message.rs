@@ -2,20 +2,44 @@
 #![allow(clippy::all)]
 //! DNS RFC 1035 Message Format Conformance Tests
 //!
-//! Validates RFC 1035 Section 4.1 message format compliance:
+//! Validates RFC 1035 Section 4.1 message format compliance of the production
+//! DNS code in `asupersync::net::dns`:
 //! - Header ID echo on response
 //! - QR/OPCODE/AA/TC/RD/RA/Z/RCODE bit positions and semantics
 //! - QDCOUNT/ANCOUNT/NSCOUNT/ARCOUNT message section counters
-//! - Domain name compression pointers correctly expanded
+//! - Domain name compression pointers, label and name length limits
 //! - Question type encodings for A/AAAA/MX/TXT/CNAME/PTR queries
 //! - EDNS0 OPT additional-record framing for replayable packet vectors
 //! - UDP 512-byte limit triggers TC (truncated) flag
 //! - DNS class values: IN (Internet), CH (Chaos), ANY (wildcard)
 //! - Common RCODE values: NOERROR, FORMERR, SERVFAIL, NXDOMAIN, NOTIMP, REFUSED
 //!
+//! # What decides each verdict
+//!
+//! Test inputs are built locally by the `create_*` builders. Every verdict is
+//! decided by a production outcome, never by a parser in this file:
+//!
+//! - `parse_dns_response_for_fuzz`: the resolver's response parser
+//!   (`parse_dns_response` in src/net/dns/resolver.rs) accepting a message, or
+//!   rejecting it with the asserted `DnsError` variant;
+//! - `decode_dns_name_for_fuzz`: the resolver's name decoder returning a name
+//!   and cursor, or rejecting the name;
+//! - the public `Resolver` (`lookup_ip`, `lookup_mx`, `lookup_txt`) talking to
+//!   a loopback nameserver run by this module. The queries production sends are
+//!   captured byte for byte, and the scripted responses decide what production
+//!   returns (records, `NoRecords`, `ServerError`, `Protocol`).
+//!
+//! Negative checks are paired with a positive control that differs in one
+//! field, so a rejection is attributable to that field.
+//!
+//! A requirement that production cannot be driven to check (a field it never
+//! reads or emits) is reported as `DnsTestVerdict::Skipped` with a note that
+//! starts "production exposes no observable for this", so it is never counted
+//! as a pass.
+//!
 //! # RFC 1035 Message Format (Section 4.1)
 //!
-//! ```
+//! ```text
 //! DNS Message Format:
 //!     +---------------------+
 //!     |        Header       |
@@ -47,7 +71,18 @@
 //!     +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
 //! ```
 
+use asupersync::net::dns::{
+    DnsError, Resolver, ResolverConfig, decode_dns_name_for_fuzz, parse_dns_response_for_fuzz,
+};
+use asupersync::types::TaskId;
+use asupersync::util::EntropySource;
+use futures_lite::future::block_on;
 use serde::{Deserialize, Serialize};
+use std::io::{self, Read, Write};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 /// RFC 2119 requirement level for conformance testing
@@ -124,17 +159,13 @@ impl Default for DnsMessageConformanceHarness {
     }
 }
 
-#[allow(dead_code)]
-
 impl DnsMessageConformanceHarness {
     /// Create new DNS message format conformance harness
-    #[allow(dead_code)]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Run all DNS message format conformance tests
-    #[allow(dead_code)]
     pub fn run_all_tests(&mut self) -> Vec<DnsConformanceResult> {
         let mut results = Vec::new();
 
@@ -172,7 +203,6 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test header ID echo validation (RFC 1035 Section 4.1.1)
-    #[allow(dead_code)]
     fn test_header_id_echo(&self) -> Vec<DnsConformanceResult> {
         vec![
             self.run_test(
@@ -207,7 +237,6 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test header flag bit positions (RFC 1035 Section 4.1.1)
-    #[allow(dead_code)]
     fn test_header_flags(&self) -> Vec<DnsConformanceResult> {
         vec![
             self.run_test(
@@ -224,12 +253,14 @@ impl DnsMessageConformanceHarness {
                 RequirementLevel::Must,
                 || self.test_opcode_field_parsing(),
             ),
-            self.run_test(
+            self.skip_test(
                 "HFL003",
                 "AA (Authoritative Answer) bit correctly processed",
                 DnsTestCategory::HeaderFlags,
                 RequirementLevel::Must,
-                || self.test_aa_bit_processing(),
+                "parse_dns_response reads only QR, TC and RCODE from the flags word \
+                 (src/net/dns/resolver.rs:1296-1303) and the resolver never sets AA in \
+                 its queries; HFL004 checks that AA is not misread as TC",
             ),
             self.run_test(
                 "HFL004",
@@ -245,12 +276,14 @@ impl DnsMessageConformanceHarness {
                 RequirementLevel::Must,
                 || self.test_rd_bit_echo(),
             ),
-            self.run_test(
+            self.skip_test(
                 "HFL006",
                 "RA (Recursion Available) bit correctly indicates server capability",
                 DnsTestCategory::HeaderFlags,
                 RequirementLevel::Must,
-                || self.test_ra_bit_capability(),
+                "the resolver never reads RA (parse_dns_response reads only QR, TC and \
+                 RCODE, src/net/dns/resolver.rs:1296-1303) and never sets it in queries; \
+                 HFL008 checks that RA is not folded into RCODE",
             ),
             self.run_test(
                 "HFL007",
@@ -270,7 +303,6 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test message section counters (RFC 1035 Section 4.1.1)
-    #[allow(dead_code)]
     fn test_section_counters(&self) -> Vec<DnsConformanceResult> {
         vec![
             self.run_test(
@@ -311,8 +343,7 @@ impl DnsMessageConformanceHarness {
         ]
     }
 
-    /// Test domain name compression (RFC 1035 Section 4.1.4)
-    #[allow(dead_code)]
+    /// Test domain name compression and name limits (RFC 1035 Sections 2.3.4, 4.1.4)
     fn test_name_compression(&self) -> Vec<DnsConformanceResult> {
         vec![
             self.run_test(
@@ -350,11 +381,24 @@ impl DnsMessageConformanceHarness {
                 RequirementLevel::Must,
                 || self.test_multilevel_compression(),
             ),
+            self.run_test(
+                "CMP006",
+                "Labels longer than 63 octets are rejected",
+                DnsTestCategory::NameCompression,
+                RequirementLevel::Must,
+                || self.test_label_length_limit(),
+            ),
+            self.run_test(
+                "CMP007",
+                "Names longer than 255 octets are rejected, including through compression",
+                DnsTestCategory::NameCompression,
+                RequirementLevel::Must,
+                || self.test_name_length_limit(),
+            ),
         ]
     }
 
     /// Test DNS question types.
-    #[allow(dead_code)]
     fn test_question_types(&self) -> Vec<DnsConformanceResult> {
         vec![
             self.run_test(
@@ -362,56 +406,60 @@ impl DnsMessageConformanceHarness {
                 "Question type A encodes as 1",
                 DnsTestCategory::QuestionTypes,
                 RequirementLevel::Must,
-                || self.test_question_type_encoding("example.com", TYPE_A, "A"),
+                || self.test_question_type_encoding(TYPE_A, "A", run_ip_lookup),
             ),
             self.run_test(
                 "QTP002",
                 "Question type AAAA encodes as 28",
                 DnsTestCategory::QuestionTypes,
                 RequirementLevel::Must,
-                || self.test_question_type_encoding("example.com", TYPE_AAAA, "AAAA"),
+                || self.test_question_type_encoding(TYPE_AAAA, "AAAA", run_ip_lookup),
             ),
             self.run_test(
                 "QTP003",
                 "Question type MX encodes as 15",
                 DnsTestCategory::QuestionTypes,
                 RequirementLevel::Must,
-                || self.test_question_type_encoding("example.com", TYPE_MX, "MX"),
+                || self.test_question_type_encoding(TYPE_MX, "MX", run_mx_lookup),
             ),
             self.run_test(
                 "QTP004",
                 "Question type TXT encodes as 16",
                 DnsTestCategory::QuestionTypes,
                 RequirementLevel::Must,
-                || self.test_question_type_encoding("example.com", TYPE_TXT, "TXT"),
+                || self.test_question_type_encoding(TYPE_TXT, "TXT", run_txt_lookup),
             ),
             self.run_test(
                 "QTP005",
                 "Question type CNAME encodes as 5",
                 DnsTestCategory::QuestionTypes,
                 RequirementLevel::Must,
-                || self.test_question_type_encoding("example.com", TYPE_CNAME, "CNAME"),
+                || self.test_cname_type_recognized(),
             ),
-            self.run_test(
+            self.skip_test(
                 "QTP006",
                 "Question type PTR encodes as 12",
                 DnsTestCategory::QuestionTypes,
                 RequirementLevel::Must,
-                || self.test_question_type_encoding("ptr.example.com", TYPE_PTR, "PTR"),
+                "the resolver has no PTR lookup and DnsQueryType has no PTR member \
+                 (src/net/dns/resolver.rs:795-829), so production never encodes or \
+                 decodes type 12",
             ),
         ]
     }
 
     /// Test additional-record framing.
-    #[allow(dead_code)]
     fn test_additional_records(&self) -> Vec<DnsConformanceResult> {
         vec![
-            self.run_test(
+            self.skip_test(
                 "ADR001",
                 "EDNS0 OPT additional record encodes type 41 and payload size",
                 DnsTestCategory::AdditionalRecords,
                 RequirementLevel::Must,
-                || self.test_edns0_opt_record_encoding(),
+                "the resolver never emits EDNS0 OPT (build_dns_query writes ARCOUNT=0, \
+                 src/net/dns/resolver.rs:1012) and parse_dns_answer skips every \
+                 non-IN-class record, OPT included, without surfacing its fields \
+                 (resolver.rs:1145-1148); ADR002 and GLD003 check OPT framing",
             ),
             self.run_test(
                 "ADR002",
@@ -424,7 +472,6 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test replayable golden vectors.
-    #[allow(dead_code)]
     fn test_golden_vectors(&self) -> Vec<DnsConformanceResult> {
         vec![
             self.run_test(
@@ -434,12 +481,14 @@ impl DnsMessageConformanceHarness {
                 RequirementLevel::Must,
                 || self.test_a_query_golden_vector(),
             ),
-            self.run_test(
+            self.skip_test(
                 "GLD002",
                 "PTR query golden vector remains stable for replay",
                 DnsTestCategory::GoldenVectors,
                 RequirementLevel::Must,
-                || self.test_ptr_query_golden_vector(),
+                "the resolver has no PTR lookup and DnsQueryType has no PTR member \
+                 (src/net/dns/resolver.rs:795-829), so production never builds a PTR \
+                 query to compare against a golden vector",
             ),
             self.run_test(
                 "GLD003",
@@ -448,11 +497,31 @@ impl DnsMessageConformanceHarness {
                 RequirementLevel::Must,
                 || self.test_opt_record_golden_vector(),
             ),
+            self.run_test(
+                "GLD004",
+                "A-record answer golden vector parses and resolves through production",
+                DnsTestCategory::GoldenVectors,
+                RequirementLevel::Must,
+                || self.test_a_answer_golden_vector(),
+            ),
+            self.run_test(
+                "GLD005",
+                "CNAME chain golden vector parses and resolves through production",
+                DnsTestCategory::GoldenVectors,
+                RequirementLevel::Must,
+                || self.test_cname_chain_golden_vector(),
+            ),
+            self.run_test(
+                "GLD006",
+                "Compressed-name MX golden vector parses and resolves through production",
+                DnsTestCategory::GoldenVectors,
+                RequirementLevel::Must,
+                || self.test_compressed_mx_golden_vector(),
+            ),
         ]
     }
 
     /// Test UDP message size limits (RFC 1035 Section 4.2.1)
-    #[allow(dead_code)]
     fn test_message_size_limits(&self) -> Vec<DnsConformanceResult> {
         vec![
             self.run_test(
@@ -476,18 +545,20 @@ impl DnsMessageConformanceHarness {
                 RequirementLevel::Must,
                 || self.test_minimum_message_size(),
             ),
-            self.run_test(
+            self.skip_test(
                 "SIZ004",
                 "Oversized message rejection",
                 DnsTestCategory::MessageSizeLimits,
                 RequirementLevel::Must,
-                || self.test_oversized_message_rejection(),
+                "production has no oversized-message rejection to drive: \
+                 parse_dns_response accepts a message of any length and \
+                 send_udp_dns_query reads into a fixed 2048-byte buffer without \
+                 reporting truncation (src/net/dns/resolver.rs:1430)",
             ),
         ]
     }
 
     /// Test DNS class values (RFC 1035 Section 3.2.4)
-    #[allow(dead_code)]
     fn test_dns_classes(&self) -> Vec<DnsConformanceResult> {
         vec![
             self.run_test(
@@ -522,7 +593,6 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test response codes (RFC 1035 Section 4.1.1)
-    #[allow(dead_code)]
     fn test_response_codes(&self) -> Vec<DnsConformanceResult> {
         vec![
             self.run_test(
@@ -578,7 +648,6 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Run a single conformance test with timing and error handling
-    #[allow(dead_code)]
     fn run_test<F>(
         &self,
         test_id: &str,
@@ -616,742 +685,927 @@ impl DnsMessageConformanceHarness {
         }
     }
 
+    /// Record a requirement that production cannot be driven to check.
+    ///
+    /// The verdict is `Skipped`, never `Pass`, and the note says why.
+    fn skip_test(
+        &self,
+        test_id: &str,
+        description: &str,
+        category: DnsTestCategory,
+        requirement_level: RequirementLevel,
+        reason: &str,
+    ) -> DnsConformanceResult {
+        DnsConformanceResult {
+            test_id: test_id.to_string(),
+            description: description.to_string(),
+            category,
+            requirement_level,
+            verdict: DnsTestVerdict::Skipped,
+            error_message: Some(format!("{SKIP_PREFIX}: {reason}")),
+            execution_time_ms: 0,
+        }
+    }
+
     // =========================================================================
     // Header ID Echo Tests
     // =========================================================================
 
-    /// Test ID echo validation
-    #[allow(dead_code)]
+    /// HID001: the production parser accepts a response echoing the query ID,
+    /// and the resolver sends the ID drawn from its entropy source and accepts
+    /// the echo.
     fn test_id_echo_validation(&self) -> Result<(), String> {
-        // Test that response ID matches query ID
-        let test_packet = create_dns_response_packet(
-            0x1234, // ID
-            0x8000, // Flags (QR=1, response)
-            0, 0, 0, 0, // Counters
-        );
+        expect_parse_ok("ID 0x1234 echoed", &create_a_response(0x1234), 0x1234)?;
 
-        let id = parse_dns_id(&test_packet)?;
-        if id == 0x1234 {
-            Ok(())
-        } else {
-            Err(format!("ID mismatch: expected 0x1234, got 0x{:04x}", id))
-        }
-    }
-
-    /// Test ID mismatch rejection
-    #[allow(dead_code)]
-    fn test_id_mismatch_rejection(&self) -> Result<(), String> {
-        let response_packet = create_dns_response_packet(
-            0x5678, // Different ID
-            0x8000, // Flags
-            0, 0, 0, 0,
-        );
-
-        // Simulate parsing with expected ID 0x1234
-        let result = validate_response_id(&response_packet, 0x1234);
-        match result {
-            Err(msg) if msg.contains("mismatched") => Ok(()),
-            _ => Err("Expected ID mismatch error".to_string()),
-        }
-    }
-
-    /// Test zero ID handling
-    #[allow(dead_code)]
-    fn test_zero_id_handling(&self) -> Result<(), String> {
-        let packet = create_dns_response_packet(0x0000, 0x8000, 0, 0, 0, 0);
-        let id = parse_dns_id(&packet)?;
-        if id == 0x0000 {
-            Ok(())
-        } else {
-            Err(format!("Zero ID not handled correctly: got 0x{:04x}", id))
-        }
-    }
-
-    /// Test maximum ID value support
-    #[allow(dead_code)]
-    fn test_max_id_support(&self) -> Result<(), String> {
-        let packet = create_dns_response_packet(0xFFFF, 0x8000, 0, 0, 0, 0);
-        let id = parse_dns_id(&packet)?;
-        if id == 0xFFFF {
-            Ok(())
-        } else {
-            Err(format!(
-                "Max ID not supported: expected 0xFFFF, got 0x{:04x}",
-                id
+        let server = LoopbackNameserver::start(|query: &[u8], _transport: Transport| {
+            Some(create_dns_response_to_query(
+                query,
+                FLAGS_RESPONSE,
+                &[create_mx_record(QNAME_PTR, 10, "mail.example.com")],
             ))
+        })?;
+        let resolver = loopback_resolver(server.addr);
+        let records = lookup_mx_records(&resolver, "example.com")
+            .map_err(|err| format!("resolver rejected a response echoing its query ID: {err:?}"))?;
+        expect_mx_records("echoed-ID lookup", &records, &[(10, "mail.example.com")])?;
+
+        let queries = server.queries();
+        let id = QUERY_ID.to_be_bytes();
+        match queries.first() {
+            Some(query) if query.bytes.get(..2) == Some(&id[..]) => Ok(()),
+            other => Err(format!(
+                "resolver query did not carry the entropy-drawn ID 0x{QUERY_ID:04x}: {other:02x?}"
+            )),
         }
+    }
+
+    /// HID002: a response whose ID differs from the query's is rejected by the
+    /// parser and by the resolver, even when it carries a usable answer.
+    fn test_id_mismatch_rejection(&self) -> Result<(), String> {
+        let response = create_a_response(0x5678);
+        expect_parse_ok(
+            "control: response checked against its own ID",
+            &response,
+            0x5678,
+        )?;
+        expect_parse_protocol_error("ID 0x5678 answering query 0x1234", &response, 0x1234)?;
+
+        let server = LoopbackNameserver::start(|query: &[u8], _transport: Transport| {
+            let mut response = create_dns_response_to_query(
+                query,
+                FLAGS_RESPONSE,
+                &[create_mx_record(QNAME_PTR, 10, "mail.example.com")],
+            );
+            let spoofed = u16::from_be_bytes([response[0], response[1]]).wrapping_add(1);
+            response[..2].copy_from_slice(&spoofed.to_be_bytes());
+            Some(response)
+        })?;
+        let resolver = loopback_resolver(server.addr);
+        match lookup_mx_records(&resolver, "example.com") {
+            Err(DnsError::Protocol(_)) => Ok(()),
+            other => Err(format!(
+                "resolver must reject a response whose ID does not echo its query, got {other:?}"
+            )),
+        }
+    }
+
+    /// HID003: ID 0 is an ordinary 16-bit value to the parser.
+    fn test_zero_id_handling(&self) -> Result<(), String> {
+        let response = create_a_response(0x0000);
+        expect_parse_ok("ID 0 answering query 0", &response, 0x0000)?;
+        expect_parse_protocol_error("ID 0 answering query 0x1234", &response, 0x1234)
+    }
+
+    /// HID004: ID 0xFFFF is accepted, and both ID octets take part in the match.
+    fn test_max_id_support(&self) -> Result<(), String> {
+        let response = create_a_response(0xFFFF);
+        expect_parse_ok("ID 0xFFFF answering query 0xFFFF", &response, 0xFFFF)?;
+        expect_parse_protocol_error("ID 0xFFFF answering query 0x00FF", &response, 0x00FF)?;
+        expect_parse_protocol_error("ID 0xFFFF answering query 0xFF00", &response, 0xFF00)
     }
 
     // =========================================================================
     // Header Flag Tests
     // =========================================================================
 
-    /// Test QR bit validation
-    #[allow(dead_code)]
+    /// HFL001: the parser accepts QR=1 and rejects the same message with QR=0.
     fn test_qr_bit_validation(&self) -> Result<(), String> {
-        // Test query (QR=0)
-        let query_packet = create_dns_response_packet(0x1234, 0x0000, 1, 0, 0, 0);
-        if is_dns_response(&query_packet)? {
-            return Err("Query packet incorrectly identified as response".to_string());
-        }
-
-        // Test response (QR=1)
-        let response_packet = create_dns_response_packet(0x1234, 0x8000, 1, 1, 0, 0);
-        if !is_dns_response(&response_packet)? {
-            return Err("Response packet not correctly identified".to_string());
-        }
-
-        Ok(())
+        let response = create_a_response(QUERY_ID);
+        expect_parse_ok("QR=1 response", &response, QUERY_ID)?;
+        expect_parse_protocol_error(
+            "same message with QR=0",
+            &with_flags(response, FLAGS_RESPONSE & !FLAG_QR),
+            QUERY_ID,
+        )?;
+        expect_parse_protocol_error(
+            "a query packet",
+            &create_dns_query_with_class(QUERY_ID, "example.com", TYPE_A, CLASS_IN),
+            QUERY_ID,
+        )
     }
 
-    /// Test OPCODE field parsing
-    #[allow(dead_code)]
+    /// HFL002: the originator sets OPCODE; every query production originates
+    /// carries OPCODE 0 (standard QUERY).
+    ///
+    /// Production never reads the OPCODE of a response
+    /// (src/net/dns/resolver.rs:1296-1303), so the response side has no
+    /// observable and is not asserted.
     fn test_opcode_field_parsing(&self) -> Result<(), String> {
-        let opcodes = [
-            (0x0000, 0, "QUERY"),
-            (0x0800, 1, "IQUERY"),
-            (0x1000, 2, "STATUS"),
-            (0x1800, 3, "Reserved"),
-        ];
-
-        for (flags, expected_opcode, name) in opcodes {
-            let packet = create_dns_response_packet(0x1234, 0x8000 | flags, 0, 0, 0, 0);
-            let opcode = parse_dns_opcode(&packet)?;
-            if opcode != expected_opcode {
+        for query in capture_queries(run_every_lookup)? {
+            let flags = header_flags(&query.bytes)?;
+            if flags & MASK_OPCODE != 0 {
                 return Err(format!(
-                    "{} opcode parsing failed: expected {}, got {}",
-                    name, expected_opcode, opcode
+                    "production query carries OPCODE {} instead of 0 (QUERY): {:02x?}",
+                    (flags & MASK_OPCODE) >> 11,
+                    query.bytes
                 ));
             }
         }
         Ok(())
     }
 
-    /// Test AA bit processing
-    #[allow(dead_code)]
-    fn test_aa_bit_processing(&self) -> Result<(), String> {
-        // Test non-authoritative (AA=0)
-        let non_auth_packet = create_dns_response_packet(0x1234, 0x8000, 0, 1, 0, 0);
-        if is_authoritative_answer(&non_auth_packet)? {
-            return Err("Non-authoritative packet incorrectly marked as authoritative".to_string());
-        }
-
-        // Test authoritative (AA=1)
-        let auth_packet = create_dns_response_packet(0x1234, 0x8400, 0, 1, 0, 0);
-        if !is_authoritative_answer(&auth_packet)? {
-            return Err("Authoritative packet not correctly identified".to_string());
-        }
-
-        Ok(())
-    }
-
-    /// Test TC bit indication
-    #[allow(dead_code)]
+    /// HFL004: the parser reads TC from bit 0x0200. With TC=1 it ignores an
+    /// incomplete answer section; with TC=0, or with only AA set, the same
+    /// message is rejected.
     fn test_tc_bit_indication(&self) -> Result<(), String> {
-        // Test not truncated (TC=0)
-        let complete_packet = create_dns_response_packet(0x1234, 0x8000, 0, 1, 0, 0);
-        if is_truncated(&complete_packet)? {
-            return Err("Complete packet incorrectly marked as truncated".to_string());
-        }
-
-        // Test truncated (TC=1)
-        let truncated_packet = create_dns_response_packet(0x1234, 0x8200, 0, 1, 0, 0);
-        if !is_truncated(&truncated_packet)? {
-            return Err("Truncated packet not correctly identified".to_string());
-        }
-
-        Ok(())
+        // ANCOUNT claims five answers but none follow, as in a datagram cut
+        // at the UDP size limit.
+        let cut = create_dns_message(
+            QUERY_ID,
+            FLAGS_RESPONSE | FLAG_TC,
+            [1, 5, 0, 0],
+            &[question_section("example.com", TYPE_A, CLASS_IN)],
+        );
+        expect_parse_ok(
+            "TC=1 response with an incomplete answer section",
+            &cut,
+            QUERY_ID,
+        )?;
+        expect_parse_protocol_error(
+            "same message with TC=0",
+            &with_flags(cut.clone(), FLAGS_RESPONSE),
+            QUERY_ID,
+        )?;
+        expect_parse_protocol_error(
+            "same message with AA=1 in place of TC=1",
+            &with_flags(cut, FLAGS_RESPONSE | FLAG_AA),
+            QUERY_ID,
+        )
     }
 
-    /// Test RD bit echo
-    #[allow(dead_code)]
+    /// HFL005: every query production sends sets RD, and a response echoing RD
+    /// is accepted.
     fn test_rd_bit_echo(&self) -> Result<(), String> {
-        // Test recursion not desired (RD=0)
-        let no_rd_packet = create_dns_response_packet(0x1234, 0x8000, 0, 0, 0, 0);
-        if recursion_desired(&no_rd_packet)? {
-            return Err("RD=0 not correctly processed".to_string());
-        }
-
-        // Test recursion desired (RD=1)
-        let rd_packet = create_dns_response_packet(0x1234, 0x8100, 0, 0, 0, 0);
-        if !recursion_desired(&rd_packet)? {
-            return Err("RD=1 not correctly processed".to_string());
-        }
-
-        Ok(())
-    }
-
-    /// Test RA bit capability indication
-    #[allow(dead_code)]
-    fn test_ra_bit_capability(&self) -> Result<(), String> {
-        // Test recursion not available (RA=0)
-        let no_ra_packet = create_dns_response_packet(0x1234, 0x8000, 0, 0, 0, 0);
-        if recursion_available(&no_ra_packet)? {
-            return Err("RA=0 not correctly processed".to_string());
-        }
-
-        // Test recursion available (RA=1)
-        let ra_packet = create_dns_response_packet(0x1234, 0x8080, 0, 0, 0, 0);
-        if !recursion_available(&ra_packet)? {
-            return Err("RA=1 not correctly processed".to_string());
-        }
-
-        Ok(())
-    }
-
-    /// Test reserved Z bits
-    #[allow(dead_code)]
-    fn test_z_bits_reserved(&self) -> Result<(), String> {
-        // Test that Z bits (0x0070) are properly masked/ignored
-        let packet_with_z_bits = create_dns_response_packet(0x1234, 0x8070, 0, 0, 0, 0);
-        let reserved_bits = parse_reserved_bits(&packet_with_z_bits)?;
-
-        // According to RFC 1035, these should be zero in well-formed messages
-        // But parsers should be able to handle non-zero values gracefully
-        if reserved_bits != 0 {
-            // This is acceptable - just verify they're parsed consistently
-        }
-        Ok(())
-    }
-
-    /// Test RCODE field status indication
-    #[allow(dead_code)]
-    fn test_rcode_field_status(&self) -> Result<(), String> {
-        let rcodes = [
-            (0, "NOERROR"),
-            (1, "FORMERR"),
-            (2, "SERVFAIL"),
-            (3, "NXDOMAIN"),
-            (4, "NOTIMP"),
-            (5, "REFUSED"),
-        ];
-
-        for (rcode, name) in rcodes {
-            let packet = create_dns_response_packet(0x1234, 0x8000 | rcode, 0, 0, 0, 0);
-            let parsed_rcode = parse_rcode(&packet)?;
-            if parsed_rcode != rcode as u8 {
+        for query in capture_queries(run_every_lookup)? {
+            if header_flags(&query.bytes)? & FLAG_RD == 0 {
                 return Err(format!(
-                    "{} RCODE parsing failed: expected {}, got {}",
-                    name, rcode, parsed_rcode
+                    "production query does not set RD: {:02x?}",
+                    query.bytes
+                ));
+            }
+        }
+        expect_parse_ok(
+            "response echoing RD=1",
+            &create_a_response(QUERY_ID),
+            QUERY_ID,
+        )
+    }
+
+    /// HFL007: every query production sends has the Z bits clear.
+    fn test_z_bits_reserved(&self) -> Result<(), String> {
+        for query in capture_queries(run_every_lookup)? {
+            let flags = header_flags(&query.bytes)?;
+            if flags & MASK_Z != 0 {
+                return Err(format!(
+                    "production query sets Z bits 0x{:04x}: {:02x?}",
+                    flags & MASK_Z,
+                    query.bytes
                 ));
             }
         }
         Ok(())
+    }
+
+    /// HFL008: the resolver takes the response status from the low four bits
+    /// only. RA, AD and CD (RFC 4035) sit next to RCODE and must not change
+    /// the outcome.
+    fn test_rcode_field_status(&self) -> Result<(), String> {
+        let flags = FLAGS_RESPONSE | FLAGS_AD_CD;
+        match lookup_mx_with_response_flags(flags, true)? {
+            Ok(records) => expect_mx_records(
+                "RCODE 0 with RA, AD and CD set",
+                &records,
+                &[(10, "mail.example.com")],
+            )?,
+            Err(err) => {
+                return Err(format!(
+                    "RCODE 0 with RA, AD and CD set: production lookup failed: {err:?}"
+                ));
+            }
+        }
+        match lookup_mx_with_response_flags(flags | RCODE_NXDOMAIN, false)? {
+            Err(DnsError::NoRecords(_)) => {}
+            other => {
+                return Err(format!(
+                    "RCODE 3 with RA, AD and CD set must report NoRecords, got {other:?}"
+                ));
+            }
+        }
+        match lookup_mx_with_response_flags(flags | RCODE_SERVFAIL, false)? {
+            Err(DnsError::ServerError(_)) => Ok(()),
+            other => Err(format!(
+                "RCODE 2 with RA, AD and CD set must report ServerError, got {other:?}"
+            )),
+        }
     }
 
     // =========================================================================
     // Section Counter Tests
     // =========================================================================
 
-    /// Test QDCOUNT (question count)
-    #[allow(dead_code)]
+    /// MSC001: the parser reads exactly QDCOUNT questions.
     fn test_qdcount_questions(&self) -> Result<(), String> {
-        let test_cases = [
-            (0, "no questions"),
-            (1, "single question"),
-            (5, "multiple questions"),
-        ];
+        let q_a = question_section("example.com", TYPE_A, CLASS_IN);
+        let q_aaaa = question_section("example.com", TYPE_AAAA, CLASS_IN);
+        let message = |qdcount: u16, sections: &[Vec<u8>]| {
+            create_dns_message(QUERY_ID, FLAGS_RESPONSE, [qdcount, 0, 0, 0], sections)
+        };
 
-        for (count, description) in test_cases {
-            let packet = create_dns_response_packet(0x1234, 0x8000, count, 0, 0, 0);
-            let qdcount = parse_qdcount(&packet)?;
-            if qdcount != count {
-                return Err(format!(
-                    "QDCOUNT {} failed: expected {}, got {}",
-                    description, count, qdcount
-                ));
-            }
-        }
-        Ok(())
+        expect_parse_ok("QDCOUNT=0, no question", &message(0, &[]), QUERY_ID)?;
+        expect_parse_ok(
+            "QDCOUNT=1, one question",
+            &message(1, &[q_a.clone()]),
+            QUERY_ID,
+        )?;
+        expect_parse_ok(
+            "QDCOUNT=2, two questions",
+            &message(2, &[q_a.clone(), q_aaaa]),
+            QUERY_ID,
+        )?;
+        expect_parse_protocol_error("QDCOUNT=2, one question", &message(2, &[q_a]), QUERY_ID)?;
+        expect_parse_protocol_error("QDCOUNT=1, no question", &message(1, &[]), QUERY_ID)
     }
 
-    /// Test ANCOUNT (answer count)
-    #[allow(dead_code)]
+    /// MSC002: the parser reads exactly ANCOUNT answer records.
     fn test_ancount_answers(&self) -> Result<(), String> {
-        let test_cases = [
-            (0, "no answers"),
-            (1, "single answer"),
-            (10, "multiple answers"),
-        ];
+        let question = question_section("example.com", TYPE_A, CLASS_IN);
+        let answer = |host: u8| create_a_record(QNAME_PTR, CLASS_IN, [192, 0, 2, host]);
+        let one = [question.clone(), answer(1)];
+        let three = [question, answer(1), answer(2), answer(3)];
 
-        for (count, description) in test_cases {
-            let packet = create_dns_response_packet(0x1234, 0x8000, 0, count, 0, 0);
-            let ancount = parse_ancount(&packet)?;
-            if ancount != count {
-                return Err(format!(
-                    "ANCOUNT {} failed: expected {}, got {}",
-                    description, count, ancount
-                ));
-            }
-        }
-        Ok(())
+        expect_parse_ok(
+            "ANCOUNT=1, one answer",
+            &create_dns_message(QUERY_ID, FLAGS_RESPONSE, [1, 1, 0, 0], &one),
+            QUERY_ID,
+        )?;
+        expect_parse_ok(
+            "ANCOUNT=3, three answers",
+            &create_dns_message(QUERY_ID, FLAGS_RESPONSE, [1, 3, 0, 0], &three),
+            QUERY_ID,
+        )?;
+        expect_parse_protocol_error(
+            "ANCOUNT=2, one answer",
+            &create_dns_message(QUERY_ID, FLAGS_RESPONSE, [1, 2, 0, 0], &one),
+            QUERY_ID,
+        )?;
+        expect_parse_protocol_error(
+            "ANCOUNT=4, three answers",
+            &create_dns_message(QUERY_ID, FLAGS_RESPONSE, [1, 4, 0, 0], &three),
+            QUERY_ID,
+        )
     }
 
-    /// Test NSCOUNT (authority record count)
-    #[allow(dead_code)]
+    /// MSC003: the parser reads exactly NSCOUNT authority records.
     fn test_nscount_authority(&self) -> Result<(), String> {
-        let test_cases = [
-            (0, "no authority"),
-            (1, "single authority"),
-            (3, "multiple authority"),
+        let sections = [
+            question_section("example.com", TYPE_A, CLASS_IN),
+            create_resource_record(
+                QNAME_PTR,
+                TYPE_NS,
+                CLASS_IN,
+                TTL,
+                &encoded_name("ns1.example.com"),
+            ),
         ];
 
-        for (count, description) in test_cases {
-            let packet = create_dns_response_packet(0x1234, 0x8000, 0, 0, count, 0);
-            let nscount = parse_nscount(&packet)?;
-            if nscount != count {
-                return Err(format!(
-                    "NSCOUNT {} failed: expected {}, got {}",
-                    description, count, nscount
-                ));
-            }
-        }
-        Ok(())
+        expect_parse_ok(
+            "NSCOUNT=1, one authority record",
+            &create_dns_message(QUERY_ID, FLAGS_RESPONSE, [1, 0, 1, 0], &sections),
+            QUERY_ID,
+        )?;
+        expect_parse_protocol_error(
+            "NSCOUNT=2, one authority record",
+            &create_dns_message(QUERY_ID, FLAGS_RESPONSE, [1, 0, 2, 0], &sections),
+            QUERY_ID,
+        )
     }
 
-    /// Test ARCOUNT (additional record count)
-    #[allow(dead_code)]
+    /// MSC004: the parser reads exactly ARCOUNT additional records.
     fn test_arcount_additional(&self) -> Result<(), String> {
-        let test_cases = [
-            (0, "no additional"),
-            (1, "single additional"),
-            (7, "multiple additional"),
+        let sections = [
+            question_section("example.com", TYPE_A, CLASS_IN),
+            create_a_record(&encoded_name("ns1.example.com"), CLASS_IN, [192, 0, 2, 53]),
         ];
 
-        for (count, description) in test_cases {
-            let packet = create_dns_response_packet(0x1234, 0x8000, 0, 0, 0, count);
-            let arcount = parse_arcount(&packet)?;
-            if arcount != count {
-                return Err(format!(
-                    "ARCOUNT {} failed: expected {}, got {}",
-                    description, count, arcount
-                ));
-            }
-        }
-        Ok(())
+        expect_parse_ok(
+            "ARCOUNT=1, one additional record",
+            &create_dns_message(QUERY_ID, FLAGS_RESPONSE, [1, 0, 0, 1], &sections),
+            QUERY_ID,
+        )?;
+        expect_parse_protocol_error(
+            "ARCOUNT=2, one additional record",
+            &create_dns_message(QUERY_ID, FLAGS_RESPONSE, [1, 0, 0, 2], &sections),
+            QUERY_ID,
+        )
     }
 
-    /// Test section counter overflow handling
-    #[allow(dead_code)]
+    /// MSC005: counters far larger than the message are rejected, not trusted.
     fn test_section_counter_overflow(&self) -> Result<(), String> {
-        // Test maximum counter values
-        let packet = create_dns_response_packet(0x1234, 0x8000, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF);
+        expect_parse_protocol_error(
+            "all four counters 0xFFFF, header only",
+            &create_dns_response_packet(QUERY_ID, FLAGS_RESPONSE, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF),
+            QUERY_ID,
+        )?;
 
-        let qdcount = parse_qdcount(&packet)?;
-        let ancount = parse_ancount(&packet)?;
-        let nscount = parse_nscount(&packet)?;
-        let arcount = parse_arcount(&packet)?;
-
-        if qdcount != 0xFFFF || ancount != 0xFFFF || nscount != 0xFFFF || arcount != 0xFFFF {
-            return Err("Maximum counter values not handled correctly".to_string());
-        }
-
-        Ok(())
+        let complete = create_a_response(QUERY_ID);
+        expect_parse_ok("control: counters match the sections", &complete, QUERY_ID)?;
+        expect_parse_protocol_error(
+            "ANCOUNT 0xFFFF with one answer present",
+            &with_counts(complete.clone(), [1, 0xFFFF, 0, 0]),
+            QUERY_ID,
+        )?;
+        expect_parse_protocol_error(
+            "ARCOUNT 0xFFFF with no additional record present",
+            &with_counts(complete, [1, 1, 0, 0xFFFF]),
+            QUERY_ID,
+        )
     }
 
     // =========================================================================
     // Name Compression Tests
     // =========================================================================
 
-    /// Test name compression pointer expansion
-    #[allow(dead_code)]
+    /// CMP001: a 2-octet pointer to the question name expands to that name and
+    /// the cursor ends after the pointer.
     fn test_name_compression_expansion(&self) -> Result<(), String> {
-        // Create a packet with compression pointer
-        let mut packet = Vec::new();
+        let packet = create_a_response(QUERY_ID);
+        // The answer's owner name is the pointer C0 0C right after the question.
+        let answer_offset = 12 + question_section("example.com", TYPE_A, CLASS_IN).len();
 
-        // Header
-        packet.extend_from_slice(&0x1234u16.to_be_bytes()); // ID
-        packet.extend_from_slice(&0x8000u16.to_be_bytes()); // Flags
-        packet.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT
-        packet.extend_from_slice(&1u16.to_be_bytes()); // ANCOUNT
-        packet.extend_from_slice(&0u16.to_be_bytes()); // NSCOUNT
-        packet.extend_from_slice(&0u16.to_be_bytes()); // ARCOUNT
+        expect_name(
+            "owner name pointer to offset 12",
+            &packet,
+            answer_offset,
+            "example.com",
+            answer_offset + 2,
+        )?;
+        expect_parse_ok(
+            "response whose answer owner is compressed",
+            &packet,
+            QUERY_ID,
+        )
+    }
 
-        // Question: example.com (at offset 12)
+    /// CMP002: pointer loops are rejected instead of followed.
+    fn test_compression_loop_detection(&self) -> Result<(), String> {
+        let mut self_loop = create_basic_dns_packet();
+        self_loop.extend_from_slice(&[0xC0, 0x0C]);
+        expect_name_protocol_error("pointer to itself", &self_loop, 12)?;
+
+        // Offset 12 points to 14, and 14 points back to 12.
+        let mut two_cycle = create_basic_dns_packet();
+        two_cycle.extend_from_slice(&[0xC0, 0x0E, 0xC0, 0x0C]);
+        expect_name_protocol_error("two-pointer cycle entered at 12", &two_cycle, 12)?;
+        expect_name_protocol_error("two-pointer cycle entered at 14", &two_cycle, 14)?;
+
+        let mut label_loop = create_basic_dns_packet();
+        label_loop.extend_from_slice(&[3, b'a', b'b', b'c', 0xC0, 0x0C]);
+        expect_name_protocol_error("label then pointer to its own start", &label_loop, 12)?;
+
+        let looping_question = create_dns_message(
+            QUERY_ID,
+            FLAGS_RESPONSE,
+            [1, 0, 0, 0],
+            &[vec![0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01]],
+        );
+        expect_parse_protocol_error(
+            "response whose question name loops",
+            &looping_question,
+            QUERY_ID,
+        )
+    }
+
+    /// CMP003: pointers that do not point to an earlier offset are rejected.
+    fn test_forward_pointer_rejection(&self) -> Result<(), String> {
+        let mut backward = create_basic_dns_packet();
+        backward.extend_from_slice(&[0x00, 0xC0, 0x0C]);
+        expect_name(
+            "control: backward pointer to the root name",
+            &backward,
+            13,
+            "",
+            15,
+        )?;
+
+        let mut forward = create_basic_dns_packet();
+        forward.extend_from_slice(&[0xC0, 0x0E, 0x00]);
+        expect_name_protocol_error("pointer forward to offset 14", &forward, 12)?;
+
+        let mut out_of_range = create_basic_dns_packet();
+        out_of_range.extend_from_slice(&[0xC0, 0x20]);
+        expect_name_protocol_error(
+            "pointer to offset 32 beyond a 14-octet message",
+            &out_of_range,
+            12,
+        )?;
+
+        let mut truncated_pointer = create_basic_dns_packet();
+        truncated_pointer.push(0xC0);
+        expect_name_protocol_error("pointer missing its second octet", &truncated_pointer, 12)
+    }
+
+    /// CMP004: the reserved label types 10 and 01 are rejected.
+    fn test_invalid_compression_format(&self) -> Result<(), String> {
+        for (prefix, bits) in [(0x80u8, "10"), (0x40u8, "01")] {
+            let mut packet = create_basic_dns_packet();
+            packet.extend_from_slice(&[prefix, 0x00]);
+            expect_name_protocol_error(&format!("reserved label type {bits}"), &packet, 12)?;
+        }
+        Ok(())
+    }
+
+    /// CMP005: labels and pointers chain across several levels, including a
+    /// pointer to a name that itself ends in pointers.
+    fn test_multilevel_compression(&self) -> Result<(), String> {
+        let mut packet = create_basic_dns_packet();
+        let com_offset = packet.len();
+        packet.extend_from_slice(&[3, b'c', b'o', b'm', 0]);
+        let example_offset = packet.len();
         packet.push(7);
         packet.extend_from_slice(b"example");
+        packet.extend_from_slice(&pointer_to(com_offset));
+        let www_offset = packet.len();
         packet.push(3);
-        packet.extend_from_slice(b"com");
-        packet.push(0);
-        packet.extend_from_slice(&1u16.to_be_bytes()); // Type A
-        packet.extend_from_slice(&1u16.to_be_bytes()); // Class IN
+        packet.extend_from_slice(b"www");
+        packet.extend_from_slice(&pointer_to(example_offset));
+        let pointer_only_offset = packet.len();
+        packet.extend_from_slice(&pointer_to(www_offset));
 
-        // Answer with compression pointer to "example.com"
-        let answer_offset = packet.len();
-        let example_com_offset = 12;
-        packet.extend_from_slice(&(0xC000u16 | example_com_offset).to_be_bytes()); // Name pointer
-        packet.extend_from_slice(&1u16.to_be_bytes()); // Type A
-        packet.extend_from_slice(&1u16.to_be_bytes()); // Class IN
-        packet.extend_from_slice(&300u32.to_be_bytes()); // TTL
-        packet.extend_from_slice(&4u16.to_be_bytes()); // RDLENGTH
-        packet.extend_from_slice(&[192, 0, 2, 1]); // 192.0.2.1
+        expect_name(
+            "label chain through two pointers",
+            &packet,
+            www_offset,
+            "www.example.com",
+            pointer_only_offset,
+        )?;
+        expect_name(
+            "pointer to a name that itself ends in pointers",
+            &packet,
+            pointer_only_offset,
+            "www.example.com",
+            pointer_only_offset + 2,
+        )
+    }
 
-        // Test that compression pointer is correctly expanded
-        let name = extract_compressed_name(&packet, answer_offset)?;
-        if name != "example.com" {
+    /// CMP006: a 63-octet label is accepted and a 64-octet label is rejected,
+    /// by the name decoder and by the whole-message parser.
+    fn test_label_length_limit(&self) -> Result<(), String> {
+        let mut max_label = create_basic_dns_packet();
+        max_label.extend_from_slice(&single_label_name(63));
+        expect_name(
+            "63-octet label",
+            &max_label,
+            12,
+            &"a".repeat(63),
+            12 + 1 + 63 + 1,
+        )?;
+
+        let mut long_label = create_basic_dns_packet();
+        long_label.extend_from_slice(&single_label_name(64));
+        expect_name_protocol_error("64-octet label", &long_label, 12)?;
+
+        let response = |label_len: usize| {
+            let mut question = single_label_name(label_len);
+            question.extend_from_slice(&TYPE_A.to_be_bytes());
+            question.extend_from_slice(&CLASS_IN.to_be_bytes());
+            create_dns_message(QUERY_ID, FLAGS_RESPONSE, [1, 0, 0, 0], &[question])
+        };
+        expect_parse_ok("question with a 63-octet label", &response(63), QUERY_ID)?;
+        expect_parse_protocol_error("question with a 64-octet label", &response(64), QUERY_ID)
+    }
+
+    /// CMP007: a 255-octet name is accepted, a 256-octet name is rejected, and
+    /// compression cannot expand a name past the limit.
+    fn test_name_length_limit(&self) -> Result<(), String> {
+        let longest = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(61)
+        );
+        let too_long = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(62)
+        );
+
+        let mut packet = create_basic_dns_packet();
+        encode_domain_name(&longest, &mut packet);
+        let wire_len = packet.len() - 12;
+        if wire_len != 255 {
             return Err(format!(
-                "Name compression failed: expected 'example.com', got '{}'",
-                name
+                "test input error: the longest name encodes to {wire_len} octets, not 255"
             ));
         }
+        expect_name("255-octet name", &packet, 12, &longest, packet.len())?;
 
-        Ok(())
-    }
+        let mut over = create_basic_dns_packet();
+        encode_domain_name(&too_long, &mut over);
+        expect_name_protocol_error("256-octet name", &over, 12)?;
 
-    /// Test compression pointer loop detection
-    #[allow(dead_code)]
-    fn test_compression_loop_detection(&self) -> Result<(), String> {
-        let mut packet = create_basic_dns_packet();
-
-        // Create a compression pointer loop: pointer at offset 12 points to offset 14,
-        // and pointer at offset 14 points back to offset 12
-        packet.truncate(12); // Remove existing data after header
-        packet.extend_from_slice(&0xC00Eu16.to_be_bytes()); // Points to offset 14
-        packet.extend_from_slice(&0xC00Cu16.to_be_bytes()); // Points to offset 12
-
-        let result = extract_compressed_name(&packet, 12);
-        match result {
-            Err(msg) if msg.contains("loop") || msg.contains("compression") => Ok(()),
-            _ => Err("Compression pointer loop not detected".to_string()),
-        }
-    }
-
-    /// Test forward compression pointer rejection
-    #[allow(dead_code)]
-    fn test_forward_pointer_rejection(&self) -> Result<(), String> {
-        let mut packet = create_basic_dns_packet();
-        packet.truncate(12);
-
-        // Create forward pointer (points ahead in the packet)
-        packet.extend_from_slice(&0xC020u16.to_be_bytes()); // Points to offset 32 (beyond packet end)
-
-        let result = extract_compressed_name(&packet, 12);
-        match result {
-            Err(_) => Ok(()), // Forward pointers should be rejected
-            Ok(_) => Err("Forward compression pointer not rejected".to_string()),
-        }
-    }
-
-    /// Test invalid compression format
-    #[allow(dead_code)]
-    fn test_invalid_compression_format(&self) -> Result<(), String> {
-        let mut packet = create_basic_dns_packet();
-        packet.truncate(12);
-
-        // Invalid compression format (reserved bits 10)
-        packet.extend_from_slice(&0x8000u16.to_be_bytes());
-
-        let result = extract_compressed_name(&packet, 12);
-        match result {
-            Err(_) => Ok(()), // Invalid format should be rejected
-            Ok(_) => Err("Invalid compression format not rejected".to_string()),
-        }
-    }
-
-    /// Test multilevel compression chains
-    #[allow(dead_code)]
-    fn test_multilevel_compression(&self) -> Result<(), String> {
-        // Test compression pointer that points to another compression pointer
-        let mut packet = Vec::new();
-
-        // Header
-        packet.extend_from_slice(&0x1234u16.to_be_bytes());
-        packet.extend_from_slice(&0x8000u16.to_be_bytes());
-        packet.extend_from_slice(&[0, 1, 0, 1, 0, 0, 0, 0]); // Counters
-
-        // First name: "com" at offset 12
-        let com_offset = packet.len();
+        let pointer_offset = packet.len();
+        packet.extend_from_slice(&pointer_to(12));
+        let prefixed_offset = packet.len();
         packet.push(3);
-        packet.extend_from_slice(b"com");
-        packet.push(0);
-
-        // Second name: pointer to "com" at offset 16
-        let second_name_offset = packet.len();
-        packet.extend_from_slice(&(0xC000u16 | (com_offset as u16)).to_be_bytes());
-
-        // Question pointing to second name
-        let question_name_offset = packet.len();
-        packet.extend_from_slice(&(0xC000u16 | (second_name_offset as u16)).to_be_bytes());
-        packet.extend_from_slice(&[0, 1, 0, 1]); // Type A, Class IN
-
-        // Test multilevel expansion
-        let name = extract_compressed_name(&packet, question_name_offset)?;
-        if name != "com" {
-            return Err(format!(
-                "Multilevel compression failed: expected 'com', got '{}'",
-                name
-            ));
-        }
-
-        Ok(())
+        packet.extend_from_slice(b"www");
+        packet.extend_from_slice(&pointer_to(12));
+        expect_name(
+            "pointer to the 255-octet name",
+            &packet,
+            pointer_offset,
+            &longest,
+            prefixed_offset,
+        )?;
+        expect_name_protocol_error(
+            "label plus pointer expanding to 259 octets",
+            &packet,
+            prefixed_offset,
+        )
     }
 
     // =========================================================================
     // Question Type Tests
     // =========================================================================
 
-    #[allow(dead_code)]
-
+    /// QTP001-QTP004: the query production sends for `qtype` is byte-identical
+    /// to the RFC 1035 encoding with that QTYPE value.
     fn test_question_type_encoding(
         &self,
-        name: &str,
         qtype: u16,
         display_name: &str,
+        run: fn(&Resolver),
     ) -> Result<(), String> {
-        let packet = create_dns_query_with_class(0x1234, name, qtype, CLASS_IN);
-        let actual_type = extract_question_type(&packet)?;
-
-        if actual_type != qtype {
-            return Err(format!(
-                "{display_name} question type mismatch: expected {}, got {}",
-                qtype, actual_type
-            ));
+        let queries = capture_queries(run)?;
+        let expected = create_expected_resolver_query(QUERY_ID, "example.com", qtype);
+        if queries.iter().any(|query| query.bytes == expected) {
+            Ok(())
+        } else {
+            Err(format!(
+                "{display_name}: no production query matched the encoding with QTYPE {qtype}\n\
+                 expected {expected:02x?}\ncaptured {queries:02x?}"
+            ))
         }
+    }
 
-        if extract_question_class(&packet)? != CLASS_IN {
-            return Err(format!(
-                "{display_name} question class was not encoded as IN"
-            ));
+    /// QTP005: production has no CNAME query API, so this checks the closest
+    /// observable: an answer record of type 5 is decoded as a CNAME and the
+    /// resolver follows it to the target name.
+    fn test_cname_type_recognized(&self) -> Result<(), String> {
+        let alias_query = create_expected_resolver_query(QUERY_ID, "alias.example.com", TYPE_MX);
+        let target_query = create_expected_resolver_query(QUERY_ID, "target.example.com", TYPE_MX);
+        let server = {
+            let alias_query = alias_query.clone();
+            let target_query = target_query.clone();
+            LoopbackNameserver::start(move |query: &[u8], _transport: Transport| {
+                let answers = if query == alias_query.as_slice() {
+                    vec![create_resource_record(
+                        QNAME_PTR,
+                        TYPE_CNAME,
+                        CLASS_IN,
+                        TTL,
+                        &encoded_name("target.example.com"),
+                    )]
+                } else if query == target_query.as_slice() {
+                    vec![create_mx_record(QNAME_PTR, 10, "mail.example.com")]
+                } else {
+                    return Some(create_dns_response_to_query(
+                        query,
+                        FLAGS_RESPONSE | RCODE_REFUSED,
+                        &[],
+                    ));
+                };
+                Some(create_dns_response_to_query(
+                    query,
+                    FLAGS_RESPONSE,
+                    &answers,
+                ))
+            })?
+        };
+        let resolver = loopback_resolver(server.addr);
+        let records = lookup_mx_records(&resolver, "alias.example.com")
+            .map_err(|err| format!("production did not follow a type-5 (CNAME) answer: {err:?}"))?;
+        expect_mx_records("MX through a CNAME", &records, &[(10, "mail.example.com")])?;
+
+        if server
+            .queries()
+            .iter()
+            .any(|query| query.bytes == target_query)
+        {
+            Ok(())
+        } else {
+            Err("production never queried the CNAME target".to_string())
         }
-
-        Ok(())
     }
 
     // =========================================================================
     // Additional Record Tests
     // =========================================================================
 
-    #[allow(dead_code)]
-
-    fn test_edns0_opt_record_encoding(&self) -> Result<(), String> {
-        let opt_record = create_opt_record(4096, 0, 0, 0x8000, &[0xde, 0xad, 0xbe, 0xef]);
-        let packet =
-            create_dns_query_with_additional(0x1234, "example.com", TYPE_A, CLASS_IN, &opt_record);
-        let opt = extract_additional_record(&packet)?;
-
-        if opt.record_type != TYPE_OPT {
-            return Err(format!(
-                "OPT record type mismatch: expected {}, got {}",
-                TYPE_OPT, opt.record_type
-            ));
-        }
-
-        if opt.class != 4096 {
-            return Err(format!(
-                "OPT UDP payload size mismatch: expected 4096, got {}",
-                opt.class
-            ));
-        }
-
-        if opt.ttl != 0x0000_8000 {
-            return Err(format!(
-                "OPT TTL field mismatch: expected 0x00008000, got 0x{:08x}",
-                opt.ttl
-            ));
-        }
-
-        if opt.rdata != [0xde, 0xad, 0xbe, 0xef] {
-            return Err(format!("OPT RDATA mismatch: got {:02x?}", opt.rdata));
-        }
-
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-
+    /// ADR002: the parser reads exactly ARCOUNT additional records, OPT
+    /// included, and bounds the OPT RDATA by RDLENGTH.
     fn test_edns0_opt_record_count(&self) -> Result<(), String> {
-        let opt_record = create_opt_record(1232, 0, 0, 0, &[]);
-        let packet = create_dns_query_with_additional(
-            0x1234,
-            "example.com",
-            TYPE_AAAA,
-            CLASS_IN,
-            &opt_record,
+        let with_opt = with_flags(
+            create_dns_query_with_additional(
+                QUERY_ID,
+                "example.com",
+                TYPE_AAAA,
+                CLASS_IN,
+                &create_opt_record(1232, 0, 0, 0, &[]),
+            ),
+            FLAGS_RESPONSE,
         );
+        expect_parse_ok("ARCOUNT=1 with one OPT record", &with_opt, QUERY_ID)?;
+        expect_parse_protocol_error(
+            "ARCOUNT=2 with one OPT record",
+            &with_counts(with_opt, [1, 0, 0, 2]),
+            QUERY_ID,
+        )?;
 
-        if parse_arcount(&packet)? != 1 {
-            return Err("Expected ARCOUNT=1 for a single OPT record".to_string());
-        }
-
-        let opt = extract_additional_record(&packet)?;
-        if opt.name_len != 1 {
-            return Err(format!(
-                "OPT owner name must be the root label terminator, got {} bytes",
-                opt.name_len
-            ));
-        }
-
-        Ok(())
+        // RDLENGTH sits after the root owner name (1), TYPE (2), CLASS (2) and TTL (4).
+        let mut overrun_opt = create_opt_record(4096, 0, 0, 0x8000, &[0xde, 0xad, 0xbe, 0xef]);
+        overrun_opt[9..11].copy_from_slice(&8u16.to_be_bytes());
+        let overrun = with_flags(
+            create_dns_query_with_additional(
+                QUERY_ID,
+                "example.com",
+                TYPE_A,
+                CLASS_IN,
+                &overrun_opt,
+            ),
+            FLAGS_RESPONSE,
+        );
+        expect_parse_protocol_error(
+            "OPT record whose RDLENGTH overruns the message",
+            &overrun,
+            QUERY_ID,
+        )
     }
 
     // =========================================================================
     // Golden Vector Tests
     // =========================================================================
 
-    #[allow(dead_code)]
-
+    /// GLD001: the A query production sends is byte-identical to the golden.
     fn test_a_query_golden_vector(&self) -> Result<(), String> {
-        let packet = create_dns_query_with_class(0x1234, "example.com", TYPE_A, CLASS_IN);
-        let expected = vec![
-            0x12, 0x34, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, b'e',
-            b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'c', b'o', b'm', 0x00, 0x00, 0x01, 0x00,
-            0x01,
-        ];
-
-        assert_packet_matches_golden("A query", &packet, &expected)
+        let queries = capture_queries(run_ip_lookup)?;
+        if queries.iter().any(|query| query.bytes == GOLDEN_A_QUERY) {
+            Ok(())
+        } else {
+            Err(format!(
+                "no production query matched the A-query golden vector\n\
+                 expected {GOLDEN_A_QUERY:02x?}\ncaptured {queries:02x?}"
+            ))
+        }
     }
 
-    #[allow(dead_code)]
-
-    fn test_ptr_query_golden_vector(&self) -> Result<(), String> {
-        let packet = create_dns_query_with_class(0x1234, "ptr.example.com", TYPE_PTR, CLASS_IN);
-        let expected = vec![
-            0x12, 0x34, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, b'p',
-            b't', b'r', 0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'c', b'o', b'm',
-            0x00, 0x00, 0x0c, 0x00, 0x01,
-        ];
-
-        assert_packet_matches_golden("PTR query", &packet, &expected)
-    }
-
-    #[allow(dead_code)]
-
+    /// GLD003: a response carrying the EDNS0 OPT golden record parses.
     fn test_opt_record_golden_vector(&self) -> Result<(), String> {
-        let opt_record = create_opt_record(4096, 0, 0, 0x8000, &[0xde, 0xad, 0xbe, 0xef]);
-        let packet =
-            create_dns_query_with_additional(0x1234, "example.com", TYPE_A, CLASS_IN, &opt_record);
-        let expected = vec![
-            0x12, 0x34, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x07, b'e',
-            b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'c', b'o', b'm', 0x00, 0x00, 0x01, 0x00,
-            0x01, 0x00, 0x00, 0x29, 0x10, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x04, 0xde, 0xad,
-            0xbe, 0xef,
-        ];
+        expect_parse_ok(
+            "OPT additional-record golden",
+            GOLDEN_OPT_RESPONSE,
+            QUERY_ID,
+        )
+    }
 
-        assert_packet_matches_golden("OPT record", &packet, &expected)
+    /// GLD004: the A-answer golden parses, and replayed to the resolver it
+    /// resolves to 192.0.2.1.
+    fn test_a_answer_golden_vector(&self) -> Result<(), String> {
+        expect_parse_ok("A-answer golden", GOLDEN_A_RESPONSE, QUERY_ID)?;
+        let server = start_golden_nameserver()?;
+        let resolver = loopback_resolver(server.addr);
+        let addresses = lookup_ip_addrs(&resolver, "example.com")
+            .map_err(|err| format!("A-answer golden replay failed in production: {err:?}"))?;
+        expect_addresses("A-answer golden replay", &addresses, &[[192, 0, 2, 1]])
+    }
+
+    /// GLD005: the CNAME-chain golden parses, and replayed to the resolver
+    /// www.example.com resolves through the alias to 192.0.2.1.
+    fn test_cname_chain_golden_vector(&self) -> Result<(), String> {
+        expect_parse_ok("CNAME-chain golden", GOLDEN_CNAME_CHAIN_RESPONSE, QUERY_ID)?;
+        let server = start_golden_nameserver()?;
+        let resolver = loopback_resolver(server.addr);
+        let addresses = lookup_ip_addrs(&resolver, "www.example.com")
+            .map_err(|err| format!("CNAME-chain golden replay failed in production: {err:?}"))?;
+        expect_addresses("CNAME-chain golden replay", &addresses, &[[192, 0, 2, 1]])?;
+
+        if server
+            .queries()
+            .iter()
+            .any(|query| query.bytes == GOLDEN_A_QUERY)
+        {
+            Ok(())
+        } else {
+            Err("production resolved the CNAME chain without querying the alias target".into())
+        }
+    }
+
+    /// GLD006: the compressed-name MX golden parses, and replayed to the
+    /// resolver both exchanges expand through their pointer chains.
+    fn test_compressed_mx_golden_vector(&self) -> Result<(), String> {
+        expect_parse_ok(
+            "compressed-name MX golden",
+            GOLDEN_COMPRESSED_MX_RESPONSE,
+            QUERY_ID,
+        )?;
+        let server = start_golden_nameserver()?;
+        let resolver = loopback_resolver(server.addr);
+        let records = lookup_mx_records(&resolver, "example.com")
+            .map_err(|err| format!("compressed MX golden replay failed in production: {err:?}"))?;
+        expect_mx_records(
+            "compressed MX golden replay",
+            &records,
+            &[(10, "mail.example.com"), (20, "backup.mail.example.com")],
+        )
     }
 
     // =========================================================================
     // Message Size Limit Tests
     // =========================================================================
 
-    /// Test UDP 512-byte limit with TC flag
-    #[allow(dead_code)]
+    /// SIZ001: an answer over 512 octets arrives over UDP cut at 512 octets
+    /// with TC=1. Production must discard it, retry over TCP and use the
+    /// complete answer.
     fn test_udp_512_limit_tc_flag(&self) -> Result<(), String> {
-        // Create a message that would exceed 512 bytes
-        let large_response_packet = create_dns_response_packet(0x1234, 0x8200, 0, 20, 0, 0); // TC=1
-
-        if !is_truncated(&large_response_packet)? {
-            return Err("Large message did not set TC flag".to_string());
+        let octets: Vec<[u8; 4]> = (1..=40u8).map(|host| [192, 0, 2, host]).collect();
+        let answers: Vec<Vec<u8>> = octets
+            .iter()
+            .map(|address| create_a_record(QNAME_PTR, CLASS_IN, *address))
+            .collect();
+        let full = create_dns_response_to_query(GOLDEN_A_QUERY, FLAGS_RESPONSE, &answers);
+        if full.len() <= 512 {
+            return Err(format!(
+                "test input error: the full response is only {} octets",
+                full.len()
+            ));
         }
+        let mut truncated = with_flags(full.clone(), FLAGS_RESPONSE | FLAG_TC);
+        truncated.truncate(512);
 
-        Ok(())
+        let server = LoopbackNameserver::start(move |query: &[u8], transport: Transport| {
+            if query != GOLDEN_A_QUERY {
+                return Some(create_dns_response_to_query(query, FLAGS_RESPONSE, &[]));
+            }
+            Some(match transport {
+                Transport::Udp => truncated.clone(),
+                Transport::Tcp => full.clone(),
+            })
+        })?;
+        let resolver = loopback_resolver(server.addr);
+        let addresses = lookup_ip_addrs(&resolver, "example.com")
+            .map_err(|err| format!("production failed on a TC=1 UDP answer: {err:?}"))?;
+        expect_addresses("TC=1 UDP answer completed over TCP", &addresses, &octets)?;
+
+        let retried_over_tcp = server
+            .queries()
+            .iter()
+            .any(|query| query.transport == Transport::Tcp && query.bytes == GOLDEN_A_QUERY);
+        if retried_over_tcp {
+            Ok(())
+        } else {
+            Err("production never retried the truncated A query over TCP".to_string())
+        }
     }
 
-    /// Test messages within 512 bytes don't set TC
-    #[allow(dead_code)]
+    /// SIZ002: an answer within 512 octets with TC=0 is used as received over
+    /// UDP, with no TCP retry.
     fn test_within_512_no_tc(&self) -> Result<(), String> {
-        let normal_packet = create_dns_response_packet(0x1234, 0x8000, 0, 1, 0, 0); // TC=0
-
-        if is_truncated(&normal_packet)? {
-            return Err("Normal sized message incorrectly set TC flag".to_string());
+        if GOLDEN_A_RESPONSE.len() > 512 {
+            return Err("test input error: the A-answer golden exceeds 512 octets".to_string());
         }
+        let server = start_golden_nameserver()?;
+        let resolver = loopback_resolver(server.addr);
+        let addresses = lookup_ip_addrs(&resolver, "example.com")
+            .map_err(|err| format!("production failed on a TC=0 UDP answer: {err:?}"))?;
+        expect_addresses("TC=0 UDP answer", &addresses, &[[192, 0, 2, 1]])?;
 
-        Ok(())
+        let tcp_queries = server
+            .queries()
+            .iter()
+            .filter(|query| query.transport == Transport::Tcp)
+            .count();
+        if tcp_queries == 0 {
+            Ok(())
+        } else {
+            Err(format!(
+                "production retried over TCP {tcp_queries} time(s) without TC set"
+            ))
+        }
     }
 
-    /// Test minimum message size (12-byte header)
-    #[allow(dead_code)]
+    /// SIZ003: a 12-octet header-only response parses; anything shorter than
+    /// a header is rejected.
     fn test_minimum_message_size(&self) -> Result<(), String> {
-        let minimal_packet = create_dns_response_packet(0x1234, 0x8000, 0, 0, 0, 0);
-
-        if minimal_packet.len() < 12 {
-            return Err("Minimal packet too small".to_string());
-        }
-
-        // Should parse without error
-        let _id = parse_dns_id(&minimal_packet)?;
-        Ok(())
-    }
-
-    /// Test oversized message rejection
-    #[allow(dead_code)]
-    fn test_oversized_message_rejection(&self) -> Result<(), String> {
-        // This is typically enforced at the transport layer
-        // Here we test that our parser handles large packets gracefully
-        let mut oversized_packet = create_dns_response_packet(0x1234, 0x8000, 0, 1, 0, 0);
-
-        // Extend to exceed reasonable DNS message size
-        oversized_packet.resize(65536, 0);
-
-        // Should either parse with TC set or reject gracefully
-        let result = parse_dns_id(&oversized_packet);
-        match result {
-            Ok(_) => Ok(()),  // Large packets can be parsed (up to implementation)
-            Err(_) => Ok(()), // Or rejected - both are acceptable
-        }
+        let minimal = create_basic_dns_packet();
+        expect_parse_ok("12-octet header-only response", &minimal, 0x1234)?;
+        expect_parse_protocol_error("11-octet message", &minimal[..11], 0x1234)?;
+        expect_parse_protocol_error("empty message", &[], 0x1234)
     }
 
     // =========================================================================
     // DNS Class Tests
     // =========================================================================
 
-    /// Test Class IN (Internet) processing
-    #[allow(dead_code)]
+    /// CLS001: every query production sends carries QCLASS IN, and an
+    /// IN-class answer is used.
     fn test_class_in_processing(&self) -> Result<(), String> {
-        let packet_with_class_in = create_dns_query_with_class(0x1234, "example.com", 1, 1); // Type A, Class IN
-        let class = extract_question_class(&packet_with_class_in)?;
+        let server = start_golden_nameserver()?;
+        let resolver = loopback_resolver(server.addr);
+        let addresses = lookup_ip_addrs(&resolver, "example.com")
+            .map_err(|err| format!("IN-class answer rejected by production: {err:?}"))?;
+        expect_addresses("IN-class answer", &addresses, &[[192, 0, 2, 1]])?;
 
-        if class != 1 {
-            return Err(format!(
-                "Class IN not processed correctly: expected 1, got {}",
-                class
-            ));
+        for query in &server.queries() {
+            if !query.bytes.ends_with(&CLASS_IN.to_be_bytes()) {
+                return Err(format!(
+                    "production query does not end in QCLASS IN: {:02x?}",
+                    query.bytes
+                ));
+            }
         }
         Ok(())
     }
 
-    /// Test Class CH (Chaos) processing
-    #[allow(dead_code)]
+    /// CLS002: a CH-class record is framed by its RDLENGTH and not used as
+    /// Internet data, and the IN-class record after it still resolves.
     fn test_class_ch_processing(&self) -> Result<(), String> {
-        let packet_with_class_ch = create_dns_query_with_class(0x1234, "example.com", 1, 3); // Type A, Class CH
-        let class = extract_question_class(&packet_with_class_ch)?;
-
-        if class != 3 {
-            return Err(format!(
-                "Class CH not processed correctly: expected 3, got {}",
-                class
-            ));
+        let answers = vec![
+            create_a_record(QNAME_PTR, CLASS_CH, [192, 0, 2, 66]),
+            create_a_record(QNAME_PTR, CLASS_IN, [192, 0, 2, 1]),
+        ];
+        match lookup_ip_with_a_answers(answers)? {
+            Ok(addresses) => expect_addresses(
+                "CH-class record followed by an IN-class record",
+                &addresses,
+                &[[192, 0, 2, 1]],
+            ),
+            Err(err) => Err(format!(
+                "CH-class record broke production resolution: {err:?}"
+            )),
         }
-        Ok(())
     }
 
-    /// Test Class ANY (wildcard) processing
-    #[allow(dead_code)]
+    /// CLS003: a response echoing a QCLASS=ANY question parses, and an answer
+    /// record of class ANY (valid only as a QCLASS) is not used as data.
     fn test_class_any_processing(&self) -> Result<(), String> {
-        let packet_with_class_any = create_dns_query_with_class(0x1234, "example.com", 1, 255); // Type A, Class ANY
-        let class = extract_question_class(&packet_with_class_any)?;
+        expect_parse_ok(
+            "response to a QCLASS=ANY question",
+            &create_dns_message(
+                QUERY_ID,
+                FLAGS_RESPONSE,
+                [1, 0, 0, 0],
+                &[question_section("example.com", TYPE_A, CLASS_ANY)],
+            ),
+            QUERY_ID,
+        )?;
 
-        if class != 255 {
-            return Err(format!(
-                "Class ANY not processed correctly: expected 255, got {}",
-                class
-            ));
+        let answers = vec![
+            create_a_record(QNAME_PTR, CLASS_ANY, [192, 0, 2, 99]),
+            create_a_record(QNAME_PTR, CLASS_IN, [192, 0, 2, 1]),
+        ];
+        match lookup_ip_with_a_answers(answers)? {
+            Ok(addresses) => expect_addresses(
+                "ANY-class record followed by an IN-class record",
+                &addresses,
+                &[[192, 0, 2, 1]],
+            ),
+            Err(err) => Err(format!(
+                "ANY-class record broke production resolution: {err:?}"
+            )),
         }
-        Ok(())
     }
 
-    /// Test invalid class rejection
-    #[allow(dead_code)]
+    /// CLS004: a record of reserved class 0 is not used; with nothing else
+    /// in the answer, production reports NoRecords.
     fn test_invalid_class_rejection(&self) -> Result<(), String> {
-        // Test with reserved class value
-        let packet_with_invalid_class = create_dns_query_with_class(0x1234, "example.com", 1, 0); // Class 0 is reserved
-        let class = extract_question_class(&packet_with_invalid_class)?;
-
-        // Parser should handle reserved classes gracefully
-        if class == 0 {
-            Ok(()) // Acceptable - parser extracted the value
-        } else {
-            Err("Invalid class handling unexpected".to_string())
+        let answers = vec![create_a_record(QNAME_PTR, 0, [192, 0, 2, 98])];
+        match lookup_ip_with_a_answers(answers)? {
+            Err(DnsError::NoRecords(_)) => Ok(()),
+            other => Err(format!(
+                "a class-0 record must not resolve; production returned {other:?}"
+            )),
         }
     }
 
@@ -1359,121 +1613,158 @@ impl DnsMessageConformanceHarness {
     // Response Code Tests
     // =========================================================================
 
-    /// Test RCODE 0 (NOERROR)
-    #[allow(dead_code)]
+    /// RCD001: NOERROR with an answer yields the records.
     fn test_rcode_noerror(&self) -> Result<(), String> {
-        let packet = create_dns_response_packet(0x1234, 0x8000, 0, 1, 0, 0); // RCODE=0
-        let rcode = parse_rcode(&packet)?;
-
-        if rcode != 0 {
-            return Err(format!("NOERROR RCODE failed: expected 0, got {}", rcode));
+        match lookup_mx_with_response_flags(FLAGS_RESPONSE, true)? {
+            Ok(records) => expect_mx_records("NOERROR", &records, &[(10, "mail.example.com")]),
+            Err(err) => Err(format!(
+                "RCODE 0 (NOERROR) with an MX answer failed in production: {err:?}"
+            )),
         }
-        Ok(())
     }
 
-    /// Test RCODE 1 (FORMERR)
-    #[allow(dead_code)]
+    /// RCD002: FORMERR surfaces as a server error.
     fn test_rcode_formerr(&self) -> Result<(), String> {
-        let packet = create_dns_response_packet(0x1234, 0x8001, 0, 0, 0, 0); // RCODE=1
-        let rcode = parse_rcode(&packet)?;
-
-        if rcode != 1 {
-            return Err(format!("FORMERR RCODE failed: expected 1, got {}", rcode));
-        }
-        Ok(())
+        expect_rcode_server_error(RCODE_FORMERR, "FORMERR")
     }
 
-    /// Test RCODE 2 (SERVFAIL)
-    #[allow(dead_code)]
+    /// RCD003: SERVFAIL surfaces as a server error.
     fn test_rcode_servfail(&self) -> Result<(), String> {
-        let packet = create_dns_response_packet(0x1234, 0x8002, 0, 0, 0, 0); // RCODE=2
-        let rcode = parse_rcode(&packet)?;
-
-        if rcode != 2 {
-            return Err(format!("SERVFAIL RCODE failed: expected 2, got {}", rcode));
-        }
-        Ok(())
+        expect_rcode_server_error(RCODE_SERVFAIL, "SERVFAIL")
     }
 
-    /// Test RCODE 3 (NXDOMAIN)
-    #[allow(dead_code)]
+    /// RCD004: NXDOMAIN surfaces as "no such name", not as a server error.
     fn test_rcode_nxdomain(&self) -> Result<(), String> {
-        let packet = create_dns_response_packet(0x1234, 0x8003, 0, 0, 0, 0); // RCODE=3
-        let rcode = parse_rcode(&packet)?;
-
-        if rcode != 3 {
-            return Err(format!("NXDOMAIN RCODE failed: expected 3, got {}", rcode));
+        match lookup_mx_with_response_flags(FLAGS_RESPONSE | RCODE_NXDOMAIN, false)? {
+            Err(DnsError::NoRecords(_)) => Ok(()),
+            other => Err(format!(
+                "RCODE 3 (NXDOMAIN) must surface as DnsError::NoRecords, got {other:?}"
+            )),
         }
-        Ok(())
     }
 
-    /// Test RCODE 4 (NOTIMP)
-    #[allow(dead_code)]
+    /// RCD005: NOTIMP surfaces as a server error.
     fn test_rcode_notimp(&self) -> Result<(), String> {
-        let packet = create_dns_response_packet(0x1234, 0x8004, 0, 0, 0, 0); // RCODE=4
-        let rcode = parse_rcode(&packet)?;
-
-        if rcode != 4 {
-            return Err(format!("NOTIMP RCODE failed: expected 4, got {}", rcode));
-        }
-        Ok(())
+        expect_rcode_server_error(RCODE_NOTIMP, "NOTIMP")
     }
 
-    /// Test RCODE 5 (REFUSED)
-    #[allow(dead_code)]
+    /// RCD006: REFUSED surfaces as a server error.
     fn test_rcode_refused(&self) -> Result<(), String> {
-        let packet = create_dns_response_packet(0x1234, 0x8005, 0, 0, 0, 0); // RCODE=5
-        let rcode = parse_rcode(&packet)?;
-
-        if rcode != 5 {
-            return Err(format!("REFUSED RCODE failed: expected 5, got {}", rcode));
-        }
-        Ok(())
+        expect_rcode_server_error(RCODE_REFUSED, "REFUSED")
     }
 
-    /// Test reserved RCODE values
-    #[allow(dead_code)]
+    /// RCD007: the reserved RCODE values 6-15 are never taken as success or
+    /// as NXDOMAIN.
     fn test_reserved_rcode_values(&self) -> Result<(), String> {
-        // Test RCODE values 6-15 (reserved in RFC 1035)
-        for rcode in 6..=15 {
-            let packet = create_dns_response_packet(0x1234, 0x8000 | rcode, 0, 0, 0, 0);
-            let parsed_rcode = parse_rcode(&packet)?;
-
-            if parsed_rcode != (rcode as u8) {
-                return Err(format!(
-                    "Reserved RCODE {} parsing failed: expected {}, got {}",
-                    rcode, rcode, parsed_rcode
-                ));
-            }
+        for rcode in 6..=15u16 {
+            expect_rcode_server_error(rcode, "reserved")?;
         }
         Ok(())
     }
 }
 
 // =============================================================================
-// Helper Functions for DNS Message Construction and Parsing
+// Constants and Golden Vectors
 // =============================================================================
 
 const TYPE_A: u16 = 1;
+const TYPE_NS: u16 = 2;
 const TYPE_CNAME: u16 = 5;
-const TYPE_PTR: u16 = 12;
 const TYPE_MX: u16 = 15;
 const TYPE_TXT: u16 = 16;
 const TYPE_AAAA: u16 = 28;
 const TYPE_OPT: u16 = 41;
 const CLASS_IN: u16 = 1;
+const CLASS_CH: u16 = 3;
+const CLASS_ANY: u16 = 255;
 
-#[allow(dead_code)]
-struct AdditionalRecord {
-    name_len: usize,
-    record_type: u16,
-    class: u16,
-    ttl: u32,
-    rdata: Vec<u8>,
-}
+const RCODE_FORMERR: u16 = 1;
+const RCODE_SERVFAIL: u16 = 2;
+const RCODE_NXDOMAIN: u16 = 3;
+const RCODE_NOTIMP: u16 = 4;
+const RCODE_REFUSED: u16 = 5;
+
+const FLAG_QR: u16 = 0x8000;
+const FLAG_AA: u16 = 0x0400;
+const FLAG_TC: u16 = 0x0200;
+const FLAG_RD: u16 = 0x0100;
+const MASK_OPCODE: u16 = 0x7800;
+const MASK_Z: u16 = 0x0070;
+/// AD and CD (RFC 4035), carved out of RFC 1035's Z field.
+const FLAGS_AD_CD: u16 = 0x0030;
+/// QR=1, RD=1, RA=1, RCODE=0: an ordinary recursive response.
+const FLAGS_RESPONSE: u16 = 0x8180;
+
+/// Query ID the loopback resolver draws from its entropy source.
+const QUERY_ID: u16 = 0x1234;
+const TTL: u32 = 3600;
+/// Compression pointer to the question name at offset 12.
+const QNAME_PTR: &[u8] = &[0xC0, 0x0C];
+/// Budget for one production lookup against the loopback nameserver. Every
+/// scenario answers, so this only matters on a stalled machine.
+const LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
+/// Every skipped requirement's note starts with this.
+const SKIP_PREFIX: &str = "production exposes no observable for this";
+
+/// The A query for example.com that production sends with ID 0x1234
+/// (RD=1, QDCOUNT=1, QTYPE A, QCLASS IN).
+const GOLDEN_A_QUERY: &[u8] = &[
+    0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // header
+    0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'c', b'o', b'm', 0x00, // name
+    0x00, 0x01, 0x00, 0x01, // QTYPE A, QCLASS IN
+];
+
+/// example.com A 192.0.2.1, owner name compressed to the question name.
+const GOLDEN_A_RESPONSE: &[u8] = &[
+    0x12, 0x34, 0x81, 0x80, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, // header
+    0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'c', b'o', b'm', 0x00, // @12
+    0x00, 0x01, 0x00, 0x01, // QTYPE A, QCLASS IN
+    0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x0e, 0x10, 0x00, 0x04, // @29 A IN
+    0xc0, 0x00, 0x02, 0x01, // 192.0.2.1
+];
+
+/// www.example.com CNAME example.com, followed by example.com A 192.0.2.1.
+/// Both names point into the question name ("example" label at offset 16).
+const GOLDEN_CNAME_CHAIN_RESPONSE: &[u8] = &[
+    0x12, 0x34, 0x81, 0x80, 0x00, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, // header
+    0x03, b'w', b'w', b'w', 0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'c', b'o', b'm',
+    0x00, // @12 www.example.com
+    0x00, 0x01, 0x00, 0x01, // QTYPE A, QCLASS IN
+    0xc0, 0x0c, 0x00, 0x05, 0x00, 0x01, 0x00, 0x00, 0x0e, 0x10, 0x00, 0x02, // @33 CNAME
+    0xc0, 0x10, // -> example.com
+    0xc0, 0x10, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x0e, 0x10, 0x00, 0x04, // @47 A IN
+    0xc0, 0x00, 0x02, 0x01, // 192.0.2.1
+];
+
+/// example.com MX 10 mail.example.com and MX 20 backup.mail.example.com.
+/// The first exchange points to the question name; the second points to the
+/// first exchange, which points on to the question name.
+const GOLDEN_COMPRESSED_MX_RESPONSE: &[u8] = &[
+    0x12, 0x34, 0x81, 0x80, 0x00, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, // header
+    0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'c', b'o', b'm', 0x00, // @12
+    0x00, 0x0f, 0x00, 0x01, // QTYPE MX, QCLASS IN
+    0xc0, 0x0c, 0x00, 0x0f, 0x00, 0x01, 0x00, 0x00, 0x0e, 0x10, 0x00, 0x09, // @29 MX IN
+    0x00, 0x0a, 0x04, b'm', b'a', b'i', b'l', 0xc0, 0x0c, // 10 mail(@43).example.com
+    0xc0, 0x0c, 0x00, 0x0f, 0x00, 0x01, 0x00, 0x00, 0x0e, 0x10, 0x00, 0x0b, // @50 MX IN
+    0x00, 0x14, 0x06, b'b', b'a', b'c', b'k', b'u', b'p', 0xc0, 0x2b, // 20 backup.@43
+];
+
+/// Response to the A query for example.com carrying one EDNS0 OPT record
+/// (UDP payload 4096, DO bit, 4 octets of option data) in the additional
+/// section.
+const GOLDEN_OPT_RESPONSE: &[u8] = &[
+    0x12, 0x34, 0x81, 0x80, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // header
+    0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'c', b'o', b'm', 0x00, // @12
+    0x00, 0x01, 0x00, 0x01, // QTYPE A, QCLASS IN
+    0x00, 0x00, 0x29, 0x10, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x04, // OPT
+    0xde, 0xad, 0xbe, 0xef, // option data
+];
+
+// =============================================================================
+// Packet Builders (test inputs only; parsing is always production)
+// =============================================================================
 
 /// Create a basic DNS response packet
-#[allow(dead_code)]
 fn create_dns_response_packet(
     id: u16,
     flags: u16,
@@ -1493,13 +1784,11 @@ fn create_dns_response_packet(
 }
 
 /// Create a basic DNS packet for testing
-#[allow(dead_code)]
 fn create_basic_dns_packet() -> Vec<u8> {
     create_dns_response_packet(0x1234, 0x8000, 0, 0, 0, 0)
 }
 
 /// Create DNS query packet with specific class
-#[allow(dead_code)]
 fn create_dns_query_with_class(id: u16, name: &str, qtype: u16, qclass: u16) -> Vec<u8> {
     let mut packet = Vec::new();
 
@@ -1518,7 +1807,6 @@ fn create_dns_query_with_class(id: u16, name: &str, qtype: u16, qclass: u16) -> 
 }
 
 /// Create DNS query packet with a single additional record.
-#[allow(dead_code)]
 fn create_dns_query_with_additional(
     id: u16,
     name: &str,
@@ -1544,7 +1832,6 @@ fn create_dns_query_with_additional(
 }
 
 /// Create an EDNS0 OPT additional record.
-#[allow(dead_code)]
 fn create_opt_record(
     udp_payload_size: u16,
     extended_rcode: u8,
@@ -1566,7 +1853,6 @@ fn create_opt_record(
 }
 
 /// Encode domain name in DNS format
-#[allow(dead_code)]
 fn encode_domain_name(name: &str, output: &mut Vec<u8>) {
     if name.is_empty() {
         output.push(0);
@@ -1582,339 +1868,585 @@ fn encode_domain_name(name: &str, output: &mut Vec<u8>) {
     output.push(0);
 }
 
-/// Parse DNS message ID from packet
-#[allow(dead_code)]
-fn parse_dns_id(packet: &[u8]) -> Result<u16, String> {
-    if packet.len() < 2 {
-        return Err("Packet too short for ID field".to_string());
+/// A header followed by `sections`, concatenated as given.
+fn create_dns_message(id: u16, flags: u16, counts: [u16; 4], sections: &[Vec<u8>]) -> Vec<u8> {
+    let mut message =
+        create_dns_response_packet(id, flags, counts[0], counts[1], counts[2], counts[3]);
+    for section in sections {
+        message.extend_from_slice(section);
     }
-    Ok(u16::from_be_bytes([packet[0], packet[1]]))
+    message
 }
 
-/// Validate response ID matches expected
-#[allow(dead_code)]
-fn validate_response_id(packet: &[u8], expected_id: u16) -> Result<(), String> {
-    let actual_id = parse_dns_id(packet)?;
-    if actual_id != expected_id {
-        Err(format!(
-            "mismatched DNS response id: expected {}, got {}",
-            expected_id, actual_id
-        ))
-    } else {
-        Ok(())
-    }
+/// The example.com A response (192.0.2.1, owner compressed) with `id`.
+fn create_a_response(id: u16) -> Vec<u8> {
+    create_dns_message(
+        id,
+        FLAGS_RESPONSE,
+        [1, 1, 0, 0],
+        &[
+            question_section("example.com", TYPE_A, CLASS_IN),
+            create_a_record(QNAME_PTR, CLASS_IN, [192, 0, 2, 1]),
+        ],
+    )
 }
 
-/// Check if packet is a DNS response (QR bit set)
-#[allow(dead_code)]
-fn is_dns_response(packet: &[u8]) -> Result<bool, String> {
-    if packet.len() < 4 {
-        return Err("Packet too short for flags field".to_string());
-    }
-    let flags = u16::from_be_bytes([packet[2], packet[3]]);
-    Ok((flags & 0x8000) != 0)
+/// The query an RFC 1035 client-side resolver sends: only RD set (QR=0, OPCODE=0,
+/// Z=0, RCODE=0), QDCOUNT=1, one IN-class question and no other sections.
+fn create_expected_resolver_query(id: u16, name: &str, qtype: u16) -> Vec<u8> {
+    create_dns_message(
+        id,
+        FLAG_RD,
+        [1, 0, 0, 0],
+        &[question_section(name, qtype, CLASS_IN)],
+    )
 }
 
-/// Parse OPCODE field from DNS flags
-#[allow(dead_code)]
-fn parse_dns_opcode(packet: &[u8]) -> Result<u8, String> {
-    if packet.len() < 4 {
-        return Err("Packet too short for flags field".to_string());
+/// A response to a production query (one question, nothing after it) that
+/// echoes the ID and the question, sets `flags` and carries `answers`.
+fn create_dns_response_to_query(query: &[u8], flags: u16, answers: &[Vec<u8>]) -> Vec<u8> {
+    let id = query
+        .get(..2)
+        .map_or(0, |bytes| u16::from_be_bytes([bytes[0], bytes[1]]));
+    let question = query.get(12..).unwrap_or(&[]);
+    let mut response = create_dns_response_packet(
+        id,
+        flags,
+        u16::from(!question.is_empty()),
+        answers.len() as u16,
+        0,
+        0,
+    );
+    response.extend_from_slice(question);
+    for answer in answers {
+        response.extend_from_slice(answer);
     }
-    let flags = u16::from_be_bytes([packet[2], packet[3]]);
-    Ok(((flags & 0x7800) >> 11) as u8)
+    response
 }
 
-/// Check if response is authoritative (AA bit set)
-#[allow(dead_code)]
-fn is_authoritative_answer(packet: &[u8]) -> Result<bool, String> {
-    if packet.len() < 4 {
-        return Err("Packet too short for flags field".to_string());
-    }
-    let flags = u16::from_be_bytes([packet[2], packet[3]]);
-    Ok((flags & 0x0400) != 0)
+/// One question entry: QNAME, QTYPE, QCLASS.
+fn question_section(name: &str, qtype: u16, qclass: u16) -> Vec<u8> {
+    let mut question = encoded_name(name);
+    question.extend_from_slice(&qtype.to_be_bytes());
+    question.extend_from_slice(&qclass.to_be_bytes());
+    question
 }
 
-/// Check if message is truncated (TC bit set)
-#[allow(dead_code)]
-fn is_truncated(packet: &[u8]) -> Result<bool, String> {
-    if packet.len() < 4 {
-        return Err("Packet too short for flags field".to_string());
-    }
-    let flags = u16::from_be_bytes([packet[2], packet[3]]);
-    Ok((flags & 0x0200) != 0)
+/// `name` in uncompressed wire format.
+fn encoded_name(name: &str) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    encode_domain_name(name, &mut encoded);
+    encoded
 }
 
-/// Check if recursion desired (RD bit set)
-#[allow(dead_code)]
-fn recursion_desired(packet: &[u8]) -> Result<bool, String> {
-    if packet.len() < 4 {
-        return Err("Packet too short for flags field".to_string());
-    }
-    let flags = u16::from_be_bytes([packet[2], packet[3]]);
-    Ok((flags & 0x0100) != 0)
+/// A name of one label of `len` octets, written raw so lengths above 63 can
+/// be expressed.
+fn single_label_name(len: usize) -> Vec<u8> {
+    let mut name = vec![len as u8];
+    name.extend_from_slice(&vec![b'a'; len]);
+    name.push(0);
+    name
 }
 
-/// Check if recursion available (RA bit set)
-#[allow(dead_code)]
-fn recursion_available(packet: &[u8]) -> Result<bool, String> {
-    if packet.len() < 4 {
-        return Err("Packet too short for flags field".to_string());
-    }
-    let flags = u16::from_be_bytes([packet[2], packet[3]]);
-    Ok((flags & 0x0080) != 0)
+/// A compression pointer to `offset`.
+fn pointer_to(offset: usize) -> [u8; 2] {
+    (0xC000u16 | offset as u16).to_be_bytes()
 }
 
-/// Parse reserved Z bits
-#[allow(dead_code)]
-fn parse_reserved_bits(packet: &[u8]) -> Result<u8, String> {
-    if packet.len() < 4 {
-        return Err("Packet too short for flags field".to_string());
-    }
-    let flags = u16::from_be_bytes([packet[2], packet[3]]);
-    Ok(((flags & 0x0070) >> 4) as u8)
+/// One resource record (RFC 1035 Section 4.1.3) with an already-encoded owner.
+fn create_resource_record(
+    owner: &[u8],
+    rr_type: u16,
+    rr_class: u16,
+    ttl: u32,
+    rdata: &[u8],
+) -> Vec<u8> {
+    let mut record = owner.to_vec();
+    record.extend_from_slice(&rr_type.to_be_bytes());
+    record.extend_from_slice(&rr_class.to_be_bytes());
+    record.extend_from_slice(&ttl.to_be_bytes());
+    record.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+    record.extend_from_slice(rdata);
+    record
 }
 
-/// Parse RCODE field
-#[allow(dead_code)]
-fn parse_rcode(packet: &[u8]) -> Result<u8, String> {
-    if packet.len() < 4 {
-        return Err("Packet too short for flags field".to_string());
-    }
-    let flags = u16::from_be_bytes([packet[2], packet[3]]);
-    Ok((flags & 0x000F) as u8)
+/// An A record of class `rr_class`.
+fn create_a_record(owner: &[u8], rr_class: u16, address: [u8; 4]) -> Vec<u8> {
+    create_resource_record(owner, TYPE_A, rr_class, TTL, &address)
 }
 
-/// Parse section counts
-#[allow(dead_code)]
-fn parse_qdcount(packet: &[u8]) -> Result<u16, String> {
-    if packet.len() < 6 {
-        return Err("Packet too short for QDCOUNT".to_string());
-    }
-    Ok(u16::from_be_bytes([packet[4], packet[5]]))
+/// An IN-class MX record with an uncompressed exchange name.
+fn create_mx_record(owner: &[u8], preference: u16, exchange: &str) -> Vec<u8> {
+    let mut rdata = preference.to_be_bytes().to_vec();
+    encode_domain_name(exchange, &mut rdata);
+    create_resource_record(owner, TYPE_MX, CLASS_IN, TTL, &rdata)
 }
 
-#[allow(dead_code)]
-
-fn parse_ancount(packet: &[u8]) -> Result<u16, String> {
-    if packet.len() < 8 {
-        return Err("Packet too short for ANCOUNT".to_string());
+/// `packet` with its flags word replaced.
+fn with_flags(mut packet: Vec<u8>, flags: u16) -> Vec<u8> {
+    if packet.len() >= 4 {
+        packet[2..4].copy_from_slice(&flags.to_be_bytes());
     }
-    Ok(u16::from_be_bytes([packet[6], packet[7]]))
+    packet
 }
 
-#[allow(dead_code)]
-
-fn parse_nscount(packet: &[u8]) -> Result<u16, String> {
-    if packet.len() < 10 {
-        return Err("Packet too short for NSCOUNT".to_string());
-    }
-    Ok(u16::from_be_bytes([packet[8], packet[9]]))
-}
-
-#[allow(dead_code)]
-
-fn parse_arcount(packet: &[u8]) -> Result<u16, String> {
-    if packet.len() < 12 {
-        return Err("Packet too short for ARCOUNT".to_string());
-    }
-    Ok(u16::from_be_bytes([packet[10], packet[11]]))
-}
-
-/// Extract compressed name from DNS packet
-#[allow(dead_code)]
-fn extract_compressed_name(packet: &[u8], offset: usize) -> Result<String, String> {
-    decode_dns_name_from_offset(packet, offset, 0)
-}
-
-/// Decode DNS name with compression support
-#[allow(dead_code)]
-fn decode_dns_name_from_offset(
-    packet: &[u8],
-    start_offset: usize,
-    depth: usize,
-) -> Result<String, String> {
-    if depth > 16 {
-        return Err("DNS compression pointer loop detected".to_string());
-    }
-
-    let mut labels = Vec::new();
-    let mut offset = start_offset;
-
-    loop {
-        if offset >= packet.len() {
-            return Err("Unexpected end of packet while parsing name".to_string());
+/// `packet` with QDCOUNT, ANCOUNT, NSCOUNT and ARCOUNT replaced.
+fn with_counts(mut packet: Vec<u8>, counts: [u16; 4]) -> Vec<u8> {
+    for (index, count) in counts.iter().enumerate() {
+        let at = 4 + index * 2;
+        if packet.len() >= at + 2 {
+            packet[at..at + 2].copy_from_slice(&count.to_be_bytes());
         }
-
-        let len = packet[offset];
-
-        // Check for compression pointer (top 2 bits set)
-        if len & 0xC0 == 0xC0 {
-            if offset + 1 >= packet.len() {
-                return Err("Truncated compression pointer".to_string());
-            }
-            let pointer = ((u16::from(len & 0x3F) << 8) | u16::from(packet[offset + 1])) as usize;
-            if pointer >= start_offset {
-                return Err("Forward compression pointer not allowed".to_string());
-            }
-            let suffix = decode_dns_name_from_offset(packet, pointer, depth + 1)?;
-            if !suffix.is_empty() {
-                labels.push(suffix);
-            }
-            break;
-        }
-
-        // Check for invalid compression format
-        if len & 0xC0 != 0 {
-            return Err("Invalid DNS label encoding".to_string());
-        }
-
-        offset += 1;
-
-        // Zero length indicates end of name
-        if len == 0 {
-            break;
-        }
-
-        // Extract label
-        if offset + (len as usize) > packet.len() {
-            return Err("Label extends beyond packet".to_string());
-        }
-
-        let label_bytes = &packet[offset..offset + (len as usize)];
-        let label = std::str::from_utf8(label_bytes)
-            .map_err(|_| "Invalid UTF-8 in DNS label".to_string())?;
-        labels.push(label.to_string());
-        offset += len as usize;
     }
-
-    Ok(labels.join("."))
+    packet
 }
 
-/// Extract question class from DNS query packet
-#[allow(dead_code)]
-fn extract_question_class(packet: &[u8]) -> Result<u16, String> {
-    if packet.len() < 12 {
-        return Err("Packet too short to contain question".to_string());
-    }
+// =============================================================================
+// Production Outcome Checks
+// =============================================================================
 
-    let offset = question_end_offset(packet)?;
-
-    if offset + 4 > packet.len() {
-        return Err("Question section truncated".to_string());
-    }
-
-    Ok(u16::from_be_bytes([packet[offset + 2], packet[offset + 3]]))
-}
-
-/// Extract question type from DNS query packet.
-#[allow(dead_code)]
-fn extract_question_type(packet: &[u8]) -> Result<u16, String> {
-    if packet.len() < 12 {
-        return Err("Packet too short to contain question".to_string());
-    }
-
-    let offset = question_end_offset(packet)?;
-    if offset + 2 > packet.len() {
-        return Err("Question type truncated".to_string());
-    }
-
-    Ok(u16::from_be_bytes([packet[offset], packet[offset + 1]]))
-}
-
-/// Extract a single additional record after the first question.
-#[allow(dead_code)]
-fn extract_additional_record(packet: &[u8]) -> Result<AdditionalRecord, String> {
-    let mut offset = question_end_offset(packet)?;
-    if offset + 4 > packet.len() {
-        return Err("Question section truncated".to_string());
-    }
-    offset += 4;
-
-    let name_start = offset;
-    offset = skip_dns_name(packet, offset)?;
-    let name_len = offset - name_start;
-
-    if offset + 10 > packet.len() {
-        return Err("Additional record header truncated".to_string());
-    }
-
-    let record_type = u16::from_be_bytes([packet[offset], packet[offset + 1]]);
-    let class = u16::from_be_bytes([packet[offset + 2], packet[offset + 3]]);
-    let ttl = u32::from_be_bytes([
-        packet[offset + 4],
-        packet[offset + 5],
-        packet[offset + 6],
-        packet[offset + 7],
-    ]);
-    let rdlen = usize::from(u16::from_be_bytes([packet[offset + 8], packet[offset + 9]]));
-    offset += 10;
-
-    if offset + rdlen > packet.len() {
-        return Err("Additional record RDATA truncated".to_string());
-    }
-
-    Ok(AdditionalRecord {
-        name_len,
-        record_type,
-        class,
-        ttl,
-        rdata: packet[offset..offset + rdlen].to_vec(),
+/// Production's response parser must accept `packet`.
+fn expect_parse_ok(label: &str, packet: &[u8], expected_id: u16) -> Result<(), String> {
+    parse_dns_response_for_fuzz(packet, expected_id).map_err(|err| {
+        format!("{label}: production parse_dns_response rejected a well-formed message: {err:?}")
     })
 }
 
-#[allow(dead_code)]
-
-fn question_end_offset(packet: &[u8]) -> Result<usize, String> {
-    let offset = skip_dns_name(packet, 12)?;
-    if offset + 4 > packet.len() {
-        return Err("Question section truncated".to_string());
-    }
-
-    Ok(offset)
-}
-
-#[allow(dead_code)]
-
-fn skip_dns_name(packet: &[u8], start_offset: usize) -> Result<usize, String> {
-    let mut offset = start_offset;
-
-    loop {
-        if offset >= packet.len() {
-            return Err("Unexpected end while parsing DNS name".to_string());
-        }
-
-        let len = packet[offset];
-        if len == 0 {
-            return Ok(offset + 1);
-        }
-
-        if len & 0xC0 == 0xC0 {
-            if offset + 1 >= packet.len() {
-                return Err("Truncated compression pointer".to_string());
-            }
-            return Ok(offset + 2);
-        }
-
-        if len & 0xC0 != 0 {
-            return Err("Invalid DNS label encoding".to_string());
-        }
-
-        offset += 1 + usize::from(len);
+/// Production's response parser must reject `packet` with `DnsError::Protocol`.
+fn expect_parse_protocol_error(label: &str, packet: &[u8], expected_id: u16) -> Result<(), String> {
+    match parse_dns_response_for_fuzz(packet, expected_id) {
+        Err(DnsError::Protocol(_)) => Ok(()),
+        Err(other) => Err(format!(
+            "{label}: expected DnsError::Protocol from production parse_dns_response, got {other:?}"
+        )),
+        Ok(()) => Err(format!(
+            "{label}: production parse_dns_response accepted a message it must reject"
+        )),
     }
 }
 
-#[allow(dead_code)]
+/// Production's name decoder must return `expected_name` with the cursor at
+/// `expected_end`.
+fn expect_name(
+    label: &str,
+    packet: &[u8],
+    start: usize,
+    expected_name: &str,
+    expected_end: usize,
+) -> Result<(), String> {
+    let mut offset = start;
+    match decode_dns_name_for_fuzz(packet, &mut offset) {
+        Ok(name) if name == expected_name && offset == expected_end => Ok(()),
+        Ok(name) => Err(format!(
+            "{label}: production decoded {name:?} with cursor {offset}, \
+             expected {expected_name:?} with cursor {expected_end}"
+        )),
+        Err(err) => Err(format!(
+            "{label}: production decode_dns_name rejected a valid name: {err:?}"
+        )),
+    }
+}
 
-fn assert_packet_matches_golden(label: &str, actual: &[u8], expected: &[u8]) -> Result<(), String> {
-    if actual != expected {
-        return Err(format!(
-            "{label} golden mismatch:\nexpected {:02x?}\nactual   {:02x?}",
-            expected, actual
-        ));
+/// Production's name decoder must reject the name at `start` with
+/// `DnsError::Protocol`.
+fn expect_name_protocol_error(label: &str, packet: &[u8], start: usize) -> Result<(), String> {
+    let mut offset = start;
+    match decode_dns_name_for_fuzz(packet, &mut offset) {
+        Err(DnsError::Protocol(_)) => Ok(()),
+        Err(other) => Err(format!(
+            "{label}: expected DnsError::Protocol from production decode_dns_name, got {other:?}"
+        )),
+        Ok(name) => Err(format!(
+            "{label}: production decode_dns_name accepted {name:?}; it must reject this name"
+        )),
+    }
+}
+
+/// Production's MX lookup must have returned exactly `expected`, in order.
+fn expect_mx_records(
+    label: &str,
+    actual: &[(u16, String)],
+    expected: &[(u16, &str)],
+) -> Result<(), String> {
+    let matches = actual.len() == expected.len()
+        && actual
+            .iter()
+            .zip(expected)
+            .all(|(got, want)| got.0 == want.0 && got.1.as_str() == want.1);
+    if matches {
+        Ok(())
+    } else {
+        Err(format!(
+            "{label}: production returned MX records {actual:?}, expected {expected:?}"
+        ))
+    }
+}
+
+/// Production's IP lookup must have returned exactly `expected`, in order.
+fn expect_addresses(label: &str, actual: &[IpAddr], expected: &[[u8; 4]]) -> Result<(), String> {
+    let expected: Vec<IpAddr> = expected
+        .iter()
+        .map(|octets| IpAddr::V4(Ipv4Addr::from(*octets)))
+        .collect();
+    if actual == expected.as_slice() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{label}: production resolved {actual:?}, expected {expected:?}"
+        ))
+    }
+}
+
+/// The flags word of a message production emitted.
+fn header_flags(message: &[u8]) -> Result<u16, String> {
+    message
+        .get(2..4)
+        .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
+        .ok_or_else(|| {
+            format!("production emitted a message shorter than a header: {message:02x?}")
+        })
+}
+
+// =============================================================================
+// Loopback Nameserver Driving the Production Resolver
+// =============================================================================
+
+/// Transport a query reached the loopback nameserver on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Transport {
+    Udp,
+    Tcp,
+}
+
+/// One query production sent to the loopback nameserver, byte for byte.
+#[derive(Debug, Clone)]
+struct CapturedQuery {
+    transport: Transport,
+    bytes: Vec<u8>,
+}
+
+/// A loopback nameserver serving UDP and TCP on one port. The test scripts
+/// its responses, and it records every query production sends to it.
+struct LoopbackNameserver {
+    addr: SocketAddr,
+    stop: Arc<AtomicBool>,
+    queries: Arc<Mutex<Vec<CapturedQuery>>>,
+    threads: Vec<JoinHandle<()>>,
+}
+
+impl LoopbackNameserver {
+    /// Starts the nameserver. `responder` sees each query and the transport
+    /// it arrived on, and returns the response to send, if any.
+    fn start<F>(responder: F) -> Result<Self, String>
+    where
+        F: Fn(&[u8], Transport) -> Option<Vec<u8>> + Send + Sync + 'static,
+    {
+        let (udp, tcp, addr) = bind_loopback_pair()?;
+        udp.set_read_timeout(Some(Duration::from_millis(20)))
+            .map_err(|err| format!("set loopback UDP read timeout: {err}"))?;
+        tcp.set_nonblocking(true)
+            .map_err(|err| format!("set loopback TCP listener nonblocking: {err}"))?;
+
+        let responder = Arc::new(responder);
+        let stop = Arc::new(AtomicBool::new(false));
+        let queries = Arc::new(Mutex::new(Vec::new()));
+
+        let udp_thread = {
+            let responder = Arc::clone(&responder);
+            let stop = Arc::clone(&stop);
+            let queries = Arc::clone(&queries);
+            thread::spawn(move || {
+                let mut buf = [0u8; 4096];
+                while !stop.load(Ordering::Acquire) {
+                    match udp.recv_from(&mut buf) {
+                        Ok((len, peer)) => {
+                            let query = buf[..len].to_vec();
+                            record_query(&queries, Transport::Udp, &query);
+                            if let Some(response) = (*responder)(&query[..], Transport::Udp) {
+                                let _ = udp.send_to(&response, peer);
+                            }
+                        }
+                        Err(err)
+                            if matches!(
+                                err.kind(),
+                                io::ErrorKind::WouldBlock
+                                    | io::ErrorKind::TimedOut
+                                    | io::ErrorKind::Interrupted
+                                    | io::ErrorKind::ConnectionReset
+                            ) => {}
+                        Err(_) => break,
+                    }
+                }
+            })
+        };
+
+        let tcp_thread = {
+            let responder = Arc::clone(&responder);
+            let stop = Arc::clone(&stop);
+            let queries = Arc::clone(&queries);
+            thread::spawn(move || {
+                while !stop.load(Ordering::Acquire) {
+                    match tcp.accept() {
+                        Ok((stream, _)) => {
+                            let _ = serve_tcp_query(stream, &*responder, &queries);
+                        }
+                        Err(err)
+                            if matches!(
+                                err.kind(),
+                                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                            ) =>
+                        {
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            })
+        };
+
+        Ok(Self {
+            addr,
+            stop,
+            queries,
+            threads: vec![udp_thread, tcp_thread],
+        })
     }
 
+    /// Every query received so far, in arrival order.
+    fn queries(&self) -> Vec<CapturedQuery> {
+        self.queries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl Drop for LoopbackNameserver {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        for handle in self.threads.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Binds a TCP listener and a UDP socket to the same loopback port.
+fn bind_loopback_pair() -> Result<(UdpSocket, TcpListener, SocketAddr), String> {
+    let mut last_error = String::from("no bind attempt was made");
+    for _ in 0..64 {
+        let tcp = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .map_err(|err| format!("bind loopback TCP nameserver: {err}"))?;
+        let addr = tcp
+            .local_addr()
+            .map_err(|err| format!("read loopback TCP nameserver address: {err}"))?;
+        match UdpSocket::bind(addr) {
+            Ok(udp) => return Ok((udp, tcp, addr)),
+            Err(err) => last_error = format!("bind loopback UDP nameserver on {addr}: {err}"),
+        }
+    }
+    Err(last_error)
+}
+
+fn record_query(queries: &Mutex<Vec<CapturedQuery>>, transport: Transport, bytes: &[u8]) {
+    queries
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(CapturedQuery {
+            transport,
+            bytes: bytes.to_vec(),
+        });
+}
+
+/// Serves one length-prefixed DNS-over-TCP exchange (RFC 1035 Section 4.2.2).
+fn serve_tcp_query<F>(
+    mut stream: TcpStream,
+    responder: &F,
+    queries: &Mutex<Vec<CapturedQuery>>,
+) -> io::Result<()>
+where
+    F: Fn(&[u8], Transport) -> Option<Vec<u8>>,
+{
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(LOOKUP_TIMEOUT))?;
+    stream.set_write_timeout(Some(LOOKUP_TIMEOUT))?;
+
+    let mut len_buf = [0u8; 2];
+    stream.read_exact(&mut len_buf)?;
+    let mut query = vec![0u8; usize::from(u16::from_be_bytes(len_buf))];
+    stream.read_exact(&mut query)?;
+    record_query(queries, Transport::Tcp, &query);
+
+    if let Some(response) = responder(&query[..], Transport::Tcp) {
+        let frame_len = u16::try_from(response.len()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "DNS response exceeds the 65535-octet TCP frame",
+            )
+        })?;
+        stream.write_all(&frame_len.to_be_bytes())?;
+        stream.write_all(&response)?;
+    }
     Ok(())
+}
+
+/// Entropy source that makes every production query ID a fixed value.
+#[derive(Debug, Clone, Copy)]
+struct FixedQueryId(u16);
+
+impl EntropySource for FixedQueryId {
+    fn fill_bytes(&self, dest: &mut [u8]) {
+        let id = self.0.to_be_bytes();
+        for (index, byte) in dest.iter_mut().enumerate() {
+            *byte = id[index % id.len()];
+        }
+    }
+
+    fn next_u64(&self) -> u64 {
+        let mut bytes = [0u8; 8];
+        self.fill_bytes(&mut bytes);
+        u64::from_le_bytes(bytes)
+    }
+
+    fn fork(&self, _task_id: TaskId) -> Arc<dyn EntropySource> {
+        Arc::new(*self)
+    }
+
+    fn source_id(&self) -> &'static str {
+        "dns-conformance-fixed-query-id"
+    }
+}
+
+/// A production resolver that sends every query, once, to `nameserver` with
+/// ID `QUERY_ID` and no caching.
+fn loopback_resolver(nameserver: SocketAddr) -> Resolver {
+    Resolver::with_config(ResolverConfig {
+        nameservers: vec![nameserver],
+        cache_enabled: false,
+        timeout: LOOKUP_TIMEOUT,
+        retries: 0,
+        ..ResolverConfig::default()
+    })
+    .with_entropy(Arc::new(FixedQueryId(QUERY_ID)))
+}
+
+fn lookup_ip_addrs(resolver: &Resolver, host: &str) -> Result<Vec<IpAddr>, DnsError> {
+    let lookup = block_on(resolver.lookup_ip(host))?;
+    Ok(lookup.addresses().to_vec())
+}
+
+fn lookup_mx_records(resolver: &Resolver, domain: &str) -> Result<Vec<(u16, String)>, DnsError> {
+    let lookup = block_on(resolver.lookup_mx(domain))?;
+    Ok(lookup
+        .records()
+        .map(|record| (record.preference, record.exchange.clone()))
+        .collect())
+}
+
+fn lookup_txt_records(resolver: &Resolver, name: &str) -> Result<Vec<String>, DnsError> {
+    let lookup = block_on(resolver.lookup_txt(name))?;
+    Ok(lookup.records().map(str::to_string).collect())
+}
+
+/// Sends the AAAA and A queries of `lookup_ip`.
+fn run_ip_lookup(resolver: &Resolver) {
+    let _ = lookup_ip_addrs(resolver, "example.com");
+}
+
+/// Sends an MX query.
+fn run_mx_lookup(resolver: &Resolver) {
+    let _ = lookup_mx_records(resolver, "example.com");
+}
+
+/// Sends a TXT query.
+fn run_txt_lookup(resolver: &Resolver) {
+    let _ = lookup_txt_records(resolver, "example.com");
+}
+
+/// Sends every query type the public resolver can originate.
+fn run_every_lookup(resolver: &Resolver) {
+    run_ip_lookup(resolver);
+    run_mx_lookup(resolver);
+    run_txt_lookup(resolver);
+}
+
+/// Runs `run` against a nameserver that answers NODATA to everything and
+/// returns the queries production sent.
+fn capture_queries<L: FnOnce(&Resolver)>(run: L) -> Result<Vec<CapturedQuery>, String> {
+    let server = LoopbackNameserver::start(|query: &[u8], _transport: Transport| {
+        Some(create_dns_response_to_query(query, FLAGS_RESPONSE, &[]))
+    })?;
+    let resolver = loopback_resolver(server.addr);
+    run(&resolver);
+    let queries = server.queries();
+    if queries.is_empty() {
+        Err("production resolver sent no query to the loopback nameserver".to_string())
+    } else {
+        Ok(queries)
+    }
+}
+
+/// A nameserver that replays each golden response to the exact production
+/// query it answers, and NODATA to anything else.
+fn start_golden_nameserver() -> Result<LoopbackNameserver, String> {
+    let www_a_query = create_expected_resolver_query(QUERY_ID, "www.example.com", TYPE_A);
+    let mx_query = create_expected_resolver_query(QUERY_ID, "example.com", TYPE_MX);
+    LoopbackNameserver::start(move |query: &[u8], _transport: Transport| {
+        if query == GOLDEN_A_QUERY {
+            Some(GOLDEN_A_RESPONSE.to_vec())
+        } else if query == www_a_query.as_slice() {
+            Some(GOLDEN_CNAME_CHAIN_RESPONSE.to_vec())
+        } else if query == mx_query.as_slice() {
+            Some(GOLDEN_COMPRESSED_MX_RESPONSE.to_vec())
+        } else {
+            Some(create_dns_response_to_query(query, FLAGS_RESPONSE, &[]))
+        }
+    })
+}
+
+/// Answers the A query for example.com with `answers` (NODATA otherwise) and
+/// returns what production's `lookup_ip` reports.
+fn lookup_ip_with_a_answers(
+    answers: Vec<Vec<u8>>,
+) -> Result<Result<Vec<IpAddr>, DnsError>, String> {
+    let server = LoopbackNameserver::start(move |query: &[u8], _transport: Transport| {
+        let served: &[Vec<u8>] = if query == GOLDEN_A_QUERY {
+            &answers
+        } else {
+            &[]
+        };
+        Some(create_dns_response_to_query(query, FLAGS_RESPONSE, served))
+    })?;
+    let resolver = loopback_resolver(server.addr);
+    Ok(lookup_ip_addrs(&resolver, "example.com"))
+}
+
+/// Answers every MX query with `flags` (and, when `with_answer`, one MX
+/// record) and returns what production's `lookup_mx` reports.
+fn lookup_mx_with_response_flags(
+    flags: u16,
+    with_answer: bool,
+) -> Result<Result<Vec<(u16, String)>, DnsError>, String> {
+    let server = LoopbackNameserver::start(move |query: &[u8], _transport: Transport| {
+        let answers = if with_answer {
+            vec![create_mx_record(QNAME_PTR, 10, "mail.example.com")]
+        } else {
+            Vec::new()
+        };
+        Some(create_dns_response_to_query(query, flags, &answers))
+    })?;
+    let resolver = loopback_resolver(server.addr);
+    Ok(lookup_mx_records(&resolver, "example.com"))
+}
+
+/// A response with RCODE `rcode` must surface as `DnsError::ServerError`.
+fn expect_rcode_server_error(rcode: u16, name: &str) -> Result<(), String> {
+    match lookup_mx_with_response_flags(FLAGS_RESPONSE | rcode, false)? {
+        Err(DnsError::ServerError(_)) => Ok(()),
+        other => Err(format!(
+            "RCODE {rcode} ({name}) must surface as DnsError::ServerError from production \
+             lookup_mx, got {other:?}"
+        )),
+    }
 }
 
 /// Generate conformance report for DNS message format tests
@@ -1976,19 +2508,19 @@ pub fn generate_dns_conformance_report(results: &[DnsConformanceResult]) -> Stri
         ));
 
         for test in tests {
-            let status = match test.verdict {
-                DnsTestVerdict::Pass => "✅",
-                DnsTestVerdict::Fail => "❌",
-                DnsTestVerdict::Skipped => "⏭️",
-                DnsTestVerdict::ExpectedFailure => "⚠️",
+            let (status, detail_label) = match test.verdict {
+                DnsTestVerdict::Pass => ("✅", "Error"),
+                DnsTestVerdict::Fail => ("❌", "Error"),
+                DnsTestVerdict::Skipped => ("⏭️", "Note"),
+                DnsTestVerdict::ExpectedFailure => ("⚠️", "Note"),
             };
             report.push_str(&format!(
                 "- {} **{}** ({}ms): {}\n",
                 status, test.test_id, test.execution_time_ms, test.description
             ));
 
-            if let Some(error) = &test.error_message {
-                report.push_str(&format!("  *Error: {}*\n", error));
+            if let Some(detail) = &test.error_message {
+                report.push_str(&format!("  *{}: {}*\n", detail_label, detail));
             }
         }
         report.push('\n');
@@ -2002,7 +2534,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[allow(dead_code)]
     fn test_dns_message_conformance_harness() {
         let mut harness = DnsMessageConformanceHarness::new();
         let results = harness.run_all_tests();
@@ -2035,6 +2566,50 @@ mod tests {
         let report = generate_dns_conformance_report(&results);
         println!("{}", report);
 
+        // Every requirement checked against production must hold.
+        let failures: Vec<String> = results
+            .iter()
+            .filter(|r| r.verdict == DnsTestVerdict::Fail)
+            .map(|r| {
+                format!(
+                    "{} ({}): {}",
+                    r.test_id,
+                    r.description,
+                    r.error_message.as_deref().unwrap_or("no error message")
+                )
+            })
+            .collect();
+        assert!(
+            failures.is_empty(),
+            "production DNS code failed RFC 1035 requirements:\n{}",
+            failures.join("\n")
+        );
+
+        // Requirements production cannot be driven to check are skipped, say
+        // why, and are never counted as passes.
+        let skipped: Vec<&str> = results
+            .iter()
+            .filter(|r| r.verdict == DnsTestVerdict::Skipped)
+            .map(|r| r.test_id.as_str())
+            .collect();
+        assert_eq!(
+            skipped,
+            ["HFL003", "HFL006", "QTP006", "ADR001", "GLD002", "SIZ004"],
+            "the set of requirements without a production observable changed"
+        );
+        for result in &results {
+            if result.verdict == DnsTestVerdict::Skipped {
+                assert!(
+                    result
+                        .error_message
+                        .as_deref()
+                        .is_some_and(|note| note.starts_with(SKIP_PREFIX)),
+                    "{} is skipped without the no-observable note",
+                    result.test_id
+                );
+            }
+        }
+
         // Expect reasonable pass rate for RFC 1035 compliance
         let pass_rate = results
             .iter()
@@ -2049,64 +2624,51 @@ mod tests {
     }
 
     #[test]
-    #[allow(dead_code)]
-    fn test_dns_header_parsing() {
-        let packet = create_dns_response_packet(0x1234, 0x8180, 1, 2, 0, 1);
-
-        assert_eq!(parse_dns_id(&packet).unwrap(), 0x1234);
-        assert!(is_dns_response(&packet).unwrap());
-        assert!(recursion_desired(&packet).unwrap());
-        assert!(recursion_available(&packet).unwrap());
-        assert_eq!(parse_rcode(&packet).unwrap(), 0);
-        assert_eq!(parse_qdcount(&packet).unwrap(), 1);
-        assert_eq!(parse_ancount(&packet).unwrap(), 2);
-        assert_eq!(parse_arcount(&packet).unwrap(), 1);
+    fn production_parser_accepts_header_only_response() {
+        let packet = create_dns_response_packet(0x1234, FLAGS_RESPONSE, 0, 0, 0, 0);
+        assert!(parse_dns_response_for_fuzz(&packet, 0x1234).is_ok());
     }
 
     #[test]
-    #[allow(dead_code)]
-    fn test_dns_flag_bits() {
-        // Test individual flag bits
-        assert!(is_dns_response(&create_dns_response_packet(0x1234, 0x8000, 0, 0, 0, 0)).unwrap());
-        assert!(!is_dns_response(&create_dns_response_packet(0x1234, 0x0000, 0, 0, 0, 0)).unwrap());
-
-        assert!(
-            is_authoritative_answer(&create_dns_response_packet(0x1234, 0x8400, 0, 0, 0, 0))
-                .unwrap()
-        );
-        assert!(
-            !is_authoritative_answer(&create_dns_response_packet(0x1234, 0x8000, 0, 0, 0, 0))
-                .unwrap()
-        );
-
-        assert!(is_truncated(&create_dns_response_packet(0x1234, 0x8200, 0, 0, 0, 0)).unwrap());
-        assert!(!is_truncated(&create_dns_response_packet(0x1234, 0x8000, 0, 0, 0, 0)).unwrap());
+    fn production_parser_rejects_query_and_short_packets() {
+        let query = create_dns_query_with_class(0x1234, "example.com", TYPE_A, CLASS_IN);
+        assert!(matches!(
+            parse_dns_response_for_fuzz(&query, 0x1234),
+            Err(DnsError::Protocol(_))
+        ));
+        assert!(matches!(
+            parse_dns_response_for_fuzz(&query[..11], 0x1234),
+            Err(DnsError::Protocol(_))
+        ));
     }
 
     #[test]
-    #[allow(dead_code)]
-    fn test_dns_compression_basic() {
+    fn production_name_decoder_rejects_name_past_end_of_packet() {
         let packet = create_basic_dns_packet();
-        let result = extract_compressed_name(&packet, 12);
-        // With basic packet, should fail gracefully
-        assert!(result.is_err());
+        let mut offset = 12;
+        assert!(matches!(
+            decode_dns_name_for_fuzz(&packet, &mut offset),
+            Err(DnsError::Protocol(_))
+        ));
     }
 
     #[test]
-    #[allow(dead_code)]
-    fn test_dns_class_extraction() {
-        let packet = create_dns_query_with_class(0x1234, "example.com", 1, 1);
-        let class = extract_question_class(&packet).unwrap();
-        assert_eq!(class, 1); // Class IN
-    }
-
-    #[test]
-    #[allow(dead_code)]
-    fn test_rcode_values() {
-        for rcode in 0..=5 {
-            let packet = create_dns_response_packet(0x1234, 0x8000 | rcode, 0, 0, 0, 0);
-            let parsed = parse_rcode(&packet).unwrap();
-            assert_eq!(parsed, rcode as u8);
+    fn golden_responses_parse_through_production() {
+        for (label, golden) in [
+            ("A answer", GOLDEN_A_RESPONSE),
+            ("CNAME chain", GOLDEN_CNAME_CHAIN_RESPONSE),
+            ("compressed MX", GOLDEN_COMPRESSED_MX_RESPONSE),
+            ("OPT additional record", GOLDEN_OPT_RESPONSE),
+        ] {
+            assert!(
+                parse_dns_response_for_fuzz(golden, QUERY_ID).is_ok(),
+                "{label} golden rejected by production"
+            );
         }
+        assert_eq!(
+            create_a_response(QUERY_ID),
+            GOLDEN_A_RESPONSE,
+            "the A-response builder and its golden diverged"
+        );
     }
 }

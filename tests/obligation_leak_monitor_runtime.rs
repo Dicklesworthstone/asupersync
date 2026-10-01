@@ -1,9 +1,10 @@
-//! The runtime feeds an opt-in obligation leak monitor one age per resolved
-//! obligation (br-asupersync-bi2462.150.2).
+//! The runtime feeds an opt-in obligation leak monitor (a change detector)
+//! one observation per resolved obligation (br-asupersync-bi2462.150.2).
 //!
-//! Each obligation counts exactly once, at its age when it is committed,
-//! aborted or leaked. The lab tests control ages through virtual time; the
-//! native test goes through the public checked-obligation API.
+//! Each committed or aborted obligation counts exactly once, at its age when
+//! it resolves; a leaked obligation counts once, as conclusive evidence. The
+//! lab tests control ages through virtual time; the native test goes through
+//! the public checked-obligation API.
 #![cfg(not(target_arch = "wasm32"))]
 
 use asupersync::Cx;
@@ -84,8 +85,65 @@ fn lab_monitor_counts_each_resolution_once_and_stays_clear_for_fast_obligations(
     log("fast", format!("{snapshot:?}"));
     assert_eq!(snapshot.observations, 20, "one observation per resolution");
     assert_eq!(snapshot.alert_state, AlertState::Clear);
-    assert!(snapshot.e_value < 1.0, "fast obligations add no evidence");
+    // The runtime's change detector stays at or below e, its fixed point for
+    // on-time ages, however many fast obligations it sees.
+    assert!(
+        snapshot.e_value <= std::f64::consts::E,
+        "fast obligations add no evidence: {}",
+        snapshot.e_value
+    );
     assert_eq!(snapshot.alert_count, 0);
+}
+
+/// Many on-time resolutions must not bury the evidence of a later slowdown.
+/// A plain e-process fed 200 fast obligations needs about eleven obligations
+/// held 1 s against 1 ms before it alarms; the runtime's change detector
+/// alarms on the first, and the alarm latches through later fast ones.
+#[test]
+fn lab_monitor_detects_a_slowdown_after_many_healthy_resolutions() {
+    let mut lab = LabRuntime::new(LabConfig::new(5));
+    lab.state.enable_obligation_leak_monitor(FAST);
+    let region = lab.state.create_root_region(Budget::INFINITE);
+    let (task, _handle) = lab
+        .state
+        .create_task(region, Budget::INFINITE, async {})
+        .expect("create holder task");
+    let resolve = |lab: &mut LabRuntime, hold_ns: u64, count: usize| {
+        let obligations: Vec<_> = (0..count)
+            .map(|_| {
+                lab.state
+                    .create_obligation(ObligationKind::SendPermit, task, region, None)
+                    .expect("reserve obligation")
+            })
+            .collect();
+        lab.advance_time(hold_ns);
+        for obligation in obligations {
+            lab.state
+                .commit_obligation(obligation)
+                .expect("commit obligation");
+        }
+    };
+    resolve(&mut lab, 10_000, 200);
+    let healthy = lab
+        .state
+        .obligation_leak_monitor_snapshot()
+        .expect("enabled monitor");
+    assert_eq!(healthy.alert_state, AlertState::Clear);
+    resolve(&mut lab, 1_000_000_000, 1);
+    let slow = lab
+        .state
+        .obligation_leak_monitor_snapshot()
+        .expect("enabled monitor");
+    log("slowdown", format!("healthy={healthy:?} slow={slow:?}"));
+    assert_eq!(slow.observations, 201);
+    assert_eq!(slow.alert_state, AlertState::Alert, "{slow:?}");
+    resolve(&mut lab, 10_000, 50);
+    let after = lab
+        .state
+        .obligation_leak_monitor_snapshot()
+        .expect("enabled monitor");
+    assert_eq!(after.alert_state, AlertState::Alert, "the alarm latches");
+    assert_eq!(after.alert_count, 1);
 }
 
 #[test]
@@ -132,8 +190,11 @@ fn lab_monitor_alerts_when_obligations_outlive_their_expected_lifetime() {
     assert_eq!(snapshot.alert_count, 1);
 }
 
+/// A leak is conclusive evidence, not an age: an obligation leaked right after
+/// it was reserved used to read as an on-time resolution and lower the
+/// e-value.
 #[test]
-fn lab_monitor_counts_a_leaked_obligation_once_at_its_final_age() {
+fn lab_monitor_alarms_on_a_leaked_obligation_and_counts_it_once() {
     let mut lab = LabRuntime::new(LabConfig::new(4).panic_on_leak(false));
     lab.state.enable_obligation_leak_monitor(FAST);
     let region = lab.state.create_root_region(Budget::INFINITE);
@@ -157,6 +218,13 @@ fn lab_monitor_counts_a_leaked_obligation_once_at_its_final_age() {
     );
     assert_eq!(lab.state.leak_count(), 1);
     assert_eq!(snapshot.observations, 1, "a leak is observed exactly once");
+    assert_eq!(
+        snapshot.alert_state,
+        AlertState::Alert,
+        "one leak alarms, before min_observations"
+    );
+    assert!(snapshot.e_value.is_infinite(), "{snapshot:?}");
+    assert_eq!(snapshot.alert_count, 1);
 }
 
 #[test]

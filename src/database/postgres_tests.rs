@@ -5617,6 +5617,45 @@ mod tests {
         assert!(PgConnectOptions::parse_with_tls("postgres://localhost/db?sslrootcert=").is_err());
     }
 
+    /// verify-ca does not check the server name, so it only means something
+    /// against a private CA. Without explicit roots it is refused instead of
+    /// trusting every publicly issued certificate for any host, as libpq does.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn verify_ca_without_explicit_roots_is_refused() {
+        let implicit = PgTlsOptions::new().verification(PgTlsVerification::VerifyCa);
+        match PgConnection::build_postgres_tls_connector(&implicit) {
+            Err(PgError::Tls(msg)) => assert!(msg.contains("verify-ca"), "got: {msg}"),
+            other => panic!("expected the verify-ca refusal, got {other:?}"),
+        }
+        let ca = crate::tls::Certificate::from_pem(include_bytes!(
+            "../../tests/fixtures/tls/postgres_ca.crt"
+        ))
+        .unwrap();
+        let explicit = PgTlsOptions::new()
+            .verification(PgTlsVerification::VerifyCa)
+            .root_certificate(ca[0].clone());
+        assert!(PgConnection::build_postgres_tls_connector(&explicit).is_ok());
+    }
+
+    /// Revocation lists are not checked, so a URL that names one is refused
+    /// rather than connecting without it. The legacy parser still ignores
+    /// unknown parameters, as it did in v0.4.3.
+    #[test]
+    fn parse_with_tls_refuses_certificate_revocation_lists() {
+        for key in ["sslcrl", "sslcrldir"] {
+            let url = format!(
+                "postgres://localhost/db?sslmode=verify-full&sslrootcert=ca.pem&{key}=revoked.pem"
+            );
+            match PgConnectOptions::parse_with_tls(&url) {
+                Err(PgError::InvalidUrl(msg)) => assert!(msg.contains(key), "got: {msg}"),
+                Err(other) => panic!("expected InvalidUrl for {key}, got {other:?}"),
+                Ok(_) => panic!("{key} was accepted and would be ignored"),
+            }
+        }
+        assert!(PgConnectOptions::parse("postgres://localhost/db?sslcrl=revoked.pem").is_ok());
+    }
+
     #[test]
     fn repeated_sslmode_uses_final_policy_without_stale_verification() {
         let (options, tls) = PgConnectOptions::parse_with_tls(

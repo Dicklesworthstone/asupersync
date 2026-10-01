@@ -290,9 +290,10 @@ fn format_run_result(result: &ScenarioRunResult, json: bool) -> String {
             format!("Steps: {}", result.lab_report.steps_total),
             format!("Faults injected: {}", result.faults_injected),
             format!(
-                "Oracles: {}/{} passed",
+                "Oracles: {}/{} passed ({} not fed by the lab runtime)",
                 result.oracle_report.passed_count,
-                result.oracle_report.checked.len()
+                result.oracle_report.checked.len(),
+                result.oracle_report.unfed_count()
             ),
         ];
         if !result.lab_report.invariant_violations.is_empty() {

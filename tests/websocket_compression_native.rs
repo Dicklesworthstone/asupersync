@@ -395,6 +395,289 @@ fn native_abandoned_receive_preserves_partial_compressed_message_across_split() 
     }
 }
 
+/// Raw DEFLATE bits, least significant first; Huffman codes go most
+/// significant bit first (RFC 1951 section 3.1.1).
+#[derive(Default)]
+struct Bits {
+    out: Vec<u8>,
+    used: usize,
+}
+
+impl Bits {
+    fn put(&mut self, value: u32, count: u32) {
+        for bit in 0..count {
+            if self.used % 8 == 0 {
+                self.out.push(0);
+            }
+            *self.out.last_mut().unwrap() |= (((value >> bit) & 1) as u8) << (self.used % 8);
+            self.used += 1;
+        }
+    }
+
+    fn code(&mut self, code: u32, count: u32) {
+        for bit in (0..count).rev() {
+            self.put((code >> bit) & 1, 1);
+        }
+    }
+}
+
+/// One fixed-Huffman block: a NUL literal, then `runs` matches of length 258
+/// at distance 1, then an optional final literal of 144..=255 (a 9-bit code),
+/// then the flush header whose tail RFC 7692 removes. Python zlib decodes
+/// `zero_runs(32_514, None)` (52,838 bytes) to 8,388,613 NULs, and
+/// `zero_runs(32_514, Some(0xff))` (52,839 bytes) to those NULs plus 0xFF.
+fn zero_runs(runs: usize, last: Option<u8>) -> Vec<u8> {
+    let mut bits = Bits::default();
+    bits.put(0, 1);
+    bits.put(1, 2);
+    bits.code(0x30, 8);
+    for _ in 0..runs {
+        bits.code(0xc5, 8);
+        bits.code(0, 5);
+    }
+    if let Some(byte) = last {
+        assert!(byte >= 144, "only 9-bit literals are encoded here");
+        bits.code(0x190 + u32::from(byte - 144), 9);
+    }
+    bits.code(0, 7);
+    bits.put(0, 3);
+    bits.out
+}
+
+/// One frame with the 16-bit extended payload length (length code 126).
+fn extended_frame(first: u8, payload: &[u8], masked: bool) -> Vec<u8> {
+    let mut wire = vec![first, 0x7e | if masked { 0x80 } else { 0 }];
+    wire.extend_from_slice(&u16::try_from(payload.len()).unwrap().to_be_bytes());
+    let mask = [0x31, 0x47, 0x53, 0x61];
+    if masked {
+        wire.extend_from_slice(&mask);
+    }
+    wire.extend(payload.iter().enumerate().map(|(index, byte)| {
+        if masked {
+            byte ^ mask[index % 4]
+        } else {
+            *byte
+        }
+    }));
+    wire
+}
+
+/// br-asupersync-ydis91: an 8 MiB message from 52 KB of DEFLATE decodes in
+/// bounded steps with a yield between them, through every public receiver.
+/// The receive that reads it is still Pending one poll later, and the decode
+/// survives that receive being abandoned (and, for Split, the split itself).
+fn large_compressed_scenario(workers: usize, role: Role) {
+    const RUNS: usize = 32_514;
+    let server = matches!(role, Role::Server);
+    let wire = extended_frame(0xc2, &zero_runs(RUNS, None), server);
+    let wire_len = wire.len();
+    let (socket, mut peer) = pair();
+    let peer = std::thread::spawn(move || {
+        if server {
+            assert!(
+                String::from_utf8(http_head(&mut peer))
+                    .unwrap()
+                    .starts_with("HTTP/1.1 101 ")
+            );
+        }
+        peer.write_all(&wire).unwrap();
+        let mut byte = [0];
+        assert_eq!(peer.read(&mut byte).expect("transport EOF"), 0);
+    });
+    let runtime = native_runtime(workers);
+    runtime.block_on(async {
+        let mut task = runtime
+            .handle()
+            .try_spawn(async move {
+                let cx = Cx::current().unwrap();
+                let bytes = Arc::new(AtomicUsize::new(0));
+                let socket = ReadWitness {
+                    socket: TcpStream::from_std(socket).unwrap(),
+                    bytes: Arc::clone(&bytes),
+                };
+                // Every poll is Pending until the frame is read and one poll after.
+                // Before the fix the poll that read it returned the whole message.
+                macro_rules! abandon_mid_decode {
+                    ($ws:ident) => {{
+                        let mut future = std::pin::pin!($ws.recv(&cx));
+                        let mut polls_after_read = 0;
+                        poll_fn(|task| {
+                            assert!(
+                                future.as_mut().poll(task).is_pending(),
+                                "decode finished inside one poll ({role:?}, {workers} workers)"
+                            );
+                            if bytes.load(Ordering::Acquire) == wire_len {
+                                polls_after_read += 1;
+                            }
+                            if polls_after_read == 2 {
+                                Poll::Ready(())
+                            } else {
+                                Poll::Pending
+                            }
+                        })
+                        .await;
+                    }};
+                }
+                macro_rules! finish_counting_yields {
+                    ($ws:ident) => {{
+                        let mut future = std::pin::pin!($ws.recv(&cx));
+                        let mut pending = 0;
+                        let received = poll_fn(|task| match future.as_mut().poll(task) {
+                            Poll::Pending => {
+                                pending += 1;
+                                Poll::Pending
+                            }
+                            ready => ready,
+                        })
+                        .await;
+                        (received, pending)
+                    }};
+                }
+                let (received, pending) = match role {
+                    Role::Server => {
+                        let mut ws = WebSocketAcceptor::new()
+                            .permessage_deflate()
+                            .ping_interval(None)
+                            .accept(&cx, UPGRADE, socket)
+                            .await
+                            .unwrap();
+                        abandon_mid_decode!(ws);
+                        finish_counting_yields!(ws)
+                    }
+                    Role::Client | Role::Split => {
+                        let mut ws = WebSocket::from_upgraded_with_extensions(
+                            socket,
+                            WebSocketConfig::new().ping_interval(None),
+                            &[PROFILE.to_owned()],
+                            client_entropy(),
+                        )
+                        .unwrap();
+                        abandon_mid_decode!(ws);
+                        if matches!(role, Role::Split) {
+                            let (mut read, _write) = ws.split();
+                            finish_counting_yields!(read)
+                        } else {
+                            finish_counting_yields!(ws)
+                        }
+                    }
+                };
+                let Some(Message::Binary(data)) = received.unwrap() else {
+                    panic!("one binary message ({role:?})")
+                };
+                assert_eq!(data.len(), 1 + 258 * RUNS);
+                assert!(data.iter().all(|byte| *byte == 0));
+                // 8 MiB at 256 KiB per step, about 2 MiB of it before abandoning.
+                assert!(
+                    pending >= 8,
+                    "{pending} yields after resuming ({role:?}, {workers} workers)"
+                );
+            })
+            .unwrap();
+        asupersync::time::timeout(asupersync::time::wall_now(), WATCHDOG, &mut task)
+            .await
+            .expect("large compressed receive completes");
+    });
+    peer.join().expect("independent RFC peer completed");
+    assert_retired(&runtime);
+}
+
+#[test]
+fn native_large_compressed_message_decodes_across_polls_and_survives_abandoned_receive() {
+    for workers in [0, 2] {
+        for role in [Role::Client, Role::Server, Role::Split] {
+            large_compressed_scenario(workers, role);
+        }
+    }
+}
+
+/// RFC 6455 §7.1.7 for a decode that spans polls: an 8 MiB compressed text
+/// message whose last byte is not UTF-8 fails only after its final step. The
+/// connection is then failed, so a later receive does not process the frame
+/// sent behind it; the codec reports that it is poisoned.
+fn large_invalid_text_scenario(workers: usize, role: Role) {
+    const RUNS: usize = 32_514;
+    let server = matches!(role, Role::Server);
+    let mut wire = extended_frame(0xc1, &zero_runs(RUNS, Some(0xff)), server);
+    wire.extend(frame(0x81, b"after", server));
+    let (socket, mut peer) = pair();
+    let peer = std::thread::spawn(move || {
+        if server {
+            assert!(
+                String::from_utf8(http_head(&mut peer))
+                    .unwrap()
+                    .starts_with("HTTP/1.1 101 ")
+            );
+        }
+        peer.write_all(&wire).unwrap();
+        let mut byte = [0];
+        assert_eq!(peer.read(&mut byte).expect("transport EOF"), 0);
+    });
+    let runtime = native_runtime(workers);
+    runtime.block_on(async {
+        let mut task = runtime
+            .handle()
+            .try_spawn(async move {
+                let cx = Cx::current().unwrap();
+                let socket = TcpStream::from_std(socket).unwrap();
+                macro_rules! fail_then_refuse {
+                    ($ws:ident) => {{
+                        let first = $ws.recv(&cx).await;
+                        assert!(
+                            matches!(first, Err(WsError::InvalidUtf8)),
+                            "{first:?} ({role:?}, {workers} workers)"
+                        );
+                        let second = $ws.recv(&cx).await;
+                        assert!(
+                            matches!(&second, Err(WsError::ProtocolViolation(reason)) if reason.contains("poisoned")),
+                            "a failed connection processes no further data: {second:?} ({role:?}, {workers} workers)"
+                        );
+                    }};
+                }
+                match role {
+                    Role::Server => {
+                        let mut ws = WebSocketAcceptor::new()
+                            .permessage_deflate()
+                            .ping_interval(None)
+                            .accept(&cx, UPGRADE, socket)
+                            .await
+                            .unwrap();
+                        fail_then_refuse!(ws);
+                    }
+                    Role::Client | Role::Split => {
+                        let mut ws = WebSocket::from_upgraded_with_extensions(
+                            socket,
+                            WebSocketConfig::new().ping_interval(None),
+                            &[PROFILE.to_owned()],
+                            client_entropy(),
+                        )
+                        .unwrap();
+                        if matches!(role, Role::Split) {
+                            let (mut read, _write) = ws.split();
+                            fail_then_refuse!(read);
+                        } else {
+                            fail_then_refuse!(ws);
+                        }
+                    }
+                }
+            })
+            .unwrap();
+        asupersync::time::timeout(asupersync::time::wall_now(), WATCHDOG, &mut task)
+            .await
+            .expect("the failed receive completes");
+    });
+    peer.join().expect("independent RFC peer completed");
+    assert_retired(&runtime);
+}
+
+#[test]
+fn native_large_compressed_invalid_text_fails_the_connection() {
+    for workers in [0, 2] {
+        for role in [Role::Client, Role::Server, Role::Split] {
+            large_invalid_text_scenario(workers, role);
+        }
+    }
+}
+
 #[test]
 fn native_http1_router_handoff_negotiates_and_runs_compressed_session() {
     use asupersync::http::h1::listener::{Http1Listener, Http1ListenerConfig};

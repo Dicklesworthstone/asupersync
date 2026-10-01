@@ -10,9 +10,14 @@
 //! the caller can cancel/drain that retained work under ordinary scheduling.
 //!
 //! This verifies task order under the existing spawn-ordinal binding, not exact
-//! production identities, worker/lane choices, timing, entropy, I/O results, or
-//! task outcomes. A source projection has no trustworthy terminal capture
-//! watermark: matching it is not proof that the production capture was complete.
+//! production identities, worker/lane choices, timing, entropy or I/O results.
+//! Terminal task outcomes are compared only when the schedule carries outcomes
+//! captured beside the production trace, as
+//! [`crate::trace::ScheduleCaptureSnapshot::production_schedule`] provides; a
+//! difference is [`StrictProductionReplayTermination::OutcomeMismatch`]. Values
+//! a task returns are never compared. A source projection has no trustworthy
+//! terminal capture watermark: matching it is not proof that the production
+//! capture was complete.
 //! Effects must remain Lab-controlled for deterministic interpretation. Driver
 //! step quotas cannot bound a user poll or callback that does not return.
 
@@ -20,7 +25,9 @@ use super::{
     LabRunReport, LabRuntime, OnReplayDivergence, ProductionReplayOptions, ProductionReplayState,
     ReplayReport,
 };
+use crate::trace::event::{TraceData, TraceEventKind};
 use crate::trace::replay::{CompactTaskId, ProductionSchedule, ReplayEvent};
+use crate::types::Severity;
 
 /// Authority granted to a production task-order projection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -110,6 +117,18 @@ pub enum StrictProductionReplayTermination {
     WorkLimit,
     /// The Lab configuration's step limit was reached; it was not overridden.
     ConfiguredStepLimit,
+    /// Order and quiescence matched, but a task's terminal outcome differs
+    /// from the outcome captured for it (br-asupersync-bi2462.8). Reported
+    /// only for a schedule that [`ProductionSchedule::carries_outcomes`].
+    OutcomeMismatch {
+        /// Spawn ordinal of the first task whose outcome differs.
+        ordinal: usize,
+        /// Outcome captured in production.
+        expected: Severity,
+        /// Outcome the Lab recorded; `None` when its completion is no longer
+        /// in the Lab's trace ring.
+        observed: Option<Severity>,
+    },
 }
 
 /// Actual observations at the strict replay boundary, not a universal replay proof.
@@ -223,8 +242,12 @@ impl LabRuntime {
     /// selector with `OnReplayDivergence::Stop`. After the last choice, only
     /// bounded command/obligation pumps may run, never another task poll. A
     /// complete receipt requires exact source consumption, exact spawn count,
-    /// and no live or queued work. An incomplete receipt is not a successful
-    /// replay, even if some or all recorded choices matched.
+    /// and no live or queued work. When the schedule carries captured terminal
+    /// outcomes, every recorded task must also end with the same outcome in
+    /// the Lab, or the receipt is
+    /// [`StrictProductionReplayTermination::OutcomeMismatch`]. An incomplete
+    /// receipt is not a successful replay, even if some or all recorded
+    /// choices matched.
     ///
     /// Normal dispatch stays paused on every exit after admission, including an
     /// unwind. The caller retains `self`; cleanup is neither run implicitly nor
@@ -263,11 +286,20 @@ impl LabRuntime {
         // Fully prepare off to the side. A failed admission never installs a
         // partial source, replaces another mode, or invokes user code.
         let replay = prepare_source(schedule, limits)?;
+        if schedule.carries_outcomes() {
+            // Keep the Lab's own terminal outcomes so they can be compared.
+            self.trace().enable_completion_outcomes();
+        }
         self.production_replay = Some(replay);
         let mut pause = PauseOnExit { runtime: self };
         let start_steps = pause.runtime.steps;
         let mut work_units = 0;
-        let termination = drive(&mut *pause.runtime, limits, &mut work_units);
+        let mut termination = drive(&mut *pause.runtime, limits, &mut work_units);
+        if termination == StrictProductionReplayTermination::Matched
+            && let Some(mismatch) = outcome_mismatch(pause.runtime, schedule)
+        {
+            termination = mismatch;
+        }
         pause
             .runtime
             .production_replay
@@ -360,6 +392,45 @@ impl LabRuntime {
             replay: self.replay_report().expect("production replay installed"),
         })
     }
+}
+
+/// The first recorded task, in spawn order, whose Lab outcome differs from
+/// its captured outcome. Lab tasks bind to recorded tasks in the order they
+/// first entered the scheduler, as for task order.
+fn outcome_mismatch(
+    runtime: &LabRuntime,
+    schedule: &ProductionSchedule,
+) -> Option<StrictProductionReplayTermination> {
+    if !schedule.carries_outcomes() {
+        return None;
+    }
+    let (events, _, kept) = runtime.trace().snapshot_with_outcomes();
+    let kept: std::collections::BTreeMap<u64, Severity> = kept.into_iter().collect();
+    let scheduler = runtime.scheduler.lock();
+    schedule
+        .spawn_order()
+        .iter()
+        .enumerate()
+        .find_map(|(ordinal, source)| {
+            let expected = schedule.captured_outcome(*source)?;
+            let observed = scheduler.first_entry(ordinal).and_then(|lab_task| {
+                events.iter().find_map(|event| match &event.data {
+                    TraceData::Task { task, .. }
+                        if event.kind == TraceEventKind::Complete && *task == lab_task =>
+                    {
+                        kept.get(&event.seq).copied()
+                    }
+                    _ => None,
+                })
+            });
+            (observed != Some(expected)).then_some(
+                StrictProductionReplayTermination::OutcomeMismatch {
+                    ordinal,
+                    expected,
+                    observed,
+                },
+            )
+        })
 }
 
 struct PauseOnExit<'a> {

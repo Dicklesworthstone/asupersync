@@ -1718,6 +1718,91 @@ mod tests {
         );
     }
 
+    /// RFC 9114 §7.2.8 reserves the HTTP/2 frame types on every stream, and
+    /// the §7.2 frame table does not allow PUSH_PROMISE on a push stream.
+    #[test]
+    fn push_streams_reject_reserved_frames_and_push_promise() {
+        let mut client = H3ConnectionState::new_client();
+        client
+            .on_remote_uni_stream_type(11, H3_STREAM_TYPE_PUSH)
+            .expect("push stream");
+        client.on_push_stream_header(11, 0).expect("push header");
+        for frame_type in [0x02_u64, 0x06, 0x08, 0x09] {
+            let frame = H3Frame::Unknown {
+                frame_type,
+                payload: Vec::new(),
+            };
+            assert_eq!(
+                client.on_uni_stream_frame(11, &frame),
+                Err(H3NativeError::ControlProtocol(
+                    "HTTP/2 frame type is reserved in HTTP/3"
+                )),
+                "push {frame_type:#x}"
+            );
+        }
+        let promise = H3Frame::PushPromise {
+            push_id: 1,
+            field_block: vec![0x00, 0x00],
+        };
+        assert_eq!(
+            client.on_uni_stream_frame(11, &promise),
+            Err(H3NativeError::ControlProtocol(
+                "PUSH_PROMISE is not allowed on a push stream"
+            ))
+        );
+        // GREASE is still ignored, and the pushed response still flows.
+        let grease = H3Frame::Unknown {
+            frame_type: 0x21,
+            payload: Vec::new(),
+        };
+        client
+            .on_uni_stream_frame(11, &grease)
+            .expect("GREASE is ignored");
+        client
+            .on_uni_stream_frame(11, &H3Frame::Headers(vec![0x80]))
+            .expect("push response headers");
+    }
+
+    /// RFC 9114 §7.2.3: a CANCEL_PUSH naming a push ID above the client's
+    /// MAX_PUSH_ID, or sent before any MAX_PUSH_ID, is H3_ID_ERROR at a
+    /// server. A client may cancel any push ID up to the maximum.
+    #[test]
+    fn server_rejects_cancel_push_above_max_push_id() {
+        let above = Err(H3NativeError::ControlProtocol(
+            "CANCEL_PUSH names a push ID above MAX_PUSH_ID",
+        ));
+        let mut server = H3ConnectionState::new_server();
+        server
+            .on_control_frame(&H3Frame::Settings(H3Settings::default()))
+            .expect("settings");
+        assert_eq!(
+            server.on_control_frame(&H3Frame::CancelPush(0)),
+            above,
+            "no MAX_PUSH_ID yet"
+        );
+
+        let mut server = H3ConnectionState::new_server();
+        server
+            .on_control_frame(&H3Frame::Settings(H3Settings::default()))
+            .expect("settings");
+        server
+            .on_control_frame(&H3Frame::MaxPushId(5))
+            .expect("MAX_PUSH_ID");
+        server
+            .on_control_frame(&H3Frame::CancelPush(5))
+            .expect("the maximum itself may be cancelled");
+        assert_eq!(server.on_control_frame(&H3Frame::CancelPush(6)), above);
+
+        // A client receiving CANCEL_PUSH is not bounded by MAX_PUSH_ID here.
+        let mut client = H3ConnectionState::new_client();
+        client
+            .on_control_frame(&H3Frame::Settings(H3Settings::default()))
+            .expect("settings");
+        client
+            .on_control_frame(&H3Frame::CancelPush(7))
+            .expect("client accepts CANCEL_PUSH");
+    }
+
     #[test]
     fn client_role_goaway_zero_blocks_all_request_streams() {
         let mut c = H3ConnectionState::new();

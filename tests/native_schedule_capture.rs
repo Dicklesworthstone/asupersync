@@ -15,7 +15,7 @@ use asupersync::trace::{
     CompactTaskId, ProductionSchedule, ProjectionError, ProjectionOptions, ScheduleCaptureError,
     ScheduleCaptureSnapshot, TraceData, TraceEvent, TraceEventKind,
 };
-use asupersync::types::{Budget, CancelKind, TaskId};
+use asupersync::types::{Budget, CancelKind, Severity, TaskId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::{Future, poll_fn};
 use std::sync::{Arc, Mutex, mpsc};
@@ -148,7 +148,15 @@ fn native_parked_wakes_replay_with_identical_terminal_values() {
             assert_eq!(snapshot.dropped_events(), 0);
             assert_eq!(snapshot.worker_count(), workers);
             assert_caller_tasks_left_out(&snapshot, values.len());
+            assert_eq!(
+                snapshot.terminal_outcomes(),
+                &[
+                    (first.min(second), Severity::Ok),
+                    (first.max(second), Severity::Ok)
+                ]
+            );
             let schedule = snapshot.production_schedule().unwrap();
+            assert!(schedule.carries_outcomes());
             assert_eq!(schedule.summary().spawned, 2);
             assert!(schedule.summary().steps >= 4);
             let mut polls = BTreeMap::new();
@@ -225,6 +233,110 @@ fn native_parked_wakes_replay_with_identical_terminal_values() {
             assert!(runtime.shutdown_timeout(WATCHDOG));
         }
     }
+}
+
+/// br-asupersync-bi2462.8: the capture keeps each task's terminal outcome, and
+/// a strict replay in which a task ends differently is refused. Natively both
+/// tasks return their input. In the Lab reconstruction the second task panics
+/// on it, which a state task records as Panicked. Task order, spawn count and
+/// quiescence all still match, so only the outcome comparison can catch it.
+#[test]
+fn native_capture_outcomes_refuse_terminal_outcome_drift() {
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(1)
+        .capture_schedules(true)
+        .build()
+        .unwrap();
+    let (parked_tx, parked_rx) = mpsc::channel();
+    let values = [17, 29];
+    let mut joins = Vec::new();
+    let mut inputs = Vec::new();
+    for value in values {
+        let (sender, receiver) = oneshot::channel();
+        inputs.push((sender, value));
+        joins.push(
+            runtime
+                .handle()
+                .spawn(receive_input(receiver, Some(parked_tx.clone()), None)),
+        );
+    }
+    drop(parked_tx);
+    parked_rx.recv_timeout(WATCHDOG).expect("first task parked");
+    parked_rx
+        .recv_timeout(WATCHDOG)
+        .expect("second task parked");
+    for (sender, value) in inputs {
+        sender.send_blocking(value).unwrap();
+    }
+    let native: Vec<_> = joins
+        .into_iter()
+        .map(|join| join_native(&runtime, join))
+        .collect();
+    assert_eq!(native, values);
+
+    let snapshot = completed_capture(&runtime);
+    let outcomes: Vec<_> = snapshot
+        .terminal_outcomes()
+        .iter()
+        .map(|(_, outcome)| *outcome)
+        .collect();
+    assert_eq!(outcomes, [Severity::Ok, Severity::Ok]);
+    let schedule = snapshot.production_schedule().unwrap();
+    assert!(schedule.carries_outcomes());
+    let by_ordinal: Vec<_> = schedule
+        .spawn_order()
+        .iter()
+        .map(|task| schedule.captured_outcome(*task))
+        .collect();
+    assert_eq!(by_ordinal, [Some(Severity::Ok), Some(Severity::Ok)]);
+
+    let mut lab = LabRuntime::new(LabConfig::new(95).max_steps(128));
+    let region = lab.state.create_root_region(Budget::INFINITE);
+    let mut lab_joins = Vec::new();
+    for value in values {
+        let (sender, receiver) = oneshot::channel();
+        let (task, join) = lab
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                let received = receive_input(receiver, None, Some((sender, value))).await;
+                assert_ne!(received, 29, "the reconstructed task fails on its input");
+                received
+            })
+            .unwrap();
+        lab.scheduler.lock().schedule(task, 0);
+        lab_joins.push(join);
+    }
+    let report = lab
+        .run_production_schedule_strict(
+            &schedule,
+            StrictProductionReplayLimits::new(512, 8, 128, 128, 8),
+        )
+        .unwrap();
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "bead": "asupersync-bi2462.8",
+            "case": "terminal_outcome_drift",
+            "captured": format!("{by_ordinal:?}"),
+            "replay": format!("{report:?}"),
+        })
+    );
+    assert_eq!(report.replay.steps_matched, report.replay.steps_total);
+    assert_eq!(
+        report.termination,
+        StrictProductionReplayTermination::OutcomeMismatch {
+            ordinal: 1,
+            expected: Severity::Ok,
+            observed: Some(Severity::Panicked),
+        }
+    );
+    assert!(!report.passed());
+    assert!(
+        lab_joins
+            .iter()
+            .all(asupersync::runtime::TaskHandle::is_finished)
+    );
+    assert!(runtime.shutdown_timeout(WATCHDOG));
 }
 
 #[test]
@@ -817,11 +929,13 @@ fn real_ring_capture_copies_with_defects_are_refused() {
     assert_eq!(report.work_units, 0);
     assert_no_stage_completed("extra_task", &values, &finished);
 
-    // Terminal outcome drift is outside the strict receipt. The projection
-    // records task order, not values: completions carry outcome 0. The same
+    // Value drift is outside the strict receipt. The projection records task
+    // order and terminal outcomes, not the values tasks return. The same
     // schedule drives a ring kicked with a different value to a Matched
-    // receipt, so comparing the values, as the tests above do, is the
-    // harness's oracle for outcomes.
+    // receipt, because every stage still ends Ok, so comparing the values,
+    // as the tests above do, is the harness's oracle for values. Outcome
+    // drift is refused by the driver itself; see
+    // native_capture_outcomes_refuse_terminal_outcome_drift.
     let (report, values, _) = replay_ring(&schedule, RING_KICK + 1, false);
     let report = report.expect("the schedule is admitted");
     log("outcome_drift", format!("{report:?}"));

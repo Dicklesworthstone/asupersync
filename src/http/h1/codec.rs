@@ -1229,6 +1229,17 @@ fn split_line_crlf(src: &mut BytesMut, max_len: usize) -> Result<Option<BytesMut
 
 pub(super) fn parse_chunk_size_line(line: &[u8]) -> Result<usize, HttpError> {
     let line = std::str::from_utf8(line).map_err(|_| HttpError::BadChunkedEncoding)?;
+    // RFC 9112 §7.1.1: chunk-ext is tokens and quoted strings, so it holds no
+    // control characters. The line runs to the first CRLF, so a bare LF or CR
+    // inside an extension would end the line early on a peer that accepts bare
+    // LF, framing the body differently (request smuggling). Reject every CTL
+    // except HTAB.
+    if line
+        .bytes()
+        .any(|byte| byte.is_ascii_control() && byte != b'\t')
+    {
+        return Err(HttpError::BadChunkedEncoding);
+    }
     // Split on ';' to separate chunk-size from optional chunk-ext (RFC 7230 §4.1).
     // Do NOT trim — chunk-size = 1*HEXDIG with no leading/trailing whitespace.
     // Trimming would mask differences from stricter proxies (request smuggling vector).
@@ -1918,6 +1929,8 @@ mod tests {
             (b"10", 16),
             (b"A;ext=1", 10),
             (b"a;name=value", 10),
+            (b"5;a=\"quoted value\"", 5),
+            (b"5;a=1;b", 5),
         ];
         for &(line, expected) in accepted {
             assert_eq!(
@@ -1940,6 +1953,12 @@ mod tests {
             b"1\0",
             &[0xff],
             b"FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+            // Control characters inside a chunk extension (RFC 9112 §7.1.1).
+            b"5;ext\nX",
+            b"5;ext\rX",
+            b"5;a=\"q\nq\"",
+            b"5;ext\x7f",
+            b"5;\x00",
         ];
         for line in rejected {
             assert!(

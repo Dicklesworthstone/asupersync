@@ -144,6 +144,126 @@ fn unified_report_text_contains_all_oracles() {
     test_complete!("unified_report_text_contains_all_oracles");
 }
 
+/// Reported oracles that `LabRuntime` does not feed (br-asupersync-52hxjz).
+/// Wiring one to the runtime means moving it to
+/// `LAB_RUNTIME_FED_ORACLE_NAMES` and removing it here.
+const LAB_UNFED_ORACLES: &[&str] = &[
+    "region_leak",
+    "ambient_authority",
+    "cancel_correctness",
+    "cancel_debt",
+    "cancel_signal_ordering",
+    "runtime_epoch",
+    "channel_atomicity",
+    "waker_dedup",
+    "actor_leak",
+    "supervision",
+    "mailbox",
+    "rref_access",
+    "reply_linearity",
+    "registry_lease",
+    "down_order",
+    "supervisor_quiescence",
+];
+
+/// Under `messaging-fabric` the suite also reports these, also unfed.
+const LAB_UNFED_FABRIC_ORACLES: &[&str] = &[
+    "fabric_publish",
+    "fabric_reply",
+    "fabric_quiescence",
+    "fabric_redelivery",
+];
+
+/// Census of `LabRuntime` oracle feeding. Every reported oracle is either in
+/// `LAB_RUNTIME_FED_ORACLE_NAMES` or in the unfed lists above, so a new oracle
+/// cannot ship unclassified. After a real workload every unfed oracle has
+/// recorded no event, so an oracle that gets wired fails here until it is
+/// reclassified.
+#[test]
+fn lab_runtime_oracle_feeding_census() {
+    use asupersync::Cx;
+    use asupersync::channel::mpsc;
+    use asupersync::lab::oracle::{LAB_RUNTIME_FED_ORACLE_NAMES, OracleRegistry};
+    use asupersync::lab::{LabConfig, LabRuntime};
+    use asupersync::types::Budget;
+    use std::collections::BTreeSet;
+
+    init_test_logging();
+    test_phase!("lab_runtime_oracle_feeding_census");
+
+    let mut lab = LabRuntime::new(LabConfig::new(0x52_4a3a).max_steps(10_000));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let (task, handle) = lab
+        .state
+        .create_task(root, Budget::INFINITE, async {
+            let cx = Cx::current().expect("lab task installs a current Cx");
+            let (tx, mut rx) = mpsc::channel::<u32>(2);
+            tx.send(&cx, 7).await.expect("send into an open channel");
+            let received = rx.recv(&cx).await.expect("receive the sent value");
+            assert_eq!(received, 7);
+        })
+        .expect("create lab task");
+    lab.scheduler.lock().schedule(task, 0);
+    lab.run_until_quiescent();
+    drop(handle);
+    assert!(lab.is_quiescent(), "the census workload must finish");
+
+    let report = lab.report();
+    let oracle_report = &report.oracle_report;
+    tracing::info!(report = %oracle_report.to_text(), "oracle feeding census");
+    assert!(oracle_report.all_passed(), "{}", oracle_report.to_text());
+
+    let reported: BTreeSet<&str> = oracle_report
+        .entries
+        .iter()
+        .map(|entry| entry.invariant.as_str())
+        .collect();
+    let fed: BTreeSet<&str> = LAB_RUNTIME_FED_ORACLE_NAMES.iter().copied().collect();
+    assert!(
+        fed.is_subset(&reported),
+        "fed oracles missing from the report: {:?}",
+        fed.difference(&reported).collect::<Vec<_>>()
+    );
+
+    let mut expected_unfed: BTreeSet<&str> = LAB_UNFED_ORACLES.iter().copied().collect();
+    if cfg!(feature = "messaging-fabric") {
+        expected_unfed.extend(LAB_UNFED_FABRIC_ORACLES.iter().copied());
+    }
+    let unfed: BTreeSet<&str> = reported.difference(&fed).copied().collect();
+    assert_eq!(
+        unfed, expected_unfed,
+        "every reported oracle must be classified as fed or unfed"
+    );
+
+    for name in &unfed {
+        assert!(!OracleRegistry::is_fed_by_lab_runtime(name), "{name}");
+        let entry = oracle_report.entry(name).expect("reported oracle");
+        assert_eq!(
+            entry.stats.events_recorded, 0,
+            "{name} recorded events, so the runtime now feeds it; reclassify it: {entry:?}"
+        );
+    }
+
+    // The fed oracles this workload reaches (a task in a region using a
+    // channel permit). task_leak sees only tasks still live at report time,
+    // and loser_drain and finalizer need a race and a finalizer.
+    for name in [
+        "obligation_leak",
+        "quiescence",
+        "region_tree",
+        "deadline_monotone",
+    ] {
+        assert!(OracleRegistry::is_fed_by_lab_runtime(name), "{name}");
+        let entry = oracle_report.entry(name).expect("reported oracle");
+        assert!(
+            entry.stats.entities_tracked > 0,
+            "{name} must observe the census workload: {entry:?}"
+        );
+    }
+
+    test_complete!("lab_runtime_oracle_feeding_census");
+}
+
 #[test]
 fn unified_report_entry_lookup() {
     init_test_logging();

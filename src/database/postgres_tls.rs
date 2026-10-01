@@ -149,6 +149,16 @@ impl PgTlsOptions {
         use std::sync::Arc;
 
         let explicit = self.has_explicit_roots();
+        // verify-ca checks the chain but not the name, so only a private CA
+        // can tell this server apart: with public roots any publicly trusted
+        // certificate, for any host, would pass. libpq refuses this too.
+        if self.verification == PgTlsVerification::VerifyCa && !explicit {
+            return Err(PgError::Tls(
+                "sslmode=verify-ca needs sslrootcert or explicit CA certificates; public roots \
+                 cannot identify a server whose name is not checked"
+                    .into(),
+            ));
+        }
         let mut roots = RootCertStore::empty();
         let mut certificates = self.root_certificates.clone();
         if let Some(path) = &self.root_certificate_file {
