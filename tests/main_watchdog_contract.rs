@@ -535,6 +535,9 @@ fn a_dependency_the_worker_could_not_build_is_undecided_unless_a_workspace_crate
     // The check-wasm32 lane on a worker without the rustup target: every crate fails
     // on a missing `core` before any code of this repository is reached.
     let missing_target = "  INFO rch::hook: Selected worker: hz2 at ubuntu@host\n    Checking cfg-if v1.0.4\nerror[E0463]: can't find crate for `core`\n  |\n  = note: the `wasm32-unknown-unknown` target may not be installed\n  = help: consider downloading the target with `rustup target add wasm32-unknown-unknown`\nerror: could not compile `cfg-if` (lib) due to 1 previous error\n  Remote command finished: exit=101 in 900ms\n";
+    // The same fault under --message-format=short: rustc prints no note (check-wasm32 on
+    // ovh-a, 2026-10-01: filed as the false P0 bi2462.147.71).
+    let missing_target_short = "  INFO rch::hook: Selected worker: ovh-a at ubuntu@host\n    Checking cfg-if v1.0.5\nerror[E0463]: can't find crate for `core`\nerror: could not compile `cfg-if` (lib) due to 1 previous error\n    Checking typenum v1.20.1\nerror: could not compile `typenum` (lib) due to 1 previous error\n  Remote command finished: exit=101 in 900ms\n";
     // A dep-info fault can stop cargo before any crate reports `could not compile`
     // (hz4, 2026-09-29: filed as the false P0 bi2462.147.66).
     let dep_info_only = "  INFO rch::hook: Selected worker: hz4 at ubuntu@host\n   Compiling syn v2.0.119\nerror: could not parse/generate dep info at: /data/tmp/rch/asupersync/08eb264dca0e0e69/.rch-target-hz4-job-1/debug/build/syn/0f39f05953ee3969/out/syn-0f39f05953ee3969.d\n\nCaused by:\n  No such file or directory (os error 2)\n  Remote command finished: exit=101 in 7561ms\n";
@@ -546,6 +549,7 @@ fn a_dependency_the_worker_could_not_build_is_undecided_unless_a_workspace_crate
                 one("fault-test", "test"),
                 one("fault-missing-source", "build"),
                 one("fault-missing-target", "build"),
+                one("fault-missing-target-short", "build"),
                 one("fault-dep-info-only", "test"),
                 one("fault-beside-workspace-error", "build"),
                 one("fault-beside-member-error", "build"),
@@ -557,6 +561,7 @@ fn a_dependency_the_worker_could_not_build_is_undecided_unless_a_workspace_crate
             "fault-test": {head.clone(): {"log": dependency_fault("")}},
             "fault-missing-source": {head.clone(): {"log": missing_source}},
             "fault-missing-target": {head.clone(): {"log": missing_target}},
+            "fault-missing-target-short": {head.clone(): {"log": missing_target_short}},
             "fault-dep-info-only": {head.clone(): {"log": dep_info_only}},
             "fault-beside-workspace-error": {head.clone(): {"log": dependency_fault(
                 "src/lib.rs:10:5: error[E0599]: no method named `frob` found\nerror: could not compile `asupersync` (lib) due to 1 previous error\n"
@@ -570,7 +575,14 @@ fn a_dependency_the_worker_could_not_build_is_undecided_unless_a_workspace_crate
         },
     });
     let result = evaluate(&scenario);
-    for lane in ["fault-build", "fault-test", "fault-missing-source", "fault-missing-target", "fault-dep-info-only"] {
+    for lane in [
+        "fault-build",
+        "fault-test",
+        "fault-missing-source",
+        "fault-missing-target",
+        "fault-missing-target-short",
+        "fault-dep-info-only",
+    ] {
         let outcome = receipt(&result, lane);
         assert_eq!(outcome["verdict"], "no-evidence", "{lane}: {result:#}");
         assert!(
@@ -594,7 +606,14 @@ fn a_dependency_the_worker_could_not_build_is_undecided_unless_a_workspace_crate
         .iter()
         .filter_map(|payload| payload["lane"].as_str())
         .collect();
-    for lane in ["fault-build", "fault-test", "fault-missing-source", "fault-missing-target", "fault-dep-info-only"] {
+    for lane in [
+        "fault-build",
+        "fault-test",
+        "fault-missing-source",
+        "fault-missing-target",
+        "fault-missing-target-short",
+        "fault-dep-info-only",
+    ] {
         assert!(!filed.contains(&lane), "a worker fault must never file a bead: {filed:?}");
     }
     assert!(
