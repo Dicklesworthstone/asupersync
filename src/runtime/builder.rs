@@ -13270,22 +13270,29 @@ worker_threads = 16
 // follows the test module so that the unsafe-boundary ledger's line locators
 // in this file stay where they are.
 impl Runtime {
-    /// Enables an anytime-valid obligation leak monitor for this runtime.
+    /// Enables an obligation leak monitor for this runtime: a
+    /// [`crate::obligation::eprocess::LeakMonitor::change_detector`], whose
+    /// expected number of observations before a false alarm is at least
+    /// `1/alpha`.
     ///
-    /// Every obligation the runtime resolves after this call (committed,
-    /// aborted or leaked) feeds the monitor its age at resolution, exactly
-    /// once. Calibrate `expected_lifetime_ns` from profiled obligation
-    /// durations or the containing budget's deadline; see
-    /// [`crate::obligation::eprocess`]. Monitoring is off by default, and a
-    /// runtime without a monitor pays one branch per resolved obligation. A
-    /// second call replaces the monitor and its evidence.
+    /// Every obligation the runtime commits or aborts after this call feeds
+    /// the monitor its age at resolution, exactly once, and a leaked
+    /// obligation raises the alarm at once. The alarm latches. Calibrate
+    /// `expected_lifetime_ns` from profiled obligation durations or the
+    /// containing budget's deadline; see [`crate::obligation::eprocess`]. An
+    /// obligation held indefinitely is not observed until it resolves.
+    /// Monitoring is off by default, and a runtime without a monitor pays one
+    /// branch per resolved obligation. A second call replaces the monitor and
+    /// its evidence.
     ///
     /// # Panics
     /// If `config` is invalid (see [`crate::obligation::eprocess::LeakMonitor::new`]).
+    /// The configuration is checked before the runtime state is locked.
     pub fn enable_obligation_leak_monitor(
         &self,
         config: crate::obligation::eprocess::MonitorConfig,
     ) {
+        let _validated = crate::obligation::eprocess::LeakMonitor::new(config);
         self.inner
             .state
             .lock()
