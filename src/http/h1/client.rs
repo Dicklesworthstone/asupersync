@@ -56,10 +56,16 @@ pub struct Http1ClientCodec {
     /// Methods of the requests this codec encoded that have no final response
     /// yet, oldest first.
     pending_methods: std::collections::VecDeque<Method>,
+    /// Set once an entry of `pending_methods` was dropped. Every later
+    /// response would then be paired with the wrong request, so decoding a
+    /// final response fails instead.
+    pending_methods_dropped: bool,
 }
 
 /// Requests remembered for response framing. A codec used only to encode
-/// never pops them, so the oldest are dropped past this depth.
+/// never pops them, so the oldest are dropped past this depth; a codec that
+/// also decodes then refuses to frame responses (it cannot tell which
+/// request each one answers).
 const MAX_PENDING_METHODS: usize = 1024;
 
 enum ClientDecodeState {
@@ -99,6 +105,7 @@ impl Http1ClientCodec {
             max_body_size: DEFAULT_MAX_BODY_SIZE,
             max_trailers_size: DEFAULT_MAX_TRAILERS_SIZE,
             pending_methods: std::collections::VecDeque::new(),
+            pending_methods_dropped: false,
         }
     }
 
@@ -321,6 +328,13 @@ impl Http1ClientCodec {
                     // body whatever its headers say (RFC 9110 §6.4.1).
                     let request_method = if matches!(status, 100..=199) && status != 101 {
                         None
+                    } else if self.pending_methods_dropped {
+                        // A dropped method shifts every later pairing: a
+                        // response to HEAD would be read with a body, or a body
+                        // parsed as the next response's head.
+                        return Err(HttpError::Io(std::io::Error::other(
+                            "more than 1024 requests awaited responses; response framing is lost",
+                        )));
                     } else {
                         self.pending_methods.pop_front()
                     };
@@ -536,6 +550,7 @@ impl crate::codec::Encoder<Request> for Http1ClientCodec {
         // a response to HEAD has no body, whatever its headers say.
         if self.pending_methods.len() >= MAX_PENDING_METHODS {
             self.pending_methods.pop_front();
+            self.pending_methods_dropped = true;
         }
         self.pending_methods.push_back(method);
         Ok(())
@@ -815,6 +830,10 @@ impl Http1Client {
         let mut read_buf = BytesMut::with_capacity(8192);
         let mut scratch = [0u8; 8192];
         let mut informational_responses = 0usize;
+        // A deferred body upload that failed because the peer closed. The
+        // server may already have answered (for example 413, then close), so
+        // its response is read before this error is reported.
+        let mut upload_error: Option<std::io::Error> = None;
         loop {
             if let Some(end) = find_headers_end(read_buf.as_ref()) {
                 if end > DEFAULT_MAX_HEADERS_SIZE {
@@ -852,8 +871,7 @@ impl Http1Client {
                         });
                     }
                     if status == 100 && !request_body_sent {
-                        io.write_all(body_bytes).await?;
-                        io.flush().await?;
+                        upload_error = upload_deferred_body(&mut io, body_bytes).await?;
                         request_body_sent = true;
                     }
                     continue;
@@ -881,7 +899,7 @@ impl Http1Client {
                 return Ok(ClientStreamingResponse {
                     head,
                     body,
-                    body_withheld: !request_body_sent,
+                    body_withheld: !request_body_sent || upload_error.is_some(),
                 });
             }
 
@@ -897,8 +915,8 @@ impl Http1Client {
                     Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
                 }
             });
-            let n = if request_body_sent || !read_buf.is_empty() {
-                read.await?
+            let read = if request_body_sent || !read_buf.is_empty() {
+                read.await
             } else {
                 // Nothing has answered the expectation yet. A server that
                 // ignores it would wait for the body forever, so send it once
@@ -909,25 +927,75 @@ impl Http1Client {
                 let waited =
                     crate::time::timeout(now, EXPECT_CONTINUE_WAIT, std::pin::pin!(read)).await;
                 match waited {
-                    Ok(read) => read?,
+                    Ok(read) => read,
                     Err(_elapsed) => {
-                        io.write_all(body_bytes).await?;
-                        io.flush().await?;
-                        request_body_sent = true;
-                        continue;
+                        // The deadline can win a poll in which the answer has
+                        // already arrived. Look once more, without waiting,
+                        // before uploading.
+                        let ready = poll_fn(|cx| {
+                            let mut rb = ReadBuf::new(&mut scratch);
+                            Poll::Ready(match Pin::new(&mut io).poll_read(cx, &mut rb) {
+                                Poll::Pending => None,
+                                Poll::Ready(Ok(())) => Some(Ok(rb.filled().len())),
+                                Poll::Ready(Err(e)) => Some(Err(e)),
+                            })
+                        })
+                        .await;
+                        if let Some(read) = ready {
+                            read
+                        } else {
+                            upload_error = upload_deferred_body(&mut io, body_bytes).await?;
+                            request_body_sent = true;
+                            continue;
+                        }
                     }
                 }
             };
 
+            let n = match read {
+                Ok(n) => n,
+                Err(error) => return Err(HttpError::Io(upload_error.take().unwrap_or(error))),
+            };
             if n == 0 {
-                return Err(HttpError::Io(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "connection closed before response headers",
-                )));
+                return Err(HttpError::Io(upload_error.take().unwrap_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "connection closed before response headers",
+                    )
+                })));
             }
 
             read_buf.extend_from_slice(&scratch[..n]);
         }
+    }
+}
+
+/// Sends a deferred `Expect: 100-continue` body. When the peer closed during
+/// the upload, it may already have answered (for example 413, then close), so
+/// that error is returned for the caller to report only if no response can be
+/// read. Any other write failure is returned at once.
+async fn upload_deferred_body<T: AsyncWrite + Unpin>(
+    io: &mut T,
+    body: &[u8],
+) -> std::io::Result<Option<std::io::Error>> {
+    let uploaded = async {
+        io.write_all(body).await?;
+        io.flush().await
+    }
+    .await;
+    match uploaded {
+        Ok(()) => Ok(None),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+            ) =>
+        {
+            Ok(Some(error))
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -945,7 +1013,8 @@ pub struct ClientStreamingResponse<T> {
     /// returned to a keep-alive pool — the next request written on it would be
     /// consumed by the server as this request's missing body
     /// (br-asupersync-h1-expect-100-pool-h9le7v). Mirrors hyper disabling
-    /// keep-alive in this case.
+    /// keep-alive in this case. It is also true when the deferred body upload
+    /// failed because the peer closed, and this response was read afterwards.
     pub body_withheld: bool,
 }
 
@@ -1363,6 +1432,43 @@ mod tests {
         let get = codec.decode(&mut buf).unwrap().expect("GET response");
         assert_eq!(get.body, b"ok");
         assert!(buf.is_empty());
+    }
+
+    /// Past its pending-method limit the codec drops the oldest method, so
+    /// every later response would be paired with the wrong request: a GET's
+    /// body read as the head that follows a HEAD. Decoding then fails instead.
+    #[test]
+    fn client_codec_refuses_to_frame_responses_after_dropping_a_method() {
+        let request = |method: Method| Request {
+            method,
+            uri: "/".to_string(),
+            version: Version::Http11,
+            headers: vec![("Host".to_string(), "example.com".to_string())],
+            body: Vec::new(),
+            trailers: Vec::new(),
+            peer_addr: None,
+        };
+        let response = &b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"[..];
+        let mut wire = BytesMut::new();
+
+        // At the limit, every response still pairs with its own request.
+        let mut codec = Http1ClientCodec::new();
+        for _ in 0..MAX_PENDING_METHODS {
+            codec.encode(request(Method::Get), &mut wire).unwrap();
+        }
+        let mut buf = BytesMut::from(response);
+        let get = codec.decode(&mut buf).unwrap().expect("GET response");
+        assert_eq!(get.body, b"ok");
+
+        // One request more: the first GET's method is dropped, and the first
+        // response would have been framed as the second request's.
+        let mut codec = Http1ClientCodec::new();
+        for _ in 0..MAX_PENDING_METHODS {
+            codec.encode(request(Method::Get), &mut wire).unwrap();
+        }
+        codec.encode(request(Method::Head), &mut wire).unwrap();
+        let mut buf = BytesMut::from(response);
+        assert!(matches!(codec.decode(&mut buf), Err(HttpError::Io(_))));
     }
 
     /// A legacy server's Latin-1 byte in a field value (obs-text) is decoded
@@ -1895,6 +2001,188 @@ mod tests {
             io.written.ends_with(b"\r\n\r\nhello"),
             "head, then the body"
         );
+    }
+
+    /// Answers the expectation only once told to, and never wakes a reader.
+    #[derive(Debug)]
+    struct AnswersWhenToldIo {
+        answered: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        written: Vec<u8>,
+        response: std::io::Cursor<Vec<u8>>,
+    }
+
+    impl AsyncRead for AnswersWhenToldIo {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            if !self.answered.load(std::sync::atomic::Ordering::SeqCst) {
+                return Poll::Pending;
+            }
+            let dst = buf.unfilled();
+            let n = std::io::Read::read(&mut self.response, dst)?;
+            buf.advance(n);
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for AnswersWhenToldIo {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            src: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.written.extend_from_slice(src);
+            Poll::Ready(Ok(src.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn expect_continue_upload(body: &[u8]) -> Request {
+        Request {
+            method: Method::Post,
+            uri: "/upload".to_string(),
+            version: Version::Http11,
+            headers: vec![
+                ("Host".to_string(), "example.com".to_string()),
+                ("Expect".to_string(), "100-continue".to_string()),
+            ],
+            body: body.to_vec(),
+            trailers: Vec::new(),
+            peer_addr: None,
+        }
+    }
+
+    /// The server answers within the expectation wait, but the task is next
+    /// polled after the wait elapsed. The answer is already readable, so the
+    /// body must not be uploaded (RFC 9110 section 10.1.1).
+    #[test]
+    fn request_streaming_expect_continue_reads_an_answer_that_arrived_before_the_wait_elapsed() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        let clock = std::sync::Arc::new(VirtualClock::starting_at(crate::types::Time::ZERO));
+        let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+        let cx = crate::cx::Cx::new_with_drivers(
+            crate::types::RegionId::new_for_test(0, 1),
+            crate::types::TaskId::new_for_test(0, 0),
+            crate::types::Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer),
+            None,
+        );
+        let _current = crate::cx::Cx::set_current(Some(cx));
+        let answered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let io = AnswersWhenToldIo {
+            answered: std::sync::Arc::clone(&answered),
+            written: Vec::new(),
+            response: std::io::Cursor::new(
+                b"HTTP/1.1 417 Expectation Failed\r\nContent-Length: 0\r\n\r\n".to_vec(),
+            ),
+        };
+        let mut request = std::pin::pin!(Http1Client::request_with_io(
+            io,
+            expect_continue_upload(b"hello")
+        ));
+        let mut task_cx = Context::from_waker(Waker::noop());
+        assert!(
+            request.as_mut().poll(&mut task_cx).is_pending(),
+            "the client waits for an answer to the expectation"
+        );
+        answered.store(true, std::sync::atomic::Ordering::SeqCst);
+        clock.advance(2_000_000_000);
+        let Poll::Ready(result) = request.as_mut().poll(&mut task_cx) else {
+            panic!("the answer is already readable");
+        };
+        let (response, io, body_withheld) = result.expect("response");
+        assert_eq!(response.status, 417);
+        assert!(body_withheld, "the body was never sent");
+        assert!(
+            io.written.ends_with(b"\r\n\r\n"),
+            "only the request head was written"
+        );
+    }
+
+    /// Ignores the expectation, then rejects the upload: the body write fails
+    /// with a broken pipe, after which the server's 413 is readable.
+    #[derive(Debug)]
+    struct RejectsTheUploadIo {
+        head_written: bool,
+        upload_failed: bool,
+        response: std::io::Cursor<Vec<u8>>,
+    }
+
+    impl AsyncRead for RejectsTheUploadIo {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            if !self.upload_failed {
+                return Poll::Pending;
+            }
+            let dst = buf.unfilled();
+            let n = std::io::Read::read(&mut self.response, dst)?;
+            buf.advance(n);
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for RejectsTheUploadIo {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            src: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            if self.head_written {
+                self.upload_failed = true;
+                return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
+            }
+            self.head_written = true;
+            Poll::Ready(Ok(src.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// A server that rejects slowly answers 413 and closes while the body is
+    /// uploading. The client reports that 413, not the broken pipe.
+    #[test]
+    fn request_streaming_expect_continue_reports_the_answer_to_a_rejected_upload() {
+        let io = RejectsTheUploadIo {
+            head_written: false,
+            upload_failed: false,
+            response: std::io::Cursor::new(
+                b"HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_vec(),
+            ),
+        };
+        let req = expect_continue_upload(b"hello");
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(block_on(Http1Client::request_with_io(io, req)));
+        });
+        let (response, io, body_withheld) = done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the request finishes after the expectation wait")
+            .expect("the server's answer, not the broken pipe");
+        assert_eq!(response.status, 413);
+        assert!(body_withheld, "the upload did not complete");
+        assert!(io.upload_failed);
     }
 
     #[test]
