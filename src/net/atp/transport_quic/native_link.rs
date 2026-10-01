@@ -8083,6 +8083,45 @@ async fn drive_native_source_stream_flush(
     }
 }
 
+/// Read control frames the receiver sent while the source stream is still
+/// queueing. The sender otherwise reads control only after its last byte, so
+/// a refusal that arrived mid-stream went unheard until the sender's own
+/// timeout (asupersync-nnm3gw). A refusal (an uncommitted Proof) ends the
+/// transfer here, exactly as the proof wait after the stream would end it.
+/// KeepAlive is skipped. Any other frame is kept in `early` for that proof
+/// wait, which handles it unchanged.
+async fn check_source_stream_control(
+    cx: &Cx,
+    link: &mut QuicLink,
+    control: &mut NativeQuicFrameTransport,
+    early: &mut Option<Frame>,
+) -> Result<(), QuicTransportError> {
+    while early.is_none() {
+        let Some(frame) = control.try_recv(cx, &mut link.conn)? else {
+            break;
+        };
+        match frame.frame_type() {
+            FrameType::KeepAlive => {}
+            FrameType::Proof => {
+                let receipt = super::parse_json::<ReceiveReceipt>(&frame)?;
+                if receipt.committed {
+                    *early = Some(frame);
+                } else {
+                    super::send_native_close(cx, &mut link.conn, control)?;
+                    link.flush(cx).await?;
+                    return Err(QuicTransportError::Integrity(
+                        receipt
+                            .reason
+                            .unwrap_or_else(|| "receiver did not commit".to_string()),
+                    ));
+                }
+            }
+            _ => *early = Some(frame),
+        }
+    }
+    Ok(())
+}
+
 /// Wait until the paced source stream may admit new payload bytes: the
 /// send queue is flushed below its cap, sent-but-unacked bytes are back under
 /// the runaway guard, and (when the receiver negotiated a bounded window) at
@@ -8094,6 +8133,8 @@ async fn drive_native_source_stream_flush(
 async fn wait_source_stream_send_admission(
     cx: &Cx,
     link: &mut QuicLink,
+    control: &mut NativeQuicFrameTransport,
+    early: &mut Option<Frame>,
     stream: StreamId,
     min_credit: u64,
     config: &QuicConfig,
@@ -8178,6 +8219,13 @@ async fn wait_source_stream_send_admission(
         }
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
         let pumped = link.pump_inbound_for(cx, SOURCE_STREAM_PTO).await?;
+        // A receiver that refused the transfer grants no more credit, so a
+        // credit-blocked sender is where a refusal would otherwise go unheard
+        // until the idle timeout. Only that case reads control here; a
+        // transfer that never waits on credit is untouched.
+        if !credit_ok {
+            check_source_stream_control(cx, link, control, early).await?;
+        }
         // Give never-yet-sent pending frames (e.g. a tree manifest's tail on
         // the control stream) a shot at whatever cwnd the latest ACKs freed:
         // the gate's non-stall path otherwise never flushes, so pending
@@ -8221,6 +8269,8 @@ async fn wait_source_stream_send_admission(
 async fn send_native_source_stream_entries_pumped(
     cx: &Cx,
     link: &mut QuicLink,
+    control: &mut NativeQuicFrameTransport,
+    early: &mut Option<Frame>,
     stream: StreamId,
     prepared: &QuicPreparedSource,
     config: &QuicConfig,
@@ -8270,7 +8320,8 @@ async fn send_native_source_stream_entries_pumped(
             if link.conn.stream_send_credit_remaining(stream) < n_u64 {
                 drive_native_source_stream_flush(cx, link, config.idle_timeout, false).await?;
                 queued_since_flush = 0;
-                wait_source_stream_send_admission(cx, link, stream, n_u64, config).await?;
+                wait_source_stream_send_admission(cx, link, control, early, stream, n_u64, config)
+                    .await?;
             }
             link.conn
                 .write_stream_bytes(cx, stream, Bytes::copy_from_slice(&buf[..n]), false)?;
@@ -8292,7 +8343,8 @@ async fn send_native_source_stream_entries_pumped(
                 // window of credit here quantized the transfer into one
                 // window per RTT); this wait only enforces the queue and
                 // unacked ceilings.
-                wait_source_stream_send_admission(cx, link, stream, 0, config).await?;
+                wait_source_stream_send_admission(cx, link, control, early, stream, 0, config)
+                    .await?;
             }
         }
         if read != entry.size {
@@ -8567,9 +8619,19 @@ async fn run_sender_session(
             source_stream_max_frame_bytes(),
         );
         let source_result: Result<SendReport, QuicTransportError> = erase_send(async {
-            let bytes_streamed =
-                send_native_source_stream_entries_pumped(cx, link, source_stream, prepared, config)
-                    .await?;
+            // A control frame read while the stream was still queueing, other
+            // than a refusal, which ends the send at once.
+            let mut early_control: Option<Frame> = None;
+            let bytes_streamed = send_native_source_stream_entries_pumped(
+                cx,
+                link,
+                &mut control,
+                &mut early_control,
+                source_stream,
+                prepared,
+                config,
+            )
+            .await?;
             if bytes_streamed != manifest.total_bytes {
                 return Err(QuicTransportError::Integrity(format!(
                     "source stream sent {bytes_streamed} bytes, expected {}",
@@ -8591,13 +8653,17 @@ async fn run_sender_session(
             // under NewReno cwnd after the initial source send returns.
             loop {
                 cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-                let reply_frame = link
-                    .next_control_frame_with_source_stream_recovery(
-                        cx,
-                        &mut control,
-                        "receive stream-source proof",
-                    )
-                    .await?;
+                let reply_frame = match early_control.take() {
+                    Some(frame) => frame,
+                    None => {
+                        link.next_control_frame_with_source_stream_recovery(
+                            cx,
+                            &mut control,
+                            "receive stream-source proof",
+                        )
+                        .await?
+                    }
+                };
                 match reply_frame.frame_type() {
                     FrameType::Proof => {
                         let receipt = super::parse_json::<ReceiveReceipt>(&reply_frame)?;
