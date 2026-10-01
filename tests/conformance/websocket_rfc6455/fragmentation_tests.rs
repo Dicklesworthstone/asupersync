@@ -10,10 +10,11 @@
 //! - Message level: reassembly lives in the production `MessageAssembler`,
 //!   which is crate-private. It is reached through the public
 //!   `WebSocket::from_upgraded` + `WebSocket::recv` path over the production
-//!   in-memory `VirtualTcpStream` transport (no OS socket, no mock). The peer
-//!   writes its frames and then shuts down its write side before `recv` is
-//!   polled, so every `recv` terminates: a regression shows up as a wrong
-//!   result or end-of-stream, never as a hang.
+//!   in-memory `VirtualTcpStream` transport (no OS socket; every byte goes
+//!   through production code). The peer writes its frames and then shuts
+//!   down its write side before `recv` is polled, so every `recv`
+//!   terminates: a regression shows up as a wrong result or end-of-stream,
+//!   never as a hang.
 //!
 //! The `pub(super)` live-connection helpers below are shared with the
 //! control-frame, close, error-handling and extension modules.

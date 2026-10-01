@@ -1891,7 +1891,7 @@ fn create_a_response(id: u16) -> Vec<u8> {
     )
 }
 
-/// The query an RFC 1035 stub resolver sends: only RD set (QR=0, OPCODE=0,
+/// The query an RFC 1035 client-side resolver sends: only RD set (QR=0, OPCODE=0,
 /// Z=0, RCODE=0), QDCOUNT=1, one IN-class question and no other sections.
 fn create_expected_resolver_query(id: u16, name: &str, qtype: u16) -> Vec<u8> {
     create_dns_message(
