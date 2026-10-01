@@ -12326,6 +12326,7 @@ worker_threads = 16
         pending: bool,
         done: bool,
         _resource: crate::sync::OwnedMutexGuard<()>,
+        _lease: Arc<()>,
     }
 
     impl Future for NativeManagedHeldFinalizer {
@@ -12456,6 +12457,12 @@ worker_threads = 16
                 .map(|_| Arc::new(crate::sync::Mutex::new(())))
                 .collect(),
         );
+        // Only held finalizers clone a lease, so a count above one means an
+        // original finalizer is still alive. Probing `resources` with
+        // try_lock would take the lock, and concurrent replacements and the
+        // test thread's own probes would then fail each other
+        // (br-asupersync-bi2462.147.72).
+        let leases: Arc<Vec<Arc<()>>> = Arc::new((0..3).map(|_| Arc::new(())).collect());
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let mut builder = SupervisorBuilder::new("native-registered-finalizer-replacement")
             .with_restart_policy(policy);
@@ -12469,19 +12476,19 @@ worker_threads = 16
             builder = builder.child(spec);
             let ready_tx = ready_tx.clone();
             let log = Arc::clone(&log);
-            let resources = Arc::clone(&resources);
+            let leases = Arc::clone(&leases);
             bindings.push(ManagedChildBinding::new(
                 name,
                 ManagedRestartMode::Transient,
                 move |cx: Cx, generation: ManagedGeneration| {
                     let ready_tx = ready_tx.clone();
                     let log = Arc::clone(&log);
-                    let resources = Arc::clone(&resources);
+                    let leases = Arc::clone(&leases);
                     async move {
                         assert_eq!(cx.task_id(), generation.task);
                         assert_eq!(cx.region_id(), generation.region);
                         if generation.number == 2 {
-                            assert!(resources.iter().all(|resource| resource.try_lock_owned().is_ok()),
+                            assert!(leases.iter().all(|lease| Arc::strong_count(lease) == 1),
                                 "replacement cannot run while any original finalizer owns its resource");
                         }
                         let (commands, mut receiver) = mpsc::channel(2);
@@ -12595,6 +12602,7 @@ worker_threads = 16
                 pending: false,
                 done: false,
                 _resource: resource,
+                _lease: Arc::clone(&leases[child]),
             };
             let mut state = runtime
                 .inner
