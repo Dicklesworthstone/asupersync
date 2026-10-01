@@ -14,13 +14,14 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use asupersync::trace::integrity::{verify_trace, VerificationOptions};
 //!
+//! # fn check_trace() -> std::io::Result<()> {
 //! // Verify a trace file
 //! let result = verify_trace("trace.bin", &VerificationOptions::default())?;
 //! if result.is_valid() {
-//!     println!("Trace is valid with {} events", result.event_count);
+//!     println!("Trace is valid with {} events", result.verified_events);
 //! } else {
 //!     for issue in result.issues() {
 //!         eprintln!("Issue: {}", issue);
@@ -29,6 +30,8 @@
 //!
 //! // Strict verification (includes timeline monotonicity)
 //! let result = verify_trace("trace.bin", &VerificationOptions::strict())?;
+//! # Ok(())
+//! # }
 //! ```
 
 use super::file::{TRACE_FILE_VERSION, TraceFileError, TraceReader};

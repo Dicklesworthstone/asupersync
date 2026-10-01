@@ -108,8 +108,20 @@
 //! If a task is cancelled while holding a resource, the [`PooledResource`]'s
 //! [`Drop`] implementation ensures the resource is returned to the pool:
 //!
-//! ```ignore
-//! async fn risky_operation(cx: &Cx, pool: &DbPool) -> Result<Data> {
+//! ```no_run
+//! use asupersync::Cx;
+//! use asupersync::sync::Pool;
+//! # struct DbConn;
+//! # impl DbConn {
+//! #     async fn query(&self, _sql: &str) -> std::io::Result<Vec<String>> {
+//! #         Ok(Vec::new())
+//! #     }
+//! # }
+//!
+//! async fn risky_operation(
+//!     cx: &Cx,
+//!     pool: &impl Pool<Resource = DbConn>,
+//! ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
 //!     let conn = pool.acquire(cx).await?;
 //!
 //!     // Even if this panics or cx is cancelled, conn will be returned!
@@ -551,9 +563,20 @@ impl<R> PooledResource<R> {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// let mut conn = pool.acquire(&cx).await?;
-    /// match conn.execute_query(sql).await {
+    /// ```no_run
+    /// # use asupersync::Cx;
+    /// # use asupersync::sync::{Pool, PoolError};
+    /// # struct Conn;
+    /// # struct DbError { broken: bool }
+    /// # impl DbError { fn is_connection_broken(&self) -> bool { self.broken } }
+    /// # impl From<PoolError> for DbError { fn from(_: PoolError) -> Self { Self { broken: false } } }
+    /// # impl Conn {
+    /// #     async fn execute_query(&mut self, _sql: &str) -> Result<Vec<String>, DbError> { Ok(Vec::new()) }
+    /// # }
+    /// # async fn run(cx: &Cx, pool: &impl Pool<Resource = Conn, Error = PoolError>, sql: &str) -> Result<Vec<String>, DbError> {
+    /// let mut conn = pool.acquire(cx).await?;
+    /// let result = conn.execute_query(sql).await;
+    /// match result {
     ///     Ok(rows) => return Ok(rows),
     ///     Err(e) if e.is_connection_broken() => {
     ///         conn.mark_broken();           // ← key call
@@ -561,6 +584,7 @@ impl<R> PooledResource<R> {
     ///     }
     ///     Err(e) => return Err(e),          // Drop returns to pool (healthy)
     /// }
+    /// # }
     /// ```
     #[inline]
     pub fn mark_broken(&mut self) {

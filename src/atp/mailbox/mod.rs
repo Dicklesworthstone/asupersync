@@ -16,29 +16,31 @@
 //!
 //! # Usage Example
 //!
-//! ```rust,ignore
-//! use asupersync::atp::mailbox::{MailboxClient, MailboxConfig};
+//! ```rust,no_run
+//! use asupersync::atp::mailbox::{MailboxClient, MailboxConfig, MailboxResult, PeerId};
+//! use asupersync::Cx;
 //!
-//! let config = MailboxConfig {
-//!     relay_endpoint: "relay.example.com:8080".parse().unwrap(),
-//!     encryption_key: generate_mailbox_key(),
-//!     quota_limit: 1_000_000_000, // 1GB
-//! };
+//! async fn mailbox_round_trip(cx: &Cx, peer_id: PeerId, payload: Vec<u8>) -> MailboxResult<()> {
+//!     let config = MailboxConfig {
+//!         relay_endpoint: "203.0.113.10:8080".parse().unwrap(),
+//!         quota_limit: 1_000_000_000, // 1GB
+//!         // `Default` generates a fresh `encryption_key` and derives
+//!         // `local_peer_id` from it.
+//!         ..MailboxConfig::default()
+//!     };
 //!
-//! let mut client = MailboxClient::new(config).await?;
+//!     let mut client = MailboxClient::new(config).await?;
 //!
-//! // Send to offline peer
-//! let transfer_id = client.send_to_mailbox(
-//!     peer_id,
-//!     object_graph,
-//!     retention_policy
-//! ).await?;
+//!     // Send to offline peer
+//!     let transfer_id = client.send_to_mailbox(cx, peer_id, payload).await?;
 //!
-//! // Receive from mailbox
-//! let transfers = client.check_mailbox().await?;
-//! for transfer in transfers {
-//!     let object = client.receive_from_mailbox(transfer.id).await?;
-//!     // Verify and process object
+//!     // Receive from mailbox
+//!     let transfers = client.check_mailbox(cx).await?;
+//!     for transfer in transfers {
+//!         let data = client.receive_from_mailbox(cx, transfer.transfer_id).await?;
+//!         // Verify and process the decrypted bytes
+//!     }
+//!     Ok(())
 //! }
 //! ```
 

@@ -21,40 +21,62 @@
 //!
 //! # Runtime Integration
 //!
-//! When the `cancel-correctness-oracle` feature is enabled, this oracle provides
-//! real-time cancellation protocol verification during development and testing:
+//! `LabRuntime` feeds this oracle's hooks during a run. Used standalone, the
+//! caller drives the same hooks for real-time cancellation protocol
+//! verification:
 //!
-//! ```rust,ignore
-//! use asupersync::lab::oracle::cancellation_protocol::{CancellationProtocolOracle, CancelCorrectnessConfig};
+//! ```rust,no_run
+//! use asupersync::lab::oracle::cancellation_protocol::{
+//!     CancelCorrectnessConfig, CancellationProtocolOracle, EnforcementMode,
+//! };
+//! use asupersync::record::task::TaskState;
+//! use asupersync::types::{Budget, CancelReason, RegionId, TaskId, Time};
 //!
 //! // Configure for runtime use
 //! let config = CancelCorrectnessConfig {
-//!     enforcement: EnforcementMode::Warn, // or Panic
+//!     enforcement: EnforcementMode::Warn, // or Panic / Collect
 //!     capture_stacks: true,
 //!     max_violations_tracked: 100,
+//!     structured_logging: true,
 //! };
 //! let mut oracle = CancellationProtocolOracle::with_config(config);
 //!
-//! // Runtime hooks automatically call these methods:
-//! oracle.on_region_create(region, parent);
+//! // Under `LabRuntime`, the runtime feeds the cancel-request, transition and
+//! // poll hooks itself; standalone use drives the hooks by hand:
+//! let region = RegionId::testing_default();
+//! let task = TaskId::testing_default();
+//! let reason = CancelReason::user("shutdown");
+//! oracle.on_region_create(region, None);
 //! oracle.on_task_create(task, region);
-//! oracle.on_cancel_request(task, reason, time);
-//! oracle.on_transition(task, from, to, time);
-//! oracle.on_region_cancel(region, reason, time);
+//! oracle.on_cancel_request(task, reason.clone(), Time::from_nanos(10));
+//! oracle.on_transition(
+//!     task,
+//!     &TaskState::Running,
+//!     &TaskState::CancelRequested {
+//!         reason: reason.clone(),
+//!         cleanup_budget: Budget::INFINITE,
+//!     },
+//!     Time::from_nanos(11),
+//! );
+//! oracle.on_region_cancel(region, reason, Time::from_nanos(12));
 //!
 //! // Check for violations
 //! if let Err(violation) = oracle.check() {
-//!     match config.enforcement {
-//!         EnforcementMode::Warn => eprintln!("Cancel protocol violation: {}", violation),
+//!     match oracle.config().enforcement {
+//!         EnforcementMode::Warn | EnforcementMode::Collect => {
+//!             eprintln!("Cancel protocol violation: {}", violation);
+//!         }
 //!         EnforcementMode::Panic => panic!("Cancel protocol violation: {}", violation),
 //!     }
 //! }
 //! ```
 //!
-//! # Zero-Cost Compilation
+//! # Feature Gating
 //!
-//! When the `cancel-correctness-oracle` feature is disabled, all oracle operations
-//! compile to no-ops with zero runtime overhead.
+//! The oracle's hooks and checks are compiled and run whether or not the
+//! `cancel-correctness-oracle` feature is enabled. The feature gates only the
+//! structured error log a violation emits
+//! ([`emit_structured_log`](ViolationRecord::emit_structured_log)).
 
 use crate::record::task::TaskState;
 use crate::runtime::RuntimeState;

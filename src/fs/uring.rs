@@ -123,11 +123,11 @@ impl std::fmt::Debug for IoUringFileInner {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use asupersync::fs::uring::IoUringFile;
 ///
 /// async fn example() -> std::io::Result<()> {
-///     let mut file = IoUringFile::open("/tmp/test.txt").await?;
+///     let file = IoUringFile::open("/tmp/test.txt")?; // `open` is synchronous
 ///     let mut buf = vec![0u8; 1024];
 ///     let n = file.read(&mut buf).await?;
 ///     Ok(())

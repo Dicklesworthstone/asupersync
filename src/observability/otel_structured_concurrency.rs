@@ -1,12 +1,13 @@
 //! OpenTelemetry integration for structured concurrency tracing.
 //!
-//! This module provides automatic span creation and context propagation for
-//! asupersync's structured concurrency primitives, enabling production-grade
-//! observability without manual instrumentation.
+//! This module provides span types, storage and context propagation for
+//! asupersync's structured concurrency primitives. The runtime does not create
+//! these spans: the caller owns a [`SpanStorage`] and records region, task,
+//! operation and cancellation spans into it.
 //!
 //! # Features
 //!
-//! - **Automatic Spans**: Regions, tasks, operations, and cancellation events
+//! - **Span Types**: Regions, tasks, operations, and cancellation events
 //! - **Hierarchical Tracing**: Perfect parent-child relationships
 //! - **Lazy Evaluation**: Minimal overhead via deferred span materialization
 //! - **Rich Context**: Structured concurrency semantic information in spans
@@ -14,17 +15,41 @@
 //!
 //! # Usage
 //!
-//! ```ignore
-//! use asupersync::observability::otel_structured_concurrency::OtelStructuredConcurrencyConfig;
-//! use asupersync::runtime::RuntimeBuilder;
+//! ```no_run
+//! use asupersync::observability::otel_structured_concurrency::{
+//!     EntityId, OtelStructuredConcurrencyConfig, SpanStorage, SpanType,
+//! };
+//! use asupersync::types::Time;
+//! use std::time::Duration;
 //!
 //! let config = OtelStructuredConcurrencyConfig::default()
 //!     .with_global_sample_rate(0.1) // 10% sampling
 //!     .with_always_sample_cancellation(); // Always trace cancellation
 //!
-//! let runtime = RuntimeBuilder::new()
-//!     .with_otel_structured_concurrency(config)
-//!     .build()?;
+//! // There is no `RuntimeBuilder` hook for this module: the caller owns a
+//! // `SpanStorage` and records structured-concurrency spans into it directly.
+//! // Without the `metrics` feature, `SpanStorage` is a no-op that records nothing.
+//! let storage = SpanStorage::new(config);
+//!
+//! // A sampled span starts as a lightweight pending record; it is only
+//! // materialized into an OpenTelemetry span when ended or once it has
+//! // accumulated enough operations.
+//! let cancel = EntityId::Cancel(1);
+//! let _recorded = storage.create_span(
+//!     SpanType::Cancel,
+//!     cancel,
+//!     "cancel_drain".to_string(),
+//!     Time::from_nanos(0),
+//!     None, // no parent OpenTelemetry context
+//! );
+//! storage.add_span_operation(cancel);
+//!
+//! // Spans left un-ended past the age threshold are reported as obligation leaks.
+//! let leaks = storage.detect_obligation_leaks(Duration::from_secs(30));
+//! assert!(leaks.is_empty());
+//!
+//! let (spans_created, ..) = storage.stats();
+//! println!("spans created: {spans_created}");
 //! ```
 
 #![allow(missing_docs)]
