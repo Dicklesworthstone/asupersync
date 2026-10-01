@@ -419,6 +419,7 @@ fn e2e_tracked_mpsc_leak_detection_panics() {
 
 #[cfg(feature = "kafka")]
 #[test]
+#[ignore = "needs a live Kafka broker at localhost:9092 (asupersync-w6qog5); run with -- --ignored"]
 fn e2e_kafka_consumer_lifecycle() {
     common::init_test_logging();
     common::run_test_with_cx(|cx| async move {
@@ -478,6 +479,7 @@ fn e2e_kafka_consumer_lifecycle() {
 
 #[cfg(feature = "kafka")]
 #[test]
+#[ignore = "needs a live Kafka broker at localhost:9092 (asupersync-w6qog5); run with -- --ignored"]
 fn e2e_kafka_producer_delivery_ack_metadata() {
     common::init_test_logging();
     common::run_test_with_cx(|cx| async move {
