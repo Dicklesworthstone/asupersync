@@ -42,7 +42,7 @@ use asupersync::combinator::{JoinSet, PipelineExecutionConfig, bracket};
 use asupersync::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
 use asupersync::cx::ChildRegionSpec;
 use asupersync::runtime::{JoinError, RuntimeBuilder, SpawnError, yield_now};
-use asupersync::sync::{Barrier, Mutex, Notify, OwnedMutexGuard, RwLock, Semaphore};
+use asupersync::sync::{Barrier, Mutex, Notify, OnceCell, OwnedMutexGuard, RwLock, Semaphore};
 use asupersync::time::{sleep, timeout};
 use asupersync::types::{Budget, Outcome};
 use asupersync::{CancelReason, Cx};
@@ -1970,6 +1970,243 @@ fn scope_timeout_inside_a_tighter_region_deadline(cx: Cx) -> ScenarioFuture {
     })
 }
 
+/// A writer parks behind a held read lock, so later readers queue behind it
+/// (writer preference). Aborting the writer must admit the queued reader
+/// while the first read lock is still held.
+fn aborted_rwlock_writer_admits_the_queued_reader(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let lock = Arc::new(RwLock::new(5u32));
+        let held = lock.read(&cx).await.expect("parent reads");
+        let l = Arc::clone(&lock);
+        let mut writer = cx
+            .spawn(move |task_cx| async move {
+                let mut guard = l.write(&task_cx).await.map_err(|error| format!("{error:?}"))?;
+                *guard = 9;
+                Ok::<(), String>(())
+            })
+            .expect("spawn writer");
+        // A waiting writer makes try_read refuse.
+        while lock.try_read().is_ok() {
+            yield_now().await;
+        }
+        let queued = Arc::new(AtomicBool::new(false));
+        let (l, q) = (Arc::clone(&lock), Arc::clone(&queued));
+        let mut reader = cx
+            .spawn(move |task_cx| async move {
+                q.store(true, Ordering::SeqCst);
+                let guard = l.read(&task_cx).await.map_err(|error| format!("{error:?}"))?;
+                Ok::<u32, String>(*guard)
+            })
+            .expect("spawn reader");
+        wait_for(&queued).await;
+        for _ in 0..4 {
+            yield_now().await;
+        }
+        writer.abort();
+        let writer_joined = writer.join(&cx).await;
+        let reader_joined = reader.join(&cx).await;
+        drop(held);
+        let value = *lock.read(&cx).await.expect("final read");
+        observe([
+            ("writer_join", outcome(&writer_joined)),
+            ("reader_join_while_read_held", outcome(&reader_joined)),
+            ("value", value.to_string()),
+        ])
+    })
+}
+
+/// `notify_one` picks a parked waiter, which is then aborted. Each waiter
+/// checks for cancellation before the notification and drops its `Notified`
+/// when cancelled. The other waiter must still finish: the dropped waiter
+/// passes the notification on, or, if it consumed the notification before
+/// the abort landed, a second notification wakes the other.
+fn aborted_notified_waiter_passes_the_notification_on(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let notify = Arc::new(Notify::new());
+        let spawn_waiter = || {
+            let n = Arc::clone(&notify);
+            cx.spawn(move |task_cx| async move {
+                let (_hold, mut never) = mpsc::channel::<u32>(1);
+                let mut cancelled = Box::pin(never.recv(&task_cx));
+                let mut notified = Box::pin(n.notified());
+                std::future::poll_fn(|poll_cx| {
+                    if cancelled.as_mut().poll(poll_cx).is_ready() {
+                        return std::task::Poll::Ready("cancelled");
+                    }
+                    if notified.as_mut().poll(poll_cx).is_ready() {
+                        return std::task::Poll::Ready("notified");
+                    }
+                    std::task::Poll::Pending
+                })
+                .await
+            })
+            .expect("spawn waiter")
+        };
+        let mut first = spawn_waiter();
+        while notify.waiter_count() < 1 {
+            yield_now().await;
+        }
+        let mut second = spawn_waiter();
+        while notify.waiter_count() < 2 {
+            yield_now().await;
+        }
+        notify.notify_one();
+        first.abort();
+        let first_joined = first.join(&cx).await;
+        if matches!(first_joined, Ok("notified")) {
+            notify.notify_one();
+        }
+        let second_joined = second.join(&cx).await;
+        observe([
+            ("second_join", outcome(&second_joined)),
+            ("waiters_after", notify.waiter_count().to_string()),
+            ("first_join", outcome(&first_joined)),
+        ])
+    })
+}
+
+/// An initializer is abandoned mid-initialization (its timeout drops it)
+/// while a second caller waits for it. The waiter must take over and
+/// initialize the cell.
+fn abandoned_once_cell_initializer_lets_the_waiter_initialize(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let cell = Arc::new(OnceCell::<u32>::new());
+        let start = cx.now();
+        let c = Arc::clone(&cell);
+        let mut initializer = cx
+            .spawn(move |_cx| async move {
+                timeout(
+                    start,
+                    Duration::from_millis(20),
+                    c.get_or_init(std::future::pending::<u32>),
+                )
+                .await
+                .is_err()
+            })
+            .expect("spawn initializer");
+        while cell.telemetry_snapshot(0).state != "initializing" {
+            yield_now().await;
+        }
+        let c = Arc::clone(&cell);
+        let mut waiter = cx
+            .spawn(move |task_cx| async move {
+                c.get_or_init_cx(&task_cx, || async { 7u32 })
+                    .await
+                    .copied()
+                    .map_err(|error| format!("{error:?}"))
+            })
+            .expect("spawn waiter");
+        let initializer_joined = initializer.join(&cx).await;
+        let waiter_joined = waiter.join(&cx).await;
+        observe([
+            ("initializer_timed_out", outcome(&initializer_joined)),
+            ("waiter_join", outcome(&waiter_joined)),
+            ("value", format!("{:?}", cell.get())),
+        ])
+    })
+}
+
+/// Two parties wait at a three-party barrier and the first is aborted. Its
+/// arrival is withdrawn: a third arrival does not trip the barrier, and it
+/// trips with one leader only when a replacement (the parent) arrives.
+fn aborted_barrier_waiter_is_withdrawn(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let barrier = Arc::new(Barrier::new(3));
+        let released = Arc::new(AtomicUsize::new(0));
+        let arrived = |b: &Barrier| b.telemetry_snapshot(0).occupied_units;
+        let spawn_party = || {
+            let (b, r) = (Arc::clone(&barrier), Arc::clone(&released));
+            cx.spawn(move |task_cx| async move {
+                let result = b.wait(&task_cx).await;
+                r.fetch_add(1, Ordering::SeqCst);
+                result
+                    .map(|result| result.is_leader())
+                    .map_err(|error| format!("{error:?}"))
+            })
+            .expect("spawn party")
+        };
+        let mut first = spawn_party();
+        while arrived(&barrier) < 1 {
+            yield_now().await;
+        }
+        let mut second = spawn_party();
+        while arrived(&barrier) < 2 {
+            yield_now().await;
+        }
+        first.abort();
+        let first_joined = first.join(&cx).await;
+        let arrived_after_abort = arrived(&barrier);
+        if arrived_after_abort != 1 {
+            // The aborted arrival still counts; report it rather than wait
+            // on a barrier whose count can no longer be trusted.
+            second.abort();
+            let second_joined = second.join(&cx).await;
+            return observe([
+                ("first_join", outcome(&first_joined)),
+                ("arrived_after_abort", arrived_after_abort.to_string()),
+                ("second_join", outcome(&second_joined)),
+            ]);
+        }
+        let mut third = spawn_party();
+        while arrived(&barrier) < 2 && released.load(Ordering::SeqCst) < 2 {
+            yield_now().await;
+        }
+        let tripped_without_replacement = released.load(Ordering::SeqCst) >= 2;
+        let parent = if tripped_without_replacement {
+            "not-needed".to_string()
+        } else {
+            format!(
+                "{:?}",
+                barrier
+                    .wait(&cx)
+                    .await
+                    .map(|result| result.is_leader())
+                    .map_err(|error| format!("{error:?}"))
+            )
+        };
+        let second_joined = second.join(&cx).await;
+        let third_joined = third.join(&cx).await;
+        let leaders = [&second_joined, &third_joined]
+            .into_iter()
+            .filter(|joined| matches!(joined, Ok(Ok(true))))
+            .count()
+            + usize::from(parent == "Ok(true)");
+        observe([
+            ("first_join", outcome(&first_joined)),
+            ("arrived_after_abort", arrived_after_abort.to_string()),
+            ("tripped_without_replacement", tripped_without_replacement.to_string()),
+            ("leaders", leaders.to_string()),
+        ])
+    })
+}
+
+/// A sender parks on a full channel and the receiver is dropped. The sender
+/// must wake with the disconnect error instead of staying parked.
+fn dropping_the_receiver_wakes_a_parked_sender(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let (tx, rx) = mpsc::channel::<u32>(1);
+        tx.send(&cx, 1).await.expect("fill the only slot");
+        let parked = tx.clone();
+        let mut sender = cx
+            .spawn(move |task_cx| async move {
+                parked
+                    .send(&task_cx, 2)
+                    .await
+                    .map_err(|error| format!("{error:?}"))
+            })
+            .expect("spawn sender");
+        while send_waiters(&tx) < 1 {
+            yield_now().await;
+        }
+        drop(rx);
+        let joined = sender.join(&cx).await;
+        observe([
+            ("sender_join", outcome(&joined)),
+            ("closed", tx.is_closed().to_string()),
+        ])
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Lab-only invariants the differential runs surfaced
 // ---------------------------------------------------------------------------
@@ -2242,5 +2479,30 @@ differential!(
 differential!(
     differential_scope_timeout_in_region_deadline,
     scope_timeout_inside_a_tighter_region_deadline,
+    []
+);
+differential!(
+    differential_aborted_rwlock_writer,
+    aborted_rwlock_writer_admits_the_queued_reader,
+    []
+);
+differential!(
+    differential_aborted_notified_waiter,
+    aborted_notified_waiter_passes_the_notification_on,
+    ["first_join"]
+);
+differential!(
+    differential_abandoned_once_cell_initializer,
+    abandoned_once_cell_initializer_lets_the_waiter_initialize,
+    []
+);
+differential!(
+    differential_aborted_barrier_waiter,
+    aborted_barrier_waiter_is_withdrawn,
+    []
+);
+differential!(
+    differential_receiver_drop_wakes_parked_sender,
+    dropping_the_receiver_wakes_a_parked_sender,
     []
 );

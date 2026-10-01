@@ -918,10 +918,18 @@ for scenario_id in "${SCENARIO_IDS[@]}"; do
     duration_ms=$(((end_s - start_s) * 1000))
     tests_passed="$(grep -c "^test .* ok$" "$scenario_log_file" 2>/dev/null || true)"
     tests_failed="$(grep -c "^test .* FAILED$" "$scenario_log_file" 2>/dev/null || true)"
+    # libtest's summary lines count what ran even when --nocapture output
+    # splits a "test ... ok" line; a filter that selects nothing must fail.
+    summary_passed="$(awk '/^test result:/ { total += $4 } END { print total + 0 }' "$scenario_log_file" 2>/dev/null || echo 0)"
 
     status="pass"
     contract_failure=0
-    if [[ "$rc" -ne 0 ]]; then
+    if [[ "$rc" -eq 0 && "$summary_passed" -eq 0 ]]; then
+        status="fail"
+        failed_count=$((failed_count + 1))
+        echo "    FAIL (zero tests ran for filter '${test_filter}') -> ${scenario_log_file}"
+        echo "    repro: ${repro_cmd}"
+    elif [[ "$rc" -ne 0 ]]; then
         status="fail"
         failed_count=$((failed_count + 1))
         if [[ "$rc" -eq 124 ]]; then
@@ -932,7 +940,7 @@ for scenario_id in "${SCENARIO_IDS[@]}"; do
         echo "    repro: ${repro_cmd}"
     else
         passed_count=$((passed_count + 1))
-        echo "    PASS (${tests_passed} tests)"
+        echo "    PASS (${summary_passed} tests)"
     fi
 
     printf -v scenario_json '{"schema_version":"raptorq-e2e-scenario-log-v2","scenario_id":"%s","category":"%s","profile":"%s","profile_set":"%s","test_filter":"%s","replay_ref":"%s","replay_ref_extra":"%s","unit_sentinel":"%s","assertion_id":"%s","run_id":"%s","seed":%s,"parameter_set":"%s","policy_snapshot_id":"%s","selected_path":"%s","phase_markers":["encode","loss","decode","proof","report"],"status":"%s","exit_code":%d,"duration_ms":%d,"tests_passed":%d,"tests_failed":%d,"artifact_path":"%s","log_path":"%s","repro_command":"%s"}' \

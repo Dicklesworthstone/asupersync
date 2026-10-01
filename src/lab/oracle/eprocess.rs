@@ -372,35 +372,13 @@ impl EProcessMonitor {
     }
 
     /// Creates a monitor for all oracle invariants with custom config.
+    ///
+    /// Tracks every name [`super::OracleSuite::report`] emits
+    /// ([`super::registry::ALL_REPORTED_ORACLE_NAMES`]), so the FABRIC oracles
+    /// are monitored when the `messaging-fabric` feature is enabled.
     #[must_use]
     pub fn all_invariants_with_config(config: EProcessConfig) -> Self {
-        let invariants = [
-            "task_leak",
-            "obligation_leak",
-            "quiescence",
-            "loser_drain",
-            "finalizer",
-            "region_tree",
-            "region_leak",
-            "ambient_authority",
-            "deadline_monotone",
-            "cancellation_protocol",
-            "cancel_correctness",
-            "cancel_debt",
-            "cancel_signal_ordering",
-            "runtime_epoch",
-            "channel_atomicity",
-            "waker_dedup",
-            "actor_leak",
-            "supervision",
-            "mailbox",
-            "rref_access",
-            "reply_linearity",
-            "registry_lease",
-            "down_order",
-            "supervisor_quiescence",
-        ];
-        Self::new(&invariants, config)
+        Self::new(super::registry::ALL_REPORTED_ORACLE_NAMES, config)
     }
 
     /// Feeds an oracle report into the monitor.
@@ -877,11 +855,54 @@ mod tests {
     #[test]
     fn monitor_all_invariants_has_spork_invariants_too() {
         let monitor = EProcessMonitor::all_invariants();
-        assert_eq!(monitor.processes.len(), 24);
+        let expected = if cfg!(feature = "messaging-fabric") {
+            28
+        } else {
+            24
+        };
+        assert_eq!(monitor.processes.len(), expected);
         assert!(monitor.process("reply_linearity").is_some());
         assert!(monitor.process("registry_lease").is_some());
         assert!(monitor.process("down_order").is_some());
         assert!(monitor.process("supervisor_quiescence").is_some());
+    }
+
+    #[test]
+    fn monitor_all_invariants_rejects_every_reported_oracle() {
+        // observe_report skips entries without an e-process, so an oracle the
+        // monitor does not track can never have its violations rejected.
+        let mut suite = crate::lab::oracle::OracleSuite::new();
+        let report = suite.report(crate::types::Time::ZERO);
+        let names: Vec<&str> = report
+            .entries
+            .iter()
+            .map(|entry| entry.invariant.as_str())
+            .collect();
+        assert_eq!(
+            EProcessMonitor::all_invariants().processes.len(),
+            names.len()
+        );
+        #[cfg(feature = "messaging-fabric")]
+        for fabric in [
+            "fabric_publish",
+            "fabric_reply",
+            "fabric_quiescence",
+            "fabric_redelivery",
+        ] {
+            assert!(names.contains(&fabric), "suite does not report {fabric}");
+        }
+
+        for name in &names {
+            let mut monitor = EProcessMonitor::all_invariants();
+            for _ in 0..20 {
+                monitor.observe_report(&make_violation_report(&names, &[name]));
+            }
+            assert_eq!(
+                monitor.rejected_invariants(),
+                vec![*name],
+                "violations of {name} were not rejected"
+            );
+        }
     }
 
     #[test]
