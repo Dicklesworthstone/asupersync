@@ -8954,6 +8954,7 @@ fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
                 .to_string(),
         );
     }
+    let (stop, _signals) = AtpServeStop::for_receive(one_shot)?;
     let runtime = build_runtime(args.workers)?;
     let dest = args.dest.clone();
     let listen = args.listen;
@@ -8999,6 +9000,7 @@ fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
                     Ok::<(), String>(())
                 } else {
                     let delta_dest = dest.clone();
+                    let _serving = stop.attach(&cx);
                     transport_tcp::serve(&cx, listener, dest.clone(), cfg, peer_id.clone(), |o| {
                         match o {
                             Ok(r) => {
@@ -9020,11 +9022,12 @@ fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
                                 );
                                 print_json(&tcp_recv_json(&r, None));
                             }
-                            Err(e) => eprintln!("atp: transfer failed: {e}"),
+                            Err(e) => stop.report_failed(&e),
                         }
                     })
                     .await
                     .map_err(|e| e.to_string())
+                    .and_then(|()| stop.stopped(Transport::Tcp, bound))
                 }
             }))
         }
@@ -9090,6 +9093,7 @@ fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
                     Ok::<(), String>(())
                 } else {
                     let delta_dest = dest.clone();
+                    let _serving = stop.attach(&cx);
                     transport_rq::serve_with_options(
                         &cx,
                         listener,
@@ -9118,11 +9122,12 @@ fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
                                 );
                                 print_json(&rq_recv_json(&r, chosen_fanout, None));
                             }
-                            Err(e) => eprintln!("atp: transfer failed: {e}"),
+                            Err(e) => stop.report_failed(&e),
                         },
                     )
                     .await
-                    .map_err(|e| e.to_string())
+                    .or_else(|error| stop.rq_accept_stopped(&cx, &error))
+                    .and_then(|()| stop.stopped(Transport::Rq, bound))
                 }
             }))
         }
@@ -9183,18 +9188,12 @@ fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
                         let bound = first_endpoint.local_addr();
                         create_receive_destination(&dest).await?;
                         eprintln!("atp: quic listening on {bound}, dest {}", dest.display());
-                        // Each accepted transfer consumes the endpoint. Preserve
-                        // the successfully bound first endpoint, then rebind its
-                        // exact address for every later transfer.
                         let mut endpoint = Some(first_endpoint);
-                        loop {
-                            let current = if let Some(first) = endpoint.take() {
-                                first
-                            } else {
-                                bind_server_endpoint(&cx, bound)
-                                    .await
-                                    .map_err(|e| e.to_string())?
-                            };
+                        let _serving = stop.attach(&cx);
+                        while let Some(current) =
+                            stop.next_quic_endpoint(&cx, &mut endpoint, bound).await?
+                        {
+                            let heard = current.metrics();
                             match receive_on_endpoint_with_options(
                                 &cx,
                                 current,
@@ -9224,9 +9223,10 @@ fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
                                     );
                                     print_json(&quic_recv_json(&r, chosen_fanout, None));
                                 }
-                                Err(e) => eprintln!("atp: transfer failed: {e}"),
+                                Err(e) => stop.report_failed_unless_idle(&e, &heard),
                             }
                         }
+                        stop.stopped(Transport::Quic, bound)
                     }
                 }))
             }
@@ -13787,5 +13787,421 @@ fn main() -> ExitCode {
             eprintln!("atp failed: {err}");
             ExitCode::FAILURE
         }
+    }
+}
+
+// ─── Stopping a persistent receive loop (br-asupersync-vlf155) ───────────────
+//
+// These items live after `main` so that `raise_fd_limit`'s unsafe-ledger line
+// locators above stay where they are.
+
+/// Hands a stop request to a persistent `atp recv`/`atp serve` loop.
+///
+/// SIGINT or SIGTERM cancels the loop task's context, and the loop ends through
+/// its own cancellation path: an in-flight receive is aborted, its staging
+/// directory is removed and its failure is reported, and a final
+/// `atp_serve_stopped` status follows. The context and the stop-requested flag
+/// share one lock, so a request that arrives before the loop attaches is
+/// applied when it does (br-asupersync-vlf155).
+#[derive(Default)]
+struct AtpServeStop {
+    state: Mutex<AtpServeStopState>,
+}
+
+#[derive(Default)]
+struct AtpServeStopState {
+    serve_cx: Option<Cx>,
+    requested: bool,
+    /// Receives that the stop aborted.
+    ///
+    /// They are the receives reported as failed after the stop request.
+    aborted: u64,
+}
+
+impl AtpServeStop {
+    /// Creates the stop handle for one `atp recv` or `atp serve` run.
+    ///
+    /// On Unix a persistent loop also gets SIGINT and SIGTERM handlers. They are
+    /// installed before the loop announces that it is listening, so a
+    /// supervisor that signals as soon as it reads that line reaches the drain.
+    /// A one-shot receive keeps the default dispositions. Bind the returned
+    /// thread before building the runtime: the runtime is then dropped first,
+    /// and a second signal still ends a teardown that hangs.
+    fn for_receive(one_shot: bool) -> Result<(Arc<Self>, Option<AtpServeSignalThread>), String> {
+        let stop = Arc::new(Self::default());
+        let signals = if one_shot {
+            None
+        } else {
+            Some(AtpServeSignalThread::start(Arc::clone(&stop))?)
+        };
+        Ok((stop, signals))
+    }
+
+    /// Records the loop task's context until the returned guard is dropped.
+    ///
+    /// The context is cancelled at once if a stop was requested first.
+    #[must_use = "the loop task's context stays attached only while the guard lives"]
+    fn attach(&self, cx: &Cx) -> AtpServeAttached<'_> {
+        let requested = {
+            let mut state = self.lock();
+            state.serve_cx = Some(cx.clone());
+            state.requested
+        };
+        if requested {
+            cancel_atp_serve(cx);
+        }
+        AtpServeAttached(self)
+    }
+
+    /// Cancels the attached loop task's context, or has [`Self::attach`] do it.
+    #[cfg(any(unix, test))]
+    fn request(&self) {
+        let serve_cx = {
+            let mut state = self.lock();
+            state.requested = true;
+            state.serve_cx.clone()
+        };
+        if let Some(cx) = serve_cx {
+            cancel_atp_serve(&cx);
+        }
+    }
+
+    fn requested(&self) -> bool {
+        self.lock().requested
+    }
+
+    /// Reports a failed receive. After a stop request it counts as aborted.
+    fn report_failed(&self, error: &impl std::fmt::Display) {
+        {
+            let mut state = self.lock();
+            if state.requested {
+                state.aborted += 1;
+            }
+        }
+        eprintln!("atp: transfer failed: {error}");
+    }
+
+    /// Reports a failed QUIC receive, unless a stop ended an idle accept.
+    ///
+    /// A stop cancels the receive whether or not a sender has reached it. A
+    /// receive whose endpoint never got a datagram was still waiting for a
+    /// client, so it was not a transfer and is not reported.
+    #[cfg(feature = "tls")]
+    fn report_failed_unless_idle(
+        &self,
+        error: &impl std::fmt::Display,
+        heard: &asupersync::net::quic_native::EndpointMetrics,
+    ) {
+        if self.requested() && heard.packets_received.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        self.report_failed(error);
+    }
+
+    /// Treats the error that ends an idle RQ loop on a stop as a clean stop.
+    ///
+    /// `serve_with_options` receives one transfer at a time. A stop during a
+    /// receive aborts it in place (its staging guard removes the staging
+    /// directory), the failure is reported, and the loop returns `Ok`. A stop
+    /// while the loop waits in `accept` instead surfaces as that accept's
+    /// `Interrupted` error, which the loop propagates rather than returning `Ok`.
+    fn rq_accept_stopped(&self, cx: &Cx, error: &RqError) -> Result<(), String> {
+        match error {
+            RqError::Io(io)
+                if io.kind() == std::io::ErrorKind::Interrupted
+                    && self.requested()
+                    && cx.is_cancel_requested() =>
+            {
+                Ok(())
+            }
+            other => Err(other.to_string()),
+        }
+    }
+
+    /// Returns the endpoint for the next QUIC receive, or `None` after a stop.
+    ///
+    /// Each accepted transfer consumes its endpoint. The loop uses the bound
+    /// `first` endpoint, then rebinds that exact address for every later
+    /// transfer. A rebind that a stop interrupted ends the loop instead of
+    /// failing it.
+    #[cfg(feature = "tls")]
+    async fn next_quic_endpoint(
+        &self,
+        cx: &Cx,
+        first: &mut Option<asupersync::net::quic_native::QuicUdpEndpoint>,
+        bound: SocketAddr,
+    ) -> Result<Option<asupersync::net::quic_native::QuicUdpEndpoint>, String> {
+        use asupersync::net::atp::transport_quic::native_link::bind_server_endpoint;
+
+        if self.requested() {
+            return Ok(None);
+        }
+        if let Some(endpoint) = first.take() {
+            return Ok(Some(endpoint));
+        }
+        match bind_server_endpoint(cx, bound).await {
+            Ok(endpoint) => Ok(Some(endpoint)),
+            Err(_) if self.requested() => Ok(None),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    /// Prints the final status of a loop that a stop request ended.
+    ///
+    /// stderr gets a line beside the `listening` one. stdout gets an
+    /// `atp_serve_stopped` event that counts the receives the stop aborted. A
+    /// loop that ended without a stop request (another canceller) is an error.
+    fn stopped(&self, transport: Transport, bound: SocketAddr) -> Result<(), String> {
+        let (requested, aborted) = {
+            let state = self.lock();
+            (state.requested, state.aborted)
+        };
+        if !requested {
+            return Err(format!(
+                "{} receive loop on {bound} ended without a stop request",
+                transport.cli_arg()
+            ));
+        }
+        eprintln!(
+            "atp: {} serve stopped on {bound}; aborted {aborted} in-flight receive(s)",
+            transport.cli_arg()
+        );
+        print_json(&serde_json::json!({
+            "event": "atp_serve_stopped",
+            "transport": transport.cli_arg(),
+            "listen_address": bound.to_string(),
+            "aborted_receives": aborted,
+        }));
+        Ok(())
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, AtpServeStopState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Keeps a loop task's context attached to its [`AtpServeStop`].
+struct AtpServeAttached<'a>(&'a AtpServeStop);
+
+impl Drop for AtpServeAttached<'_> {
+    fn drop(&mut self) {
+        self.0.lock().serve_cx = None;
+    }
+}
+
+/// Cancels a persistent loop task's context.
+///
+/// The loop observes it at its next checkpoint; a pending accept or read is
+/// woken.
+fn cancel_atp_serve(cx: &Cx) {
+    cx.cancel_with(
+        asupersync::types::CancelKind::User,
+        Some("atp serve stop requested (SIGINT or SIGTERM)"),
+    );
+}
+
+/// Forwards SIGINT and SIGTERM to a persistent receive loop.
+///
+/// The first signal stops the loop through [`AtpServeStop`]. A second one stops
+/// waiting for that drain: the process ends by the signal's default action, as
+/// it would with no handler (shell status 130 or 143).
+#[cfg(unix)]
+struct AtpServeSignalThread {
+    handle: signal_hook::iterator::Handle,
+    join: Option<thread::JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+impl AtpServeSignalThread {
+    fn start(stop: Arc<AtpServeStop>) -> Result<Self, String> {
+        let mut signals = signal_hook::iterator::Signals::new([
+            signal_hook::consts::SIGINT,
+            signal_hook::consts::SIGTERM,
+        ])
+        .map_err(|err| format!("install SIGINT/SIGTERM handlers: {err}"))?;
+        let handle = signals.handle();
+        let join = thread::Builder::new()
+            .name("atp-serve-signals".to_string())
+            .spawn(move || {
+                let mut stopping = false;
+                for signal in signals.forever() {
+                    if stopping {
+                        // Second signal: give up on the drain.
+                        if signal_hook::low_level::emulate_default_handler(signal).is_err() {
+                            std::process::exit(128 + signal);
+                        }
+                    } else {
+                        stopping = true;
+                        stop.request();
+                    }
+                }
+            })
+            .map_err(|err| {
+                handle.close();
+                format!("start the SIGINT/SIGTERM thread: {err}")
+            })?;
+        Ok(Self {
+            handle,
+            join: Some(join),
+        })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for AtpServeSignalThread {
+    fn drop(&mut self) {
+        self.handle.close();
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+/// Off Unix a persistent loop keeps the default console-interrupt behavior.
+#[cfg(not(unix))]
+struct AtpServeSignalThread;
+
+#[cfg(not(unix))]
+impl AtpServeSignalThread {
+    fn start(_stop: Arc<AtpServeStop>) -> Result<Self, String> {
+        Ok(Self)
+    }
+}
+
+#[cfg(test)]
+mod serve_stop_tests {
+    use super::*;
+
+    /// A context owned by a real runtime task, as the receive loops have.
+    fn task_cx(runtime: &asupersync::runtime::Runtime) -> Cx {
+        runtime.block_on(
+            runtime
+                .handle()
+                .spawn(async { Cx::current().expect("stop test task cx") }),
+        )
+    }
+
+    #[test]
+    fn a_stop_requested_before_attach_cancels_the_context_when_it_attaches() {
+        let runtime = build_runtime(1).expect("stop test runtime");
+        let cx = task_cx(&runtime);
+        let stop = AtpServeStop::default();
+        stop.request();
+        assert!(stop.requested());
+        assert!(!cx.is_cancel_requested(), "nothing is attached yet");
+
+        let attached = stop.attach(&cx);
+        assert!(cx.is_cancel_requested(), "attach applies the earlier stop");
+        drop(attached);
+        let still_attached = stop.lock().serve_cx.is_some();
+        assert!(!still_attached, "the guard detaches");
+    }
+
+    #[test]
+    fn only_failures_after_the_stop_request_count_as_aborted_receives() {
+        let runtime = build_runtime(1).expect("stop test runtime");
+        let cx = task_cx(&runtime);
+        let stop = AtpServeStop::default();
+        let bound: SocketAddr = "127.0.0.1:8472".parse().expect("loopback address");
+        let _attached = stop.attach(&cx);
+
+        stop.report_failed(&"probe closed before its handshake");
+        assert!(!cx.is_cancel_requested());
+        let early = stop.stopped(Transport::Tcp, bound);
+        assert!(
+            early.is_err(),
+            "a loop that ends without a stop request is an error: {early:?}"
+        );
+
+        stop.request();
+        assert!(cx.is_cancel_requested(), "the stop cancels the task");
+        stop.report_failed(&"receive aborted by the stop");
+        let aborted = stop.lock().aborted;
+        assert_eq!(aborted, 1);
+        assert_eq!(stop.stopped(Transport::Tcp, bound), Ok(()));
+    }
+
+    #[test]
+    fn an_interrupted_rq_accept_is_a_clean_stop_only_after_a_stop_request() {
+        let runtime = build_runtime(1).expect("stop test runtime");
+        let cx = task_cx(&runtime);
+        let stop = AtpServeStop::default();
+        let interrupted = || {
+            RqError::Io(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "cancelled",
+            ))
+        };
+        let _attached = stop.attach(&cx);
+        assert!(stop.rq_accept_stopped(&cx, &interrupted()).is_err());
+
+        stop.request();
+        assert_eq!(stop.rq_accept_stopped(&cx, &interrupted()), Ok(()));
+        let reset = RqError::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
+        assert!(stop.rq_accept_stopped(&cx, &reset).is_err());
+        let frame = RqError::Frame("bad frame".to_string());
+        assert!(stop.rq_accept_stopped(&cx, &frame).is_err());
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn a_stopped_quic_accept_that_heard_no_datagram_is_not_a_failed_transfer() {
+        let stop = AtpServeStop::default();
+        let idle = asupersync::net::quic_native::EndpointMetrics::default();
+        let contacted = asupersync::net::quic_native::EndpointMetrics::default();
+        contacted.packets_received.store(3, Ordering::Relaxed);
+
+        stop.report_failed_unless_idle(&"accept timed out", &idle);
+        stop.request();
+        stop.report_failed_unless_idle(&"cancelled", &idle);
+        let after_idle = stop.lock().aborted;
+        assert_eq!(after_idle, 0, "an idle accept is not a transfer");
+        stop.report_failed_unless_idle(&"cancelled", &contacted);
+        let after_contact = stop.lock().aborted;
+        assert_eq!(after_contact, 1, "a contacted endpoint was a transfer");
+    }
+
+    /// The stop wakes a task parked in a plain `accept`.
+    ///
+    /// The idle RQ loop parks this way; the accept then fails with `Interrupted`.
+    #[test]
+    fn a_stop_request_wakes_a_task_parked_in_accept() {
+        let stop = Arc::new(AtpServeStop::default());
+        let task_stop = Arc::clone(&stop);
+        let (bound_tx, bound_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let runtime = build_runtime(1).expect("stop test runtime");
+            let accepted = runtime.block_on(runtime.handle().spawn(async move {
+                let cx = Cx::current().expect("stop test task cx");
+                let listener = TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("bind loopback listener");
+                let _attached = task_stop.attach(&cx);
+                let _ = bound_tx.send(listener.local_addr().expect("bound address"));
+                listener
+                    .accept()
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.kind())
+            }));
+            let _ = done_tx.send(accepted);
+        });
+        bound_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the task bound its listener");
+        // The accept is parked: nothing connects to the listener.
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "accept returned before any stop request"
+        );
+
+        stop.request();
+        let accepted = done_rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the stop ends the parked accept within 20 s");
+        assert_eq!(accepted, Err(std::io::ErrorKind::Interrupted));
     }
 }

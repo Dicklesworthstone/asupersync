@@ -806,7 +806,6 @@ fn spawn_quic_transfer_listener(
     let peer_label = identity.peer_id_hex();
     let (bind_tx, bind_rx) = mpsc::channel::<std::result::Result<SocketAddr, String>>();
 
-    // Detached for the daemon's lifetime; the process exits on shutdown.
     let _quic_transfer_listener = runtime_handle.spawn(async move {
         let Some(cx) = asupersync::cx::Cx::current() else {
             let _ = bind_tx.send(Err(
@@ -814,6 +813,7 @@ fn spawn_quic_transfer_listener(
             ));
             return;
         };
+        let _listening = transfer_stats.shutdown.attach(&cx);
         let first_endpoint = match bind_server_endpoint(&cx, bind_addr).await {
             Ok(endpoint) => endpoint,
             Err(err) => {
@@ -827,12 +827,13 @@ fn spawn_quic_transfer_listener(
 
         let rebind_addr = local_addr;
         let mut next_endpoint = Some(first_endpoint);
-        loop {
+        while !transfer_stats.shutdown.requested() {
             let endpoint = if let Some(endpoint) = next_endpoint.take() {
                 endpoint
             } else {
                 match bind_server_endpoint(&cx, rebind_addr).await {
                     Ok(endpoint) => endpoint,
+                    Err(_) if transfer_stats.shutdown.requested() => break,
                     Err(err) => {
                         transfer_stats.record_failed();
                         warn!("ATP QUIC transfer listener failed to rebind {rebind_addr}: {err}");
@@ -840,6 +841,7 @@ fn spawn_quic_transfer_listener(
                     }
                 }
             };
+            let heard = endpoint.metrics();
             match receive_on_endpoint(&cx, endpoint, &inbox_dir, &quic_config, &peer_label).await {
                 Ok(report) => {
                     transfer_stats.record_committed(report.bytes_received);
@@ -850,10 +852,7 @@ fn spawn_quic_transfer_listener(
                         "ATP QUIC transfer committed to inbox"
                     );
                 }
-                Err(err) => {
-                    transfer_stats.record_failed();
-                    warn!("ATP QUIC transfer failed: {err}");
-                }
+                Err(err) => transfer_stats.record_failed_quic_receive(&err, &heard),
             }
         }
     });
@@ -927,6 +926,7 @@ struct TransferStats {
     committed: std::sync::atomic::AtomicU64,
     failed: std::sync::atomic::AtomicU64,
     bytes_received: std::sync::atomic::AtomicU64,
+    shutdown: ListenerShutdown,
 }
 
 impl TransferStats {
@@ -1280,15 +1280,18 @@ fn install_signal_listener() -> Result<mpsc::Receiver<DaemonSignal>> {
 
         let mut signals = Signals::new([SIGINT, SIGTERM, SIGHUP])?;
         thread::spawn(move || {
+            let mut stopping = false;
             for signal in signals.forever() {
                 let event = match signal {
+                    SIGINT | SIGTERM if stopping => end_by_default_signal_action(signal),
                     SIGINT => DaemonSignal::Interrupt,
                     SIGTERM => DaemonSignal::Terminate,
                     SIGHUP => DaemonSignal::Reload,
                     _ => continue,
                 };
-                if sender.send(event).is_err() {
-                    break;
+                stopping |= event != DaemonSignal::Reload;
+                if sender.send(event).is_err() && event != DaemonSignal::Reload {
+                    end_by_default_signal_action(signal);
                 }
             }
         });
@@ -1594,7 +1597,7 @@ async fn run_daemon_service(
         let peer_label = identity.peer_id_hex();
         let stats = Arc::clone(&transfer_stats);
         let (bind_tx, bind_rx) = mpsc::channel::<std::result::Result<SocketAddr, String>>();
-        // Detached for the daemon's lifetime; the process exits on shutdown.
+        // Detached; the daemon's stop request cancels it (`ListenerShutdown`).
         let _transfer_listener = runtime_handle.spawn(async move {
             let Some(cx) = asupersync::cx::Cx::current() else {
                 let _ = bind_tx.send(Err(
@@ -1602,6 +1605,7 @@ async fn run_daemon_service(
                 ));
                 return;
             };
+            let _listening = stats.shutdown.attach(&cx);
             let listener = match AsupTcpListener::bind(bind_addr).await {
                 Ok(listener) => listener,
                 Err(err) => {
@@ -1639,16 +1643,11 @@ async fn run_daemon_service(
                             "ATP transfer committed to inbox"
                         );
                     }
-                    Err(err) => {
-                        stats.record_failed();
-                        warn!("ATP transfer failed: {err}");
-                    }
+                    Err(err) => stats.record_failed_receive("ATP transfer failed", &err),
                 },
             )
             .await;
-            if let Err(err) = result {
-                warn!("ATP transfer listener stopped: {err}");
-            }
+            stats.log_listener_exit("ATP transfer listener", &result);
         });
 
         bind_rx
@@ -1800,6 +1799,7 @@ async fn run_daemon_service(
     }
 
     info!("Received shutdown signal, stopping daemon...");
+    let drained = transfer_stats.stop_and_drain(daemon_state.config.service.shutdown_timeout_secs);
     for event in compiled_app.shutdown_events() {
         match event.role {
             Some(role) => info!(
@@ -1813,7 +1813,7 @@ async fn run_daemon_service(
     if let Some(endpoint) = diagnostics_endpoint {
         endpoint.stop();
     }
-    Ok(())
+    drained
 }
 
 fn stop_daemon(cli: AtpdCli) -> Result<()> {
@@ -2346,6 +2346,223 @@ fn atpd_quic_config_defaults() -> asupersync::net::atp::transport_quic::QuicConf
     }
 }
 
+// ─── Stopping the transfer listeners (br-asupersync-vlf155) ───────────────────
+//
+// Defined after main's body so the unsafe-ledger line pins above stay put.
+
+/// Ends the process by `signal`'s default action.
+///
+/// A second SIGINT or SIGTERM stops waiting for the listener drain, as does one
+/// that arrives after the daemon stopped reading signals: the signal is not
+/// swallowed (br-asupersync-vlf155).
+#[cfg(unix)]
+fn end_by_default_signal_action(signal: i32) -> ! {
+    let _ = signal_hook::low_level::emulate_default_handler(signal);
+    std::process::exit(128 + signal)
+}
+
+/// Stops the daemon's transfer listeners and lets them drain.
+///
+/// Each listener task attaches its context when it starts. The first SIGINT or
+/// SIGTERM ends the daemon's main loop, which then requests the stop: every
+/// attached context is cancelled, the TCP accept loop aborts and drains its
+/// in-flight receives (their staging directories are removed and each failure
+/// is reported), and the QUIC loop ends its current receive. The daemon waits
+/// for every attached listener to return before it exits, instead of dropping
+/// in-flight receives with the runtime (br-asupersync-vlf155).
+#[derive(Default)]
+struct ListenerShutdown {
+    state: Mutex<ListenerShutdownState>,
+    returned: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct ListenerShutdownState {
+    contexts: Vec<asupersync::cx::Cx>,
+    live: usize,
+    requested: bool,
+    /// Receives that the stop aborted.
+    ///
+    /// They are the receives reported as failed after the stop request.
+    aborted: u64,
+}
+
+impl std::fmt::Debug for ListenerShutdown {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (live, requested, aborted) = {
+            let state = self.lock();
+            (state.live, state.requested, state.aborted)
+        };
+        formatter
+            .debug_struct("ListenerShutdown")
+            .field("live", &live)
+            .field("requested", &requested)
+            .field("aborted", &aborted)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ListenerShutdown {
+    /// Counts a listener task as running until the returned guard is dropped.
+    ///
+    /// Its context is cancelled at once if the stop came first.
+    #[must_use = "the listener counts as running only while the guard lives"]
+    fn attach(&self, cx: &asupersync::cx::Cx) -> ListenerAttached<'_> {
+        let requested = {
+            let mut state = self.lock();
+            state.contexts.push(cx.clone());
+            state.live += 1;
+            state.requested
+        };
+        if requested {
+            cancel_listener(cx);
+        }
+        ListenerAttached(self)
+    }
+
+    fn requested(&self) -> bool {
+        self.lock().requested
+    }
+
+    /// Cancels every attached listener context.
+    fn request(&self) {
+        let contexts = {
+            let mut state = self.lock();
+            state.requested = true;
+            state.contexts.clone()
+        };
+        for cx in &contexts {
+            cancel_listener(cx);
+        }
+    }
+
+    /// Counts a failed receive as aborted when the stop was already requested.
+    fn note_failure(&self) {
+        let mut state = self.lock();
+        if state.requested {
+            state.aborted += 1;
+        }
+    }
+
+    fn aborted(&self) -> u64 {
+        self.lock().aborted
+    }
+
+    /// Waits up to `bound` for every attached listener to return.
+    fn wait_until_returned(&self, bound: Duration) -> bool {
+        let state = self.lock();
+        let (state, waited) = self
+            .returned
+            .wait_timeout_while(state, bound, |state| state.live > 0)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        drop(state);
+        !waited.timed_out()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, ListenerShutdownState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Counts a listener task as running until it returns.
+struct ListenerAttached<'a>(&'a ListenerShutdown);
+
+impl Drop for ListenerAttached<'_> {
+    fn drop(&mut self) {
+        {
+            let mut state = self.0.lock();
+            state.live = state.live.saturating_sub(1);
+        }
+        self.0.returned.notify_all();
+    }
+}
+
+fn cancel_listener(cx: &asupersync::cx::Cx) {
+    cx.cancel_with(
+        asupersync::types::CancelKind::User,
+        Some("atpd stop requested (SIGINT or SIGTERM)"),
+    );
+}
+
+impl TransferStats {
+    /// Records and logs a failed receive as `{context}: {error}`.
+    ///
+    /// A failure reported after the stop request is a receive that the stop
+    /// aborted, and it is also counted as one.
+    fn record_failed_receive(&self, context: &str, error: &impl std::fmt::Display) {
+        self.record_failed();
+        self.shutdown.note_failure();
+        warn!("{context}: {error}");
+    }
+
+    /// Records a failed QUIC receive, unless the stop ended an idle accept.
+    ///
+    /// The stop cancels a receive whether or not a sender has reached it. One
+    /// whose endpoint never got a datagram was still waiting for a client, so
+    /// it was not a transfer and is neither counted nor logged.
+    #[cfg(feature = "tls")]
+    fn record_failed_quic_receive(
+        &self,
+        error: &impl std::fmt::Display,
+        heard: &asupersync::net::quic_native::EndpointMetrics,
+    ) {
+        if self.shutdown.requested() && heard.packets_received.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        self.record_failed_receive("ATP QUIC transfer failed", error);
+    }
+
+    /// Logs how a listener task ended: drained on the stop request, or failed.
+    fn log_listener_exit(
+        &self,
+        listener: &str,
+        result: &std::result::Result<(), impl std::fmt::Display>,
+    ) {
+        match result {
+            Ok(()) if self.shutdown.requested() => info!("{listener} drained and stopped"),
+            Ok(()) => warn!("{listener} stopped without a stop request"),
+            Err(err) => warn!("{listener} stopped: {err}"),
+        }
+    }
+
+    /// Stops the transfer listeners and waits for their in-flight receives.
+    ///
+    /// Waits up to `timeout_secs` (`service.shutdown_timeout_secs`, at least one
+    /// second), then logs the final transfer counts. A drain that does not end
+    /// in time is an error: the runtime teardown that follows would drop the
+    /// receives still in flight.
+    fn stop_and_drain(&self, timeout_secs: u64) -> Result<()> {
+        let bound = Duration::from_secs(timeout_secs.max(1));
+        self.shutdown.request();
+        let returned = self.shutdown.wait_until_returned(bound);
+        let committed = self.committed.load(Ordering::Relaxed);
+        let failed = self.failed.load(Ordering::Relaxed);
+        let aborted = self.shutdown.aborted();
+        if !returned {
+            warn!(
+                transfers_committed = committed,
+                transfers_failed = failed,
+                aborted_receives = aborted,
+                "ATP transfer listeners did not drain within {}s",
+                bound.as_secs()
+            );
+            return Err(cli_error(format!(
+                "ATP transfer listeners did not drain within {}s of the stop request",
+                bound.as_secs()
+            )));
+        }
+        info!(
+            transfers_committed = committed,
+            transfers_failed = failed,
+            aborted_receives = aborted,
+            "ATP transfer listeners drained"
+        );
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2822,5 +3039,95 @@ mod tests {
             message.contains("server_cert_path") && !message.contains("conflicts"),
             "legacy auth fields should not block direct QUIC transport auth, got {message}"
         );
+    }
+
+    /// A runtime and a context owned by one of its tasks, as a listener has.
+    fn listener_task_cx() -> (asupersync::runtime::Runtime, asupersync::cx::Cx) {
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(1)
+            .build()
+            .expect("listener test runtime");
+        let cx = runtime.block_on(
+            runtime
+                .handle()
+                .spawn(async { asupersync::cx::Cx::current().expect("listener test cx") }),
+        );
+        (runtime, cx)
+    }
+
+    /// br-asupersync-vlf155: the stop cancels attached and late listeners.
+    #[test]
+    fn listener_shutdown_cancels_attached_and_late_listeners() {
+        let (_runtime, early) = listener_task_cx();
+        let (_late_runtime, late) = listener_task_cx();
+        let shutdown = ListenerShutdown::default();
+        let early_guard = shutdown.attach(&early);
+        assert!(!early.is_cancel_requested());
+
+        shutdown.request();
+        assert!(early.is_cancel_requested(), "the stop cancels the listener");
+        let late_guard = shutdown.attach(&late);
+        assert!(late.is_cancel_requested(), "a late listener is cancelled");
+        drop((early_guard, late_guard));
+        assert!(shutdown.wait_until_returned(Duration::from_secs(1)));
+    }
+
+    /// br-asupersync-vlf155: `stop_and_drain` waits for a draining listener.
+    ///
+    /// Only failures reported after the stop count as aborted receives.
+    #[test]
+    fn stop_and_drain_waits_for_the_listener_and_counts_aborted_receives() {
+        let (_runtime, cx) = listener_task_cx();
+        let stats = Arc::new(TransferStats::default());
+        stats.record_failed_receive("ATP transfer failed", &"probe closed early");
+        let listener_stats = Arc::clone(&stats);
+        let (attached_tx, attached_rx) = mpsc::channel();
+        let listener = thread::spawn(move || {
+            let _listening = listener_stats.shutdown.attach(&cx);
+            let _ = attached_tx.send(());
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            while !cx.is_cancel_requested() && std::time::Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(5));
+            }
+            listener_stats.record_failed_receive("ATP transfer failed", &"aborted by the stop");
+        });
+        attached_rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the listener attached");
+
+        let drained = stats.stop_and_drain(20);
+        listener.join().expect("listener thread");
+        assert!(drained.is_ok(), "{drained:?}");
+        assert_eq!(stats.shutdown.aborted(), 1);
+        assert_eq!(stats.failed.load(Ordering::Relaxed), 2);
+    }
+
+    /// br-asupersync-vlf155: a listener that never returns fails the drain.
+    #[test]
+    fn stop_and_drain_reports_a_listener_that_does_not_return() {
+        let (_runtime, cx) = listener_task_cx();
+        let stats = TransferStats::default();
+        let _stuck = stats.shutdown.attach(&cx);
+        let drained = stats.stop_and_drain(1);
+        assert!(cx.is_cancel_requested());
+        let error = drained.expect_err("the drain times out");
+        assert!(error.to_string().contains("did not drain"), "{error}");
+    }
+
+    /// br-asupersync-vlf155: a stopped QUIC accept with no datagram is idle.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn stopped_idle_quic_accept_is_not_a_failed_transfer() {
+        let stats = TransferStats::default();
+        let idle = asupersync::net::quic_native::EndpointMetrics::default();
+        let contacted = asupersync::net::quic_native::EndpointMetrics::default();
+        contacted.packets_received.store(1, Ordering::Relaxed);
+
+        stats.shutdown.request();
+        stats.record_failed_quic_receive(&"cancelled", &idle);
+        assert_eq!(stats.failed.load(Ordering::Relaxed), 0);
+        stats.record_failed_quic_receive(&"cancelled", &contacted);
+        assert_eq!(stats.failed.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.shutdown.aborted(), 1);
     }
 }

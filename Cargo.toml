@@ -790,6 +790,12 @@ name = "atp_cli_quic_loopback"
 path = "tests/atp_cli_quic_loopback.rs"
 required-features = ["atp-cli", "tls"]
 
+# Runs both the `atp` and the `atpd` binary (br-asupersync-vlf155).
+[[test]]
+name = "atp_daemon_signal_shutdown"
+path = "tests/atp_daemon_signal_shutdown.rs"
+required-features = ["atp-cli", "atpd-daemon"]
+
 [[test]]
 name = "atp_dogfood_integration"
 path = "tests/atp_dogfood_integration.rs"
