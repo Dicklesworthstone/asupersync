@@ -988,7 +988,7 @@ pub trait Reactor: Send + Sync {
     ///
     /// Returns an error if registration fails:
     /// - `io::ErrorKind::AlreadyExists` - Source is already registered
-    /// - `io::ErrorKind::InvalidInput` - Source fd/handle is invalid
+    /// - `io::ErrorKind::InvalidInput`, or `EBADF` on Unix - Source fd/handle is invalid
     /// - `io::ErrorKind::OutOfMemory` - Too many registrations
     /// - Platform-specific errors from epoll_ctl/kevent/CreateIoCompletionPort
     ///
