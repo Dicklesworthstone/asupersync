@@ -193,21 +193,28 @@ const WINDOW: usize = 32 * 1024;
 /// such a reference can only produce NUL bytes, so NUL-free output is proof
 /// that none occurred. Otherwise the message is decoded again over a 0xFF fill,
 /// and the two results differ exactly when a reference reached the fill.
+///
+/// Only the first `WINDOW` output bytes need either check. A reference reaches
+/// at most `WINDOW` bytes back, so it can reach the fill only from an earlier
+/// position. Every later byte is copied from message bytes, which both decodes
+/// share once their first `WINDOW` bytes agree.
 #[cfg(feature = "compression")]
 fn inflate(payload: &[u8], max: usize) -> Result<Bytes, WsError> {
     let zero_filled = inflate_over(payload, max, 0x00, None)?;
-    if !zero_filled.contains(&0) {
+    let head = &zero_filled[..zero_filled.len().min(WINDOW)];
+    if !head.contains(&0) {
         return Ok(zero_filled);
     }
     // Compare the 0xFF-fill decode against the first one as it is produced,
-    // instead of buffering a second copy: peak memory stays one decoded
-    // message, and a divergence stops at its first chunk (br-asupersync-ydis91).
-    inflate_over(payload, max, 0xff, Some(&zero_filled))?;
+    // instead of buffering a second copy, and stop after the head: a 64 MiB
+    // message no longer pays a second 64 MiB decode (br-asupersync-ydis91).
+    inflate_over(payload, max, 0xff, Some(head))?;
     Ok(zero_filled)
 }
 
 /// Decode `payload` over a `fill` window. With `reference`, output is compared
-/// against it chunk by chunk and not retained; the result is then empty.
+/// against it chunk by chunk and not retained, and decoding stops at the end
+/// of `reference`; the result is then empty.
 #[cfg(feature = "compression")]
 fn inflate_over(
     payload: &[u8],
@@ -247,12 +254,15 @@ fn inflate_over(
         offset += read;
         match reference {
             Some(reference) => {
-                let expected = produced
-                    .checked_add(written)
-                    .and_then(|end| reference.get(produced..end))
+                let end = produced.saturating_add(written).min(reference.len());
+                let expected = reference
+                    .get(produced..end)
                     .ok_or_else(references_before_message)?;
-                if expected != &chunk[..written] {
+                if expected != &chunk[..end - produced] {
                     return Err(references_before_message());
+                }
+                if end == reference.len() {
+                    return Ok(Bytes::new());
                 }
             }
             None => append_bounded(&mut output, &chunk[..written], max)?,
@@ -392,5 +402,77 @@ mod tests {
         assert!(inflate(&message, 0).unwrap().is_empty());
         message.splice(..0, [1, 0, 0, 255, 255]);
         assert!(matches!(inflate(&message, 0), Err(WsError::PayloadTooLarge { size: 257, max: 256 })));
+    }
+
+    /// Raw DEFLATE bits, least significant first (RFC 1951 section 3.1.1).
+    #[derive(Default)]
+    struct Bits {
+        out: Vec<u8>,
+        used: usize,
+    }
+
+    impl Bits {
+        fn put(&mut self, value: u32, count: u32) {
+            for bit in 0..count {
+                if self.used % 8 == 0 {
+                    self.out.push(0);
+                }
+                *self.out.last_mut().unwrap() |= (((value >> bit) & 1) as u8) << (self.used % 8);
+                self.used += 1;
+            }
+        }
+
+        /// A Huffman code, most significant bit first.
+        fn code(&mut self, code: u32, count: u32) {
+            for bit in (0..count).rev() {
+                self.put((code >> bit) & 1, 1);
+            }
+        }
+    }
+
+    /// A stored run of `run` bytes, then one fixed-Huffman match of length 3
+    /// reaching 32 KiB back, then the flush header whose tail RFC 7692 removes.
+    fn reach_back(run: usize, byte: u8) -> Vec<u8> {
+        let mut bits = Bits::default();
+        bits.put(0, 3);
+        let len = u16::try_from(run).unwrap();
+        bits.out.extend_from_slice(&len.to_le_bytes());
+        bits.out.extend_from_slice(&(!len).to_le_bytes());
+        bits.out.resize(bits.out.len() + run, byte);
+        bits.used = bits.out.len() * 8;
+        bits.put(0, 1);
+        bits.put(1, 2);
+        bits.code(1, 7);
+        bits.code(29, 5);
+        bits.put(8191, 13);
+        bits.code(0, 7);
+        bits.put(0, 3);
+        bits.out
+    }
+
+    #[test]
+    fn permessage_deflate_reference_check_covers_exactly_the_first_window() {
+        // From position WINDOW - 1, a reference WINDOW back lands one byte
+        // before the message.
+        let before = reach_back(WINDOW - 1, b'a');
+        assert!(matches!(
+            inflate(&before, 1 << 20),
+            Err(WsError::ProtocolViolation(reason)) if reason.contains("before the message")
+        ));
+        // From position WINDOW, it lands on the first message byte.
+        let letters = reach_back(WINDOW, b'a');
+        assert_eq!(
+            inflate(&letters, 1 << 20).unwrap().as_ref(),
+            vec![b'a'; WINDOW + 3]
+        );
+        let zeros = reach_back(WINDOW, 0);
+        let decoded = inflate(&zeros, 1 << 20).unwrap();
+        assert_eq!(decoded.as_ref(), vec![0; WINDOW + 3]);
+        // The 0xFF-fill pass stops at the end of its reference. Output past
+        // the first window is never compared again (br-asupersync-ydis91).
+        let mut tail_differs = decoded.to_vec();
+        *tail_differs.last_mut().unwrap() = 1;
+        assert!(inflate_over(&zeros, 1 << 20, 0xff, Some(&tail_differs[..WINDOW])).is_ok());
+        assert!(inflate_over(&zeros, 1 << 20, 0xff, Some(&tail_differs)).is_err());
     }
 }
