@@ -7,7 +7,7 @@
 //! 1. Adding more than K encoded symbols never degrades decode success (monotone)
 //! 2. Receiving exact systematic prefix (K source symbols) always decodes via identity path
 //! 3. Symbol permutation preserves decoded payload
-//! 4. Any K-subset from [0..N) suffices to decode with high probability per RFC 6330
+//! 4. Any (K + 2)-subset of [0..N) decodes (RFC 6330 failure probability near 1e-6)
 //! 5. Partial decode failure + additional repair symbols converges to success
 //!
 //! Uses proptest with lab-runtime fixed seeds for deterministic, reproducible results.
@@ -21,7 +21,9 @@ mod raptorq_decoder_metamorphic_tests {
     use asupersync::config::RaptorQConfig;
     use asupersync::cx::Cx;
     use asupersync::raptorq::builder::RaptorQSenderBuilder;
-    use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
+    use asupersync::raptorq::decoder::{
+        DecodeError, DecodeResult, InactivationDecoder, ReceivedSymbol,
+    };
     use asupersync::security::AuthenticatedSymbol;
     use asupersync::transport::sink::SymbolSink;
     use asupersync::types::ObjectId;
@@ -150,6 +152,11 @@ mod raptorq_decoder_metamorphic_tests {
         received
     }
 
+    /// Symbol size for every relation. With 256..512-byte objects this gives
+    /// K = 16..32 source symbols in one block, so subsets, permutations and
+    /// repair-symbol substitution are non-trivial. (At 512 bytes K was 1.)
+    const SYMBOL_SIZE: u16 = 16;
+
     fn create_test_decoder(
         symbols: &[AuthenticatedSymbol],
         k: usize,
@@ -161,6 +168,23 @@ mod raptorq_decoder_metamorphic_tests {
             .symbol();
         let seed = seed_for_block(first_symbol.object_id(), first_symbol.sbn());
         InactivationDecoder::new(k, symbol_size, seed)
+    }
+
+    /// Decode one block's received transport symbols through the direct
+    /// `InactivationDecoder` API.
+    ///
+    /// `InactivationDecoder::decode` requires the caller to supply the S + H
+    /// LDPC/HDPC constraint rows itself (`decoding.rs` does this for the
+    /// production receive path); it only synthesizes the zero-padding LT rows
+    /// for ESIs K..K'. Without these rows every decode fails with
+    /// `InsufficientSymbols { received: n, required: K + S + H }`.
+    fn decode_with_constraints(
+        decoder: &InactivationDecoder,
+        received: &[ReceivedSymbol],
+    ) -> Result<DecodeResult, DecodeError> {
+        let mut equations = decoder.constraint_symbols();
+        equations.extend_from_slice(received);
+        decoder.decode(&equations)
     }
 
     fn reconstruct_original_data(source_symbols: &[Vec<u8>], original_len: usize) -> Vec<u8> {
@@ -194,7 +218,7 @@ mod raptorq_decoder_metamorphic_tests {
             let config = RaptorQConfig {
                 encoding: asupersync::config::EncodingConfig {
                     repair_overhead: 1.20, // 20% overhead for extra symbols
-                    symbol_size: 512,
+                    symbol_size: SYMBOL_SIZE,
                     ..Default::default()
                 },
                 ..Default::default()
@@ -229,8 +253,8 @@ mod raptorq_decoder_metamorphic_tests {
 
             test_section!("decode_testing");
 
-            let minimal_result = decoder.decode(&minimal_symbols);
-            let extended_result = decoder.decode(&extended_symbols);
+            let minimal_result = decode_with_constraints(&decoder, &minimal_symbols);
+            let extended_result = decode_with_constraints(&decoder, &extended_symbols);
 
             // MR1 ASSERTION: Adding symbols should never degrade success
             match minimal_result {
@@ -260,9 +284,17 @@ mod raptorq_decoder_metamorphic_tests {
                         }
                     }
                 }
-                Err(_) => {
-                    // Minimal failed - extended may succeed (this is allowed monotonicity)
-                    // We don't assert anything here as additional symbols might help
+                Err(e) => {
+                    // Fewer than K symbols may legitimately fail. A set holding
+                    // all K source symbols (the sink emits them first) plus the
+                    // constraint rows must decode.
+                    prop_assert!(
+                        minimal_count < k,
+                        "MR1 VIOLATION: {} symbols including all {} source symbols failed to decode: {:?}",
+                        minimal_count,
+                        k,
+                        e
+                    );
                 }
             }
         });
@@ -291,7 +323,7 @@ mod raptorq_decoder_metamorphic_tests {
             let config = RaptorQConfig {
                 encoding: asupersync::config::EncodingConfig {
                     repair_overhead: 1.10, // Minimal overhead for systematic test
-                    symbol_size: 512,
+                    symbol_size: SYMBOL_SIZE,
                     ..Default::default()
                 },
                 ..Default::default()
@@ -318,8 +350,23 @@ mod raptorq_decoder_metamorphic_tests {
 
             // Test with exactly K systematic symbols (should always decode via identity)
             let systematic_result = if symbols.len() >= k {
+                // MR2 premise: the sink keeps emission order and the encoder emits
+                // a single block's source ESIs 0..K-1 before any repair, so this
+                // prefix is exactly the systematic set. Fail closed if it is not.
+                for (index, auth_symbol) in symbols[..k].iter().enumerate() {
+                    let symbol = auth_symbol.symbol();
+                    prop_assert!(
+                        symbol.kind() == asupersync::types::SymbolKind::Source
+                            && symbol.esi() as usize == index,
+                        "MR2 premise: prefix symbol {} is {:?} esi {}, expected source esi {}",
+                        index,
+                        symbol.kind(),
+                        symbol.esi(),
+                        index
+                    );
+                }
                 let systematic_symbols = symbols_to_received_symbols(&symbols[..k], k);
-                let result = decoder.decode(&systematic_symbols);
+                let result = decode_with_constraints(&decoder, &systematic_symbols);
 
                 // MR2 ASSERTION: K source symbols should always decode via identity
                 match &result {
@@ -349,7 +396,7 @@ mod raptorq_decoder_metamorphic_tests {
             // Compare with mixed source+repair symbols for same result
             if symbols.len() >= k + 3 {
                 let mixed_symbols = symbols_to_received_symbols(&symbols[..k + 3], k);
-                let mixed_result = decoder.decode(&mixed_symbols);
+                let mixed_result = decode_with_constraints(&decoder, &mixed_symbols);
 
                 if let (Some(Ok(sys_decoded)), Ok(mixed_decoded)) =
                     (systematic_result.as_ref(), &mixed_result)
@@ -386,7 +433,14 @@ mod raptorq_decoder_metamorphic_tests {
             let data = generate_deterministic_data(data_size, seed);
             let object_id = ObjectId::new_for_test(seed);
 
-            let config = RaptorQConfig::default();
+            let config = RaptorQConfig {
+                encoding: asupersync::config::EncodingConfig {
+                    repair_overhead: 1.30,
+                    symbol_size: SYMBOL_SIZE,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
             let sink = DeterministicSink::new(seed);
             let mut sender = RaptorQSenderBuilder::new()
                 .config(config.clone())
@@ -420,8 +474,8 @@ mod raptorq_decoder_metamorphic_tests {
 
             test_section!("decode_comparison");
 
-            let original_result = decoder.decode(&original_symbols);
-            let permuted_result = decoder.decode(&permuted_symbols);
+            let original_result = decode_with_constraints(&decoder, &original_symbols);
+            let permuted_result = decode_with_constraints(&decoder, &permuted_symbols);
 
             // MR3 ASSERTION: Symbol permutation should preserve decode result
             match (original_result, permuted_result) {
@@ -447,8 +501,17 @@ mod raptorq_decoder_metamorphic_tests {
                 (Err(_), Ok(_)) => {
                     prop_assert!(false, "MR3 VIOLATION: permutation improved decode success");
                 }
-                (Err(_), Err(_)) => {
-                    // Both failed - consistent behavior
+                (Err(e), Err(_)) => {
+                    // Both failing is consistent only when the set lacks some
+                    // source symbol. With all K source symbols (the sink emits
+                    // them first) plus the constraint rows, decode must succeed.
+                    prop_assert!(
+                        symbol_count < k,
+                        "MR3 VIOLATION: {} symbols including all {} source symbols failed to decode in either order: {:?}",
+                        symbol_count,
+                        k,
+                        e
+                    );
                 }
             }
         });
@@ -457,7 +520,7 @@ mod raptorq_decoder_metamorphic_tests {
     }
 
     // ============================================================================
-    // MR 4: K-Subset Decode Sufficiency (RFC 6330)
+    // MR 4: (K + 2)-Subset Decode Sufficiency (RFC 6330)
     // ============================================================================
 
     #[test]
@@ -478,7 +541,7 @@ mod raptorq_decoder_metamorphic_tests {
             let config = RaptorQConfig {
                 encoding: asupersync::config::EncodingConfig {
                     repair_overhead: 1.50, // High overhead for subset testing
-                    symbol_size: 512,
+                    symbol_size: SYMBOL_SIZE,
                     ..Default::default()
                 },
                 ..Default::default()
@@ -503,79 +566,81 @@ mod raptorq_decoder_metamorphic_tests {
             let symbol_size = config.encoding.symbol_size as usize;
             let decoder = create_test_decoder(&symbols, k, symbol_size);
 
-            // Test multiple random K-subsets from available symbols
-            if symbols.len() >= k + 10 {
-                let mut rng = DetRng::new(subset_seed);
-                let mut subset_results = Vec::new();
+            // MR4 premise: a (K + 2)-subset exists. Fail closed instead of
+            // skipping the relation (the old K + 10 guard never held, so this
+            // relation never ran).
+            let subset_size = k + 2;
+            prop_assert!(
+                symbols.len() >= subset_size,
+                "MR4 premise: {} symbols emitted for K = {}, need at least K + 2",
+                symbols.len(),
+                k
+            );
 
-                for subset_id in 0..3 {
-                    test_section!(format!("subset_{}", subset_id));
+            let mut rng = DetRng::new(subset_seed);
+            let mut dropped_sources_total = 0usize;
 
-                    // Select random K symbols from available set
-                    let mut selected_indices: Vec<usize> = (0..symbols.len()).collect();
+            for subset_id in 0..3 {
+                test_section!(format!("subset_{}", subset_id));
 
-                    // Fisher-Yates shuffle for random selection
-                    for i in (1..selected_indices.len()).rev() {
-                        let j = (rng.next_u32() as usize) % (i + 1);
-                        selected_indices.swap(i, j);
-                    }
-                    selected_indices.truncate(k);
-                    selected_indices.sort(); // Deterministic ordering
-
-                    let subset_auth_symbols: Vec<_> = selected_indices
-                        .iter()
-                        .map(|&idx| symbols[idx].clone())
-                        .collect();
-
-                    let subset_symbols = symbols_to_received_symbols(&subset_auth_symbols, k);
-                    let subset_result = decoder.decode(&subset_symbols);
-
-                    subset_results.push((subset_id, subset_result));
+                // Fisher-Yates shuffle, then keep a random (K + 2)-subset of
+                // all emitted symbols, sources and repairs alike.
+                let mut selected_indices: Vec<usize> = (0..symbols.len()).collect();
+                for i in (1..selected_indices.len()).rev() {
+                    let j = (rng.next_u32() as usize) % (i + 1);
+                    selected_indices.swap(i, j);
                 }
+                selected_indices.truncate(subset_size);
+                selected_indices.sort_unstable();
 
-                test_section!("k_subset_verification");
+                let subset_auth_symbols: Vec<_> = selected_indices
+                    .iter()
+                    .map(|&idx| symbols[idx].clone())
+                    .collect();
+                let sources_kept = subset_auth_symbols
+                    .iter()
+                    .filter(|s| s.symbol().kind() == asupersync::types::SymbolKind::Source)
+                    .count();
+                dropped_sources_total += k - sources_kept;
 
-                // MR4 ASSERTION: Any K-subset should decode successfully with high probability
-                let mut successful_decodes = Vec::new();
-                for (subset_id, result) in &subset_results {
-                    match result {
-                        Ok(decoded) => {
-                            let decoded_data =
-                                reconstruct_original_data(&decoded.source, data.len());
-                            prop_assert_eq!(
-                                &decoded_data, &data,
-                                "MR4 VIOLATION: K-subset {} decode failed identity",
-                                subset_id
-                            );
-                            successful_decodes.push(decoded_data);
-                        }
-                        Err(e) => {
-                            // Some K-subsets may fail due to unlucky selection,
-                            // but most should succeed per RFC 6330
-                            eprintln!("K-subset {} failed (may be acceptable): {:?}", subset_id, e);
-                        }
-                    }
-                }
+                let subset_symbols = symbols_to_received_symbols(&subset_auth_symbols, k);
 
-                // All successful decodes should produce identical results
-                if successful_decodes.len() > 1 {
-                    for (i, decoded) in successful_decodes.iter().enumerate() {
+                // MR4 ASSERTION: any K + 2 symbols decode to the original object.
+                // RFC 6330 targets a decode failure probability near 1e-6 at
+                // K + 2 received symbols, so a failure here is a decoder defect.
+                match decode_with_constraints(&decoder, &subset_symbols) {
+                    Ok(decoded) => {
+                        let decoded_data = reconstruct_original_data(&decoded.source, data.len());
                         prop_assert_eq!(
-                            &successful_decodes[0], decoded,
-                            "MR4 VIOLATION: K-subset {} produced different result",
-                            i
+                            &decoded_data,
+                            &data,
+                            "MR4 VIOLATION: (K + 2)-subset {} (K = {}, {} source symbols dropped) decoded to different bytes",
+                            subset_id,
+                            k,
+                            k - sources_kept
+                        );
+                    }
+                    Err(e) => {
+                        prop_assert!(
+                            false,
+                            "MR4 VIOLATION: (K + 2)-subset {} (K = {}, {} source symbols dropped) failed to decode: {:?}",
+                            subset_id,
+                            k,
+                            k - sources_kept,
+                            e
                         );
                     }
                 }
-
-                // With high repair overhead, we expect good decode success rate
-                let success_rate = successful_decodes.len() as f64 / subset_results.len() as f64;
-                prop_assert!(
-                    success_rate >= 0.5, // At least 50% success rate expected with high overhead
-                    "MR4 VIOLATION: K-subset success rate too low: {:.2}",
-                    success_rate
-                );
             }
+
+            // MR4 premise: at least one subset replaced a source symbol with a
+            // repair symbol, so the repair path was exercised.
+            prop_assert!(
+                dropped_sources_total > 0,
+                "MR4 premise: no subset dropped a source symbol (K = {}, {} symbols)",
+                k,
+                symbols.len()
+            );
         });
 
         test_complete!("mr4_k_subset_decode_sufficiency");
@@ -603,7 +668,7 @@ mod raptorq_decoder_metamorphic_tests {
             let config = RaptorQConfig {
                 encoding: asupersync::config::EncodingConfig {
                     repair_overhead: 1.40, // High overhead for convergence testing
-                    symbol_size: 512,
+                    symbol_size: SYMBOL_SIZE,
                     ..Default::default()
                 },
                 ..Default::default()
@@ -634,10 +699,12 @@ mod raptorq_decoder_metamorphic_tests {
             for step in 1..=convergence_steps {
                 test_section!(format!("convergence_step_{}", step));
 
-                // Start with insufficient symbols, then add more
-                let symbol_count = std::cmp::min(symbols.len(), k - 2 + step * 2);
+                // Grow the in-order prefix by two symbols per step: K - 2 + 2*step,
+                // i.e. K, K + 2, K + 4, ... for step >= 1. Written so it cannot
+                // underflow when K < 2.
+                let symbol_count = std::cmp::min(symbols.len(), (k + step * 2).saturating_sub(2));
                 let step_symbols = symbols_to_received_symbols(&symbols[..symbol_count], k);
-                let step_result = decoder.decode(&step_symbols);
+                let step_result = decode_with_constraints(&decoder, &step_symbols);
 
                 convergence_results.push((step, symbol_count, step_result));
             }
@@ -725,7 +792,7 @@ mod raptorq_decoder_metamorphic_tests {
             let config = RaptorQConfig {
                 encoding: asupersync::config::EncodingConfig {
                     repair_overhead: 1.30,
-                    symbol_size: 512,
+                    symbol_size: SYMBOL_SIZE,
                     ..Default::default()
                 },
                 ..Default::default()
@@ -763,7 +830,7 @@ mod raptorq_decoder_metamorphic_tests {
 
             test_section!("composite_decode");
 
-            let composite_result = decoder.decode(&received_symbols);
+            let composite_result = decode_with_constraints(&decoder, &received_symbols);
 
             // COMPOSITE ASSERTION: All metamorphic properties hold together
             match composite_result {

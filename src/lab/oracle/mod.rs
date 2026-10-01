@@ -116,8 +116,8 @@ pub use region_leak::{
 };
 pub use region_tree::{RegionTreeEntry, RegionTreeOracle, RegionTreeViolation};
 pub use registry::{
-    ALL_REPORTED_ORACLE_NAMES, ORACLE_ALL, ORACLE_DESCRIPTORS, OracleDescriptor, OracleRegistry,
-    OracleRegistryError,
+    ALL_REPORTED_ORACLE_NAMES, LAB_RUNTIME_FED_ORACLE_NAMES, ORACLE_ALL, ORACLE_DESCRIPTORS,
+    OracleDescriptor, OracleRegistry, OracleRegistryError,
 };
 pub use rref_access::{RRefAccessOracle, RRefAccessViolation, RRefAccessViolationKind, RRefId};
 pub use runtime_epoch::{

@@ -42,9 +42,14 @@ Scenario: example-race-condition [PASS]
 Seed: 42
 Steps: 0
 Faults injected: 0
-Oracles: 17/17 passed
+Oracles: 24/24 passed (16 not fed by the lab runtime)
 Certificate: event_hash=0, schedule_hash=0
 ```
+
+The count in parentheses is the number of checked oracles that the lab
+runtime never sends events to. They pass without having observed anything.
+`asupersync::lab::oracle::LAB_RUNTIME_FED_ORACLE_NAMES` lists the oracles it
+does feed.
 
 `lab.seed` feeds the deterministic scheduler. The YAML schema itself does not
 create application tasks, messages, leases, or saga work, so a narrative
