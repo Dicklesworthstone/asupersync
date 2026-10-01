@@ -781,6 +781,11 @@ path = "tests/atp_cli_dry_run.rs"
 required-features = ["atp-cli"]
 
 [[test]]
+name = "atp_cli_journey"
+path = "tests/atp_cli_journey.rs"
+required-features = ["cli"]
+
+[[test]]
 name = "atp_cli_quic_loopback"
 path = "tests/atp_cli_quic_loopback.rs"
 required-features = ["atp-cli", "tls"]
