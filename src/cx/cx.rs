@@ -2269,6 +2269,22 @@ impl<Caps> Cx<Caps> {
         self.inner.read().budget
     }
 
+    /// The budget new work started by this task inherits: tasks it spawns and
+    /// scopes and regions it opens. That is its live budget, except while the
+    /// task runs its cancellation cleanup. The cleanup budget's poll quota then
+    /// bounds only this task's own drain, so the new work carries no poll
+    /// quota from it. A flush or drain helper spawned during cleanup would
+    /// otherwise be cancelled with `PollQuota` after 50 to 1000 polls
+    /// (br-asupersync-0fvvq9).
+    fn inherited_budget(&self) -> Budget {
+        let inner = self.inner.read();
+        if inner.cleanup_phase {
+            inner.budget.with_poll_quota(u32::MAX)
+        } else {
+            inner.budget
+        }
+    }
+
     /// Returns the explicit capability/resource budget carried by this context.
     #[inline]
     #[must_use]
@@ -4072,7 +4088,7 @@ impl<Caps> Cx<Caps> {
     /// quiescence guarantees.
     #[must_use]
     pub fn scope(&self) -> crate::cx::Scope<'static> {
-        let budget = self.budget();
+        let budget = self.inherited_budget();
         debug!(
             task_id = ?self.task_id(),
             region_id = ?self.region_id(),
@@ -4156,7 +4172,9 @@ impl<Caps> Cx<Caps> {
             // meets these values with the region record, but cannot recover
             // constraints held only by this Cx. Carry them in the request so
             // opening a child cannot restore authority the caller gave up.
-            budget: self.budget().meet(spec.budget.unwrap_or(Budget::INFINITE)),
+            budget: self
+                .inherited_budget()
+                .meet(spec.budget.unwrap_or(Budget::INFINITE)),
             capability_budget: self
                 .capability_budget()
                 .meet(spec.capability_budget.unwrap_or(CapabilityBudget::UNSPECIFIED)),
@@ -4191,7 +4209,7 @@ impl<Caps> Cx<Caps> {
     /// ```
     #[must_use]
     pub fn scope_with_budget(&self, budget: Budget) -> crate::cx::Scope<'static> {
-        let parent_budget = self.budget();
+        let parent_budget = self.inherited_budget();
         let deadline_tightened = match (parent_budget.deadline, budget.deadline) {
             (Some(parent), Some(child)) => child < parent,
             (None, Some(_)) => true,
@@ -4508,7 +4526,7 @@ where
         };
         self.spawn_via_gateway(
             self.region_id(),
-            self.budget(),
+            self.inherited_budget(),
             self.capability_budget(),
             &gateway,
             &pending,
@@ -4537,7 +4555,7 @@ where
         };
         self.spawn_via_gateway(
             self.region_id(),
-            self.budget(),
+            self.inherited_budget(),
             self.capability_budget(),
             &gateway,
             &pending,
@@ -4906,7 +4924,7 @@ where
         };
         self.spawn_local_via_lane(
             self.region_id(),
-            self.budget(),
+            self.inherited_budget(),
             self.capability_budget(),
             &gateway,
             &pending,

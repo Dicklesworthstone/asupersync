@@ -883,6 +883,10 @@ pub struct CxInner {
     pub(crate) cancel_waker_registry_closed: bool,
     /// Current mask depth.
     pub mask_depth: u32,
+    /// The task runs its cancellation cleanup: `budget` is the cleanup budget,
+    /// whose poll quota bounds only this task's own drain, not work it starts
+    /// (br-asupersync-0fvvq9).
+    pub(crate) cleanup_phase: bool,
     /// Progress checkpoint state.
     pub checkpoint_state: CheckpointState,
     /// Fast atomic cancellation flag retained for 0.4.3 compatibility.
@@ -942,6 +946,7 @@ impl CxInner {
             next_cancel_waker_token: 0,
             cancel_waker_registry_closed: false,
             mask_depth: 0,
+            cleanup_phase: false,
             checkpoint_state: CheckpointState::new(),
             fast_cancel,
             cancellation,

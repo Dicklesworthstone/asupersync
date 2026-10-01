@@ -714,6 +714,7 @@ impl TaskRecord {
                 if let Some(guard) = inner_guard.as_mut() {
                     guard.budget = new_budget;
                     guard.budget_baseline = new_budget;
+                    guard.cleanup_phase = true;
                 }
                 // Also update polls_remaining to respect tighter quota
                 self.polls_remaining = self.polls_remaining.min(new_budget.poll_quota);
@@ -739,6 +740,7 @@ impl TaskRecord {
                 if let Some(guard) = inner_guard.as_mut() {
                     guard.budget = new_budget;
                     guard.budget_baseline = new_budget;
+                    guard.cleanup_phase = true;
                 }
                 // Also update polls_remaining to respect tighter quota
                 self.polls_remaining = self.polls_remaining.min(new_budget.poll_quota);
@@ -957,6 +959,7 @@ impl TaskRecord {
         if let Some(cleanup_budget) = active_cleanup_budget {
             guard.budget = cleanup_budget;
             guard.budget_baseline = cleanup_budget;
+            guard.cleanup_phase = true;
             self.polls_remaining = self.polls_remaining.min(cleanup_budget.poll_quota);
         }
         self.cleanup_budget().map(|budget| budget.priority)
@@ -1102,6 +1105,7 @@ impl TaskRecord {
                 let mut guard = inner.write();
                 guard.budget = cleanup_budget;
                 guard.budget_baseline = cleanup_budget;
+                guard.cleanup_phase = true;
             }
             self.polls_remaining = self.polls_remaining.min(cleanup_budget.poll_quota);
         }
@@ -1288,6 +1292,7 @@ impl TaskRecord {
                     let mut guard = inner.write();
                     guard.budget = budget;
                     guard.budget_baseline = budget;
+                    guard.cleanup_phase = true;
                 }
                 self.polls_remaining = budget.poll_quota;
 

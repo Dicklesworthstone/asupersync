@@ -1116,7 +1116,10 @@ pub(crate) fn scheduler_drives_current_task() -> bool {
 ///
 /// A task in its cancellation cleanup phase is not charged here. Its cleanup
 /// budget stays advisory on the production runtime, as before: enforcing it
-/// would rewrite the reason of a long graceful drain to `PollQuota`.
+/// would rewrite the reason of a long graceful drain to `PollQuota`. The same
+/// holds once cancellation is requested on the task's `Cx` but the task record
+/// has not caught up yet (`TaskHandle::abort`, `Cx::cancel_with`): that
+/// request already owns the reason (br-asupersync-0fvvq9).
 #[inline]
 pub(crate) fn consume_budget_poll(record: &mut crate::record::TaskRecord) {
     if record.polls_remaining == u32::MAX || record.state.is_cancelling() {
@@ -1126,6 +1129,9 @@ pub(crate) fn consume_budget_poll(record: &mut crate::record::TaskRecord) {
         return;
     };
     let mut guard = inner.write();
+    if guard.cancel_requested {
+        return;
+    }
     if guard.budget.consume_poll().is_none() {
         guard.set_cancel_requested(true);
         let quota = crate::types::CancelReason::poll_quota();

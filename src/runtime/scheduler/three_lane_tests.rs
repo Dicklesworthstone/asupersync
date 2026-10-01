@@ -12718,3 +12718,37 @@ fn production_poll_quota_leaves_unbounded_and_cleanup_budgets_alone() {
         Some(CancelKind::User)
     );
 }
+
+/// `TaskHandle::abort` and `Cx::cancel_with` write the request into the
+/// task's `Cx` before the runtime updates the task record. A task whose quota
+/// runs out in that window keeps the reason it was cancelled with: the poll
+/// charge used to rewrite it to `PollQuota` (br-asupersync-0fvvq9).
+#[test]
+fn production_poll_quota_keeps_a_cancellation_already_requested_on_the_cx() {
+    let (mut record, inner) = poll_quota_record(
+        TaskId::new_for_test(903, 1),
+        Budget::new().with_poll_quota(1),
+    );
+    consume_budget_poll(&mut record);
+    assert_eq!(record.polls_remaining, 0);
+    {
+        // What TaskHandle::abort does before the record catches up.
+        let mut guard = inner.write();
+        guard.set_cancel_requested(true);
+        guard.cancel_reason = Some(CancelReason::user("abort"));
+    }
+    assert!(
+        !record.state.is_cancelling(),
+        "the record has not caught up"
+    );
+    for _ in 0..3 {
+        consume_budget_poll(&mut record);
+    }
+    let guard = inner.read();
+    assert!(guard.cancel_requested);
+    assert_eq!(
+        guard.cancel_reason.as_ref().map(|reason| reason.kind),
+        Some(CancelKind::User),
+        "an exhausted quota must not rewrite the requested reason"
+    );
+}

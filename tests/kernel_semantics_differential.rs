@@ -1300,6 +1300,101 @@ fn region_poll_quota_stops_a_busy_task(cx: Cx) -> ScenarioFuture {
     })
 }
 
+/// The same quota stops a task that never calls `checkpoint()` and only reads
+/// its cancellation flag between yields. Nothing in the task notices the spent
+/// quota, so the scheduler itself must request cancellation: polls 1 to 3
+/// spend a quota of 3, and the request lands before poll 4
+/// (br-asupersync-0fvvq9).
+fn region_poll_quota_cancels_a_task_that_never_checkpoints(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let mut spec = ChildRegionSpec::inherit();
+        spec.budget = Some(Budget::new().with_poll_quota(3));
+        let child = cx
+            .open_child_region(spec)
+            .await
+            .expect("open child region with a poll quota");
+        let mut handle = child
+            .cx()
+            .spawn(|task_cx| async move {
+                for round in 0..1_000u32 {
+                    if task_cx.is_cancel_requested() {
+                        let reason = task_cx
+                            .cancel_reason()
+                            .map(|reason| format!("{:?}", reason.kind));
+                        return (Some(round), reason);
+                    }
+                    yield_now().await;
+                }
+                (None, None)
+            })
+            .expect("spawn inside the child region");
+        let joined = handle.join(&cx).await;
+        let closed = child.close().await;
+        let joined = outcome(&joined);
+        assert_ne!(
+            joined, "ok:(None, None)",
+            "the spent quota must request cancellation"
+        );
+        observe([("join", joined), ("close", format!("{closed:?}"))])
+    })
+}
+
+/// A task cancelled through its handle acknowledges and enters cleanup, where
+/// its live budget becomes the User cleanup budget of 1000 polls. It then
+/// spawns a helper that yields 1100 times. The cleanup quota bounds only the
+/// cancelled task's own drain, so the helper must finish every round instead
+/// of being cancelled with `PollQuota` (br-asupersync-0fvvq9).
+fn cleanup_spawned_helper_is_not_bound_by_the_cleanup_quota(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let (started, _) = flags();
+        let s = Arc::clone(&started);
+        let (result_tx, mut result_rx) = oneshot::channel::<Result<u32, (u32, Option<String>)>>();
+        let mut handle = cx
+            .spawn(move |task_cx| async move {
+                s.store(true, Ordering::SeqCst);
+                while task_cx.checkpoint().is_ok() {
+                    yield_now().await;
+                }
+                // Acknowledged. One more poll lets the runtime install the
+                // cleanup budget before the helper is spawned.
+                yield_now().await;
+                // The lab also charges cleanup polls; production does not.
+                let cleanup_quota = task_cx.budget().poll_quota;
+                let in_cleanup = cleanup_quota > 900 && cleanup_quota <= 1_000;
+                let spawned = task_cx.spawn(move |helper_cx| async move {
+                    let mut result = Ok(1_100);
+                    for round in 0..1_100u32 {
+                        if helper_cx.checkpoint().is_err() {
+                            let reason = helper_cx
+                                .cancel_reason()
+                                .map(|reason| format!("{:?}", reason.kind));
+                            result = Err((round, reason));
+                            break;
+                        }
+                        yield_now().await;
+                    }
+                    let _ = result_tx.send_blocking(result);
+                });
+                (in_cleanup, spawned.is_ok())
+            })
+            .expect("spawn");
+        wait_for(&started).await;
+        yield_now().await;
+        handle.abort_with_reason(CancelReason::user("drain"));
+        let helper = format!("{:?}", result_rx.recv(&cx).await);
+        let joined = outcome(&handle.join(&cx).await);
+        assert_eq!(
+            joined, "ok:(true, true)",
+            "the cancelled task reached its User cleanup budget before spawning"
+        );
+        assert_eq!(
+            helper, "Ok(Ok(1100))",
+            "the helper is not bound by the cleanup quota"
+        );
+        observe([("join", joined), ("helper", helper)])
+    })
+}
+
 fn spawn_blocking_returns_its_value(cx: Cx) -> ScenarioFuture {
     Box::pin(async move {
         let mut handle = cx.spawn_blocking(|_cx| 41u32 + 1).expect("spawn_blocking");
@@ -2371,6 +2466,16 @@ differential!(
 differential!(
     differential_region_poll_quota,
     region_poll_quota_stops_a_busy_task,
+    []
+);
+differential!(
+    differential_region_poll_quota_without_checkpoints,
+    region_poll_quota_cancels_a_task_that_never_checkpoints,
+    []
+);
+differential!(
+    differential_cleanup_spawned_helper_quota,
+    cleanup_spawned_helper_is_not_bound_by_the_cleanup_quota,
     []
 );
 differential!(

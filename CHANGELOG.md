@@ -189,6 +189,28 @@ lacked "empty" failed even when the hash matched. Its methods now report a
 cancelled `Cx` as `Cancelled` rather than as
 `PlatformError::OperatingSystemError`.
 
+### Behavior change — the production runtime enforces explicit poll quotas
+
+`Budget::with_poll_quota` bounds how many times a task is polled. The
+`LabRuntime` always enforced it; the production scheduler ignored it, so a
+quota that held in lab tests did not hold in production
+(`asupersync-r017wv`). The production scheduler now spends one poll before
+each poll of a task with a finite quota, and requests cancellation with
+`CancelKind::PollQuota` once it is spent.
+
+Budgets without a quota are unaffected: `Budget::new()`, `Budget::default()`
+and `Budget::INFINITE` carry `u32::MAX`, as do the root region and the
+`block_on` request context. Code that sets a quota explicitly now gets the
+documented bound. That covers scope and region budgets, AppSpec
+`budgets[].poll_quota`, and a request budget such as `with_poll_quota(10_000)`,
+which now cancels a long-running streaming handler after 10,000 polls. Raise
+or drop such quotas where work is meant to be unbounded.
+
+A cancelled task's cleanup budget stays advisory in production. Work the task
+starts during cleanup (spawned tasks, scopes and regions) does not inherit the
+cleanup budget's poll quota. A cancellation already requested on a task's
+`Cx` keeps its reason when the quota runs out (`asupersync-0fvvq9`).
+
 ### Durable ATP resume and journaling
 
 - Sender checkpoints are persisted in bounded, append-only journals before EOF,
