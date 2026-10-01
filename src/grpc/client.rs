@@ -1035,7 +1035,14 @@ impl<C: Codec> GrpcClient<C> {
         }
     }
 
-    /// Start a server streaming RPC call.
+    /// Start a server streaming RPC call on a deterministic `loopback` channel.
+    ///
+    /// This legacy entry point never contacts a server. On a channel whose
+    /// host is `loopback` it returns a stream holding the request itself as
+    /// the single response, which needs `Req` and `Resp` to be the same type
+    /// (`FAILED_PRECONDITION` otherwise). Every network channel gets
+    /// `UNIMPLEMENTED`. For a real server-streaming call over HTTP/2 use
+    /// `GrpcClient::into_native_server_streaming`.
     #[allow(clippy::unused_async)]
     pub async fn server_streaming<Req, Resp>(
         &mut self,
@@ -1064,7 +1071,14 @@ impl<C: Codec> GrpcClient<C> {
         Ok(Response::with_metadata(stream, metadata))
     }
 
-    /// Start a client streaming RPC call.
+    /// Start a client streaming RPC call on a deterministic `loopback` channel.
+    ///
+    /// This legacy entry point never contacts a server. On a channel whose
+    /// host is `loopback` the response is the one message sent through the
+    /// sink, which needs `Req` and `Resp` to be the same type; more than one
+    /// message is `FAILED_PRECONDITION`. Every network channel gets
+    /// `UNIMPLEMENTED`. For a real upload over HTTP/2 use
+    /// `GrpcClient::into_native_duplex`.
     #[allow(clippy::unused_async)]
     pub async fn client_streaming<Req, Resp>(
         &mut self,
@@ -1105,7 +1119,14 @@ impl<C: Codec> GrpcClient<C> {
         Ok((sink, future))
     }
 
-    /// Start a bidirectional streaming RPC call.
+    /// Start a bidirectional streaming RPC call on a deterministic `loopback`
+    /// channel.
+    ///
+    /// This legacy entry point never contacts a server. On a channel whose
+    /// host is `loopback` every message sent through the sink comes back on
+    /// the response stream, which needs `Req` and `Resp` to be the same type.
+    /// Every network channel gets `UNIMPLEMENTED`. For a real bidirectional
+    /// call over HTTP/2 use `GrpcClient::into_native_duplex`.
     #[allow(clippy::unused_async)]
     pub async fn bidi_streaming<Req, Resp>(
         &mut self,
