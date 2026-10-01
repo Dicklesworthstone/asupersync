@@ -107,6 +107,9 @@ struct PartialMessage {
 pub(super) struct MessageAssembler {
     max_message_size: usize,
     partial: Option<PartialMessage>,
+    /// A complete compressed message whose decode spans polls. Its frames are
+    /// consumed, so it lives here and survives an abandoned receive.
+    inflating: Option<(Opcode, super::compression::Inflation)>,
 }
 
 impl MessageAssembler {
@@ -114,10 +117,55 @@ impl MessageAssembler {
         Self {
             max_message_size,
             partial: None,
+            inflating: None,
+        }
+    }
+
+    /// Whether a compressed message is still decoding. The receiver resumes
+    /// it, yielding between steps, before it decodes another frame.
+    pub(super) fn is_inflating(&self) -> bool {
+        self.inflating.is_some()
+    }
+
+    /// Decode the pending compressed message one bounded step further
+    /// (br-asupersync-ydis91). `Ok(None)` means it is not complete yet.
+    pub(super) fn resume(&mut self) -> Result<Option<Message>, WsError> {
+        let Some((opcode, inflation)) = self.inflating.as_mut() else {
+            return Ok(None);
+        };
+        let opcode = *opcode;
+        let step = inflation.step(super::compression::INFLATE_STEP_CHUNKS);
+        if !matches!(step, Ok(None)) {
+            self.inflating = None;
+        }
+        match step? {
+            Some(payload) => Ok(Some(message_from_payload(opcode, payload)?)),
+            None => Ok(None),
+        }
+    }
+
+    fn complete(
+        &mut self,
+        opcode: Opcode,
+        payload: Bytes,
+        compressed: bool,
+    ) -> Result<Option<Message>, WsError> {
+        match super::compression::incoming(payload, compressed, self.max_message_size)? {
+            super::compression::Incoming::Ready(payload) => {
+                Ok(Some(message_from_payload(opcode, payload)?))
+            }
+            super::compression::Incoming::Inflating(inflation) => {
+                self.inflating = Some((opcode, inflation));
+                self.resume()
+            }
         }
     }
 
     pub(super) fn push_frame(&mut self, frame: Frame) -> Result<Option<Message>, WsError> {
+        debug_assert!(
+            self.inflating.is_none(),
+            "a frame arrived before the pending message finished decoding"
+        );
         match frame.opcode {
             Opcode::Text | Opcode::Binary => self.push_data_frame(frame),
             Opcode::Continuation => self.push_continuation_frame(&frame),
@@ -141,8 +189,7 @@ impl MessageAssembler {
         }
 
         if frame.fin {
-            let payload = super::compression::incoming(frame.payload, frame.rsv1, self.max_message_size)?;
-            return Ok(Some(message_from_payload(frame.opcode, payload)?));
+            return self.complete(frame.opcode, frame.payload, frame.rsv1);
         }
 
         let mut data = BytesMut::with_capacity(payload_len);
@@ -182,8 +229,7 @@ impl MessageAssembler {
         let compressed = partial.compressed;
         let data = std::mem::take(&mut partial.data).freeze();
         self.partial = None;
-        let data = super::compression::incoming(data, compressed, self.max_message_size)?;
-        Ok(Some(message_from_payload(opcode, data)?))
+        self.complete(opcode, data, compressed)
     }
 }
 
@@ -672,6 +718,26 @@ where
                         continue;
                     }
                     Err(e) => return Err(e),
+                }
+            }
+
+            // A compressed message decodes in bounded steps with a yield
+            // between them, so one large message cannot hold this worker
+            // for its whole decode (br-asupersync-ydis91).
+            if self.assembler.is_inflating() {
+                match self.assembler.resume() {
+                    Ok(Some(msg)) => return Ok(Some(msg)),
+                    Ok(None) => {
+                        crate::runtime::yield_now().await;
+                        continue;
+                    }
+                    Err(err) => {
+                        // RFC 6455 §7.1.7, as for push_frame below.
+                        self.codec.poison();
+                        self.close_handshake
+                            .force_close(CloseReason::new(err.as_close_code(), None));
+                        return Err(err);
+                    }
                 }
             }
 

@@ -508,6 +508,26 @@ where
                 }
             }
 
+            // A compressed message decodes in bounded steps with a yield
+            // between them, so one large message cannot hold this worker
+            // for its whole decode (br-asupersync-ydis91).
+            if self.assembler.is_inflating() {
+                match self.assembler.resume() {
+                    Ok(Some(msg)) => return Ok(Some(msg)),
+                    Ok(None) => {
+                        crate::runtime::yield_now().await;
+                        continue;
+                    }
+                    Err(err) => {
+                        // RFC 6455 §7.1.7, as for push_frame below.
+                        self.codec.poison();
+                        self.close_handshake
+                            .force_close(CloseReason::new(err.as_close_code(), None));
+                        return Err(err);
+                    }
+                }
+            }
+
             let decoded = self.codec.decode(&mut self.read_buf).inspect_err(|error| {
                 self.close_handshake
                     .force_close(CloseReason::new(error.as_close_code(), None));

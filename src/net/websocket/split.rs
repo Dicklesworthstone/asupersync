@@ -640,6 +640,37 @@ where
                 self.shared.lock().pending_pong_flush = false;
             }
 
+            // A compressed message decodes in bounded steps with a yield
+            // between them, so one large message cannot hold this worker for
+            // its whole decode (br-asupersync-ydis91). Like push_frame below,
+            // each step runs on the assembler taken out of the mutex.
+            let inflating = self.shared.lock().assembler.is_inflating();
+            if inflating {
+                let mut assembler = {
+                    let mut shared = self.shared.lock();
+                    let max = shared.config.max_message_size;
+                    std::mem::replace(&mut shared.assembler, MessageAssembler::new(max))
+                };
+                let result = assembler.resume();
+                self.shared.lock().assembler = assembler;
+                match result {
+                    Ok(Some(msg)) => return Ok(Some(msg)),
+                    Ok(None) => {
+                        crate::runtime::yield_now().await;
+                        continue;
+                    }
+                    Err(err) => {
+                        // RFC 6455 §7.1.7, as for push_frame below.
+                        let mut shared = self.shared.lock();
+                        shared.codec.poison();
+                        shared
+                            .close_handshake
+                            .force_close(CloseReason::new(err.as_close_code(), None));
+                        return Err(err);
+                    }
+                }
+            }
+
             // Try to decode a frame from the buffer
             let maybe_frame = {
                 let shared = &mut *self.shared.lock();
