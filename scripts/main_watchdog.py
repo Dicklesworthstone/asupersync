@@ -158,6 +158,10 @@ WORKER_FAULT_RE = re.compile(
     r"|failed to download `"
     r"|couldn't read `[^`]*/registry/src/[^`]*`: No such file or directory"
     r"|target may not be installed"
+    # Under --message-format=short rustc drops the "target may not be installed" note, so
+    # the missing sysroot crate is the only signal (check-wasm32 on ovh-a, 2026-10-01,
+    # filed as the false P0 bi2462.147.71).
+    r"|can't find crate for `(?:core|std|alloc)`"
 )
 # A crate built from a local path ("Checking franken-kernel v0.1.0 (/…/franken_kernel)")
 # belongs to this repository; registry and git dependencies carry no absolute path.
