@@ -792,14 +792,17 @@ fn test_authorization_enforcement(cx: &Cx) -> ConformanceResult {
 /// Run full ATP protocol conformance test suite.
 #[test]
 fn atp_protocol_full_conformance() {
-    let cx = test_cx();
+    // Each case run gets its own test_cx(), so its 5 s budget covers that case
+    // alone. One shared context let the suite's total time (all cases, then
+    // the MUST cases again) exhaust the budget on a loaded worker, and every
+    // later case then failed on cancellation (br-asupersync-bi2462.147.75).
     let mut pass = 0;
     let mut fail = 0;
     let mut skipped = 0;
     let mut known_gap = 0;
 
     for case in ATP_CONFORMANCE_CASES {
-        let result = (case.test_fn)(&cx);
+        let result = (case.test_fn)(&test_cx());
         let verdict = result.verdict();
         match &result {
             ConformanceResult::Pass { .. } => {
@@ -842,7 +845,7 @@ fn atp_protocol_full_conformance() {
     let must_pass = ATP_CONFORMANCE_CASES
         .iter()
         .filter(|c| c.level == RequirementLevel::Must)
-        .filter(|c| matches!((c.test_fn)(&cx), ConformanceResult::Pass { .. }))
+        .filter(|c| matches!((c.test_fn)(&test_cx()), ConformanceResult::Pass { .. }))
         .count();
     let compliance_score = if must_tests > 0 {
         (must_pass as f64 / must_tests as f64) * 100.0
@@ -882,15 +885,13 @@ fn atp_protocol_full_conformance() {
 /// Generate compliance coverage matrix.
 #[test]
 fn atp_protocol_coverage_matrix() {
-    let cx = test_cx();
-
     println!("# ATP Protocol Conformance Coverage Matrix");
     println!();
     println!("| Test ID | Section | Level | Category | Status | Description |");
     println!("| ------- | ------- | ----- | -------- | ------ | ----------- |");
 
     for case in ATP_CONFORMANCE_CASES {
-        let result = (case.test_fn)(&cx);
+        let result = (case.test_fn)(&test_cx());
         let status = match result {
             ConformanceResult::Pass { .. } => "PASS",
             ConformanceResult::Fail { .. } => "FAIL",
