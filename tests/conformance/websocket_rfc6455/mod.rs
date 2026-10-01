@@ -257,19 +257,20 @@ mod tests {
 
         assert!(!must_tests.is_empty(), "Should have MUST requirement tests");
 
-        // Calculate MUST compliance rate
-        let must_passed = must_tests
+        // Every MUST clause passes. A percentage threshold would hide a
+        // failing MUST behind the passing ones, so name each failure.
+        let must_failures: Vec<_> = must_tests
             .iter()
-            .filter(|r| r.verdict == TestVerdict::Pass)
-            .count();
+            .filter(|r| r.verdict != TestVerdict::Pass)
+            .map(|r| format!("{} ({:?}): {:?}", r.test_id, r.verdict, r.notes))
+            .collect();
 
-        let compliance_rate = (must_passed as f64) / (must_tests.len() as f64) * 100.0;
-
-        // RFC compliance requires high MUST coverage
         assert!(
-            compliance_rate >= 95.0,
-            "MUST clause compliance rate {:.1}% is below 95% threshold",
-            compliance_rate
+            must_failures.is_empty(),
+            "{} of {} MUST clauses failed:\n{}",
+            must_failures.len(),
+            must_tests.len(),
+            must_failures.join("\n")
         );
     }
 }

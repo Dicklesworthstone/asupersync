@@ -707,8 +707,12 @@ where
                             Ok(Some(msg)) => return Ok(Some(msg)),
                             Ok(None) => {}
                             Err(err) => {
-                                self.shared
-                                    .lock()
+                                // RFC 6455 §7.1.7: a failed connection processes
+                                // no further peer data, including frames already
+                                // buffered behind the violation.
+                                let mut shared = self.shared.lock();
+                                shared.codec.poison();
+                                shared
                                     .close_handshake
                                     .force_close(CloseReason::new(err.as_close_code(), None));
                                 return Err(err);
@@ -2269,6 +2273,32 @@ mod tests {
 
             let ws = read.reunite(write).expect("split halves must reunite");
             assert_eq!(&ws.io.written[2..6], &[0xDE, 0xAD, 0xBE, 0xEF]);
+        });
+    }
+
+    /// RFC 6455 §7.1.7: once message assembly fails the connection, the read
+    /// half must not deliver the data frame buffered behind the violation.
+    #[test]
+    fn read_half_processes_no_data_after_an_assembly_failure() {
+        future::block_on(async {
+            let mut wire = encode_server_frame(Frame::text(Bytes::from_static(&[0xFF, 0xFE])));
+            wire.extend(encode_server_frame(Frame::text(Bytes::from_static(
+                b"after-failure",
+            ))));
+            let ws = WebSocket::from_upgraded(TestIo::new(wire), WebSocketConfig::default());
+            let (mut read, _write) = ws.split();
+            let cx = test_cx_with_entropy(Arc::new(FixedEntropy([1, 2, 3, 4])));
+
+            let first = read.recv(&cx).await;
+            assert!(
+                first.is_err(),
+                "invalid UTF-8 text must fail the connection, got {first:?}"
+            );
+            let second = read.recv(&cx).await;
+            assert!(
+                !matches!(second, Ok(Some(Message::Text(_) | Message::Binary(_)))),
+                "data after the failure must not be delivered, got {second:?}"
+            );
         });
     }
 }
