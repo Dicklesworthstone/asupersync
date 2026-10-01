@@ -1841,9 +1841,9 @@ fn stop_daemon(cli: AtpdCli) -> Result<()> {
         if term_result == 0 {
             println!("Sent shutdown signal to ATP daemon (PID: {})", pid);
 
-            // Wait for graceful shutdown (up to 10 seconds)
+            // Wait out the daemon's own drain bound before escalating (ks43rc)
             let start = Instant::now();
-            let timeout = Duration::from_secs(10);
+            let timeout = stop_wait_bound(&cli.config);
 
             loop {
                 // Check if process still exists using native libc call (signal 0)
@@ -1926,7 +1926,7 @@ fn stop_daemon(cli: AtpdCli) -> Result<()> {
         println!("Sent shutdown request to ATP daemon (PID: {})", pid);
 
         let start = Instant::now();
-        let timeout = Duration::from_secs(10);
+        let timeout = stop_wait_bound(&cli.config);
         while process_is_running(pid) && start.elapsed() <= timeout {
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -2361,6 +2361,24 @@ fn end_by_default_signal_action(signal: i32) -> ! {
     std::process::exit(128 + signal)
 }
 
+/// Extra time `atpd stop` allows beyond the daemon's drain bound.
+const STOP_WAIT_MARGIN_SECS: u64 = 5;
+
+/// How long `atpd stop` waits for the daemon to exit before forcing it.
+///
+/// On SIGTERM the daemon drains its listeners for up to
+/// `service.shutdown_timeout_secs` (br-asupersync-vlf155), so the stop command
+/// waits that long plus [`STOP_WAIT_MARGIN_SECS`]. A fixed 10 s wait killed a
+/// slower drain mid-way (br-asupersync-ks43rc). An unreadable config falls back
+/// to the default drain bound.
+fn stop_wait_bound(config_path: &PathBuf) -> Duration {
+    let drain_secs = load_daemon_config(config_path).map_or_else(
+        |_| AtpdConfig::default().service.shutdown_timeout_secs,
+        |config| config.service.shutdown_timeout_secs,
+    );
+    Duration::from_secs(drain_secs.max(1).saturating_add(STOP_WAIT_MARGIN_SECS))
+}
+
 /// Stops the daemon's transfer listeners and lets them drain.
 ///
 /// Each listener task attaches its context when it starts. The first SIGINT or
@@ -2566,6 +2584,43 @@ impl TransferStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stop_waits_out_the_configured_drain_bound_before_forcing() {
+        let directory = tempfile::tempdir().expect("stop-bound test directory");
+
+        // A daemon configured to drain for 45 s is given 45 s + margin, not
+        // the old fixed 10 s (br-asupersync-ks43rc).
+        let mut config = AtpdConfig::default();
+        config.service.shutdown_timeout_secs = 45;
+        let configured = directory.path().join("atpd.toml");
+        std::fs::write(&configured, toml::to_string_pretty(&config).unwrap()).unwrap();
+        assert_eq!(
+            stop_wait_bound(&configured),
+            Duration::from_secs(45 + STOP_WAIT_MARGIN_SECS)
+        );
+
+        // A zero drain bound still gets at least one second plus the margin.
+        config.service.shutdown_timeout_secs = 0;
+        std::fs::write(&configured, toml::to_string_pretty(&config).unwrap()).unwrap();
+        assert_eq!(
+            stop_wait_bound(&configured),
+            Duration::from_secs(1 + STOP_WAIT_MARGIN_SECS)
+        );
+
+        // A missing or unreadable config falls back to the default drain bound.
+        let default_bound = Duration::from_secs(
+            AtpdConfig::default().service.shutdown_timeout_secs + STOP_WAIT_MARGIN_SECS,
+        );
+        assert_eq!(
+            stop_wait_bound(&directory.path().join("absent.toml")),
+            default_bound
+        );
+        let garbled = directory.path().join("garbled.toml");
+        std::fs::write(&garbled, "service = [not toml").unwrap();
+        assert_eq!(stop_wait_bound(&garbled), default_bound);
+        assert!(default_bound > Duration::from_secs(10));
+    }
 
     #[cfg(feature = "tls")]
     #[test]
