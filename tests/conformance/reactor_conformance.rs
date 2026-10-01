@@ -18,13 +18,14 @@
 //! `<prefix>backend_available` row whose verdict is `Skip`; it never
 //! contributes a `Pass`.
 //!
-//! Two io_uring divergences are tracked (`known_gap`): asupersync-2mc31r
-//! (`register` waits for a blocked `poll`) and asupersync-ubwvb0
-//! (`EDGE_TRIGGERED` ignored). Their
-//! io_uring rows and differentials report `TestVerdict::ExpectedGap` only
-//! when the observation matches the gap exactly and conforms in every other
-//! check; a conforming backend passes and is remarked as having closed the
-//! gap, and any other observation fails. Every other row is strict.
+//! One io_uring divergence is tracked (`known_gap`): asupersync-2mc31r
+//! (`register` waits for a blocked `poll`). Its io_uring row and differential
+//! report `TestVerdict::ExpectedGap` only when the observation matches the gap
+//! exactly and conforms in every other check; a conforming backend passes and
+//! is remarked as having closed the gap, and any other observation fails.
+//! Every other row is strict, including the edge-triggered rows: io_uring
+//! serves `EDGE_TRIGGERED` with a multishot poll since asupersync-ubwvb0, so
+//! a new edge after a drain must arrive there as it does on epoll.
 //!
 //! Contracts (documentation under `src/runtime/reactor/`):
 //!
@@ -101,16 +102,11 @@ const CHURN_TOKEN_BASE: usize = 5_000;
 /// its observation matches the gap exactly and conforms in every other check.
 const GAP_REGISTER_WHILE_POLLING: &str = "asupersync-2mc31r: io_uring poll holds the ring lock \
      across submit_and_wait, so register waits for the poll";
-const GAP_EDGE_TRIGGERED: &str = "asupersync-ubwvb0: io_uring ignores EDGE_TRIGGERED; every \
-     completion disarms until modify";
 
 /// The tracked gap a backend may show for a contract, if any.
 fn known_gap(contract: Contract, kind: RowKind) -> Option<&'static str> {
     match (contract, kind) {
         (Contract::RegisterWhilePollBlocked, RowKind::IoUring) => Some(GAP_REGISTER_WHILE_POLLING),
-        (Contract::EdgeTriggeredRedeliversAfterDrain, RowKind::IoUring) => {
-            Some(GAP_EDGE_TRIGGERED)
-        }
         _ => None,
     }
 }
@@ -122,7 +118,7 @@ const EPOLL_ABSENT: &str = "EpollReactor is compiled only for Linux/Android \
 
 #[cfg(all(target_os = "linux", not(feature = "io-uring")))]
 const IO_URING_ABSENT: &str = "built without the io-uring feature: IoUringReactor is the \
-     Unsupported shell (src/runtime/reactor/io_uring.rs:3440-3504), so the io_uring rows \
+     Unsupported shell (src/runtime/reactor/io_uring.rs:4266-4330), so the io_uring rows \
      and the io_uring_vs_epoll differential did not run";
 
 #[cfg(not(target_os = "linux"))]
@@ -217,7 +213,7 @@ reactor_contracts! {
         lab: true,
         spec: "src/runtime/reactor/mod.rs:975-1000 (register), 1051-1080 (poll)",
         code: "epoll.rs:325-421 register, 575-610 poll, 277-316 readiness translation; \
-               io_uring.rs:1585-1624 register, 1684-1818 poll, 1905-1926 readiness translation",
+               io_uring.rs:1585-1624 register, 1684-1818 poll, 1908-1926 readiness translation",
     }
     WritableOnConnectedSocket {
         slug: "writable_on_connected_socket",
@@ -226,7 +222,7 @@ reactor_contracts! {
         lab: true,
         spec: "src/runtime/reactor/mod.rs:903-907 (writable readiness), 1051-1080 (poll)",
         code: "epoll.rs:227-247 interest to EPOLLOUT, 277-308 translation; \
-               io_uring.rs:1883-1903 interest to POLLOUT, 1905-1926 translation",
+               io_uring.rs:1883-1906 interest to POLLOUT, 1908-1926 translation",
     }
     ModifySwitchesInterest {
         slug: "modify_switches_interest",
@@ -235,7 +231,7 @@ reactor_contracts! {
         lab: true,
         spec: "src/runtime/reactor/mod.rs:1002-1024 (modify)",
         code: "epoll.rs:423-500 modify, 277-308 readiness masked by interest; \
-               io_uring.rs:1626-1670 modify, 1883-1903 poll mask from interest",
+               io_uring.rs:1626-1670 modify, 1883-1906 poll mask from interest",
     }
     DeregisterStopsEvents {
         slug: "deregister_stops_events",
@@ -244,7 +240,7 @@ reactor_contracts! {
         lab: true,
         spec: "src/runtime/reactor/mod.rs:1026-1049 (deregister), 1108-1111 (registration_count)",
         code: "epoll.rs:502-573 deregister, 311-316 unknown tokens dropped; \
-               io_uring.rs:1672-1682 deregister, 1962-1974 stale completions dropped",
+               io_uring.rs:1672-1682 deregister, 1958-1969 stale completions dropped",
     }
     RegistrationErrors {
         slug: "registration_errors",
@@ -296,7 +292,7 @@ reactor_contracts! {
         lab: true,
         spec: "src/runtime/reactor/mod.rs:272-305 (Events), 1064-1067 (poll count), 930-933 (oneshot)",
         code: "epoll.rs:575-610 (batch bounded by Events capacity); \
-               io_uring.rs:1721-1724 and 1956-1999 (whole completion queue drained per poll)",
+               io_uring.rs:1721-1724 and 1949-1999 (whole completion queue drained per poll)",
     }
     ConcurrentRegistrationChurn {
         slug: "concurrent_registration_churn",
@@ -305,7 +301,7 @@ reactor_contracts! {
         lab: true,
         spec: "src/runtime/reactor/mod.rs:918-922 (thread safety), 1108-1111 (registration_count)",
         code: "epoll.rs:171-180 (state mutex, atomic count); \
-               io_uring.rs:1143-1161 (ring and state mutexes), 1840-1842",
+               io_uring.rs:1143-1163 (ring and state mutexes), 1840-1842",
     }
     RegisterWhilePollBlocked {
         slug: "register_while_poll_blocked",
@@ -315,7 +311,7 @@ reactor_contracts! {
         spec: "src/runtime/reactor/mod.rs:918-922 (all methods callable concurrently)",
         code: "epoll.rs:575-594 (the wait holds only the event-buffer lock) and 345 (register \
                takes the state lock); io_uring.rs:1697-1701 (ring lock held across \
-               submit_and_wait) and 1347-1353 (register needs the ring lock); callers work \
+               submit_and_wait) and 1343-1350 (register needs the ring lock); callers work \
                around it in src/runtime/io_driver.rs:626-630 (wake before register)",
     }
     OneshotDefaultRequiresRearm {
@@ -325,7 +321,7 @@ reactor_contracts! {
         lab: false,
         spec: "src/runtime/reactor/mod.rs:930-933 and 93-97 (Unix backends default to oneshot, re-armed by modify)",
         code: "epoll.rs:251-263 (non-edge maps to PollMode::Oneshot); \
-               io_uring.rs:1975-1977 (a completion disarms), 1653-1658 (modify re-arms)",
+               io_uring.rs:1970-1972 (a completion disarms), 1653-1658 (modify re-arms)",
     }
     EdgeTriggeredRedeliversAfterDrain {
         slug: "edge_triggered_redelivers_after_drain",
@@ -333,9 +329,10 @@ reactor_contracts! {
         category: EdgeTriggeredMode,
         lab: false,
         spec: "src/runtime/reactor/mod.rs:935-937 and 99-101; interest.rs:68-70 (EDGE_TRIGGERED)",
-        code: "epoll.rs:252-257 (EDGE_TRIGGERED maps to PollMode::Edge); io_uring.rs:1883-1903 \
-               (mode bits are not mapped; PollAdd is single-shot) and 1975-1977 (a completion \
-               disarms until modify)",
+        code: "epoll.rs:252-257 (EDGE_TRIGGERED maps to PollMode::Edge); io_uring.rs:1866-1870 \
+               (a persistent edge interest is one multishot PollAdd) and 1902-1904 (EPOLLET), \
+               1957-1972 (a completion with IORING_CQE_F_MORE leaves it armed), 4227-4259 \
+               (a multishot poll the kernel ended is re-armed)",
     }
 }
 
@@ -1146,7 +1143,7 @@ mod kernel_checks {
     }
 
     pub(super) fn run(contract: Contract, kind: RowKind, reactor: &Arc<dyn Reactor>) -> Observation {
-        // Only the two tracked io_uring gaps can turn a deviation into an
+        // Only the tracked io_uring gap can turn a deviation into an
         // ExpectedGap; on every other row and backend `gap` is None.
         let gap = known_gap(contract, kind);
         observe(|obs| match contract {
@@ -1164,7 +1161,7 @@ mod kernel_checks {
             Contract::RegisterWhilePollBlocked => register_while_poll_blocked(reactor, gap, obs),
             Contract::OneshotDefaultRequiresRearm => oneshot_default_requires_rearm(reactor, obs),
             Contract::EdgeTriggeredRedeliversAfterDrain => {
-                edge_triggered_redelivers_after_drain(reactor, gap, obs)
+                edge_triggered_redelivers_after_drain(reactor, obs)
             }
         })
     }
@@ -1977,7 +1974,6 @@ mod kernel_checks {
 
     fn edge_triggered_redelivers_after_drain(
         reactor: &Arc<dyn Reactor>,
-        gap: Option<&'static str>,
         obs: &mut Observation,
     ) -> io::Result<()> {
         let r: &dyn Reactor = &**reactor;
@@ -2021,17 +2017,16 @@ mod kernel_checks {
         send(&peer, b"y")?;
         let second = wait_for(r, token, obs)?;
         expect_only(obs, &second, &[token]);
-        match (readiness_of(&second, token), gap) {
-            (Some(ready), _) => {
+        match readiness_of(&second, token) {
+            Some(ready) => {
                 obs.note(format!("new edge without modify: {}", flags(ready)));
                 obs.require(ready.is_readable(), || {
                     format!("the new edge lacks read readiness ({})", flags(ready))
                 });
             }
-            // The tracked gap: the accepted registration fired once and stays
-            // disarmed, so the new edge after the drain delivers nothing.
-            (None, Some(gap)) => obs.gap_note(gap, "new edge without modify: none"),
-            (None, None) => {
+            // Every backend that accepts the flag must deliver this edge; on
+            // io_uring this was the tracked gap asupersync-ubwvb0.
+            None => {
                 obs.note("new edge without modify: none");
                 obs.violation(format!(
                     "the EDGE_TRIGGERED registration was accepted, but a new edge after a \
@@ -2040,7 +2035,6 @@ mod kernel_checks {
                 ));
             }
         }
-        obs.gap_closed_remark(gap, "a new edge after a full drain was delivered without modify()");
         r.deregister(token).map_err(during("deregister"))?;
         Ok(())
     }
@@ -2722,16 +2716,34 @@ mod tests {
 
     #[test]
     fn probe_and_gap_controls_fail_when_they_must() {
+        // asupersync-ubwvb0 is closed: the edge-triggered contract tolerates
+        // no gap on any backend, so its io_uring rows are strict.
+        for kind in [
+            RowKind::Epoll,
+            RowKind::IoUring,
+            RowKind::IoUringVsEpoll,
+            RowKind::Lab,
+        ] {
+            assert_eq!(
+                known_gap(Contract::EdgeTriggeredRedeliversAfterDrain, kind),
+                None,
+                "the edge-triggered contract must not tolerate a gap on {kind:?}"
+            );
+        }
+
         // The differential reports a tracked gap only for differences that
         // the gap explains, on its own contract, with no other violation.
-        let contract = Contract::EdgeTriggeredRedeliversAfterDrain;
-        let gap = known_gap(contract, RowKind::IoUring).expect("the edge gap is tracked");
+        let contract = Contract::RegisterWhilePollBlocked;
+        let gap = known_gap(contract, RowKind::IoUring).expect("the register gap is tracked");
         assert_eq!(known_gap(contract, RowKind::Epoll), None);
         assert_eq!(known_gap(contract, RowKind::Lab), None);
+        let registered = "register while another thread is blocked in poll(None): Ok";
+        let stalled = "register while another thread is blocked in poll(None): stalled until \
+                       wake(), then Ok";
         let conforming = || {
             let mut observation = Observation::default();
-            observation.note("first edge: R");
-            observation.note("new edge without modify: R");
+            observation.note(registered);
+            observation.note("readiness delivered: yes");
             observation
         };
         let epoll = conforming();
@@ -2741,8 +2753,8 @@ mod tests {
         );
 
         let mut gapped = Observation::default();
-        gapped.note("first edge: R");
-        gapped.gap_note(gap, "new edge without modify: none");
+        gapped.gap_note(gap, stalled);
+        gapped.note("readiness delivered: yes");
         assert_eq!(gapped.verdict(), TestVerdict::ExpectedGap(gap.to_owned()));
         assert_eq!(
             differential_verdict(contract, Some(&epoll), &gapped),
@@ -2764,8 +2776,8 @@ mod tests {
         );
 
         let mut unexplained = Observation::default();
-        unexplained.note("first edge: R+H");
-        unexplained.gap_note(gap, "new edge without modify: none");
+        unexplained.gap_note(gap, stalled);
+        unexplained.note("readiness delivered: no");
         assert!(
             matches!(
                 differential_verdict(contract, Some(&epoll), &unexplained),
@@ -2775,8 +2787,8 @@ mod tests {
         );
 
         let mut misaligned = Observation::default();
-        misaligned.note("first edge: R");
-        misaligned.gap_note(gap, "new edge without modify: none");
+        misaligned.gap_note(gap, stalled);
+        misaligned.note("readiness delivered: yes");
         misaligned.note("one line more than epoll");
         assert!(
             matches!(
@@ -2787,8 +2799,8 @@ mod tests {
         );
 
         let mut gapped_and_broken = Observation::default();
-        gapped_and_broken.note("first edge: R");
-        gapped_and_broken.gap_note(gap, "new edge without modify: none");
+        gapped_and_broken.gap_note(gap, stalled);
+        gapped_and_broken.note("readiness delivered: yes");
         gapped_and_broken.violation("an unrelated deviation");
         assert!(matches!(gapped_and_broken.verdict(), TestVerdict::Fail(_)));
         assert!(
