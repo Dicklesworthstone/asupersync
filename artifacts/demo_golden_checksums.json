@@ -3,19 +3,19 @@
   "generated_by": "demo_benchmark (bd-77g6j.3)",
   "checksums": {
     "demo/failing_seed": {
-      "output_hash": "6abe2f4b2df1474a569e776779d9b190ae69061287207937e19af225a56d8721"
+      "output_hash": "67144aa59ee12af33ce6c5ee0c44554e6b301fd828c1de79f3a9eb554ff390fa"
     },
     "demo/minimized_elements": {
-      "output_hash": "0cd76c88cc6cee445f11ec7294ac4b9fef197998169cd43c4d9bf60f040d1dd6"
+      "output_hash": "ef3962e96617eeec1df599c92e3ac68eae4e8fed70b2c808b29168e2063be0ca"
     },
     "demo/narrative": {
-      "output_hash": "161f81fe1466699cef90e3b5aa4abb20ec9b41cac96d798120ea6a3327fd7cbd"
+      "output_hash": "715a31737feaec753bbb3385b7af7b93de9f77ea812906b13b5640f6dba5c176"
     },
     "demo/original_elements": {
-      "output_hash": "2b5765734900cb8ffd1e3945c15a594d8e7d50f36072ab46672456cfeca97a64"
+      "output_hash": "4b1102cbb249ca1051572cb258f58a905bb315bbb592d0cb34c876b77588372f"
     },
     "demo/trace_file": {
-      "output_hash": "464ac86018060683a2efd3c0c277d37ea9adc8289fee91c0af83a327510d31d3"
+      "output_hash": "a90e31bf3f8aa55e3926db0cfa0b3fee1e7900c0214f9a276af76805013d22b8"
     }
   }
 }

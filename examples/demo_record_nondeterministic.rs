@@ -1,22 +1,23 @@
 #![allow(missing_docs)]
-//! Nondeterministic failure demo: cancel/obligation race condition (bd-77g6j.1).
+//! Nondeterministic failure demo: an obligation leak found by seed sweep (bd-77g6j.1).
 //!
-//! This demo sweeps seeds to find a schedule where the race between cancel
-//! propagation and obligation resolution produces an obligation leak.
+//! This demo sweeps seeds to find a schedule in which a task finishes while it
+//! still holds an unresolved obligation, which the runtime reports as a leak.
 //! When a failure seed is found, the execution trace is recorded to an .ftrace
 //! file for deterministic replay and time-travel debugging.
 //!
-//! The race window: when cancel is requested on a region, tasks in that region
-//! may hold unresolved obligations (SendPermit, Ack, Lease). The cancel path
-//! marks the region Closing and tasks for cancel, but does NOT abort in-flight
-//! obligations. If a task acquires an obligation just before cancel propagates
-//! and the obligation is not resolved before the region fully closes, the
-//! obligation leaks in Reserved state.
+//! The scenario: 8 tasks split between a region that is cancelled and a
+//! surviving region. Each task reserves 1-3 obligations (SendPermit, Ack,
+//! Lease, IoOp), and almost every obligation is committed or aborted before
+//! the tasks run. For rare seeds, one obligation in the surviving region stays
+//! "late": never resolved, like a code path that forgets to commit. When its
+//! task completes normally, the runtime's completion audit reports the leak.
+//! Late obligations belong to the surviving region because the cancelled
+//! region cannot leak: cancellation aborts the obligations its tasks hold.
 //!
-//! In the lab runtime (single-threaded, deterministic), we simulate this race
-//! by varying the obligation resolution order per seed. For most seeds, all
-//! obligations resolve cleanly. For rare seeds, the resolution order leaves
-//! an obligation in Reserved state at region close — a genuine leak.
+//! In the lab runtime (single-threaded, deterministic), the seed decides which
+//! obligation, if any, is late. For most seeds every obligation resolves
+//! cleanly; the rare seed that leaves one late is a genuine leak.
 //!
 //! Usage:
 //!   rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_example_docs cargo run --example demo_record_nondeterministic
@@ -91,9 +92,9 @@ impl Rng {
 struct TrackedObligation {
     id: ObligationId,
     commit: bool,
-    /// If true, this obligation is "late" — it simulates the race window
-    /// where the obligation is acquired just before cancel propagates.
-    /// Late obligations are not resolved before the region closes.
+    /// If true, this obligation is "late": it stands in for a code path that
+    /// forgets to resolve it, so it is still reserved when its task completes.
+    /// Late obligations are never resolved.
     is_late: bool,
 }
 
@@ -107,14 +108,13 @@ struct SeedOutcome {
     wall_ms: u64,
 }
 
-/// Build and run the cancel/obligation race scenario for a single seed.
+/// Build and run the obligation-leak scenario for a single seed.
 ///
 /// The scenario creates 8 tasks split between a cancel-target region and a
-/// survivor region. Each task acquires 1-3 obligations. For most seeds, all
-/// obligations are resolved before the cancel-target region closes. For rare
-/// seeds (~1/10000 per obligation, ~1/1000 per seed), an obligation is marked "late" — it is not
-/// resolved before cancel, simulating the race window. If a late obligation
-/// belongs to the cancel-target region, it leaks.
+/// survivor region. Each task acquires 1-3 obligations, and all of them are
+/// resolved before the tasks run, except that each survivor-region obligation
+/// is "late" with probability 1/10000. A late obligation is never resolved;
+/// when its task completes normally, the runtime reports it as a leak.
 fn run_scenario(seed: u64, record: bool) -> SeedOutcome {
     let start = Instant::now();
     let mut rng = Rng::new(seed);
@@ -167,10 +167,10 @@ fn run_scenario(seed: u64, record: bool) -> SeedOutcome {
             let commit = rng.chance(60);
 
             if let Ok(obl_id) = runtime.state.create_obligation(kind, task_id, region, None) {
-                // An obligation is "late" with small probability (~1/500).
-                // This simulates the race window where the task acquires an
-                // obligation just before cancel propagates to it.
-                let is_late = region == cancel_target && rng.rare(10_000);
+                // A survivor-region obligation is "late" with probability
+                // 1/10000. Cancellation would abort a cancel-target task's
+                // leftover obligations, so only a survivor's can leak.
+                let is_late = region == survivor && rng.rare(10_000);
 
                 obligations.push(TrackedObligation {
                     id: obl_id,
@@ -208,9 +208,8 @@ fn run_scenario(seed: u64, record: bool) -> SeedOutcome {
         runtime.advance_time(u64::from(rng.next_u32(50_000)) + 1);
     }
 
-    // Late obligations are NOT resolved — they simulate the race window
-    // where a task acquires an obligation just before cancel propagates.
-    // The obligation stays in Reserved state when the region closes = leak.
+    // Late obligations are NOT resolved. A survivor task still holding one
+    // when it completes normally is reported by the completion audit = leak.
 
     runtime.advance_time(1_000_000);
     runtime.run_until_quiescent();
@@ -227,7 +226,7 @@ fn run_scenario(seed: u64, record: bool) -> SeedOutcome {
 }
 
 /// Resolve all non-late obligations (commit or abort).
-/// Late obligations are deliberately left unresolved to simulate the race window.
+/// Late obligations are deliberately left unresolved.
 fn resolve_batch(runtime: &mut LabRuntime, obligations: &[TrackedObligation]) {
     for obl in obligations {
         if obl.is_late {
@@ -333,7 +332,7 @@ fn replay_scenario_for_trace(runtime: &mut LabRuntime, seed: u64) {
             let kind = OBLIGATION_KINDS[(i as usize + j as usize) % OBLIGATION_KINDS.len()];
             let commit = rng.chance(60);
             if let Ok(obl_id) = runtime.state.create_obligation(kind, task_id, region, None) {
-                let is_late = region == cancel_target && rng.rare(10_000);
+                let is_late = region == survivor && rng.rare(10_000);
                 obligations.push(TrackedObligation {
                     id: obl_id,
                     commit,
@@ -446,4 +445,19 @@ fn main() {
     println!("  Leak count:    {failure_leak_count}");
     println!("  Events:        {failure_events}");
     println!("  Attempts:      {attempts}/{seed_count}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The default sweep's first leak is seed 329, and the recording rerun of
+    /// that seed reproduces it. If the runtime stops reporting this leak, the
+    /// demo has nothing to find (br-asupersync-mcyofo).
+    #[test]
+    fn sweep_finds_seed_329_and_the_recording_reproduces_it() {
+        let first = (0..2_000).find(|&seed| run_scenario(seed, false).leak_count > 0);
+        assert_eq!(first, Some(329));
+        assert_eq!(run_scenario(329, true).leak_count, 1);
+    }
 }

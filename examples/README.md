@@ -51,8 +51,8 @@ this index.
   cancellation at recorded await points.
 - [`chaos_testing.rs`](chaos_testing.rs) — deterministic delay, fault, and
   budget injection.
-- [`demo_record_nondeterministic.rs`](demo_record_nondeterministic.rs) — record
-  a cancellation/obligation race for replay.
+- [`demo_record_nondeterministic.rs`](demo_record_nondeterministic.rs) — find
+  and record an obligation leak for replay.
 - [`demo_delta_debug.rs`](demo_delta_debug.rs) — minimize a structured failure
   trace hierarchically.
 - [`demo_benchmark.rs`](demo_benchmark.rs) — reproducible time-travel benchmark
