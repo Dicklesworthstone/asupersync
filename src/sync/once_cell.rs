@@ -318,6 +318,20 @@ impl<T> OnceCell<T> {
     /// If the cell is uninitialized, `f` is called to create the value.
     /// If multiple threads call this concurrently, only one will run the
     /// initialization function; others will block waiting for the result.
+    ///
+    /// # Blocking — do not call from async context that shares a thread with the initializer
+    ///
+    /// This has the same hazard as [`set`](Self::set). While another
+    /// initialization is in flight, it parks the calling OS thread on a condvar
+    /// until that initializer finishes. If the in-flight initializer is an
+    /// **async** task (`get_or_init(async { ... }).await` suspended
+    /// mid-`await`) running on the **same** OS thread as this call — always the
+    /// case on a current-thread runtime — the condvar wait blocks the only
+    /// thread that could ever resume that initializer, and **both deadlock
+    /// permanently**.
+    ///
+    /// From async code, use [`get_or_init`](Self::get_or_init), which yields
+    /// rather than blocks.
     #[inline]
     pub fn get_or_init_blocking<F>(&self, f: F) -> &T
     where
