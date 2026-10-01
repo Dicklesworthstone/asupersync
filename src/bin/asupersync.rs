@@ -1835,8 +1835,15 @@ impl Outputtable for AtpServeOutput {
     }
 
     fn human_format(&self) -> String {
+        // The final "stopped" status (br-asupersync-ylvfod) names the address
+        // the daemon served; the "listening" text is unchanged.
+        let label = if self.message == "stopped" {
+            "Was listening on"
+        } else {
+            "Listening on"
+        };
         format!(
-            "ATP daemon {}\n  Listening on: {}",
+            "ATP daemon {}\n  {label}: {}",
             self.message, self.listen_address
         )
     }
@@ -5769,6 +5776,19 @@ fn expand_home(path: &Path, home: Option<&Path>) -> Result<PathBuf, CliError> {
 }
 
 fn atp_serve(args: &AtpServeArgs, output: &mut Output) -> Result<(), CliError> {
+    atp_serve_with_stop(args, output, None)
+}
+
+/// Runs `atp serve` until it is stopped (br-asupersync-ylvfod).
+///
+/// With `stop` unset, SIGINT and SIGTERM stop it; their handlers are installed
+/// once the listener is bound. Tests pass their own handle instead, so the test
+/// process keeps its default signal dispositions.
+fn atp_serve_with_stop(
+    args: &AtpServeArgs,
+    output: &mut Output,
+    stop: Option<Arc<AtpServeStop>>,
+) -> Result<(), CliError> {
     use std::net::ToSocketAddrs;
 
     // Real ATP-over-TCP receiver (br-asupersync-qk02uw). Previously this printed
@@ -5851,38 +5871,201 @@ fn atp_serve(args: &AtpServeArgs, output: &mut Output) -> Result<(), CliError> {
         .local_addr()
         .map_or(listen_label, |bound| bound.to_string());
 
+    // br-asupersync-ylvfod: a stop request (SIGINT or SIGTERM for the CLI) ends
+    // the loop through serve()'s own cancellation path, which aborts and drains
+    // in-flight receives (their staging directories are removed and their
+    // results reported) instead of dying mid-transfer by the default action.
+    // The handlers are installed before "listening" is announced, so a
+    // supervisor that signals as soon as it reads that line reaches the drain.
+    #[cfg(unix)]
+    let (stop, _signals) = match stop {
+        Some(stop) => (stop, None),
+        None => {
+            let stop = Arc::new(AtpServeStop::default());
+            let signals = AtpServeSignalThread::start(Arc::clone(&stop))?;
+            (stop, Some(signals))
+        }
+    };
+    #[cfg(not(unix))]
+    let stop = stop.unwrap_or_default();
+
     let payload = AtpServeOutput::new("listening", &listen_label);
     output
         .write(&payload)
         .map_err(output_write_error("ATP serve status"))?;
 
-    runtime
-        .block_on(runtime.handle().spawn(async move {
-            let cx = Cx::current().expect("ATP serve task context");
-            asupersync::net::atp::transport_tcp::serve(
-                &cx,
-                listener,
-                dest_dir,
-                cfg,
-                "asupersync-cli".to_string(),
-                |outcome| {
-                    if let Ok(report) = &outcome {
-                        eprintln!(
-                            "atp: committed transfer {} ({} bytes, {} files)",
-                            report.transfer_id, report.bytes_received, report.files
-                        );
-                    } else if let Err(err) = &outcome {
-                        eprintln!("atp: transfer failed: {err}");
-                    }
-                },
-            )
-            .await
-            .map_err(|e| e.to_string())
-        }))
+    let served = runtime.block_on(runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("ATP serve task context");
+        stop.attach(&cx);
+        let serve_result = asupersync::net::atp::transport_tcp::serve(
+            &cx,
+            listener,
+            dest_dir,
+            cfg,
+            "asupersync-cli".to_string(),
+            |outcome| {
+                if let Ok(report) = &outcome {
+                    eprintln!(
+                        "atp: committed transfer {} ({} bytes, {} files)",
+                        report.transfer_id, report.bytes_received, report.files
+                    );
+                } else if let Err(err) = &outcome {
+                    eprintln!("atp: transfer failed: {err}");
+                }
+            },
+        )
+        .await;
+        stop.detach();
+        serve_result.map_err(|e| e.to_string())
+    }));
+    // serve() returns Ok only once a stop request cancelled it and its receives
+    // drained, so "stopped" is the final status line. The runtime is dropped
+    // before the signal thread, so a second signal still ends a teardown that
+    // hangs.
+    let result = served
         .map_err(|err: String| {
             CliError::new("atp_serve_failed", "ATP serve loop failed").detail(err)
+        })
+        .and_then(|()| {
+            output
+                .write(&AtpServeOutput::new("stopped", &listen_label))
+                .map_err(output_write_error("ATP serve status"))
+        });
+    drop(runtime);
+    result
+}
+
+/// Hands a stop request to the `atp serve` task (br-asupersync-ylvfod).
+///
+/// The task's context and the stop-requested flag share one lock, so a request
+/// that arrives before the task starts is applied when it attaches.
+#[derive(Default)]
+struct AtpServeStop {
+    state: std::sync::Mutex<AtpServeStopState>,
+}
+
+#[derive(Default)]
+struct AtpServeStopState {
+    serve_cx: Option<Cx>,
+    requested: bool,
+}
+
+impl AtpServeStop {
+    /// Records the serve task's context, cancelling it now if a stop came first.
+    fn attach(&self, cx: &Cx) {
+        let requested = {
+            let mut state = self.lock();
+            state.serve_cx = Some(cx.clone());
+            state.requested
+        };
+        if requested {
+            cancel_atp_serve(cx);
+        }
+    }
+
+    /// Releases the serve task's context once `serve()` has returned.
+    fn detach(&self) {
+        self.lock().serve_cx = None;
+    }
+
+    /// Cancels the serve task's context, or has [`Self::attach`] cancel it.
+    #[cfg(any(unix, test))]
+    fn request(&self) {
+        let serve_cx = {
+            let mut state = self.lock();
+            state.requested = true;
+            state.serve_cx.clone()
+        };
+        if let Some(cx) = serve_cx {
+            cancel_atp_serve(&cx);
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, AtpServeStopState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Cancels the serve task's context.
+///
+/// `serve()` observes it at its next checkpoint (a pending accept is woken),
+/// aborts and drains its in-flight receives, and returns `Ok`.
+fn cancel_atp_serve(cx: &Cx) {
+    cx.cancel_with(
+        asupersync::types::CancelKind::User,
+        Some("atp serve stop requested (SIGINT or SIGTERM)"),
+    );
+}
+
+/// Forwards SIGINT and SIGTERM to a running `atp serve` (br-asupersync-ylvfod).
+///
+/// The first signal cancels the serve task through [`AtpServeStop`]. A second
+/// one stops waiting for that drain: the process ends by the signal's default
+/// action, as it would with no handler (shell status 130 or 143).
+#[cfg(unix)]
+struct AtpServeSignalThread {
+    handle: signal_hook::iterator::Handle,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+impl AtpServeSignalThread {
+    fn start(stop: Arc<AtpServeStop>) -> Result<Self, CliError> {
+        let mut signals = signal_hook::iterator::Signals::new([
+            signal_hook::consts::SIGINT,
+            signal_hook::consts::SIGTERM,
+        ])
+        .map_err(|err| {
+            CliError::new(
+                "atp_serve_signal_failed",
+                "Failed to install ATP serve signal handlers",
+            )
+            .detail(err.to_string())
+            .exit_code(ExitCode::RUNTIME_ERROR)
         })?;
-    Ok(())
+        let handle = signals.handle();
+        let join = std::thread::Builder::new()
+            .name("asupersync-atp-serve-signals".to_string())
+            .spawn(move || {
+                let mut stopping = false;
+                for signal in signals.forever() {
+                    if stopping {
+                        // Second signal: give up on the drain.
+                        if signal_hook::low_level::emulate_default_handler(signal).is_err() {
+                            std::process::exit(128 + signal);
+                        }
+                    } else {
+                        stopping = true;
+                        stop.request();
+                    }
+                }
+            })
+            .map_err(|err| {
+                handle.close();
+                CliError::new(
+                    "atp_serve_signal_failed",
+                    "Failed to start the ATP serve signal thread",
+                )
+                .detail(err.to_string())
+                .exit_code(ExitCode::RUNTIME_ERROR)
+            })?;
+        Ok(Self {
+            handle,
+            join: Some(join),
+        })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for AtpServeSignalThread {
+    fn drop(&mut self) {
+        self.handle.close();
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
 }
 
 /// Honest fail-closed handler for ATP CLI commands whose real implementation is
@@ -17923,10 +18106,13 @@ lab:
             daemon: false,
             allow_plaintext: false,
         };
-        // The serve loop runs until the test process exits.
+        // The serve loop runs until the test process exits. Its own stop handle
+        // keeps the CLI's SIGINT/SIGTERM handlers out of the test process
+        // (br-asupersync-ylvfod).
         std::thread::spawn(move || {
             let mut output = Output::with_writer(OutputFormat::StreamJson, serve_writer);
-            let _ = atp_serve(&serve_args, &mut output);
+            let stop = Arc::new(AtpServeStop::default());
+            let _ = atp_serve_with_stop(&serve_args, &mut output, Some(stop));
         });
         let mut status = None;
         for _ in 0..1500 {
@@ -17986,6 +18172,63 @@ lab:
             bytes.len(),
             payload.len()
         );
+    }
+
+    /// asupersync-ylvfod: a stop request cancels the serve loop, which returns
+    /// Ok and reports `stopped` after `listening`, without signals.
+    #[test]
+    fn atp_serve_stop_request_ends_the_loop_with_a_stopped_status() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        let data_dir = std::env::temp_dir().join(format!(
+            "asupersync-atp-serve-stop-{}-{nanos}",
+            std::process::id()
+        ));
+        let capture = SharedWrite::default();
+        let writer = capture.clone();
+        let stop = Arc::new(AtpServeStop::default());
+        let serve_stop = Arc::clone(&stop);
+        let args = AtpServeArgs {
+            profile: "full".to_string(),
+            listen: "127.0.0.1:0".to_string(),
+            data_dir: data_dir.clone(),
+            daemon: false,
+            allow_plaintext: false,
+        };
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut output = Output::with_writer(OutputFormat::StreamJson, writer);
+            let _ = done_tx.send(atp_serve_with_stop(&args, &mut output, Some(serve_stop)));
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !capture.contents().ends_with('\n') {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "serve did not report listening within 30 s"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        stop.request();
+        let result = done_rx
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("serve returns within 20 s of the stop request");
+        let error = result.err().map(|error| (error.error_type, error.detail));
+        assert_eq!(error, None, "a requested stop is a clean exit");
+        let lines: Vec<serde_json::Value> = capture
+            .contents()
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("status line is JSON"))
+            .collect();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines[0]["message"], "listening", "{lines:?}");
+        assert_eq!(lines[1]["message"], "stopped", "{lines:?}");
+        assert_eq!(lines[0]["listen_address"], lines[1]["listen_address"]);
+        let inbox: Vec<_> = std::fs::read_dir(data_dir.join("inbox"))
+            .expect("serve created its inbox")
+            .collect();
+        assert!(inbox.is_empty(), "an idle stop leaves the inbox empty");
     }
 
     #[test]
