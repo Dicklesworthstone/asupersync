@@ -2567,6 +2567,14 @@ impl PgConnectOptions {
                         })?;
                         connect_timeout = Some(std::time::Duration::from_secs(secs));
                     }
+                    // Revocation lists are not checked. Refusing them keeps a
+                    // trust policy from being dropped silently; the legacy
+                    // parser still ignores them, as it always has.
+                    "sslcrl" | "sslcrldir" if extended_tls => {
+                        return Err(PgError::InvalidUrl(format!(
+                            "{key} is not supported: certificate revocation lists are not checked"
+                        )));
+                    }
                     _ => {} // ignore unknown parameters
                 }
             }
