@@ -220,6 +220,34 @@ fn icmp_port_unreachable_reaches_recv_error_on_runtime_reactor() {
     ));
 }
 
+/// A connected socket without `set_recverr` keeps an ICMP error in the
+/// socket's error field, not in the error queue, and the kernel keeps raising
+/// POLLERR for it. `recv_error` returns that pending error instead of
+/// re-arming on it in a loop. Before, it spun until something else cleared it.
+#[test]
+fn recv_error_returns_a_pending_socket_error_instead_of_spinning() {
+    on_runtime(async {
+        let dead = closed_port("127.0.0.1");
+        let mut socket = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
+        socket.connect(dead).await.unwrap();
+        socket.send(b"to a closed port").await.unwrap();
+        let mut buf = [0_u8; 32];
+        let error = timeout(
+            wall_now(),
+            Duration::from_secs(2),
+            socket.recv_error(&mut buf),
+        )
+        .await
+        .expect("recv_error must not keep waiting on a raised POLLERR")
+        .expect_err("no queued report, only the pending socket error");
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
+        assert!(
+            socket.try_recv_error(&mut buf).unwrap().is_none(),
+            "nothing was queued"
+        );
+    });
+}
+
 #[test]
 fn icmpv6_port_unreachable_reaches_recv_error_on_runtime_reactor() {
     if std::net::UdpSocket::bind("[::1]:0").is_err() {
