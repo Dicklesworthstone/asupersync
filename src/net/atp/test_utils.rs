@@ -18,8 +18,13 @@ pub const TEST_BUDGET: Budget =
 pub const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Creates a test context with appropriate budget and cancellation setup.
+///
+/// The deadline is [`TEST_BUDGET_DEADLINE_MS`] after creation. [`TEST_BUDGET`]
+/// holds that span as an absolute time on the process clock, so a context
+/// built from it directly expires once the test process is five seconds old.
 pub fn test_cx() -> Cx {
-    Cx::for_testing_with_budget(TEST_BUDGET)
+    let deadline = crate::time::wall_now() + Duration::from_millis(TEST_BUDGET_DEADLINE_MS);
+    Cx::for_testing_with_budget(Budget::new().with_deadline(deadline))
 }
 
 /// Test data patterns for ATP testing.
@@ -131,13 +136,26 @@ mod tests {
     use super::*;
     use crate::types::{CancelReason, Outcome};
 
+    /// The budget runs from creation. An absolute deadline on the process
+    /// clock expired for every context made after the test binary was five
+    /// seconds old, failing ATP conformance cases on a loaded worker
+    /// (br-asupersync-bi2462.147.74).
     #[test]
     fn test_cx_creation() {
+        // Start the shared process clock and let it advance, so a deadline
+        // fixed at five seconds cannot pass for one measured from creation.
+        let _ = crate::time::wall_now();
+        std::thread::sleep(Duration::from_millis(10));
+        let before = crate::time::wall_now();
         let cx = test_cx();
-        assert_eq!(
-            cx.budget().deadline.map(Time::as_millis),
-            Some(TEST_BUDGET_DEADLINE_MS)
+        let after = crate::time::wall_now();
+        let budget = Duration::from_millis(TEST_BUDGET_DEADLINE_MS);
+        let deadline = cx.budget().deadline.expect("test budget has a deadline");
+        assert!(
+            deadline >= before + budget && deadline <= after + budget,
+            "deadline {deadline:?} is not {budget:?} after {before:?}..{after:?}"
         );
+        assert!(cx.checkpoint().is_ok());
     }
 
     #[test]
