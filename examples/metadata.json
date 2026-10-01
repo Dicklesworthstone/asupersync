@@ -321,7 +321,7 @@
       "file": "examples/demo_benchmark.rs",
       "loc": {
         "start": 1,
-        "end": 679
+        "end": 681
       },
       "kind": "rust",
       "demonstrates": [
@@ -340,7 +340,7 @@
       "file": "examples/demo_delta_debug.rs",
       "loc": {
         "start": 1,
-        "end": 374
+        "end": 406
       },
       "kind": "rust",
       "demonstrates": [
@@ -359,7 +359,7 @@
       "file": "examples/demo_record_nondeterministic.rs",
       "loc": {
         "start": 1,
-        "end": 449
+        "end": 463
       },
       "kind": "rust",
       "demonstrates": [
@@ -369,7 +369,7 @@
       ],
       "feature_flags": [],
       "run_command": "cargo run --example demo_record_nondeterministic",
-      "description": "Seed sweep that records a cancel and obligation race for deterministic replay."
+      "description": "Seed sweep that finds and records an obligation leak for deterministic replay."
     },
     {
       "name": "deterministic_test",

@@ -2,7 +2,8 @@
 //! Hierarchical delta debugging demo (bd-77g6j.2).
 //!
 //! This demo:
-//! 1. Sweeps seeds to find a cancel/obligation race condition.
+//! 1. Sweeps seeds to find an obligation leak: a task that completes while it
+//!    still holds an unresolved obligation.
 //! 2. Extracts the scenario as [`ScenarioElement`]s.
 //! 3. Runs [`TraceMinimizer::minimize`] to find the minimal failing subset.
 //! 4. Generates a Markdown narrative explaining the root cause.
@@ -123,8 +124,8 @@ fn extract_elements(seed: u64) -> Vec<ScenarioElement> {
         for j in 0..num_obligations {
             let kind = OBLIGATION_KINDS[(i as usize + j as usize) % OBLIGATION_KINDS.len()];
             let commit = rng.chance(60);
-            // Short-circuit: rng.rare() is only called when region == cancel_target.
-            let is_late = region_idx == 1 && rng.rare(10_000);
+            // Short-circuit: rng.rare() is only called when region == survivor.
+            let is_late = region_idx == 2 && rng.rare(10_000);
 
             elems.push(ScenarioElement::CreateObligation {
                 task_idx: i as usize,
@@ -370,5 +371,36 @@ fn main() {
     println!("\nMinimal failure scenario:");
     for (i, elem) in report.minimized_elements().iter().enumerate() {
         println!("  {}. {elem}", i + 1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Seed 329's leak minimizes to the survivor region, its task and the
+    /// task's late obligation. The cancellation is not part of the cause, so
+    /// the minimizer removes it (br-asupersync-mcyofo).
+    #[test]
+    fn seed_329_minimizes_to_the_survivor_task_and_its_late_obligation() {
+        let elements = extract_elements(329);
+        assert!(check_for_leak(&elements));
+        let report = TraceMinimizer::minimize(&elements, check_for_leak);
+        assert!(report.is_minimal);
+        assert_eq!(report.minimized_count, 3);
+        let minimal = report.minimized_elements();
+        assert!(
+            minimal
+                .iter()
+                .all(|elem| !matches!(elem, ScenarioElement::CancelRegion { .. }))
+        );
+        assert!(minimal.iter().any(|elem| matches!(
+            elem,
+            ScenarioElement::CreateObligation {
+                region_idx: 2,
+                is_late: true,
+                ..
+            }
+        )));
     }
 }

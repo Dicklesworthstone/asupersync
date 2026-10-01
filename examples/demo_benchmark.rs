@@ -173,7 +173,9 @@ fn extract_elements(seed: u64) -> Vec<ScenarioElement> {
         for j in 0..num_obligations {
             let kind = OBLIGATION_KINDS[(i as usize + j as usize) % OBLIGATION_KINDS.len()];
             let commit = rng.chance(60);
-            let is_late = region_idx == 1 && rng.rare(10_000);
+            // Only a survivor's late obligation can leak: cancellation aborts
+            // the obligations a cancel-target task still holds.
+            let is_late = region_idx == 2 && rng.rare(10_000);
 
             elems.push(ScenarioElement::CreateObligation {
                 task_idx: i as usize,
@@ -374,7 +376,7 @@ fn replay_scenario(runtime: &mut LabRuntime, seed: u64) {
             let kind = OBLIGATION_KINDS[(i as usize + j as usize) % OBLIGATION_KINDS.len()];
             let commit = rng.chance(60);
             if let Ok(obl_id) = runtime.state.create_obligation(kind, task_id, region, None) {
-                let is_late = region == cancel_target && rng.rare(10_000);
+                let is_late = region == survivor && rng.rare(10_000);
                 obligations.push(TrackedObligation {
                     id: obl_id,
                     commit,
