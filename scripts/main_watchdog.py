@@ -1437,6 +1437,15 @@ def build_lanes(head: str, paths: list[str], jobs: int, with_all_features: bool)
             "kind": "build",
             "argv": ["cargo", "check", "-j", str(jobs), "-p", "asupersync-browser-core", "--target", "wasm32-unknown-unknown", "--keep-going", "--message-format=short"],
         },
+        {
+            # Nothing else builds the excluded fuzz workspace: it stopped resolving at the
+            # 0.5.0 bump and no fuzz target built for weeks unseen (asupersync-ned8po). No
+            # --locked: a root dependency change re-locks fuzz/'s path packages, and this
+            # lane is here to catch fuzz targets that stop compiling against the crate.
+            "id": "check-fuzz",
+            "kind": "build",
+            "argv": ["cargo", "check", "-j", str(jobs), "--manifest-path", "fuzz/Cargo.toml", "--bins", "--keep-going", "--message-format=short"],
+        },
     ]
     if with_all_features:
         lanes.insert(1, {"id": "check-all-features", "kind": "build", "argv": ["cargo", "check", "-j", str(jobs), "--all-targets", "--all-features", "--keep-going", "--message-format=short"]})
