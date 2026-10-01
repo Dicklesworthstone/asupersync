@@ -12808,6 +12808,9 @@ struct LabRunOutput {
     oracles_checked: usize,
     oracles_passed: usize,
     oracles_failed: usize,
+    /// Checked oracles that the lab runtime does not feed; they pass without
+    /// observing anything (br-asupersync-52hxjz).
+    oracles_unfed: usize,
     invariant_violations: Vec<String>,
     event_hash: u64,
     schedule_hash: u64,
@@ -12824,6 +12827,7 @@ impl LabRunOutput {
             oracles_checked: result.oracle_report.checked.len(),
             oracles_passed: result.oracle_report.passed_count,
             oracles_failed: result.oracle_report.failed_count,
+            oracles_unfed: result.oracle_report.unfed_count(),
             invariant_violations: result.lab_report.invariant_violations.clone(),
             event_hash: result.certificate.event_hash,
             schedule_hash: result.certificate.schedule_hash,
@@ -12840,8 +12844,8 @@ impl Outputtable for LabRunOutput {
             format!("Steps: {}", self.steps),
             format!("Faults injected: {}", self.faults_injected),
             format!(
-                "Oracles: {}/{} passed",
-                self.oracles_passed, self.oracles_checked
+                "Oracles: {}/{} passed ({} not fed by the lab runtime)",
+                self.oracles_passed, self.oracles_checked, self.oracles_unfed
             ),
         ];
         if !self.invariant_violations.is_empty() {

@@ -557,6 +557,17 @@ impl FilteredOracleReport {
         }
     }
 
+    /// Number of checked oracles that `LabRuntime` does not feed (see
+    /// [`OracleRegistry::is_fed_by_lab_runtime`]). They are counted in
+    /// `passed_count`, but they observed nothing in this run.
+    #[must_use]
+    pub fn unfed_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| !OracleRegistry::is_fed_by_lab_runtime(&e.invariant))
+            .count()
+    }
+
     /// Convert to JSON.
     #[must_use]
     pub fn to_json(&self) -> serde_json::Value {
