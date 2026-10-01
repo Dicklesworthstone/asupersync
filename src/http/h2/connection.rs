@@ -1001,9 +1001,17 @@ impl Connection {
     }
 
     /// Reset a stream.
+    ///
+    /// A stream is reset at most once: after our RST_STREAM the peer treats
+    /// any further frame on the stream as a STREAM_CLOSED error, so a second
+    /// local reset keeps the first error code and queues nothing.
     pub fn reset_stream(&mut self, stream_id: u32, error_code: ErrorCode) {
         if let Some(stream) = self.streams.get_mut(stream_id) {
+            if stream.reset_sent() {
+                return;
+            }
             stream.reset(error_code);
+            stream.mark_reset_sent();
         }
         self.pending_ops.push_back(PendingOp::RstStream {
             stream_id,
@@ -1301,6 +1309,11 @@ impl Connection {
                 "DATA received on closed stream",
             )
         })?;
+        // RFC 9113 §5.1: DATA the peer sent before our RST_STREAM reached it
+        // is discarded. Its connection credit was counted above.
+        if stream.reset_sent() {
+            return Ok(None);
+        }
         stream.recv_data(payload_len, frame.end_stream)?;
 
         #[cfg(feature = "http2-streaming")]
@@ -1361,6 +1374,17 @@ impl Connection {
                 "HEADERS received after both directions ended",
             ));
         }
+        if self
+            .streams
+            .get(frame.stream_id)
+            .is_some_and(Stream::reset_sent)
+        {
+            return self.discard_header_fragment(
+                frame.stream_id,
+                frame.header_block,
+                frame.end_headers,
+            );
+        }
         // RFC 9113 §6.8: After sending GOAWAY, refuse new streams with IDs
         // above the advertised last_stream_id. Without this, a misbehaving
         // peer could open unbounded streams during the drain phase.
@@ -1412,6 +1436,7 @@ impl Connection {
                 // graceful-drain quiescence (active_stream_count) forever.
                 if let Some(stream) = self.streams.get_mut(frame.stream_id) {
                     stream.reset(ErrorCode::RefusedStream);
+                    stream.mark_reset_sent();
                 }
                 result?; // bubble up compression errors
                 Ok(None)
@@ -1453,6 +1478,17 @@ impl Connection {
             }
         }
 
+        if self
+            .streams
+            .get(frame.stream_id)
+            .is_some_and(Stream::reset_sent)
+        {
+            return self.discard_header_fragment(
+                frame.stream_id,
+                frame.header_block,
+                frame.end_headers,
+            );
+        }
         let stream = self
             .streams
             .get_mut(frame.stream_id)
@@ -1481,6 +1517,7 @@ impl Connection {
                 // during graceful drain.
                 if let Some(stream) = self.streams.get_mut(frame.stream_id) {
                     stream.reset(ErrorCode::RefusedStream);
+                    stream.mark_reset_sent();
                 }
                 result?; // bubble up compression errors
                 Ok(None)
@@ -1490,6 +1527,41 @@ impl Connection {
         } else {
             Ok(None)
         }
+    }
+
+    /// Take a field block fragment the peer sent before our RST_STREAM
+    /// reached it. RFC 9113 §5.1 ignores the frame, but §4.3 still requires
+    /// the block to pass through the HPACK decoder: the peer's encoder has
+    /// already applied its dynamic-table insertions, and skipping them
+    /// misdecodes every later field block on the connection.
+    fn discard_header_fragment(
+        &mut self,
+        stream_id: u32,
+        fragment: Bytes,
+        end_headers: bool,
+    ) -> Result<Option<ReceivedFrame>, H2Error> {
+        let stream = self
+            .streams
+            .get_mut(stream_id)
+            .ok_or_else(|| H2Error::connection(ErrorCode::InternalError, "reset stream missing"))?;
+        // A block too large to keep cannot be decoded, and a stream error
+        // would leave the tables out of step, so it ends the connection.
+        stream.add_header_fragment(fragment).map_err(|error| {
+            H2Error::connection(error.code, "oversized field block on a reset stream")
+        })?;
+        if !end_headers {
+            self.continuation_stream_id = Some(stream_id);
+            self.continuation_started_at = Some((self.time_getter)());
+            return Ok(None);
+        }
+        self.continuation_stream_id = None;
+        self.continuation_started_at = None;
+        let mut block = BytesMut::new();
+        for fragment in stream.take_header_fragments() {
+            block.extend_from_slice(&fragment);
+        }
+        self.hpack_decoder.decode(&mut block.freeze())?;
+        Ok(None)
     }
 
     /// Decode accumulated headers for a stream.
@@ -7592,6 +7664,203 @@ mod tests {
             matches!(frame2, Frame::GoAway(_)),
             "GOAWAY should preserve ordering"
         );
+    }
+
+    fn encode_with(encoder: &mut hpack::Encoder, headers: &[(&str, &str)]) -> Bytes {
+        let mut encoded = BytesMut::new();
+        encoder.encode(
+            &headers
+                .iter()
+                .map(|(name, value)| Header::new(*name, *value))
+                .collect::<Vec<_>>(),
+            &mut encoded,
+        );
+        encoded.freeze()
+    }
+
+    /// RFC 9113 §5.1: after sending RST_STREAM an endpoint MUST ignore the
+    /// frames the peer already had in flight on that stream, and §4.3 still
+    /// requires their field blocks to be decoded so both HPACK tables stay in
+    /// step. A server that stopped an upload early receives the client's late
+    /// DATA and trailers: neither is a stream error, neither is charged to the
+    /// peer-reset budget, and a later request decodes a field the discarded
+    /// trailers added to the dynamic table.
+    #[test]
+    fn frames_in_flight_after_a_local_reset_are_ignored_and_keep_hpack_in_step() {
+        for split_block in [false, true] {
+            let mut conn =
+                Connection::server(Settings::default()).rst_stream_rate_limit(RstStreamRateLimit {
+                    max_rst_streams: 1,
+                    rst_window_ms: DEFAULT_RST_STREAM_RATE_WINDOW_MS,
+                });
+            conn.process_frame(Frame::Settings(SettingsFrame::new(Vec::new())))
+                .unwrap();
+            let mut client = hpack::Encoder::new();
+            let upload = encode_with(
+                &mut client,
+                &[
+                    (":method", "POST"),
+                    (":scheme", "https"),
+                    (":path", "/upload"),
+                    (":authority", "example.com"),
+                ],
+            );
+            conn.process_frame(Frame::Headers(HeadersFrame::new(1, upload, false, true)))
+                .unwrap();
+            // The response is complete; stop the unfinished upload.
+            conn.reset_stream(1, ErrorCode::NoError);
+            while conn.next_frame().is_some() {}
+
+            let late_data = conn.process_frame(Frame::Data(DataFrame::new(
+                1,
+                Bytes::from_static(b"late"),
+                false,
+            )));
+            assert!(matches!(late_data, Ok(None)), "late DATA: {late_data:?}");
+            let trailers = encode_with(&mut client, &[("x-checksum", "abc123")]);
+            let late_trailers = if split_block {
+                let head = conn.process_frame(Frame::Headers(HeadersFrame::new(
+                    1,
+                    trailers.slice(..1),
+                    true,
+                    false,
+                )));
+                assert!(matches!(head, Ok(None)), "late HEADERS: {head:?}");
+                conn.process_frame(Frame::Continuation(ContinuationFrame {
+                    stream_id: 1,
+                    header_block: trailers.slice(1..),
+                    end_headers: true,
+                }))
+            } else {
+                conn.process_frame(Frame::Headers(HeadersFrame::new(1, trailers, true, true)))
+            };
+            assert!(
+                matches!(late_trailers, Ok(None)),
+                "late trailers: {late_trailers:?}"
+            );
+
+            let next = encode_with(
+                &mut client,
+                &[
+                    (":method", "GET"),
+                    (":scheme", "https"),
+                    (":path", "/next"),
+                    (":authority", "example.com"),
+                    ("x-checksum", "abc123"),
+                ],
+            );
+            match conn.process_frame(Frame::Headers(HeadersFrame::new(3, next, true, true))) {
+                Ok(Some(ReceivedFrame::Headers {
+                    stream_id: 3,
+                    headers,
+                    ..
+                })) => assert!(
+                    headers
+                        .iter()
+                        .any(|header| header.name == "x-checksum" && header.value == "abc123"),
+                    "{headers:?}"
+                ),
+                other => panic!("the next request must decode: {other:?}"),
+            }
+            assert_eq!(conn.rst_stream_count, 0, "late frames are not peer resets");
+            let mut answered = Vec::new();
+            while let Some(frame) = conn.next_frame() {
+                if let Frame::RstStream(reset) = frame {
+                    answered.push(reset.stream_id);
+                }
+            }
+            assert!(
+                answered.is_empty(),
+                "late frames were answered: {answered:?}"
+            );
+        }
+    }
+
+    /// A producer start that fails on a stream the request input already
+    /// reset, or an idle timeout racing a body error, resets the stream a
+    /// second time. Only the first RST_STREAM leaves.
+    #[test]
+    fn a_stream_is_reset_at_most_once() {
+        let mut conn = Connection::server(Settings::default());
+        conn.process_frame(Frame::Settings(SettingsFrame::new(Vec::new())))
+            .unwrap();
+        conn.process_frame(Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/once"),
+            false,
+            true,
+        )))
+        .unwrap();
+        conn.reset_stream(1, ErrorCode::ProtocolError);
+        conn.reset_stream(1, ErrorCode::InternalError);
+        let mut resets = Vec::new();
+        while let Some(frame) = conn.next_frame() {
+            if let Frame::RstStream(reset) = frame {
+                resets.push((reset.stream_id, reset.error_code));
+            }
+        }
+        assert_eq!(resets, vec![(1, ErrorCode::ProtocolError)]);
+        assert_eq!(
+            conn.stream(1).and_then(Stream::error_code),
+            Some(ErrorCode::ProtocolError)
+        );
+    }
+
+    /// The client side of the same race: a cancelled call's response is
+    /// already in flight. Its HEADERS and DATA are ignored, and the next
+    /// response on the connection decodes the fields they indexed.
+    #[test]
+    fn a_cancelled_request_keeps_hpack_in_step_with_its_in_flight_response() {
+        let mut conn = Connection::client(Settings::client());
+        conn.process_frame(Frame::Settings(SettingsFrame::new(Vec::new())))
+            .unwrap();
+        let cancelled = conn
+            .open_stream(test_request_header_vec("/watch"), true)
+            .unwrap();
+        let next = conn
+            .open_stream(test_request_header_vec("/next"), true)
+            .unwrap();
+        conn.reset_stream(cancelled, ErrorCode::Cancel);
+        while conn.next_frame().is_some() {}
+
+        let mut server = hpack::Encoder::new();
+        let fields = [(":status", "200"), ("x-request-id", "r-1")];
+        let late_head = conn.process_frame(Frame::Headers(HeadersFrame::new(
+            cancelled,
+            encode_with(&mut server, &fields),
+            false,
+            true,
+        )));
+        assert!(matches!(late_head, Ok(None)), "late HEADERS: {late_head:?}");
+        let late_data = conn.process_frame(Frame::Data(DataFrame::new(
+            cancelled,
+            Bytes::from_static(b"event"),
+            false,
+        )));
+        assert!(matches!(late_data, Ok(None)), "late DATA: {late_data:?}");
+
+        match conn.process_frame(Frame::Headers(HeadersFrame::new(
+            next,
+            encode_with(&mut server, &fields),
+            true,
+            true,
+        ))) {
+            Ok(Some(ReceivedFrame::Headers {
+                stream_id,
+                headers,
+                end_stream: true,
+            })) => {
+                assert_eq!(stream_id, next);
+                assert!(
+                    headers
+                        .iter()
+                        .any(|header| header.name == "x-request-id" && header.value == "r-1"),
+                    "{headers:?}"
+                );
+            }
+            other => panic!("the next response must decode: {other:?}"),
+        }
+        assert_eq!(conn.rst_stream_count, 0);
     }
 
     // =====================================================================

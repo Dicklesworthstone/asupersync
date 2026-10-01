@@ -223,6 +223,9 @@ pub struct Stream {
     refused_headers: bool,
     /// Error code if stream was reset.
     error_code: Option<ErrorCode>,
+    /// This endpoint sent RST_STREAM, so frames the peer sent before the
+    /// reset reached it are ignored rather than treated as errors.
+    reset_sent: bool,
     /// Whether we've received END_HEADERS.
     headers_complete: bool,
     /// br-asupersync-0eyf7t — Set to `true` AFTER the initial
@@ -297,6 +300,7 @@ impl Stream {
             queued_end_stream: false,
             refused_headers: false,
             error_code: None,
+            reset_sent: false,
             headers_complete: true,
             initial_headers_decoded: false,
             header_fragments: Vec::new(),
@@ -515,6 +519,18 @@ impl Stream {
 
     pub(crate) fn headers_refused(&self) -> bool {
         self.refused_headers
+    }
+
+    /// Record that this endpoint sent RST_STREAM for the stream.
+    pub(crate) fn mark_reset_sent(&mut self) {
+        self.reset_sent = true;
+    }
+
+    /// RFC 9113 §5.1: after sending RST_STREAM, frames the peer had already
+    /// sent on the stream are ignored. Their field blocks are still decoded
+    /// so the HPACK dynamic tables stay in step.
+    pub(crate) fn reset_sent(&self) -> bool {
+        self.reset_sent
     }
 
     pub(crate) fn wire_closed(&self) -> bool {

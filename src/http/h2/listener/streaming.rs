@@ -206,6 +206,16 @@ struct LiveRequest {
 }
 
 impl LiveRequest {
+    /// Stop taking request input while the response path keeps the stream.
+    fn abandon(&mut self, error: IncomingBodyError) {
+        self.abandoned = true;
+        self.pending_data.clear();
+        self.pending_trailers = None;
+        if let Some(BodySource { writer, .. }) = &mut self.source {
+            writer.fail(error);
+        }
+    }
+
     fn fail(&mut self, error: IncomingBodyError) {
         if self.failed {
             return;
@@ -824,12 +834,15 @@ impl StreamingRequests {
                     }
                 }
                 Err(IncomingBodyError::ConsumerDropped) => {
-                    entry.abandoned = true;
-                    entry.pending_data.clear();
-                    entry.pending_trailers = None;
-                    if let Some(BodySource { writer, .. }) = &mut entry.source {
-                        writer.fail(IncomingBodyError::ConsumerDropped);
-                    }
+                    entry.abandon(IncomingBodyError::ConsumerDropped);
+                    progressed = true;
+                }
+                // The request Cx was cancelled, as by a gRPC deadline or
+                // service cancel. That stops input, not the stream: the
+                // handler or its producer may still commit a response or
+                // terminal trailers, and the response path ends the stream.
+                Err(error @ IncomingBodyError::Cancelled { .. }) => {
+                    entry.abandon(error);
                     progressed = true;
                 }
                 Err(error) => {
@@ -862,9 +875,13 @@ impl StreamingRequests {
             if let Some(source) = &entry.source
                 && let Poll::Ready(Err(error)) = source.writer.poll_consumer_dropped(poll_cx)
             {
-                let code = body_error_code(&error);
-                entry.fail(error);
-                conn.reset_stream(stream_id, code);
+                if matches!(error, IncomingBodyError::Cancelled { .. }) {
+                    entry.abandon(error);
+                } else {
+                    let code = body_error_code(&error);
+                    entry.fail(error);
+                    conn.reset_stream(stream_id, code);
+                }
             }
         }
         entry.completion_seen = true;
