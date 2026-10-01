@@ -1233,6 +1233,51 @@ mod tests {
         crate::test_complete!("pooled_resource_discard_hold_duration_uses_time_getter");
     }
 
+    /// c11v6v item 6: a legacy checkout settles its pool slot even when the
+    /// injected clock panics while the return or discard reads the hold time.
+    /// The clock's panic still reaches the caller, after the settlement.
+    #[test]
+    fn legacy_pool_clock_panic_still_settles_the_slot() {
+        init_test("legacy_pool_clock_panic_still_settles_the_slot");
+        reset_test_pool_time();
+        let pool = GenericPool::with_time_getter(
+            simple_factory,
+            PoolConfig::with_max_size(1),
+            panic_once_test_pool_time_now,
+        );
+        let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
+        for (settle, idle) in [
+            ("drop", 1),
+            ("return", 1),
+            ("broken drop", 0),
+            ("discard", 0),
+        ] {
+            let mut held = futures_lite::future::block_on(pool.acquire(&cx)).unwrap();
+            if settle == "broken drop" {
+                held.mark_broken();
+            }
+            panic_test_pool_time_on_call(1);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match settle {
+                "return" => held.return_to_pool(),
+                "discard" => held.discard(),
+                _ => drop(held),
+            }));
+            let failure = result.expect_err("the clock's panic still reaches the caller");
+            assert!(
+                failure
+                    .downcast_ref::<String>()
+                    .unwrap()
+                    .contains("intentional pool time panic"),
+                "{settle}"
+            );
+            assert_eq!(test_pool_time_probe_state(), (1, None), "{settle}");
+            let stats = pool.stats();
+            assert_eq!(stats.active, 0, "{settle}: the slot is free again");
+            assert_eq!(stats.idle, idle, "{settle}");
+        }
+        crate::test_complete!("legacy_pool_clock_panic_still_settles_the_slot");
+    }
+
     #[test]
     fn pooled_resource_discard_commits_before_resource_drop_panics() {
         init_test("pooled_resource_discard_commits_before_resource_drop_panics");

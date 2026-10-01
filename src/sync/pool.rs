@@ -611,7 +611,12 @@ impl<R> PooledResource<R> {
             return;
         }
 
-        let hold_duration = self.held_duration();
+        // The injected clock runs before the slot is settled. If it panics,
+        // the settlement still happens with ZERO, and `panics` resumes the
+        // clock's panic when it drops (br-asupersync-c11v6v item 6).
+        let mut panics = CheckedPoolCleanupPanics::new();
+        let mut hold_duration = Duration::ZERO;
+        panics.run(|| hold_duration = self.held_duration());
         if let Some(resource) = self.resource.take() {
             let _ = self.return_tx.send(PoolReturn::Return {
                 resource,
@@ -631,7 +636,11 @@ impl<R> PooledResource<R> {
             return;
         }
 
-        let hold_duration = self.held_duration();
+        // As in return_inner, a panicking clock cannot keep the slot. A
+        // resource destructor panic below outranks the clock's panic.
+        let mut panics = CheckedPoolCleanupPanics::new();
+        let mut hold_duration = Duration::ZERO;
+        panics.run(|| hold_duration = self.held_duration());
         // Commit the logical discard before destroying arbitrary resource
         // state. `R::drop` may unwind; the pool must already know that its
         // active slot is reusable, and blocked acquirers must already have
