@@ -1140,6 +1140,87 @@ fn atpd_sigterm_mid_transfer_reports_the_aborted_receive() {
     );
 }
 
+/// A reload with a config atpd cannot apply fails the daemon closed, but only
+/// after its listeners drain (br-asupersync-ks43rc).
+///
+/// SIGHUP arrives while a transfer is parked mid-flight and the config file is
+/// garbled. atpd must exit non-zero (it does not keep running on a config it
+/// refused), and first drain the receive like any other stop: the receive is
+/// reported as failed, its staging directory is removed, and the inbox is
+/// empty.
+#[test]
+fn atpd_failed_reload_mid_transfer_drains_before_failing() {
+    let root = scratch_root("atpd-bad-reload");
+    let data = init_atpd(&root);
+    let inbox = data.join("inbox");
+    let source = write_payload(&root, ENTRY_BYTES);
+    let mut daemon = start_atpd(&root, &data, &[]);
+    let listen = atpd_ready(&mut daemon, false);
+    let sender = ParkedSender::start(listen, source);
+    let (sent, total) = sender.wait_parked();
+    assert!(
+        0 < sent && sent < total,
+        "the sender must park mid-transfer, at {sent} of {total} bytes"
+    );
+    let staging_before = wait_for_entry(&inbox, TCP_STAGING_PREFIX, IN_FLIGHT_LIMIT);
+    assert!(
+        !staging_before.is_empty(),
+        "the in-flight receive never put a staging directory into {}: {:?}",
+        inbox.display(),
+        dir_entries(&inbox)
+    );
+
+    // atpd_command points --config at this path; until now it did not exist.
+    write_file(&root.join("absent-config.toml"), b"service = [not toml");
+    let stop = stop_atpd(&mut daemon, Signal::SIGHUP, &inbox);
+    let send_outcome = sender.finish();
+
+    let mut problems = Vec::new();
+    match stop.status.and_then(|status| status.code()) {
+        Some(code) if code != 0 => {}
+        _ => problems.push(format!(
+            "a refused reload must stop atpd with a non-zero exit code; got {}",
+            describe_status(stop.status)
+        )),
+    }
+    for (needle, wanted) in [
+        ("ATP daemon configuration reload failed", 1),
+        (ATPD_LISTENER_DRAINED, 1),
+        (ATPD_LISTENERS_DRAINED, 1),
+        (ATPD_FAILED, 1),
+        (ATPD_COMMITTED, 0),
+    ] {
+        let found = count_containing(&stop.log, needle);
+        if found != wanted {
+            problems.push(format!(
+                "the log must carry `{needle}` {wanted} time(s); found {found}"
+            ));
+        }
+    }
+    let staging = with_prefix(&stop.inbox_entries, ".atp-");
+    if !staging.is_empty() {
+        problems.push(format!(
+            "staging directories survived the stop: {staging:?}"
+        ));
+    }
+    if !stop.inbox_entries.is_empty() {
+        problems.push(format!(
+            "the inbox must stay empty: {:?}",
+            stop.inbox_entries
+        ));
+    }
+    if send_outcome == Ok(true) {
+        problems.push("the sender reported a committed receipt for an aborted transfer".into());
+    }
+    assert!(
+        problems.is_empty(),
+        "{problems:#?}\nstaging before the signal: {staging_before:?}\nsender outcome: \
+         {send_outcome:?}\nscratch root: {}\nlog: {:#?}",
+        root.display(),
+        stop.log
+    );
+}
+
 /// An idle atpd with its QUIC listener stops on SIGTERM.
 ///
 /// Both listeners return, and the QUIC listener's interrupted idle accept is

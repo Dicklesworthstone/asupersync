@@ -1725,6 +1725,9 @@ async fn run_daemon_service(
     };
 
     let mut reload_count = reload_count;
+    // A reload that cannot be applied fails the daemon closed, but only after
+    // its transfer listeners drain, like any other stop (br-asupersync-ks43rc).
+    let mut reload_failure = None;
     loop {
         match signal_rx.recv_timeout(Duration::from_secs(
             daemon_state
@@ -1735,9 +1738,18 @@ async fn run_daemon_service(
                 .max(1),
         )) {
             Ok(DaemonSignal::Reload) => {
-                let reloaded = load_daemon_config(&config_path)?;
-                prepare_daemon_directories(&reloaded)?;
-                let reloaded_identity = load_identity_store(&identity_store_path(&reloaded))?;
+                let loaded = load_daemon_config(&config_path).and_then(|reloaded| {
+                    prepare_daemon_directories(&reloaded)?;
+                    let identity = load_identity_store(&identity_store_path(&reloaded))?;
+                    Ok((reloaded, identity))
+                });
+                let (reloaded, reloaded_identity) = match loaded {
+                    Ok(loaded) => loaded,
+                    Err(error) => {
+                        reload_failure = Some(error);
+                        break;
+                    }
+                };
                 if reloaded.network.bind_addr != config.network.bind_addr {
                     warn!(
                         configured = %reloaded.network.bind_addr,
@@ -1763,18 +1775,20 @@ async fn run_daemon_service(
                 config = reloaded;
                 daemon_state.config = config.clone();
                 reload_count = reload_count.saturating_add(1);
-                *health_snapshot
-                    .lock()
-                    .map_err(|_| cli_error("diagnostics snapshot mutex poisoned"))? =
-                    DaemonHealthSnapshot::from_state(
-                        &daemon_state,
-                        &reloaded_identity,
-                        &compiled_app.start_order,
-                        transfer_listener_addr,
-                        quic_transfer_listener_addr,
-                        started_at_micros,
-                        reload_count,
-                    );
+                let Ok(mut snapshot) = health_snapshot.lock() else {
+                    reload_failure = Some(cli_error("diagnostics snapshot mutex poisoned"));
+                    break;
+                };
+                *snapshot = DaemonHealthSnapshot::from_state(
+                    &daemon_state,
+                    &reloaded_identity,
+                    &compiled_app.start_order,
+                    transfer_listener_addr,
+                    quic_transfer_listener_addr,
+                    started_at_micros,
+                    reload_count,
+                );
+                drop(snapshot);
                 info!(reload_count, "ATP daemon configuration reloaded");
             }
             Ok(DaemonSignal::Interrupt | DaemonSignal::Terminate) => {
@@ -1798,7 +1812,11 @@ async fn run_daemon_service(
         }
     }
 
-    info!("Received shutdown signal, stopping daemon...");
+    if let Some(error) = &reload_failure {
+        warn!(%error, "ATP daemon configuration reload failed; draining listeners and stopping");
+    } else {
+        info!("Received shutdown signal, stopping daemon...");
+    }
     let drained = transfer_stats.stop_and_drain(daemon_state.config.service.shutdown_timeout_secs);
     for event in compiled_app.shutdown_events() {
         match event.role {
@@ -1813,7 +1831,7 @@ async fn run_daemon_service(
     if let Some(endpoint) = diagnostics_endpoint {
         endpoint.stop();
     }
-    drained
+    reload_failure.map_or(drained, Err)
 }
 
 fn stop_daemon(cli: AtpdCli) -> Result<()> {

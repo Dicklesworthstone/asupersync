@@ -16754,7 +16754,14 @@ where
         if cx.is_cancel_requested() {
             return Ok(());
         }
-        let (stream, peer) = control_listener.accept().await?;
+        let (stream, peer) = match control_listener.accept().await {
+            Ok(accepted) => accepted,
+            // Cancellation interrupts the pending accept. That is the documented
+            // stop, not a failure, whichever side of the check above it lands
+            // on (br-asupersync-ks43rc).
+            Err(_) if cx.is_cancel_requested() => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
         let result = receive_connection_with_options(
             cx,
             stream,
