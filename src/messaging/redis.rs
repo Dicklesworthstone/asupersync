@@ -2607,7 +2607,7 @@ where
 {
     let mut owner_cancel = CancelWakerGuard::new(cx);
     let mut driver_cancel = Cx::current().as_ref().map(CancelWakerGuard::new);
-    let deadline = [
+    let mut deadlines: Vec<_> = [
         cx.budget().deadline,
         driver_cancel
             .as_ref()
@@ -2615,8 +2615,13 @@ where
     ]
     .into_iter()
     .flatten()
-    .min();
-    let mut deadline_timer = deadline.map(|at| Box::pin(crate::time::sleep_until(at)));
+    .collect();
+    deadlines.sort_unstable();
+    // Latest first, so `pop` yields the next deadline to arm.
+    deadlines.reverse();
+    let mut deadline_timer = deadlines
+        .pop()
+        .map(|at| Box::pin(crate::time::sleep_until(at)));
     let mut future = std::pin::pin!(future);
     std::future::poll_fn(|task_cx| {
         // Register before checking. Cancellation may occur while a new Waker
@@ -2625,13 +2630,17 @@ where
         if let Some(driver) = driver_cancel.as_mut() {
             driver.refresh(task_cx.waker());
         }
-        // Arm (or re-arm) the deadline wakeup. Once it has fired it is
-        // dropped: the checkpoints below observe the expired budget.
-        if deadline_timer
+        // Arm (or re-arm) the deadline wakeup. A fired timer is replaced by
+        // the next deadline: the earlier one may not end the call (for
+        // example, the driving task is inside a masked section), and nothing
+        // else would wake a read parked on a silent server at the later one.
+        while deadline_timer
             .as_mut()
             .is_some_and(|timer| timer.as_mut().poll(task_cx).is_ready())
         {
-            deadline_timer = None;
+            deadline_timer = deadlines
+                .pop()
+                .map(|at| Box::pin(crate::time::sleep_until(at)));
         }
         let cancelled = || {
             cx.checkpoint().is_err()

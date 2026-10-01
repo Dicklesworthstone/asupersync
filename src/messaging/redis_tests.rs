@@ -7454,4 +7454,72 @@ mod tests {
 
         server.join().ok();
     }
+
+    /// br-asupersync-798g1k: with two budget deadlines, an earlier one that
+    /// fires without ending the call (here the driving task's checkpoints are
+    /// masked) must not leave the later one unarmed. Otherwise nothing wakes a
+    /// read parked on a silent server at the later deadline.
+    #[test]
+    fn redis_io_arms_the_later_deadline_when_the_earlier_one_does_not_end_the_call() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, RegionId, TaskId, Time};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Context, Poll, Wake, Waker};
+
+        struct CountWakes(AtomicUsize);
+        impl Wake for CountWakes {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+        let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+        let cx_with_deadline = |task: u32, deadline_ms: u64| {
+            Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(task, 0),
+                Budget::new().with_deadline(Time::from_millis(deadline_ms)),
+                None,
+                None,
+                None,
+                Some(timer.clone()),
+                None,
+            )
+        };
+        let owner = cx_with_deadline(1, 300);
+        let driver = cx_with_deadline(2, 100);
+        let _current = Cx::set_current(Some(driver.clone()));
+        let silent_server = std::future::pending::<Result<(), RedisError>>();
+        let mut call = std::pin::pin!(crate::combinator::bracket::commit_section(
+            &driver,
+            u32::MAX,
+            redis_io(&owner, silent_server),
+        ));
+        let wakes = Arc::new(CountWakes(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut task_cx = Context::from_waker(&waker);
+        assert!(call.as_mut().poll(&mut task_cx).is_pending());
+
+        // The driver's deadline passes, but its checkpoints are masked.
+        clock.advance(150_000_000);
+        let _fired = timer.process_timers();
+        assert!(
+            call.as_mut().poll(&mut task_cx).is_pending(),
+            "the masked driver does not end the call"
+        );
+
+        // Only a timer for the owner's later deadline can wake the read now.
+        let before = wakes.0.load(Ordering::SeqCst);
+        clock.advance(200_000_000);
+        let _fired = timer.process_timers();
+        assert!(
+            wakes.0.load(Ordering::SeqCst) > before,
+            "the owner's deadline must wake the parked read"
+        );
+        assert!(matches!(
+            call.as_mut().poll(&mut task_cx),
+            Poll::Ready(Err(RedisError::Cancelled))
+        ));
+    }
 }
