@@ -440,7 +440,13 @@ mod keepalive {
         Cancel,
         SlowUpload,
         EchoingUpload,
+        PackedEchoes,
+        EarlyStatus,
     }
+
+    /// Small response messages a PackedEchoes peer puts in each of two
+    /// back-to-back 16 KiB DATA frames after the first upload.
+    const PACKED_PER_FRAME: usize = FRAME_BYTES / 9;
 
     /// Response frames an EchoingUpload peer queues ahead of each PING ACK:
     /// more than the uploads that fit in one keepalive timeout at one frame
@@ -534,7 +540,7 @@ mod keepalive {
                                     reply(&mut connection, &mut codec, b"noise");
                                 }
                                 Mode::Silent => {}
-                                Mode::SlowUpload => {
+                                Mode::SlowUpload | Mode::PackedEchoes | Mode::EarlyStatus => {
                                     write_ping(&mut socket, PingFrame::ack(ping.opaque_data));
                                 }
                                 Mode::EchoingUpload => {
@@ -571,7 +577,13 @@ mod keepalive {
                             body.extend_from_slice(&data);
                             while let Some(message) = codec.decode_message(&mut body).unwrap() {
                                 assert_eq!(message.as_ref(), b"upload");
-                                if matches!(mode, Mode::SlowUpload | Mode::EchoingUpload) {
+                                if matches!(
+                                    mode,
+                                    Mode::SlowUpload
+                                        | Mode::EchoingUpload
+                                        | Mode::PackedEchoes
+                                        | Mode::EarlyStatus
+                                ) {
                                     // No response DATA between probes, so the
                                     // client stays idle long enough to probe,
                                     // and nothing gives it a reason to read.
@@ -579,6 +591,41 @@ mod keepalive {
                                     // response DATA queued ahead of its ACK.
                                     uploads += 1;
                                     received_data = true;
+                                    if matches!(mode, Mode::PackedEchoes) && uploads == 1 {
+                                        // Two full frames of small messages in
+                                        // one write: a single flush drain sees
+                                        // both before decoding any of them.
+                                        let mut packed = BytesMut::new();
+                                        for _ in 0..2 * PACKED_PER_FRAME {
+                                            codec
+                                                .encode_message(
+                                                    &Bytes::from_static(b"echo"),
+                                                    &mut packed,
+                                                )
+                                                .unwrap();
+                                        }
+                                        let packed = packed.freeze();
+                                        let half = packed.len() / 2;
+                                        connection
+                                            .send_data(1, packed.slice(..half), false)
+                                            .unwrap();
+                                        connection
+                                            .send_data(1, packed.slice(half..), false)
+                                            .unwrap();
+                                    }
+                                    if matches!(mode, Mode::EarlyStatus) && uploads == 2 {
+                                        connection
+                                            .send_headers(
+                                                1,
+                                                vec![
+                                                    Header::new("grpc-status", "7"),
+                                                    Header::new("grpc-message", "early refusal"),
+                                                ],
+                                                true,
+                                            )
+                                            .unwrap();
+                                        terminated = true;
+                                    }
                                     continue;
                                 }
                                 assert!(!received_data, "request message is sent exactly once");
@@ -586,12 +633,20 @@ mod keepalive {
                                 reply(&mut connection, &mut codec, b"echo");
                             }
                             if end_stream && !watch {
-                                if !matches!(mode, Mode::SlowUpload | Mode::EchoingUpload) {
+                                if !matches!(
+                                    mode,
+                                    Mode::SlowUpload
+                                        | Mode::EchoingUpload
+                                        | Mode::PackedEchoes
+                                        | Mode::EarlyStatus
+                                ) {
                                     assert!(matches!(mode, Mode::Ack));
                                     assert_eq!(probes, 2);
                                 }
-                                terminal(&mut connection);
-                                terminated = true;
+                                if !terminated {
+                                    terminal(&mut connection);
+                                    terminated = true;
+                                }
                             }
                         }
                         _ => {}
@@ -706,7 +761,7 @@ mod keepalive {
                 assert!(status.message().contains("keepalive"));
             }
             Mode::Cancel => assert_eq!(result.unwrap_err().code(), Code::Cancelled),
-            Mode::SlowUpload | Mode::EchoingUpload => {
+            Mode::SlowUpload | Mode::EchoingUpload | Mode::PackedEchoes | Mode::EarlyStatus => {
                 unreachable!("slow uploads run through slow_upload")
             }
         }
@@ -734,11 +789,16 @@ mod keepalive {
             else { RuntimeBuilder::new().worker_threads(workers) }.build().unwrap();
         let (result, sent, echoes) = runtime.block_on(runtime.handle().spawn_checked(async move {
             let cx = Cx::current().unwrap();
-            let channel = Channel::builder(format!("http://{address}"))
+            let mut builder = Channel::builder(format!("http://{address}"))
                 .keepalive_interval(Duration::from_millis(100))
                 .keepalive_timeout(Duration::from_millis(300))
-                .connect_timeout(LIMIT)
-                .connect().await.unwrap();
+                .connect_timeout(LIMIT);
+            if matches!(mode, Mode::PackedEchoes) {
+                // Retention bound = 64 + 5 + one frame: two full frames of
+                // small messages exceed it unless the flush drain stops.
+                builder = builder.max_recv_message_size(64);
+            }
+            let channel = builder.connect().await.unwrap();
             let mut stream = GrpcClient::new(channel).into_native_duplex(
                 &cx, "/svc/Upload", Request::new(()),
             ).await.unwrap();
@@ -761,7 +821,7 @@ mod keepalive {
                         }
                     }
                     Ok(Some(NativeDuplexEvent::Message(message)))
-                        if matches!(mode, Mode::EchoingUpload) =>
+                        if matches!(mode, Mode::EchoingUpload | Mode::PackedEchoes) =>
                     {
                         assert_eq!(message.as_ref(), b"echo");
                         echoes += 1;
@@ -778,18 +838,33 @@ mod keepalive {
         let (probes, _, uploads) = peer.join().expect("slow-upload peer observed retirement EOF");
         let outcome = format!("workers={workers} mode={mode:?} sent={sent} uploads={uploads} echoes={echoes} probes={probes} result={:?}",
             result.as_ref().map_err(Status::code));
-        assert!(result.is_ok(), "a healthy acknowledging peer must not fail the upload: {outcome}");
-        assert_eq!((sent, uploads), (UPLOADS, UPLOADS), "{outcome}");
-        if matches!(mode, Mode::EchoingUpload) {
-            // Every burst ahead of an ACK arrived whole, over several probes.
-            assert!(
-                echoes >= 2 * ECHOES_PER_PROBE && echoes % ECHOES_PER_PROBE == 0,
-                "{outcome}"
-            );
-        } else {
+        if matches!(mode, Mode::EarlyStatus) {
+            // The flush drain read the peer's terminal status. The call
+            // reports it instead of a send boundary that the next
+            // queue_message would refuse with FAILED_PRECONDITION.
+            let status = result.unwrap_err();
+            assert_eq!(status.code(), Code::PermissionDenied, "{outcome}");
+            assert!((2..UPLOADS).contains(&sent), "{outcome}");
             assert_eq!(echoes, 0, "{outcome}");
+        } else {
+            assert!(
+                result.is_ok(),
+                "a healthy acknowledging peer must not fail the upload: {outcome}"
+            );
+            assert_eq!((sent, uploads), (UPLOADS, UPLOADS), "{outcome}");
+            if matches!(mode, Mode::EchoingUpload) {
+                // Every burst ahead of an ACK arrived whole, over several probes.
+                assert!(
+                    echoes >= 2 * ECHOES_PER_PROBE && echoes % ECHOES_PER_PROBE == 0,
+                    "{outcome}"
+                );
+            } else if matches!(mode, Mode::PackedEchoes) {
+                assert_eq!(echoes, 2 * PACKED_PER_FRAME, "{outcome}");
+            } else {
+                assert_eq!(echoes, 0, "{outcome}");
+            }
+            assert!(probes >= 2, "the upload outlived several acknowledged probes: {outcome}");
         }
-        assert!(probes >= 2, "the upload outlived several acknowledged probes: {outcome}");
         let report = runtime.shutdown_drained(LIMIT);
         assert_eq!(report.outcome, RootDrainOutcome::Quiescent);
         assert!(runtime.shutdown_timeout(LIMIT));
@@ -798,7 +873,10 @@ mod keepalive {
     fn checked(workers: usize, mode: Mode, watch: bool) {
         let (done, finished) = mpsc::channel();
         let thread = std::thread::spawn(move || {
-            if matches!(mode, Mode::SlowUpload | Mode::EchoingUpload) {
+            if matches!(
+                mode,
+                Mode::SlowUpload | Mode::EchoingUpload | Mode::PackedEchoes | Mode::EarlyStatus
+            ) {
                 slow_upload(workers, mode);
             } else {
                 scenario(workers, mode, watch);
@@ -836,6 +914,25 @@ mod keepalive {
     fn native_channel_keepalive_reads_acks_behind_echoed_response_frames() {
         for workers in [1, 2] {
             checked(workers, Mode::EchoingUpload, false);
+        }
+    }
+
+    /// The flush drain decodes nothing, so it stops before another DATA frame
+    /// could pass the response retention bound. Two packed frames read in one
+    /// drain used to fail a healthy call with RESOURCE_EXHAUSTED.
+    #[test]
+    fn native_channel_keepalive_flush_drain_respects_the_retention_bound() {
+        for workers in [1, 2] {
+            checked(workers, Mode::PackedEchoes, false);
+        }
+    }
+
+    /// A terminal status the flush drain read is reported, not hidden behind
+    /// a send boundary that the next queue_message refuses.
+    #[test]
+    fn native_channel_keepalive_flush_drain_reports_an_early_terminal_status() {
+        for workers in [1, 2] {
+            checked(workers, Mode::EarlyStatus, false);
         }
     }
 }
