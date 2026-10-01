@@ -4084,6 +4084,17 @@ impl H3ConnectionState {
             }
             self.max_push_id_received = Some(*id);
         }
+        // RFC 9114 §7.2.3: a CANCEL_PUSH naming a push ID above the maximum
+        // the client allowed is H3_ID_ERROR. No promise can exceed that
+        // maximum, so this bound needs no record of promises made.
+        if self.config.endpoint_role == H3EndpointRole::Server
+            && let H3Frame::CancelPush(id) = frame
+            && self.max_push_id_received.is_none_or(|max| *id > max)
+        {
+            return Err(H3NativeError::ControlProtocol(
+                "CANCEL_PUSH names a push ID above MAX_PUSH_ID",
+            ));
+        }
         if let H3Frame::Goaway(id) = frame {
             if self.config.endpoint_role == H3EndpointRole::Client
                 && !is_client_initiated_bidirectional_stream_id(*id)
@@ -4422,6 +4433,15 @@ impl H3ConnectionState {
         match kind {
             H3UniStreamType::Control => self.on_control_frame(frame),
             H3UniStreamType::Push => {
+                // RFC 9114 §7.2.8 reserves the HTTP/2 frame types on every
+                // stream, and the §7.2 frame table does not allow PUSH_PROMISE
+                // on a push stream (H3_FRAME_UNEXPECTED).
+                reject_http2_reserved_frame(frame)?;
+                if matches!(frame, H3Frame::PushPromise { .. }) {
+                    return Err(H3NativeError::ControlProtocol(
+                        "PUSH_PROMISE is not allowed on a push stream",
+                    ));
+                }
                 let state = self.push_streams.entry(stream_id).or_default();
                 if state.push_id.is_none() {
                     return Err(H3NativeError::StreamProtocol("push stream missing push id"));
