@@ -2328,15 +2328,28 @@ impl TransactionalProducer {
             let producer = self.producer.clone();
             let timeout = self.config.transaction_timeout;
             move || {
-                producer
-                    .abort_transaction(timeout)
-                    .map_err(|err| map_rdkafka_error(&err, None))
+                producer.abort_transaction(timeout).map_err(|err| {
+                    // A fenced producer must be recreated. Keep that verdict
+                    // instead of reporting a retryable broker error forever.
+                    let fatal =
+                        matches!(&err, RdKafkaError::Transaction(native) if native.is_fatal());
+                    if fatal {
+                        map_transaction_failure(err)
+                    } else {
+                        map_rdkafka_error(&err, None)
+                    }
+                })
             }
         })
         .await;
 
         #[cfg(not(feature = "kafka"))]
         operation.complete(Ok(()))
+    }
+
+    fn needs_abort_recovery(&self, generation: u64) -> bool {
+        let state = self.state.lock();
+        state.generation == generation && state.phase == TransactionPhase::NeedsAbortRecovery
     }
 }
 
@@ -2849,6 +2862,13 @@ impl Transaction<'_> {
     #[allow(unused_variables, clippy::unused_async)]
     pub async fn abort(mut self, cx: &Cx) -> Result<(), KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+        // A failed enrollment or commit left this transaction needing abort
+        // recovery, which is this abort. Run it now instead of leaving the
+        // broker transaction open until the next begin or its timeout.
+        if self.producer.needs_abort_recovery(self.generation) {
+            self.finished = true;
+            return self.producer.recover_abandoned_transaction(cx).await;
+        }
         self.producer.ensure_active_transaction(self.generation)?;
 
         #[cfg(feature = "kafka")]
@@ -4331,7 +4351,14 @@ mod tests {
             assert!(!error.is_retryable() && !error.is_connection_error());
             assert_eq!(producer.state.lock().phase, TransactionPhase::NeedsAbortRecovery);
             assert_eq!(consumer.committed_offset(input, 0), Some(2));
-            assert!(producer.begin_transaction(&cx).await.is_err(), "fatal producer must remain fenced");
+            // The next begin's abort recovery hits the same fatal error. It must
+            // keep the fatal verdict, not come back as a retryable broker error.
+            let error = producer.begin_transaction(&cx).await.unwrap_err();
+            assert!(
+                error.transaction_failure().is_some_and(KafkaTransactionFailure::is_fatal),
+                "fatal producer must remain fenced: {error:?}"
+            );
+            assert!(!error.is_retryable() && !error.is_transient(), "{error:?}");
 
             // Switching to a fresh snapshot after the enrolled one went stale is
             // refused, and must not leave the transaction committable with only
@@ -5034,6 +5061,42 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(metadata.offset, 1);
+        });
+    }
+
+    /// Aborting a transaction that a failed enrollment or commit poisoned runs
+    /// the abort recovery. It used to refuse ("must be aborted before reuse"),
+    /// leaving the broker transaction open until the next begin or its timeout.
+    #[cfg(not(feature = "kafka"))]
+    #[test]
+    fn transactional_abort_of_a_poisoned_transaction_runs_the_recovery() {
+        let _broker = deterministic_broker_guard();
+        crate::test_utils::run_test_with_cx(|cx| async move {
+            let topic = "transactional-poisoned-abort";
+            let producer = TransactionalProducer::new(TransactionalConfig::new(
+                ProducerConfig::default(),
+                "tx-poisoned-abort".to_string(),
+            ))
+            .unwrap();
+
+            let tx = producer.begin_transaction(&cx).await.unwrap();
+            tx.send(&cx, topic, None, b"staged-then-poisoned")
+                .await
+                .unwrap();
+            // The state a failed offset enrollment or commit leaves behind.
+            producer.state.lock().phase = TransactionPhase::NeedsAbortRecovery;
+            tx.abort(&cx).await.unwrap();
+            assert_eq!(producer.state.lock().phase, TransactionPhase::Idle);
+
+            let next = producer.begin_transaction(&cx).await.unwrap();
+            next.send(&cx, topic, None, b"committed").await.unwrap();
+            next.commit(&cx).await.unwrap();
+            let plain = KafkaProducer::new(ProducerConfig::default()).unwrap();
+            let metadata = plain
+                .send(&cx, topic, None, b"after", Some(0))
+                .await
+                .unwrap();
+            assert_eq!(metadata.offset, 1, "the poisoned record was discarded");
         });
     }
 
