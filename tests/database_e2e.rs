@@ -210,8 +210,21 @@ fn read_port(name: &str, internal: u16) -> Option<u16> {
 fn wait_postgres_ready(name: &str) -> bool {
     for _ in 0..40 {
         std::thread::sleep(Duration::from_millis(500));
+        // Probe over TCP: the image's init phase runs a temporary server on the
+        // Unix socket only and then restarts, so a socket probe can report
+        // ready before the server the test connects to is up.
         let r = Command::new("docker")
-            .args(["exec", name, "pg_isready", "-U", "testuser", "-d", "testdb"])
+            .args([
+                "exec",
+                name,
+                "pg_isready",
+                "-h",
+                "127.0.0.1",
+                "-U",
+                "testuser",
+                "-d",
+                "testdb",
+            ])
             .output();
         if r.is_ok_and(|o| o.status.success()) {
             std::thread::sleep(Duration::from_millis(300));
