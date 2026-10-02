@@ -274,7 +274,7 @@ fn native_tls_endpoint_authenticates_streams_and_retains_metadata() {
                 )
                 .await
                 .unwrap();
-            assert!(stream.initial_metadata().unwrap().get("x-setup").is_some());
+            assert!(stream.headers().await.unwrap().get("x-setup").is_some());
             assert!(stream.status().is_none());
             assert_eq!(stream.message().await.unwrap().unwrap().as_ref(), b"one");
             assert!(stream.message().await.unwrap().unwrap().is_empty());

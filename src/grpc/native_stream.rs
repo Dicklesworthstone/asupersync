@@ -7,7 +7,9 @@
 //! caller must verify TLS identity and negotiate `h2` before passing TLS here;
 //! setting `scheme = "https"` is not authentication. For this constructor,
 //! connection establishment precedes the call. [`NativeStreamEndpoint`] instead
-//! dials a resolved address under a deadline that includes setup and headers.
+//! dials a resolved address under a setup deadline that ends once the request
+//! is written and the server's HTTP/2 SETTINGS arrive. Response headers are
+//! read later, under the call deadline only.
 //!
 //! Polling [`NativeServerStream::message`] supplies receive demand. Dropping
 //! that borrowing future preserves partial request writes, frame decoding and
@@ -56,7 +58,7 @@ use crate::grpc::status::{Code, GrpcError, Status, TransportErrorKind};
 use crate::grpc::streaming::{Metadata, MetadataValue, Request, Streaming};
 use crate::http::h2::connection::{CLIENT_PREFACE, ReceivedFrame};
 use crate::http::h2::frame::PingFrame;
-use crate::http::h2::{Connection, Frame, FrameCodec, Header, Settings};
+use crate::http::h2::{Connection, ConnectionState, Frame, FrameCodec, Header, Settings};
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::time::{Sleep, TimerDriverHandle};
 use crate::types::{CancelKind, Time};
@@ -91,8 +93,12 @@ pub(crate) struct NativeStreamWindows {
 
 impl NativeStreamWindows {
     fn validate(self) -> Result<(), Status> {
+        // The automatic stream WINDOW_UPDATE fires once the window drops below
+        // a quarter of its initial size. That threshold is 0 for a window of 3
+        // bytes or less, so such a window is never refilled and the call could
+        // never receive a message.
         if self.connection.is_some_and(|size| !(65_535..=0x7fff_ffff).contains(&size))
-            || self.stream.is_some_and(|size| size > 0x7fff_ffff)
+            || self.stream.is_some_and(|size| !(4..=0x7fff_ffff).contains(&size))
         {
             return Err(Status::invalid_argument("invalid native gRPC receive windows"));
         }
@@ -557,6 +563,18 @@ where
             .ok_or_else(|| Status::internal("native gRPC response lacks initial metadata"))
     }
 
+    /// Drive the connection until the server's HTTP/2 SETTINGS have arrived
+    /// and every currently sendable request frame, including our SETTINGS
+    /// acknowledgement, has been written. Frames read on the way are kept for
+    /// `headers()` and `message()`.
+    ///
+    /// Connection setup ends here rather than at the response headers:
+    /// grpc-go and grpc-java servers send those with the first message, so a
+    /// Watch whose first event is slow must not be bounded by setup.
+    pub(super) async fn establish(&mut self) -> Result<(), Status> {
+        poll_fn(|task| self.poll_established(task)).await
+    }
+
     /// Read one typed message, or the call's terminal result.
     /// A dropped borrowing wait can be resumed; no background work continues.
     pub async fn message(&mut self) -> Result<Option<C::Decode>, Status> {
@@ -612,6 +630,38 @@ where
         for _ in 0..POLL_STEPS {
             if let Err(error) = self.gate(task) { return Poll::Ready(Err(self.finish(error))); }
             if self.response.initial.is_some() { return Poll::Ready(Ok(())); }
+            match self.poll_received(task) {
+                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(self.finish(error))),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+        task.waker().wake_by_ref();
+        Poll::Pending
+    }
+
+    fn poll_established(&mut self, task: &mut Context<'_>) -> Poll<Result<(), Status>> {
+        let _ambient = Cx::set_current(Some(self.cx.clone()));
+        if let Some(status) = &self.final_status {
+            return Poll::Ready(if status.code() == Code::Ok { Ok(()) } else { Err(status.clone()) });
+        }
+        for _ in 0..POLL_STEPS {
+            if let Err(error) = self.gate(task) { return Poll::Ready(Err(self.finish(error))); }
+            if self.connection.as_ref()
+                .is_some_and(|connection| connection.state() != ConnectionState::Handshaking)
+            {
+                // The peer's SETTINGS are in. Flow-blocked request DATA does
+                // not hold setup: it moves once the server grants credit.
+                match self.poll_outbound(task) {
+                    Poll::Ready(Ok(())) => {
+                        self.unflushed_read_frames = 0;
+                        return Poll::Ready(Ok(()));
+                    }
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(self.finish(error))),
+                    // Keep reading while the write is parked (see poll_received).
+                    Poll::Pending => {}
+                }
+            }
             match self.poll_received(task) {
                 Poll::Ready(Ok(())) => {}
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(self.finish(error))),

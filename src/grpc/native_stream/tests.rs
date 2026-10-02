@@ -451,6 +451,20 @@ fn invalid_timeout_reserved_metadata_and_unavailable_timer_refuse_before_io() {
     assert_eq!(result.unwrap_err().code(), Code::FailedPrecondition);
 }
 
+// br-asupersync-cmg03d: Channel::initial_stream_window_size(0..=3) used to be
+// accepted, and the call then waited for its first message until the deadline.
+#[test]
+fn receive_windows_that_can_never_be_refilled_are_refused() {
+    for size in 0..4 {
+        let windows = NativeStreamWindows { connection: None, stream: Some(size) };
+        assert_eq!(windows.validate().unwrap_err().code(), Code::InvalidArgument, "window {size}");
+    }
+    for size in [4, 65_535, 0x7fff_ffff] {
+        let windows = NativeStreamWindows { connection: None, stream: Some(size) };
+        assert!(windows.validate().is_ok(), "window {size}");
+    }
+}
+
 #[test]
 fn explicit_cancel_and_whole_stream_drop_release_io_once_without_new_io() {
     let (io, probe) = fixture(Vec::new(), 16384, false);

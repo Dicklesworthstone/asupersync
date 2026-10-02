@@ -478,6 +478,7 @@ fn native_endpoint_dials_health_watch_and_closes_its_owned_connection() {
                     )
                     .await
                     .unwrap();
+                assert!(stream.headers().await.is_ok());
                 assert!(stream.initial_metadata().is_some());
                 assert_eq!(
                     stream.message().await.unwrap().unwrap().as_ref(),
@@ -509,9 +510,41 @@ fn native_endpoint_dials_health_watch_and_closes_its_owned_connection() {
     }
 }
 
-// Peer sends SETTINGS but no response headers. The atomic witness is set
-// BEFORE those bytes wake the client, so Pending really belongs to header wait.
-fn stalled_peer() -> (SocketAddr, Arc<AtomicBool>, std::thread::JoinHandle<()>) {
+// What the scripted peer does once it has read the client preface.
+#[derive(Clone, Copy)]
+enum PeerScript {
+    // Withholds the rest of its SETTINGS frame after four header bytes, so
+    // the HTTP/2 handshake never completes.
+    Silent,
+    // Sends SETTINGS and never responds.
+    SettingsOnly,
+    // Sends SETTINGS, then after the delay one message "hi" and OK trailers,
+    // with no earlier response headers: grpc-go's shape for a Watch whose
+    // first event is slow.
+    LazyResponse(Duration),
+}
+
+// HPACK literals without indexing, so no dynamic table is involved.
+fn peer_frame(kind: u8, flags: u8, fields: &[(&str, &str)], data: &[u8]) -> Vec<u8> {
+    let mut payload = data.to_vec();
+    for (name, value) in fields {
+        assert!(name.len() < 127 && value.len() < 127);
+        payload.extend_from_slice(&[0, u8::try_from(name.len()).unwrap()]);
+        payload.extend_from_slice(name.as_bytes());
+        payload.push(u8::try_from(value.len()).unwrap());
+        payload.extend_from_slice(value.as_bytes());
+    }
+    let mut frame = u32::try_from(payload.len()).unwrap().to_be_bytes()[1..].to_vec();
+    frame.extend_from_slice(&[kind, flags, 0, 0, 0, 1]);
+    frame.extend_from_slice(&payload);
+    frame
+}
+
+// The atomic witness is set when the preface has been read, BEFORE any peer
+// bytes can wake the client, so a Pending seen after it belongs to setup.
+fn scripted_peer(
+    script: PeerScript,
+) -> (SocketAddr, Arc<AtomicBool>, std::thread::JoinHandle<()>) {
     use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -540,7 +573,23 @@ fn stalled_peer() -> (SocketAddr, Arc<AtomicBool>, std::thread::JoinHandle<()>) 
         socket.read_exact(&mut preface).unwrap();
         assert_eq!(&preface, crate::http::h2::connection::CLIENT_PREFACE);
         observed.store(true, Ordering::Release);
-        socket.write_all(&[0, 0, 0, 4, 0, 0, 0, 0, 0]).unwrap();
+        // A silent peer sends only the first four bytes of its SETTINGS frame
+        // header: they wake the client, which cannot complete the handshake.
+        let settings = [0, 0, 0, 4, 0, 0, 0, 0, 0];
+        let sent = if matches!(script, PeerScript::Silent) { 4 } else { settings.len() };
+        socket.write_all(&settings[..sent]).unwrap();
+        if let PeerScript::LazyResponse(delay) = script {
+            std::thread::sleep(delay);
+            let mut response = peer_frame(
+                1,
+                4,
+                &[(":status", "200"), ("content-type", "application/grpc")],
+                &[],
+            );
+            response.extend(peer_frame(0, 0, &[], &[0, 0, 0, 0, 2, b'h', b'i']));
+            response.extend(peer_frame(1, 5, &[("grpc-status", "0")], &[]));
+            socket.write_all(&response).unwrap();
+        }
         let mut bytes = [0; 4096];
         for _ in 0..128 {
             match socket.read(&mut bytes) {
@@ -556,8 +605,8 @@ fn stalled_peer() -> (SocketAddr, Arc<AtomicBool>, std::thread::JoinHandle<()>) 
 }
 
 #[test]
-fn native_setup_timeout_closes_stalled_header_wait_without_cancelling_parent() {
-    let (address, reached, peer) = stalled_peer();
+fn native_setup_timeout_closes_a_stalled_http2_handshake_without_cancelling_parent() {
+    let (address, reached, peer) = scripted_peer(PeerScript::Silent);
     let observed = Arc::clone(&reached);
     runtime_case(false, move |cx| async move {
         let endpoint =
@@ -575,18 +624,93 @@ fn native_setup_timeout_closes_stalled_header_wait_without_cancelling_parent() {
             reached.load(Ordering::Acquire),
             "peer received actual connection preface"
         );
-        assert_eq!(result.unwrap_err().code(), Code::DeadlineExceeded);
+        let status = result.unwrap_err();
+        assert_eq!(status.code(), Code::DeadlineExceeded, "{status:?}");
+        assert!(status.message().contains("setup"), "{status:?}");
         assert!(!cx.is_cancel_requested());
     });
     peer.join().unwrap();
     assert!(observed.load(Ordering::Acquire));
 }
 
+// br-asupersync-cmg03d: setup used to wait for response headers, so a Watch
+// against a server that sends them with its first message (grpc-go,
+// grpc-java) failed with DEADLINE_EXCEEDED once the connect timeout elapsed.
 #[test]
-fn native_cancel_and_dropped_setup_retire_a_witnessed_pending_header_wait() {
+fn native_setup_timeout_does_not_bound_a_lazy_first_response() {
+    const SETUP: Duration = Duration::from_secs(1);
+    const FIRST_EVENT: Duration = Duration::from_millis(2500);
+    let (address, _reached, peer) = scripted_peer(PeerScript::LazyResponse(FIRST_EVENT));
+    runtime_case(false, move |cx| async move {
+        let timer = cx.timer_driver().unwrap();
+        let started = timer.now();
+        let endpoint = NativeStreamEndpoint::new(address, "localhost", SETUP).unwrap();
+        let mut stream = endpoint
+            .connect_tcp(
+                &cx,
+                "/test.Service/Watch",
+                Request::new(Bytes::new()),
+                IdentityCodec,
+                NativeStreamConfig::default(),
+            )
+            .await
+            .expect("setup ends with the server's SETTINGS, not its first response");
+        let connected = Duration::from_nanos(timer.now().duration_since(started));
+        assert!(stream.initial_metadata().is_none(), "connected after {connected:?}");
+        let message = stream.message().await;
+        let waited = Duration::from_nanos(timer.now().duration_since(started));
+        let message = message
+            .unwrap_or_else(|status| {
+                panic!("connected after {connected:?}, failed after {waited:?}: {status:?}")
+            })
+            .expect("one message before the trailers");
+        assert_eq!(message.as_ref(), b"hi");
+        assert!(waited >= FIRST_EVENT, "first message after {waited:?}");
+        assert!(stream.message().await.unwrap().is_none());
+        assert_eq!(stream.status().unwrap().code(), Code::Ok);
+        assert!(!cx.is_cancel_requested());
+    });
+    peer.join().unwrap();
+}
+
+#[test]
+fn native_call_deadline_not_setup_bounds_the_wait_for_response_headers() {
+    const SETUP: Duration = Duration::from_secs(1);
+    const CALL: Duration = Duration::from_secs(3);
+    let (address, _reached, peer) = scripted_peer(PeerScript::SettingsOnly);
+    runtime_case(false, move |cx| async move {
+        let timer = cx.timer_driver().unwrap();
+        let started = timer.now();
+        let endpoint = NativeStreamEndpoint::new(address, "localhost", SETUP).unwrap();
+        let mut stream = endpoint
+            .connect_tcp(
+                &cx,
+                "/test.Service/Watch",
+                Request::new(Bytes::new()),
+                IdentityCodec,
+                NativeStreamConfig {
+                    timeout: Some(CALL),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("setup ends with the server's SETTINGS");
+        let status = stream.headers().await.unwrap_err();
+        let waited = Duration::from_nanos(timer.now().duration_since(started));
+        assert_eq!(status.code(), Code::DeadlineExceeded, "{status:?}");
+        assert!(status.message().contains("stream deadline"), "{status:?}");
+        assert!(waited >= CALL, "header wait ended after {waited:?}");
+        assert_eq!(stream.status().unwrap().code(), Code::DeadlineExceeded);
+        assert!(!cx.is_cancel_requested());
+    });
+    peer.join().unwrap();
+}
+
+#[test]
+fn native_cancel_and_dropped_setup_retire_a_witnessed_pending_handshake_wait() {
     for multithread in [false, true] {
         for cancel in [false, true] {
-            let (address, reached, peer) = stalled_peer();
+            let (address, reached, peer) = scripted_peer(PeerScript::Silent);
             runtime_case(multithread, move |cx| async move {
                 let endpoint =
                     NativeStreamEndpoint::new(address, "localhost", Duration::from_secs(3))
@@ -602,7 +726,7 @@ fn native_cancel_and_dropped_setup_retire_a_witnessed_pending_header_wait() {
                     let polled = future.as_mut().poll(task);
                     assert!(
                         polled.is_pending(),
-                        "peer deliberately withholds response headers"
+                        "peer deliberately withholds its SETTINGS"
                     );
                     if reached.load(Ordering::Acquire) {
                         Poll::Ready(())

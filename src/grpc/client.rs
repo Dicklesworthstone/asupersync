@@ -739,7 +739,11 @@ impl<C: Codec> GrpcClient<C> {
     /// Deterministic loopback is supported by [`Self::server_streaming`], not
     /// this native method. Missing I/O/timer authority, invalid configuration,
     /// unavailable compression and transport metadata overrides refuse before
-    /// dialing. Setup includes DNS, TCP, TLS, encoding and response headers.
+    /// dialing. Setup, bounded by the channel's connect timeout, includes DNS,
+    /// TCP, TLS, encoding, writing the request and the server's HTTP/2
+    /// SETTINGS. It does not include response headers, which grpc-go and
+    /// grpc-java servers send with the first message: a Watch whose first
+    /// event is slow waits under the call deadline and keepalive only.
     ///
     /// ```no_run
     /// use asupersync::{Cx, bytes::Bytes};

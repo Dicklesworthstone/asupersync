@@ -27,8 +27,10 @@ use std::time::Duration;
 /// the authority is an HTTP routing label, not authentication.
 ///
 /// The setup timeout covers resolution, dialing, optional TLS, codec setup and
-/// initial headers. Server-stream setup waits for response headers; duplex
-/// setup flushes request headers so callers can begin uploading immediately.
+/// initial headers. Server-stream setup writes the request and waits for the
+/// server's HTTP/2 SETTINGS, not for response headers, which servers may send
+/// with their first message. Duplex setup flushes request headers so callers
+/// can begin uploading immediately.
 /// It is separate from the optional whole-call timeout: a Watch with no call
 /// deadline can continue after successful setup. Every phase observes one
 /// absolute setup deadline, met with the request and caller's whole-call bound.
@@ -146,7 +148,7 @@ impl NativeStreamEndpoint {
             .await
     }
 
-    /// Connect over plaintext TCP and wait for the response's initial headers.
+    /// Connect over plaintext TCP and send the request.
     ///
     /// Requires a native I/O driver, an enabled I/O capability mask, and a timer
     /// driver on the explicit `cx`; no virtual `IoCap` is needed. Another task's
@@ -155,8 +157,12 @@ impl NativeStreamEndpoint {
     /// before sending request bytes. An encoding error closes that connection.
     ///
     /// This method accepts only `config.scheme == "http"`. It never silently
-    /// downgrades an HTTPS request. A successful return means headers arrived,
-    /// NOT that the RPC succeeded: consume `message()` through its final status.
+    /// downgrades an HTTPS request. The setup timeout covers dialing, writing
+    /// the request and the server's HTTP/2 SETTINGS, not the response headers:
+    /// servers such as grpc-go send those with the first message. A successful
+    /// return means the connection is up and the request was written, NOT that
+    /// the RPC succeeded: read `headers()` or consume `message()` through its
+    /// final status, both bounded by the call deadline only.
     /// Dropping the setup wait is not resumable; only borrowing waits on the
     /// returned stream retain progress. No request retry is performed.
     ///
@@ -210,11 +216,14 @@ impl NativeStreamEndpoint {
     /// offer `h2` ALPN. TLS success without `h2` refuses before any gRPC bytes.
     /// This method accepts only the `https` scheme and never retries plaintext.
     ///
-    /// One setup deadline covers resolution, TCP, handshake, codec setup and initial headers.
-    /// The original whole-call deadline then remains on the returned stream,
-    /// including time spent connecting. With no whole-call deadline, a Watch
-    /// may outlive the setup interval after its headers have arrived. A shorter
-    /// timeout configured on the TLS connector remains effective too.
+    /// One setup deadline covers resolution, TCP, handshake, codec setup,
+    /// writing the request and the server's HTTP/2 SETTINGS. Response headers
+    /// are not part of setup, because servers may send them with the first
+    /// message. The original whole-call deadline then remains on the returned
+    /// stream, including time spent connecting. With no whole-call deadline, a
+    /// Watch may outlive the setup interval, including the wait for its first
+    /// response. A shorter timeout configured on the TLS connector remains
+    /// effective too.
     ///
     /// Each stage is polled under the explicit `cx`, not an unrelated ambient
     /// task. Dropping setup retires its acquired transport, without cancelling
@@ -226,8 +235,9 @@ impl NativeStreamEndpoint {
     /// Invalid scheme, server name, configuration, metadata or missing explicit
     /// capabilities refuse before dialing. TLS/certificate/ALPN failures return
     /// `UNAVAILABLE`; observed cancellation or elapsed setup takes precedence.
-    /// A successful return proves initial headers, not a successful RPC: consume
-    /// `message()` through the terminal status as for [`Self::connect_tcp`].
+    /// A successful return proves an established connection and a written
+    /// request, not a successful RPC: consume `message()` through the terminal
+    /// status as for [`Self::connect_tcp`].
     ///
     /// ```no_run
     /// use asupersync::{Cx, bytes::Bytes, tls::TlsConnector};
@@ -406,7 +416,9 @@ impl NativeStreamEndpoint {
                 )
             })
             .await?;
-        setup.run(async { stream.headers().await.map(|_| ()) }).await?;
+        // Response headers are not part of setup: a server may send them with
+        // its first message, which a Watch can produce long after connecting.
+        setup.run(stream.establish()).await?;
         Ok(stream)
     }
 
