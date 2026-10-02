@@ -78,8 +78,11 @@ These 13 YAML files are typed `Scenario` fixtures. Their filenames, comments,
 and descriptions are authoring narratives, not evidence that the runner simulates
 every declared network, cancellation, or fault effect or schedules the named
 workload. Include paths are validated but not merged. Only participants whose
-role is exactly `sender` or `receiver` run, as lab tasks on bounded two-phase
-`mpsc` channels; other roles run nothing (`Steps: 0 (no workload ran)`). See the
+role is exactly `sender`, `receiver`, `swarm`, `supervisor` or `worker` run:
+senders and receivers as lab tasks on bounded two-phase `mpsc` channels, a
+swarm as many short lab tasks, and supervisors as managed supervisors that
+restart failing workers. Other roles run nothing
+(`Steps: 0 (no workload ran)`). See the
 [author guide](../docs/adoption/getting_started.md) for the field boundaries.
 
 - [`scenarios/smoke_happy_path.yaml`](scenarios/smoke_happy_path.yaml) — small
@@ -98,11 +101,13 @@ role is exactly `sender` or `receiver` run, as lab tasks on bounded two-phase
 - [`scenarios/custom_latency_model.yaml`](scenarios/custom_latency_model.yaml) —
   network-validation fixture; the runner does not consume network settings.
 - [`scenarios/host_crash_restart.yaml`](scenarios/host_crash_restart.yaml) —
-  crash/restart declaration fixture; those actions are trace records today.
+  supervision fixture; its `supervisor` restarts each `worker` after one
+  failure, while the crash and restart actions stay trace records.
 - [`scenarios/partition_heal.yaml`](scenarios/partition_heal.yaml) — network
   partition/heal declaration fixture; those actions are trace records today.
 - [`scenarios/stress_10k_tasks.yaml`](scenarios/stress_10k_tasks.yaml) —
-  large-scale authoring narrative; the YAML does not schedule that workload.
+  stress fixture; one `swarm` participant runs 1,000 short lab tasks under
+  chaos.
 
 The standalone FrankenLab CLI also ships three typed scenario fixtures, all
 covered by [`metadata.json`](metadata.json):

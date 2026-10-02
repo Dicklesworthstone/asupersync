@@ -183,7 +183,7 @@
       "file": "examples/README.md",
       "loc": {
         "start": 1,
-        "end": 115
+        "end": 120
       },
       "kind": "markdown",
       "demonstrates": [
@@ -822,7 +822,7 @@
       "file": "examples/scenarios/stress_10k_tasks.yaml",
       "loc": {
         "start": 1,
-        "end": 44
+        "end": 50
       },
       "kind": "scenario-yaml",
       "demonstrates": [

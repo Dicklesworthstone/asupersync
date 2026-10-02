@@ -2,7 +2,8 @@
 //!
 //! Bridges [`Scenario`] YAML specifications to [`LabRuntime`] execution, providing:
 //!
-//! - Participant workloads: `sender` and `receiver` roles become real lab tasks
+//! - Participant workloads: `sender`, `receiver`, `swarm`, `supervisor` and
+//!   `worker` roles become real lab tasks
 //! - Timed fault injection based on scenario fault events
 //! - Oracle filtering (only check oracles listed in the scenario)
 //! - Seed exploration (run the same scenario across multiple seeds)
@@ -10,9 +11,11 @@
 //!
 //! # Participant workloads
 //!
-//! Before any fault fires, the runner spawns one lab task per participant
-//! whose `role` is exactly `sender` or `receiver` (case-sensitive), all in
-//! one root region:
+//! Before any fault fires, the runner spawns lab tasks for every participant
+//! whose `role` is exactly `sender`, `receiver`, `swarm`, `supervisor` or
+//! `worker` (case-sensitive), all in one root region.
+//!
+//! Channel roles:
 //!
 //! - each receiver owns a bounded [`mpsc`] channel
 //!   (`properties.capacity`, default 4, at most 4096) and drains it until
@@ -25,14 +28,38 @@
 //!   implicit sink task drains, and receivers without senders observe a
 //!   closed channel at once.
 //!
-//! Lab chaos may cancel these tasks mid-protocol. A send or receive that
-//! ends in cancellation is counted and stops that task; it is never retried.
-//! The runner appends a `workload:` entry to the report's invariant
-//! violations, which fails the run, when a bound task cannot be spawned,
-//! meets an outcome the channel contract rules out, receives one sender's
-//! values out of order, or drains its channel to close without receiving
-//! every value committed into it. Timed faults stay trace and effect-summary
-//! records; they do not partition the bound channels.
+//! Swarm role: a swarm spawns `properties.tasks` short member tasks (default
+//! 100, from 1 to 20000). Each member yields twice and bumps a counter that
+//! all members share; it checks for cancellation before every step.
+//!
+//! Supervision roles: each `supervisor` runs a [`ManagedSupervisor`] in its
+//! task. Workers go to the supervisors round-robin in declaration order, and
+//! workers without any supervisor share one implicit supervisor. Each worker
+//! is a transient child under a one-for-one policy without backoff. A worker
+//! generation yields once, then returns `Outcome::Err` until the worker has
+//! failed `properties.fail_times` times (default 1, at most 1000), and
+//! succeeds after that. A supervisor allows `properties.max_restarts`
+//! restarts per minute across its workers; the default is the sum of their
+//! `fail_times`. When the budget runs out, the failing worker stays stopped;
+//! the supervisor does not escalate.
+//!
+//! Lab chaos may cancel these tasks mid-protocol. A send or receive, swarm
+//! member, worker generation or supervisor that ends in cancellation is
+//! counted and stops; it is never retried. The runner appends a `workload:`
+//! entry to the report's invariant violations, which fails the run, when:
+//!
+//! - a bound task cannot be spawned, or a supervisor topology is refused;
+//! - a task meets an outcome its contract rules out;
+//! - a receiver gets one sender's values out of order, or drains its channel
+//!   to close without receiving every value committed into it;
+//! - a swarm member neither completes nor ends cancelled;
+//! - a worker never succeeds, or succeeds after a restart count other than
+//!   its `fail_times`;
+//! - a supervisor exits with an error or a panic, or its restart batches do
+//!   not match its workers' restarts.
+//!
+//! Timed faults stay trace and effect-summary records; they do not partition
+//! the bound channels or crash the supervised workers.
 //!
 //! Every other role is unbound: the runner validates the participant and
 //! schedules no work for it. A scenario without bound participants still
@@ -60,14 +87,21 @@ use super::runtime::{LabRunReport, LabRuntime};
 use super::scenario::{FaultAction, FaultEvent, Participant, Scenario, ValidationError};
 use crate::channel::mpsc::{self, RecvError, SendError};
 use crate::cx::Cx;
-use crate::runtime::TaskHandle;
+use crate::runtime::{JoinError, TaskHandle, yield_now};
+use crate::supervision::{
+    BackoffStrategy, ChildSpec, EscalationPolicy, ManagedChildBinding, ManagedChildCompletion,
+    ManagedGeneration, ManagedRestartMode, ManagedSupervisor, ManagedSupervisorReport,
+    RestartPolicy, SupervisionConfig, SupervisorBuilder,
+};
 use crate::trace::replay::ReplayTrace;
-use crate::types::{Budget, Outcome, RegionId, Time};
+use crate::types::{Budget, CancelReason, Outcome, RegionId, Time};
+use parking_lot::Mutex;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::time::Duration;
 
 const REPLAY_DIVERGENCE_CODE: &str = "ASUP-E401";
 const LAB_SCENARIO_RUNNER_ADAPTER: &str = "lab.scenario_runner";
@@ -723,6 +757,26 @@ const MAX_RECEIVER_CAPACITY: usize = 4096;
 const IMPLICIT_SINK_NAME: &str = "<implicit-sink>";
 /// Role label printed for a participant whose `role` is empty.
 const EMPTY_ROLE_LABEL: &str = "<none>";
+/// Participant role bound to a set of short member tasks.
+const SWARM_ROLE: &str = "swarm";
+/// Participant role bound to a managed supervisor running the workers.
+const SUPERVISOR_ROLE: &str = "supervisor";
+/// Participant role bound to a supervised child that fails, then succeeds.
+const WORKER_ROLE: &str = "worker";
+/// Members a swarm spawns when `properties.tasks` is absent.
+const DEFAULT_SWARM_TASKS: usize = 100;
+/// Largest accepted `properties.tasks`.
+const MAX_SWARM_TASKS: usize = 20_000;
+/// Yields each swarm member performs before it completes.
+const SWARM_MEMBER_YIELDS: usize = 2;
+/// Failures a worker returns when `properties.fail_times` is absent.
+const DEFAULT_WORKER_FAIL_TIMES: u64 = 1;
+/// Largest accepted `properties.fail_times`.
+const MAX_WORKER_FAIL_TIMES: u64 = 1_000;
+/// Sliding window, in minutes, of a supervisor's restart budget.
+const SUPERVISOR_RESTART_WINDOW_MINS: u64 = 1;
+/// Name of the implicit supervisor of workers without one.
+const IMPLICIT_SUPERVISOR_NAME: &str = "<implicit-supervisor>";
 
 /// One declared participant and its role.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -748,11 +802,19 @@ pub struct ParticipantBindings {
     pub unbound: Vec<ParticipantBinding>,
     /// True when senders have no receiver, so the runner adds a sink task.
     pub implicit_sink: bool,
+    /// True when workers have no supervisor, so the runner adds one.
+    pub implicit_supervisor: bool,
 }
 
 impl ParticipantBindings {
     /// Roles the runner binds to lab tasks.
-    pub const BOUND_ROLES: &'static [&'static str] = &[SENDER_ROLE, RECEIVER_ROLE];
+    pub const BOUND_ROLES: &'static [&'static str] = &[
+        SENDER_ROLE,
+        RECEIVER_ROLE,
+        SWARM_ROLE,
+        SUPERVISOR_ROLE,
+        WORKER_ROLE,
+    ];
 
     /// Returns true when the scenario declares no participants.
     #[must_use]
@@ -806,6 +868,12 @@ enum PlannedWork {
     Send { messages: u64 },
     /// Drain a channel with this capacity.
     Drain { capacity: usize },
+    /// Spawn this many swarm members.
+    Swarm { tasks: usize },
+    /// Supervise the assigned workers; `None` derives the restart budget.
+    Supervise { max_restarts: Option<u32> },
+    /// Fail this many times under a supervisor, then succeed.
+    Work { fail_times: u64 },
 }
 
 /// One bound participant, in declaration order.
@@ -832,6 +900,13 @@ impl WorkloadPlan {
                     .map(|messages| PlannedWork::Send { messages }),
                 RECEIVER_ROLE => Self::receiver_capacity(participant)
                     .map(|capacity| PlannedWork::Drain { capacity }),
+                SWARM_ROLE => {
+                    Self::swarm_tasks(participant).map(|tasks| PlannedWork::Swarm { tasks })
+                }
+                SUPERVISOR_ROLE => Self::supervisor_restarts(participant)
+                    .map(|max_restarts| PlannedWork::Supervise { max_restarts }),
+                WORKER_ROLE => Self::worker_fail_times(participant)
+                    .map(|fail_times| PlannedWork::Work { fail_times }),
                 _ => continue,
             };
             match work {
@@ -887,6 +962,63 @@ impl WorkloadPlan {
                 )
             })
     }
+
+    fn swarm_tasks(participant: &Participant) -> Result<usize, ValidationError> {
+        let Some(value) = participant.properties.get("tasks") else {
+            return Ok(DEFAULT_SWARM_TASKS);
+        };
+        value
+            .as_u64()
+            .and_then(|tasks| usize::try_from(tasks).ok())
+            .filter(|tasks| (1..=MAX_SWARM_TASKS).contains(tasks))
+            .ok_or_else(|| {
+                Self::property_error(
+                    participant,
+                    "tasks",
+                    format!(
+                        "a bound swarm's task count must be an integer from 1 to {MAX_SWARM_TASKS}"
+                    ),
+                )
+            })
+    }
+
+    fn supervisor_restarts(participant: &Participant) -> Result<Option<u32>, ValidationError> {
+        let Some(value) = participant.properties.get("max_restarts") else {
+            return Ok(None);
+        };
+        value
+            .as_u64()
+            .and_then(|restarts| u32::try_from(restarts).ok())
+            .map(Some)
+            .ok_or_else(|| {
+                Self::property_error(
+                    participant,
+                    "max_restarts",
+                    format!(
+                        "a bound supervisor's restart budget must be an integer from 0 to {}",
+                        u32::MAX
+                    ),
+                )
+            })
+    }
+
+    fn worker_fail_times(participant: &Participant) -> Result<u64, ValidationError> {
+        let Some(value) = participant.properties.get("fail_times") else {
+            return Ok(DEFAULT_WORKER_FAIL_TIMES);
+        };
+        value
+            .as_u64()
+            .filter(|fail_times| *fail_times <= MAX_WORKER_FAIL_TIMES)
+            .ok_or_else(|| {
+                Self::property_error(
+                    participant,
+                    "fail_times",
+                    format!(
+                        "a bound worker's failure count must be an integer from 0 to {MAX_WORKER_FAIL_TIMES}"
+                    ),
+                )
+            })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -908,6 +1040,9 @@ enum WorkloadRole {
     Sender,
     Receiver,
     Sink,
+    Swarm,
+    Supervisor,
+    Worker,
 }
 
 impl WorkloadRole {
@@ -916,6 +1051,9 @@ impl WorkloadRole {
             Self::Sender => SENDER_ROLE,
             Self::Receiver => RECEIVER_ROLE,
             Self::Sink => "sink",
+            Self::Swarm => SWARM_ROLE,
+            Self::Supervisor => SUPERVISOR_ROLE,
+            Self::Worker => WORKER_ROLE,
         }
     }
 }
@@ -966,16 +1104,270 @@ struct WorkloadLane {
     drain: Arc<WorkloadCounters>,
 }
 
+/// Terminal state of one spawned lab task, read from its join handle after
+/// the run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JoinState {
+    /// The task returned.
+    Completed,
+    /// The task ended in cancellation, whether or not its body returned.
+    Cancelled,
+    /// The task panicked.
+    Panicked,
+    /// The task had not reached a terminal state.
+    Running,
+    /// The join result was already taken.
+    Consumed,
+}
+
+impl JoinState {
+    fn observe(handle: &mut TaskHandle<()>) -> Self {
+        match handle.try_join() {
+            Ok(Some(())) => Self::Completed,
+            Ok(None) => Self::Running,
+            Err(JoinError::Cancelled(_)) => Self::Cancelled,
+            Err(JoinError::Panicked(_)) => Self::Panicked,
+            Err(JoinError::PolledAfterCompletion) => Self::Consumed,
+        }
+    }
+}
+
+/// A swarm member's body has not ended.
+const MEMBER_UNFINISHED: u8 = 0;
+/// A swarm member ran every step.
+const MEMBER_COMPLETED: u8 = 1;
+/// A swarm member stopped at a cancellation checkpoint.
+const MEMBER_CANCELLED: u8 = 2;
+/// A swarm member ran without a task context.
+const MEMBER_UNEXPECTED: u8 = 3;
+
+/// State shared by the members of one swarm.
+#[derive(Debug)]
+struct SwarmMembers {
+    /// One `MEMBER_*` outcome per member, written when its body ends.
+    outcomes: Box<[AtomicU8]>,
+    /// The counter every member bumps once per step it runs.
+    touches: AtomicU64,
+}
+
+impl SwarmMembers {
+    fn new(members: usize) -> Self {
+        Self {
+            outcomes: (0..members)
+                .map(|_| AtomicU8::new(MEMBER_UNFINISHED))
+                .collect(),
+            touches: AtomicU64::new(0),
+        }
+    }
+}
+
+/// How the members of one swarm ended.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SwarmTally {
+    /// Members the runtime accepted.
+    spawned: u64,
+    /// Members that ran every step.
+    completed: u64,
+    /// Members that ended in cancellation.
+    cancelled: u64,
+    /// Members that panicked before their body ended.
+    panicked: u64,
+    /// Members that neither ended nor were cancelled.
+    unfinished: u64,
+    /// Members that ran without a task context.
+    unexpected: u64,
+}
+
+/// Counters one bound worker updates across its generations.
+#[derive(Debug, Default)]
+struct WorkerState {
+    /// Generations whose body started.
+    attempts: AtomicU64,
+    /// Generations that returned `Outcome::Err`.
+    failures: AtomicU64,
+    /// Generations that stopped at a cancellation checkpoint.
+    cancelled: AtomicU64,
+    /// Generations whose number disagreed with the attempt count.
+    unexpected: AtomicU64,
+}
+
+/// A worker as its supervisor runs it.
+#[derive(Debug)]
+struct AssignedWorker {
+    name: String,
+    fail_times: u64,
+    state: Arc<WorkerState>,
+}
+
+/// How a managed supervisor's controller ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ControllerExit {
+    Completed,
+    Cancelled,
+    Failed(String),
+    Panicked(String),
+}
+
+/// How the last generation of a supervised worker ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChildExit {
+    Succeeded,
+    /// Returned `Outcome::Err` with this attempt number.
+    Failed(u64),
+    Cancelled,
+    Panicked,
+}
+
+impl ChildExit {
+    fn of(completion: &ManagedChildCompletion<u64>) -> Self {
+        match &completion.task_outcome {
+            Err(JoinError::Cancelled(_)) => Self::Cancelled,
+            Err(JoinError::Panicked(_) | JoinError::PolledAfterCompletion) => Self::Panicked,
+            Ok(()) => match &completion.outcome {
+                Outcome::Ok(()) => Self::Succeeded,
+                Outcome::Err(attempt) => Self::Failed(*attempt),
+                Outcome::Cancelled(_) => Self::Cancelled,
+                Outcome::Panicked(_) => Self::Panicked,
+            },
+        }
+    }
+
+    fn label(self) -> String {
+        match self {
+            Self::Succeeded => "succeeded".to_owned(),
+            Self::Failed(attempt) => format!("failed@{attempt}"),
+            Self::Cancelled => "cancelled".to_owned(),
+            Self::Panicked => "panicked".to_owned(),
+        }
+    }
+}
+
+/// The last generation of one supervised worker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChildSummary {
+    name: String,
+    /// Number of the last generation; generations start at one.
+    generations: u64,
+    exit: ChildExit,
+}
+
+/// What a managed supervisor reported when its controller returned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SupervisorSummary {
+    exit: ControllerExit,
+    /// Replacement batches the shared restart budget admitted.
+    restart_batches: u64,
+    /// The last generation of each worker that started.
+    children: Vec<ChildSummary>,
+}
+
+impl SupervisorSummary {
+    fn of(report: &ManagedSupervisorReport<u64>) -> Self {
+        let exit = match &report.outcome {
+            Outcome::Ok(()) => ControllerExit::Completed,
+            Outcome::Err(error) => ControllerExit::Failed(format!("{error:?}")),
+            Outcome::Cancelled(_) => ControllerExit::Cancelled,
+            Outcome::Panicked(payload) => ControllerExit::Panicked(payload.message().to_owned()),
+        };
+        Self {
+            exit,
+            restart_batches: report.restart_batches,
+            children: report
+                .children
+                .iter()
+                .map(|completion| ChildSummary {
+                    name: completion.name.as_str().to_owned(),
+                    generations: completion.generation.number,
+                    exit: ChildExit::of(completion),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// A bound supervisor, the workers it runs, and its report once it returns.
+#[derive(Debug)]
+struct SupervisorState {
+    workers: Vec<AssignedWorker>,
+    summary: Mutex<Option<SupervisorSummary>>,
+}
+
+impl AssignedWorker {
+    /// Appends this worker's anomalies, judged from its supervisor's report.
+    fn collect_violations(
+        &self,
+        supervisor: Option<&SupervisorSummary>,
+        supervisor_cancelled: bool,
+        violations: &mut Vec<String>,
+    ) {
+        let label = format!("workload:{}:{}", WorkloadRole::Worker.label(), self.name);
+        let child = supervisor.and_then(|summary| {
+            summary
+                .children
+                .iter()
+                .find(|child| child.name == self.name)
+        });
+        let s = &self.state;
+        let detail = format!(
+            "fail_times={},attempts={},failures={},cancelled={},unexpected={},generations={},exit={}",
+            self.fail_times,
+            count(&s.attempts),
+            count(&s.failures),
+            count(&s.cancelled),
+            count(&s.unexpected),
+            child.map_or(0, |child| child.generations),
+            child.map_or_else(|| "none".to_owned(), |child| child.exit.label()),
+        );
+        if count(&s.unexpected) > 0 {
+            violations.push(format!("{label}:unexpected_outcome:{detail}"));
+        }
+        match child {
+            Some(child) if child.exit == ChildExit::Succeeded => {
+                // One-for-one, transient: every failure restarts exactly this
+                // worker, and success stops it.
+                if child.generations.saturating_sub(1) != self.fail_times {
+                    violations.push(format!("{label}:restart_mismatch:{detail}"));
+                }
+                if count(&s.attempts) != child.generations {
+                    violations.push(format!("{label}:attempt_mismatch:{detail}"));
+                }
+            }
+            Some(child) if child.exit == ChildExit::Cancelled => {}
+            _ if supervisor_cancelled || count(&s.cancelled) > 0 => {}
+            _ => violations.push(format!("{label}:never_succeeded:{detail}")),
+        }
+    }
+}
+
+/// Role-specific state of one bound task.
+#[derive(Debug)]
+enum BoundDetail {
+    /// Sender, receiver or sink: the task counters hold everything.
+    Channel,
+    /// The members of a swarm.
+    Swarm(Arc<SwarmMembers>),
+    /// A supervisor and the workers it runs.
+    Supervisor(Arc<SupervisorState>),
+    /// A worker; its supervisor runs its generations and reports on it.
+    Worker,
+}
+
 /// One bound task and its counters.
 #[derive(Debug)]
 struct BoundTask {
     name: String,
     role: WorkloadRole,
-    /// Values the task was planned to send (zero for drains).
+    /// Planned work: values to send (sender), members (swarm), failures
+    /// before success (worker) or the restart budget (supervisor); zero for
+    /// drains.
     planned: u64,
     /// Why the runtime refused to spawn the task, if it did.
     spawn_refusal: Option<String>,
     counters: Arc<WorkloadCounters>,
+    detail: BoundDetail,
+    /// Terminal states of the lab tasks spawned for this participant, in
+    /// spawn order, read after the run.
+    joins: Vec<JoinState>,
 }
 
 impl BoundTask {
@@ -1003,6 +1395,122 @@ impl BoundTask {
             violations.push(format!("{label}:spawn_refused:{refusal}"));
             return;
         }
+        match &self.detail {
+            BoundDetail::Channel => self.collect_channel_violations(&label, violations),
+            BoundDetail::Swarm(members) => {
+                self.collect_swarm_violations(&label, members, violations);
+            }
+            BoundDetail::Supervisor(state) => {
+                self.collect_supervisor_violations(&label, state, violations);
+            }
+            // The worker's supervisor judges it from the managed report.
+            BoundDetail::Worker => {}
+        }
+    }
+
+    /// Classifies every swarm member from its body outcome and join state.
+    fn swarm_tally(&self, members: &SwarmMembers) -> SwarmTally {
+        let mut tally = SwarmTally {
+            spawned: u64::try_from(self.joins.len()).unwrap_or(u64::MAX),
+            ..SwarmTally::default()
+        };
+        for (outcome, join) in members.outcomes.iter().zip(&self.joins) {
+            let bucket = match outcome.load(Ordering::Relaxed) {
+                MEMBER_COMPLETED => &mut tally.completed,
+                MEMBER_CANCELLED => &mut tally.cancelled,
+                MEMBER_UNEXPECTED => &mut tally.unexpected,
+                // The body never ended: the join state says why.
+                _ => match join {
+                    JoinState::Cancelled => &mut tally.cancelled,
+                    JoinState::Panicked => &mut tally.panicked,
+                    JoinState::Completed | JoinState::Running | JoinState::Consumed => {
+                        &mut tally.unfinished
+                    }
+                },
+            };
+            *bucket += 1;
+        }
+        tally
+    }
+
+    fn collect_swarm_violations(
+        &self,
+        label: &str,
+        members: &SwarmMembers,
+        violations: &mut Vec<String>,
+    ) {
+        let tally = self.swarm_tally(members);
+        let summary = format!(
+            "planned={},spawned={},completed={},cancelled={},panicked={},unfinished={},unexpected={},touches={}",
+            self.planned,
+            tally.spawned,
+            tally.completed,
+            tally.cancelled,
+            tally.panicked,
+            tally.unfinished,
+            tally.unexpected,
+            count(&members.touches),
+        );
+        if tally.unexpected > 0 {
+            violations.push(format!("{label}:unexpected_outcome:{summary}"));
+        }
+        if tally.completed + tally.cancelled != tally.spawned {
+            violations.push(format!("{label}:incomplete:{summary}"));
+        }
+    }
+
+    fn collect_supervisor_violations(
+        &self,
+        label: &str,
+        state: &SupervisorState,
+        violations: &mut Vec<String>,
+    ) {
+        if count(&self.counters.unexpected) > 0 {
+            violations.push(format!("{label}:unexpected_outcome:no_task_context"));
+        }
+        let summary = state.summary.lock().clone();
+        let cancelled = match summary.as_ref().map(|summary| &summary.exit) {
+            Some(ControllerExit::Completed) => false,
+            Some(ControllerExit::Cancelled) => true,
+            Some(ControllerExit::Failed(error)) => {
+                violations.push(format!("{label}:supervisor_error:{error}"));
+                false
+            }
+            Some(ControllerExit::Panicked(message)) => {
+                violations.push(format!("{label}:supervisor_panicked:{message}"));
+                false
+            }
+            // The controller returned no report: only cancellation excuses it.
+            None => {
+                let join = self.joins.first().copied();
+                let cancelled = join == Some(JoinState::Cancelled);
+                if !cancelled {
+                    violations.push(format!("{label}:no_report:join={join:?}"));
+                }
+                cancelled
+            }
+        };
+        if let Some(summary) = &summary {
+            // One-for-one: each admitted batch restarts exactly one worker.
+            // Cancellation may stop a batch after it was counted.
+            let restarts: u64 = summary
+                .children
+                .iter()
+                .map(|child| child.generations.saturating_sub(1))
+                .sum();
+            if summary.exit == ControllerExit::Completed && summary.restart_batches != restarts {
+                violations.push(format!(
+                    "{label}:restart_batches_mismatch:batches={},restarts={restarts}",
+                    summary.restart_batches
+                ));
+            }
+        }
+        for worker in &state.workers {
+            worker.collect_violations(summary.as_ref(), cancelled, violations);
+        }
+    }
+
+    fn collect_channel_violations(&self, label: &str, violations: &mut Vec<String>) {
         let c = &self.counters;
         if count(&c.unexpected) > 0 {
             violations.push(format!(
@@ -1023,14 +1531,18 @@ impl BoundTask {
 #[derive(Debug, Default)]
 struct ParticipantWorkload {
     tasks: Vec<BoundTask>,
-    /// Join handles, held until the run is reported.
-    handles: Vec<TaskHandle<()>>,
+    /// Join handles with the index of their task record, held until the run
+    /// is reported.
+    handles: Vec<(usize, TaskHandle<()>)>,
 }
 
 /// Work a bound participant was given before its task is spawned.
 enum Endpoint {
     Send { messages: u64 },
     Drain { rx: mpsc::Receiver<WorkloadMessage> },
+    Swarm { tasks: usize },
+    Supervise { max_restarts: Option<u32> },
+    Work { fail_times: u64 },
 }
 
 impl ParticipantWorkload {
@@ -1045,16 +1557,28 @@ impl ParticipantWorkload {
         }
         let root = runtime.state.create_root_region(Budget::INFINITE);
 
-        // Pass 1: a counter set per participant and a channel per receiver,
-        // so that every sender sees the full lane list.
+        // Pass 1: a counter set per participant, a channel per receiver and a
+        // supervisor per worker, so that every sender sees the full lane list
+        // and every supervisor its full worker list.
         let counters: Vec<Arc<WorkloadCounters>> = plan
             .participants
             .iter()
             .map(|_| Arc::new(WorkloadCounters::default()))
             .collect();
+        let supervisor_count = plan
+            .participants
+            .iter()
+            .filter(|participant| matches!(participant.work, PlannedWork::Supervise { .. }))
+            .count();
+        // Worker `n`, in declaration order, goes to supervisor
+        // `n % supervisor_count`, also in declaration order.
+        let mut supervised: Vec<Vec<AssignedWorker>> =
+            (0..supervisor_count).map(|_| Vec::new()).collect();
+        let mut orphans = Vec::new();
         let mut lanes = Vec::new();
         let mut endpoints = Vec::with_capacity(plan.participants.len());
         let mut sender_total = 0_usize;
+        let mut worker_total = 0_usize;
         for (participant, participant_counters) in plan.participants.iter().zip(&counters) {
             match participant.work {
                 PlannedWork::Send { messages } => {
@@ -1068,6 +1592,24 @@ impl ParticipantWorkload {
                         drain: Arc::clone(participant_counters),
                     });
                     endpoints.push(Endpoint::Drain { rx });
+                }
+                PlannedWork::Swarm { tasks } => endpoints.push(Endpoint::Swarm { tasks }),
+                PlannedWork::Supervise { max_restarts } => {
+                    endpoints.push(Endpoint::Supervise { max_restarts });
+                }
+                PlannedWork::Work { fail_times } => {
+                    let worker = AssignedWorker {
+                        name: participant.name.clone(),
+                        fail_times,
+                        state: Arc::new(WorkerState::default()),
+                    };
+                    if supervisor_count == 0 {
+                        orphans.push(worker);
+                    } else {
+                        supervised[worker_total % supervisor_count].push(worker);
+                    }
+                    worker_total += 1;
+                    endpoints.push(Endpoint::Work { fail_times });
                 }
             }
         }
@@ -1083,8 +1625,10 @@ impl ParticipantWorkload {
             None
         };
 
-        // Pass 2: spawn in declaration order, then the sink.
+        // Pass 2: spawn in declaration order, then the sink, then the
+        // implicit supervisor.
         let mut sender_index = 0_usize;
+        let mut supervised = supervised.into_iter();
         for ((participant, endpoint), task_counters) in
             plan.participants.iter().zip(endpoints).zip(counters)
         {
@@ -1119,6 +1663,30 @@ impl ParticipantWorkload {
                         body,
                     );
                 }
+                Endpoint::Swarm { tasks } => {
+                    workload.spawn_swarm(runtime, root, &participant.name, tasks, task_counters);
+                }
+                Endpoint::Supervise { max_restarts } => {
+                    let workers = supervised.next().unwrap_or_default();
+                    workload.spawn_supervisor(
+                        runtime,
+                        root,
+                        &participant.name,
+                        max_restarts,
+                        workers,
+                        task_counters,
+                    );
+                }
+                Endpoint::Work { fail_times } => {
+                    // The worker's supervisor spawns its generations.
+                    workload.push_task(
+                        &participant.name,
+                        WorkloadRole::Worker,
+                        fail_times,
+                        task_counters,
+                        BoundDetail::Worker,
+                    );
+                }
             }
         }
         if let Some((rx, drain)) = sink {
@@ -1133,10 +1701,61 @@ impl ParticipantWorkload {
                 body,
             );
         }
+        if !orphans.is_empty() {
+            workload.spawn_supervisor(
+                runtime,
+                root,
+                IMPLICIT_SUPERVISOR_NAME,
+                None,
+                orphans,
+                Arc::new(WorkloadCounters::default()),
+            );
+        }
         // Release the spawner's own senders: once every sender task ends, the
         // drain tasks see their channels close.
         drop(lanes);
         workload
+    }
+
+    /// Records a bound participant and returns the index of its record.
+    fn push_task(
+        &mut self,
+        name: &str,
+        role: WorkloadRole,
+        planned: u64,
+        counters: Arc<WorkloadCounters>,
+        detail: BoundDetail,
+    ) -> usize {
+        self.tasks.push(BoundTask {
+            name: name.to_owned(),
+            role,
+            planned,
+            spawn_refusal: None,
+            counters,
+            detail,
+            joins: Vec::new(),
+        });
+        self.tasks.len() - 1
+    }
+
+    /// Spawns one lab task for the record at `owner` and schedules it.
+    fn spawn_owned<F>(
+        &mut self,
+        runtime: &mut LabRuntime,
+        root: RegionId,
+        owner: usize,
+        body: F,
+    ) -> Result<(), String>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let (task, handle) = runtime
+            .state
+            .create_task(root, Budget::INFINITE, body)
+            .map_err(|error| error.to_string())?;
+        runtime.scheduler.lock().schedule(task, 0);
+        self.handles.push((owner, handle));
+        Ok(())
     }
 
     fn spawn_task<F>(
@@ -1151,35 +1770,220 @@ impl ParticipantWorkload {
     ) where
         F: Future<Output = ()> + Send + 'static,
     {
-        let spawn_refusal = match runtime.state.create_task(root, Budget::INFINITE, body) {
-            Ok((task, handle)) => {
-                runtime.scheduler.lock().schedule(task, 0);
-                self.handles.push(handle);
-                None
-            }
-            Err(error) => Some(error.to_string()),
-        };
-        self.tasks.push(BoundTask {
-            name: name.to_owned(),
-            role,
-            planned,
-            spawn_refusal,
-            counters,
-        });
+        let owner = self.push_task(name, role, planned, counters, BoundDetail::Channel);
+        if let Err(refusal) = self.spawn_owned(runtime, root, owner, body) {
+            self.tasks[owner].spawn_refusal = Some(refusal);
+        }
     }
 
-    /// Releases the join handles and appends `workload:` violations.
+    /// Spawns one lab task per swarm member, stopping at the first refusal.
+    fn spawn_swarm(
+        &mut self,
+        runtime: &mut LabRuntime,
+        root: RegionId,
+        name: &str,
+        tasks: usize,
+        counters: Arc<WorkloadCounters>,
+    ) {
+        let members = Arc::new(SwarmMembers::new(tasks));
+        let owner = self.push_task(
+            name,
+            WorkloadRole::Swarm,
+            u64::try_from(tasks).unwrap_or(u64::MAX),
+            counters,
+            BoundDetail::Swarm(Arc::clone(&members)),
+        );
+        for member in 0..tasks {
+            let body = run_swarm_member(Arc::clone(&members), member);
+            if let Err(refusal) = self.spawn_owned(runtime, root, owner, body) {
+                self.tasks[owner].spawn_refusal = Some(format!("member {member}: {refusal}"));
+                break;
+            }
+        }
+    }
+
+    /// Spawns one lab task that runs a managed supervisor over `workers`.
+    fn spawn_supervisor(
+        &mut self,
+        runtime: &mut LabRuntime,
+        root: RegionId,
+        name: &str,
+        max_restarts: Option<u32>,
+        workers: Vec<AssignedWorker>,
+        counters: Arc<WorkloadCounters>,
+    ) {
+        let budget = max_restarts.unwrap_or_else(|| {
+            let failures = workers.iter().fold(0_u64, |total, worker| {
+                total.saturating_add(worker.fail_times)
+            });
+            u32::try_from(failures).unwrap_or(u32::MAX)
+        });
+        let topology = managed_supervisor(name, &workers, budget);
+        let state = Arc::new(SupervisorState {
+            workers,
+            summary: Mutex::new(None),
+        });
+        let owner = self.push_task(
+            name,
+            WorkloadRole::Supervisor,
+            u64::from(budget),
+            Arc::clone(&counters),
+            BoundDetail::Supervisor(Arc::clone(&state)),
+        );
+        let refusal = match topology {
+            Ok(supervisor) => {
+                let body = run_supervisor(supervisor, state, counters);
+                self.spawn_owned(runtime, root, owner, body).err()
+            }
+            Err(refusal) => Some(refusal),
+        };
+        self.tasks[owner].spawn_refusal = refusal;
+    }
+
+    /// Reads every join handle, then appends `workload:` violations.
     ///
     /// Returns the task records so callers can inspect the counters.
     fn finish(self, violations: &mut Vec<String>) -> Vec<BoundTask> {
-        for task in &self.tasks {
+        let Self { mut tasks, handles } = self;
+        for (owner, mut handle) in handles {
+            let join = JoinState::observe(&mut handle);
+            if let Some(task) = tasks.get_mut(owner) {
+                task.joins.push(join);
+            }
+        }
+        for task in &tasks {
             task.collect_violations(violations);
         }
         violations.sort();
         violations.dedup();
-        drop(self.handles);
-        self.tasks
+        tasks
     }
+}
+
+/// Legacy boot hook that the compiled supervisor topology requires.
+///
+/// The managed binding never calls it. If anything did, it would refuse
+/// instead of starting an untracked task.
+fn refuse_legacy_start(
+    _scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
+    _state: &mut crate::runtime::RuntimeState,
+    _cx: &Cx,
+) -> Result<crate::types::TaskId, crate::runtime::SpawnError> {
+    Err(crate::runtime::SpawnError::RuntimeUnavailable)
+}
+
+/// Builds the managed supervisor of a bound `supervisor` participant.
+///
+/// Every worker is an optional, transient child under a one-for-one policy
+/// with no backoff. The restart budget allows `max_restarts` restarts per
+/// window across all workers; an exhausted budget stops the failing worker.
+fn managed_supervisor(
+    name: &str,
+    workers: &[AssignedWorker],
+    max_restarts: u32,
+) -> Result<ManagedSupervisor<u64>, String> {
+    let mut builder = SupervisorBuilder::new(name).with_restart_policy(RestartPolicy::OneForOne);
+    let mut bindings = Vec::with_capacity(workers.len());
+    for worker in workers {
+        // Not required: a generation that chaos cancels before it starts
+        // stops this worker instead of failing the whole supervisor.
+        builder = builder
+            .child(ChildSpec::new(worker.name.as_str(), refuse_legacy_start).with_required(false));
+        let fail_times = worker.fail_times;
+        let state = Arc::clone(&worker.state);
+        bindings.push(ManagedChildBinding::new(
+            worker.name.as_str(),
+            ManagedRestartMode::Transient,
+            move |cx: Cx, generation: ManagedGeneration| {
+                run_worker_generation(cx, generation, fail_times, Arc::clone(&state))
+            },
+        ));
+    }
+    let config = SupervisionConfig::new(
+        max_restarts,
+        Duration::from_mins(SUPERVISOR_RESTART_WINDOW_MINS),
+    )
+    .with_restart_policy(RestartPolicy::OneForOne)
+    .with_backoff(BackoffStrategy::None)
+    .with_escalation(EscalationPolicy::Stop);
+    builder
+        .compile()
+        .map_err(|error| format!("supervisor topology refused: {error}"))?
+        .bind_managed(bindings, config)
+        .map_err(|error| format!("supervisor binding refused: {error:?}"))
+}
+
+/// Body of a bound `supervisor` task: run the managed supervisor to its end
+/// and keep a summary of its report.
+async fn run_supervisor(
+    supervisor: ManagedSupervisor<u64>,
+    state: Arc<SupervisorState>,
+    counters: Arc<WorkloadCounters>,
+) {
+    if let Some(cx) = Cx::current() {
+        let report = supervisor.run(&cx).await;
+        *state.summary.lock() = Some(SupervisorSummary::of(&report));
+    } else {
+        bump(&counters.unexpected);
+    }
+    counters.finished.store(true, Ordering::Relaxed);
+}
+
+/// Body of one generation of a bound `worker`, run by its supervisor.
+///
+/// The generation yields once, then fails with its attempt number until the
+/// worker has failed `fail_times` times, and succeeds after that.
+async fn run_worker_generation(
+    cx: Cx,
+    generation: ManagedGeneration,
+    fail_times: u64,
+    state: Arc<WorkerState>,
+) -> Outcome<(), u64> {
+    let attempt = state.attempts.fetch_add(1, Ordering::Relaxed) + 1;
+    if generation.number != attempt {
+        bump(&state.unexpected);
+    }
+    yield_now().await;
+    if cx.checkpoint().is_err() {
+        bump(&state.cancelled);
+        return Outcome::Cancelled(
+            cx.cancel_reason()
+                .unwrap_or_else(|| CancelReason::user("worker generation cancelled")),
+        );
+    }
+    if attempt <= fail_times {
+        bump(&state.failures);
+        Outcome::Err(attempt)
+    } else {
+        Outcome::Ok(())
+    }
+}
+
+/// Body of one swarm member: a few cooperative steps, each behind a
+/// cancellation checkpoint and counted on the swarm's shared counter.
+async fn run_swarm_member(members: Arc<SwarmMembers>, member: usize) {
+    let outcome = match Cx::current() {
+        Some(cx) => swarm_member_steps(&cx, &members.touches).await,
+        None => MEMBER_UNEXPECTED,
+    };
+    if let Some(slot) = members.outcomes.get(member) {
+        slot.store(outcome, Ordering::Relaxed);
+    }
+}
+
+async fn swarm_member_steps(cx: &Cx, touches: &AtomicU64) -> u8 {
+    for _ in 0..SWARM_MEMBER_YIELDS {
+        if cx.checkpoint().is_err() {
+            return MEMBER_CANCELLED;
+        }
+        bump(touches);
+        yield_now().await;
+    }
+    if cx.checkpoint().is_err() {
+        return MEMBER_CANCELLED;
+    }
+    bump(touches);
+    MEMBER_COMPLETED
 }
 
 /// Body of a bound `sender` task.
@@ -1392,13 +2196,15 @@ impl ScenarioRunner {
     /// Classify the scenario's participants into bound and unbound roles.
     ///
     /// This is a pure function of the scenario. It does not check the
-    /// `messages` and `capacity` properties of bound participants; a run
-    /// rejects malformed values as a validation error.
+    /// properties of bound participants; a run rejects malformed values as a
+    /// validation error.
     #[must_use]
     pub fn participant_bindings(scenario: &Scenario) -> ParticipantBindings {
         let mut bindings = ParticipantBindings::default();
         let mut has_sender = false;
         let mut has_receiver = false;
+        let mut has_supervisor = false;
+        let mut has_worker = false;
         for participant in &scenario.participants {
             let binding = ParticipantBinding {
                 name: participant.name.clone(),
@@ -1413,10 +2219,20 @@ impl ScenarioRunner {
                     has_receiver = true;
                     bindings.bound.push(binding);
                 }
+                SUPERVISOR_ROLE => {
+                    has_supervisor = true;
+                    bindings.bound.push(binding);
+                }
+                WORKER_ROLE => {
+                    has_worker = true;
+                    bindings.bound.push(binding);
+                }
+                SWARM_ROLE => bindings.bound.push(binding),
                 _ => bindings.unbound.push(binding),
             }
         }
         bindings.implicit_sink = has_sender && !has_receiver;
+        bindings.implicit_supervisor = has_worker && !has_supervisor;
         bindings
     }
 
@@ -1662,7 +2478,8 @@ impl ScenarioRunner {
     /// Run a scenario, optionally overriding the seed.
     ///
     /// Bound participants run as lab tasks (see the module docs). A malformed
-    /// `messages` or `capacity` property on one of them is a validation error.
+    /// `messages`, `capacity`, `tasks`, `max_restarts` or `fail_times`
+    /// property on one of them is a validation error.
     ///
     /// # Errors
     ///
@@ -2480,7 +3297,11 @@ mod tests {
                 "Participants: 3 bound (sender, receiver), 3 unbound (Sender, coordinator, <none>)"
             )
         );
-        assert_eq!(ParticipantBindings::BOUND_ROLES, ["sender", "receiver"]);
+        assert!(!bindings.implicit_supervisor);
+        assert_eq!(
+            ParticipantBindings::BOUND_ROLES,
+            ["sender", "receiver", "swarm", "supervisor", "worker"]
+        );
 
         scenario.participants = vec![
             participant("producer-a", "sender"),
@@ -2801,6 +3622,434 @@ mod tests {
             "a 10% per-dispatch cancel rate must cancel some reserve or receive across eight seeds"
         );
         crate::test_complete!("cancellation_mid_protocol_still_resolves_every_obligation");
+    }
+
+    // ── swarm, supervisor and worker workloads (asupersync-y1dzts) ───────
+
+    fn swarm_scenario(members: usize) -> Scenario {
+        let mut scenario = minimal_scenario();
+        scenario.id = "test-swarm".to_string();
+        // Each member leaves a spawn and a completion event in the trace; a
+        // truncated trace fails the run.
+        scenario.lab.trace_capacity = 16_384;
+        scenario.participants = vec![participant_with(
+            "swarm",
+            "swarm",
+            "tasks",
+            serde_json::json!(members),
+        )];
+        scenario
+    }
+
+    /// The tally of the run's swarm and the value of its shared counter.
+    fn swarm_tally_of(tasks: &[BoundTask]) -> (SwarmTally, u64) {
+        let (task, members) = tasks
+            .iter()
+            .find_map(|task| match &task.detail {
+                BoundDetail::Swarm(members) => Some((task, members)),
+                _ => None,
+            })
+            .expect("a swarm task record");
+        (task.swarm_tally(members), count(&members.touches))
+    }
+
+    fn supervisor_state<'a>(tasks: &'a [BoundTask], name: &str) -> &'a SupervisorState {
+        tasks
+            .iter()
+            .find_map(|task| match &task.detail {
+                BoundDetail::Supervisor(state) if task.name == name => Some(Arc::as_ref(state)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no supervisor record named {name}"))
+    }
+
+    fn supervisor_summary(tasks: &[BoundTask], name: &str) -> SupervisorSummary {
+        supervisor_state(tasks, name)
+            .summary
+            .lock()
+            .clone()
+            .unwrap_or_else(|| panic!("supervisor {name} returned no report"))
+    }
+
+    fn worker_names(state: &SupervisorState) -> Vec<&str> {
+        state
+            .workers
+            .iter()
+            .map(|worker| worker.name.as_str())
+            .collect()
+    }
+
+    /// One supervisor and three workers that fail 3, 0 and 1 (default) times.
+    fn supervisor_scenario() -> Scenario {
+        let mut scenario = minimal_scenario();
+        scenario.id = "test-supervisor-worker".to_string();
+        scenario.participants = vec![
+            participant("sup", "supervisor"),
+            participant_with("flaky", "worker", "fail_times", serde_json::json!(3)),
+            participant_with("steady", "worker", "fail_times", serde_json::json!(0)),
+            participant("plain", "worker"),
+        ];
+        scenario
+    }
+
+    #[test]
+    fn swarm_spawns_every_member_and_every_member_completes() {
+        init_test("swarm_spawns_every_member_and_every_member_completes");
+        let members = 500_usize;
+        let expected = members as u64;
+        let scenario = swarm_scenario(members);
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+        assert!(
+            result.lab_report.steps_total >= expected,
+            "{} steps for {members} members",
+            result.lab_report.steps_total
+        );
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].role, WorkloadRole::Swarm);
+        assert_eq!(tasks[0].planned, expected);
+        assert!(tasks[0].spawn_refusal.is_none());
+        let (tally, touches) = swarm_tally_of(&tasks);
+        assert_eq!(
+            tally,
+            SwarmTally {
+                spawned: expected,
+                completed: expected,
+                ..SwarmTally::default()
+            }
+        );
+        // Every member ran every step: once per yield and once to finish.
+        assert_eq!(touches, expected * (SWARM_MEMBER_YIELDS as u64 + 1));
+
+        let second = ScenarioRunner::run(&scenario).unwrap();
+        assert_eq!(second.certificate, result.certificate);
+        let replayed = ScenarioRunner::validate_replay(&scenario).expect("same seed must replay");
+        assert_eq!(replayed.certificate, result.certificate);
+        let empty = ScenarioRunner::run(&minimal_scenario()).unwrap();
+        assert_ne!(
+            result.certificate.event_hash, empty.certificate.event_hash,
+            "the swarm must leave events in the trace"
+        );
+        crate::test_complete!("swarm_spawns_every_member_and_every_member_completes");
+    }
+
+    #[test]
+    fn swarm_members_stopped_by_chaos_are_counted_not_failed() {
+        init_test("swarm_members_stopped_by_chaos_are_counted_not_failed");
+        let members = 200_u64;
+        let mut scenario = swarm_scenario(200);
+        scenario.id = "test-swarm-chaos".to_string();
+        scenario.chaos = ChaosSection::Custom {
+            cancel_probability: 0.05,
+            delay_probability: 0.1,
+            delay_min_ms: 0,
+            delay_max_ms: 50,
+            io_error_probability: 0.0,
+            wakeup_storm_probability: 0.01,
+            budget_exhaustion_probability: 0.01,
+        };
+
+        let mut cancelled = 0_u64;
+        for seed in 0..4 {
+            let (result, tasks) = ScenarioRunner::run_seeded(&scenario, Some(seed)).unwrap();
+            assert!(result.passed(), "seed {seed}: {}", failure_detail(&result));
+            let (tally, _) = swarm_tally_of(&tasks);
+            assert_eq!(tally.spawned, members, "seed {seed}: {tally:?}");
+            assert_eq!(
+                tally.completed + tally.cancelled,
+                members,
+                "seed {seed}: {tally:?}"
+            );
+            cancelled += tally.cancelled;
+        }
+        assert!(
+            cancelled > 0,
+            "5% cancellation and 1% budget exhaustion per dispatch must stop some member across four seeds"
+        );
+        crate::test_complete!("swarm_members_stopped_by_chaos_are_counted_not_failed");
+    }
+
+    /// Deliberate-failure control target (see the y1dzts notes): if workers
+    /// are bound as `ManagedRestartMode::Temporary`, the supervisor never
+    /// restarts them and this test must fail.
+    #[test]
+    fn supervisor_restarts_each_worker_exactly_fail_times() {
+        init_test("supervisor_restarts_each_worker_exactly_fail_times");
+        let scenario = supervisor_scenario();
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+        assert!(result.lab_report.steps_total > 0);
+
+        let sup = tasks
+            .iter()
+            .find(|task| task.name == "sup")
+            .expect("supervisor record");
+        assert_eq!(sup.role, WorkloadRole::Supervisor);
+        // The default restart budget is the workers' total failure count.
+        assert_eq!(sup.planned, 3 + DEFAULT_WORKER_FAIL_TIMES);
+        assert_eq!(sup.joins, [JoinState::Completed]);
+        let state = supervisor_state(&tasks, "sup");
+        assert_eq!(worker_names(state), ["flaky", "steady", "plain"]);
+
+        let summary = supervisor_summary(&tasks, "sup");
+        assert_eq!(summary.exit, ControllerExit::Completed);
+        assert_eq!(summary.restart_batches, 3 + DEFAULT_WORKER_FAIL_TIMES);
+        for (name, fail_times) in [
+            ("flaky", 3),
+            ("steady", 0),
+            ("plain", DEFAULT_WORKER_FAIL_TIMES),
+        ] {
+            let child = summary
+                .children
+                .iter()
+                .find(|child| child.name == name)
+                .unwrap_or_else(|| panic!("no report for {name}: {summary:?}"));
+            assert_eq!(child.exit, ChildExit::Succeeded, "{name}: {child:?}");
+            assert_eq!(child.generations, fail_times + 1, "{name}: {child:?}");
+
+            let worker = state
+                .workers
+                .iter()
+                .find(|worker| worker.name == name)
+                .expect("assigned worker");
+            assert_eq!(count(&worker.state.attempts), fail_times + 1, "{name}");
+            assert_eq!(count(&worker.state.failures), fail_times, "{name}");
+            assert_eq!(count(&worker.state.cancelled), 0, "{name}");
+            assert_eq!(count(&worker.state.unexpected), 0, "{name}");
+
+            let record = tasks
+                .iter()
+                .find(|task| task.name == name)
+                .expect("worker record");
+            assert_eq!(record.role, WorkloadRole::Worker);
+            assert_eq!(record.planned, fail_times);
+        }
+
+        let second = ScenarioRunner::run(&scenario).unwrap();
+        assert_eq!(second.certificate, result.certificate);
+        let replayed = ScenarioRunner::validate_replay(&scenario).expect("same seed must replay");
+        assert_eq!(replayed.certificate, result.certificate);
+        assert!(replayed.passed(), "{}", failure_detail(&replayed));
+        let identity = ScenarioRunner::scenario_identity(&scenario, None);
+        let via_identity = ScenarioRunner::run_with_identity(&scenario, &identity).unwrap();
+        assert!(via_identity.certificate.steps > 0);
+        assert!(via_identity.passed(), "{}", failure_detail(&via_identity));
+        crate::test_complete!("supervisor_restarts_each_worker_exactly_fail_times");
+    }
+
+    #[test]
+    fn exhausted_restart_budget_is_a_workload_violation() {
+        init_test("exhausted_restart_budget_is_a_workload_violation");
+        let mut scenario = minimal_scenario();
+        scenario.id = "test-restart-budget".to_string();
+        scenario.participants = vec![
+            participant_with("sup", "supervisor", "max_restarts", serde_json::json!(1)),
+            participant_with("flaky", "worker", "fail_times", serde_json::json!(3)),
+        ];
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(!result.passed());
+        let violations = &result.lab_report.invariant_violations;
+        let workload: Vec<&String> = violations
+            .iter()
+            .filter(|violation| violation.starts_with("workload:"))
+            .collect();
+        assert_eq!(workload.len(), 1, "{violations:?}");
+        assert!(
+            workload[0].starts_with("workload:worker:flaky:never_succeeded:"),
+            "{violations:?}"
+        );
+
+        // The budget admitted one restart; the second failure stopped the
+        // worker without escalating.
+        assert_eq!(tasks[0].planned, 1);
+        let summary = supervisor_summary(&tasks, "sup");
+        assert_eq!(summary.exit, ControllerExit::Completed);
+        assert_eq!(summary.restart_batches, 1);
+        assert_eq!(summary.children.len(), 1);
+        assert_eq!(summary.children[0].generations, 2);
+        assert_eq!(summary.children[0].exit, ChildExit::Failed(2));
+        crate::test_complete!("exhausted_restart_budget_is_a_workload_violation");
+    }
+
+    #[test]
+    fn workers_go_round_robin_to_supervisors_and_orphans_get_an_implicit_one() {
+        init_test("workers_go_round_robin_to_supervisors_and_orphans_get_an_implicit_one");
+        let mut scenario = minimal_scenario();
+        scenario.id = "test-supervision-topology".to_string();
+        scenario.participants = vec![
+            participant("w1", "worker"),
+            participant("s1", "supervisor"),
+            participant("w2", "worker"),
+            participant("s2", "supervisor"),
+            participant("w3", "worker"),
+        ];
+        let bindings = ScenarioRunner::participant_bindings(&scenario);
+        assert!(!bindings.implicit_supervisor);
+        assert_eq!(
+            bindings.summary_line().as_deref(),
+            Some("Participants: 5 bound (worker, supervisor), 0 unbound")
+        );
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+        assert_eq!(worker_names(supervisor_state(&tasks, "s1")), ["w1", "w3"]);
+        assert_eq!(worker_names(supervisor_state(&tasks, "s2")), ["w2"]);
+        assert_eq!(supervisor_summary(&tasks, "s1").restart_batches, 2);
+        assert_eq!(supervisor_summary(&tasks, "s2").restart_batches, 1);
+
+        scenario.participants = vec![participant("w1", "worker"), participant("w2", "worker")];
+        let bindings = ScenarioRunner::participant_bindings(&scenario);
+        assert!(bindings.implicit_supervisor);
+        assert!(!bindings.implicit_sink);
+        assert_eq!(
+            bindings.summary_line().as_deref(),
+            Some("Participants: 2 bound (worker), 0 unbound")
+        );
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+        let implicit = tasks
+            .iter()
+            .find(|task| task.name == IMPLICIT_SUPERVISOR_NAME)
+            .expect("implicit supervisor record");
+        assert_eq!(implicit.role, WorkloadRole::Supervisor);
+        assert_eq!(
+            worker_names(supervisor_state(&tasks, IMPLICIT_SUPERVISOR_NAME)),
+            ["w1", "w2"]
+        );
+        let summary = supervisor_summary(&tasks, IMPLICIT_SUPERVISOR_NAME);
+        assert_eq!(summary.restart_batches, 2);
+        assert!(
+            summary
+                .children
+                .iter()
+                .all(|child| child.exit == ChildExit::Succeeded),
+            "{summary:?}"
+        );
+
+        // A supervisor without workers still runs its controller.
+        scenario.participants = vec![participant("s1", "supervisor")];
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+        assert!(result.lab_report.steps_total > 0);
+        assert_eq!(tasks[0].planned, 0);
+        let summary = supervisor_summary(&tasks, "s1");
+        assert_eq!(summary.exit, ControllerExit::Completed);
+        assert!(summary.children.is_empty());
+        crate::test_complete!(
+            "workers_go_round_robin_to_supervisors_and_orphans_get_an_implicit_one"
+        );
+    }
+
+    #[test]
+    fn swarm_supervisor_and_worker_properties_are_validated() {
+        init_test("swarm_supervisor_and_worker_properties_are_validated");
+        let mut scenario = minimal_scenario();
+        scenario.participants = vec![
+            participant_with("a", "swarm", "tasks", serde_json::json!(0)),
+            participant_with(
+                "b",
+                "swarm",
+                "tasks",
+                serde_json::json!(MAX_SWARM_TASKS + 1),
+            ),
+            participant_with("c", "swarm", "tasks", serde_json::json!("many")),
+            participant_with("d", "supervisor", "max_restarts", serde_json::json!(-1)),
+            participant_with(
+                "e",
+                "supervisor",
+                "max_restarts",
+                serde_json::json!(u64::from(u32::MAX) + 1),
+            ),
+            participant_with(
+                "f",
+                "worker",
+                "fail_times",
+                serde_json::json!(MAX_WORKER_FAIL_TIMES + 1),
+            ),
+            participant_with("g", "worker", "fail_times", serde_json::json!(1.5)),
+            // Unbound roles keep free-form properties.
+            participant_with("h", "Worker", "fail_times", serde_json::json!(-1)),
+        ];
+        match ScenarioRunner::run(&scenario) {
+            Err(ScenarioRunnerError::Validation { errors, .. }) => {
+                let fields: Vec<_> = errors.iter().map(|error| error.field.as_str()).collect();
+                assert_eq!(
+                    fields,
+                    [
+                        "participants.a.properties.tasks",
+                        "participants.b.properties.tasks",
+                        "participants.c.properties.tasks",
+                        "participants.d.properties.max_restarts",
+                        "participants.e.properties.max_restarts",
+                        "participants.f.properties.fail_times",
+                        "participants.g.properties.fail_times",
+                    ]
+                );
+            }
+            other => panic!("expected a participant property validation error, got {other:?}"),
+        }
+
+        // The default task count and zero restarts and failures run.
+        scenario.participants = vec![
+            participant("swarm", "swarm"),
+            participant_with("sup", "supervisor", "max_restarts", serde_json::json!(0)),
+            participant_with("steady", "worker", "fail_times", serde_json::json!(0)),
+        ];
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+        let (tally, _) = swarm_tally_of(&tasks);
+        assert_eq!(tally.completed, DEFAULT_SWARM_TASKS as u64, "{tally:?}");
+        let summary = supervisor_summary(&tasks, "sup");
+        assert_eq!(summary.restart_batches, 0);
+        assert_eq!(summary.children[0].generations, 1);
+        assert_eq!(summary.children[0].exit, ChildExit::Succeeded);
+        crate::test_complete!("swarm_supervisor_and_worker_properties_are_validated");
+    }
+
+    #[test]
+    fn supervised_workers_stopped_by_chaos_are_counted_not_failed() {
+        init_test("supervised_workers_stopped_by_chaos_are_counted_not_failed");
+        let mut scenario = supervisor_scenario();
+        scenario.id = "test-supervisor-chaos".to_string();
+        scenario.chaos = ChaosSection::Custom {
+            cancel_probability: 0.1,
+            delay_probability: 0.0,
+            delay_min_ms: 0,
+            delay_max_ms: 10,
+            io_error_probability: 0.0,
+            wakeup_storm_probability: 0.0,
+            budget_exhaustion_probability: 0.0,
+        };
+
+        let mut stopped = 0_u64;
+        for seed in 0..8 {
+            let (result, tasks) = ScenarioRunner::run_seeded(&scenario, Some(seed)).unwrap();
+            assert!(result.passed(), "seed {seed}: {}", failure_detail(&result));
+            let state = supervisor_state(&tasks, "sup");
+            let summary = state.summary.lock().clone();
+            for worker in &state.workers {
+                let child = summary.as_ref().and_then(|summary| {
+                    summary
+                        .children
+                        .iter()
+                        .find(|child| child.name == worker.name)
+                });
+                match child {
+                    Some(child) if child.exit == ChildExit::Succeeded => assert_eq!(
+                        child.generations,
+                        worker.fail_times + 1,
+                        "seed {seed}: {}: {child:?}",
+                        worker.name
+                    ),
+                    _ => stopped += 1,
+                }
+            }
+        }
+        assert!(
+            stopped > 0,
+            "a 10% per-dispatch cancel rate must stop some worker across eight seeds"
+        );
+        crate::test_complete!("supervised_workers_stopped_by_chaos_are_counted_not_failed");
     }
 
     // ── derive-trait coverage (wave 73) ──────────────────────────────────
