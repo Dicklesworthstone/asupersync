@@ -13290,9 +13290,12 @@ worker_threads = 16
 // in this file stay where they are.
 impl Runtime {
     /// Enables an obligation leak monitor for this runtime: a
-    /// [`crate::obligation::eprocess::LeakMonitor::change_detector`], whose
-    /// expected number of observations before a false alarm is at least
-    /// `1/alpha`.
+    /// [`crate::obligation::eprocess::LeakMonitor::change_detector`] over
+    /// `horizon` resolved obligations. The probability of a false alarm
+    /// within them is at most `alpha`. Choose `horizon` to cover the whole
+    /// monitored period, for example `10^9`: the detection delay grows only
+    /// with its logarithm, while a short horizon makes a latched false alarm
+    /// on a busy runtime likely.
     ///
     /// Every obligation the runtime commits or aborts after this call feeds
     /// the monitor its age at resolution, exactly once, and a leaked
@@ -13305,18 +13308,20 @@ impl Runtime {
     /// its evidence.
     ///
     /// # Panics
-    /// If `config` is invalid (see [`crate::obligation::eprocess::LeakMonitor::new`]).
-    /// The configuration is checked before the runtime state is locked.
+    /// If `config` or `horizon` is invalid (see
+    /// [`crate::obligation::eprocess::LeakMonitor::change_detector`]). They are
+    /// checked before the runtime state is locked.
     pub fn enable_obligation_leak_monitor(
         &self,
         config: crate::obligation::eprocess::MonitorConfig,
+        horizon: u64,
     ) {
-        let _validated = crate::obligation::eprocess::LeakMonitor::new(config);
+        let _validated = crate::obligation::eprocess::LeakMonitor::change_detector(config, horizon);
         self.inner
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .enable_obligation_leak_monitor(config);
+            .enable_obligation_leak_monitor(config, horizon);
     }
 
     /// The obligation leak monitor's current snapshot, or `None` when

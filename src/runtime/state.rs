@@ -1899,6 +1899,9 @@ pub struct RuntimeState {
     /// Opt-in anytime-valid leak monitor, fed one age per resolved
     /// obligation (br-asupersync-bi2462.150.2). `None` by default.
     obligation_leak_monitor: Option<parking_lot::Mutex<crate::obligation::eprocess::LeakMonitor>>,
+    /// Leaks that the `Recover` policy is aborting while a monitor is
+    /// enabled: their abort effect must not feed the monitor an on-time age.
+    leak_recovered_obligations: HashSet<ObligationId>,
     /// Optional cached draining-region count for governor/diagnostic snapshots.
     read_biased_draining_region_snapshot: ReadBiasedDrainingRegionSnapshot,
     /// Leak-handling recursion depth for diagnostics.
@@ -2144,6 +2147,7 @@ impl RuntimeState {
             leak_escalation: None,
             leak_count: 0,
             obligation_leak_monitor: None,
+            leak_recovered_obligations: HashSet::new(),
             read_biased_draining_region_snapshot: ReadBiasedDrainingRegionSnapshot::default(),
             handling_leaks: 0,
             in_flight_leak_ids: HashSet::new(),
@@ -2816,27 +2820,30 @@ impl RuntimeState {
     }
 
     /// Enables an obligation leak monitor, a
-    /// [`LeakMonitor::change_detector`](crate::obligation::eprocess::LeakMonitor::change_detector):
-    /// its expected number of observations before a false alarm is at least
-    /// `1/alpha`, and its alarm latches.
+    /// [`LeakMonitor::change_detector`](crate::obligation::eprocess::LeakMonitor::change_detector)
+    /// over `horizon` resolutions: the probability of a false alarm within
+    /// them is at most `alpha`, and its alarm latches. Choose `horizon` to
+    /// cover the monitored period.
     ///
     /// From this call on, every obligation this state commits or aborts feeds
     /// the monitor its age at resolution, exactly once, and every leaked
     /// obligation (still reserved when its holder completes) raises the alarm
-    /// through `observe_leak`. The first alarm is reported as a warning event.
-    /// Obligations resolved earlier are not observed, and a second call
-    /// replaces the monitor and its evidence. Live obligations are never
-    /// rescanned, so one held indefinitely is not observed; bound that with a
-    /// budget deadline.
+    /// through `observe_leak`, including one the `Recover` policy aborts. The
+    /// first alarm is reported as a warning event. Obligations resolved
+    /// earlier are not observed, and a second call replaces the monitor and
+    /// its evidence. Live obligations are never rescanned, so one held
+    /// indefinitely is not observed; bound that with a budget deadline.
     ///
     /// # Panics
-    /// If `config` is invalid (see [`LeakMonitor::new`](crate::obligation::eprocess::LeakMonitor::new)).
+    /// If `config` or `horizon` is invalid (see
+    /// [`LeakMonitor::change_detector`](crate::obligation::eprocess::LeakMonitor::change_detector)).
     pub fn enable_obligation_leak_monitor(
         &mut self,
         config: crate::obligation::eprocess::MonitorConfig,
+        horizon: u64,
     ) {
         self.obligation_leak_monitor = Some(parking_lot::Mutex::new(
-            crate::obligation::eprocess::LeakMonitor::change_detector(config),
+            crate::obligation::eprocess::LeakMonitor::change_detector(config, horizon),
         ));
     }
 
@@ -5303,9 +5310,16 @@ impl RuntimeState {
                 }
             }
             ObligationLeakResponse::Recover => {
+                let monitored = self.obligation_leak_monitor.is_some();
                 for &id in &leak_ids {
+                    // A recovered leak is still a leak to the monitor, not an
+                    // abort on time: its abort effect, dispatched now or later,
+                    // skips the age it would otherwise report.
+                    if monitored {
+                        self.leak_recovered_obligations.insert(id);
+                    }
                     // Abort instead of marking leaked — performs resource cleanup.
-                    let _ = self.abort_obligation_in(
+                    let aborted = self.abort_obligation_in(
                         regions,
                         tasks,
                         obligations,
@@ -5313,6 +5327,13 @@ impl RuntimeState {
                         id,
                         ObligationAbortReason::Error,
                     );
+                    if monitored {
+                        if aborted.is_ok() {
+                            self.observe_obligation_leak();
+                        } else {
+                            self.leak_recovered_obligations.remove(&id);
+                        }
+                    }
                 }
                 crate::tracing_compat::warn!(
                     task_id = ?error.task_id,
@@ -6221,7 +6242,9 @@ impl RuntimeState {
             )
         });
         self.metrics.obligation_discharged(info.region);
-        self.observe_obligation_age(info.duration);
+        if !self.leak_recovered_obligations.remove(&info.id) {
+            self.observe_obligation_age(info.duration);
+        }
 
         // Track obligation settlement work in debt monitor
         let cancel_reason = CancelReason::new(CancelKind::User);

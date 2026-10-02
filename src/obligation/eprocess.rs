@@ -2,8 +2,10 @@
 //!
 //! An e-process is a non-negative supermartingale under the null hypothesis
 //! ("no leaks: all obligations resolve within their expected lifetime").
-//! When the e-value exceeds 1/α, we reject the null with Type-I error ≤ α —
-//! regardless of when we choose to stop monitoring (Ville's inequality).
+//! For [`LeakMonitor::new`], when the e-value exceeds 1/α, we reject the
+//! null with Type-I error ≤ α, regardless of when we choose to stop
+//! monitoring (Ville's inequality). A [`LeakMonitor::change_detector`] gives
+//! the same α over a declared horizon of observations instead.
 //!
 //! The monitor is opt-in. `Runtime::enable_obligation_leak_monitor` (or
 //! `RuntimeState::enable_obligation_leak_monitor`, for example on a
@@ -38,8 +40,17 @@
 //!
 //! # False-Alarm Guarantees
 //!
-//! By Ville's inequality: P(∃t: E_t ≥ 1/α | H0) ≤ α.
+//! For [`LeakMonitor::new`], by Ville's inequality: P(∃t: E_t ≥ 1/α | H0) ≤ α.
 //! This holds for *any* stopping rule, including data-dependent ones.
+//!
+//! A change detector over a horizon of `n` observations alarms at
+//! `R ≥ n/α`, so P(a false alarm within the first `n` observations | H0) ≤ α.
+//! Past `n` observations the bound lapses and the latched alarm eventually
+//! fires on healthy data, so cover the whole monitored period, or reset the
+//! detector before then. Both bounds assume each observation's likelihood
+//! ratio has mean at most 1 given the earlier ones, which fails when the order
+//! of observations depends on the ages themselves (see
+//! [`LeakMonitor::change_detector`]).
 //!
 //! # Calibration
 //!
@@ -79,7 +90,9 @@ pub mod conformance;
 #[derive(Debug, Clone, Copy)]
 pub struct MonitorConfig {
     /// Type-I error bound (false-positive rate). Must be in (0, 1).
-    /// The monitor guarantees P(false alarm) ≤ alpha under H0.
+    /// Under H0, a [`LeakMonitor::new`] monitor guarantees P(false alarm) ≤
+    /// alpha, and a [`LeakMonitor::change_detector`] guarantees it within
+    /// its horizon.
     pub alpha: f64,
     /// Expected obligation lifetime in nanoseconds under the null.
     /// Obligations pending longer than this are increasingly suspicious.
@@ -106,7 +119,9 @@ pub enum AlertState {
     Clear,
     /// E-value is elevated but below threshold.
     Watching,
-    /// E-value exceeds 1/α: leak detected with bounded false-positive rate.
+    /// The statistic reached the monitor's threshold (1/α, or horizon/α for a
+    /// change detector), or a leak was reported: leak detected with a bounded
+    /// false-positive rate.
     Alert,
 }
 
@@ -133,7 +148,7 @@ pub struct LeakMonitor {
     /// Current e-value (product of likelihood ratios).
     /// Starts at 1.0 (no evidence).
     e_value: f64,
-    /// Rejection threshold: 1/alpha.
+    /// Rejection threshold: 1/alpha, or horizon/alpha for a change detector.
     threshold: f64,
     /// Number of observations so far.
     observations: u64,
@@ -193,23 +208,42 @@ impl LeakMonitor {
     /// e-detector `R_n = (R_{n-1} + 1) · LR_n`, with `R_0 = 0` and the
     /// likelihood ratio `LR_n` of [`Self::observe`]: the sum of the e-processes
     /// started at every observation. Under the null, `R_n − n` is a
-    /// supermartingale, so `R_n` stays bounded on healthy data, and the
-    /// guarantee is an average run length: the expected number of
-    /// observations before a false alarm is at least `1/alpha`.
+    /// supermartingale, so `R_n` stays bounded on healthy data.
     ///
-    /// The detector alarms once `R_n ≥ 1/alpha` with at least
+    /// The detector alarms once `R_n ≥ horizon/alpha` with at least
     /// `min_observations` observations, and the alarm latches until
-    /// [`Self::reset`]. Below the threshold its state is
-    /// [`AlertState::Clear`]: an elevated `R_n` is not evidence by itself.
-    /// [`Self::e_value`] reports `R_n`.
+    /// [`Self::reset`]. For `k ≤ horizon`, `R_k − k + horizon` is a
+    /// non-negative supermartingale starting at `horizon`, so by Ville's
+    /// inequality P(a false alarm within the first `horizon` observations)
+    /// ≤ `alpha`, and the average run length to a false alarm is at least
+    /// `horizon/alpha`. A threshold of `1/alpha` alone would only promise an
+    /// average run length of `1/alpha` observations: a runtime resolving
+    /// thousands of obligations per second would latch a false alarm within
+    /// seconds. Choose `horizon` to cover the whole monitored period (for
+    /// example `10^9` resolutions); the detection delay grows only with the
+    /// logarithm of the threshold. Past `horizon` observations the bound
+    /// lapses, so reset or replace the detector before then.
+    ///
+    /// The bound needs each likelihood ratio to have mean at most 1 given
+    /// the earlier observations. Feeding ages in an order that depends on the
+    /// ages breaks that: when obligations reserved together resolve, their
+    /// slowest ones arrive last and consecutively, which reads as a change.
+    ///
+    /// Below the threshold its state is [`AlertState::Clear`]: an elevated
+    /// `R_n` is not evidence by itself. [`Self::e_value`] reports `R_n`.
     ///
     /// # Panics
     ///
-    /// Panics if `alpha` is not in (0, 1) or `expected_lifetime_ns` is 0.
+    /// Panics if `alpha` is not in (0, 1), `expected_lifetime_ns` is 0 or
+    /// `horizon` is 0.
     #[must_use]
-    pub fn change_detector(config: MonitorConfig) -> Self {
+    pub fn change_detector(config: MonitorConfig, horizon: u64) -> Self {
+        assert!(horizon > 0, "horizon must be > 0");
         let mut monitor = Self::new(config);
         monitor.change_detector = true;
+        #[allow(clippy::cast_precision_loss)]
+        let horizon = horizon as f64;
+        monitor.threshold = horizon / config.alpha;
         monitor.reset();
         monitor
     }
@@ -328,7 +362,8 @@ impl LeakMonitor {
         self.e_value
     }
 
-    /// Returns the rejection threshold (1/alpha).
+    /// Returns the rejection threshold: 1/alpha, or horizon/alpha for a
+    /// change detector.
     #[must_use]
     pub fn threshold(&self) -> f64 {
         self.threshold
@@ -457,6 +492,9 @@ mod tests {
             min_observations: 3,
         }
     }
+
+    /// Change-detector horizon for the tests: threshold 10^6 / 0.01 = 10^8.
+    const HORIZON: u64 = 1_000_000;
 
     // ---- Construction ---------------------------------------------------
 
@@ -725,16 +763,17 @@ mod tests {
     }
 
     /// After many on-time resolutions the test-mode e-value has decayed so
-    /// far that a late obligation cannot alarm. The change detector's
+    /// far that late obligations cannot alarm. The change detector's
     /// statistic stays bounded (by e, the fixed point of `(R + 1) · L` for
-    /// `L = 1/(1 + 1/e)`), so the same late obligation alarms, and the alarm
-    /// latches until reset.
+    /// `L = 1/(1 + 1/e)`), so a short run of late obligations alarms, and the
+    /// alarm latches until reset.
     #[test]
     fn change_detector_stays_bounded_on_healthy_data_and_latches_its_alarm() {
         init_test("change_detector_stays_bounded_on_healthy_data_and_latches_its_alarm");
         let mut test_mode = LeakMonitor::new(default_config());
-        let mut detector = LeakMonitor::change_detector(default_config());
+        let mut detector = LeakMonitor::change_detector(default_config(), HORIZON);
         assert_eq!(detector.e_value(), 0.0);
+        assert!((detector.threshold() - 1e8).abs() < 1.0, "{}", detector.threshold());
         for i in 0u64..10_000 {
             let age = (i % 10) * 100_000; // 0 to 0.9 ms against 1 ms
             test_mode.observe(age);
@@ -744,11 +783,14 @@ mod tests {
         assert_eq!(detector.alert_state(), AlertState::Clear);
         assert!(test_mode.e_value() < 1e-100, "{}", test_mode.e_value());
 
-        // One obligation held 1 s against 1 ms.
-        test_mode.observe(1_000_000_000);
-        detector.observe(1_000_000_000);
+        // Obligations held 1 s against 1 ms multiply the statistic by about
+        // 731 each: the third crosses 10^8.
+        for late in 1..=3 {
+            test_mode.observe(1_000_000_000);
+            detector.observe(1_000_000_000);
+            assert_eq!(detector.is_alert(), late == 3, "late obligation {late}");
+        }
         assert!(!test_mode.is_alert(), "decayed evidence cannot alarm");
-        assert_eq!(detector.alert_state(), AlertState::Alert);
         assert_eq!(detector.alert_count(), 1);
 
         for _ in 0..100 {
@@ -770,6 +812,44 @@ mod tests {
         );
     }
 
+    /// Healthy ages drawn from Exp(mean μ), the boundary of the null the
+    /// likelihood ratio is valid for. A detector whose horizon covers all
+    /// 10^4 of them must not alarm, although its statistic passes 1/alpha:
+    /// a 1/alpha threshold, which bounds only the average run length (by 100
+    /// observations), latched a false alarm on this healthy run.
+    #[test]
+    fn change_detector_threshold_covers_its_horizon_of_healthy_observations() {
+        init_test("change_detector_threshold_covers_its_horizon_of_healthy_observations");
+        const N: u64 = 10_000;
+        let config = default_config();
+        let mut detector = LeakMonitor::change_detector(config, N);
+        // xorshift64*: a fixed, platform-independent sequence.
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        for _ in 0..N {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            let bits = state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11;
+            let uniform = (bits as f64 + 0.5) / (1u64 << 53) as f64;
+            let age = (-uniform.ln() * config.expected_lifetime_ns as f64) as u64;
+            detector.observe(age);
+        }
+        assert!(
+            detector.peak_e_value() >= 1.0 / config.alpha,
+            "peak {}",
+            detector.peak_e_value()
+        );
+        assert!(
+            !detector.is_alert(),
+            "peak {} against threshold {}",
+            detector.peak_e_value(),
+            detector.threshold()
+        );
+        crate::test_complete!(
+            "change_detector_threshold_covers_its_horizon_of_healthy_observations"
+        );
+    }
+
     /// A leak never happens under the null, so one is conclusive: the monitor
     /// alarms before `min_observations`, stays alarmed through later on-time
     /// observations, and clears only on reset. Both monitor kinds.
@@ -778,7 +858,7 @@ mod tests {
         init_test("observe_leak_is_conclusive_and_latches");
         for mut monitor in [
             LeakMonitor::new(default_config()),
-            LeakMonitor::change_detector(default_config()),
+            LeakMonitor::change_detector(default_config(), HORIZON),
         ] {
             monitor.observe_leak();
             assert_eq!(monitor.alert_state(), AlertState::Alert);
