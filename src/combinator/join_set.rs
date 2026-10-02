@@ -360,9 +360,11 @@ where
         // finished; region close remains the quiescence backstop. Explicit
         // TaskHandle::abort can strengthen a completed task's reason, so do
         // not use it on terminal members during implicit ownership cleanup.
-        // This also protects completed prefixes retained by drain_all.
+        // This also protects completed prefixes retained by drain_all. A
+        // member that published its result is terminal even before the
+        // scheduler retires its record, which is when is_finished() turns true.
         for handle in &self.handles {
-            if !handle.is_finished() {
+            if !handle.terminal_published() {
                 handle.abort();
             }
         }
@@ -976,6 +978,57 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A runtime member publishes its result before the scheduler retires its
+    /// record and opens its retirement barrier; is_finished() stays false in
+    /// between. On a multi-thread runtime the owner can drop the set in that
+    /// window. The member has finished, so dropping the set must not request
+    /// its cancellation, while a member that has not published still gets one.
+    #[test]
+    fn dropping_a_member_published_before_retirement_does_not_cancel_it() {
+        let cx = Cx::for_testing();
+        let scope = Scope::<FailFast>::new(
+            crate::RegionId::new_for_test(12, 1),
+            crate::Budget::INFINITE,
+        );
+        let mut set = JoinSet::<u32, &'static str, FailFast>::new(&scope);
+        let finished_cx = Cx::for_testing();
+        let running_cx = Cx::for_testing();
+        let (finished_tx, finished_rx) = oneshot::channel();
+        let (_running_tx, running_rx) = oneshot::channel();
+        set.handles
+            .push(TaskHandle::with_retirement_barrier_for_test(
+                TaskId::new_for_test(1, 0),
+                finished_rx,
+                Arc::downgrade(&finished_cx.inner),
+                crate::runtime::task_handle::RetirementBarrier::pending(),
+            ));
+        set.handles
+            .push(TaskHandle::with_retirement_barrier_for_test(
+                TaskId::new_for_test(2, 0),
+                running_rx,
+                Arc::downgrade(&running_cx.inner),
+                crate::runtime::task_handle::RetirementBarrier::pending(),
+            ));
+        finished_tx
+            .send(&cx, Ok(Ok(7)))
+            .expect("the finished member publishes its result");
+        assert!(
+            !set.handles[0].is_finished(),
+            "the closed barrier still gates the published result"
+        );
+
+        drop(set);
+
+        assert!(
+            !finished_cx.is_cancel_requested(),
+            "dropping the set cancelled a member that had already published its result"
+        );
+        assert!(
+            running_cx.is_cancel_requested(),
+            "dropping the set must still cancel a member that has not finished"
+        );
     }
 
     #[test]

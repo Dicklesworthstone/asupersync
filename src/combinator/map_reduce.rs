@@ -672,9 +672,11 @@ impl<T, E> Drop for ExecutingMapOwner<T, E> {
     fn drop(&mut self) {
         // Drop requests cancellation; it cannot claim to have awaited cleanup.
         // The existing region owns any child that still needs cooperative polls.
+        // A child that published its result has finished, even before its
+        // record retires: do not stamp a cancellation onto it.
         for slot in &self.slots {
             if let Some(handle) = &slot.handle
-                && !handle.is_finished()
+                && !handle.terminal_published()
                 && let Err(payload) = catch_unwind(AssertUnwindSafe(|| handle.abort()))
             {
                 // Do not let a secondary arbitrary panic payload destructor
@@ -1216,6 +1218,79 @@ mod tests {
         lab.state.advance_region_state(region);
         assert!(lab.state.region(region).is_none());
         assert!(lab.run_until_quiescent_with_report().lab_test_passed());
+    }
+
+    /// A mapped child publishes its result before the scheduler retires its
+    /// record and opens its retirement barrier; is_finished() stays false in
+    /// between. Dropping the owner in that window must not request the
+    /// finished child's cancellation, while an unfinished child still gets one.
+    #[test]
+    fn dropping_the_owner_spares_a_child_published_before_retirement() {
+        use crate::channel::oneshot;
+        use crate::runtime::task_handle::RetirementBarrier;
+        use crate::types::TaskId;
+
+        let cx = Cx::for_testing();
+        let finished_cx = Cx::for_testing();
+        let running_cx = Cx::for_testing();
+        let (finished_tx, finished_rx) = oneshot::channel::<Result<(), JoinError>>();
+        let (_running_tx, running_rx) = oneshot::channel::<Result<(), JoinError>>();
+        let slot = |index: usize, handle| ExecutingMapSlot::<u32, ()> {
+            index,
+            handle: Some(handle),
+            returned: Arc::new(parking_lot::Mutex::new(None)),
+            value: None,
+            drain_reason: None,
+        };
+        let owner = ExecutingMapOwner {
+            cx: cx.clone(),
+            cancel_waker: None,
+            slots: VecDeque::from([
+                slot(
+                    0,
+                    TaskHandle::with_retirement_barrier_for_test(
+                        TaskId::new_for_test(1, 0),
+                        finished_rx,
+                        Arc::downgrade(&finished_cx.inner),
+                        RetirementBarrier::pending(),
+                    ),
+                ),
+                slot(
+                    1,
+                    TaskHandle::with_retirement_barrier_for_test(
+                        TaskId::new_for_test(2, 0),
+                        running_rx,
+                        Arc::downgrade(&running_cx.inner),
+                        RetirementBarrier::pending(),
+                    ),
+                ),
+            ]),
+            accumulator: None,
+            next_scan: 0,
+            scan_end: 0,
+        };
+        finished_tx
+            .send(&cx, Ok(()))
+            .expect("the finished child publishes its result");
+        assert!(
+            !owner.slots[0]
+                .handle
+                .as_ref()
+                .expect("the finished child's handle")
+                .is_finished(),
+            "the closed barrier still gates the published result"
+        );
+
+        drop(owner);
+
+        assert!(
+            !finished_cx.is_cancel_requested(),
+            "dropping the owner cancelled a child that had already published its result"
+        );
+        assert!(
+            running_cx.is_cancel_requested(),
+            "dropping the owner must still cancel a child that has not finished"
+        );
     }
 
     fn run_executing_case<F, Fut, T>(factory: F) -> T
