@@ -56,8 +56,8 @@ does feed.
 `lab.seed` feeds the deterministic scheduler. The YAML schema itself does not
 create application tasks, messages, leases, or saga work. The runner binds
 only participants whose `role` is exactly `sender`, `receiver`, `swarm`,
-`supervisor`, `worker`, `saga-coordinator` or `saga-participant` (the match is
-case-sensitive) and spawns lab tasks for them:
+`supervisor`, `worker`, `saga-coordinator`, `saga-participant`, `primary` or
+`replica` (the match is case-sensitive) and spawns lab tasks for them:
 
 - a receiver owns a bounded `mpsc` channel (`properties.capacity`, default 4,
   at most 4096) and drains it until every sender is gone;
@@ -86,31 +86,41 @@ case-sensitive) and spawns lab tasks for them:
   most `step_ms` for the reply. A refused, lost or late reply aborts the saga,
   which runs the registered compensations in reverse order: each undoes an
   applied step, or fences one that was never applied so that a late request
-  is refused.
+  is refused;
+- a primary appends `properties.writes` entries (default 20, at most 10000),
+  one per round of `properties.write_ms` virtual milliseconds (default 50).
+  Replicas go to the primaries round-robin, and replicas without a primary
+  share an implicit one. Each round the primary ships every lagging replica
+  its log from that replica's acknowledged length and waits at most
+  `write_ms` for the reply; a lost or late batch is shipped again the next
+  round. After the last write it keeps shipping for up to 40 rounds until
+  every replica has the whole log.
 
-Saga requests and replies cross a simulated network. The `network` preset
+Saga and replication messages cross a simulated network. The `network` preset
 (`ideal`, `local`, `lan`, `wan`, `satellite`, `congested` or `lossy`) sets
 every link's latency, jitter and packet loss, and a `links` entry keyed
 `"from->to"` overrides one direction's `latency` and `packet_loss`; the other
 link fields are not modeled. `partition` and `heal` faults whose `from` and
 `to` name two participants cut and restore the link between them. A message
 that the network drops or that is sent over a cut link is lost, and a
-coordinator whose request or reply is lost times out. When saga roles are
-bound, the runner fires due timers on its way to each fault and advances
-virtual time to the next timer whenever the lab is idle.
+coordinator whose request or reply is lost times out. When saga or
+replication roles are bound, the runner fires due timers on its way to each
+fault and advances virtual time to the next timer whenever the lab is idle.
 
 Lab chaos can cancel these tasks mid-protocol; a cancelled send, receive,
-swarm task, worker generation, supervisor or saga task is counted and stops,
-and a cancelled coordinator aborts its saga. A run fails with a `workload:`
-invariant violation if a bound task cannot be spawned, receives one sender's
-values out of order, drains its channel to close without receiving every
-committed value, or meets an outcome its contract rules out. It also fails if
-a swarm task neither completes nor ends cancelled, a worker never succeeds or
-succeeds after a restart count other than its `fail_times`, a supervisor exits
-with an error, a completed saga left a step unapplied, or an aborted saga left
-one applied or did not run each compensation exactly once in reverse order. A
-malformed `messages`, `capacity`, `tasks`, `max_restarts`, `fail_times` or
-`step_ms` value on a bound participant is a run-time validation error.
+swarm task, worker generation, supervisor, saga or replication task is counted
+and stops, and a cancelled coordinator aborts its saga. A run fails with a
+`workload:` invariant violation if a bound task cannot be spawned, receives
+one sender's values out of order, drains its channel to close without
+receiving every committed value, or meets an outcome its contract rules out.
+It also fails if a swarm task neither completes nor ends cancelled, a worker
+never succeeds or succeeds after a restart count other than its `fail_times`,
+a supervisor exits with an error, a completed saga left a step unapplied, an
+aborted saga left one applied or did not run each compensation exactly once
+in reverse order, or a replica's log is not a prefix of its primary's log. A
+malformed `messages`, `capacity`, `tasks`, `max_restarts`, `fail_times`,
+`step_ms`, `writes` or `write_ms` value on a bound participant is a run-time
+validation error.
 
 Every other role is unbound and schedules no work. The `Participants:` line
 (printed only when the scenario declares participants) shows the split, and a
@@ -193,12 +203,12 @@ the coordinator earlier, which aborts the saga the same way. Either way the
 run fails if a step stays applied after the abort.
 
 Every fault declaration also produces a timed trace entry. Partition and heal
-between two participants cut and restore saga links. Disk pressure/recovery,
-delayed cleanup, and process stall/resume affect a synthetic effect summary.
-Host crash/restart and clock skew/reset are recorded but do not simulate those
-behaviors. The network section shapes saga messages, as described above. The
-cancellation section is validation-only, and participant names validate fault
-references.
+between two participants cut and restore saga and replication links. Disk
+pressure/recovery, delayed cleanup, and process stall/resume affect a
+synthetic effect summary. Host crash/restart and clock skew/reset are recorded
+but do not simulate those behaviors. The network section shapes saga and
+replication messages, as described above. The cancellation section is
+validation-only, and participant names validate fault references.
 
 ## JSON result output
 
@@ -274,13 +284,13 @@ Current field-consumption boundaries:
 | `lab.*` | Builds the lab configuration, including seed and step limit |
 | `chaos.*` | Builds the current chaos policy |
 | `oracles` | Selects registered runner checks; unknown names are rejected |
-| `faults` | Produces timed trace entries; only a subset affects the synthetic effect summary; `partition`/`heal` between two participants cut and restore saga links |
+| `faults` | Produces timed trace entries; only a subset affects the synthetic effect summary; `partition`/`heal` between two participants cut and restore saga and replication links |
 | `resource_caps` | Partially consumed for post-parse/runtime artifact limits |
 | `minimization` | Partially consumed by minimization/report paths |
 | `include` | Paths are validated only; referenced files are not read or merged |
-| `network` | The preset and per-link `latency`/`packet_loss` shape saga messages between participants; other link fields are not modeled |
+| `network` | The preset and per-link `latency`/`packet_loss` shape saga and replication messages between participants; other link fields are not modeled |
 | `cancellation` | Validated only; not consumed by `ScenarioRunner` |
-| `participants` | Names validate fault references; `sender`/`receiver` (`messages`/`capacity`), `swarm` (`tasks`), `supervisor` (`max_restarts`), `worker` (`fail_times`), `saga-coordinator` (`step_ms`) and `saga-participant` roles run as lab tasks; other roles are unused |
+| `participants` | Names validate fault references; `sender`/`receiver` (`messages`/`capacity`), `swarm` (`tasks`), `supervisor` (`max_restarts`), `worker` (`fail_times`), `saga-coordinator` (`step_ms`), `saga-participant`, `primary` (`writes`/`write_ms`) and `replica` roles run as lab tasks; other roles are unused |
 | `expected_invariants` | Validated only; does not select or enforce runner checks |
 | `golden_projection` | `format` is unused; `canonicalized` and `redacted` do not transform output |
 

@@ -3,8 +3,8 @@
 //! Bridges [`Scenario`] YAML specifications to [`LabRuntime`] execution, providing:
 //!
 //! - Participant workloads: `sender`, `receiver`, `swarm`, `supervisor`,
-//!   `worker`, `saga-coordinator` and `saga-participant` roles become real
-//!   lab tasks
+//!   `worker`, `saga-coordinator`, `saga-participant`, `primary` and
+//!   `replica` roles become real lab tasks
 //! - Timed fault injection based on scenario fault events
 //! - Oracle filtering (only check oracles listed in the scenario)
 //! - Seed exploration (run the same scenario across multiple seeds)
@@ -14,8 +14,8 @@
 //!
 //! Before any fault fires, the runner spawns lab tasks for every participant
 //! whose `role` is exactly `sender`, `receiver`, `swarm`, `supervisor`,
-//! `worker`, `saga-coordinator` or `saga-participant` (case-sensitive), all
-//! in one root region.
+//! `worker`, `saga-coordinator`, `saga-participant`, `primary` or `replica`
+//! (case-sensitive), all in one root region.
 //!
 //! Channel roles:
 //!
@@ -59,16 +59,29 @@
 //! arrives after the abort is refused. A coordinator that is cancelled aborts
 //! too.
 //!
-//! Saga requests and replies cross a simulated network. The scenario's
+//! Replication roles: each `primary` appends `properties.writes` entries
+//! (default 20, at most 10000), one per round of `properties.write_ms`
+//! virtual milliseconds (default 50, from 1 to 60000). Replicas go to the
+//! primaries round-robin in declaration order, and replicas without any
+//! primary share one implicit primary. Each round the primary ships every
+//! lagging replica its log from that replica's acknowledged length and waits
+//! at most `write_ms` for the reply; a lost or late batch is shipped again
+//! the next round. A replica applies only a batch that continues its log.
+//! After the last write the primary keeps shipping for up to 40 rounds,
+//! until every replica has the whole log; whether they converged is
+//! recorded, not required.
+//!
+//! Saga and replication messages cross a simulated network. The scenario's
 //! `network` preset sets every link's latency, jitter and packet loss (the
 //! [`crate::lab::network::NetworkConditions`] of the same name), and a
 //! `links` entry keyed `"from->to"` overrides one direction's `latency` and
 //! `packet_loss`; the other link fields are not modeled. `partition` and
 //! `heal` faults whose `from` and `to` name two participants cut and restore
 //! the link between them. A message that is dropped or sent over a cut link
-//! is lost, and a coordinator whose request or reply is lost times out. When
-//! saga roles are bound, the runner fires due timers on its way to each fault
-//! and runs with automatic virtual-time advance after the last one.
+//! is lost, and a coordinator or primary whose request or reply is lost
+//! times out. When saga or replication roles are bound, the runner fires due
+//! timers on its way to each fault and runs with automatic virtual-time
+//! advance after the last one.
 //!
 //! Lab chaos may cancel these tasks mid-protocol. A send or receive, swarm
 //! member, worker generation, supervisor or saga task that ends in
@@ -87,11 +100,13 @@
 //!   not match its workers' restarts;
 //! - a completed saga left a participant's step unapplied, an aborted saga
 //!   left one applied, or its compensations did not run exactly once each in
-//!   reverse step order.
+//!   reverse step order;
+//! - a replica's applied log is not a prefix of its primary's log, or a
+//!   primary that was not cancelled never finished.
 //!
-//! Apart from cutting saga links, timed faults stay trace and effect-summary
-//! records; they do not partition the bound channels or crash the supervised
-//! workers.
+//! Apart from cutting saga and replication links, timed faults stay trace
+//! and effect-summary records; they do not partition the bound channels or
+//! crash the supervised workers.
 //!
 //! Every other role is unbound: the runner validates the participant and
 //! schedules no work for it. A scenario without bound participants still
@@ -858,6 +873,20 @@ const STEP_APPLIED: u8 = 1;
 const STEP_UNDONE: u8 = 2;
 /// The step was compensated before it was applied; a later request is refused.
 const STEP_FENCED: u8 = 3;
+/// Role of a participant that appends to a log and ships it to its replicas.
+const PRIMARY_ROLE: &str = "primary";
+/// Role of a participant that applies the log its primary ships.
+const REPLICA_ROLE: &str = "replica";
+/// Default number of entries a primary appends.
+const DEFAULT_PRIMARY_WRITES: u64 = 20;
+/// Largest accepted `writes`.
+const MAX_PRIMARY_WRITES: u64 = 10_000;
+/// Default virtual time between a primary's rounds, and each batch's reply budget.
+const DEFAULT_WRITE_MS: u64 = 50;
+/// Rounds a primary keeps shipping after its last write, for lagging replicas.
+const CATCH_UP_ROUNDS: usize = 40;
+/// Name of the primary that serves replicas no primary owns.
+const IMPLICIT_PRIMARY_NAME: &str = "<implicit-primary>";
 
 /// One declared participant and its role.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -887,6 +916,8 @@ pub struct ParticipantBindings {
     pub implicit_supervisor: bool,
     /// True when saga participants have no coordinator, so the runner adds one.
     pub implicit_coordinator: bool,
+    /// True when replicas have no primary, so the runner adds one.
+    pub implicit_primary: bool,
 }
 
 impl ParticipantBindings {
@@ -899,6 +930,8 @@ impl ParticipantBindings {
         WORKER_ROLE,
         SAGA_COORDINATOR_ROLE,
         SAGA_PARTICIPANT_ROLE,
+        PRIMARY_ROLE,
+        REPLICA_ROLE,
     ];
 
     /// Returns true when the scenario declares no participants.
@@ -963,6 +996,11 @@ enum PlannedWork {
     Coordinate { step_ms: u64 },
     /// Apply one saga step on request.
     Participate,
+    /// Append `writes` entries, one round every `write_ms`, and ship the log
+    /// to the assigned replicas.
+    Lead { writes: u64, write_ms: u64 },
+    /// Apply the log a primary ships.
+    Follow,
 }
 
 /// One bound participant, in declaration order.
@@ -999,6 +1037,11 @@ impl WorkloadPlan {
                 SAGA_COORDINATOR_ROLE => Self::saga_step_ms(participant)
                     .map(|step_ms| PlannedWork::Coordinate { step_ms }),
                 SAGA_PARTICIPANT_ROLE => Ok(PlannedWork::Participate),
+                PRIMARY_ROLE => Self::primary_writes(participant).and_then(|writes| {
+                    Self::primary_write_ms(participant)
+                        .map(|write_ms| PlannedWork::Lead { writes, write_ms })
+                }),
+                REPLICA_ROLE => Ok(PlannedWork::Follow),
                 _ => continue,
             };
             match work {
@@ -1135,13 +1178,52 @@ impl WorkloadPlan {
             })
     }
 
-    /// True when the plan runs a saga coordinator, declared or implicit; its
-    /// steps wait on virtual-time timers.
+    fn primary_writes(participant: &Participant) -> Result<u64, ValidationError> {
+        let Some(value) = participant.properties.get("writes") else {
+            return Ok(DEFAULT_PRIMARY_WRITES);
+        };
+        value
+            .as_u64()
+            .filter(|writes| *writes <= MAX_PRIMARY_WRITES)
+            .ok_or_else(|| {
+                Self::property_error(
+                    participant,
+                    "writes",
+                    format!(
+                        "a bound primary's write count must be an integer from 0 to {MAX_PRIMARY_WRITES}"
+                    ),
+                )
+            })
+    }
+
+    fn primary_write_ms(participant: &Participant) -> Result<u64, ValidationError> {
+        let Some(value) = participant.properties.get("write_ms") else {
+            return Ok(DEFAULT_WRITE_MS);
+        };
+        value
+            .as_u64()
+            .filter(|write_ms| (1..=MAX_SAGA_STEP_MS).contains(write_ms))
+            .ok_or_else(|| {
+                Self::property_error(
+                    participant,
+                    "write_ms",
+                    format!(
+                        "a bound primary's round interval must be an integer from 1 to {MAX_SAGA_STEP_MS} milliseconds"
+                    ),
+                )
+            })
+    }
+
+    /// True when the plan runs a saga coordinator or a primary, declared or
+    /// implicit; their rounds wait on virtual-time timers.
     fn is_timed(&self) -> bool {
         self.participants.iter().any(|participant| {
             matches!(
                 participant.work,
-                PlannedWork::Coordinate { .. } | PlannedWork::Participate
+                PlannedWork::Coordinate { .. }
+                    | PlannedWork::Participate
+                    | PlannedWork::Lead { .. }
+                    | PlannedWork::Follow
             )
         })
     }
@@ -1171,6 +1253,8 @@ enum WorkloadRole {
     Worker,
     SagaCoordinator,
     SagaParticipant,
+    Primary,
+    Replica,
 }
 
 impl WorkloadRole {
@@ -1184,6 +1268,8 @@ impl WorkloadRole {
             Self::Worker => WORKER_ROLE,
             Self::SagaCoordinator => SAGA_COORDINATOR_ROLE,
             Self::SagaParticipant => SAGA_PARTICIPANT_ROLE,
+            Self::Primary => PRIMARY_ROLE,
+            Self::Replica => REPLICA_ROLE,
         }
     }
 }
@@ -1750,6 +1836,67 @@ impl SagaRecord {
     }
 }
 
+/// Entries a primary ships to a replica: its log from index `from` on. The
+/// replica replies with its log length after applying them.
+#[derive(Debug)]
+struct ReplicationBatch {
+    from: usize,
+    entries: Vec<u64>,
+    reply: oneshot::Sender<usize>,
+}
+
+/// One replica as its primary ships to it.
+#[derive(Debug)]
+struct ReplicaTarget {
+    name: String,
+    batches: mpsc::Sender<ReplicationBatch>,
+}
+
+/// A bound primary's log, its replicas' applied logs, and how shipping went.
+#[derive(Debug, Default)]
+struct ReplicationRecord {
+    /// The primary's log; entry `i` is `i`.
+    log: Mutex<Vec<u64>>,
+    /// Replica names and applied logs, in assignment order.
+    replicas: Vec<(String, Arc<Mutex<Vec<u64>>>)>,
+    /// Batches and replies lost on a cut link or dropped by the network.
+    lost: AtomicU64,
+    /// Every replica acknowledged the whole log before the primary stopped.
+    converged: AtomicBool,
+}
+
+impl ReplicationRecord {
+    /// Appends this primary's anomalies: a replica whose applied log is not
+    /// a prefix of the primary's, or a primary that never finished although
+    /// it was not cancelled. Convergence depends on the scenario's network
+    /// and faults, so it is recorded, not required.
+    fn collect_violations(
+        &self,
+        label: &str,
+        finished: bool,
+        cancelled: bool,
+        violations: &mut Vec<String>,
+    ) {
+        let log = self.log.lock().clone();
+        for (name, replica) in &self.replicas {
+            let replica = replica.lock().clone();
+            if !log.starts_with(&replica) {
+                violations.push(format!(
+                    "{label}:diverged:{name}:primary_len={},replica={replica:?}",
+                    log.len()
+                ));
+            }
+        }
+        if !finished && !cancelled {
+            violations.push(format!(
+                "{label}:no_end:log_len={},lost={}",
+                log.len(),
+                count(&self.lost)
+            ));
+        }
+    }
+}
+
 /// Role-specific state of one bound task.
 #[derive(Debug)]
 enum BoundDetail {
@@ -1765,6 +1912,10 @@ enum BoundDetail {
     SagaCoordinator(Arc<SagaRecord>),
     /// A saga participant; its coordinator's record holds its step.
     SagaParticipant,
+    /// A primary and its replicas' logs.
+    Primary(Arc<ReplicationRecord>),
+    /// A replica; its primary's record holds its log.
+    Replica,
 }
 
 /// One bound task and its counters.
@@ -1843,6 +1994,31 @@ impl BoundTask {
                         count(&c.received),
                         count(&c.committed),
                         count(&c.cancelled),
+                        count(&c.unexpected),
+                    ));
+                }
+            }
+            BoundDetail::Primary(record) => {
+                let c = &self.counters;
+                if count(&c.unexpected) > 0 {
+                    violations.push(format!("{label}:unexpected_outcome:no_task_context"));
+                }
+                let cancelled =
+                    count(&c.cancelled) > 0 || self.joins.first() == Some(&JoinState::Cancelled);
+                record.collect_violations(
+                    &label,
+                    c.finished.load(Ordering::Relaxed),
+                    cancelled,
+                    violations,
+                );
+            }
+            BoundDetail::Replica => {
+                let c = &self.counters;
+                if count(&c.unexpected) > 0 {
+                    violations.push(format!(
+                        "{label}:unexpected_outcome:batches={},applied={},unexpected={}",
+                        count(&c.received),
+                        count(&c.committed),
                         count(&c.unexpected),
                     ));
                 }
@@ -2015,7 +2191,18 @@ enum Endpoint {
         requests: mpsc::Receiver<SagaRequest>,
         step: Arc<AtomicU8>,
     },
+    Lead {
+        writes: u64,
+        write_ms: u64,
+    },
+    Follow {
+        batches: mpsc::Receiver<ReplicationBatch>,
+        log: Arc<Mutex<Vec<u64>>>,
+    },
 }
+
+/// A replica's shipping endpoint and applied log, before its primary is spawned.
+type AssignedReplica = (ReplicaTarget, Arc<Mutex<Vec<u64>>>);
 
 impl ParticipantWorkload {
     /// Spawns the planned tasks in a new root region and schedules them.
@@ -2060,11 +2247,20 @@ impl ParticipantWorkload {
         let mut coordinated: Vec<Vec<SagaStepTarget>> =
             (0..coordinator_count).map(|_| Vec::new()).collect();
         let mut uncoordinated = Vec::new();
+        // Replicas go to the primaries the same way.
+        let primary_count = plan
+            .participants
+            .iter()
+            .filter(|participant| matches!(participant.work, PlannedWork::Lead { .. }))
+            .count();
+        let mut led: Vec<Vec<AssignedReplica>> = (0..primary_count).map(|_| Vec::new()).collect();
+        let mut unled = Vec::new();
         let mut lanes = Vec::new();
         let mut endpoints = Vec::with_capacity(plan.participants.len());
         let mut sender_total = 0_usize;
         let mut worker_total = 0_usize;
         let mut saga_participant_total = 0_usize;
+        let mut replica_total = 0_usize;
         for (participant, participant_counters) in plan.participants.iter().zip(&counters) {
             match participant.work {
                 PlannedWork::Send { messages } => {
@@ -2116,6 +2312,25 @@ impl ParticipantWorkload {
                     saga_participant_total += 1;
                     endpoints.push(Endpoint::Participate { requests, step });
                 }
+                PlannedWork::Lead { writes, write_ms } => {
+                    endpoints.push(Endpoint::Lead { writes, write_ms });
+                }
+                PlannedWork::Follow => {
+                    let (tx, batches) = mpsc::channel(1);
+                    let log = Arc::new(Mutex::new(Vec::new()));
+                    let target = ReplicaTarget {
+                        name: participant.name.clone(),
+                        batches: tx,
+                    };
+                    let replica = (target, Arc::clone(&log));
+                    if primary_count == 0 {
+                        unled.push(replica);
+                    } else {
+                        led[replica_total % primary_count].push(replica);
+                    }
+                    replica_total += 1;
+                    endpoints.push(Endpoint::Follow { batches, log });
+                }
             }
         }
         let sink = if lanes.is_empty() && sender_total > 0 {
@@ -2135,6 +2350,7 @@ impl ParticipantWorkload {
         let mut sender_index = 0_usize;
         let mut supervised = supervised.into_iter();
         let mut coordinated = coordinated.into_iter();
+        let mut led = led.into_iter();
         for ((participant, endpoint), task_counters) in
             plan.participants.iter().zip(endpoints).zip(counters)
         {
@@ -2217,6 +2433,31 @@ impl ParticipantWorkload {
                         workload.tasks[owner].spawn_refusal = Some(refusal);
                     }
                 }
+                Endpoint::Lead { writes, write_ms } => {
+                    let replicas = led.next().unwrap_or_default();
+                    workload.spawn_primary(
+                        runtime,
+                        root,
+                        &participant.name,
+                        writes,
+                        write_ms,
+                        replicas,
+                        task_counters,
+                    );
+                }
+                Endpoint::Follow { batches, log } => {
+                    let owner = workload.push_task(
+                        &participant.name,
+                        WorkloadRole::Replica,
+                        0,
+                        Arc::clone(&task_counters),
+                        BoundDetail::Replica,
+                    );
+                    let body = run_replica(batches, log, task_counters);
+                    if let Err(refusal) = workload.spawn_owned(runtime, root, owner, body) {
+                        workload.tasks[owner].spawn_refusal = Some(refusal);
+                    }
+                }
             }
         }
         if let Some((rx, drain)) = sink {
@@ -2248,6 +2489,17 @@ impl ParticipantWorkload {
                 IMPLICIT_COORDINATOR_NAME,
                 DEFAULT_SAGA_STEP_MS,
                 uncoordinated,
+                Arc::new(WorkloadCounters::default()),
+            );
+        }
+        if !unled.is_empty() {
+            workload.spawn_primary(
+                runtime,
+                root,
+                IMPLICIT_PRIMARY_NAME,
+                DEFAULT_PRIMARY_WRITES,
+                DEFAULT_WRITE_MS,
+                unled,
                 Arc::new(WorkloadCounters::default()),
             );
         }
@@ -2411,6 +2663,49 @@ impl ParticipantWorkload {
             name.to_owned(),
             targets,
             step_ms,
+            Arc::clone(&self.partitions),
+            Arc::clone(&self.network),
+            record,
+            counters,
+        );
+        if let Err(refusal) = self.spawn_owned(runtime, root, owner, body) {
+            self.tasks[owner].spawn_refusal = Some(refusal);
+        }
+    }
+
+    /// Spawns one lab task that appends `writes` entries and ships its log to
+    /// `replicas`, in their order.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_primary(
+        &mut self,
+        runtime: &mut LabRuntime,
+        root: RegionId,
+        name: &str,
+        writes: u64,
+        write_ms: u64,
+        replicas: Vec<AssignedReplica>,
+        counters: Arc<WorkloadCounters>,
+    ) {
+        let (targets, logs): (Vec<ReplicaTarget>, Vec<_>) = replicas.into_iter().unzip();
+        let record = Arc::new(ReplicationRecord {
+            replicas: targets
+                .iter()
+                .map(|target| target.name.clone())
+                .zip(logs)
+                .collect(),
+            ..ReplicationRecord::default()
+        });
+        let owner = self.push_task(
+            name,
+            WorkloadRole::Primary,
+            writes,
+            Arc::clone(&counters),
+            BoundDetail::Primary(Arc::clone(&record)),
+        );
+        let body = run_primary(
+            name.to_owned(),
+            targets,
+            Replication { writes, write_ms },
             Arc::clone(&self.partitions),
             Arc::clone(&self.network),
             record,
@@ -2615,8 +2910,8 @@ async fn run_saga_coordinator(
             break;
         }
         bump(&record.registered);
-        let link = SagaLink {
-            coordinator: &name,
+        let link = HubLink {
+            hub: &name,
             partitions: &partitions,
             network: &network,
         };
@@ -2635,22 +2930,107 @@ async fn run_saga_coordinator(
     // Dropping `targets` closes every participant's request channel.
 }
 
-/// The links between a coordinator and its participants.
+/// The links between one participant (a saga coordinator or a primary) and
+/// its peers.
 #[derive(Clone, Copy)]
-struct SagaLink<'a> {
-    coordinator: &'a str,
+struct HubLink<'a> {
+    hub: &'a str,
     partitions: &'a PartitionTable,
     network: &'a NetworkModel,
 }
 
-impl SagaLink<'_> {
-    /// How long a message between the coordinator and `participant` takes,
-    /// or `None` when it is lost: the link is cut or the network drops it.
-    fn transit(self, from: &str, to: &str, participant: &str) -> Option<Duration> {
-        if self.partitions.is_cut(self.coordinator, participant) {
+impl HubLink<'_> {
+    /// How long a message between the hub and `peer` takes, or `None` when
+    /// it is lost: the link is cut or the network drops it.
+    fn transit(self, from: &str, to: &str, peer: &str) -> Option<Duration> {
+        if self.partitions.is_cut(self.hub, peer) {
             return None;
         }
         self.network.transit(from, to)
+    }
+
+    /// One request/reply exchange with `peer` that must finish within
+    /// `budget`. `send` delivers the request once it has crossed the
+    /// network; `None` from `send` means the peer is gone. The reply also
+    /// crosses the network, and a lost message makes the exchange wait out
+    /// the budget. `lost` counts lost messages.
+    async fn exchange<T, S, F>(
+        self,
+        cx: &Cx,
+        peer: &str,
+        budget: Duration,
+        lost: &AtomicU64,
+        send: S,
+    ) -> Exchange<T>
+    where
+        S: FnOnce(oneshot::Sender<T>) -> F,
+        F: Future<Output = Result<(), ExchangeSendError>>,
+    {
+        let (reply, mut replies) = oneshot::channel();
+        // The reply sender of a lost request. Keeping it makes the exchange
+        // wait out its budget instead of seeing a closed reply.
+        let mut unanswered = None;
+        let attempt = async {
+            let Some(delay) = self.transit(self.hub, peer, peer) else {
+                unanswered = Some(reply);
+                bump(lost);
+                return std::future::pending().await;
+            };
+            transit_delay(cx, delay).await;
+            match send(reply).await {
+                Ok(()) => {}
+                Err(ExchangeSendError::Cancelled) => return Exchange::Cancelled,
+                Err(ExchangeSendError::Gone) => return Exchange::Gone,
+            }
+            let answer = replies.recv(cx).await;
+            let Some(delay) = self.transit(peer, self.hub, peer) else {
+                // The reply is lost, perhaps after the peer acted on the
+                // request.
+                bump(lost);
+                return std::future::pending().await;
+            };
+            transit_delay(cx, delay).await;
+            match answer {
+                Ok(value) => Exchange::Replied(value),
+                Err(oneshot::RecvError::Cancelled) => Exchange::Cancelled,
+                Err(oneshot::RecvError::Closed | oneshot::RecvError::PolledAfterCompletion) => {
+                    Exchange::NoReply
+                }
+            }
+        };
+        let outcome = crate::time::timeout(cx.now(), budget, attempt).await;
+        drop(unanswered);
+        outcome.unwrap_or(Exchange::TimedOut)
+    }
+}
+
+/// Why a request could not be handed to its peer.
+enum ExchangeSendError {
+    Cancelled,
+    Gone,
+}
+
+/// How a request/reply exchange ended.
+enum Exchange<T> {
+    Replied(T),
+    /// The peer dropped the reply without answering.
+    NoReply,
+    /// The peer's request channel is closed.
+    Gone,
+    Cancelled,
+    TimedOut,
+}
+
+/// Hands a request to a peer's bounded channel.
+async fn send_request<T>(
+    cx: &Cx,
+    requests: &mpsc::Sender<T>,
+    request: T,
+) -> Result<(), ExchangeSendError> {
+    match requests.send(cx, request).await {
+        Ok(()) => Ok(()),
+        Err(SendError::Cancelled(_)) => Err(ExchangeSendError::Cancelled),
+        Err(SendError::Disconnected(_) | SendError::Full(_)) => Err(ExchangeSendError::Gone),
     }
 }
 
@@ -2658,50 +3038,26 @@ impl SagaLink<'_> {
 /// messages cross the network: each can be delayed or lost on the way.
 async fn request_step(
     cx: &Cx,
-    link: SagaLink<'_>,
+    link: HubLink<'_>,
     target: &SagaStepTarget,
     step: Duration,
     record: &SagaRecord,
 ) -> Result<(), SagaEnd> {
     let participant = target.name.as_str();
-    let (reply, mut replies) = oneshot::channel();
-    // The reply sender of a lost request. Keeping it makes the coordinator
-    // wait out the timeout instead of seeing a closed reply.
-    let mut unanswered = None;
-    let exchange = async {
-        let Some(delay) = link.transit(link.coordinator, participant, participant) else {
-            unanswered = Some(reply);
-            bump(&record.lost);
-            return std::future::pending().await;
-        };
-        transit_delay(cx, delay).await;
-        match target.requests.send(cx, SagaRequest { reply }).await {
-            Ok(()) => {}
-            Err(SendError::Cancelled(_)) => return Err(SagaEnd::Cancelled),
-            Err(SendError::Disconnected(_) | SendError::Full(_)) => {
-                return Err(SagaEnd::Aborted(format!("{participant} is gone")));
-            }
-        }
-        let answer = replies.recv(cx).await;
-        let Some(delay) = link.transit(participant, link.coordinator, participant) else {
-            // The reply is lost, perhaps after the participant applied the
-            // step; the compensation will undo it.
-            bump(&record.lost);
-            return std::future::pending().await;
-        };
-        transit_delay(cx, delay).await;
-        match answer {
-            Ok(true) => Ok(()),
-            Ok(false) => Err(SagaEnd::Aborted(format!("{participant} refused"))),
-            Err(oneshot::RecvError::Cancelled) => Err(SagaEnd::Cancelled),
-            Err(oneshot::RecvError::Closed | oneshot::RecvError::PolledAfterCompletion) => {
-                Err(SagaEnd::Aborted(format!("{participant} dropped the reply")))
-            }
-        }
-    };
-    let answer = crate::time::timeout(cx.now(), step, exchange).await;
-    drop(unanswered);
-    answer.unwrap_or_else(|_| Err(SagaEnd::Aborted(format!("{participant} timed out"))))
+    // A lost reply may follow an applied step; the compensation undoes it.
+    let outcome = link
+        .exchange(cx, participant, step, &record.lost, |reply| {
+            send_request(cx, &target.requests, SagaRequest { reply })
+        })
+        .await;
+    match outcome {
+        Exchange::Replied(true) => Ok(()),
+        Exchange::Replied(false) => Err(SagaEnd::Aborted(format!("{participant} refused"))),
+        Exchange::NoReply => Err(SagaEnd::Aborted(format!("{participant} dropped the reply"))),
+        Exchange::Gone => Err(SagaEnd::Aborted(format!("{participant} is gone"))),
+        Exchange::Cancelled => Err(SagaEnd::Cancelled),
+        Exchange::TimedOut => Err(SagaEnd::Aborted(format!("{participant} timed out"))),
+    }
 }
 
 /// Body of a bound `saga-participant`: it applies each request unless its
@@ -2729,6 +3085,148 @@ async fn run_saga_participant(
                     }
                     // The coordinator may have stopped waiting for this reply.
                     let _ = request.reply.send(&cx, applied);
+                }
+                Err(RecvError::Disconnected) => {
+                    counters.drained_to_close.store(true, Ordering::Relaxed);
+                    break;
+                }
+                Err(RecvError::Cancelled) => {
+                    bump(&counters.cancelled);
+                    break;
+                }
+                Err(RecvError::Empty) => {
+                    bump(&counters.unexpected);
+                    break;
+                }
+            }
+        }
+    } else {
+        bump(&counters.unexpected);
+    }
+    counters.finished.store(true, Ordering::Relaxed);
+}
+
+/// How much a primary writes, and how often.
+#[derive(Debug, Clone, Copy)]
+struct Replication {
+    writes: u64,
+    write_ms: u64,
+}
+
+/// Body of a bound `primary`, or of the implicit one.
+///
+/// Each round it sleeps `write_ms` of virtual time, appends the next entry
+/// while writes remain, and ships every lagging replica the log from that
+/// replica's acknowledged length, waiting at most `write_ms` for each reply.
+/// A lost or late batch is shipped again the next round. After the last
+/// write it keeps shipping for up to [`CATCH_UP_ROUNDS`] rounds, until every
+/// replica has the whole log.
+async fn run_primary(
+    name: String,
+    targets: Vec<ReplicaTarget>,
+    plan: Replication,
+    partitions: Arc<PartitionTable>,
+    network: Arc<NetworkModel>,
+    record: Arc<ReplicationRecord>,
+    counters: Arc<WorkloadCounters>,
+) {
+    let Some(cx) = Cx::current() else {
+        bump(&counters.unexpected);
+        counters.finished.store(true, Ordering::Relaxed);
+        return;
+    };
+    let interval = Duration::from_millis(plan.write_ms);
+    let writes = usize::try_from(plan.writes).unwrap_or(usize::MAX);
+    let link = HubLink {
+        hub: &name,
+        partitions: &partitions,
+        network: &network,
+    };
+    let mut acked = vec![0_usize; targets.len()];
+    let mut cancelled = false;
+    'rounds: for round in 0..writes.saturating_add(CATCH_UP_ROUNDS) {
+        crate::time::sleep(cx.now(), interval).await;
+        if cx.checkpoint().is_err() {
+            cancelled = true;
+            break;
+        }
+        let log_len = {
+            let mut log = record.log.lock();
+            if round < writes {
+                log.push(u64::try_from(round).unwrap_or(u64::MAX));
+            }
+            log.len()
+        };
+        if round >= writes && acked.iter().all(|len| *len >= log_len) {
+            break;
+        }
+        for (target, acked) in targets.iter().zip(acked.iter_mut()) {
+            if *acked >= log_len {
+                continue;
+            }
+            let from = *acked;
+            let entries = record.log.lock()[from..].to_vec();
+            let cx_ref = &cx;
+            let batches = &target.batches;
+            let outcome = link
+                .exchange(&cx, &target.name, interval, &record.lost, move |reply| {
+                    let batch = ReplicationBatch {
+                        from,
+                        entries,
+                        reply,
+                    };
+                    send_request(cx_ref, batches, batch)
+                })
+                .await;
+            match outcome {
+                Exchange::Replied(len) => *acked = len,
+                Exchange::Cancelled => {
+                    cancelled = true;
+                    break 'rounds;
+                }
+                // Shipped again next round.
+                Exchange::TimedOut | Exchange::NoReply | Exchange::Gone => {}
+            }
+        }
+    }
+    let log_len = record.log.lock().len();
+    record.converged.store(
+        !cancelled && acked.iter().all(|len| *len == log_len),
+        Ordering::Relaxed,
+    );
+    if cancelled {
+        bump(&counters.cancelled);
+    }
+    counters.finished.store(true, Ordering::Relaxed);
+    // Dropping `targets` closes every replica's batch channel.
+}
+
+/// Body of a bound `replica`: it applies each batch that continues its log
+/// and replies with its log length. A batch that would leave a gap is not
+/// applied, and the primary ships again from the replied length.
+async fn run_replica(
+    mut batches: mpsc::Receiver<ReplicationBatch>,
+    log: Arc<Mutex<Vec<u64>>>,
+    counters: Arc<WorkloadCounters>,
+) {
+    if let Some(cx) = Cx::current() {
+        loop {
+            match batches.recv(&cx).await {
+                Ok(batch) => {
+                    bump(&counters.received);
+                    let len = {
+                        let mut log = log.lock();
+                        if batch.from <= log.len() {
+                            let overlap = log.len() - batch.from;
+                            for entry in batch.entries.into_iter().skip(overlap) {
+                                log.push(entry);
+                                bump(&counters.committed);
+                            }
+                        }
+                        log.len()
+                    };
+                    // The primary may have stopped waiting for this reply.
+                    let _ = batch.reply.send(&cx, len);
                 }
                 Err(RecvError::Disconnected) => {
                     counters.drained_to_close.store(true, Ordering::Relaxed);
@@ -2971,6 +3469,8 @@ impl ScenarioRunner {
         let mut has_worker = false;
         let mut has_coordinator = false;
         let mut has_saga_participant = false;
+        let mut has_primary = false;
+        let mut has_replica = false;
         for participant in &scenario.participants {
             let binding = ParticipantBinding {
                 name: participant.name.clone(),
@@ -3001,6 +3501,14 @@ impl ScenarioRunner {
                     has_saga_participant = true;
                     bindings.bound.push(binding);
                 }
+                PRIMARY_ROLE => {
+                    has_primary = true;
+                    bindings.bound.push(binding);
+                }
+                REPLICA_ROLE => {
+                    has_replica = true;
+                    bindings.bound.push(binding);
+                }
                 SWARM_ROLE => bindings.bound.push(binding),
                 _ => bindings.unbound.push(binding),
             }
@@ -3008,6 +3516,7 @@ impl ScenarioRunner {
         bindings.implicit_sink = has_sender && !has_receiver;
         bindings.implicit_supervisor = has_worker && !has_supervisor;
         bindings.implicit_coordinator = has_saga_participant && !has_coordinator;
+        bindings.implicit_primary = has_replica && !has_primary;
         bindings
     }
 
@@ -4147,7 +4656,9 @@ mod tests {
                 "supervisor",
                 "worker",
                 "saga-coordinator",
-                "saga-participant"
+                "saga-participant",
+                "primary",
+                "replica"
             ]
         );
 
@@ -4162,12 +4673,12 @@ mod tests {
             Some("Participants: 2 bound (sender), 0 unbound")
         );
 
-        scenario.participants = vec![participant("node-a", "primary")];
+        scenario.participants = vec![participant("node-a", "lease-holder")];
         assert_eq!(
             ScenarioRunner::participant_bindings(&scenario)
                 .summary_line()
                 .as_deref(),
-            Some("Participants: 0 bound, 1 unbound (primary)")
+            Some("Participants: 0 bound, 1 unbound (lease-holder)")
         );
         crate::test_complete!("participant_bindings_classify_roles_exactly");
     }
@@ -4178,7 +4689,7 @@ mod tests {
         let baseline = ScenarioRunner::run(&minimal_scenario()).unwrap();
         let mut scenario = minimal_scenario();
         scenario.participants = vec![
-            participant("node-a", "primary"),
+            participant("node-a", "lease-holder"),
             participant("node-b", "Receiver"),
         ];
         let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
@@ -5252,6 +5763,200 @@ mod tests {
             )
         );
         crate::test_complete!("network_latency_and_loss_reach_saga_messages");
+    }
+
+    fn replication_record<'a>(tasks: &'a [BoundTask], name: &str) -> &'a ReplicationRecord {
+        tasks
+            .iter()
+            .find_map(|task| match &task.detail {
+                BoundDetail::Primary(record) if task.name == name => Some(&**record),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no primary named {name}"))
+    }
+
+    fn replica_logs(record: &ReplicationRecord) -> Vec<(String, Vec<u64>)> {
+        record
+            .replicas
+            .iter()
+            .map(|(name, log)| (name.clone(), log.lock().clone()))
+            .collect()
+    }
+
+    fn replication_scenario(replicas: usize, writes: u64) -> Scenario {
+        let mut scenario = minimal_scenario();
+        scenario.id = "test-replication".to_string();
+        scenario.participants = vec![participant_with(
+            "p",
+            "primary",
+            "writes",
+            serde_json::json!(writes),
+        )];
+        scenario
+            .participants
+            .extend((0..replicas).map(|index| participant(&format!("r{index}"), "replica")));
+        scenario
+    }
+
+    fn partition_fault(at_ms: u64, action: FaultAction, from: &str, to: &str) -> FaultEvent {
+        FaultEvent {
+            at_ms,
+            action,
+            args: BTreeMap::from([
+                ("from".to_string(), serde_json::json!(from)),
+                ("to".to_string(), serde_json::json!(to)),
+            ]),
+        }
+    }
+
+    #[test]
+    fn replication_ships_the_whole_log_to_every_replica() {
+        init_test("replication_ships_the_whole_log_to_every_replica");
+        let scenario = replication_scenario(2, 10);
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+        let record = replication_record(&tasks, "p");
+        let expected: Vec<u64> = (0..10).collect();
+        assert_eq!(*record.log.lock(), expected);
+        assert!(record.converged.load(Ordering::Relaxed));
+        assert_eq!(count(&record.lost), 0);
+        assert_eq!(
+            replica_logs(record),
+            [
+                ("r0".to_owned(), expected.clone()),
+                ("r1".to_owned(), expected)
+            ]
+        );
+        crate::test_complete!("replication_ships_the_whole_log_to_every_replica");
+    }
+
+    /// Rounds start 50 ms apart. r1's link is cut from 120 to 360 ms, and a
+    /// lost batch costs its round the 50 ms reply budget, so the rounds at
+    /// 150, 250 and 350 ms lose r1's batch; the round at 450 ms catches it
+    /// up. Without the heal it keeps the two entries it had, a safe prefix.
+    #[test]
+    fn a_partitioned_replica_catches_up_after_the_heal() {
+        init_test("a_partitioned_replica_catches_up_after_the_heal");
+        let mut scenario = replication_scenario(2, 10);
+        scenario.faults = vec![
+            partition_fault(120, FaultAction::Partition, "p", "r1"),
+            partition_fault(360, FaultAction::Heal, "p", "r1"),
+        ];
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+        let record = replication_record(&tasks, "p");
+        let expected: Vec<u64> = (0..10).collect();
+        assert!(record.converged.load(Ordering::Relaxed));
+        assert_eq!(count(&record.lost), 3);
+        assert_eq!(replica_logs(record)[1], ("r1".to_owned(), expected));
+
+        scenario.faults.pop();
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+        let record = replication_record(&tasks, "p");
+        assert!(!record.converged.load(Ordering::Relaxed));
+        assert_eq!(replica_logs(record)[1], ("r1".to_owned(), vec![0, 1]));
+        assert_eq!(replica_logs(record)[0].1.len(), 10);
+        crate::test_complete!("a_partitioned_replica_catches_up_after_the_heal");
+    }
+
+    /// Half of r0's replies are dropped, so the primary ships again entries
+    /// r0 already applied. r0 skips the overlap: its log stays duplicate-free.
+    #[test]
+    fn lost_replies_resend_entries_the_replica_skips() {
+        init_test("lost_replies_resend_entries_the_replica_skips");
+        let mut scenario = replication_scenario(1, 10);
+        scenario
+            .network
+            .links
+            .insert("r0->p".to_owned(), link(None, Some(0.5)));
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+        let record = replication_record(&tasks, "p");
+        assert!(count(&record.lost) > 0);
+        assert!(record.converged.load(Ordering::Relaxed));
+        let expected: Vec<u64> = (0..10).collect();
+        assert_eq!(replica_logs(record), [("r0".to_owned(), expected)]);
+        // Every lost reply followed an applied batch, so the next batch
+        // overlapped; r0 still applied each entry exactly once.
+        let r0 = tasks.iter().find(|task| task.name == "r0").expect("r0");
+        assert_eq!(count(&r0.counters.committed), 10);
+        crate::test_complete!("lost_replies_resend_entries_the_replica_skips");
+    }
+
+    /// The shipped fixture: node-b's link is cut from 200 to 800 ms while
+    /// node-a writes 20 entries, one every 50 ms.
+    #[test]
+    fn composed_partition_fixture_replica_converges_after_the_heal() {
+        init_test("composed_partition_fixture_replica_converges_after_the_heal");
+        let yaml = include_str!("../../examples/scenarios/composed_partition_test.yaml");
+        let scenario: Scenario = serde_yaml::from_str(yaml).expect("parse composed fixture");
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+        let record = replication_record(&tasks, "node-a");
+        assert!(record.converged.load(Ordering::Relaxed));
+        assert!(count(&record.lost) > 0, "the partition must cost batches");
+        let expected: Vec<u64> = (0..DEFAULT_PRIMARY_WRITES).collect();
+        assert_eq!(replica_logs(record), [("node-b".to_owned(), expected)]);
+        crate::test_complete!("composed_partition_fixture_replica_converges_after_the_heal");
+    }
+
+    #[test]
+    fn replication_checker_flags_diverged_replicas_and_a_missing_end() {
+        init_test("replication_checker_flags_diverged_replicas_and_a_missing_end");
+        let record = |replicas: Vec<Vec<u64>>| ReplicationRecord {
+            log: Mutex::new(vec![0, 1, 2]),
+            replicas: replicas
+                .into_iter()
+                .enumerate()
+                .map(|(index, log)| (format!("r{index}"), Arc::new(Mutex::new(log))))
+                .collect(),
+            ..ReplicationRecord::default()
+        };
+        let kinds = |record: &ReplicationRecord, finished: bool| {
+            let mut violations = Vec::new();
+            record.collect_violations("workload:primary:p", finished, false, &mut violations);
+            violations
+                .iter()
+                .map(|violation| violation.split(':').nth(3).unwrap_or_default().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert!(kinds(&record(vec![vec![], vec![0, 1], vec![0, 1, 2]]), true).is_empty());
+        assert_eq!(kinds(&record(vec![vec![0, 5]]), true), ["diverged"]);
+        assert_eq!(kinds(&record(vec![vec![0, 1, 2, 3]]), true), ["diverged"]);
+        assert_eq!(kinds(&record(vec![vec![0]]), false), ["no_end"]);
+        crate::test_complete!("replication_checker_flags_diverged_replicas_and_a_missing_end");
+    }
+
+    #[test]
+    fn primary_properties_are_validated() {
+        init_test("primary_properties_are_validated");
+        let mut scenario = minimal_scenario();
+        scenario.participants = vec![
+            participant_with(
+                "a",
+                "primary",
+                "writes",
+                serde_json::json!(MAX_PRIMARY_WRITES + 1),
+            ),
+            participant_with("b", "primary", "writes", serde_json::json!("many")),
+            participant_with("c", "primary", "write_ms", serde_json::json!(0)),
+        ];
+        match ScenarioRunner::run(&scenario) {
+            Err(ScenarioRunnerError::Validation { errors, .. }) => {
+                let fields: Vec<_> = errors.iter().map(|error| error.field.as_str()).collect();
+                assert_eq!(
+                    fields,
+                    [
+                        "participants.a.properties.writes",
+                        "participants.b.properties.writes",
+                        "participants.c.properties.write_ms",
+                    ]
+                );
+            }
+            other => panic!("expected a participant property validation error, got {other:?}"),
+        }
+        crate::test_complete!("primary_properties_are_validated");
     }
 
     #[test]

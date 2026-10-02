@@ -79,16 +79,17 @@ and descriptions are authoring narratives, not evidence that the runner simulate
 every declared network, cancellation, or fault effect or schedules the named
 workload. Include paths are validated but not merged. Only participants whose
 role is exactly `sender`, `receiver`, `swarm`, `supervisor`, `worker`,
-`saga-coordinator` or `saga-participant` run: senders and receivers as lab
-tasks on bounded two-phase `mpsc` channels, a swarm as many short lab tasks,
-supervisors as managed supervisors that restart failing workers, and saga
-coordinators as `remote::Saga` runs that compensate in reverse when a
-participant refuses or a message is lost. The `network` preset and per-link
-latency and loss delay or drop saga messages, and `partition` and `heal`
-faults between two participants cut and restore saga links; no other fault
-changes the workload. Other roles run nothing (`Steps: 0 (no workload ran)`).
-See the [author guide](../docs/adoption/getting_started.md) for the field
-boundaries.
+`saga-coordinator`, `saga-participant`, `primary` or `replica` run: senders
+and receivers as lab tasks on bounded two-phase `mpsc` channels, a swarm as
+many short lab tasks, supervisors as managed supervisors that restart failing
+workers, saga coordinators as `remote::Saga` runs that compensate in reverse
+when a participant refuses or a message is lost, and primaries as log
+shippers that catch lagging replicas up. The `network` preset and per-link
+latency and loss delay or drop saga and replication messages, and
+`partition` and `heal` faults between two participants cut and restore their
+links; no other fault changes the workload. Other roles run nothing
+(`Steps: 0 (no workload ran)`). See the
+[author guide](../docs/adoption/getting_started.md) for the field boundaries.
 
 - [`scenarios/smoke_happy_path.yaml`](scenarios/smoke_happy_path.yaml) — small
   typed smoke fixture.
@@ -102,7 +103,8 @@ boundaries.
 - [`scenarios/composable_base.yaml`](scenarios/composable_base.yaml) — reusable
   base-shaped fixture; current loaders do not merge it into another document.
 - [`scenarios/composed_partition_test.yaml`](scenarios/composed_partition_test.yaml)
-  — include and partition declaration fixture; include resolution is not wired.
+  — replication fixture; `node-b` misses `node-a`'s batches while their link
+  is cut and catches up after the heal. Its include is not merged.
 - [`scenarios/custom_latency_model.yaml`](scenarios/custom_latency_model.yaml) —
   network-latency fixture; its hub and peer roles are unbound, so its links
   shape no traffic.
