@@ -35,15 +35,17 @@ frankenlab validate frankenlab/examples/scenarios/01_race_condition.yaml
 frankenlab run frankenlab/examples/scenarios/01_race_condition.yaml
 ```
 
-Human-readable output has this shape:
+Human-readable output has this shape (`<N>` and `<u64>` stand for the values
+your binary prints):
 
 ```
 Scenario: example-race-condition [PASS]
 Seed: 42
-Steps: 0
+Steps: <N>
+Participants: 2 bound (sender), 0 unbound
 Faults injected: 0
 Oracles: 24/24 passed (16 not fed by the lab runtime)
-Certificate: event_hash=0, schedule_hash=0
+Certificate: event_hash=<u64>, schedule_hash=<u64>
 ```
 
 The count in parentheses is the number of checked oracles that the lab
@@ -52,9 +54,31 @@ runtime never sends events to. They pass without having observed anything.
 does feed.
 
 `lab.seed` feeds the deterministic scheduler. The YAML schema itself does not
-create application tasks, messages, leases, or saga work, so a narrative
-scenario may legitimately report zero steps. Treat the result as evidence for
-the current runner and binary, not as a cross-build or cross-platform promise.
+create application tasks, messages, leases, or saga work. The runner binds
+only participants whose `role` is exactly `sender` or `receiver` (the match is
+case-sensitive) and spawns a lab task for each:
+
+- a receiver owns a bounded `mpsc` channel (`properties.capacity`, default 4,
+  at most 4096) and drains it until every sender is gone;
+- a sender sends `properties.messages` values (default 16) to the receivers in
+  round-robin order through the two-phase `reserve`/`send` API, so each value
+  is a runtime-tracked `SendPermit` obligation that the obligation oracle sees;
+- senders without any receiver, as in `01_race_condition.yaml`, race on one
+  shared channel drained by an implicit sink task, and receivers without
+  senders see a closed channel at once.
+
+Lab chaos can cancel these tasks mid-protocol; a cancelled send or receive is
+counted and ends that task. A run fails with a `workload:` invariant violation
+if a bound task cannot be spawned, receives one sender's values out of order,
+drains its channel to close without receiving every committed value, or meets
+an outcome the channel contract rules out. A malformed `messages` or `capacity`
+value on a bound participant is a run-time validation error.
+
+Every other role is unbound and schedules no work. The `Participants:` line
+(printed only when the scenario declares participants) shows the split, and a
+run that executed nothing prints `Steps: 0 (no workload ran)`: its oracles had
+nothing to observe. Treat the result as evidence for the current runner and
+binary, not as a cross-build or cross-platform promise.
 
 Try a different seed:
 
@@ -64,19 +88,20 @@ frankenlab run frankenlab/examples/scenarios/01_race_condition.yaml --seed 99
 
 ## 3. Explore scheduler seeds
 
-Sweep through seeds for the workload the runner actually has. Exploration does
-not synthesize a workload from participant names or a scenario description.
+Sweep through seeds for the workload the runner actually has: the bound
+`sender`/`receiver` tasks, if any. Exploration does not synthesize work for
+unbound roles or from a scenario description.
 
 ```bash
 frankenlab explore frankenlab/examples/scenarios/02_obligation_leak.yaml --seeds 200
 ```
 
-Output:
+Output shape:
 
 ```
 Exploration: example-obligation-leak [PASS]
 Seeds: 200/200 passed
-Unique fingerprints: 200
+Unique fingerprints: <N>
 ```
 
 If a seed fails, FrankenLab reports the first failing seed. Replay the exact
@@ -92,10 +117,10 @@ fingerprints:
 frankenlab replay frankenlab/examples/scenarios/01_race_condition.yaml
 ```
 
-Output:
+Output shape:
 
 ```
-Replay verified: example-race-condition (seed=42, event_hash=0, schedule_hash=0)
+Replay verified: example-race-condition (seed=42, event_hash=<u64>, schedule_hash=<u64>)
 ```
 
 If the two runs disagree, FrankenLab reports a divergence. A green replay is a
@@ -115,8 +140,10 @@ Today, every fault declaration produces a timed trace entry. Disk
 pressure/recovery, delayed cleanup, and process stall/resume also affect a
 synthetic effect summary. Partition/heal, host crash/restart, and clock
 skew/reset are recorded but do not simulate those behaviors. Network and
-cancellation sections are validation-only, participant names only validate
-fault references, and participant roles/properties do not schedule work.
+cancellation sections are validation-only, and participant names validate
+fault references. This fixture's `saga-coordinator` and `saga-participant`
+roles are unbound, so the run prints `Steps: 0 (no workload ran)` and
+`Participants: 0 bound, 11 unbound (saga-coordinator, saga-participant)`.
 
 The fixture is therefore useful for schema and trace-shape authoring, but its
 name and comments are not proof of a partitioned saga execution.
@@ -166,9 +193,22 @@ lab:
 chaos:
   preset: "off"
 
+participants:
+  - name: producer
+    role: sender
+    properties:
+      messages: 32
+  - name: consumer
+    role: receiver
+    properties:
+      capacity: 2
+
 oracles:
   - all
 ```
+
+Without the two bound participants, this scenario would run an empty lab and
+print `Steps: 0 (no workload ran)`.
 
 Current field-consumption boundaries:
 
@@ -183,7 +223,7 @@ Current field-consumption boundaries:
 | `include` | Paths are validated only; referenced files are not read or merged |
 | `network` | Validated only; not consumed by `ScenarioRunner` |
 | `cancellation` | Validated only; not consumed by `ScenarioRunner` |
-| `participants` | Names validate fault references; roles/properties are otherwise unused |
+| `participants` | Names validate fault references; `sender`/`receiver` roles (with `messages`/`capacity` properties) run as lab tasks; other roles are unused |
 | `expected_invariants` | Validated only; does not select or enforce runner checks |
 | `golden_projection` | `format` is unused; `canonicalized` and `redacted` do not transform output |
 

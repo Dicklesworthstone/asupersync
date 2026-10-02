@@ -2,10 +2,43 @@
 //!
 //! Bridges [`Scenario`] YAML specifications to [`LabRuntime`] execution, providing:
 //!
+//! - Participant workloads: `sender` and `receiver` roles become real lab tasks
 //! - Timed fault injection based on scenario fault events
 //! - Oracle filtering (only check oracles listed in the scenario)
 //! - Seed exploration (run the same scenario across multiple seeds)
 //! - Replay validation (run twice, verify identical trace certificates)
+//!
+//! # Participant workloads
+//!
+//! Before any fault fires, the runner spawns one lab task per participant
+//! whose `role` is exactly `sender` or `receiver` (case-sensitive), all in
+//! one root region:
+//!
+//! - each receiver owns a bounded [`mpsc`] channel
+//!   (`properties.capacity`, default 4, at most 4096) and drains it until
+//!   every sender is gone;
+//! - each sender sends `properties.messages` values (default 16) to the
+//!   receivers in round-robin order through the two-phase `reserve` and
+//!   `send` API, so every value is a runtime-tracked `SendPermit`
+//!   obligation;
+//! - senders without any receiver race on one shared channel that an
+//!   implicit sink task drains, and receivers without senders observe a
+//!   closed channel at once.
+//!
+//! Lab chaos may cancel these tasks mid-protocol. A send or receive that
+//! ends in cancellation is counted and stops that task; it is never retried.
+//! The runner appends a `workload:` entry to the report's invariant
+//! violations, which fails the run, when a bound task cannot be spawned,
+//! meets an outcome the channel contract rules out, receives one sender's
+//! values out of order, or drains its channel to close without receiving
+//! every value committed into it. Timed faults stay trace and effect-summary
+//! records; they do not partition the bound channels.
+//!
+//! Every other role is unbound: the runner validates the participant and
+//! schedules no work for it. A scenario without bound participants still
+//! runs an empty lab and reports zero steps.
+//! [`ScenarioRunner::participant_bindings`] reports the split. The workload is
+//! a pure function of the scenario and the lab seed.
 //!
 //! # Quick Start
 //!
@@ -24,11 +57,17 @@ use super::config::LabConfig;
 use super::dual_run::{DualRunScenarioIdentity, ReplayMetadata, SeedLineageRecord};
 use super::oracle::{OracleRegistry, OracleRegistryError, OracleReport};
 use super::runtime::{LabRunReport, LabRuntime};
-use super::scenario::{FaultAction, FaultEvent, Scenario, ValidationError};
+use super::scenario::{FaultAction, FaultEvent, Participant, Scenario, ValidationError};
+use crate::channel::mpsc::{self, RecvError, SendError};
+use crate::cx::Cx;
+use crate::runtime::TaskHandle;
 use crate::trace::replay::ReplayTrace;
-use crate::types::Time;
+use crate::types::{Budget, Outcome, RegionId, Time};
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
+use std::future::Future;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 const REPLAY_DIVERGENCE_CODE: &str = "ASUP-E401";
 const LAB_SCENARIO_RUNNER_ADAPTER: &str = "lab.scenario_runner";
@@ -667,6 +706,587 @@ impl ExplorationRunSummary {
 }
 
 // ---------------------------------------------------------------------------
+// Participant bindings
+// ---------------------------------------------------------------------------
+
+/// Participant role bound to a task that sends values.
+const SENDER_ROLE: &str = "sender";
+/// Participant role bound to a task that drains a channel.
+const RECEIVER_ROLE: &str = "receiver";
+/// Values a sender produces when `properties.messages` is absent.
+const DEFAULT_SENDER_MESSAGES: u64 = 16;
+/// Channel capacity a receiver offers when `properties.capacity` is absent.
+const DEFAULT_RECEIVER_CAPACITY: usize = 4;
+/// Largest accepted `properties.capacity`; the channel preallocates its queue.
+const MAX_RECEIVER_CAPACITY: usize = 4096;
+/// Name of the implicit sink task in `workload:` diagnostics.
+const IMPLICIT_SINK_NAME: &str = "<implicit-sink>";
+/// Role label printed for a participant whose `role` is empty.
+const EMPTY_ROLE_LABEL: &str = "<none>";
+
+/// One declared participant and its role.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[non_exhaustive]
+pub struct ParticipantBinding {
+    /// Participant name from the scenario.
+    pub name: String,
+    /// Participant role from the scenario; empty when the role was omitted.
+    pub role: String,
+}
+
+/// Which declared participants the scenario runner executes.
+///
+/// Participants whose role is one of [`Self::BOUND_ROLES`] (exact,
+/// case-sensitive) run as lab tasks; every other participant is validated but
+/// schedules no work. Both lists keep declaration order.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+#[non_exhaustive]
+pub struct ParticipantBindings {
+    /// Participants the runner spawns as lab tasks.
+    pub bound: Vec<ParticipantBinding>,
+    /// Participants the runner validates but does not execute.
+    pub unbound: Vec<ParticipantBinding>,
+    /// True when senders have no receiver, so the runner adds a sink task.
+    pub implicit_sink: bool,
+}
+
+impl ParticipantBindings {
+    /// Roles the runner binds to lab tasks.
+    pub const BOUND_ROLES: &'static [&'static str] = &[SENDER_ROLE, RECEIVER_ROLE];
+
+    /// Returns true when the scenario declares no participants.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.bound.is_empty() && self.unbound.is_empty()
+    }
+
+    /// One-line human summary, or `None` when no participants are declared.
+    ///
+    /// The line reads `Participants: X bound (roles), Y unbound (roles)`. Each
+    /// role list names the distinct roles in declaration order and is left out
+    /// when its count is zero; an empty role prints as `<none>`.
+    #[must_use]
+    pub fn summary_line(&self) -> Option<String> {
+        if self.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "Participants: {} bound{}, {} unbound{}",
+            self.bound.len(),
+            Self::role_list(&self.bound),
+            self.unbound.len(),
+            Self::role_list(&self.unbound),
+        ))
+    }
+
+    fn role_list(entries: &[ParticipantBinding]) -> String {
+        let mut roles: Vec<&str> = Vec::new();
+        for entry in entries {
+            let role = if entry.role.is_empty() {
+                EMPTY_ROLE_LABEL
+            } else {
+                entry.role.as_str()
+            };
+            if !roles.contains(&role) {
+                roles.push(role);
+            }
+        }
+        if roles.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", roles.join(", "))
+        }
+    }
+}
+
+/// Planned work for one bound participant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlannedWork {
+    /// Send this many values.
+    Send { messages: u64 },
+    /// Drain a channel with this capacity.
+    Drain { capacity: usize },
+}
+
+/// One bound participant, in declaration order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlannedParticipant {
+    name: String,
+    work: PlannedWork,
+}
+
+/// Validated workload for the bound participants of one scenario.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct WorkloadPlan {
+    participants: Vec<PlannedParticipant>,
+}
+
+impl WorkloadPlan {
+    /// Builds the plan, rejecting malformed properties of bound participants.
+    fn from_scenario(scenario: &Scenario) -> Result<Self, Vec<ValidationError>> {
+        let mut participants = Vec::new();
+        let mut errors = Vec::new();
+        for participant in &scenario.participants {
+            let work = match participant.role.as_str() {
+                SENDER_ROLE => Self::sender_messages(participant)
+                    .map(|messages| PlannedWork::Send { messages }),
+                RECEIVER_ROLE => Self::receiver_capacity(participant)
+                    .map(|capacity| PlannedWork::Drain { capacity }),
+                _ => continue,
+            };
+            match work {
+                Ok(work) => participants.push(PlannedParticipant {
+                    name: participant.name.clone(),
+                    work,
+                }),
+                Err(error) => errors.push(error),
+            }
+        }
+        if errors.is_empty() {
+            Ok(Self { participants })
+        } else {
+            Err(errors)
+        }
+    }
+
+    fn property_error(participant: &Participant, key: &str, message: String) -> ValidationError {
+        ValidationError {
+            field: format!("participants.{}.properties.{key}", participant.name),
+            message,
+        }
+    }
+
+    fn sender_messages(participant: &Participant) -> Result<u64, ValidationError> {
+        let Some(value) = participant.properties.get("messages") else {
+            return Ok(DEFAULT_SENDER_MESSAGES);
+        };
+        value.as_u64().ok_or_else(|| {
+            Self::property_error(
+                participant,
+                "messages",
+                "a bound sender's message count must be a non-negative integer".to_owned(),
+            )
+        })
+    }
+
+    fn receiver_capacity(participant: &Participant) -> Result<usize, ValidationError> {
+        let Some(value) = participant.properties.get("capacity") else {
+            return Ok(DEFAULT_RECEIVER_CAPACITY);
+        };
+        value
+            .as_u64()
+            .and_then(|capacity| usize::try_from(capacity).ok())
+            .filter(|capacity| (1..=MAX_RECEIVER_CAPACITY).contains(capacity))
+            .ok_or_else(|| {
+                Self::property_error(
+                    participant,
+                    "capacity",
+                    format!(
+                        "a bound receiver's channel capacity must be an integer from 1 to {MAX_RECEIVER_CAPACITY}"
+                    ),
+                )
+            })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Participant workload execution
+// ---------------------------------------------------------------------------
+
+/// A value sent by a bound sender.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorkloadMessage {
+    /// Index of the producing sender among the bound senders.
+    sender: usize,
+    /// The sender's sequence number for this value, starting at zero.
+    seq: u64,
+}
+
+/// What a bound task does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkloadRole {
+    Sender,
+    Receiver,
+    Sink,
+}
+
+impl WorkloadRole {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Sender => SENDER_ROLE,
+            Self::Receiver => RECEIVER_ROLE,
+            Self::Sink => "sink",
+        }
+    }
+}
+
+/// Counters one bound task updates while it runs.
+///
+/// The lab polls every task on the thread that drives it, so relaxed atomics
+/// are enough; they exist only because task futures must be `Send`.
+#[derive(Debug, Default)]
+struct WorkloadCounters {
+    /// Sender: values committed through a reserved permit.
+    committed: AtomicU64,
+    /// Drain: values any sender committed into this task's channel.
+    delivered: AtomicU64,
+    /// Drain: values received.
+    received: AtomicU64,
+    /// Reserves or receives that ended in cancellation.
+    cancelled: AtomicU64,
+    /// Sender: reserves or sends that found the receiving end gone.
+    disconnected: AtomicU64,
+    /// Drain: values that arrived out of their sender's order.
+    out_of_order: AtomicU64,
+    /// Outcomes the channel contract rules out, or a missing task context.
+    unexpected: AtomicU64,
+    /// Drain: the receive loop ended because every sender was gone.
+    drained_to_close: AtomicBool,
+    /// The task body ran to its end.
+    finished: AtomicBool,
+}
+
+fn bump(counter: &AtomicU64) {
+    counter.fetch_add(1, Ordering::Relaxed);
+}
+
+fn count(counter: &AtomicU64) -> u64 {
+    counter.load(Ordering::Relaxed)
+}
+
+fn flag(value: &AtomicBool) -> u8 {
+    u8::from(value.load(Ordering::Relaxed))
+}
+
+/// The sending half of one drain task's channel.
+#[derive(Debug, Clone)]
+struct WorkloadLane {
+    tx: mpsc::Sender<WorkloadMessage>,
+    /// Counters of the task that drains this channel.
+    drain: Arc<WorkloadCounters>,
+}
+
+/// One bound task and its counters.
+#[derive(Debug)]
+struct BoundTask {
+    name: String,
+    role: WorkloadRole,
+    /// Values the task was planned to send (zero for drains).
+    planned: u64,
+    /// Why the runtime refused to spawn the task, if it did.
+    spawn_refusal: Option<String>,
+    counters: Arc<WorkloadCounters>,
+}
+
+impl BoundTask {
+    fn counter_summary(&self) -> String {
+        let c = &self.counters;
+        format!(
+            "planned={},committed={},delivered={},received={},cancelled={},disconnected={},out_of_order={},unexpected={},drained_to_close={},finished={}",
+            self.planned,
+            count(&c.committed),
+            count(&c.delivered),
+            count(&c.received),
+            count(&c.cancelled),
+            count(&c.disconnected),
+            count(&c.out_of_order),
+            count(&c.unexpected),
+            flag(&c.drained_to_close),
+            flag(&c.finished),
+        )
+    }
+
+    /// Appends one `workload:` violation per anomaly this task observed.
+    fn collect_violations(&self, violations: &mut Vec<String>) {
+        let label = format!("workload:{}:{}", self.role.label(), self.name);
+        if let Some(refusal) = &self.spawn_refusal {
+            violations.push(format!("{label}:spawn_refused:{refusal}"));
+            return;
+        }
+        let c = &self.counters;
+        if count(&c.unexpected) > 0 {
+            violations.push(format!(
+                "{label}:unexpected_outcome:{}",
+                self.counter_summary()
+            ));
+        }
+        if count(&c.out_of_order) > 0 {
+            violations.push(format!("{label}:fifo_violation:{}", self.counter_summary()));
+        }
+        if c.drained_to_close.load(Ordering::Relaxed) && count(&c.received) != count(&c.delivered) {
+            violations.push(format!("{label}:lost_values:{}", self.counter_summary()));
+        }
+    }
+}
+
+/// The bound participant tasks of one run.
+#[derive(Debug, Default)]
+struct ParticipantWorkload {
+    tasks: Vec<BoundTask>,
+    /// Join handles, held until the run is reported.
+    handles: Vec<TaskHandle<()>>,
+}
+
+/// Work a bound participant was given before its task is spawned.
+enum Endpoint {
+    Send { messages: u64 },
+    Drain { rx: mpsc::Receiver<WorkloadMessage> },
+}
+
+impl ParticipantWorkload {
+    /// Spawns the planned tasks in a new root region and schedules them.
+    ///
+    /// An empty plan spawns nothing and creates no region, so a scenario
+    /// without bound participants keeps the empty-lab trace it always had.
+    fn spawn(runtime: &mut LabRuntime, plan: &WorkloadPlan) -> Self {
+        let mut workload = Self::default();
+        if plan.participants.is_empty() {
+            return workload;
+        }
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+
+        // Pass 1: a counter set per participant and a channel per receiver,
+        // so that every sender sees the full lane list.
+        let counters: Vec<Arc<WorkloadCounters>> = plan
+            .participants
+            .iter()
+            .map(|_| Arc::new(WorkloadCounters::default()))
+            .collect();
+        let mut lanes = Vec::new();
+        let mut endpoints = Vec::with_capacity(plan.participants.len());
+        let mut sender_total = 0_usize;
+        for (participant, participant_counters) in plan.participants.iter().zip(&counters) {
+            match participant.work {
+                PlannedWork::Send { messages } => {
+                    sender_total += 1;
+                    endpoints.push(Endpoint::Send { messages });
+                }
+                PlannedWork::Drain { capacity } => {
+                    let (tx, rx) = mpsc::channel(capacity);
+                    lanes.push(WorkloadLane {
+                        tx,
+                        drain: Arc::clone(participant_counters),
+                    });
+                    endpoints.push(Endpoint::Drain { rx });
+                }
+            }
+        }
+        let sink = if lanes.is_empty() && sender_total > 0 {
+            let drain = Arc::new(WorkloadCounters::default());
+            let (tx, rx) = mpsc::channel(DEFAULT_RECEIVER_CAPACITY);
+            lanes.push(WorkloadLane {
+                tx,
+                drain: Arc::clone(&drain),
+            });
+            Some((rx, drain))
+        } else {
+            None
+        };
+
+        // Pass 2: spawn in declaration order, then the sink.
+        let mut sender_index = 0_usize;
+        for ((participant, endpoint), task_counters) in
+            plan.participants.iter().zip(endpoints).zip(counters)
+        {
+            match endpoint {
+                Endpoint::Send { messages } => {
+                    let body = run_sender(
+                        lanes.clone(),
+                        sender_index,
+                        messages,
+                        Arc::clone(&task_counters),
+                    );
+                    sender_index += 1;
+                    workload.spawn_task(
+                        runtime,
+                        root,
+                        &participant.name,
+                        WorkloadRole::Sender,
+                        messages,
+                        task_counters,
+                        body,
+                    );
+                }
+                Endpoint::Drain { rx } => {
+                    let body = run_drain(rx, sender_total, Arc::clone(&task_counters));
+                    workload.spawn_task(
+                        runtime,
+                        root,
+                        &participant.name,
+                        WorkloadRole::Receiver,
+                        0,
+                        task_counters,
+                        body,
+                    );
+                }
+            }
+        }
+        if let Some((rx, drain)) = sink {
+            let body = run_drain(rx, sender_total, Arc::clone(&drain));
+            workload.spawn_task(
+                runtime,
+                root,
+                IMPLICIT_SINK_NAME,
+                WorkloadRole::Sink,
+                0,
+                drain,
+                body,
+            );
+        }
+        // Release the spawner's own senders: once every sender task ends, the
+        // drain tasks see their channels close.
+        drop(lanes);
+        workload
+    }
+
+    fn spawn_task<F>(
+        &mut self,
+        runtime: &mut LabRuntime,
+        root: RegionId,
+        name: &str,
+        role: WorkloadRole,
+        planned: u64,
+        counters: Arc<WorkloadCounters>,
+        body: F,
+    ) where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let spawn_refusal = match runtime.state.create_task(root, Budget::INFINITE, body) {
+            Ok((task, handle)) => {
+                runtime.scheduler.lock().schedule(task, 0);
+                self.handles.push(handle);
+                None
+            }
+            Err(error) => Some(error.to_string()),
+        };
+        self.tasks.push(BoundTask {
+            name: name.to_owned(),
+            role,
+            planned,
+            spawn_refusal,
+            counters,
+        });
+    }
+
+    /// Releases the join handles and appends `workload:` violations.
+    ///
+    /// Returns the task records so callers can inspect the counters.
+    fn finish(self, violations: &mut Vec<String>) -> Vec<BoundTask> {
+        for task in &self.tasks {
+            task.collect_violations(violations);
+        }
+        violations.sort();
+        violations.dedup();
+        drop(self.handles);
+        self.tasks
+    }
+}
+
+/// Body of a bound `sender` task.
+///
+/// Value `seq` goes to lane `(sender + seq) % lanes`, so senders start on
+/// different receivers and then rotate through all of them.
+async fn run_sender(
+    lanes: Vec<WorkloadLane>,
+    sender: usize,
+    messages: u64,
+    counters: Arc<WorkloadCounters>,
+) {
+    match Cx::current() {
+        Some(cx) if !lanes.is_empty() => {
+            let mut lane = sender % lanes.len();
+            for seq in 0..messages {
+                let WorkloadLane { tx, drain } = &lanes[lane];
+                lane = (lane + 1) % lanes.len();
+                let message = WorkloadMessage { sender, seq };
+                // Two-phase send: the permit is a runtime obligation from the
+                // reserve until `send` commits it.
+                let stop = match tx.reserve(&cx).await {
+                    Ok(permit) => match permit.send(message) {
+                        Outcome::Ok(()) => {
+                            bump(&counters.committed);
+                            bump(&drain.delivered);
+                            false
+                        }
+                        Outcome::Err(SendError::Disconnected(_)) => {
+                            bump(&counters.disconnected);
+                            false
+                        }
+                        Outcome::Err(SendError::Cancelled(_)) | Outcome::Cancelled(_) => {
+                            bump(&counters.cancelled);
+                            true
+                        }
+                        Outcome::Err(SendError::Full(_)) | Outcome::Panicked(_) => {
+                            bump(&counters.unexpected);
+                            false
+                        }
+                    },
+                    Err(SendError::Cancelled(())) => {
+                        bump(&counters.cancelled);
+                        true
+                    }
+                    Err(SendError::Disconnected(())) => {
+                        bump(&counters.disconnected);
+                        false
+                    }
+                    Err(SendError::Full(())) => {
+                        bump(&counters.unexpected);
+                        false
+                    }
+                };
+                if stop {
+                    break;
+                }
+            }
+        }
+        // A bound task always runs with a task context and at least one lane.
+        _ => bump(&counters.unexpected),
+    }
+    counters.finished.store(true, Ordering::Relaxed);
+}
+
+/// Body of a bound `receiver` task or the implicit sink.
+async fn run_drain(
+    mut rx: mpsc::Receiver<WorkloadMessage>,
+    sender_total: usize,
+    counters: Arc<WorkloadCounters>,
+) {
+    if let Some(cx) = Cx::current() {
+        let mut last_seq: Vec<Option<u64>> = vec![None; sender_total];
+        loop {
+            match rx.recv(&cx).await {
+                Ok(message) => {
+                    bump(&counters.received);
+                    if let Some(last) = last_seq.get_mut(message.sender) {
+                        if last.is_some_and(|previous| message.seq <= previous) {
+                            bump(&counters.out_of_order);
+                        }
+                        *last = Some(message.seq);
+                    } else {
+                        bump(&counters.unexpected);
+                    }
+                }
+                Err(RecvError::Disconnected) => {
+                    counters.drained_to_close.store(true, Ordering::Relaxed);
+                    break;
+                }
+                Err(RecvError::Cancelled) => {
+                    bump(&counters.cancelled);
+                    break;
+                }
+                Err(RecvError::Empty) => {
+                    bump(&counters.unexpected);
+                    break;
+                }
+            }
+        }
+    } else {
+        bump(&counters.unexpected);
+    }
+    counters.finished.store(true, Ordering::Relaxed);
+}
+
+// ---------------------------------------------------------------------------
 // ScenarioRunner
 // ---------------------------------------------------------------------------
 
@@ -761,6 +1381,43 @@ impl ScenarioRunner {
     fn validate_oracle_names(scenario: &Scenario) -> Result<(), ScenarioRunnerError> {
         OracleRegistry::validate_reported_selection(&scenario.oracles)
             .map_err(|err| ScenarioRunnerError::UnknownOracle(err.name().to_owned()))
+    }
+
+    /// Build the participant workload, rejecting malformed bound properties.
+    fn workload_plan(scenario: &Scenario) -> Result<WorkloadPlan, ScenarioRunnerError> {
+        WorkloadPlan::from_scenario(scenario)
+            .map_err(|errors| Self::validation_error(scenario, errors))
+    }
+
+    /// Classify the scenario's participants into bound and unbound roles.
+    ///
+    /// This is a pure function of the scenario. It does not check the
+    /// `messages` and `capacity` properties of bound participants; a run
+    /// rejects malformed values as a validation error.
+    #[must_use]
+    pub fn participant_bindings(scenario: &Scenario) -> ParticipantBindings {
+        let mut bindings = ParticipantBindings::default();
+        let mut has_sender = false;
+        let mut has_receiver = false;
+        for participant in &scenario.participants {
+            let binding = ParticipantBinding {
+                name: participant.name.clone(),
+                role: participant.role.clone(),
+            };
+            match participant.role.as_str() {
+                SENDER_ROLE => {
+                    has_sender = true;
+                    bindings.bound.push(binding);
+                }
+                RECEIVER_ROLE => {
+                    has_receiver = true;
+                    bindings.bound.push(binding);
+                }
+                _ => bindings.unbound.push(binding),
+            }
+        }
+        bindings.implicit_sink = has_sender && !has_receiver;
+        bindings
     }
 
     /// Create a `LabConfig` from a scenario, always enabling replay recording.
@@ -960,10 +1617,12 @@ impl ScenarioRunner {
             return Err(Self::validation_error(scenario, errors));
         }
         Self::validate_oracle_names(scenario)?;
+        let plan = Self::workload_plan(scenario)?;
 
         let effective_seed = identity.seed_plan.effective_lab_seed();
         let config = Self::lab_config_for_identity(scenario, identity);
         let mut runtime = LabRuntime::new(config);
+        let workload = ParticipantWorkload::spawn(&mut runtime, &plan);
 
         let (fault_log, fault_effect_summary) = Self::inject_faults(&mut runtime, scenario);
         let faults_injected = fault_log.len();
@@ -971,7 +1630,8 @@ impl ScenarioRunner {
             Self::minimized_counterexample_for(scenario, &fault_log, &fault_effect_summary);
         runtime.run_until_quiescent();
 
-        let lab_report = runtime.report();
+        let mut lab_report = runtime.report();
+        workload.finish(&mut lab_report.invariant_violations);
         let certificate = Self::certificate_snapshot(&lab_report);
         let replay_metadata = Self::replay_metadata_for_run(identity, &lab_report);
         let seed_lineage = identity.seed_lineage();
@@ -1001,6 +1661,9 @@ impl ScenarioRunner {
 
     /// Run a scenario, optionally overriding the seed.
     ///
+    /// Bound participants run as lab tasks (see the module docs). A malformed
+    /// `messages` or `capacity` property on one of them is a validation error.
+    ///
     /// # Errors
     ///
     /// Returns an error if the scenario fails validation or contains unknown oracle names.
@@ -1008,17 +1671,27 @@ impl ScenarioRunner {
         scenario: &Scenario,
         seed_override: Option<u64>,
     ) -> Result<ScenarioRunResult, ScenarioRunnerError> {
+        Self::run_seeded(scenario, seed_override).map(|(result, _tasks)| result)
+    }
+
+    /// [`Self::run_with_seed`], also returning the bound tasks' records.
+    fn run_seeded(
+        scenario: &Scenario,
+        seed_override: Option<u64>,
+    ) -> Result<(ScenarioRunResult, Vec<BoundTask>), ScenarioRunnerError> {
         // 1. Validate
         let errors = scenario.validate();
         if !errors.is_empty() {
             return Err(Self::validation_error(scenario, errors));
         }
         Self::validate_oracle_names(scenario)?;
+        let plan = Self::workload_plan(scenario)?;
 
-        // 2. Build runtime
+        // 2. Build runtime and spawn the bound participants
         let effective_seed = seed_override.unwrap_or(scenario.lab.seed);
         let config = Self::lab_config_for(scenario, seed_override);
         let mut runtime = LabRuntime::new(config);
+        let workload = ParticipantWorkload::spawn(&mut runtime, &plan);
 
         // 3. Inject timed faults and run between them
         let (fault_log, fault_effect_summary) = Self::inject_faults(&mut runtime, scenario);
@@ -1029,8 +1702,9 @@ impl ScenarioRunner {
         // 4. Run to quiescence after all faults
         runtime.run_until_quiescent();
 
-        // 5. Collect report
-        let lab_report = runtime.report();
+        // 5. Collect report, folding in workload anomalies
+        let mut lab_report = runtime.report();
+        let tasks = workload.finish(&mut lab_report.invariant_violations);
         let certificate = Self::certificate_snapshot(&lab_report);
         let identity = Self::scenario_identity(scenario, seed_override);
         let replay_metadata = Self::replay_metadata_for_run(&identity, &lab_report);
@@ -1046,7 +1720,7 @@ impl ScenarioRunner {
         // 7. Extract replay trace
         let replay_trace = runtime.finish_replay_trace();
 
-        Ok(ScenarioRunResult {
+        let result = ScenarioRunResult {
             scenario_id: scenario.id.clone(),
             seed: effective_seed,
             lab_report,
@@ -1060,7 +1734,8 @@ impl ScenarioRunner {
             adapter: LAB_SCENARIO_RUNNER_ADAPTER.to_string(),
             replay_metadata,
             seed_lineage,
-        })
+        };
+        Ok((result, tasks))
     }
 
     /// Explore a scenario across a range of seeds.
@@ -1719,6 +2394,413 @@ mod tests {
         assert!(msg.contains("seed 42"));
         assert!(msg.contains("divergence"));
         crate::test_complete!("error_display_divergence");
+    }
+
+    // ── participant workloads (asupersync-39okzv) ────────────────────────
+
+    fn participant(name: &str, role: &str) -> crate::lab::scenario::Participant {
+        crate::lab::scenario::Participant {
+            name: name.to_string(),
+            role: role.to_string(),
+            properties: BTreeMap::new(),
+        }
+    }
+
+    fn participant_with(
+        name: &str,
+        role: &str,
+        key: &str,
+        value: serde_json::Value,
+    ) -> crate::lab::scenario::Participant {
+        let mut participant = participant(name, role);
+        participant.properties.insert(key.to_string(), value);
+        participant
+    }
+
+    /// Two senders and two receivers with default properties: 32 values.
+    fn sender_receiver_scenario() -> Scenario {
+        let mut scenario = minimal_scenario();
+        scenario.id = "test-sender-receiver".to_string();
+        scenario.participants = vec![
+            participant("alice", "sender"),
+            participant("bob", "receiver"),
+            participant("carol", "sender"),
+            participant("dave", "receiver"),
+        ];
+        scenario
+    }
+
+    fn tasks_with_role(tasks: &[BoundTask], role: WorkloadRole) -> Vec<&BoundTask> {
+        tasks.iter().filter(|task| task.role == role).collect()
+    }
+
+    fn failure_detail(result: &ScenarioRunResult) -> String {
+        let failed_oracles: Vec<_> = result
+            .oracle_report
+            .entries
+            .iter()
+            .filter(|entry| !entry.passed)
+            .map(|entry| (entry.invariant.clone(), entry.violation.clone()))
+            .collect();
+        format!(
+            "quiescent={} violations={:?} failed_oracles={failed_oracles:?}",
+            result.lab_report.quiescent, result.lab_report.invariant_violations
+        )
+    }
+
+    #[test]
+    fn participant_bindings_classify_roles_exactly() {
+        init_test("participant_bindings_classify_roles_exactly");
+        let mut scenario = minimal_scenario();
+        let none = ScenarioRunner::participant_bindings(&scenario);
+        assert!(none.is_empty());
+        assert_eq!(none.summary_line(), None);
+
+        scenario.participants = vec![
+            participant("alice", "sender"),
+            participant("bob", "receiver"),
+            participant("carol", "Sender"),
+            participant("dave", "coordinator"),
+            participant("erin", ""),
+            participant("frank", "receiver"),
+        ];
+        let bindings = ScenarioRunner::participant_bindings(&scenario);
+        let names = |entries: &[ParticipantBinding]| {
+            entries
+                .iter()
+                .map(|entry| entry.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&bindings.bound), ["alice", "bob", "frank"]);
+        assert_eq!(names(&bindings.unbound), ["carol", "dave", "erin"]);
+        assert!(!bindings.implicit_sink);
+        assert_eq!(
+            bindings.summary_line().as_deref(),
+            Some(
+                "Participants: 3 bound (sender, receiver), 3 unbound (Sender, coordinator, <none>)"
+            )
+        );
+        assert_eq!(ParticipantBindings::BOUND_ROLES, ["sender", "receiver"]);
+
+        scenario.participants = vec![
+            participant("producer-a", "sender"),
+            participant("producer-b", "sender"),
+        ];
+        let senders_only = ScenarioRunner::participant_bindings(&scenario);
+        assert!(senders_only.implicit_sink);
+        assert_eq!(
+            senders_only.summary_line().as_deref(),
+            Some("Participants: 2 bound (sender), 0 unbound")
+        );
+
+        scenario.participants = vec![participant("node-a", "primary")];
+        assert_eq!(
+            ScenarioRunner::participant_bindings(&scenario)
+                .summary_line()
+                .as_deref(),
+            Some("Participants: 0 bound, 1 unbound (primary)")
+        );
+        crate::test_complete!("participant_bindings_classify_roles_exactly");
+    }
+
+    #[test]
+    fn unbound_participants_schedule_no_work() {
+        init_test("unbound_participants_schedule_no_work");
+        let baseline = ScenarioRunner::run(&minimal_scenario()).unwrap();
+        let mut scenario = minimal_scenario();
+        scenario.participants = vec![
+            participant("node-a", "primary"),
+            participant("node-b", "Receiver"),
+        ];
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(tasks.is_empty());
+        assert_eq!(result.lab_report.steps_total, 0);
+        assert_eq!(
+            result.certificate, baseline.certificate,
+            "unbound participants must leave the empty-lab trace untouched"
+        );
+        assert!(result.passed());
+        crate::test_complete!("unbound_participants_schedule_no_work");
+    }
+
+    #[test]
+    fn sender_receiver_workload_executes_real_steps() {
+        init_test("sender_receiver_workload_executes_real_steps");
+        let scenario = sender_receiver_scenario();
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+        assert!(result.lab_report.steps_total > 0);
+        assert_eq!(
+            result.oracle_report.checked.len(),
+            OracleRegistry::reported_names().len()
+        );
+        assert_eq!(result.oracle_report.failed_count, 0);
+
+        let senders = tasks_with_role(&tasks, WorkloadRole::Sender);
+        let receivers = tasks_with_role(&tasks, WorkloadRole::Receiver);
+        assert_eq!((senders.len(), receivers.len(), tasks.len()), (2, 2, 4));
+        let committed: u64 = senders
+            .iter()
+            .map(|task| count(&task.counters.committed))
+            .sum();
+        let delivered: u64 = receivers
+            .iter()
+            .map(|task| count(&task.counters.delivered))
+            .sum();
+        let received: u64 = receivers
+            .iter()
+            .map(|task| count(&task.counters.received))
+            .sum();
+        assert_eq!(committed, 2 * DEFAULT_SENDER_MESSAGES);
+        assert_eq!(delivered, committed);
+        assert_eq!(received, committed);
+        for task in &tasks {
+            let summary = task.counter_summary();
+            assert!(task.spawn_refusal.is_none(), "{}: {summary}", task.name);
+            assert!(
+                task.counters.finished.load(Ordering::Relaxed),
+                "{}: {summary}",
+                task.name
+            );
+            assert_eq!(
+                count(&task.counters.cancelled),
+                0,
+                "{}: {summary}",
+                task.name
+            );
+            assert_eq!(
+                count(&task.counters.unexpected),
+                0,
+                "{}: {summary}",
+                task.name
+            );
+        }
+        for receiver in &receivers {
+            assert!(receiver.counters.drained_to_close.load(Ordering::Relaxed));
+            // Two senders rotating over two receivers give each one half.
+            assert_eq!(count(&receiver.counters.received), DEFAULT_SENDER_MESSAGES);
+        }
+        crate::test_complete!("sender_receiver_workload_executes_real_steps");
+    }
+
+    #[test]
+    fn sender_receiver_workload_is_deterministic_and_replays() {
+        init_test("sender_receiver_workload_is_deterministic_and_replays");
+        let scenario = sender_receiver_scenario();
+        let first = ScenarioRunner::run(&scenario).unwrap();
+        let second = ScenarioRunner::run(&scenario).unwrap();
+        assert_eq!(first.certificate, second.certificate);
+        assert!(first.certificate.steps > 0);
+
+        let empty = ScenarioRunner::run(&minimal_scenario()).unwrap();
+        assert_ne!(
+            first.certificate.event_hash, empty.certificate.event_hash,
+            "the bound workload must leave events in the trace"
+        );
+
+        let replayed = ScenarioRunner::validate_replay(&scenario).expect("same seed must replay");
+        assert_eq!(replayed.certificate, first.certificate);
+        assert!(replayed.passed(), "{}", failure_detail(&replayed));
+
+        let identity = ScenarioRunner::scenario_identity(&scenario, None);
+        let via_identity = ScenarioRunner::run_with_identity(&scenario, &identity).unwrap();
+        assert!(via_identity.certificate.steps > 0);
+        assert!(via_identity.passed(), "{}", failure_detail(&via_identity));
+        crate::test_complete!("sender_receiver_workload_is_deterministic_and_replays");
+    }
+
+    #[test]
+    fn senders_without_receivers_drain_into_implicit_sink() {
+        init_test("senders_without_receivers_drain_into_implicit_sink");
+        let mut scenario = minimal_scenario();
+        scenario.participants = vec![
+            participant("producer-a", "sender"),
+            participant("producer-b", "sender"),
+        ];
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+        let sinks = tasks_with_role(&tasks, WorkloadRole::Sink);
+        assert_eq!(sinks.len(), 1);
+        let sink = sinks[0];
+        assert_eq!(sink.name, IMPLICIT_SINK_NAME);
+        assert_eq!(
+            count(&sink.counters.received),
+            2 * DEFAULT_SENDER_MESSAGES,
+            "{}",
+            sink.counter_summary()
+        );
+        assert!(sink.counters.drained_to_close.load(Ordering::Relaxed));
+        assert_eq!(count(&sink.counters.out_of_order), 0);
+        crate::test_complete!("senders_without_receivers_drain_into_implicit_sink");
+    }
+
+    #[test]
+    fn receivers_without_senders_see_a_closed_channel() {
+        init_test("receivers_without_senders_see_a_closed_channel");
+        let mut scenario = minimal_scenario();
+        scenario.participants = vec![participant("bob", "receiver")];
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+        assert!(result.lab_report.steps_total > 0);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(count(&tasks[0].counters.received), 0);
+        assert!(tasks[0].counters.drained_to_close.load(Ordering::Relaxed));
+        crate::test_complete!("receivers_without_senders_see_a_closed_channel");
+    }
+
+    #[test]
+    fn bound_participant_properties_are_validated() {
+        init_test("bound_participant_properties_are_validated");
+        let mut scenario = minimal_scenario();
+        scenario.participants = vec![
+            participant_with("alice", "sender", "messages", serde_json::json!("many")),
+            participant_with("bob", "receiver", "capacity", serde_json::json!(0)),
+            participant_with(
+                "carol",
+                "receiver",
+                "capacity",
+                serde_json::json!(MAX_RECEIVER_CAPACITY + 1),
+            ),
+            // Unbound roles keep free-form properties.
+            participant_with("dave", "coordinator", "capacity", serde_json::json!(0)),
+        ];
+        match ScenarioRunner::run(&scenario) {
+            Err(ScenarioRunnerError::Validation { errors, .. }) => {
+                let fields: Vec<_> = errors.iter().map(|error| error.field.as_str()).collect();
+                assert_eq!(
+                    fields,
+                    [
+                        "participants.alice.properties.messages",
+                        "participants.bob.properties.capacity",
+                        "participants.carol.properties.capacity",
+                    ]
+                );
+            }
+            other => panic!("expected a participant property validation error, got {other:?}"),
+        }
+
+        scenario.participants = vec![
+            participant_with("alice", "sender", "messages", serde_json::json!(0)),
+            participant_with(
+                "bob",
+                "receiver",
+                "capacity",
+                serde_json::json!(MAX_RECEIVER_CAPACITY),
+            ),
+        ];
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+        assert_eq!(count(&tasks[0].counters.committed), 0);
+        assert!(tasks[1].counters.drained_to_close.load(Ordering::Relaxed));
+        crate::test_complete!("bound_participant_properties_are_validated");
+    }
+
+    /// Deliberate-failure control target (see the 39okzv notes): if the sender
+    /// forgets its permit instead of sending it, this test must fail on the
+    /// `obligation_leak` oracle.
+    #[test]
+    fn two_phase_permits_are_obligations_the_leak_oracle_sees() {
+        init_test("two_phase_permits_are_obligations_the_leak_oracle_sees");
+        let mut scenario = minimal_scenario();
+        scenario.id = "test-permit-obligations".to_string();
+        // A leak must surface as an oracle verdict, not as a runtime panic.
+        scenario.lab.panic_on_obligation_leak = false;
+        scenario.oracles = vec!["obligation_leak".to_string()];
+        // messages <= capacity: the sender never waits, even if permits leak.
+        scenario.participants = vec![
+            participant_with("alice", "sender", "messages", serde_json::json!(4)),
+            participant_with("bob", "receiver", "capacity", serde_json::json!(4)),
+        ];
+
+        let plan = WorkloadPlan::from_scenario(&scenario).expect("valid plan");
+        let mut runtime = LabRuntime::new(ScenarioRunner::lab_config_for(&scenario, None));
+        let workload = ParticipantWorkload::spawn(&mut runtime, &plan);
+        runtime.run_until_quiescent();
+
+        let report = runtime.report();
+        let entry = report
+            .oracle_report
+            .entry("obligation_leak")
+            .expect("obligation leak oracle is registered");
+        assert!(
+            entry.passed,
+            "every reserved permit must be committed: {entry:?}"
+        );
+        assert_eq!(runtime.state.leak_count(), 0);
+        let stats = runtime
+            .state
+            .obligation_gateway()
+            .expect("the lab installs an obligation gateway")
+            .mailbox()
+            .stats();
+        assert_eq!(stats.reserved, 4, "four permits were reserved: {stats:?}");
+        assert_eq!(stats.committed, 4, "four permits were sent: {stats:?}");
+        assert_eq!(stats.leaked, 0, "{stats:?}");
+        assert_eq!(runtime.state.pending_obligation_count(), 0);
+
+        let mut violations = Vec::new();
+        let tasks = workload.finish(&mut violations);
+        assert!(violations.is_empty(), "{violations:?}");
+        assert_eq!(count(&tasks[1].counters.received), 4);
+
+        let result = ScenarioRunner::run(&scenario).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+        crate::test_complete!("two_phase_permits_are_obligations_the_leak_oracle_sees");
+    }
+
+    #[test]
+    fn cancellation_mid_protocol_still_resolves_every_obligation() {
+        init_test("cancellation_mid_protocol_still_resolves_every_obligation");
+        let mut scenario = minimal_scenario();
+        scenario.id = "test-cancel-mid-protocol".to_string();
+        scenario.chaos = ChaosSection::Custom {
+            cancel_probability: 0.1,
+            delay_probability: 0.0,
+            delay_min_ms: 0,
+            delay_max_ms: 10,
+            io_error_probability: 0.0,
+            wakeup_storm_probability: 0.0,
+            budget_exhaustion_probability: 0.0,
+        };
+        scenario.participants = vec![
+            participant_with("alice", "sender", "messages", serde_json::json!(24)),
+            participant_with("bob", "receiver", "capacity", serde_json::json!(2)),
+            participant_with("carol", "receiver", "capacity", serde_json::json!(2)),
+        ];
+
+        let mut cancelled = 0_u64;
+        for seed in 0..8 {
+            let (result, tasks) = ScenarioRunner::run_seeded(&scenario, Some(seed)).unwrap();
+            assert!(result.passed(), "seed {seed}: {}", failure_detail(&result));
+            let sender = &tasks[0];
+            let c = &sender.counters;
+            let committed = count(&c.committed);
+            assert!(
+                committed + count(&c.cancelled) + count(&c.disconnected) <= sender.planned,
+                "seed {seed}: {}",
+                sender.counter_summary()
+            );
+            let receivers = tasks_with_role(&tasks, WorkloadRole::Receiver);
+            let delivered: u64 = receivers
+                .iter()
+                .map(|task| count(&task.counters.delivered))
+                .sum();
+            let received: u64 = receivers
+                .iter()
+                .map(|task| count(&task.counters.received))
+                .sum();
+            assert_eq!(delivered, committed, "seed {seed}");
+            assert!(received <= delivered, "seed {seed}");
+            cancelled += tasks
+                .iter()
+                .map(|task| count(&task.counters.cancelled))
+                .sum::<u64>();
+        }
+        assert!(
+            cancelled > 0,
+            "a 10% per-dispatch cancel rate must cancel some reserve or receive across eight seeds"
+        );
+        crate::test_complete!("cancellation_mid_protocol_still_resolves_every_obligation");
     }
 
     // ── derive-trait coverage (wave 73) ──────────────────────────────────

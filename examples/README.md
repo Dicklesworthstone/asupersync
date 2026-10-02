@@ -77,10 +77,10 @@ this index.
 These 13 YAML files are typed `Scenario` fixtures. Their filenames, comments,
 and descriptions are authoring narratives, not evidence that the runner simulates
 every declared network, cancellation, or fault effect or schedules the named
-workload. In particular, include paths are validated but not merged, and
-the schema itself schedules no application tasks. See the
-[FrankenLab author guide](../docs/adoption/getting_started.md) for the current
-input, output, diagnostics, and field-consumption boundaries.
+workload. Include paths are validated but not merged. Only participants whose
+role is exactly `sender` or `receiver` run, as lab tasks on bounded two-phase
+`mpsc` channels; other roles run nothing (`Steps: 0 (no workload ran)`). See the
+[author guide](../docs/adoption/getting_started.md) for the field boundaries.
 
 - [`scenarios/smoke_happy_path.yaml`](scenarios/smoke_happy_path.yaml) — small
   typed smoke fixture.
@@ -88,7 +88,7 @@ input, output, diagnostics, and field-consumption boundaries.
   — fixture declaring cancellation settings, which are currently
   validation-only.
 - [`scenarios/chaos_sendpermit_ack.yaml`](scenarios/chaos_sendpermit_ack.yaml) —
-  typed chaos and oracle configuration fixture.
+  chaos fixture; its `sender` and `receiver` run as a real channel workload.
 - [`scenarios/clock_skew_lease.yaml`](scenarios/clock_skew_lease.yaml) —
   clock-skew declaration fixture; the action is recorded rather than simulated.
 - [`scenarios/composable_base.yaml`](scenarios/composable_base.yaml) — reusable
@@ -108,8 +108,8 @@ The standalone FrankenLab CLI also ships three typed scenario fixtures, all
 covered by [`metadata.json`](metadata.json):
 
 - [`01_race_condition.yaml`](../frankenlab/examples/scenarios/01_race_condition.yaml)
-  — typed fixture describing a race-condition narrative.
+  — race-condition fixture; two `sender` tasks race on one implicit-sink channel.
 - [`02_obligation_leak.yaml`](../frankenlab/examples/scenarios/02_obligation_leak.yaml)
-  — typed fixture describing an obligation-leak narrative.
+  — obligation fixture; one `sender` and four `receiver` tasks under light chaos.
 - [`03_saga_partition.yaml`](../frankenlab/examples/scenarios/03_saga_partition.yaml)
-  — typed fixture describing a partitioned-saga narrative.
+  — partitioned-saga narrative; its saga roles are unbound, so no workload runs.
