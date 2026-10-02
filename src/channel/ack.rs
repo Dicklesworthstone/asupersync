@@ -772,10 +772,16 @@ impl<T> Drop for Delivery<T> {
                 } else if exhausted {
                     state.rejected = true;
                     returned = abandoned.take();
-                } else {
+                } else if self.issued {
                     state
                         .ready
                         .push_back(abandoned.take().expect("owned retry"));
+                } else {
+                    // A refused or cancelled admission is rollback, not a
+                    // retry: the item keeps its place at the head.
+                    state
+                        .ready
+                        .push_front(abandoned.take().expect("owned rollback"));
                 }
             }
             let reason = if returned.is_some() {

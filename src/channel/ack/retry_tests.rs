@@ -160,6 +160,34 @@ fn checked_admission_refusals_do_not_spend_the_worker_delivery_allowance() {
     });
 }
 
+/// A refused Ack admission is rollback, not a worker attempt: the item keeps
+/// its place at the head instead of rotating behind items no worker has tried.
+/// Only a delivery that a worker dropped or nacked joins the tail.
+#[test]
+fn refused_admission_keeps_the_item_at_the_head_of_the_queue() {
+    run_case(|cx| async move {
+        let (blocker, _keeper) = channel::<()>(1);
+        let held_quota = blocker.try_reserve(&cx).unwrap();
+        let (tx, rx) = channel(2);
+        tx.try_send(&Cx::for_testing(), 1).unwrap();
+        tx.try_send(&Cx::for_testing(), 2).unwrap();
+        // An odd number of refusals: a rotating queue would end with 2 first.
+        for _ in 0..3 {
+            assert!(matches!(
+                rx.try_recv_with_ack(&cx),
+                Err(QueueError::Admission(
+                    ObligationAdmissionError::LimitReached { limit: 1, .. }
+                ))
+            ));
+        }
+        drop(held_quota);
+        assert_eq!(rx.try_recv_with_ack(&cx).unwrap().ack(), 1);
+        assert_eq!(rx.try_recv_with_ack(&cx).unwrap().ack(), 2);
+        drop(tx);
+        assert!(matches!(rx.try_recv_with_ack(&cx), Err(QueueError::Closed)));
+    });
+}
+
 #[test]
 fn cancelled_receiver_never_spends_the_first_delivery() {
     let live = Cx::for_testing();
