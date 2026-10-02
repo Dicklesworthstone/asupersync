@@ -1166,6 +1166,10 @@ struct WorkloadCounters {
     cancelled: AtomicU64,
     /// Sender: reserves or sends that found the receiving end gone.
     disconnected: AtomicU64,
+    /// Sender: disconnects from a drain that had reported its channel closed
+    /// while this sender, which holds a sending handle, was still alive. A
+    /// correct channel cannot produce one.
+    premature_disconnects: AtomicU64,
     /// Drain: values that arrived out of their sender's order.
     out_of_order: AtomicU64,
     /// Outcomes the channel contract rules out, or a missing task context.
@@ -1186,6 +1190,16 @@ fn count(counter: &AtomicU64) -> u64 {
 
 fn flag(value: &AtomicBool) -> u8 {
     u8::from(value.load(Ordering::Relaxed))
+}
+
+/// Counts a sender's disconnect. It is premature when the drain had already
+/// reported its channel closed: the sender still holds a sending handle, so
+/// the channel cannot really be closed (br-asupersync-nq2dgn).
+fn note_disconnect(sender: &WorkloadCounters, drain: &WorkloadCounters) {
+    bump(&sender.disconnected);
+    if drain.drained_to_close.load(Ordering::Relaxed) {
+        bump(&sender.premature_disconnects);
+    }
 }
 
 /// The sending half of one drain task's channel.
@@ -1655,6 +1669,14 @@ impl BoundTask {
             violations.push(format!("{label}:spawn_refused:{refusal}"));
             return;
         }
+        // A task that panicked never reached its own accounting, so its
+        // counters can look clean; its join handle says what happened. A
+        // swarm counts its members' panics itself (br-asupersync-nq2dgn).
+        if !matches!(self.detail, BoundDetail::Swarm(_))
+            && self.joins.contains(&JoinState::Panicked)
+        {
+            violations.push(format!("{label}:panicked:joins={:?}", self.joins));
+        }
         match &self.detail {
             BoundDetail::Channel => self.collect_channel_violations(&label, violations),
             BoundDetail::Swarm(members) => {
@@ -1802,6 +1824,13 @@ impl BoundTask {
         }
         if c.drained_to_close.load(Ordering::Relaxed) && count(&c.received) != count(&c.delivered) {
             violations.push(format!("{label}:lost_values:{}", self.counter_summary()));
+        }
+        if count(&c.premature_disconnects) > 0 {
+            violations.push(format!(
+                "{label}:premature_disconnect:premature={},{}",
+                count(&c.premature_disconnects),
+                self.counter_summary()
+            ));
         }
     }
 }
@@ -2565,7 +2594,7 @@ async fn run_sender(
                             false
                         }
                         Outcome::Err(SendError::Disconnected(_)) => {
-                            bump(&counters.disconnected);
+                            note_disconnect(&counters, drain);
                             false
                         }
                         Outcome::Err(SendError::Cancelled(_)) | Outcome::Cancelled(_) => {
@@ -2582,7 +2611,7 @@ async fn run_sender(
                         true
                     }
                     Err(SendError::Disconnected(())) => {
-                        bump(&counters.disconnected);
+                        note_disconnect(&counters, drain);
                         false
                     }
                     Err(SendError::Full(())) => {
@@ -4828,6 +4857,77 @@ mod tests {
             ]
         );
         crate::test_complete!("saga_partition_fixture_compensates_the_steps_before_the_cut_link");
+    }
+
+    fn planted_task(
+        role: WorkloadRole,
+        detail: BoundDetail,
+        joins: Vec<JoinState>,
+        counters: WorkloadCounters,
+    ) -> BoundTask {
+        BoundTask {
+            name: "t".to_owned(),
+            role,
+            planned: 1,
+            spawn_refusal: None,
+            counters: Arc::new(counters),
+            detail,
+            joins,
+        }
+    }
+
+    fn violation_kinds(task: &BoundTask) -> Vec<String> {
+        let mut violations = Vec::new();
+        task.collect_violations(&mut violations);
+        violations
+            .iter()
+            .map(|violation| violation.split(':').nth(3).unwrap_or_default().to_owned())
+            .collect()
+    }
+
+    /// A panicked workload task, and a sender disconnected by a drain that
+    /// had reported its channel closed, are violations even when every other
+    /// counter looks clean (br-asupersync-nq2dgn).
+    #[test]
+    fn panicked_tasks_and_premature_disconnects_are_workload_violations() {
+        init_test("panicked_tasks_and_premature_disconnects_are_workload_violations");
+        let receiver = |joins| {
+            planted_task(
+                WorkloadRole::Receiver,
+                BoundDetail::Channel,
+                joins,
+                WorkloadCounters::default(),
+            )
+        };
+        assert!(violation_kinds(&receiver(vec![JoinState::Completed])).is_empty());
+        assert_eq!(
+            violation_kinds(&receiver(vec![JoinState::Panicked])),
+            ["panicked"]
+        );
+        let participant = planted_task(
+            WorkloadRole::SagaParticipant,
+            BoundDetail::SagaParticipant,
+            vec![JoinState::Panicked],
+            WorkloadCounters::default(),
+        );
+        assert_eq!(violation_kinds(&participant), ["panicked"]);
+
+        let sender = WorkloadCounters::default();
+        let drain = WorkloadCounters::default();
+        note_disconnect(&sender, &drain);
+        assert_eq!(count(&sender.premature_disconnects), 0);
+        drain.drained_to_close.store(true, Ordering::Relaxed);
+        note_disconnect(&sender, &drain);
+        assert_eq!(count(&sender.disconnected), 2);
+        assert_eq!(count(&sender.premature_disconnects), 1);
+        let sender = planted_task(
+            WorkloadRole::Sender,
+            BoundDetail::Channel,
+            vec![JoinState::Completed],
+            sender,
+        );
+        assert_eq!(violation_kinds(&sender), ["premature_disconnect"]);
+        crate::test_complete!("panicked_tasks_and_premature_disconnects_are_workload_violations");
     }
 
     #[test]

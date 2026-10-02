@@ -356,6 +356,7 @@ fn run_all_example_scenarios() {
 
     let mut passed = 0;
     let mut total = 0;
+    let mut with_workload = 0;
 
     for entry in std::fs::read_dir(&dir).expect("read scenario dir") {
         let entry = entry.expect("dir entry");
@@ -375,6 +376,19 @@ fn run_all_example_scenarios() {
                         r.oracle_report.failed_count,
                         r.lab_report.invariant_violations.len()
                     );
+                    // A fixture with bound participants must run them: a
+                    // passing run of zero steps proves nothing.
+                    if !ScenarioRunner::participant_bindings(&scenario)
+                        .bound
+                        .is_empty()
+                    {
+                        assert!(
+                            r.lab_report.steps_total > 0,
+                            "Scenario {} binds participants but ran no steps",
+                            path.file_name().unwrap().to_string_lossy()
+                        );
+                        with_workload += 1;
+                    }
                     passed += 1;
                 }
                 Err(e) => {
@@ -392,6 +406,12 @@ fn run_all_example_scenarios() {
         "Expected at least 10 scenario files, found {total}"
     );
     assert_eq!(passed, total, "Not all scenarios passed");
+    // chaos_sendpermit_ack, host_crash_restart, partition_heal and
+    // stress_10k_tasks bind participants today.
+    assert!(
+        with_workload >= 4,
+        "Expected at least 4 scenarios to run a workload, found {with_workload}"
+    );
     test_complete!("run_all_example_scenarios", passed = passed, total = total);
 }
 
