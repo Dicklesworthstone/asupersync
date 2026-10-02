@@ -3478,7 +3478,22 @@ where
                     }
                 }
                 #[cfg(feature = "http2-streaming")]
-                DriverEvent::StreamingProgress => {}
+                DriverEvent::StreamingProgress => {
+                    // Returned credit lets a peer send again: its stalled-upload
+                    // clock restarts from now.
+                    #[cfg(feature = "http2-streaming")]
+                    if let Some(incoming) = &mut incoming {
+                        for stream_id in incoming.take_credit_released() {
+                            refresh_live_request_idle(
+                                &mut pending_stream_idle_deadlines,
+                                incoming,
+                                stream_id,
+                                stream_idle_timeout,
+                                time_getter,
+                            );
+                        }
+                    }
+                }
                 DriverEvent::ForceClose => {
                     // Escalation: drop the transport; spawned handler hops are
                     // raced against ForceClosing and request-region teardown is
@@ -3565,6 +3580,25 @@ where
                     return Ok(());
                 }
                 DriverEvent::StreamIdleTimeout(stream_id) => {
+                    // The timeout bounds a stalled upload. A peer whose stream
+                    // credit is spent cannot send: a handler that has not read
+                    // its body holds the upload, so the clock waits for credit.
+                    #[cfg(feature = "http2-streaming")]
+                    if let Some(incoming) = &incoming
+                        && incoming.awaits_input(stream_id)
+                        && conn
+                            .stream(stream_id)
+                            .is_some_and(|stream| stream.recv_window() <= 0)
+                    {
+                        refresh_live_request_idle(
+                            &mut pending_stream_idle_deadlines,
+                            incoming,
+                            stream_id,
+                            stream_idle_timeout,
+                            time_getter,
+                        );
+                        continue;
+                    }
                     #[cfg(feature = "http2-streaming")]
                     if let Some(incoming) = &mut incoming {
                         incoming.fail(
