@@ -8362,12 +8362,19 @@ mod tests {
         let c2 = obligation(c);
         let b1 = obligation(b);
         let _d1 = obligation(d);
-        runtime.state.commit_obligation(b1).expect("commit b's obligation");
+        runtime
+            .state
+            .commit_obligation(b1)
+            .expect("commit b's obligation");
 
         for _ in 0..5 {
             runtime.step();
         }
-        runtime.state.task_mut(d).unwrap().mark_polled(runtime.steps);
+        runtime
+            .state
+            .task_mut(d)
+            .unwrap()
+            .mark_polled(runtime.steps);
 
         let threshold = runtime.config.futurelock_max_idle_steps;
         let task_by_task: Vec<_> = runtime
