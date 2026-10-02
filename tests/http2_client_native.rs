@@ -100,6 +100,58 @@ fn public_http2_client_uploads_and_downloads_beyond_both_initial_windows() {
     }
 }
 
+/// The client advertises receive windows that track max_response_body,
+/// capped at 16 MiB. Only a response larger than that cap makes the server
+/// wait for the client's WINDOW_UPDATE frames, so this download crosses it.
+/// Without the client's receive-side refill the server stalls at 16 MiB and
+/// the request times out.
+#[test]
+fn public_http2_client_downloads_beyond_its_largest_receive_window() {
+    const DOWNLOAD: usize = 16 * 1024 * 1024 + 1024 * 1024 + 7;
+    let runtime = runtime(2);
+    let handle = runtime.handle();
+    runtime.block_on(async move {
+        let listener = Http2Listener::bind_with_config(
+            "127.0.0.1:0",
+            |request: Request| async move {
+                assert_eq!(request.method, Method::Get);
+                let body: Vec<u8> = (0..DOWNLOAD).map(|index| (index % 253) as u8).collect();
+                Response::new(200, "OK", body)
+            },
+            config(),
+        )
+        .await
+        .unwrap();
+        let address = listener.local_addr().unwrap();
+        let shutdown = listener.shutdown_signal();
+        let server = handle
+            .clone()
+            .try_spawn(async move { listener.run(&handle).await })
+            .unwrap();
+        let cx = Cx::current().unwrap();
+        let response = Http2Client::new()
+            .timeout(Duration::from_secs(60))
+            .max_response_body(2 * DOWNLOAD)
+            .get(format!("http://{address}/download"))
+            .send(&cx)
+            .await
+            .expect("the download completes once the client refills its windows");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body.len(), DOWNLOAD);
+        assert!(
+            response
+                .body
+                .iter()
+                .enumerate()
+                .all(|(index, byte)| usize::from(*byte) == index % 253),
+            "the downloaded body is byte-identical"
+        );
+        assert!(shutdown.begin_drain(Duration::from_secs(2)));
+        server.await.unwrap();
+    });
+    quiescent(&runtime);
+}
+
 struct Peer {
     io: std::net::TcpStream,
     codec: FrameCodec,
