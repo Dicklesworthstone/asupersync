@@ -235,9 +235,11 @@ impl NativeStreamEndpoint {
     /// Invalid scheme, server name, configuration, metadata or missing explicit
     /// capabilities refuse before dialing. TLS/certificate/ALPN failures return
     /// `UNAVAILABLE`; observed cancellation or elapsed setup takes precedence.
-    /// A successful return proves an established connection and a written
-    /// request, not a successful RPC: consume `message()` through the terminal
-    /// status as for [`Self::connect_tcp`].
+    /// A successful return proves an established connection whose request was
+    /// written, or already answered by the server's response headers, not a
+    /// successful RPC. Any unwritten rest of the request is flushed while
+    /// `message()` is consumed through the terminal status, as for
+    /// [`Self::connect_tcp`].
     ///
     /// ```no_run
     /// use asupersync::{Cx, bytes::Bytes, tls::TlsConnector};
