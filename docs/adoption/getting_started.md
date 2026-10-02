@@ -88,11 +88,16 @@ case-sensitive) and spawns lab tasks for them:
   applied step, or fences one that was never applied so that a late request
   is refused.
 
-`partition` and `heal` faults whose `from` and `to` name two participants cut
-and restore the link between them. A saga request sent over a cut link is
-lost, and its coordinator times out. When saga roles are bound, the runner
-fires due timers on its way to each fault and advances virtual time to the
-next timer whenever the lab is idle.
+Saga requests and replies cross a simulated network. The `network` preset
+(`ideal`, `local`, `lan`, `wan`, `satellite`, `congested` or `lossy`) sets
+every link's latency, jitter and packet loss, and a `links` entry keyed
+`"from->to"` overrides one direction's `latency` and `packet_loss`; the other
+link fields are not modeled. `partition` and `heal` faults whose `from` and
+`to` name two participants cut and restore the link between them. A message
+that the network drops or that is sent over a cut link is lost, and a
+coordinator whose request or reply is lost times out. When saga roles are
+bound, the runner fires due timers on its way to each fault and advances
+virtual time to the next timer whenever the lab is idle.
 
 Lab chaos can cancel these tasks mid-protocol; a cancelled send, receive,
 swarm task, worker generation, supervisor or saga task is counted and stops,
@@ -173,16 +178,17 @@ frankenlab run frankenlab/examples/scenarios/03_saga_partition.yaml
 ```text
 Scenario: example-saga-partition [PASS]
 Seed: 314159
-Steps: 61
+Steps: 58
 Participants: 11 bound (saga-coordinator, saga-participant), 0 unbound
 Faults injected: 8
 Oracles: 24/24 passed (16 not fed by the lab runtime)
 ```
 
-The coordinator asks one participant every 50 ms of virtual time. Without
-chaos it reaches participant-7 at 400 ms, its request is lost on the cut link,
-the coordinator times out at 450 ms, and the saga compensates participants 7
-to 0 in reverse; participants 8 and 9 are never asked. Heavy chaos can cancel
+The coordinator asks one participant every 50 ms of virtual time, plus the
+LAN round trip of each step (2-10 ms). Without chaos it reaches participant-7
+at about 440 ms, its request is lost on the cut link, the coordinator times
+out 50 ms later, and the saga compensates participants 7 to 0 in reverse;
+participants 8 and 9 are never asked. Heavy chaos can cancel
 the coordinator earlier, which aborts the saga the same way. Either way the
 run fails if a step stays applied after the abort.
 
@@ -190,8 +196,9 @@ Every fault declaration also produces a timed trace entry. Partition and heal
 between two participants cut and restore saga links. Disk pressure/recovery,
 delayed cleanup, and process stall/resume affect a synthetic effect summary.
 Host crash/restart and clock skew/reset are recorded but do not simulate those
-behaviors. Network and cancellation sections are validation-only, and
-participant names validate fault references.
+behaviors. The network section shapes saga messages, as described above. The
+cancellation section is validation-only, and participant names validate fault
+references.
 
 ## JSON result output
 
@@ -271,7 +278,7 @@ Current field-consumption boundaries:
 | `resource_caps` | Partially consumed for post-parse/runtime artifact limits |
 | `minimization` | Partially consumed by minimization/report paths |
 | `include` | Paths are validated only; referenced files are not read or merged |
-| `network` | Validated only; not consumed by `ScenarioRunner` |
+| `network` | The preset and per-link `latency`/`packet_loss` shape saga messages between participants; other link fields are not modeled |
 | `cancellation` | Validated only; not consumed by `ScenarioRunner` |
 | `participants` | Names validate fault references; `sender`/`receiver` (`messages`/`capacity`), `swarm` (`tasks`), `supervisor` (`max_restarts`), `worker` (`fail_times`), `saga-coordinator` (`step_ms`) and `saga-participant` roles run as lab tasks; other roles are unused |
 | `expected_invariants` | Validated only; does not select or enforce runner checks |

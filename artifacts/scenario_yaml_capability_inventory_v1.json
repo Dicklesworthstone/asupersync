@@ -965,7 +965,7 @@
     {
       "field_group": "faults",
       "state": "PARTIAL",
-      "behavior": "timed and traced; only disk pressure/recovery, delayed cleanup, and process stall/resume affect the synthetic fault summary"
+      "behavior": "timed and traced; disk pressure/recovery, delayed cleanup, and process stall/resume affect the synthetic fault summary, and partition/heal between two named participants cut and restore their saga links"
     },
     {
       "field_group": "oracles",
@@ -989,8 +989,8 @@
     },
     {
       "field_group": "participants",
-      "state": "VALIDATION_ONLY",
-      "behavior": "names validate fault references; roles and properties are not consumed by the runner"
+      "state": "PARTIAL",
+      "behavior": "names validate fault references; the exact roles sender, receiver, swarm, supervisor, worker, saga-coordinator, and saga-participant run lab workloads shaped by their properties, while every other role runs nothing"
     },
     {
       "field_group": "expected_invariants",
@@ -998,9 +998,14 @@
       "behavior": "names are validated but do not select or enforce runner checks"
     },
     {
-      "field_group": "network,cancellation",
+      "field_group": "network",
+      "state": "PARTIAL",
+      "behavior": "the preset and per-link latency and packet_loss delay or drop saga messages between participants; corruption, duplication, reordering, and bandwidth are not modeled, and no other workload is shaped"
+    },
+    {
+      "field_group": "cancellation",
       "state": "VALIDATION_ONLY",
-      "behavior": "semantics are validated but neither section is consumed by ScenarioRunner"
+      "behavior": "semantics are validated but the section is not consumed by ScenarioRunner"
     },
     {
       "field_group": "include",
@@ -2265,7 +2270,7 @@
     },
     {
       "gap_id": "SCN-GAP-02",
-      "finding": "network presets and link conditions are validated but not consumed by ScenarioRunner",
+      "finding": "network presets and per-link latency and packet_loss reach only saga messages; corruption, duplication, reordering, and bandwidth are validated but not modeled, and channel, swarm, and supervision workloads ignore the network section",
       "owner_bead": "asupersync-5z2scg.5.5",
       "evidence_state": "BLOCKED_GAP"
     },
@@ -2277,7 +2282,7 @@
     },
     {
       "gap_id": "SCN-GAP-04",
-      "finding": "participant roles and properties are not consumed; names only validate fault references",
+      "finding": "only seven exact role names bind a workload and read its properties; any other role, including narrative names such as hub, peer, or lease-holder, is unbound and runs nothing",
       "owner_bead": "asupersync-5z2scg.5.5",
       "evidence_state": "BLOCKED_GAP"
     },
@@ -2295,13 +2300,13 @@
     },
     {
       "gap_id": "SCN-GAP-07",
-      "finding": "partition, heal, host crash/restart, and clock skew/reset faults are trace records without simulated behavioral effects",
+      "finding": "partition and heal cut and restore only saga links between two named participants; host crash/restart and clock skew/reset faults are trace records without simulated behavioral effects",
       "owner_bead": "asupersync-5z2scg.5.5",
       "evidence_state": "BLOCKED_GAP"
     },
     {
       "gap_id": "SCN-GAP-08",
-      "finding": "the YAML schema schedules no workload; narrative send, lease, saga, and 10K-task scenarios can run an empty runtime",
+      "finding": "only participants with a bound role schedule a workload; narrative lease scenarios and documents without bound roles still run an empty runtime",
       "owner_bead": "asupersync-5z2scg.5.5",
       "evidence_state": "BLOCKED_GAP"
     },

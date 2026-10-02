@@ -83,10 +83,12 @@ role is exactly `sender`, `receiver`, `swarm`, `supervisor`, `worker`,
 tasks on bounded two-phase `mpsc` channels, a swarm as many short lab tasks,
 supervisors as managed supervisors that restart failing workers, and saga
 coordinators as `remote::Saga` runs that compensate in reverse when a
-participant refuses or its request is lost. `partition` and `heal` faults
-between two participants cut and restore saga links; no other fault changes
-the workload. Other roles run nothing (`Steps: 0 (no workload ran)`). See the
-[author guide](../docs/adoption/getting_started.md) for the field boundaries.
+participant refuses or a message is lost. The `network` preset and per-link
+latency and loss delay or drop saga messages, and `partition` and `heal`
+faults between two participants cut and restore saga links; no other fault
+changes the workload. Other roles run nothing (`Steps: 0 (no workload ran)`).
+See the [author guide](../docs/adoption/getting_started.md) for the field
+boundaries.
 
 - [`scenarios/smoke_happy_path.yaml`](scenarios/smoke_happy_path.yaml) — small
   typed smoke fixture.
@@ -102,7 +104,8 @@ the workload. Other roles run nothing (`Steps: 0 (no workload ran)`). See the
 - [`scenarios/composed_partition_test.yaml`](scenarios/composed_partition_test.yaml)
   — include and partition declaration fixture; include resolution is not wired.
 - [`scenarios/custom_latency_model.yaml`](scenarios/custom_latency_model.yaml) —
-  network-validation fixture; the runner does not consume network settings.
+  network-latency fixture; its hub and peer roles are unbound, so its links
+  shape no traffic.
 - [`scenarios/host_crash_restart.yaml`](scenarios/host_crash_restart.yaml) —
   supervision fixture; its `supervisor` restarts each `worker` after one
   failure, while the crash and restart actions stay trace records.

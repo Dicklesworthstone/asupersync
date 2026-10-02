@@ -59,11 +59,16 @@
 //! arrives after the abort is refused. A coordinator that is cancelled aborts
 //! too.
 //!
-//! `partition` and `heal` faults whose `from` and `to` name two participants
-//! cut and restore the link between them. A saga request sent over a cut
-//! link is lost; its coordinator times out waiting for the reply. When saga
-//! roles are bound, the runner fires due timers on its way to each fault and
-//! runs with automatic virtual-time advance after the last one.
+//! Saga requests and replies cross a simulated network. The scenario's
+//! `network` preset sets every link's latency, jitter and packet loss (the
+//! [`crate::lab::network::NetworkConditions`] of the same name), and a
+//! `links` entry keyed `"from->to"` overrides one direction's `latency` and
+//! `packet_loss`; the other link fields are not modeled. `partition` and
+//! `heal` faults whose `from` and `to` name two participants cut and restore
+//! the link between them. A message that is dropped or sent over a cut link
+//! is lost, and a coordinator whose request or reply is lost times out. When
+//! saga roles are bound, the runner fires due timers on its way to each fault
+//! and runs with automatic virtual-time advance after the last one.
 //!
 //! Lab chaos may cancel these tasks mid-protocol. A send or receive, swarm
 //! member, worker generation, supervisor or saga task that ends in
@@ -109,9 +114,13 @@
 
 use super::config::LabConfig;
 use super::dual_run::{DualRunScenarioIdentity, ReplayMetadata, SeedLineageRecord};
+use super::network::{LatencyModel, NetworkConditions};
 use super::oracle::{OracleRegistry, OracleRegistryError, OracleReport};
 use super::runtime::{LabRunReport, LabRuntime};
-use super::scenario::{FaultAction, FaultEvent, Participant, Scenario, ValidationError};
+use super::scenario::{
+    FaultAction, FaultEvent, LatencySpec, NetworkPreset, NetworkSection, Participant, Scenario,
+    ValidationError,
+};
 use crate::channel::mpsc::{self, RecvError, SendError};
 use crate::channel::oneshot;
 use crate::cx::Cx;
@@ -124,6 +133,7 @@ use crate::supervision::{
 };
 use crate::trace::replay::ReplayTrace;
 use crate::types::{Budget, CancelReason, Outcome, RegionId, Time};
+use crate::util::DetRng;
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Write as _;
@@ -1474,6 +1484,108 @@ impl AssignedWorker {
     }
 }
 
+/// Mixed into the lab seed for the network model's own random stream.
+const NETWORK_SEED_SALT: u64 = 0x6e65_7477_6f72_6b21;
+
+/// Latency and loss for messages between participants, from the scenario's
+/// `network` section. Every directed link uses the preset's conditions, and
+/// a `"from->to"` entry in `links` overrides that link's latency model
+/// (without jitter) and packet loss. Corruption, duplication, reordering and
+/// bandwidth are not modeled. The random stream is seeded from the lab seed
+/// and drawn in message order, so a run stays deterministic.
+#[derive(Debug)]
+struct NetworkModel {
+    preset: NetworkConditions,
+    links: BTreeMap<(String, String), NetworkConditions>,
+    rng: Mutex<DetRng>,
+}
+
+impl Default for NetworkModel {
+    fn default() -> Self {
+        Self::new(&NetworkSection::default(), 0)
+    }
+}
+
+impl NetworkModel {
+    fn new(section: &NetworkSection, seed: u64) -> Self {
+        let preset = match section.preset {
+            NetworkPreset::Ideal => NetworkConditions::ideal(),
+            NetworkPreset::Local => NetworkConditions::local(),
+            NetworkPreset::Lan => NetworkConditions::lan(),
+            NetworkPreset::Wan => NetworkConditions::wan(),
+            NetworkPreset::Satellite => NetworkConditions::satellite(),
+            NetworkPreset::Congested => NetworkConditions::congested(),
+            NetworkPreset::Lossy => NetworkConditions::lossy(),
+        };
+        let links = section
+            .links
+            .iter()
+            .filter_map(|(key, link)| {
+                let (from, to) = key.split_once("->")?;
+                let mut conditions = preset.clone();
+                if let Some(latency) = &link.latency {
+                    conditions.latency = Self::latency_model(latency);
+                    conditions.jitter = None;
+                }
+                if let Some(loss) = link.packet_loss {
+                    conditions.packet_loss = loss;
+                }
+                Some(((from.trim().to_owned(), to.trim().to_owned()), conditions))
+            })
+            .collect();
+        Self {
+            preset,
+            links,
+            rng: Mutex::new(DetRng::new(seed ^ NETWORK_SEED_SALT)),
+        }
+    }
+
+    fn latency_model(spec: &LatencySpec) -> LatencyModel {
+        match *spec {
+            LatencySpec::Fixed { ms } => LatencyModel::Fixed(Duration::from_millis(ms)),
+            LatencySpec::Uniform { min_ms, max_ms } => LatencyModel::Uniform {
+                min: Duration::from_millis(min_ms),
+                max: Duration::from_millis(max_ms),
+            },
+            LatencySpec::Normal { mean_ms, stddev_ms } => LatencyModel::Normal {
+                mean: Duration::from_millis(mean_ms),
+                std_dev: Duration::from_millis(stddev_ms),
+            },
+        }
+    }
+
+    /// How long a message from `from` to `to` takes, or `None` when the link
+    /// drops it.
+    fn transit(&self, from: &str, to: &str) -> Option<Duration> {
+        let conditions = self
+            .links
+            .get(&(from.to_owned(), to.to_owned()))
+            .unwrap_or(&self.preset);
+        let mut rng = self.rng.lock();
+        if conditions.packet_loss > 0.0 {
+            // 53 random bits as a fraction in [0, 1).
+            #[allow(clippy::cast_precision_loss)]
+            let draw = (rng.next_u64() >> 11) as f64 / (1_u64 << 53) as f64;
+            if draw < conditions.packet_loss {
+                return None;
+            }
+        }
+        let latency = conditions.latency.sample(&mut rng);
+        let jitter = conditions
+            .jitter
+            .as_ref()
+            .map_or(Duration::ZERO, |jitter| jitter.sample(&mut rng));
+        Some(latency.saturating_add(jitter))
+    }
+}
+
+/// Waits out a network delay; a zero delay does not touch the timer wheel.
+async fn transit_delay(cx: &Cx, delay: Duration) {
+    if !delay.is_zero() {
+        crate::time::sleep(cx.now(), delay).await;
+    }
+}
+
 /// Links between participants that a `partition` fault cut and no `heal`
 /// restored yet, as unordered name pairs.
 #[derive(Debug, Default)]
@@ -1556,7 +1668,7 @@ struct SagaRecord {
     participants: Vec<(String, Arc<AtomicU8>)>,
     /// Steps whose compensation the saga registered.
     registered: AtomicU64,
-    /// Requests lost on a cut link.
+    /// Requests and replies lost on a cut link or dropped by the network.
     lost: AtomicU64,
     /// Step indices in the order their compensations ran.
     compensated: Mutex<Vec<usize>>,
@@ -1873,6 +1985,8 @@ struct ParticipantWorkload {
     handles: Vec<(usize, TaskHandle<()>)>,
     /// Links cut by `partition` faults; saga coordinators consult it.
     partitions: Arc<PartitionTable>,
+    /// Latency and loss of messages between participants.
+    network: Arc<NetworkModel>,
     /// True when some task waits on virtual-time timers.
     timed: bool,
 }
@@ -1908,8 +2022,9 @@ impl ParticipantWorkload {
     ///
     /// An empty plan spawns nothing and creates no region, so a scenario
     /// without bound participants keeps the empty-lab trace it always had.
-    fn spawn(runtime: &mut LabRuntime, plan: &WorkloadPlan) -> Self {
+    fn spawn(runtime: &mut LabRuntime, plan: &WorkloadPlan, network: &NetworkSection) -> Self {
         let mut workload = Self {
+            network: Arc::new(NetworkModel::new(network, runtime.config().seed)),
             timed: plan.is_timed(),
             ..Self::default()
         };
@@ -2297,6 +2412,7 @@ impl ParticipantWorkload {
             targets,
             step_ms,
             Arc::clone(&self.partitions),
+            Arc::clone(&self.network),
             record,
             counters,
         );
@@ -2463,6 +2579,7 @@ async fn run_saga_coordinator(
     targets: Vec<SagaStepTarget>,
     step_ms: u64,
     partitions: Arc<PartitionTable>,
+    network: Arc<NetworkModel>,
     record: Arc<SagaRecord>,
     counters: Arc<WorkloadCounters>,
 ) {
@@ -2498,7 +2615,12 @@ async fn run_saga_coordinator(
             break;
         }
         bump(&record.registered);
-        if let Err(stop) = request_step(&cx, &name, target, step, &partitions, &record).await {
+        let link = SagaLink {
+            coordinator: &name,
+            partitions: &partitions,
+            network: &network,
+        };
+        if let Err(stop) = request_step(&cx, link, target, step, &record).await {
             end = stop;
             break;
         }
@@ -2513,41 +2635,73 @@ async fn run_saga_coordinator(
     // Dropping `targets` closes every participant's request channel.
 }
 
-/// Sends one apply request and waits at most `step` for its reply.
+/// The links between a coordinator and its participants.
+#[derive(Clone, Copy)]
+struct SagaLink<'a> {
+    coordinator: &'a str,
+    partitions: &'a PartitionTable,
+    network: &'a NetworkModel,
+}
+
+impl SagaLink<'_> {
+    /// How long a message between the coordinator and `participant` takes,
+    /// or `None` when it is lost: the link is cut or the network drops it.
+    fn transit(self, from: &str, to: &str, participant: &str) -> Option<Duration> {
+        if self.partitions.is_cut(self.coordinator, participant) {
+            return None;
+        }
+        self.network.transit(from, to)
+    }
+}
+
+/// Sends one apply request and waits at most `step` for its reply. Both
+/// messages cross the network: each can be delayed or lost on the way.
 async fn request_step(
     cx: &Cx,
-    coordinator: &str,
+    link: SagaLink<'_>,
     target: &SagaStepTarget,
     step: Duration,
-    partitions: &PartitionTable,
     record: &SagaRecord,
 ) -> Result<(), SagaEnd> {
+    let participant = target.name.as_str();
     let (reply, mut replies) = oneshot::channel();
-    // A request over a cut link is lost. Keeping its reply sender makes the
-    // coordinator wait out the timeout instead of seeing a closed reply.
-    let lost = if partitions.is_cut(coordinator, &target.name) {
-        bump(&record.lost);
-        Some(reply)
-    } else {
+    // The reply sender of a lost request. Keeping it makes the coordinator
+    // wait out the timeout instead of seeing a closed reply.
+    let mut unanswered = None;
+    let exchange = async {
+        let Some(delay) = link.transit(link.coordinator, participant, participant) else {
+            unanswered = Some(reply);
+            bump(&record.lost);
+            return std::future::pending().await;
+        };
+        transit_delay(cx, delay).await;
         match target.requests.send(cx, SagaRequest { reply }).await {
-            Ok(()) => None,
+            Ok(()) => {}
             Err(SendError::Cancelled(_)) => return Err(SagaEnd::Cancelled),
             Err(SendError::Disconnected(_) | SendError::Full(_)) => {
-                return Err(SagaEnd::Aborted(format!("{} is gone", target.name)));
+                return Err(SagaEnd::Aborted(format!("{participant} is gone")));
+            }
+        }
+        let answer = replies.recv(cx).await;
+        let Some(delay) = link.transit(participant, link.coordinator, participant) else {
+            // The reply is lost, perhaps after the participant applied the
+            // step; the compensation will undo it.
+            bump(&record.lost);
+            return std::future::pending().await;
+        };
+        transit_delay(cx, delay).await;
+        match answer {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(SagaEnd::Aborted(format!("{participant} refused"))),
+            Err(oneshot::RecvError::Cancelled) => Err(SagaEnd::Cancelled),
+            Err(oneshot::RecvError::Closed | oneshot::RecvError::PolledAfterCompletion) => {
+                Err(SagaEnd::Aborted(format!("{participant} dropped the reply")))
             }
         }
     };
-    let answer = crate::time::timeout(cx.now(), step, replies.recv(cx)).await;
-    drop(lost);
-    match answer {
-        Ok(Ok(true)) => Ok(()),
-        Ok(Ok(false)) => Err(SagaEnd::Aborted(format!("{} refused", target.name))),
-        Ok(Err(oneshot::RecvError::Cancelled)) => Err(SagaEnd::Cancelled),
-        Ok(Err(oneshot::RecvError::Closed | oneshot::RecvError::PolledAfterCompletion)) => Err(
-            SagaEnd::Aborted(format!("{} dropped the reply", target.name)),
-        ),
-        Err(_) => Err(SagaEnd::Aborted(format!("{} timed out", target.name))),
-    }
+    let answer = crate::time::timeout(cx.now(), step, exchange).await;
+    drop(unanswered);
+    answer.unwrap_or_else(|_| Err(SagaEnd::Aborted(format!("{participant} timed out"))))
 }
 
 /// Body of a bound `saga-participant`: it applies each request unless its
@@ -3126,7 +3280,7 @@ impl ScenarioRunner {
         let effective_seed = identity.seed_plan.effective_lab_seed();
         let config = Self::lab_config_for_identity(scenario, identity);
         let mut runtime = LabRuntime::new(config);
-        let workload = ParticipantWorkload::spawn(&mut runtime, &plan);
+        let workload = ParticipantWorkload::spawn(&mut runtime, &plan, &scenario.network);
 
         let (fault_log, fault_effect_summary) = Self::drive(&mut runtime, scenario, &workload);
         let faults_injected = fault_log.len();
@@ -3195,7 +3349,7 @@ impl ScenarioRunner {
         let effective_seed = seed_override.unwrap_or(scenario.lab.seed);
         let config = Self::lab_config_for(scenario, seed_override);
         let mut runtime = LabRuntime::new(config);
-        let workload = ParticipantWorkload::spawn(&mut runtime, &plan);
+        let workload = ParticipantWorkload::spawn(&mut runtime, &plan, &scenario.network);
 
         // 3-4. Inject timed faults, running between them, then run to
         // quiescence
@@ -4256,7 +4410,7 @@ mod tests {
 
         let plan = WorkloadPlan::from_scenario(&scenario).expect("valid plan");
         let mut runtime = LabRuntime::new(ScenarioRunner::lab_config_for(&scenario, None));
-        let workload = ParticipantWorkload::spawn(&mut runtime, &plan);
+        let workload = ParticipantWorkload::spawn(&mut runtime, &plan, &scenario.network);
         runtime.run_until_quiescent();
 
         let report = runtime.report();
@@ -4879,9 +5033,10 @@ mod tests {
     }
 
     /// The shipped fixture's partition reaches the workload. Without chaos
-    /// the coordinator asks participant-i at 50 * (i + 1) ms, so
-    /// participant-7's request at 400 ms crosses the link cut at 200 ms and
-    /// the saga times out at 450 ms.
+    /// the coordinator asks participant-i at 50 * (i + 1) ms plus the LAN
+    /// round trips before it (2-10 ms each), so participant-7's request, at
+    /// about 440 ms, crosses the link cut from 200 to 800 ms and the saga
+    /// times out.
     #[test]
     fn saga_partition_fixture_compensates_the_steps_before_the_cut_link() {
         init_test("saga_partition_fixture_compensates_the_steps_before_the_cut_link");
@@ -4984,6 +5139,119 @@ mod tests {
         );
         assert_eq!(violation_kinds(&sender), ["premature_disconnect"]);
         crate::test_complete!("panicked_tasks_and_premature_disconnects_are_workload_violations");
+    }
+
+    fn link(
+        latency_ms: Option<u64>,
+        packet_loss: Option<f64>,
+    ) -> crate::lab::scenario::LinkConditions {
+        crate::lab::scenario::LinkConditions {
+            latency: latency_ms.map(|ms| LatencySpec::Fixed { ms }),
+            packet_loss,
+            packet_corrupt: None,
+            packet_duplicate: None,
+            packet_reorder: None,
+            bandwidth: None,
+        }
+    }
+
+    #[test]
+    fn network_model_follows_the_preset_and_link_overrides() {
+        init_test("network_model_follows_the_preset_and_link_overrides");
+        let ideal = NetworkModel::new(&NetworkSection::default(), 7);
+        assert_eq!(ideal.transit("a", "b"), Some(Duration::ZERO));
+
+        let mut section = NetworkSection {
+            preset: NetworkPreset::Lan,
+            ..NetworkSection::default()
+        };
+        section.links.insert("a->b".to_owned(), link(Some(7), None));
+        section
+            .links
+            .insert("b->a".to_owned(), link(None, Some(1.0)));
+        let model = NetworkModel::new(&section, 7);
+        assert_eq!(model.transit("a", "b"), Some(Duration::from_millis(7)));
+        assert_eq!(model.transit("b", "a"), None);
+        for _ in 0..64 {
+            // LAN: 1-5 ms, and its 0.01% loss may drop one.
+            if let Some(delay) = model.transit("a", "c") {
+                assert!(
+                    (Duration::from_millis(1)..=Duration::from_millis(5)).contains(&delay),
+                    "{delay:?}"
+                );
+            }
+        }
+
+        // Same seed, same draws; another seed, other draws.
+        let draws = |seed| {
+            let model = NetworkModel::new(&section, seed);
+            (0..32).map(|_| model.transit("a", "c")).collect::<Vec<_>>()
+        };
+        assert_eq!(draws(11), draws(11));
+        assert_ne!(draws(11), draws(12));
+        crate::test_complete!("network_model_follows_the_preset_and_link_overrides");
+    }
+
+    /// Saga messages cross the network: a lost reply, a request slower than
+    /// the reply budget, and latency within it.
+    #[test]
+    fn network_latency_and_loss_reach_saga_messages() {
+        init_test("network_latency_and_loss_reach_saga_messages");
+        let run = |links: Vec<(&str, crate::lab::scenario::LinkConditions)>| {
+            let mut scenario = saga_scenario(2);
+            for (key, conditions) in links {
+                scenario.network.links.insert(key.to_owned(), conditions);
+            }
+            let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+            assert!(result.passed(), "{}", failure_detail(&result));
+            let record = saga_record(&tasks, "coord");
+            (
+                record.end.lock().clone(),
+                count(&record.lost),
+                record.compensated.lock().clone(),
+                saga_steps(record)
+                    .into_iter()
+                    .map(|(_, state)| state)
+                    .collect::<Vec<_>>(),
+            )
+        };
+
+        // p0 applies its step but the reply is dropped: the timeout aborts
+        // the saga, and the compensation undoes the applied step.
+        assert_eq!(
+            run(vec![("p0->coord", link(None, Some(1.0)))]),
+            (
+                Some(SagaEnd::Aborted("p0 timed out".to_owned())),
+                1,
+                vec![0],
+                vec!["undone", "pending"]
+            )
+        );
+        // p1's request takes 60 ms, longer than the 50 ms reply budget: the
+        // saga aborts before it arrives, so p1's step is fenced.
+        assert_eq!(
+            run(vec![("coord->p1", link(Some(60), None))]),
+            (
+                Some(SagaEnd::Aborted("p1 timed out".to_owned())),
+                0,
+                vec![1, 0],
+                vec!["undone", "fenced"]
+            )
+        );
+        // A 40 ms round trip fits the budget.
+        assert_eq!(
+            run(vec![
+                ("coord->p0", link(Some(20), None)),
+                ("p0->coord", link(Some(20), None)),
+            ]),
+            (
+                Some(SagaEnd::Completed),
+                0,
+                vec![],
+                vec!["applied", "applied"]
+            )
+        );
+        crate::test_complete!("network_latency_and_loss_reach_saga_messages");
     }
 
     #[test]
