@@ -966,13 +966,13 @@ fn tracing_bind_addr(line: &str, marker: &str) -> Option<SocketAddr> {
     })
 }
 
-/// Waits until a signal reaches atpd's handler; returns its TCP listener.
+/// Waits until atpd is up; returns its TCP listener.
 ///
-/// atpd installs its signal listener after its transfer listeners have bound
-/// and before it starts the diagnostics endpoint, so the diagnostics line
-/// means that a signal now takes the daemon's stop path. A listener logs its
-/// own `bound and accepting` line after it reports the bind, so the lines can
-/// arrive in any order.
+/// atpd installs its signal listener before its transfer listeners bind and
+/// starts the diagnostics endpoint last, so the diagnostics line means that a
+/// signal takes the daemon's stop path. A listener logs its own `bound and
+/// accepting` line after it reports the bind, so the lines can arrive in any
+/// order.
 fn atpd_ready(daemon: &mut Process, quic: bool) -> SocketAddr {
     let mut transfer = None;
     let mut quic_bound = !quic;
@@ -1252,6 +1252,158 @@ fn atpd_with_quic_sigterm_idle_stops_both_listeners() {
     assert!(
         problems.is_empty(),
         "{problems:#?}\nscratch root: {}\nlog: {:#?}",
+        root.display(),
+        stop.log
+    );
+}
+
+/// `atpd stop` finds a daemon that `atpd start` started, drains it and exits
+/// 0, and the PID file is gone afterwards (asupersync-fas2rq). `atpd start`
+/// used to never write its PID file, so `atpd stop` printed "not running"
+/// while the daemon kept running.
+#[test]
+fn atpd_stop_command_finds_a_started_daemon_and_drains_it() {
+    let root = scratch_root("atpd-stop-command");
+    let data = init_atpd(&root);
+    let pid_file = root.join("atpd.pid");
+    let mut daemon = start_atpd(&root, &data, &[]);
+    atpd_ready(&mut daemon, false);
+    let recorded = std::fs::read_to_string(&pid_file).ok();
+    let expected = daemon.child.as_ref().expect("child is owned").id().to_string();
+
+    // The daemon is this test's child: reap it while `atpd stop` waits, or
+    // its zombie would look alive to the stop command.
+    let mut stopper = Process::spawn("atpd stop", atpd_command(&root).arg("stop"));
+    let daemon_status = daemon.wait_exit(EXIT_LIMIT);
+    let stop_status = stopper.wait_exit(EXIT_LIMIT);
+    let mut log = daemon.all_lines(Pipe::Stdout);
+    log.extend(daemon.all_lines(Pipe::Stderr));
+    let mut stop_log = stopper.all_lines(Pipe::Stdout);
+    stop_log.extend(stopper.all_lines(Pipe::Stderr));
+
+    let mut problems = Vec::new();
+    if recorded.as_deref().map(str::trim) != Some(expected.as_str()) {
+        problems.push(format!(
+            "the running daemon's PID file held {recorded:?}, expected {expected}"
+        ));
+    }
+    if daemon_status.and_then(|status| status.code()) != Some(0) {
+        problems.push(format!(
+            "`atpd stop` must stop the daemon with exit 0; got {}",
+            describe_status(daemon_status)
+        ));
+    }
+    if stop_status.and_then(|status| status.code()) != Some(0)
+        || count_containing(&stop_log, "ATP daemon stopped successfully") != 1
+    {
+        problems.push(format!(
+            "`atpd stop` must report a clean stop; got {}",
+            describe_status(stop_status)
+        ));
+    }
+    if count_containing(&log, ATPD_LISTENERS_DRAINED) != 1 {
+        problems.push("the daemon must drain its listeners".to_string());
+    }
+    if pid_file.exists() {
+        problems.push("the PID file must be removed after the stop".to_string());
+    }
+    assert!(
+        problems.is_empty(),
+        "{problems:#?}\nscratch root: {}\ndaemon log: {log:#?}\nstop log: {stop_log:#?}",
+        root.display()
+    );
+}
+
+/// `atpd stop` signals only an ATP daemon (asupersync-fas2rq). A PID file
+/// naming another process is stale: that process keeps running and the file
+/// is removed. A PID file holding 0 is refused: `kill(0, ..)` would signal the
+/// stop command's whole process group. That stop runs in its own process
+/// group, so a regression can only signal itself.
+#[test]
+fn atpd_stop_never_signals_a_process_that_is_not_an_atp_daemon() {
+    use std::os::unix::process::CommandExt;
+
+    let root = scratch_root("atpd-stop-identity");
+    let pid_file = root.join("atpd.pid");
+    let mut bystander = Command::new("sleep")
+        .arg("60")
+        .spawn()
+        .expect("spawn a bystander process");
+    write_file(&pid_file, bystander.id().to_string().as_bytes());
+    let stale = atpd_command(&root)
+        .arg("stop")
+        .output()
+        .expect("run atpd stop on a stale PID file");
+    let bystander_alive = bystander.try_wait().expect("poll bystander").is_none();
+    let _ = bystander.kill();
+    let _ = bystander.wait();
+    let stale_removed = !pid_file.exists();
+
+    write_file(&pid_file, b"0");
+    let zero = atpd_command(&root)
+        .arg("stop")
+        .process_group(0)
+        .output()
+        .expect("run atpd stop on PID 0");
+
+    let mut problems = Vec::new();
+    if !bystander_alive {
+        problems.push("`atpd stop` signalled a process that is not an ATP daemon".to_string());
+    }
+    if !stale.status.success()
+        || !String::from_utf8_lossy(&stale.stdout).contains("stale PID file")
+        || !stale_removed
+    {
+        problems.push(format!(
+            "a stale PID file must be reported and removed; status {}, stdout {:?}, removed {}",
+            describe_status(Some(stale.status)),
+            String::from_utf8_lossy(&stale.stdout),
+            stale_removed
+        ));
+    }
+    if zero.status.code() != Some(1)
+        || !String::from_utf8_lossy(&zero.stderr).contains("cannot name an ATP daemon")
+    {
+        problems.push(format!(
+            "a PID file holding 0 must be refused without signalling; status {}, stderr {:?}",
+            describe_status(Some(zero.status)),
+            String::from_utf8_lossy(&zero.stderr)
+        ));
+    }
+    assert!(problems.is_empty(), "{problems:#?}\nscratch root: {}", root.display());
+}
+
+/// An idle diagnostics client does not keep atpd from exiting on SIGTERM
+/// (asupersync-fas2rq). The endpoint thread serves one connection at a time
+/// and is joined at shutdown; its read used to have no timeout.
+///
+/// The client connects and then sends nothing. The endpoint accepts within
+/// its 100 ms poll, so after the wait below it is parked in that read. If a
+/// loaded host delays the accept past the signal, the stop path never accepts
+/// the client and this test passes without exercising the read.
+#[test]
+fn atpd_sigterm_exits_while_a_diagnostics_client_is_idle() {
+    let root = scratch_root("atpd-diagnostics-idle");
+    let data = init_atpd(&root);
+    let inbox = data.join("inbox");
+    let mut daemon = start_atpd(&root, &data, &[]);
+    atpd_ready(&mut daemon, false);
+    let diagnostics = daemon
+        .stdout_seen
+        .iter()
+        .find_map(|line| tracing_bind_addr(line, "ATP daemon diagnostics endpoint started"))
+        .expect("atpd logged its diagnostics address");
+    let idle = TcpStream::connect(diagnostics).expect("connect an idle diagnostics client");
+    thread::sleep(Duration::from_secs(1));
+
+    let stop = stop_atpd(&mut daemon, Signal::SIGTERM, &inbox);
+    drop(idle);
+    assert_eq!(
+        stop.status.and_then(|status| status.code()),
+        Some(0),
+        "atpd must exit 0 within {EXIT_LIMIT:?} with an idle diagnostics client; got {}\n\
+         scratch root: {}\nlog: {:#?}",
+        describe_status(stop.status),
         root.display(),
         stop.log
     );
