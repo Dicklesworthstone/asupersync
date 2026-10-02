@@ -1610,6 +1610,7 @@ impl KafkaConsumer {
         if self.closed.load(Ordering::Acquire) {
             return Err(KafkaError::Config("consumer is closed".to_string()));
         }
+        let resubscribed = !state.subscribed_topics.is_empty();
         state.subscribed_topics = normalized;
         #[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
         {
@@ -1634,7 +1635,13 @@ impl KafkaConsumer {
             }
         }
         state.positions.clear();
-        state.rebalance_generation = 0;
+        // The generation is monotonic: a new subscription is a membership
+        // change, so group metadata captured before it must never validate
+        // again. Resetting it to 0 let two later rebalances bring stale
+        // metadata back to a matching generation (asupersync-lde436).
+        if resubscribed {
+            state.rebalance_generation = state.rebalance_generation.saturating_add(1);
+        }
         state.last_revoked_partitions.clear();
         drop(state);
         self.state_notify.notify_waiters();
@@ -3444,6 +3451,37 @@ mod tests {
                 vec![("orders".to_string(), 0)]
             );
             assert_eq!(consumer.position("orders", 1), None);
+        });
+    }
+
+    // asupersync-lde436 item 5: subscribe() reset the generation to 0, so a
+    // rebalance after a re-subscribe brought metadata captured before it back
+    // to a matching generation and assignment, and it validated again.
+    #[test]
+    fn group_metadata_from_before_a_resubscribe_never_validates_again() {
+        #[cfg(not(feature = "kafka"))]
+        let _broker = deterministic_broker_guard();
+        run_test_with_cx(|cx| async move {
+            let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
+            consumer.subscribe(&cx, &["orders"]).await.unwrap();
+            assert_eq!(consumer.rebalance_generation(), 0);
+            let owned = [TopicPartitionOffset::new("orders", 1, 0)];
+            consumer.rebalance(&cx, &owned).await.unwrap();
+            let before = consumer.group_metadata_for_state_test();
+
+            consumer.subscribe(&cx, &["orders"]).await.unwrap();
+            consumer.rebalance(&cx, &owned).await.unwrap();
+            assert_eq!(consumer.assigned_partitions(), vec![("orders".to_string(), 1)]);
+            assert!(
+                consumer.rebalance_generation() > before.generation(),
+                "generation {} after a re-subscribe, {} before it",
+                consumer.rebalance_generation(),
+                before.generation()
+            );
+            assert!(matches!(
+                before.prepare_offsets(&owned),
+                Err(KafkaError::Transaction(_))
+            ));
         });
     }
 
