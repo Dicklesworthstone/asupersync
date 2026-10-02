@@ -1555,6 +1555,12 @@ pub struct AdmittedRegion {
 pub struct AdmittedRegionSlot {
     inner: Mutex<Option<Result<AdmittedRegion, crate::runtime::region_table::RegionCreateError>>>,
     waiters: Mutex<Vec<std::task::Waker>>,
+    // Both flags change only while `inner` is locked, so publication and
+    // abandonment are ordered against each other.
+    published: AtomicBool,
+    // The opening was dropped before taking the outcome; publication closes
+    // the minted region itself instead of storing it for nobody.
+    abandoned: AtomicBool,
 }
 
 impl fmt::Debug for AdmittedRegionSlot {
@@ -1579,14 +1585,26 @@ impl AdmittedRegionSlot {
         &self,
         result: Result<AdmittedRegion, crate::runtime::region_table::RegionCreateError>,
     ) {
-        let waiters = {
+        let (waiters, orphan) = {
             let mut inner = self.inner.lock();
-            if inner.is_some() {
+            if self.published.load(Ordering::Acquire) {
                 return;
             }
-            *inner = Some(result);
-            std::mem::take(&mut *self.waiters.lock())
+            self.published.store(true, Ordering::Release);
+            let orphan = if self.abandoned.load(Ordering::Acquire) {
+                Some(result)
+            } else {
+                *inner = Some(result);
+                None
+            };
+            (std::mem::take(&mut *self.waiters.lock()), orphan)
         };
+        // Nobody will take a region minted for a dropped opening. Its handle's
+        // drop backstop queues the close, so the region cannot stay open
+        // without an owner (and park its parent's close).
+        if let Some(Ok(admitted)) = orphan {
+            drop(crate::cx::ChildRegion::<crate::cx::cap::All>::from_admitted(admitted));
+        }
         for waker in waiters {
             waker.wake();
         }
@@ -1602,17 +1620,38 @@ impl AdmittedRegionSlot {
     /// Returns true while the mint outcome is still pending.
     #[must_use]
     pub fn is_pending(&self) -> bool {
-        self.inner.lock().is_none()
+        let _inner = self.inner.lock();
+        !self.published.load(Ordering::Acquire)
     }
 
     pub(crate) fn register(&self, waker: std::task::Waker) {
-        // Re-check under the lock: publication may have landed between the
-        // caller's take() attempt and this registration.
-        if !self.inner.lock().is_none() {
+        // Hold `inner` through the push: publication takes the waiters while
+        // holding it, so it either sees this waker or has already published,
+        // which this check observes.
+        let inner = self.inner.lock();
+        if self.published.load(Ordering::Acquire) {
+            drop(inner);
             waker.wake_by_ref();
             return;
         }
-        self.waiters.lock().push(waker);
+        let mut waiters = self.waiters.lock();
+        if !waiters
+            .iter()
+            .any(|registered| registered.will_wake(&waker))
+        {
+            waiters.push(waker);
+        }
+    }
+
+    /// Marks the slot as abandoned by its only consumer and returns an
+    /// outcome that was published but not taken, for the caller to close.
+    /// A later publication closes the region it mints instead.
+    pub(crate) fn abandon(
+        &self,
+    ) -> Option<Result<AdmittedRegion, crate::runtime::region_table::RegionCreateError>> {
+        let mut inner = self.inner.lock();
+        self.abandoned.store(true, Ordering::Release);
+        inner.take()
     }
 }
 
@@ -2024,6 +2063,62 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::thread;
+
+    struct CountWakes(AtomicUsize);
+    impl std::task::Wake for CountWakes {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn region_create_failure() -> crate::runtime::region_table::RegionCreateError {
+        crate::runtime::region_table::RegionCreateError::ParentNotFound(RegionId::new_for_test(
+            9, 0,
+        ))
+    }
+
+    /// The region slot's waiter list holds each waker once, publication wakes
+    /// it exactly once, and a registration after publication wakes at once.
+    #[test]
+    fn region_slot_publication_wakes_each_registered_waiter_once() {
+        let slot = AdmittedRegionSlot::new();
+        let wakes = Arc::new(CountWakes(AtomicUsize::new(0)));
+        let waker = std::task::Waker::from(Arc::clone(&wakes));
+        for _ in 0..3 {
+            slot.register(waker.clone());
+        }
+        assert_eq!(slot.waiters.lock().len(), 1, "repeated polls register once");
+        assert!(slot.is_pending());
+        slot.publish(Err(region_create_failure()));
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
+        assert!(!slot.is_pending());
+        slot.register(waker.clone());
+        assert_eq!(
+            wakes.0.load(Ordering::SeqCst),
+            2,
+            "late registration wakes at once"
+        );
+        assert!(matches!(slot.take(), Some(Err(_))));
+        assert!(!slot.is_pending(), "a taken outcome is still published");
+        slot.publish(Err(region_create_failure()));
+        assert!(slot.take().is_none(), "later publications are ignored");
+    }
+
+    /// An abandoned slot hands back an outcome published before abandonment
+    /// and stores none published after it.
+    #[test]
+    fn region_slot_abandonment_returns_or_discards_the_outcome() {
+        let published_first = AdmittedRegionSlot::new();
+        published_first.publish(Err(region_create_failure()));
+        assert!(matches!(published_first.abandon(), Some(Err(_))));
+        assert!(published_first.take().is_none());
+
+        let abandoned_first = AdmittedRegionSlot::new();
+        assert!(abandoned_first.abandon().is_none());
+        abandoned_first.publish(Err(region_create_failure()));
+        assert!(!abandoned_first.is_pending());
+        assert!(abandoned_first.take().is_none(), "nobody would take it");
+    }
 
     /// Embedded-table admission for the owner-pinned local lane, matching
     /// the production drain entry (`admit_local_spawn_request_in`).

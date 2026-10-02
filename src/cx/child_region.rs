@@ -139,6 +139,10 @@ impl From<RegionCreateError> for ChildRegionError {
 /// no runtime gateway and a runtime that vanished while pending — resolve as
 /// [`ChildRegionError`] instead of panicking or hanging.
 ///
+/// Dropping an opening before it resolves (a timeout, a lost race, an aborted
+/// task) closes the region it would have opened, so the region never stays
+/// open without an owner and a parent's close never waits for it.
+///
 /// `Caps` is the opener's compile-time capability set. The child's principal
 /// context carries the same set, so opening a region cannot widen a restricted
 /// context back to `cap::All` (asupersync-cwxavr).
@@ -215,6 +219,20 @@ impl<Caps> Future for ChildRegionOpening<Caps> {
         }
         slot.register(cx.waker().clone());
         Poll::Pending
+    }
+}
+
+impl<Caps> Drop for ChildRegionOpening<Caps> {
+    fn drop(&mut self) {
+        // The Create command is already queued. A region minted for an opening
+        // that nobody awaits any more must still close: the slot closes one
+        // minted later, and one minted already but never taken closes here
+        // through the handle's drop backstop.
+        if let Some((slot, _)) = self.pending.take()
+            && let Some(Ok(admitted)) = slot.abandon()
+        {
+            drop(ChildRegion::<Caps>::from_admitted(admitted));
+        }
     }
 }
 
@@ -485,6 +503,54 @@ mod tests {
             );
             child.close().await.expect("child region closes");
         });
+    }
+
+    /// Yields until the scheduler has published the slot's mint outcome.
+    async fn await_publication(slot: &AdmittedRegionSlot) {
+        for _ in 0..10_000 {
+            if !slot.is_pending() {
+                return;
+            }
+            crate::runtime::yield_now().await;
+        }
+        panic!("the scheduler never minted the region");
+    }
+
+    /// An opening dropped before it resolves (a timeout, a lost race, an
+    /// aborted task) must not leave the region the scheduler mints for it
+    /// open with no owner until some ancestor closes. That holds whether the
+    /// opening is dropped before the region is minted or after it was
+    /// published but never taken: either way the slot ends up empty because
+    /// the region was handed to its close backstop.
+    #[test]
+    fn a_dropped_opening_never_leaves_its_minted_region_to_nobody() {
+        for published_before_drop in [false, true] {
+            let runtime = RuntimeBuilder::current_thread()
+                .build()
+                .expect("current-thread runtime builds");
+            let parent = runtime.request_cx_with_budget(Budget::with_deadline_at_secs(60));
+            runtime.block_on_with_cx(parent.clone(), async move {
+                let owner = parent
+                    .open_child_region(ChildRegionSpec::inherit())
+                    .await
+                    .expect("the owner region opens");
+                // Queue the Create command, keeping a view of its slot.
+                let opening = owner.cx().open_child_region(ChildRegionSpec::inherit());
+                let slot = Arc::clone(&opening.pending.as_ref().expect("a queued opening").0);
+                if published_before_drop {
+                    // Minted and published, but never polled or taken.
+                    await_publication(&slot).await;
+                }
+                drop(opening);
+                await_publication(&slot).await;
+                assert!(
+                    slot.take().is_none(),
+                    "published_before_drop={published_before_drop}: \
+                     the minted region was left in the slot for nobody"
+                );
+                owner.close().await.expect("the owner region closes");
+            });
+        }
     }
 
     #[test]
