@@ -4417,6 +4417,22 @@ mod tests {
             transaction.abort(&cx).await.unwrap();
             assert_eq!(consumer.committed_offset(input, 0), Some(2));
 
+            // Dropped with enrolled offsets, neither committed nor aborted: the
+            // offsets must never reach the consumer's committed cache, and the
+            // next begin aborts the abandoned transaction first
+            // (asupersync-lde436 item 4).
+            let transaction = producer.begin_transaction(&cx).await.unwrap();
+            transaction.send(&cx, output, Some(b"same-partition"), b"dropped").await.unwrap();
+            transaction.send_offsets_to_transaction(&cx, &offsets(3), &metadata).await.unwrap();
+            drop(transaction);
+            assert_eq!(producer.state.lock().phase, TransactionPhase::NeedsAbortRecovery);
+            assert!(producer.state.lock().pending_offsets.is_none());
+            assert_eq!(consumer.committed_offset(input, 0), Some(2));
+            let transaction = producer.begin_transaction(&cx).await.unwrap();
+            assert_eq!(producer.state.lock().phase, TransactionPhase::Active);
+            assert_eq!(consumer.committed_offset(input, 0), Some(2));
+            transaction.abort(&cx).await.unwrap();
+
             let transaction = producer.begin_transaction(&cx).await.unwrap();
             cluster.request_errors(RDKafkaApiKey::TxnOffsetCommit, &[
                 RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN_MEMBER_ID,
