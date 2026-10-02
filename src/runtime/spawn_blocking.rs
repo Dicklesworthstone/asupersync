@@ -36,7 +36,8 @@ use std::thread;
 /// Created by [`Cx::spawn_blocking_drained`]. Cancellation fences a queued
 /// closure and requests cancellation through the closure's own `Cx`; an
 /// already claimed closure must return cooperatively. Dropping this handle
-/// requests cancellation while its region continues to own the operation.
+/// before the closure finishes requests cancellation while its region
+/// continues to own the operation; dropping it afterwards cancels nothing.
 /// A completed result belongs to the handle, like an ordinary task result.
 #[must_use = "join to observe the blocking operation's result and retirement"]
 pub struct DrainedBlockingHandle<T> {
@@ -110,12 +111,18 @@ impl<T> DrainedBlockingHandle<T> {
 
 impl<T> Drop for DrainedBlockingHandle<T> {
     fn drop(&mut self) {
-        let completed = {
+        let (finished, completed) = {
             let mut state = self.state.inner.lock();
             state.abandoned = true;
-            if state.finished { state.result.take() } else { None }
+            let finished = state.finished;
+            (finished, if finished { state.result.take() } else { None })
         };
-        self.abort();
+        // A finished operation has nothing left to cancel. Aborting it would
+        // mark a Cx clone the closure returned as cancelled and queue a cancel
+        // for a retired task (asupersync-67tsr5).
+        if !finished {
+            self.abort();
+        }
         // A result already published to this handle is caller-owned. Before
         // publication, the pool worker destroys abandoned results and only then
         // releases the runtime task's retirement wait.
