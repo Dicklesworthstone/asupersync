@@ -1678,12 +1678,32 @@ impl Drop for NatsCancelWakerGuard {
 /// driving it. No ambient context is replaced: capability restrictions and
 /// supervisor shutdown remain effective while caller cancellation can wake a
 /// silent read, blocked write, connection attempt, or TLS handshake.
+///
+/// A budget deadline on either context is a cancellation source too, but
+/// `Cx::checkpoint` only notices an expired deadline when something polls.
+/// A timer for each deadline re-polls work parked on a silent server, so it
+/// fails with `Cancelled` at the deadline, as `redis_io` does.
 async fn nats_io<T, E>(cx: &Cx, future: impl Future<Output = Result<T, E>>) -> Result<T, NatsError>
 where
     NatsError: From<E>,
 {
     let mut owner_cancel = NatsCancelWakerGuard::new(cx);
     let mut driver_cancel = Cx::current().as_ref().map(NatsCancelWakerGuard::new);
+    let mut deadlines: Vec<_> = [
+        cx.budget().deadline,
+        driver_cancel
+            .as_ref()
+            .and_then(|driver| driver.cx.budget().deadline),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    deadlines.sort_unstable();
+    // Latest first, so `pop` yields the next deadline to arm.
+    deadlines.reverse();
+    let mut deadline_timer = deadlines
+        .pop()
+        .map(|at| Box::pin(crate::time::sleep_until(at)));
     let mut future = std::pin::pin!(future);
     std::future::poll_fn(|task_cx| {
         // Registration precedes the checkpoint: cancellation published while
@@ -1692,6 +1712,17 @@ where
         owner_cancel.refresh(task_cx.waker());
         if let Some(driver) = driver_cancel.as_mut() {
             driver.refresh(task_cx.waker());
+        }
+        // Arm (or re-arm) the deadline wakeup. A fired timer is replaced by
+        // the next deadline: the earlier one may not end the call (for
+        // example, the driving task is inside a masked section).
+        while deadline_timer
+            .as_mut()
+            .is_some_and(|timer| timer.as_mut().poll(task_cx).is_ready())
+        {
+            deadline_timer = deadlines
+                .pop()
+                .map(|at| Box::pin(crate::time::sleep_until(at)));
         }
         if cx.checkpoint().is_err()
             || driver_cancel
@@ -4408,6 +4439,79 @@ mod tests {
         assert!(!driver.is_cancel_requested());
         assert!(owner.inner.read().cancel_waker_registrations.is_empty());
         assert!(driver.inner.read().cancel_waker_registrations.is_empty());
+    }
+
+    /// A budget deadline must wake work parked on a silent server; a
+    /// checkpoint alone notices an expired deadline only when something
+    /// polls. With two deadlines, an earlier one that does not end the call
+    /// (here the driving task's checkpoints are masked) must not leave the
+    /// later one unarmed.
+    #[test]
+    fn nats_io_wakes_a_parked_call_at_each_budget_deadline() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, RegionId, TaskId, Time};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountWakes(AtomicUsize);
+        impl std::task::Wake for CountWakes {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+        let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+        let cx_with_deadline = |task: u32, deadline_ms: u64| {
+            Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(task, 0),
+                Budget::new().with_deadline(Time::from_millis(deadline_ms)),
+                None,
+                None,
+                None,
+                Some(timer.clone()),
+                None,
+            )
+        };
+        let owner = cx_with_deadline(1, 300);
+        let driver = cx_with_deadline(2, 100);
+        let _current = Cx::set_current(Some(driver.clone()));
+        let silent_server = std::future::pending::<Result<(), NatsError>>();
+        let mut call = std::pin::pin!(crate::combinator::bracket::commit_section(
+            &driver,
+            u32::MAX,
+            nats_io(&owner, silent_server),
+        ));
+        let wakes = Arc::new(CountWakes(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut task_cx = std::task::Context::from_waker(&waker);
+        assert!(call.as_mut().poll(&mut task_cx).is_pending());
+
+        // The driver's deadline wakes the call, which stays pending because
+        // the driver's checkpoints are masked.
+        clock.advance(150_000_000);
+        let _fired = timer.process_timers();
+        assert!(
+            wakes.0.load(Ordering::SeqCst) > 0,
+            "the driver's deadline must wake the parked call"
+        );
+        assert!(
+            call.as_mut().poll(&mut task_cx).is_pending(),
+            "the masked driver does not end the call"
+        );
+
+        // Only a timer for the owner's later deadline can wake it now.
+        let before = wakes.0.load(Ordering::SeqCst);
+        clock.advance(200_000_000);
+        let _fired = timer.process_timers();
+        assert!(
+            wakes.0.load(Ordering::SeqCst) > before,
+            "the owner's deadline must wake the parked call"
+        );
+        assert!(matches!(
+            call.as_mut().poll(&mut task_cx),
+            Poll::Ready(Err(NatsError::Cancelled))
+        ));
     }
 
     #[test]
