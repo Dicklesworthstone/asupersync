@@ -492,6 +492,28 @@ impl ScenarioRunResult {
             && self.lab_report.invariant_violations.is_empty()
     }
 
+    /// [`Self::to_json`] plus what the run executed, for command-line JSON
+    /// output. `workload_ran` is true when the lab took at least one step;
+    /// a passing run where it is false checked nothing. When the scenario
+    /// declares participants, `participant_bindings` lists which ones ran.
+    #[must_use]
+    pub fn to_json_with_bindings(&self, bindings: &ParticipantBindings) -> serde_json::Value {
+        let mut value = self.to_json();
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "workload_ran".to_owned(),
+                serde_json::Value::Bool(self.lab_report.steps_total > 0),
+            );
+            if !bindings.is_empty() {
+                object.insert(
+                    "participant_bindings".to_owned(),
+                    serde_json::to_value(bindings).unwrap_or(serde_json::Value::Null),
+                );
+            }
+        }
+        value
+    }
+
     /// Convert to JSON for artifact storage.
     #[must_use]
     pub fn to_json(&self) -> serde_json::Value {
@@ -778,6 +800,8 @@ const SENDER_ROLE: &str = "sender";
 const RECEIVER_ROLE: &str = "receiver";
 /// Values a sender produces when `properties.messages` is absent.
 const DEFAULT_SENDER_MESSAGES: u64 = 16;
+/// Largest accepted `messages`; each value is a few lab steps.
+const MAX_SENDER_MESSAGES: u64 = 1_000_000;
 /// Channel capacity a receiver offers when `properties.capacity` is absent.
 const DEFAULT_RECEIVER_CAPACITY: usize = 4;
 /// Largest accepted `properties.capacity`; the channel preallocates its queue.
@@ -993,13 +1017,18 @@ impl WorkloadPlan {
         let Some(value) = participant.properties.get("messages") else {
             return Ok(DEFAULT_SENDER_MESSAGES);
         };
-        value.as_u64().ok_or_else(|| {
-            Self::property_error(
-                participant,
-                "messages",
-                "a bound sender's message count must be a non-negative integer".to_owned(),
-            )
-        })
+        value
+            .as_u64()
+            .filter(|messages| *messages <= MAX_SENDER_MESSAGES)
+            .ok_or_else(|| {
+                Self::property_error(
+                    participant,
+                    "messages",
+                    format!(
+                        "a bound sender's message count must be an integer from 0 to {MAX_SENDER_MESSAGES}"
+                    ),
+                )
+            })
     }
 
     fn receiver_capacity(participant: &Participant) -> Result<usize, ValidationError> {
@@ -4149,6 +4178,12 @@ mod tests {
             ),
             // Unbound roles keep free-form properties.
             participant_with("dave", "coordinator", "capacity", serde_json::json!(0)),
+            participant_with(
+                "erin",
+                "sender",
+                "messages",
+                serde_json::json!(MAX_SENDER_MESSAGES + 1),
+            ),
         ];
         match ScenarioRunner::run(&scenario) {
             Err(ScenarioRunnerError::Validation { errors, .. }) => {
@@ -4159,6 +4194,7 @@ mod tests {
                         "participants.alice.properties.messages",
                         "participants.bob.properties.capacity",
                         "participants.carol.properties.capacity",
+                        "participants.erin.properties.messages",
                     ]
                 );
             }
@@ -4179,6 +4215,26 @@ mod tests {
         assert_eq!(count(&tasks[0].counters.committed), 0);
         assert!(tasks[1].counters.drained_to_close.load(Ordering::Relaxed));
         crate::test_complete!("bound_participant_properties_are_validated");
+    }
+
+    /// The command-line JSON says whether anything ran and what was bound.
+    #[test]
+    fn json_with_bindings_reports_whether_a_workload_ran() {
+        init_test("json_with_bindings_reports_whether_a_workload_ran");
+        let empty = minimal_scenario();
+        let result = ScenarioRunner::run(&empty).unwrap();
+        let json = result.to_json_with_bindings(&ScenarioRunner::participant_bindings(&empty));
+        assert_eq!(json["workload_ran"], false);
+        assert!(json.get("participant_bindings").is_none(), "{json}");
+        assert_eq!(json["scenario_id"], result.to_json()["scenario_id"]);
+
+        let bound = sender_receiver_scenario();
+        let result = ScenarioRunner::run(&bound).unwrap();
+        let json = result.to_json_with_bindings(&ScenarioRunner::participant_bindings(&bound));
+        assert_eq!(json["workload_ran"], true);
+        assert_eq!(json["participant_bindings"]["bound"][0]["name"], "alice");
+        assert_eq!(json["participant_bindings"]["bound"][1]["role"], "receiver");
+        crate::test_complete!("json_with_bindings_reports_whether_a_workload_ran");
     }
 
     /// Deliberate-failure control target (see the 39okzv notes): if the sender

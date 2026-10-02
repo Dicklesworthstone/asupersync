@@ -61,9 +61,10 @@ case-sensitive) and spawns lab tasks for them:
 
 - a receiver owns a bounded `mpsc` channel (`properties.capacity`, default 4,
   at most 4096) and drains it until every sender is gone;
-- a sender sends `properties.messages` values (default 16) to the receivers in
-  round-robin order through the two-phase `reserve`/`send` API, so each value
-  is a runtime-tracked `SendPermit` obligation that the obligation oracle sees;
+- a sender sends `properties.messages` values (default 16, at most 1000000) to
+  the receivers in round-robin order through the two-phase `reserve`/`send`
+  API, so each value is a runtime-tracked `SendPermit` obligation that the
+  obligation oracle sees;
 - senders without any receiver, as in `01_race_condition.yaml`, race on one
   shared channel drained by an implicit sink task, and receivers without
   senders see a closed channel at once;
@@ -200,6 +201,11 @@ Add `--json` for a machine-readable command result or report:
 frankenlab run 01_race_condition.yaml --json | jq .passed
 # => true
 ```
+
+The result also carries `workload_ran`, false when the run took no steps (a
+pass then checked nothing), and, when the scenario declares participants,
+`participant_bindings` with the bound and unbound lists. `asupersync lab run
+--json` writes the same object.
 
 This flag does not make the CLI accept a JSON `Scenario`, and it does not emit
 canonical Scenario JSON. Both application loaders take a YAML Scenario path.

@@ -286,7 +286,7 @@ fn format_run_result(
     json: bool,
 ) -> String {
     if json {
-        pretty_json_or(&result.to_json(), "{}")
+        pretty_json_or(&result.to_json_with_bindings(bindings), "{}")
     } else {
         let status = if result.passed() { "PASS" } else { "FAIL" };
         let steps = result.lab_report.steps_total;
@@ -1366,11 +1366,16 @@ mod tests {
         );
         assert_eq!(lines[4], "Faults injected: 0", "{text}");
 
-        // The JSON form is the unchanged run result.
+        // The JSON form is the run result plus whether anything ran and what
+        // was bound.
         assert_eq!(
             format_run_result(&result, &bindings, true),
-            pretty_json_or(&result.to_json(), "{}")
+            pretty_json_or(&result.to_json_with_bindings(&bindings), "{}")
         );
+        let json: serde_json::Value =
+            serde_json::from_str(&format_run_result(&result, &bindings, true)).expect("JSON");
+        assert_eq!(json["workload_ran"], true);
+        assert_eq!(json["participant_bindings"]["unbound"][0]["name"], "carol");
     }
 
     #[test]

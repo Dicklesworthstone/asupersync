@@ -10224,13 +10224,13 @@ fn lab_run(args: &LabRunArgs, output: &mut Output) -> Result<(), CliError> {
             .map_err(scenario_runner_error)?;
 
     let passed = result.passed();
+    let bindings =
+        asupersync::lab::scenario_runner::ScenarioRunner::participant_bindings(&scenario);
 
     if args.json {
-        let json = JsonOutputValue::new(result.to_json());
+        let json = JsonOutputValue::new(result.to_json_with_bindings(&bindings));
         output.write(&json).map_err(output_cli_error)?;
     } else {
-        let bindings =
-            asupersync::lab::scenario_runner::ScenarioRunner::participant_bindings(&scenario);
         let report = LabRunOutput::from_result(&result, &bindings);
         output.write(&report).map_err(output_cli_error)?;
     }
@@ -14868,17 +14868,18 @@ lab:
         )
         .expect("write bound scenario");
 
-        let run = |path: &Path, format: OutputFormat| {
+        let run_with = |path: &Path, format: OutputFormat, json: bool| {
             let capture = SharedWrite::default();
             let mut output = Output::with_writer(format, capture.clone());
             let args = LabRunArgs {
                 scenario: path.to_path_buf(),
                 seed: None,
-                json: false,
+                json,
             };
             let passed = lab_run(&args, &mut output).is_ok();
             (passed, capture.contents())
         };
+        let run = |path: &Path, format: OutputFormat| run_with(path, format, false);
 
         let (passed, human) = run(&empty, OutputFormat::Human);
         assert!(passed, "{human}");
@@ -14888,6 +14889,15 @@ lab:
         assert!(!human.contains("Participants:"), "{human}");
         let (_, json) = run(&empty, OutputFormat::Json);
         assert!(!json.contains("participant_bindings"), "{json}");
+        // `--json` writes the full result, plus whether anything ran.
+        let (_, full) = run_with(&empty, OutputFormat::Json, true);
+        let value: serde_json::Value = serde_json::from_str(full.trim()).expect("lab run --json");
+        assert_eq!(value["workload_ran"], false, "{full}");
+        assert!(value.get("participant_bindings").is_none(), "{full}");
+        let (_, full) = run_with(&bound, OutputFormat::Json, true);
+        let value: serde_json::Value = serde_json::from_str(full.trim()).expect("lab run --json");
+        assert_eq!(value["workload_ran"], true, "{full}");
+        assert_eq!(value["participant_bindings"]["bound"][0]["name"], "alice");
 
         let (passed, human) = run(&bound, OutputFormat::Human);
         assert!(passed, "{human}");
