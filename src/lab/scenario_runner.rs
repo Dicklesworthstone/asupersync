@@ -3,8 +3,8 @@
 //! Bridges [`Scenario`] YAML specifications to [`LabRuntime`] execution, providing:
 //!
 //! - Participant workloads: `sender`, `receiver`, `swarm`, `supervisor`,
-//!   `worker`, `saga-coordinator`, `saga-participant`, `primary` and
-//!   `replica` roles become real lab tasks
+//!   `worker`, `saga-coordinator`, `saga-participant`, `primary`, `replica`,
+//!   `lease-grantor` and `lease-holder` roles become real lab tasks
 //! - Timed fault injection based on scenario fault events
 //! - Oracle filtering (only check oracles listed in the scenario)
 //! - Seed exploration (run the same scenario across multiple seeds)
@@ -14,8 +14,8 @@
 //!
 //! Before any fault fires, the runner spawns lab tasks for every participant
 //! whose `role` is exactly `sender`, `receiver`, `swarm`, `supervisor`,
-//! `worker`, `saga-coordinator`, `saga-participant`, `primary` or `replica`
-//! (case-sensitive), all in one root region.
+//! `worker`, `saga-coordinator`, `saga-participant`, `primary`, `replica`,
+//! `lease-grantor` or `lease-holder` (case-sensitive), all in one root region.
 //!
 //! Channel roles:
 //!
@@ -71,17 +71,33 @@
 //! until every replica has the whole log; whether they converged is
 //! recorded, not required.
 //!
-//! Saga and replication messages cross a simulated network. The scenario's
+//! Lease roles: each `lease-grantor` grants one lease, for
+//! `properties.initial_lease_ms` (default 100, from 1 to 60000) by its own
+//! clock, to one holder at a time: it grants when nobody holds the lease,
+//! when the requester already holds it, or when the holder's grant has run
+//! out. Holders go to the grantors round-robin in declaration order, and
+//! holders without any grantor share one implicit grantor. After
+//! `properties.start_ms` (default 0) a `lease-holder` asks for the lease
+//! every `properties.renew_ms` (default 40) until it gets it, renews it
+//! `properties.renewals` times (default 4, at most 10000) at the same
+//! interval, and releases it. It believes it holds the lease until the
+//! grant's length less `properties.margin_ms` (default 10) after it sent the
+//! request, by its own clock, and it holds a runtime-tracked `Lease`
+//! obligation for as long as it believes so. A `clock_skew` fault sets its
+//! `host`'s clock offset to `skew_ms`, and `clock_reset` sets it back to
+//! zero; only lease roles read participant clocks.
+//!
+//! Saga, replication and lease messages cross a simulated network. The scenario's
 //! `network` preset sets every link's latency, jitter and packet loss (the
 //! [`crate::lab::network::NetworkConditions`] of the same name), and a
 //! `links` entry keyed `"from->to"` overrides one direction's `latency` and
 //! `packet_loss`; the other link fields are not modeled. `partition` and
 //! `heal` faults whose `from` and `to` name two participants cut and restore
 //! the link between them. A message that is dropped or sent over a cut link
-//! is lost, and a coordinator or primary whose request or reply is lost
-//! times out. When saga or replication roles are bound, the runner fires due
-//! timers on its way to each fault and runs with automatic virtual-time
-//! advance after the last one.
+//! is lost, and a coordinator, primary or holder whose request or reply is
+//! lost times out. When saga, replication or lease roles are bound, the
+//! runner fires due timers on its way to each fault and runs with automatic
+//! virtual-time advance after the last one.
 //!
 //! Lab chaos may cancel these tasks mid-protocol. A send or receive, swarm
 //! member, worker generation, supervisor or saga task that ends in
@@ -102,11 +118,13 @@
 //!   left one applied, or its compensations did not run exactly once each in
 //!   reverse step order;
 //! - a replica's applied log is not a prefix of its primary's log, or a
-//!   primary that was not cancelled never finished.
+//!   primary that was not cancelled never finished;
+//! - two holders of one grantor believed they held its lease at the same
+//!   virtual time, or a holder that was not cancelled never finished.
 //!
-//! Apart from cutting saga and replication links, timed faults stay trace
-//! and effect-summary records; they do not partition the bound channels or
-//! crash the supervised workers.
+//! Apart from cutting saga, replication and lease links and skewing lease
+//! clocks, timed faults stay trace and effect-summary records; they do not
+//! partition the bound channels or crash the supervised workers.
 //!
 //! Every other role is unbound: the runner validates the participant and
 //! schedules no work for it. A scenario without bound participants still
@@ -139,6 +157,7 @@ use super::scenario::{
 use crate::channel::mpsc::{self, RecvError, SendError};
 use crate::channel::oneshot;
 use crate::cx::Cx;
+use crate::record::{ObligationAbortReason, ObligationKind};
 use crate::remote::Saga;
 use crate::runtime::{JoinError, TaskHandle, yield_now};
 use crate::supervision::{
@@ -887,6 +906,24 @@ const DEFAULT_WRITE_MS: u64 = 50;
 const CATCH_UP_ROUNDS: usize = 40;
 /// Name of the primary that serves replicas no primary owns.
 const IMPLICIT_PRIMARY_NAME: &str = "<implicit-primary>";
+/// Role of a participant that grants one lease to its holders, one at a time.
+const LEASE_GRANTOR_ROLE: &str = "lease-grantor";
+/// Role of a participant that acquires, renews and releases its grantor's lease.
+const LEASE_HOLDER_ROLE: &str = "lease-holder";
+/// Default length of each grant, when the grantor has no `initial_lease_ms`.
+const DEFAULT_LEASE_MS: u64 = 100;
+/// Default number of renewals a holder makes before it releases the lease.
+const DEFAULT_LEASE_RENEWALS: u64 = 4;
+/// Largest accepted `renewals`.
+const MAX_LEASE_RENEWALS: u64 = 10_000;
+/// Default virtual time between a holder's requests, and each request's reply budget.
+const DEFAULT_RENEW_MS: u64 = 40;
+/// Default time a holder takes off each grant to allow for clock skew.
+const DEFAULT_LEASE_MARGIN_MS: u64 = 10;
+/// Requests a holder makes for the lease before it gives up.
+const MAX_ACQUIRE_ATTEMPTS: u32 = 100;
+/// Name of the grantor that serves holders no grantor owns.
+const IMPLICIT_GRANTOR_NAME: &str = "<implicit-grantor>";
 
 /// One declared participant and its role.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -918,6 +955,8 @@ pub struct ParticipantBindings {
     pub implicit_coordinator: bool,
     /// True when replicas have no primary, so the runner adds one.
     pub implicit_primary: bool,
+    /// True when lease holders have no grantor, so the runner adds one.
+    pub implicit_grantor: bool,
 }
 
 impl ParticipantBindings {
@@ -932,6 +971,8 @@ impl ParticipantBindings {
         SAGA_PARTICIPANT_ROLE,
         PRIMARY_ROLE,
         REPLICA_ROLE,
+        LEASE_GRANTOR_ROLE,
+        LEASE_HOLDER_ROLE,
     ];
 
     /// Returns true when the scenario declares no participants.
@@ -1001,6 +1042,23 @@ enum PlannedWork {
     Lead { writes: u64, write_ms: u64 },
     /// Apply the log a primary ships.
     Follow,
+    /// Grant one lease of `lease_ms` at a time to the assigned holders.
+    Grant { lease_ms: u64 },
+    /// Acquire, renew and release the assigned grantor's lease.
+    Hold(LeaseTerms),
+}
+
+/// How a lease holder uses its grantor's lease.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LeaseTerms {
+    /// Successful renewals before the holder releases the lease.
+    renewals: u64,
+    /// Virtual time between requests, and each request's reply budget.
+    renew_ms: u64,
+    /// Time taken off each grant to allow for clock skew.
+    margin_ms: u64,
+    /// Virtual time before the first request.
+    start_ms: u64,
 }
 
 /// One bound participant, in declaration order.
@@ -1042,6 +1100,10 @@ impl WorkloadPlan {
                         .map(|write_ms| PlannedWork::Lead { writes, write_ms })
                 }),
                 REPLICA_ROLE => Ok(PlannedWork::Follow),
+                LEASE_GRANTOR_ROLE => {
+                    Self::lease_ms(participant).map(|lease_ms| PlannedWork::Grant { lease_ms })
+                }
+                LEASE_HOLDER_ROLE => Self::lease_terms(participant).map(PlannedWork::Hold),
                 _ => continue,
             };
             match work {
@@ -1214,8 +1276,86 @@ impl WorkloadPlan {
             })
     }
 
-    /// True when the plan runs a saga coordinator or a primary, declared or
-    /// implicit; their rounds wait on virtual-time timers.
+    fn lease_ms(participant: &Participant) -> Result<u64, ValidationError> {
+        Self::bounded_ms(
+            participant,
+            "initial_lease_ms",
+            DEFAULT_LEASE_MS,
+            1,
+            "a bound lease grantor's lease length",
+        )
+    }
+
+    fn lease_terms(participant: &Participant) -> Result<LeaseTerms, ValidationError> {
+        let renewals = match participant.properties.get("renewals") {
+            None => DEFAULT_LEASE_RENEWALS,
+            Some(value) => value
+                .as_u64()
+                .filter(|renewals| *renewals <= MAX_LEASE_RENEWALS)
+                .ok_or_else(|| {
+                    Self::property_error(
+                        participant,
+                        "renewals",
+                        format!(
+                            "a bound lease holder's renewal count must be an integer from 0 to {MAX_LEASE_RENEWALS}"
+                        ),
+                    )
+                })?,
+        };
+        let what = "a bound lease holder's";
+        Ok(LeaseTerms {
+            renewals,
+            renew_ms: Self::bounded_ms(
+                participant,
+                "renew_ms",
+                DEFAULT_RENEW_MS,
+                1,
+                &format!("{what} request interval"),
+            )?,
+            margin_ms: Self::bounded_ms(
+                participant,
+                "margin_ms",
+                DEFAULT_LEASE_MARGIN_MS,
+                0,
+                &format!("{what} skew margin"),
+            )?,
+            start_ms: Self::bounded_ms(
+                participant,
+                "start_ms",
+                0,
+                0,
+                &format!("{what} start delay"),
+            )?,
+        })
+    }
+
+    /// Reads a millisecond property from `min` to [`MAX_SAGA_STEP_MS`].
+    fn bounded_ms(
+        participant: &Participant,
+        key: &str,
+        default: u64,
+        min: u64,
+        what: &str,
+    ) -> Result<u64, ValidationError> {
+        let Some(value) = participant.properties.get(key) else {
+            return Ok(default);
+        };
+        value
+            .as_u64()
+            .filter(|ms| (min..=MAX_SAGA_STEP_MS).contains(ms))
+            .ok_or_else(|| {
+                Self::property_error(
+                    participant,
+                    key,
+                    format!(
+                        "{what} must be an integer from {min} to {MAX_SAGA_STEP_MS} milliseconds"
+                    ),
+                )
+            })
+    }
+
+    /// True when the plan runs a saga coordinator, a primary or a lease
+    /// holder, declared or implicit; their rounds wait on virtual-time timers.
     fn is_timed(&self) -> bool {
         self.participants.iter().any(|participant| {
             matches!(
@@ -1224,6 +1364,8 @@ impl WorkloadPlan {
                     | PlannedWork::Participate
                     | PlannedWork::Lead { .. }
                     | PlannedWork::Follow
+                    | PlannedWork::Grant { .. }
+                    | PlannedWork::Hold(_)
             )
         })
     }
@@ -1255,6 +1397,8 @@ enum WorkloadRole {
     SagaParticipant,
     Primary,
     Replica,
+    LeaseGrantor,
+    LeaseHolder,
 }
 
 impl WorkloadRole {
@@ -1270,6 +1414,8 @@ impl WorkloadRole {
             Self::SagaParticipant => SAGA_PARTICIPANT_ROLE,
             Self::Primary => PRIMARY_ROLE,
             Self::Replica => REPLICA_ROLE,
+            Self::LeaseGrantor => LEASE_GRANTOR_ROLE,
+            Self::LeaseHolder => LEASE_HOLDER_ROLE,
         }
     }
 }
@@ -1711,6 +1857,46 @@ impl PartitionTable {
     }
 }
 
+/// Clock offsets of participants, in milliseconds. A `clock_skew` fault sets
+/// its `host`'s offset to `skew_ms`, and `clock_reset` sets it back to zero.
+/// A participant's clock reads the lab's virtual time plus its offset, and
+/// never reads below zero.
+#[derive(Debug, Default)]
+struct ClockTable {
+    offsets: Mutex<BTreeMap<String, i64>>,
+}
+
+impl ClockTable {
+    /// Applies a `clock_skew` or `clock_reset` fault.
+    fn apply(&self, fault: &FaultEvent) {
+        let Some(host) = fault.args.get("host").and_then(serde_json::Value::as_str) else {
+            return;
+        };
+        match fault.action {
+            FaultAction::ClockSkew => {
+                if let Some(skew) = fault
+                    .args
+                    .get("skew_ms")
+                    .and_then(serde_json::Value::as_i64)
+                {
+                    self.offsets.lock().insert(host.to_owned(), skew);
+                }
+            }
+            FaultAction::ClockReset => {
+                self.offsets.lock().remove(host);
+            }
+            _ => {}
+        }
+    }
+
+    /// The time `name`'s clock reads when the lab's virtual time is `now`.
+    fn local(&self, name: &str, now: Time) -> Time {
+        let offset_ms = self.offsets.lock().get(name).copied().unwrap_or(0);
+        let nanos = i128::from(now.as_nanos()) + i128::from(offset_ms) * 1_000_000;
+        Time::from_nanos(u64::try_from(nanos.max(0)).unwrap_or(u64::MAX))
+    }
+}
+
 /// An apply request; the participant replies whether it applied its step.
 #[derive(Debug)]
 struct SagaRequest {
@@ -1897,6 +2083,80 @@ impl ReplicationRecord {
     }
 }
 
+/// A holder's request to its grantor: acquire or renew the lease, or
+/// release it. The grantor replies with the grant's length in milliseconds
+/// when it grants, and `None` when another holder has the lease or the
+/// request was a release.
+#[derive(Debug)]
+struct LeaseRequest {
+    holder: String,
+    release: bool,
+    reply: oneshot::Sender<Option<u64>>,
+}
+
+/// One holder's grantor, as the holder reaches it.
+#[derive(Debug, Clone)]
+struct GrantorTarget {
+    name: String,
+    requests: mpsc::Sender<LeaseRequest>,
+    record: Arc<LeaseRecord>,
+}
+
+/// How a holder's tenure ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TenureEnd {
+    /// It made its renewals and released the lease.
+    Released,
+    /// Its own clock reached the end of its last grant.
+    Expired,
+    /// It was cancelled while it held the lease.
+    Cancelled,
+}
+
+/// When one holder believed it held the lease, in the lab's virtual time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Tenure {
+    holder: String,
+    start: Time,
+    end: Time,
+    ending: TenureEnd,
+}
+
+/// A grantor's lease: its holders' tenures and how its requests went.
+#[derive(Debug, Default)]
+struct LeaseRecord {
+    tenures: Mutex<Vec<Tenure>>,
+    /// Acquisitions and renewals the grantor granted.
+    grants: AtomicU64,
+    /// Requests refused because another holder had the lease.
+    refused: AtomicU64,
+    /// Requests and replies lost on a cut link or dropped by the network.
+    lost: AtomicU64,
+}
+
+impl LeaseRecord {
+    /// Appends a violation for every two holders whose tenures overlap: for
+    /// a while both believed they held the one lease.
+    fn collect_violations(&self, label: &str, violations: &mut Vec<String>) {
+        let tenures = self.tenures.lock().clone();
+        for (index, a) in tenures.iter().enumerate() {
+            for b in &tenures[index + 1..] {
+                if a.holder != b.holder && a.start < b.end && b.start < a.end {
+                    violations.push(format!(
+                        "{label}:double_holder:{}@{}..{}ms,{}@{}..{}ms",
+                        a.holder,
+                        a.start.as_millis(),
+                        a.end.as_millis(),
+                        b.holder,
+                        b.start.as_millis(),
+                        b.end.as_millis(),
+                    ));
+                }
+            }
+        }
+    }
+}
+
 /// Role-specific state of one bound task.
 #[derive(Debug)]
 enum BoundDetail {
@@ -1916,6 +2176,10 @@ enum BoundDetail {
     Primary(Arc<ReplicationRecord>),
     /// A replica; its primary's record holds its log.
     Replica,
+    /// A lease grantor and its holders' tenures.
+    LeaseGrantor(Arc<LeaseRecord>),
+    /// A lease holder; its grantor's record holds its tenure.
+    LeaseHolder,
 }
 
 /// One bound task and its counters.
@@ -2021,6 +2285,27 @@ impl BoundTask {
                         count(&c.committed),
                         count(&c.unexpected),
                     ));
+                }
+            }
+            BoundDetail::LeaseGrantor(record) => {
+                if count(&self.counters.unexpected) > 0 {
+                    violations.push(format!("{label}:unexpected_outcome:no_task_context"));
+                }
+                record.collect_violations(&label, violations);
+            }
+            BoundDetail::LeaseHolder => {
+                let c = &self.counters;
+                if count(&c.unexpected) > 0 {
+                    violations.push(format!(
+                        "{label}:unexpected_outcome:grants={},unexpected={}",
+                        count(&c.received),
+                        count(&c.unexpected),
+                    ));
+                }
+                let cancelled =
+                    count(&c.cancelled) > 0 || self.joins.first() == Some(&JoinState::Cancelled);
+                if !c.finished.load(Ordering::Relaxed) && !cancelled {
+                    violations.push(format!("{label}:no_end:grants={}", count(&c.received)));
                 }
             }
         }
@@ -2163,6 +2448,8 @@ struct ParticipantWorkload {
     partitions: Arc<PartitionTable>,
     /// Latency and loss of messages between participants.
     network: Arc<NetworkModel>,
+    /// Participant clock offsets from `clock_skew` faults; lease roles read them.
+    clocks: Arc<ClockTable>,
     /// True when some task waits on virtual-time timers.
     timed: bool,
 }
@@ -2198,6 +2485,16 @@ enum Endpoint {
     Follow {
         batches: mpsc::Receiver<ReplicationBatch>,
         log: Arc<Mutex<Vec<u64>>>,
+    },
+    Grant {
+        lease_ms: u64,
+        requests: mpsc::Receiver<LeaseRequest>,
+        record: Arc<LeaseRecord>,
+    },
+    Hold {
+        terms: LeaseTerms,
+        /// Index of the holder's grantor, chosen once every grantor exists.
+        grantor: usize,
     },
 }
 
@@ -2255,12 +2552,20 @@ impl ParticipantWorkload {
             .count();
         let mut led: Vec<Vec<AssignedReplica>> = (0..primary_count).map(|_| Vec::new()).collect();
         let mut unled = Vec::new();
+        // Lease holders go to the grantors the same way.
+        let grantor_count = plan
+            .participants
+            .iter()
+            .filter(|participant| matches!(participant.work, PlannedWork::Grant { .. }))
+            .count();
+        let mut grantors: Vec<GrantorTarget> = Vec::with_capacity(grantor_count.max(1));
         let mut lanes = Vec::new();
         let mut endpoints = Vec::with_capacity(plan.participants.len());
         let mut sender_total = 0_usize;
         let mut worker_total = 0_usize;
         let mut saga_participant_total = 0_usize;
         let mut replica_total = 0_usize;
+        let mut holder_total = 0_usize;
         for (participant, participant_counters) in plan.participants.iter().zip(&counters) {
             match participant.work {
                 PlannedWork::Send { messages } => {
@@ -2331,8 +2636,41 @@ impl ParticipantWorkload {
                     replica_total += 1;
                     endpoints.push(Endpoint::Follow { batches, log });
                 }
+                PlannedWork::Grant { lease_ms } => {
+                    let (tx, requests) = mpsc::channel(1);
+                    let record = Arc::new(LeaseRecord::default());
+                    grantors.push(GrantorTarget {
+                        name: participant.name.clone(),
+                        requests: tx,
+                        record: Arc::clone(&record),
+                    });
+                    endpoints.push(Endpoint::Grant {
+                        lease_ms,
+                        requests,
+                        record,
+                    });
+                }
+                PlannedWork::Hold(terms) => {
+                    endpoints.push(Endpoint::Hold {
+                        terms,
+                        grantor: holder_total % grantor_count.max(1),
+                    });
+                    holder_total += 1;
+                }
             }
         }
+        let implicit_grantor = if grantor_count == 0 && holder_total > 0 {
+            let (tx, requests) = mpsc::channel(1);
+            let record = Arc::new(LeaseRecord::default());
+            grantors.push(GrantorTarget {
+                name: IMPLICIT_GRANTOR_NAME.to_owned(),
+                requests: tx,
+                record: Arc::clone(&record),
+            });
+            Some((requests, record))
+        } else {
+            None
+        };
         let sink = if lanes.is_empty() && sender_total > 0 {
             let drain = Arc::new(WorkloadCounters::default());
             let (tx, rx) = mpsc::channel(DEFAULT_RECEIVER_CAPACITY);
@@ -2458,6 +2796,46 @@ impl ParticipantWorkload {
                         workload.tasks[owner].spawn_refusal = Some(refusal);
                     }
                 }
+                Endpoint::Grant {
+                    lease_ms,
+                    requests,
+                    record,
+                } => {
+                    workload.spawn_grantor(
+                        runtime,
+                        root,
+                        &participant.name,
+                        lease_ms,
+                        requests,
+                        record,
+                        task_counters,
+                    );
+                }
+                Endpoint::Hold { terms, grantor } => {
+                    let owner = workload.push_task(
+                        &participant.name,
+                        WorkloadRole::LeaseHolder,
+                        terms.renewals,
+                        Arc::clone(&task_counters),
+                        BoundDetail::LeaseHolder,
+                    );
+                    let Some(grantor) = grantors.get(grantor).cloned() else {
+                        workload.tasks[owner].spawn_refusal = Some("no lease grantor".to_owned());
+                        continue;
+                    };
+                    let body = run_lease_holder(
+                        participant.name.clone(),
+                        grantor,
+                        terms,
+                        Arc::clone(&workload.partitions),
+                        Arc::clone(&workload.network),
+                        Arc::clone(&workload.clocks),
+                        task_counters,
+                    );
+                    if let Err(refusal) = workload.spawn_owned(runtime, root, owner, body) {
+                        workload.tasks[owner].spawn_refusal = Some(refusal);
+                    }
+                }
             }
         }
         if let Some((rx, drain)) = sink {
@@ -2503,9 +2881,22 @@ impl ParticipantWorkload {
                 Arc::new(WorkloadCounters::default()),
             );
         }
+        if let Some((requests, record)) = implicit_grantor {
+            workload.spawn_grantor(
+                runtime,
+                root,
+                IMPLICIT_GRANTOR_NAME,
+                DEFAULT_LEASE_MS,
+                requests,
+                record,
+                Arc::new(WorkloadCounters::default()),
+            );
+        }
         // Release the spawner's own senders: once every sender task ends, the
-        // drain tasks see their channels close.
+        // drain tasks see their channels close, and once every holder ends,
+        // its grantor does.
         drop(lanes);
+        drop(grantors);
         workload
     }
 
@@ -2708,6 +3099,38 @@ impl ParticipantWorkload {
             Replication { writes, write_ms },
             Arc::clone(&self.partitions),
             Arc::clone(&self.network),
+            record,
+            counters,
+        );
+        if let Err(refusal) = self.spawn_owned(runtime, root, owner, body) {
+            self.tasks[owner].spawn_refusal = Some(refusal);
+        }
+    }
+
+    /// Spawns one lab task that grants its lease on `requests`.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_grantor(
+        &mut self,
+        runtime: &mut LabRuntime,
+        root: RegionId,
+        name: &str,
+        lease_ms: u64,
+        requests: mpsc::Receiver<LeaseRequest>,
+        record: Arc<LeaseRecord>,
+        counters: Arc<WorkloadCounters>,
+    ) {
+        let owner = self.push_task(
+            name,
+            WorkloadRole::LeaseGrantor,
+            lease_ms,
+            Arc::clone(&counters),
+            BoundDetail::LeaseGrantor(Arc::clone(&record)),
+        );
+        let body = run_lease_grantor(
+            name.to_owned(),
+            requests,
+            lease_ms,
+            Arc::clone(&self.clocks),
             record,
             counters,
         );
@@ -3248,6 +3671,269 @@ async fn run_replica(
     counters.finished.store(true, Ordering::Relaxed);
 }
 
+/// Body of a bound `lease-grantor`, or of the implicit one.
+///
+/// It grants its one lease when nobody has it, when the requester already
+/// has it (a renewal), or when the holder's grant has run out by the
+/// grantor's own clock. Each grant lasts `lease_ms` from the moment the
+/// grantor took the request. A release from the current holder frees the
+/// lease at once.
+async fn run_lease_grantor(
+    name: String,
+    mut requests: mpsc::Receiver<LeaseRequest>,
+    lease_ms: u64,
+    clocks: Arc<ClockTable>,
+    record: Arc<LeaseRecord>,
+    counters: Arc<WorkloadCounters>,
+) {
+    if let Some(cx) = Cx::current() {
+        let lease = Duration::from_millis(lease_ms);
+        // The current holder and the end of its grant, by this grantor's clock.
+        let mut current: Option<(String, Time)> = None;
+        loop {
+            match requests.recv(&cx).await {
+                Ok(request) => {
+                    bump(&counters.received);
+                    let now = clocks.local(&name, cx.now());
+                    let held_by_requester = current
+                        .as_ref()
+                        .is_some_and(|(holder, _)| *holder == request.holder);
+                    let answer = if request.release {
+                        if held_by_requester {
+                            current = None;
+                        }
+                        None
+                    } else if held_by_requester
+                        || current.as_ref().is_none_or(|(_, ends)| now >= *ends)
+                    {
+                        current = Some((request.holder, now + lease));
+                        bump(&record.grants);
+                        Some(lease_ms)
+                    } else {
+                        bump(&record.refused);
+                        None
+                    };
+                    // The holder may have stopped waiting for this reply.
+                    let _ = request.reply.send(&cx, answer);
+                }
+                Err(RecvError::Disconnected) => {
+                    counters.drained_to_close.store(true, Ordering::Relaxed);
+                    break;
+                }
+                Err(RecvError::Cancelled) => {
+                    bump(&counters.cancelled);
+                    break;
+                }
+                Err(RecvError::Empty) => {
+                    bump(&counters.unexpected);
+                    break;
+                }
+            }
+        }
+    } else {
+        bump(&counters.unexpected);
+    }
+    counters.finished.store(true, Ordering::Relaxed);
+}
+
+/// How one lease request ended, as its holder sees it.
+enum LeaseReply {
+    /// Granted for this many milliseconds.
+    Granted(u64),
+    /// Another holder has the lease, or the release was taken.
+    Busy,
+    /// The request or its reply was lost, or came too late.
+    Lost,
+    /// The grantor is gone.
+    Gone,
+    Cancelled,
+}
+
+/// Sends one lease request to `grantor` and waits at most `budget` for the
+/// reply. Both messages cross the network.
+async fn lease_request(
+    cx: &Cx,
+    link: HubLink<'_>,
+    grantor: &GrantorTarget,
+    holder: &str,
+    release: bool,
+    budget: Duration,
+) -> LeaseReply {
+    let outcome = link
+        .exchange(cx, &grantor.name, budget, &grantor.record.lost, |reply| {
+            let request = LeaseRequest {
+                holder: holder.to_owned(),
+                release,
+                reply,
+            };
+            send_request(cx, &grantor.requests, request)
+        })
+        .await;
+    match outcome {
+        Exchange::Replied(Some(lease_ms)) => LeaseReply::Granted(lease_ms),
+        Exchange::Replied(None) => LeaseReply::Busy,
+        Exchange::TimedOut | Exchange::NoReply => LeaseReply::Lost,
+        Exchange::Gone => LeaseReply::Gone,
+        Exchange::Cancelled => LeaseReply::Cancelled,
+    }
+}
+
+/// Body of a bound `lease-holder`.
+///
+/// After `start_ms` it asks its grantor for the lease every `renew_ms`
+/// until it gets it, at most [`MAX_ACQUIRE_ATTEMPTS`] times. It then renews
+/// the lease every `renew_ms` until `renewals` renewals succeeded, and
+/// releases it. From each grant it believes it holds the lease until the
+/// grant's length minus `margin_ms` after it sent the request, by its own
+/// clock. A renewal that is refused or lost leaves that deadline in place,
+/// and the holder stops when its clock reaches it. While it holds the lease
+/// it holds a runtime-tracked `Lease` obligation, which it commits when it
+/// releases the lease and aborts when the lease runs out or it is cancelled.
+async fn run_lease_holder(
+    name: String,
+    grantor: GrantorTarget,
+    terms: LeaseTerms,
+    partitions: Arc<PartitionTable>,
+    network: Arc<NetworkModel>,
+    clocks: Arc<ClockTable>,
+    counters: Arc<WorkloadCounters>,
+) {
+    if let Some(cx) = Cx::current() {
+        let link = HubLink {
+            hub: &name,
+            partitions: &partitions,
+            network: &network,
+        };
+        hold_lease(&cx, &name, link, &grantor, terms, &clocks, &counters).await;
+    } else {
+        bump(&counters.unexpected);
+    }
+    counters.finished.store(true, Ordering::Relaxed);
+    // Dropping `grantor` lets the grantor see its last holder leave.
+}
+
+async fn hold_lease(
+    cx: &Cx,
+    name: &str,
+    link: HubLink<'_>,
+    grantor: &GrantorTarget,
+    terms: LeaseTerms,
+    clocks: &ClockTable,
+    counters: &WorkloadCounters,
+) {
+    let interval = Duration::from_millis(terms.renew_ms);
+    let margin_nanos = terms.margin_ms.saturating_mul(1_000_000);
+    // The end of a grant by this holder's clock: the grant's length after
+    // the request was sent, less the margin.
+    let grant_end = |sent: Time, lease_ms: u64| {
+        (sent + Duration::from_millis(lease_ms)).saturating_sub_nanos(margin_nanos)
+    };
+    if terms.start_ms > 0 {
+        crate::time::sleep(cx.now(), Duration::from_millis(terms.start_ms)).await;
+    }
+    let mut deadline = None;
+    for _ in 0..MAX_ACQUIRE_ATTEMPTS {
+        if cx.checkpoint().is_err() {
+            bump(&counters.cancelled);
+            return;
+        }
+        let began = cx.now();
+        let sent = clocks.local(name, began);
+        match lease_request(cx, link, grantor, name, false, interval).await {
+            LeaseReply::Granted(lease_ms) => {
+                bump(&counters.received);
+                deadline = Some(grant_end(sent, lease_ms));
+                break;
+            }
+            LeaseReply::Cancelled => {
+                bump(&counters.cancelled);
+                return;
+            }
+            LeaseReply::Gone => return,
+            LeaseReply::Busy | LeaseReply::Lost => {}
+        }
+        // The next attempt starts one interval after this one began.
+        let next = began + interval;
+        if next > cx.now() {
+            crate::time::sleep(
+                cx.now(),
+                Duration::from_nanos(next.duration_since(cx.now())),
+            )
+            .await;
+        }
+    }
+    let Some(mut deadline) = deadline else {
+        // Never granted: no tenure.
+        return;
+    };
+    let token = cx
+        .try_register_obligation_checked(ObligationKind::Lease, cx.task_id())
+        .unwrap_or_else(|_| {
+            bump(&counters.unexpected);
+            None
+        });
+    let start = cx.now();
+    let mut renewed = 0_u64;
+    let ending = loop {
+        let local = clocks.local(name, cx.now());
+        if local >= deadline {
+            break TenureEnd::Expired;
+        }
+        let left = Duration::from_nanos(deadline.duration_since(local));
+        crate::time::sleep(cx.now(), interval.min(left)).await;
+        if cx.checkpoint().is_err() {
+            break TenureEnd::Cancelled;
+        }
+        let local = clocks.local(name, cx.now());
+        if local >= deadline {
+            break TenureEnd::Expired;
+        }
+        if renewed >= terms.renewals {
+            break TenureEnd::Released;
+        }
+        // The renewal must end before the lease does.
+        let left = Duration::from_nanos(deadline.duration_since(local));
+        match lease_request(cx, link, grantor, name, false, interval.min(left)).await {
+            LeaseReply::Granted(lease_ms) => {
+                bump(&counters.received);
+                deadline = grant_end(local, lease_ms);
+                renewed += 1;
+            }
+            LeaseReply::Cancelled => break TenureEnd::Cancelled,
+            // Try again next interval while the lease lasts.
+            LeaseReply::Busy | LeaseReply::Lost | LeaseReply::Gone => {}
+        }
+    };
+    // From here on the holder no longer believes it holds the lease.
+    grantor.record.tenures.lock().push(Tenure {
+        holder: name.to_owned(),
+        start,
+        end: cx.now(),
+        ending,
+    });
+    match ending {
+        TenureEnd::Released => {
+            // A lost release lets the lease run out at the grantor instead.
+            let _ = lease_request(cx, link, grantor, name, true, interval).await;
+            if let Some(token) = token {
+                token.commit();
+            }
+            bump(&counters.committed);
+        }
+        TenureEnd::Expired => {
+            if let Some(token) = token {
+                token.abort(ObligationAbortReason::Explicit);
+            }
+        }
+        TenureEnd::Cancelled => {
+            if let Some(token) = token {
+                token.abort(ObligationAbortReason::Cancel);
+            }
+            bump(&counters.cancelled);
+        }
+    }
+}
+
 /// Body of a bound `sender` task.
 ///
 /// Value `seq` goes to lane `(sender + seq) % lanes`, so senders start on
@@ -3471,6 +4157,8 @@ impl ScenarioRunner {
         let mut has_saga_participant = false;
         let mut has_primary = false;
         let mut has_replica = false;
+        let mut has_grantor = false;
+        let mut has_holder = false;
         for participant in &scenario.participants {
             let binding = ParticipantBinding {
                 name: participant.name.clone(),
@@ -3509,6 +4197,14 @@ impl ScenarioRunner {
                     has_replica = true;
                     bindings.bound.push(binding);
                 }
+                LEASE_GRANTOR_ROLE => {
+                    has_grantor = true;
+                    bindings.bound.push(binding);
+                }
+                LEASE_HOLDER_ROLE => {
+                    has_holder = true;
+                    bindings.bound.push(binding);
+                }
                 SWARM_ROLE => bindings.bound.push(binding),
                 _ => bindings.unbound.push(binding),
             }
@@ -3517,6 +4213,7 @@ impl ScenarioRunner {
         bindings.implicit_supervisor = has_worker && !has_supervisor;
         bindings.implicit_coordinator = has_saga_participant && !has_coordinator;
         bindings.implicit_primary = has_replica && !has_primary;
+        bindings.implicit_grantor = has_holder && !has_grantor;
         bindings
     }
 
@@ -3605,6 +4302,7 @@ impl ScenarioRunner {
             });
             fault_effect_summary.apply_fault(fault, scenario.resource_caps.max_artifact_bytes);
             workload.partitions.apply(fault);
+            workload.clocks.apply(fault);
         }
 
         (fault_log, fault_effect_summary)
@@ -4658,7 +5356,9 @@ mod tests {
                 "saga-coordinator",
                 "saga-participant",
                 "primary",
-                "replica"
+                "replica",
+                "lease-grantor",
+                "lease-holder"
             ]
         );
 
@@ -4673,12 +5373,12 @@ mod tests {
             Some("Participants: 2 bound (sender), 0 unbound")
         );
 
-        scenario.participants = vec![participant("node-a", "lease-holder")];
+        scenario.participants = vec![participant("a", "hub")];
         assert_eq!(
             ScenarioRunner::participant_bindings(&scenario)
                 .summary_line()
                 .as_deref(),
-            Some("Participants: 0 bound, 1 unbound (lease-holder)")
+            Some("Participants: 0 bound, 1 unbound (hub)")
         );
         crate::test_complete!("participant_bindings_classify_roles_exactly");
     }
@@ -4689,7 +5389,7 @@ mod tests {
         let baseline = ScenarioRunner::run(&minimal_scenario()).unwrap();
         let mut scenario = minimal_scenario();
         scenario.participants = vec![
-            participant("node-a", "lease-holder"),
+            participant("node-a", "hub"),
             participant("node-b", "Receiver"),
         ];
         let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
@@ -5957,6 +6657,239 @@ mod tests {
             other => panic!("expected a participant property validation error, got {other:?}"),
         }
         crate::test_complete!("primary_properties_are_validated");
+    }
+
+    fn lease_record<'a>(tasks: &'a [BoundTask], name: &str) -> &'a LeaseRecord {
+        tasks
+            .iter()
+            .find_map(|task| match &task.detail {
+                BoundDetail::LeaseGrantor(record) if task.name == name => Some(&**record),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no lease grantor named {name}"))
+    }
+
+    fn tenures(record: &LeaseRecord) -> Vec<(String, u64, u64, TenureEnd)> {
+        record
+            .tenures
+            .lock()
+            .iter()
+            .map(|tenure| {
+                (
+                    tenure.holder.clone(),
+                    tenure.start.as_millis(),
+                    tenure.end.as_millis(),
+                    tenure.ending,
+                )
+            })
+            .collect()
+    }
+
+    /// Grantor `g` (100 ms grants) and holders `h1` and `h2`. `h2` asks first
+    /// at 5 ms, after `h1` has the lease, and then every 30 ms.
+    fn lease_scenario(h1: &[(&str, serde_json::Value)]) -> Scenario {
+        let mut scenario = minimal_scenario();
+        scenario.id = "test-lease".to_string();
+        let mut first = participant("h1", "lease-holder");
+        for (key, value) in h1 {
+            first.properties.insert((*key).to_string(), value.clone());
+        }
+        let mut second = participant_with("h2", "lease-holder", "start_ms", serde_json::json!(5));
+        second
+            .properties
+            .insert("renew_ms".to_string(), serde_json::json!(30));
+        scenario.participants = vec![participant("g", "lease-grantor"), first, second];
+        scenario
+    }
+
+    fn skew_fault(at_ms: u64, host: &str, skew_ms: i64) -> FaultEvent {
+        FaultEvent {
+            at_ms,
+            action: FaultAction::ClockSkew,
+            args: BTreeMap::from([
+                ("host".to_string(), serde_json::json!(host)),
+                ("skew_ms".to_string(), serde_json::json!(skew_ms)),
+            ]),
+        }
+    }
+
+    /// h1 holds from 0 ms and renews at 40, 80, 120 and 160 ms (each grant
+    /// ends for h1 90 ms after its request), then releases at 200 ms. h2's
+    /// requests at 5, 35, ..., 185 ms are refused; at 215 ms it gets the
+    /// lease, renews every 30 ms and releases at 365 ms.
+    #[test]
+    fn lease_holders_take_turns() {
+        init_test("lease_holders_take_turns");
+        let scenario = lease_scenario(&[]);
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+        let record = lease_record(&tasks, "g");
+        assert_eq!(
+            tenures(record),
+            [
+                ("h1".to_owned(), 0, 200, TenureEnd::Released),
+                ("h2".to_owned(), 215, 365, TenureEnd::Released),
+            ]
+        );
+        assert_eq!(count(&record.grants), 10);
+        assert_eq!(count(&record.refused), 7);
+        assert_eq!(count(&record.lost), 0);
+        crate::test_complete!("lease_holders_take_turns");
+    }
+
+    /// At 20 ms g's clock jumps 70 ms ahead, so h1's first grant runs out at
+    /// g at 30 ms instead of 100 ms. Without a margin h1 believes it until
+    /// 100 ms, but g grants h2 the lease at 35 ms and refuses h1's renewals:
+    /// two holders. A 70 ms margin ends h1's belief at 30 ms after each
+    /// request; renewing every 20 ms it keeps the lease safely until it
+    /// releases it at 100 ms, and h2 gets it at 125 ms.
+    #[test]
+    fn grantor_clock_skew_needs_the_holder_margin() {
+        init_test("grantor_clock_skew_needs_the_holder_margin");
+        let mut scenario = lease_scenario(&[("margin_ms", serde_json::json!(0))]);
+        scenario.faults = vec![skew_fault(20, "g", 70)];
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(!result.passed());
+        let workload: Vec<_> = result
+            .lab_report
+            .invariant_violations
+            .iter()
+            .filter(|violation| violation.starts_with("workload:"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            workload,
+            ["workload:lease-grantor:g:double_holder:h1@0..100ms,h2@35..185ms"]
+        );
+        assert_eq!(
+            tenures(lease_record(&tasks, "g"))[0],
+            ("h1".to_owned(), 0, 100, TenureEnd::Expired)
+        );
+
+        let mut scenario = lease_scenario(&[
+            ("margin_ms", serde_json::json!(70)),
+            ("renew_ms", serde_json::json!(20)),
+        ]);
+        scenario.faults = vec![skew_fault(20, "g", 70)];
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+        assert_eq!(
+            tenures(lease_record(&tasks, "g")),
+            [
+                ("h1".to_owned(), 0, 100, TenureEnd::Released),
+                ("h2".to_owned(), 125, 275, TenureEnd::Released),
+            ]
+        );
+        crate::test_complete!("grantor_clock_skew_needs_the_holder_margin");
+    }
+
+    /// The shipped fixture: node-a holds node-b's lease through four
+    /// renewals while node-b's clock runs 1 ms ahead, and releases it.
+    #[test]
+    fn clock_skew_lease_fixture_holds_and_releases() {
+        init_test("clock_skew_lease_fixture_holds_and_releases");
+        let yaml = include_str!("../../examples/scenarios/clock_skew_lease.yaml");
+        let scenario: Scenario = serde_yaml::from_str(yaml).expect("parse lease fixture");
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+        let record = lease_record(&tasks, "node-b");
+        let held = tenures(record);
+        assert_eq!(held.len(), 1, "{held:?}");
+        assert_eq!(held[0].0, "node-a");
+        assert_eq!(held[0].3, TenureEnd::Released);
+        assert_eq!(
+            (
+                count(&record.grants),
+                count(&record.refused),
+                count(&record.lost)
+            ),
+            (5, 0, 0)
+        );
+        crate::test_complete!("clock_skew_lease_fixture_holds_and_releases");
+    }
+
+    #[test]
+    fn lease_checker_flags_overlapping_holders_only() {
+        init_test("lease_checker_flags_overlapping_holders_only");
+        let tenure = |holder: &str, start: u64, end: u64| Tenure {
+            holder: holder.to_owned(),
+            start: Time::from_millis(start),
+            end: Time::from_millis(end),
+            ending: TenureEnd::Released,
+        };
+        let kinds = |held: Vec<Tenure>| {
+            let record = LeaseRecord {
+                tenures: Mutex::new(held),
+                ..LeaseRecord::default()
+            };
+            let mut violations = Vec::new();
+            record.collect_violations("workload:lease-grantor:g", &mut violations);
+            violations
+        };
+        assert!(kinds(vec![tenure("a", 0, 100), tenure("b", 100, 200)]).is_empty());
+        assert!(kinds(vec![tenure("a", 0, 100), tenure("a", 50, 150)]).is_empty());
+        assert_eq!(
+            kinds(vec![tenure("a", 0, 100), tenure("b", 50, 150)]),
+            ["workload:lease-grantor:g:double_holder:a@0..100ms,b@50..150ms"]
+        );
+        crate::test_complete!("lease_checker_flags_overlapping_holders_only");
+    }
+
+    #[test]
+    fn clock_faults_offset_one_participant_clock() {
+        init_test("clock_faults_offset_one_participant_clock");
+        let clocks = ClockTable::default();
+        let now = Time::from_millis(50);
+        clocks.apply(&skew_fault(0, "a", 30));
+        clocks.apply(&skew_fault(0, "b", -80));
+        assert_eq!(clocks.local("a", now), Time::from_millis(80));
+        assert_eq!(clocks.local("b", now), Time::ZERO);
+        assert_eq!(clocks.local("c", now), now);
+        clocks.apply(&FaultEvent {
+            at_ms: 0,
+            action: FaultAction::ClockReset,
+            args: BTreeMap::from([("host".to_string(), serde_json::json!("a"))]),
+        });
+        assert_eq!(clocks.local("a", now), now);
+        crate::test_complete!("clock_faults_offset_one_participant_clock");
+    }
+
+    #[test]
+    fn lease_properties_are_validated() {
+        init_test("lease_properties_are_validated");
+        let mut scenario = minimal_scenario();
+        scenario.participants = vec![
+            participant_with(
+                "g",
+                "lease-grantor",
+                "initial_lease_ms",
+                serde_json::json!(0),
+            ),
+            participant_with(
+                "h0",
+                "lease-holder",
+                "renewals",
+                serde_json::json!(MAX_LEASE_RENEWALS + 1),
+            ),
+            participant_with("h1", "lease-holder", "renew_ms", serde_json::json!(0)),
+            participant_with("h2", "lease-holder", "margin_ms", serde_json::json!("wide")),
+        ];
+        match ScenarioRunner::run(&scenario) {
+            Err(ScenarioRunnerError::Validation { errors, .. }) => {
+                let fields: Vec<_> = errors.iter().map(|error| error.field.as_str()).collect();
+                assert_eq!(
+                    fields,
+                    [
+                        "participants.g.properties.initial_lease_ms",
+                        "participants.h0.properties.renewals",
+                        "participants.h1.properties.renew_ms",
+                        "participants.h2.properties.margin_ms",
+                    ]
+                );
+            }
+            other => panic!("expected a participant property validation error, got {other:?}"),
+        }
+        crate::test_complete!("lease_properties_are_validated");
     }
 
     #[test]

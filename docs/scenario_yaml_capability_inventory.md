@@ -183,11 +183,12 @@ configuration, chaos policy, oracle selection, and the fault list. Resource
 caps, minimization, golden projection, participants, and network are only
 partially consumed. Participants whose role is exactly `sender`, `receiver`,
 `swarm`, `supervisor`, `worker`, `saga-coordinator`, `saga-participant`,
-`primary`, or `replica` run lab workloads that read their properties; every
-other role runs nothing. The network preset and per-link `latency` and
-`packet_loss` delay or drop saga and replication messages; corruption,
-duplication, reordering, and bandwidth are not modeled, and no other workload
-is shaped (2026-10-02 refresh of these rows against the runner source).
+`primary`, `replica`, `lease-grantor`, or `lease-holder` run lab workloads
+that read their properties; every other role runs nothing. The network preset
+and per-link `latency` and `packet_loss` delay or drop saga, replication, and
+lease messages; corruption, duplication, reordering, and bandwidth are not
+modeled, and no other workload is shaped (2026-10-02 refresh of these rows
+against the runner source).
 
 Several declared capabilities are currently validation-only:
 
@@ -205,14 +206,15 @@ scenario document.
 Fault injection is also partial. Every fault becomes a timed user-trace entry.
 Disk pressure/recovery, delayed cleanup, and process stall/resume affect a
 synthetic summary. Partition/heal between two named participants cuts and
-restores their saga and replication links. Host crash/restart and clock
-skew/reset do not simulate those behaviors.
+restores their saga, replication, and lease links, and clock skew/reset move
+the clock of a lease role. Host crash/restart do not simulate those
+behaviors.
 
 Most importantly, outside the bound roles above the YAML schema
-does not schedule an application workload. Descriptions such as lease are
-narrative metadata, not executable task definitions. A valid file without a
-bound role runs an otherwise empty lab runtime and reports success. This
-inventory does not call that runtime-feature parity.
+does not schedule an application workload. Descriptions such as a hub-and-peer
+topology are narrative metadata, not executable task definitions. A valid file
+without a bound role runs an otherwise empty lab runtime and reports success.
+This inventory does not call that runtime-feature parity.
 
 ## Diagnostics and resource boundaries
 
@@ -545,12 +547,12 @@ The artifact routes sixteen fail-closed gaps:
 | Gap | Finding | Owner |
 | --- | --- | --- |
 | `SCN-GAP-01` | include is validated but never resolved or merged | A4 |
-| `SCN-GAP-02` | network latency and loss reach only saga and replication messages; four link fields are not modeled | A5 |
+| `SCN-GAP-02` | network latency and loss reach only saga, replication, and lease messages; four link fields are not modeled | A5 |
 | `SCN-GAP-03` | cancellation configuration is validation-only | A5 |
-| `SCN-GAP-04` | only nine exact roles bind a workload; other roles run nothing | A5 |
+| `SCN-GAP-04` | only eleven exact roles bind a workload; other roles run nothing | A5 |
 | `SCN-GAP-05` | expected invariants do not select checks | A5 |
 | `SCN-GAP-06` | library canonical JSON exists, but golden format selection/redaction remain unwired | A4 |
-| `SCN-GAP-07` | partition/heal affect only saga and replication links; four fault actions have no simulated effect | A5 |
+| `SCN-GAP-07` | partition/heal affect only saga, replication, and lease links and clock faults only lease clocks; host crash/restart have no simulated effect | A5 |
 | `SCN-GAP-08` | documents without a bound role schedule no workload | A5 |
 | `SCN-GAP-09` | library canonical JSON exists, but neither CLI exposes dump/conversion | A4 |
 | `SCN-GAP-10` | no application document/work bounds | A3 |

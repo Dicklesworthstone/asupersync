@@ -79,16 +79,19 @@ and descriptions are authoring narratives, not evidence that the runner simulate
 every declared network, cancellation, or fault effect or schedules the named
 workload. Include paths are validated but not merged. Only participants whose
 role is exactly `sender`, `receiver`, `swarm`, `supervisor`, `worker`,
-`saga-coordinator`, `saga-participant`, `primary` or `replica` run: senders
-and receivers as lab tasks on bounded two-phase `mpsc` channels, a swarm as
-many short lab tasks, supervisors as managed supervisors that restart failing
-workers, saga coordinators as `remote::Saga` runs that compensate in reverse
-when a participant refuses or a message is lost, and primaries as log
-shippers that catch lagging replicas up. The `network` preset and per-link
-latency and loss delay or drop saga and replication messages, and
-`partition` and `heal` faults between two participants cut and restore their
-links; no other fault changes the workload. Other roles run nothing
-(`Steps: 0 (no workload ran)`). See the
+`saga-coordinator`, `saga-participant`, `primary`, `replica`,
+`lease-grantor` or `lease-holder` run: senders and receivers as lab tasks on
+bounded two-phase `mpsc` channels, a swarm as many short lab tasks,
+supervisors as managed supervisors that restart failing workers, saga
+coordinators as `remote::Saga` runs that compensate in reverse when a
+participant refuses or a message is lost, primaries as log shippers that
+catch lagging replicas up, and lease holders that acquire, renew and release
+their grantor's lease while the run checks that no two hold it at once. The
+`network` preset and per-link latency and loss delay or drop saga,
+replication and lease messages; `partition` and `heal` faults between two
+participants cut and restore their links, and `clock_skew` and `clock_reset`
+move a lease role's clock. No other fault changes the workload. Other roles
+run nothing (`Steps: 0 (no workload ran)`). See the
 [author guide](../docs/adoption/getting_started.md) for the field boundaries.
 
 - [`scenarios/smoke_happy_path.yaml`](scenarios/smoke_happy_path.yaml) — small
@@ -99,7 +102,8 @@ links; no other fault changes the workload. Other roles run nothing
 - [`scenarios/chaos_sendpermit_ack.yaml`](scenarios/chaos_sendpermit_ack.yaml) —
   chaos fixture; its `sender` and `receiver` run as a real channel workload.
 - [`scenarios/clock_skew_lease.yaml`](scenarios/clock_skew_lease.yaml) —
-  clock-skew declaration fixture; the action is recorded rather than simulated.
+  lease fixture; `node-a` holds `node-b`'s lease through four renewals while
+  `node-b`'s clock runs 1 ms ahead, then releases it.
 - [`scenarios/composable_base.yaml`](scenarios/composable_base.yaml) — reusable
   base-shaped fixture; current loaders do not merge it into another document.
 - [`scenarios/composed_partition_test.yaml`](scenarios/composed_partition_test.yaml)

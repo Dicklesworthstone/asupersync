@@ -965,7 +965,7 @@
     {
       "field_group": "faults",
       "state": "PARTIAL",
-      "behavior": "timed and traced; disk pressure/recovery, delayed cleanup, and process stall/resume affect the synthetic fault summary, and partition/heal between two named participants cut and restore their saga and replication links"
+      "behavior": "timed and traced; disk pressure/recovery, delayed cleanup, and process stall/resume affect the synthetic fault summary, and partition/heal between two named participants cut and restore their saga, replication, and lease links, and clock skew/reset move a lease role's clock"
     },
     {
       "field_group": "oracles",
@@ -990,7 +990,7 @@
     {
       "field_group": "participants",
       "state": "PARTIAL",
-      "behavior": "names validate fault references; the exact roles sender, receiver, swarm, supervisor, worker, saga-coordinator, saga-participant, primary, and replica run lab workloads shaped by their properties, while every other role runs nothing"
+      "behavior": "names validate fault references; the exact roles sender, receiver, swarm, supervisor, worker, saga-coordinator, saga-participant, primary, replica, lease-grantor, and lease-holder run lab workloads shaped by their properties, while every other role runs nothing"
     },
     {
       "field_group": "expected_invariants",
@@ -1000,7 +1000,7 @@
     {
       "field_group": "network",
       "state": "PARTIAL",
-      "behavior": "the preset and per-link latency and packet_loss delay or drop saga and replication messages between participants; corruption, duplication, reordering, and bandwidth are not modeled, and no other workload is shaped"
+      "behavior": "the preset and per-link latency and packet_loss delay or drop saga, replication, and lease messages between participants; corruption, duplication, reordering, and bandwidth are not modeled, and no other workload is shaped"
     },
     {
       "field_group": "cancellation",
@@ -2270,7 +2270,7 @@
     },
     {
       "gap_id": "SCN-GAP-02",
-      "finding": "network presets and per-link latency and packet_loss reach only saga and replication messages; corruption, duplication, reordering, and bandwidth are validated but not modeled, and channel, swarm, and supervision workloads ignore the network section",
+      "finding": "network presets and per-link latency and packet_loss reach only saga, replication, and lease messages; corruption, duplication, reordering, and bandwidth are validated but not modeled, and channel, swarm, and supervision workloads ignore the network section",
       "owner_bead": "asupersync-5z2scg.5.5",
       "evidence_state": "BLOCKED_GAP"
     },
@@ -2282,7 +2282,7 @@
     },
     {
       "gap_id": "SCN-GAP-04",
-      "finding": "only nine exact role names bind a workload and read its properties; any other role, including narrative names such as hub, peer, or lease-holder, is unbound and runs nothing",
+      "finding": "only eleven exact role names bind a workload and read its properties; any other role, including narrative names such as hub or wan-peer, is unbound and runs nothing",
       "owner_bead": "asupersync-5z2scg.5.5",
       "evidence_state": "BLOCKED_GAP"
     },
@@ -2300,13 +2300,13 @@
     },
     {
       "gap_id": "SCN-GAP-07",
-      "finding": "partition and heal cut and restore only saga and replication links between two named participants; host crash/restart and clock skew/reset faults are trace records without simulated behavioral effects",
+      "finding": "partition and heal cut and restore only saga, replication, and lease links between two named participants, and clock skew/reset move only lease roles' clocks; host crash/restart faults are trace records without simulated behavioral effects",
       "owner_bead": "asupersync-5z2scg.5.5",
       "evidence_state": "BLOCKED_GAP"
     },
     {
       "gap_id": "SCN-GAP-08",
-      "finding": "only participants with a bound role schedule a workload; narrative lease scenarios and documents without bound roles still run an empty runtime",
+      "finding": "only participants with a bound role schedule a workload; narrative topologies such as hub and peers, and documents without bound roles, still run an empty runtime",
       "owner_bead": "asupersync-5z2scg.5.5",
       "evidence_state": "BLOCKED_GAP"
     },

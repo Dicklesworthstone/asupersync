@@ -406,11 +406,12 @@ fn run_all_example_scenarios() {
         "Expected at least 10 scenario files, found {total}"
     );
     assert_eq!(passed, total, "Not all scenarios passed");
-    // chaos_sendpermit_ack, host_crash_restart, partition_heal and
-    // stress_10k_tasks bind participants today.
+    // chaos_sendpermit_ack, clock_skew_lease, composed_partition_test,
+    // host_crash_restart, partition_heal and stress_10k_tasks bind
+    // participants today.
     assert!(
-        with_workload >= 4,
-        "Expected at least 4 scenarios to run a workload, found {with_workload}"
+        with_workload >= 6,
+        "Expected at least 6 scenarios to run a workload, found {with_workload}"
     );
     test_complete!("run_all_example_scenarios", passed = passed, total = total);
 }
