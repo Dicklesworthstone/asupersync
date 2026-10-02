@@ -2,8 +2,9 @@
 //!
 //! Bridges [`Scenario`] YAML specifications to [`LabRuntime`] execution, providing:
 //!
-//! - Participant workloads: `sender`, `receiver`, `swarm`, `supervisor` and
-//!   `worker` roles become real lab tasks
+//! - Participant workloads: `sender`, `receiver`, `swarm`, `supervisor`,
+//!   `worker`, `saga-coordinator` and `saga-participant` roles become real
+//!   lab tasks
 //! - Timed fault injection based on scenario fault events
 //! - Oracle filtering (only check oracles listed in the scenario)
 //! - Seed exploration (run the same scenario across multiple seeds)
@@ -12,8 +13,9 @@
 //! # Participant workloads
 //!
 //! Before any fault fires, the runner spawns lab tasks for every participant
-//! whose `role` is exactly `sender`, `receiver`, `swarm`, `supervisor` or
-//! `worker` (case-sensitive), all in one root region.
+//! whose `role` is exactly `sender`, `receiver`, `swarm`, `supervisor`,
+//! `worker`, `saga-coordinator` or `saga-participant` (case-sensitive), all
+//! in one root region.
 //!
 //! Channel roles:
 //!
@@ -43,10 +45,31 @@
 //! `fail_times`. When the budget runs out, the failing worker stays stopped;
 //! the supervisor does not escalate.
 //!
+//! Saga roles: each `saga-coordinator` runs a [`Saga`] with one step per
+//! `saga-participant`. Participants go to the coordinators round-robin in
+//! declaration order, and participants without any coordinator share one
+//! implicit coordinator. Before each step the coordinator sleeps
+//! `properties.step_ms` of virtual time (default 50, at most 60000). It then
+//! registers the step's compensation, sends the participant an apply request
+//! on a bounded [`mpsc`] channel and waits at most `step_ms` for the
+//! [`oneshot`] reply. A participant applies a request only if its step was
+//! not compensated first. A refused, lost or late reply aborts the saga, which
+//! runs the registered compensations in reverse order. A compensation undoes
+//! an applied step or fences one that was never applied, so a request that
+//! arrives after the abort is refused. A coordinator that is cancelled aborts
+//! too.
+//!
+//! `partition` and `heal` faults whose `from` and `to` name two participants
+//! cut and restore the link between them. A saga request sent over a cut
+//! link is lost; its coordinator times out waiting for the reply. When saga
+//! roles are bound, the runner fires due timers on its way to each fault and
+//! runs with automatic virtual-time advance after the last one.
+//!
 //! Lab chaos may cancel these tasks mid-protocol. A send or receive, swarm
-//! member, worker generation or supervisor that ends in cancellation is
-//! counted and stops; it is never retried. The runner appends a `workload:`
-//! entry to the report's invariant violations, which fails the run, when:
+//! member, worker generation, supervisor or saga task that ends in
+//! cancellation is counted and stops; it is never retried. The runner appends
+//! a `workload:` entry to the report's invariant violations, which fails the
+//! run, when:
 //!
 //! - a bound task cannot be spawned, or a supervisor topology is refused;
 //! - a task meets an outcome its contract rules out;
@@ -56,10 +79,14 @@
 //! - a worker never succeeds, or succeeds after a restart count other than
 //!   its `fail_times`;
 //! - a supervisor exits with an error or a panic, or its restart batches do
-//!   not match its workers' restarts.
+//!   not match its workers' restarts;
+//! - a completed saga left a participant's step unapplied, an aborted saga
+//!   left one applied, or its compensations did not run exactly once each in
+//!   reverse step order.
 //!
-//! Timed faults stay trace and effect-summary records; they do not partition
-//! the bound channels or crash the supervised workers.
+//! Apart from cutting saga links, timed faults stay trace and effect-summary
+//! records; they do not partition the bound channels or crash the supervised
+//! workers.
 //!
 //! Every other role is unbound: the runner validates the participant and
 //! schedules no work for it. A scenario without bound participants still
@@ -86,7 +113,9 @@ use super::oracle::{OracleRegistry, OracleRegistryError, OracleReport};
 use super::runtime::{LabRunReport, LabRuntime};
 use super::scenario::{FaultAction, FaultEvent, Participant, Scenario, ValidationError};
 use crate::channel::mpsc::{self, RecvError, SendError};
+use crate::channel::oneshot;
 use crate::cx::Cx;
+use crate::remote::Saga;
 use crate::runtime::{JoinError, TaskHandle, yield_now};
 use crate::supervision::{
     BackoffStrategy, ChildSpec, EscalationPolicy, ManagedChildBinding, ManagedChildCompletion,
@@ -96,7 +125,7 @@ use crate::supervision::{
 use crate::trace::replay::ReplayTrace;
 use crate::types::{Budget, CancelReason, Outcome, RegionId, Time};
 use parking_lot::Mutex;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Write as _;
 use std::future::Future;
 use std::sync::Arc;
@@ -777,6 +806,24 @@ const MAX_WORKER_FAIL_TIMES: u64 = 1_000;
 const SUPERVISOR_RESTART_WINDOW_MINS: u64 = 1;
 /// Name of the implicit supervisor of workers without one.
 const IMPLICIT_SUPERVISOR_NAME: &str = "<implicit-supervisor>";
+/// Role of a participant that runs a saga over its participants.
+const SAGA_COORDINATOR_ROLE: &str = "saga-coordinator";
+/// Role of a participant that applies one saga step on request.
+const SAGA_PARTICIPANT_ROLE: &str = "saga-participant";
+/// Default virtual time a coordinator waits before each step and for its reply.
+const DEFAULT_SAGA_STEP_MS: u64 = 50;
+/// Largest accepted `step_ms`.
+const MAX_SAGA_STEP_MS: u64 = 60_000;
+/// Name of the coordinator that runs participants no coordinator owns.
+const IMPLICIT_COORDINATOR_NAME: &str = "<implicit-coordinator>";
+/// A participant's step: neither applied nor compensated.
+const STEP_PENDING: u8 = 0;
+/// The participant applied the step.
+const STEP_APPLIED: u8 = 1;
+/// The step was applied, then compensated.
+const STEP_UNDONE: u8 = 2;
+/// The step was compensated before it was applied; a later request is refused.
+const STEP_FENCED: u8 = 3;
 
 /// One declared participant and its role.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -804,6 +851,8 @@ pub struct ParticipantBindings {
     pub implicit_sink: bool,
     /// True when workers have no supervisor, so the runner adds one.
     pub implicit_supervisor: bool,
+    /// True when saga participants have no coordinator, so the runner adds one.
+    pub implicit_coordinator: bool,
 }
 
 impl ParticipantBindings {
@@ -814,6 +863,8 @@ impl ParticipantBindings {
         SWARM_ROLE,
         SUPERVISOR_ROLE,
         WORKER_ROLE,
+        SAGA_COORDINATOR_ROLE,
+        SAGA_PARTICIPANT_ROLE,
     ];
 
     /// Returns true when the scenario declares no participants.
@@ -874,6 +925,10 @@ enum PlannedWork {
     Supervise { max_restarts: Option<u32> },
     /// Fail this many times under a supervisor, then succeed.
     Work { fail_times: u64 },
+    /// Run a saga over the assigned participants, one step every `step_ms`.
+    Coordinate { step_ms: u64 },
+    /// Apply one saga step on request.
+    Participate,
 }
 
 /// One bound participant, in declaration order.
@@ -907,6 +962,9 @@ impl WorkloadPlan {
                     .map(|max_restarts| PlannedWork::Supervise { max_restarts }),
                 WORKER_ROLE => Self::worker_fail_times(participant)
                     .map(|fail_times| PlannedWork::Work { fail_times }),
+                SAGA_COORDINATOR_ROLE => Self::saga_step_ms(participant)
+                    .map(|step_ms| PlannedWork::Coordinate { step_ms }),
+                SAGA_PARTICIPANT_ROLE => Ok(PlannedWork::Participate),
                 _ => continue,
             };
             match work {
@@ -1019,6 +1077,35 @@ impl WorkloadPlan {
                 )
             })
     }
+
+    fn saga_step_ms(participant: &Participant) -> Result<u64, ValidationError> {
+        let Some(value) = participant.properties.get("step_ms") else {
+            return Ok(DEFAULT_SAGA_STEP_MS);
+        };
+        value
+            .as_u64()
+            .filter(|step_ms| (1..=MAX_SAGA_STEP_MS).contains(step_ms))
+            .ok_or_else(|| {
+                Self::property_error(
+                    participant,
+                    "step_ms",
+                    format!(
+                        "a bound saga coordinator's step interval must be an integer from 1 to {MAX_SAGA_STEP_MS} milliseconds"
+                    ),
+                )
+            })
+    }
+
+    /// True when the plan runs a saga coordinator, declared or implicit; its
+    /// steps wait on virtual-time timers.
+    fn is_timed(&self) -> bool {
+        self.participants.iter().any(|participant| {
+            matches!(
+                participant.work,
+                PlannedWork::Coordinate { .. } | PlannedWork::Participate
+            )
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1043,6 +1130,8 @@ enum WorkloadRole {
     Swarm,
     Supervisor,
     Worker,
+    SagaCoordinator,
+    SagaParticipant,
 }
 
 impl WorkloadRole {
@@ -1054,6 +1143,8 @@ impl WorkloadRole {
             Self::Swarm => SWARM_ROLE,
             Self::Supervisor => SUPERVISOR_ROLE,
             Self::Worker => WORKER_ROLE,
+            Self::SagaCoordinator => SAGA_COORDINATOR_ROLE,
+            Self::SagaParticipant => SAGA_PARTICIPANT_ROLE,
         }
     }
 }
@@ -1064,11 +1155,12 @@ impl WorkloadRole {
 /// are enough; they exist only because task futures must be `Send`.
 #[derive(Debug, Default)]
 struct WorkloadCounters {
-    /// Sender: values committed through a reserved permit.
+    /// Sender: values committed through a reserved permit. Saga participant:
+    /// requests applied.
     committed: AtomicU64,
     /// Drain: values any sender committed into this task's channel.
     delivered: AtomicU64,
-    /// Drain: values received.
+    /// Drain: values received. Saga participant: requests received.
     received: AtomicU64,
     /// Reserves or receives that ended in cancellation.
     cancelled: AtomicU64,
@@ -1339,6 +1431,170 @@ impl AssignedWorker {
     }
 }
 
+/// Links between participants that a `partition` fault cut and no `heal`
+/// restored yet, as unordered name pairs.
+#[derive(Debug, Default)]
+struct PartitionTable {
+    cut: Mutex<BTreeSet<(String, String)>>,
+}
+
+impl PartitionTable {
+    fn link(a: &str, b: &str) -> (String, String) {
+        if a <= b {
+            (a.to_owned(), b.to_owned())
+        } else {
+            (b.to_owned(), a.to_owned())
+        }
+    }
+
+    /// Applies a `partition` or `heal` fault between two named participants.
+    fn apply(&self, fault: &FaultEvent) {
+        let endpoint = |key: &str| fault.args.get(key).and_then(serde_json::Value::as_str);
+        let (Some(from), Some(to)) = (endpoint("from"), endpoint("to")) else {
+            return;
+        };
+        let link = Self::link(from, to);
+        match fault.action {
+            FaultAction::Partition => {
+                self.cut.lock().insert(link);
+            }
+            FaultAction::Heal => {
+                self.cut.lock().remove(&link);
+            }
+            _ => {}
+        }
+    }
+
+    fn is_cut(&self, a: &str, b: &str) -> bool {
+        self.cut.lock().contains(&Self::link(a, b))
+    }
+}
+
+/// An apply request; the participant replies whether it applied its step.
+#[derive(Debug)]
+struct SagaRequest {
+    reply: oneshot::Sender<bool>,
+}
+
+/// One saga participant as its coordinator drives it.
+#[derive(Debug)]
+struct SagaStepTarget {
+    name: String,
+    /// The participant's step state, `STEP_*`. It stands for the participant's
+    /// durable record, which a compensation updates directly.
+    step: Arc<AtomicU8>,
+    requests: mpsc::Sender<SagaRequest>,
+}
+
+/// How a coordinator's saga ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SagaEnd {
+    Completed,
+    /// Aborted for this reason.
+    Aborted(String),
+    /// The coordinator was cancelled, and aborted.
+    Cancelled,
+}
+
+impl SagaEnd {
+    fn label(&self) -> String {
+        match self {
+            Self::Completed => "completed".to_owned(),
+            Self::Aborted(reason) => format!("aborted({reason})"),
+            Self::Cancelled => "cancelled".to_owned(),
+        }
+    }
+}
+
+/// A bound coordinator's participants and what its saga did.
+#[derive(Debug)]
+struct SagaRecord {
+    /// Participant names and step states, in step order.
+    participants: Vec<(String, Arc<AtomicU8>)>,
+    /// Steps whose compensation the saga registered.
+    registered: AtomicU64,
+    /// Requests lost on a cut link.
+    lost: AtomicU64,
+    /// Step indices in the order their compensations ran.
+    compensated: Mutex<Vec<usize>>,
+    end: Mutex<Option<SagaEnd>>,
+}
+
+const fn step_label(state: u8) -> &'static str {
+    match state {
+        STEP_PENDING => "pending",
+        STEP_APPLIED => "applied",
+        STEP_UNDONE => "undone",
+        STEP_FENCED => "fenced",
+        _ => "invalid",
+    }
+}
+
+/// Undoes an applied step, or fences one that was never applied so that a
+/// request arriving later is refused.
+fn compensate_step(step: &AtomicU8) -> String {
+    // The participant's only write is pending -> applied, so an applied step
+    // stays applied until this store.
+    match step.compare_exchange(
+        STEP_PENDING,
+        STEP_FENCED,
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+    ) {
+        Ok(_) => "fenced".to_owned(),
+        Err(STEP_APPLIED) => {
+            step.store(STEP_UNDONE, Ordering::Relaxed);
+            "undone".to_owned()
+        }
+        Err(state) => format!("already {}", step_label(state)),
+    }
+}
+
+impl SagaRecord {
+    /// Appends this saga's anomalies. `cancelled` is true when the
+    /// coordinator task ended cancelled.
+    fn collect_violations(&self, label: &str, cancelled: bool, violations: &mut Vec<String>) {
+        let end = self.end.lock().clone();
+        let registered = usize::try_from(count(&self.registered)).unwrap_or(usize::MAX);
+        let compensated = self.compensated.lock().clone();
+        let states: Vec<(&str, u8)> = self
+            .participants
+            .iter()
+            .map(|(name, step)| (name.as_str(), step.load(Ordering::Relaxed)))
+            .collect();
+        let detail = format!(
+            "end={},registered={registered},lost={},compensated={compensated:?},steps=[{}]",
+            end.as_ref()
+                .map_or_else(|| "none".to_owned(), SagaEnd::label),
+            count(&self.lost),
+            states
+                .iter()
+                .map(|(name, state)| format!("{name}={}", step_label(*state)))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        if end == Some(SagaEnd::Completed) {
+            if states.iter().any(|(_, state)| *state != STEP_APPLIED) {
+                violations.push(format!("{label}:incomplete_commit:{detail}"));
+            }
+            if !compensated.is_empty() {
+                violations.push(format!("{label}:compensated_after_commit:{detail}"));
+            }
+            return;
+        }
+        // Aborted, cancelled, or never finished.
+        if end.is_none() && !cancelled {
+            violations.push(format!("{label}:no_end:{detail}"));
+        }
+        if states.iter().any(|(_, state)| *state == STEP_APPLIED) {
+            violations.push(format!("{label}:applied_after_abort:{detail}"));
+        }
+        if compensated.iter().copied().ne((0..registered).rev()) {
+            violations.push(format!("{label}:compensation_order:{detail}"));
+        }
+    }
+}
+
 /// Role-specific state of one bound task.
 #[derive(Debug)]
 enum BoundDetail {
@@ -1350,6 +1606,10 @@ enum BoundDetail {
     Supervisor(Arc<SupervisorState>),
     /// A worker; its supervisor runs its generations and reports on it.
     Worker,
+    /// A saga coordinator and its participants' steps.
+    SagaCoordinator(Arc<SagaRecord>),
+    /// A saga participant; its coordinator's record holds its step.
+    SagaParticipant,
 }
 
 /// One bound task and its counters.
@@ -1405,6 +1665,25 @@ impl BoundTask {
             }
             // The worker's supervisor judges it from the managed report.
             BoundDetail::Worker => {}
+            BoundDetail::SagaCoordinator(record) => {
+                if count(&self.counters.unexpected) > 0 {
+                    violations.push(format!("{label}:unexpected_outcome:no_task_context"));
+                }
+                let cancelled = self.joins.first() == Some(&JoinState::Cancelled);
+                record.collect_violations(&label, cancelled, violations);
+            }
+            BoundDetail::SagaParticipant => {
+                let c = &self.counters;
+                if count(&c.unexpected) > 0 || count(&c.committed) > 1 {
+                    violations.push(format!(
+                        "{label}:unexpected_outcome:requests={},applied={},cancelled={},unexpected={}",
+                        count(&c.received),
+                        count(&c.committed),
+                        count(&c.cancelled),
+                        count(&c.unexpected),
+                    ));
+                }
+            }
         }
     }
 
@@ -1534,15 +1813,36 @@ struct ParticipantWorkload {
     /// Join handles with the index of their task record, held until the run
     /// is reported.
     handles: Vec<(usize, TaskHandle<()>)>,
+    /// Links cut by `partition` faults; saga coordinators consult it.
+    partitions: Arc<PartitionTable>,
+    /// True when some task waits on virtual-time timers.
+    timed: bool,
 }
 
 /// Work a bound participant was given before its task is spawned.
 enum Endpoint {
-    Send { messages: u64 },
-    Drain { rx: mpsc::Receiver<WorkloadMessage> },
-    Swarm { tasks: usize },
-    Supervise { max_restarts: Option<u32> },
-    Work { fail_times: u64 },
+    Send {
+        messages: u64,
+    },
+    Drain {
+        rx: mpsc::Receiver<WorkloadMessage>,
+    },
+    Swarm {
+        tasks: usize,
+    },
+    Supervise {
+        max_restarts: Option<u32>,
+    },
+    Work {
+        fail_times: u64,
+    },
+    Coordinate {
+        step_ms: u64,
+    },
+    Participate {
+        requests: mpsc::Receiver<SagaRequest>,
+        step: Arc<AtomicU8>,
+    },
 }
 
 impl ParticipantWorkload {
@@ -1551,7 +1851,10 @@ impl ParticipantWorkload {
     /// An empty plan spawns nothing and creates no region, so a scenario
     /// without bound participants keeps the empty-lab trace it always had.
     fn spawn(runtime: &mut LabRuntime, plan: &WorkloadPlan) -> Self {
-        let mut workload = Self::default();
+        let mut workload = Self {
+            timed: plan.is_timed(),
+            ..Self::default()
+        };
         if plan.participants.is_empty() {
             return workload;
         }
@@ -1575,10 +1878,20 @@ impl ParticipantWorkload {
         let mut supervised: Vec<Vec<AssignedWorker>> =
             (0..supervisor_count).map(|_| Vec::new()).collect();
         let mut orphans = Vec::new();
+        // Saga participants go to the coordinators the same way.
+        let coordinator_count = plan
+            .participants
+            .iter()
+            .filter(|participant| matches!(participant.work, PlannedWork::Coordinate { .. }))
+            .count();
+        let mut coordinated: Vec<Vec<SagaStepTarget>> =
+            (0..coordinator_count).map(|_| Vec::new()).collect();
+        let mut uncoordinated = Vec::new();
         let mut lanes = Vec::new();
         let mut endpoints = Vec::with_capacity(plan.participants.len());
         let mut sender_total = 0_usize;
         let mut worker_total = 0_usize;
+        let mut saga_participant_total = 0_usize;
         for (participant, participant_counters) in plan.participants.iter().zip(&counters) {
             match participant.work {
                 PlannedWork::Send { messages } => {
@@ -1611,6 +1924,25 @@ impl ParticipantWorkload {
                     worker_total += 1;
                     endpoints.push(Endpoint::Work { fail_times });
                 }
+                PlannedWork::Coordinate { step_ms } => {
+                    endpoints.push(Endpoint::Coordinate { step_ms });
+                }
+                PlannedWork::Participate => {
+                    let (tx, requests) = mpsc::channel(1);
+                    let step = Arc::new(AtomicU8::new(STEP_PENDING));
+                    let target = SagaStepTarget {
+                        name: participant.name.clone(),
+                        step: Arc::clone(&step),
+                        requests: tx,
+                    };
+                    if coordinator_count == 0 {
+                        uncoordinated.push(target);
+                    } else {
+                        coordinated[saga_participant_total % coordinator_count].push(target);
+                    }
+                    saga_participant_total += 1;
+                    endpoints.push(Endpoint::Participate { requests, step });
+                }
             }
         }
         let sink = if lanes.is_empty() && sender_total > 0 {
@@ -1626,9 +1958,10 @@ impl ParticipantWorkload {
         };
 
         // Pass 2: spawn in declaration order, then the sink, then the
-        // implicit supervisor.
+        // implicit supervisor, then the implicit coordinator.
         let mut sender_index = 0_usize;
         let mut supervised = supervised.into_iter();
+        let mut coordinated = coordinated.into_iter();
         for ((participant, endpoint), task_counters) in
             plan.participants.iter().zip(endpoints).zip(counters)
         {
@@ -1687,6 +2020,30 @@ impl ParticipantWorkload {
                         BoundDetail::Worker,
                     );
                 }
+                Endpoint::Coordinate { step_ms } => {
+                    let targets = coordinated.next().unwrap_or_default();
+                    workload.spawn_coordinator(
+                        runtime,
+                        root,
+                        &participant.name,
+                        step_ms,
+                        targets,
+                        task_counters,
+                    );
+                }
+                Endpoint::Participate { requests, step } => {
+                    let owner = workload.push_task(
+                        &participant.name,
+                        WorkloadRole::SagaParticipant,
+                        1,
+                        Arc::clone(&task_counters),
+                        BoundDetail::SagaParticipant,
+                    );
+                    let body = run_saga_participant(requests, step, task_counters);
+                    if let Err(refusal) = workload.spawn_owned(runtime, root, owner, body) {
+                        workload.tasks[owner].spawn_refusal = Some(refusal);
+                    }
+                }
             }
         }
         if let Some((rx, drain)) = sink {
@@ -1708,6 +2065,16 @@ impl ParticipantWorkload {
                 IMPLICIT_SUPERVISOR_NAME,
                 None,
                 orphans,
+                Arc::new(WorkloadCounters::default()),
+            );
+        }
+        if !uncoordinated.is_empty() {
+            workload.spawn_coordinator(
+                runtime,
+                root,
+                IMPLICIT_COORDINATOR_NAME,
+                DEFAULT_SAGA_STEP_MS,
+                uncoordinated,
                 Arc::new(WorkloadCounters::default()),
             );
         }
@@ -1840,12 +2207,52 @@ impl ParticipantWorkload {
         self.tasks[owner].spawn_refusal = refusal;
     }
 
+    /// Spawns one lab task that runs a saga over `targets`, in their order.
+    fn spawn_coordinator(
+        &mut self,
+        runtime: &mut LabRuntime,
+        root: RegionId,
+        name: &str,
+        step_ms: u64,
+        targets: Vec<SagaStepTarget>,
+        counters: Arc<WorkloadCounters>,
+    ) {
+        let record = Arc::new(SagaRecord {
+            participants: targets
+                .iter()
+                .map(|target| (target.name.clone(), Arc::clone(&target.step)))
+                .collect(),
+            registered: AtomicU64::new(0),
+            lost: AtomicU64::new(0),
+            compensated: Mutex::new(Vec::new()),
+            end: Mutex::new(None),
+        });
+        let owner = self.push_task(
+            name,
+            WorkloadRole::SagaCoordinator,
+            u64::try_from(targets.len()).unwrap_or(u64::MAX),
+            Arc::clone(&counters),
+            BoundDetail::SagaCoordinator(Arc::clone(&record)),
+        );
+        let body = run_saga_coordinator(
+            name.to_owned(),
+            targets,
+            step_ms,
+            Arc::clone(&self.partitions),
+            record,
+            counters,
+        );
+        if let Err(refusal) = self.spawn_owned(runtime, root, owner, body) {
+            self.tasks[owner].spawn_refusal = Some(refusal);
+        }
+    }
+
     /// Reads every join handle, then appends `workload:` violations.
     ///
     /// Returns the task records so callers can inspect the counters.
     fn finish(self, violations: &mut Vec<String>) -> Vec<BoundTask> {
-        let Self { mut tasks, handles } = self;
-        for (owner, mut handle) in handles {
+        let mut tasks = self.tasks;
+        for (owner, mut handle) in self.handles {
             let join = JoinState::observe(&mut handle);
             if let Some(task) = tasks.get_mut(owner) {
                 task.joins.push(join);
@@ -1984,6 +2391,151 @@ async fn swarm_member_steps(cx: &Cx, touches: &AtomicU64) -> u8 {
     }
     bump(touches);
     MEMBER_COMPLETED
+}
+
+/// Body of a bound `saga-coordinator`, or of the implicit one.
+///
+/// Before each step it sleeps `step_ms` of virtual time, registers the
+/// step's compensation and asks the participant to apply the step. The saga
+/// completes when every participant applied its step and aborts, running the
+/// registered compensations in reverse, at the first refusal, lost reply or
+/// cancellation.
+async fn run_saga_coordinator(
+    name: String,
+    targets: Vec<SagaStepTarget>,
+    step_ms: u64,
+    partitions: Arc<PartitionTable>,
+    record: Arc<SagaRecord>,
+    counters: Arc<WorkloadCounters>,
+) {
+    let Some(cx) = Cx::current() else {
+        bump(&counters.unexpected);
+        counters.finished.store(true, Ordering::Relaxed);
+        return;
+    };
+    let step = Duration::from_millis(step_ms);
+    let mut saga = Saga::new();
+    let mut end = SagaEnd::Completed;
+    for (index, target) in targets.iter().enumerate() {
+        crate::time::sleep(cx.now(), step).await;
+        if cx.checkpoint().is_err() {
+            end = SagaEnd::Cancelled;
+            break;
+        }
+        // Register the compensation before the request can be applied: a
+        // participant may apply a request whose reply never arrives.
+        let compensated_step = Arc::clone(&target.step);
+        let log = Arc::clone(&record);
+        let registered = saga.step(
+            &target.name,
+            || Ok(()),
+            move || {
+                log.compensated.lock().push(index);
+                compensate_step(&compensated_step)
+            },
+        );
+        if registered.is_err() {
+            bump(&counters.unexpected);
+            end = SagaEnd::Aborted("registration failed".to_owned());
+            break;
+        }
+        bump(&record.registered);
+        if let Err(stop) = request_step(&cx, &name, target, step, &partitions, &record).await {
+            end = stop;
+            break;
+        }
+    }
+    if end == SagaEnd::Completed {
+        saga.complete();
+    } else {
+        saga.abort();
+    }
+    *record.end.lock() = Some(end);
+    counters.finished.store(true, Ordering::Relaxed);
+    // Dropping `targets` closes every participant's request channel.
+}
+
+/// Sends one apply request and waits at most `step` for its reply.
+async fn request_step(
+    cx: &Cx,
+    coordinator: &str,
+    target: &SagaStepTarget,
+    step: Duration,
+    partitions: &PartitionTable,
+    record: &SagaRecord,
+) -> Result<(), SagaEnd> {
+    let (reply, mut replies) = oneshot::channel();
+    // A request over a cut link is lost. Keeping its reply sender makes the
+    // coordinator wait out the timeout instead of seeing a closed reply.
+    let lost = if partitions.is_cut(coordinator, &target.name) {
+        bump(&record.lost);
+        Some(reply)
+    } else {
+        match target.requests.send(cx, SagaRequest { reply }).await {
+            Ok(()) => None,
+            Err(SendError::Cancelled(_)) => return Err(SagaEnd::Cancelled),
+            Err(SendError::Disconnected(_) | SendError::Full(_)) => {
+                return Err(SagaEnd::Aborted(format!("{} is gone", target.name)));
+            }
+        }
+    };
+    let answer = crate::time::timeout(cx.now(), step, replies.recv(cx)).await;
+    drop(lost);
+    match answer {
+        Ok(Ok(true)) => Ok(()),
+        Ok(Ok(false)) => Err(SagaEnd::Aborted(format!("{} refused", target.name))),
+        Ok(Err(oneshot::RecvError::Cancelled)) => Err(SagaEnd::Cancelled),
+        Ok(Err(oneshot::RecvError::Closed | oneshot::RecvError::PolledAfterCompletion)) => Err(
+            SagaEnd::Aborted(format!("{} dropped the reply", target.name)),
+        ),
+        Err(_) => Err(SagaEnd::Aborted(format!("{} timed out", target.name))),
+    }
+}
+
+/// Body of a bound `saga-participant`: it applies each request unless its
+/// step was compensated first, and replies whether it applied it.
+async fn run_saga_participant(
+    mut requests: mpsc::Receiver<SagaRequest>,
+    step: Arc<AtomicU8>,
+    counters: Arc<WorkloadCounters>,
+) {
+    if let Some(cx) = Cx::current() {
+        loop {
+            match requests.recv(&cx).await {
+                Ok(request) => {
+                    bump(&counters.received);
+                    let applied = step
+                        .compare_exchange(
+                            STEP_PENDING,
+                            STEP_APPLIED,
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                        )
+                        .is_ok();
+                    if applied {
+                        bump(&counters.committed);
+                    }
+                    // The coordinator may have stopped waiting for this reply.
+                    let _ = request.reply.send(&cx, applied);
+                }
+                Err(RecvError::Disconnected) => {
+                    counters.drained_to_close.store(true, Ordering::Relaxed);
+                    break;
+                }
+                Err(RecvError::Cancelled) => {
+                    bump(&counters.cancelled);
+                    break;
+                }
+                Err(RecvError::Empty) => {
+                    bump(&counters.unexpected);
+                    break;
+                }
+            }
+        }
+    } else {
+        bump(&counters.unexpected);
+    }
+    counters.finished.store(true, Ordering::Relaxed);
 }
 
 /// Body of a bound `sender` task.
@@ -2205,6 +2757,8 @@ impl ScenarioRunner {
         let mut has_receiver = false;
         let mut has_supervisor = false;
         let mut has_worker = false;
+        let mut has_coordinator = false;
+        let mut has_saga_participant = false;
         for participant in &scenario.participants {
             let binding = ParticipantBinding {
                 name: participant.name.clone(),
@@ -2227,12 +2781,21 @@ impl ScenarioRunner {
                     has_worker = true;
                     bindings.bound.push(binding);
                 }
+                SAGA_COORDINATOR_ROLE => {
+                    has_coordinator = true;
+                    bindings.bound.push(binding);
+                }
+                SAGA_PARTICIPANT_ROLE => {
+                    has_saga_participant = true;
+                    bindings.bound.push(binding);
+                }
                 SWARM_ROLE => bindings.bound.push(binding),
                 _ => bindings.unbound.push(binding),
             }
         }
         bindings.implicit_sink = has_sender && !has_receiver;
         bindings.implicit_supervisor = has_worker && !has_supervisor;
+        bindings.implicit_coordinator = has_saga_participant && !has_coordinator;
         bindings
     }
 
@@ -2269,21 +2832,28 @@ impl ScenarioRunner {
     fn inject_faults(
         runtime: &mut LabRuntime,
         scenario: &Scenario,
+        workload: &ParticipantWorkload,
     ) -> (Vec<FaultInjectionLogEntry>, FaultEffectSummary) {
         let mut fault_log = Vec::with_capacity(scenario.faults.len());
         let mut fault_effect_summary = FaultEffectSummary::default();
 
         for fault in &scenario.faults {
-            // Advance time to the fault trigger point
             let target_nanos = fault.at_ms.saturating_mul(1_000_000);
             let target_time = Time::from_nanos(target_nanos);
-            if target_time > runtime.now() {
-                let delta_nanos = target_time.as_nanos() - runtime.now().as_nanos();
-                runtime.advance_time(delta_nanos);
-            }
+            if workload.timed {
+                // Fire the timers due on the way, so timed tasks act at
+                // their own deadlines rather than all at the fault time.
+                Self::run_timed_until(runtime, target_time);
+            } else {
+                // Advance time to the fault trigger point
+                if target_time > runtime.now() {
+                    let delta_nanos = target_time.as_nanos() - runtime.now().as_nanos();
+                    runtime.advance_time(delta_nanos);
+                }
 
-            // Run to idle so pending tasks respond to the current state
-            runtime.run_until_idle();
+                // Run to idle so pending tasks respond to the current state
+                runtime.run_until_idle();
+            }
 
             // Record the fault as a user_trace event
             let action_name = match fault.action {
@@ -2313,9 +2883,69 @@ impl ScenarioRunner {
                 trace_message,
             });
             fault_effect_summary.apply_fault(fault, scenario.resource_caps.max_artifact_bytes);
+            workload.partitions.apply(fault);
         }
 
         (fault_log, fault_effect_summary)
+    }
+
+    /// Injects the scenario's faults, running the lab between them, and then
+    /// runs it to quiescence. Timed tasks need the clock to advance to their
+    /// next timer whenever the lab is idle.
+    fn drive(
+        runtime: &mut LabRuntime,
+        scenario: &Scenario,
+        workload: &ParticipantWorkload,
+    ) -> (Vec<FaultInjectionLogEntry>, FaultEffectSummary) {
+        let injected = Self::inject_faults(runtime, scenario, workload);
+        if workload.timed {
+            runtime.run_with_auto_advance();
+        } else {
+            runtime.run_until_quiescent();
+        }
+        injected
+    }
+
+    /// Runs a timed workload up to virtual time `target`. It runs to idle,
+    /// fires each timer due before `target` in deadline order, and then moves
+    /// the clock to `target`. A timer due at `target` itself fires after the
+    /// fault at `target` takes effect.
+    fn run_timed_until(runtime: &mut LabRuntime, target: Time) {
+        loop {
+            runtime.run_until_idle();
+            if runtime
+                .config()
+                .max_steps
+                .is_some_and(|max| runtime.steps() >= max)
+            {
+                break;
+            }
+            let next = runtime
+                .state
+                .timer_driver_handle()
+                .and_then(|timers| timers.next_deadline());
+            let Some(deadline) = next.filter(|deadline| *deadline < target) else {
+                break;
+            };
+            if deadline > runtime.now() {
+                runtime.advance_time_to(deadline);
+            }
+            let fired = runtime
+                .state
+                .timer_driver_handle()
+                .map_or(0, |timers| timers.process_timers());
+            let after = runtime
+                .state
+                .timer_driver_handle()
+                .and_then(|timers| timers.next_deadline());
+            if fired == 0 && after == Some(deadline) {
+                // Nothing fired and nothing moved: stop instead of spinning.
+                break;
+            }
+        }
+        if target > runtime.now() {
+            runtime.advance_time_to(target);
+        }
     }
 
     /// Summarize fault args for trace events.
@@ -2440,11 +3070,10 @@ impl ScenarioRunner {
         let mut runtime = LabRuntime::new(config);
         let workload = ParticipantWorkload::spawn(&mut runtime, &plan);
 
-        let (fault_log, fault_effect_summary) = Self::inject_faults(&mut runtime, scenario);
+        let (fault_log, fault_effect_summary) = Self::drive(&mut runtime, scenario, &workload);
         let faults_injected = fault_log.len();
         let minimized_counterexample =
             Self::minimized_counterexample_for(scenario, &fault_log, &fault_effect_summary);
-        runtime.run_until_quiescent();
 
         let mut lab_report = runtime.report();
         workload.finish(&mut lab_report.invariant_violations);
@@ -2510,14 +3139,12 @@ impl ScenarioRunner {
         let mut runtime = LabRuntime::new(config);
         let workload = ParticipantWorkload::spawn(&mut runtime, &plan);
 
-        // 3. Inject timed faults and run between them
-        let (fault_log, fault_effect_summary) = Self::inject_faults(&mut runtime, scenario);
+        // 3-4. Inject timed faults, running between them, then run to
+        // quiescence
+        let (fault_log, fault_effect_summary) = Self::drive(&mut runtime, scenario, &workload);
         let faults_injected = fault_log.len();
         let minimized_counterexample =
             Self::minimized_counterexample_for(scenario, &fault_log, &fault_effect_summary);
-
-        // 4. Run to quiescence after all faults
-        runtime.run_until_quiescent();
 
         // 5. Collect report, folding in workload anomalies
         let mut lab_report = runtime.report();
@@ -3298,9 +3925,18 @@ mod tests {
             )
         );
         assert!(!bindings.implicit_supervisor);
+        assert!(!bindings.implicit_coordinator);
         assert_eq!(
             ParticipantBindings::BOUND_ROLES,
-            ["sender", "receiver", "swarm", "supervisor", "worker"]
+            [
+                "sender",
+                "receiver",
+                "swarm",
+                "supervisor",
+                "worker",
+                "saga-coordinator",
+                "saga-participant"
+            ]
         );
 
         scenario.participants = vec![
@@ -4050,6 +4686,323 @@ mod tests {
             "a 10% per-dispatch cancel rate must stop some worker across eight seeds"
         );
         crate::test_complete!("supervised_workers_stopped_by_chaos_are_counted_not_failed");
+    }
+
+    fn saga_record<'a>(tasks: &'a [BoundTask], name: &str) -> &'a SagaRecord {
+        tasks
+            .iter()
+            .find_map(|task| match &task.detail {
+                BoundDetail::SagaCoordinator(record) if task.name == name => Some(&**record),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no saga coordinator named {name}"))
+    }
+
+    fn saga_steps(record: &SagaRecord) -> Vec<(&str, &'static str)> {
+        record
+            .participants
+            .iter()
+            .map(|(name, step)| (name.as_str(), step_label(step.load(Ordering::Relaxed))))
+            .collect()
+    }
+
+    fn saga_scenario(participants: usize) -> Scenario {
+        let mut scenario = minimal_scenario();
+        scenario.id = "test-saga".to_string();
+        scenario.participants = vec![participant("coord", "saga-coordinator")];
+        scenario.participants.extend(
+            (0..participants).map(|index| participant(&format!("p{index}"), "saga-participant")),
+        );
+        scenario
+    }
+
+    fn link_fault(at_ms: u64, action: FaultAction, to: &str) -> FaultEvent {
+        FaultEvent {
+            at_ms,
+            action,
+            args: BTreeMap::from([
+                ("from".to_string(), serde_json::json!("coord")),
+                ("to".to_string(), serde_json::json!(to)),
+            ]),
+        }
+    }
+
+    #[test]
+    fn saga_completes_when_every_participant_applies_its_step() {
+        init_test("saga_completes_when_every_participant_applies_its_step");
+        let scenario = saga_scenario(3);
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+
+        let record = saga_record(&tasks, "coord");
+        assert_eq!(*record.end.lock(), Some(SagaEnd::Completed));
+        assert_eq!(count(&record.registered), 3);
+        assert_eq!(count(&record.lost), 0);
+        assert!(record.compensated.lock().is_empty());
+        assert_eq!(
+            saga_steps(record),
+            [("p0", "applied"), ("p1", "applied"), ("p2", "applied")]
+        );
+        // One step every DEFAULT_SAGA_STEP_MS of virtual time.
+        assert!(
+            result.lab_report.now_nanos >= 3 * DEFAULT_SAGA_STEP_MS * 1_000_000,
+            "virtual time {} ns",
+            result.lab_report.now_nanos
+        );
+        for task in tasks_with_role(&tasks, WorkloadRole::SagaParticipant) {
+            assert_eq!(count(&task.counters.received), 1, "{}", task.name);
+            assert_eq!(count(&task.counters.committed), 1, "{}", task.name);
+            assert!(task.counters.drained_to_close.load(Ordering::Relaxed));
+        }
+        crate::test_complete!("saga_completes_when_every_participant_applies_its_step");
+    }
+
+    /// Steps run at 50, 100 and 150 ms. The link to p2 is cut at 120 ms, so
+    /// its request is lost and the coordinator times out at 200 ms. The
+    /// saga then undoes p1 and p0 after fencing p2, and never asks p3.
+    #[test]
+    fn partition_loses_a_request_and_the_saga_compensates_in_reverse() {
+        init_test("partition_loses_a_request_and_the_saga_compensates_in_reverse");
+        let mut scenario = saga_scenario(4);
+        scenario.faults = vec![
+            link_fault(120, FaultAction::Partition, "p2"),
+            link_fault(400, FaultAction::Heal, "p2"),
+        ];
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+
+        let record = saga_record(&tasks, "coord");
+        assert_eq!(
+            *record.end.lock(),
+            Some(SagaEnd::Aborted("p2 timed out".to_owned()))
+        );
+        assert_eq!(count(&record.lost), 1);
+        assert_eq!(count(&record.registered), 3);
+        assert_eq!(*record.compensated.lock(), [2, 1, 0]);
+        assert_eq!(
+            saga_steps(record),
+            [
+                ("p0", "undone"),
+                ("p1", "undone"),
+                ("p2", "fenced"),
+                ("p3", "pending")
+            ]
+        );
+        let p2 = tasks.iter().find(|task| task.name == "p2").expect("p2");
+        assert_eq!(count(&p2.counters.received), 0);
+        crate::test_complete!("partition_loses_a_request_and_the_saga_compensates_in_reverse");
+    }
+
+    /// The shipped fixture's partition reaches the workload. Without chaos
+    /// the coordinator asks participant-i at 50 * (i + 1) ms, so
+    /// participant-7's request at 400 ms crosses the link cut at 200 ms and
+    /// the saga times out at 450 ms.
+    #[test]
+    fn saga_partition_fixture_compensates_the_steps_before_the_cut_link() {
+        init_test("saga_partition_fixture_compensates_the_steps_before_the_cut_link");
+        let yaml = include_str!("../../frankenlab/examples/scenarios/03_saga_partition.yaml");
+        let mut scenario: Scenario = serde_yaml::from_str(yaml).expect("parse 03_saga_partition");
+        scenario.chaos = ChaosSection::Off;
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+
+        let record = saga_record(&tasks, "coordinator");
+        assert_eq!(
+            *record.end.lock(),
+            Some(SagaEnd::Aborted("participant-7 timed out".to_owned()))
+        );
+        assert_eq!(count(&record.lost), 1);
+        assert_eq!(*record.compensated.lock(), [7, 6, 5, 4, 3, 2, 1, 0]);
+        let steps = saga_steps(record);
+        assert_eq!(steps.len(), 10);
+        assert!(
+            steps[..7].iter().all(|(_, state)| *state == "undone"),
+            "{steps:?}"
+        );
+        assert_eq!(
+            steps[7..],
+            [
+                ("participant-7", "fenced"),
+                ("participant-8", "pending"),
+                ("participant-9", "pending")
+            ]
+        );
+        crate::test_complete!("saga_partition_fixture_compensates_the_steps_before_the_cut_link");
+    }
+
+    #[test]
+    fn saga_participants_go_round_robin_and_orphans_get_an_implicit_coordinator() {
+        init_test("saga_participants_go_round_robin_and_orphans_get_an_implicit_coordinator");
+        let mut scenario = minimal_scenario();
+        scenario.participants = vec![
+            participant("a", "saga-participant"),
+            participant("c1", "saga-coordinator"),
+            participant("b", "saga-participant"),
+            participant_with("c2", "saga-coordinator", "step_ms", serde_json::json!(5)),
+            participant("c", "saga-participant"),
+        ];
+        let bindings = ScenarioRunner::participant_bindings(&scenario);
+        assert_eq!(bindings.bound.len(), 5);
+        assert!(!bindings.implicit_coordinator);
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+        let names = |record: &SagaRecord| {
+            record
+                .participants
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(saga_record(&tasks, "c1")), ["a", "c"]);
+        assert_eq!(names(saga_record(&tasks, "c2")), ["b"]);
+
+        scenario.participants = vec![
+            participant("a", "saga-participant"),
+            participant("b", "saga-participant"),
+        ];
+        assert!(ScenarioRunner::participant_bindings(&scenario).implicit_coordinator);
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+        let record = saga_record(&tasks, IMPLICIT_COORDINATOR_NAME);
+        assert_eq!(names(record), ["a", "b"]);
+        assert_eq!(*record.end.lock(), Some(SagaEnd::Completed));
+        crate::test_complete!(
+            "saga_participants_go_round_robin_and_orphans_get_an_implicit_coordinator"
+        );
+    }
+
+    #[test]
+    fn saga_step_interval_is_validated() {
+        init_test("saga_step_interval_is_validated");
+        let mut scenario = minimal_scenario();
+        scenario.participants = vec![
+            participant_with("a", "saga-coordinator", "step_ms", serde_json::json!(0)),
+            participant_with(
+                "b",
+                "saga-coordinator",
+                "step_ms",
+                serde_json::json!(MAX_SAGA_STEP_MS + 1),
+            ),
+            participant_with(
+                "c",
+                "saga-coordinator",
+                "step_ms",
+                serde_json::json!("soon"),
+            ),
+            participant_with(
+                "d",
+                "saga-coordinator",
+                "step_ms",
+                serde_json::json!(MAX_SAGA_STEP_MS),
+            ),
+        ];
+        match ScenarioRunner::run(&scenario) {
+            Err(ScenarioRunnerError::Validation { errors, .. }) => {
+                let fields: Vec<_> = errors.iter().map(|error| error.field.as_str()).collect();
+                assert_eq!(
+                    fields,
+                    [
+                        "participants.a.properties.step_ms",
+                        "participants.b.properties.step_ms",
+                        "participants.c.properties.step_ms",
+                    ]
+                );
+            }
+            other => panic!("expected a participant property validation error, got {other:?}"),
+        }
+        crate::test_complete!("saga_step_interval_is_validated");
+    }
+
+    #[test]
+    fn sagas_stopped_by_chaos_never_leave_a_step_applied() {
+        init_test("sagas_stopped_by_chaos_never_leave_a_step_applied");
+        let mut scenario = saga_scenario(5);
+        scenario.chaos = ChaosSection::Custom {
+            cancel_probability: 0.1,
+            delay_probability: 0.0,
+            delay_min_ms: 0,
+            delay_max_ms: 10,
+            io_error_probability: 0.0,
+            wakeup_storm_probability: 0.0,
+            budget_exhaustion_probability: 0.0,
+        };
+        let mut aborted = 0_u64;
+        for seed in 0..8 {
+            let (result, tasks) = ScenarioRunner::run_seeded(&scenario, Some(seed)).unwrap();
+            assert!(result.passed(), "seed {seed}: {}", failure_detail(&result));
+            let record = saga_record(&tasks, "coord");
+            let steps = saga_steps(record);
+            if *record.end.lock() == Some(SagaEnd::Completed) {
+                assert!(
+                    steps.iter().all(|(_, state)| *state == "applied"),
+                    "seed {seed}: {steps:?}"
+                );
+            } else {
+                aborted += 1;
+                assert!(
+                    steps.iter().all(|(_, state)| *state != "applied"),
+                    "seed {seed}: {steps:?}"
+                );
+            }
+        }
+        assert!(
+            aborted > 0,
+            "a 10% per-dispatch cancel rate must stop some saga across eight seeds"
+        );
+        crate::test_complete!("sagas_stopped_by_chaos_never_leave_a_step_applied");
+    }
+
+    /// The checker flags each broken end state; planted records stand in for
+    /// a saga implementation that got it wrong.
+    #[test]
+    fn saga_checker_flags_partial_commits_leftover_steps_and_misordered_compensation() {
+        init_test("saga_checker_flags_partial_commits_leftover_steps_and_misordered_compensation");
+        let record = |end: SagaEnd, states: &[u8], compensated: Vec<usize>| SagaRecord {
+            participants: states
+                .iter()
+                .enumerate()
+                .map(|(index, state)| (format!("p{index}"), Arc::new(AtomicU8::new(*state))))
+                .collect(),
+            registered: AtomicU64::new(u64::try_from(compensated.len()).unwrap_or(u64::MAX)),
+            lost: AtomicU64::new(0),
+            compensated: Mutex::new(compensated),
+            end: Mutex::new(Some(end)),
+        };
+        let kinds = |record: &SagaRecord| {
+            let mut violations = Vec::new();
+            record.collect_violations("workload:saga-coordinator:coord", false, &mut violations);
+            violations
+                .iter()
+                .map(|violation| violation.split(':').nth(3).unwrap_or_default().to_owned())
+                .collect::<Vec<_>>()
+        };
+
+        let clean_abort = record(
+            SagaEnd::Aborted("p1 refused".to_owned()),
+            &[STEP_UNDONE, STEP_FENCED],
+            vec![1, 0],
+        );
+        assert!(kinds(&clean_abort).is_empty(), "{:?}", kinds(&clean_abort));
+        let partial_commit = record(SagaEnd::Completed, &[STEP_APPLIED, STEP_PENDING], vec![]);
+        assert_eq!(kinds(&partial_commit), ["incomplete_commit"]);
+        let leftover = record(SagaEnd::Cancelled, &[STEP_APPLIED, STEP_FENCED], vec![1, 0]);
+        assert_eq!(kinds(&leftover), ["applied_after_abort"]);
+        let misordered = record(
+            SagaEnd::Aborted("p1 timed out".to_owned()),
+            &[STEP_UNDONE, STEP_FENCED],
+            vec![0, 1],
+        );
+        assert_eq!(kinds(&misordered), ["compensation_order"]);
+
+        let step = AtomicU8::new(STEP_PENDING);
+        assert_eq!(compensate_step(&step), "fenced");
+        assert_eq!(step.load(Ordering::Relaxed), STEP_FENCED);
+        let step = AtomicU8::new(STEP_APPLIED);
+        assert_eq!(compensate_step(&step), "undone");
+        assert_eq!(compensate_step(&step), "already undone");
+        crate::test_complete!(
+            "saga_checker_flags_partial_commits_leftover_steps_and_misordered_compensation"
+        );
     }
 
     // ── derive-trait coverage (wave 73) ──────────────────────────────────

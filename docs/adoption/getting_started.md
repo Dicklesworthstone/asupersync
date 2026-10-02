@@ -56,8 +56,8 @@ does feed.
 `lab.seed` feeds the deterministic scheduler. The YAML schema itself does not
 create application tasks, messages, leases, or saga work. The runner binds
 only participants whose `role` is exactly `sender`, `receiver`, `swarm`,
-`supervisor` or `worker` (the match is case-sensitive) and spawns lab tasks
-for them:
+`supervisor`, `worker`, `saga-coordinator` or `saga-participant` (the match is
+case-sensitive) and spawns lab tasks for them:
 
 - a receiver owns a bounded `mpsc` channel (`properties.capacity`, default 4,
   at most 4096) and drains it until every sender is gone;
@@ -75,18 +75,36 @@ for them:
   one-for-one child that fails `properties.fail_times` times (default 1, at
   most 1000) and then succeeds. The supervisor allows
   `properties.max_restarts` restarts per minute across its workers, by
-  default the sum of their `fail_times`, and stops a worker that exhausts it.
+  default the sum of their `fail_times`, and stops a worker that exhausts it;
+- a saga coordinator runs an `asupersync::remote::Saga` with one step per saga
+  participant. Participants go to the coordinators round-robin in declaration
+  order, and participants without a coordinator share an implicit one. Before
+  each step the coordinator sleeps `properties.step_ms` of virtual time
+  (default 50, from 1 to 60000), registers the step's compensation, asks the
+  participant to apply the step over a bounded `mpsc` channel and waits at
+  most `step_ms` for the reply. A refused, lost or late reply aborts the saga,
+  which runs the registered compensations in reverse order: each undoes an
+  applied step, or fences one that was never applied so that a late request
+  is refused.
+
+`partition` and `heal` faults whose `from` and `to` name two participants cut
+and restore the link between them. A saga request sent over a cut link is
+lost, and its coordinator times out. When saga roles are bound, the runner
+fires due timers on its way to each fault and advances virtual time to the
+next timer whenever the lab is idle.
 
 Lab chaos can cancel these tasks mid-protocol; a cancelled send, receive,
-swarm task, worker generation or supervisor is counted and stops. A run fails
-with a `workload:` invariant violation if a bound task cannot be spawned,
-receives one sender's values out of order, drains its channel to close without
-receiving every committed value, or meets an outcome its contract rules out. It
-also fails if a swarm task neither completes nor ends cancelled, a worker never
-succeeds or succeeds after a restart count other than its `fail_times`, or a
-supervisor exits with an error. A malformed `messages`, `capacity`, `tasks`,
-`max_restarts` or `fail_times` value on a bound participant is a run-time
-validation error.
+swarm task, worker generation, supervisor or saga task is counted and stops,
+and a cancelled coordinator aborts its saga. A run fails with a `workload:`
+invariant violation if a bound task cannot be spawned, receives one sender's
+values out of order, drains its channel to close without receiving every
+committed value, or meets an outcome its contract rules out. It also fails if
+a swarm task neither completes nor ends cancelled, a worker never succeeds or
+succeeds after a restart count other than its `fail_times`, a supervisor exits
+with an error, a completed saga left a step unapplied, or an aborted saga left
+one applied or did not run each compensation exactly once in reverse order. A
+malformed `messages`, `capacity`, `tasks`, `max_restarts`, `fail_times` or
+`step_ms` value on a bound participant is a run-time validation error.
 
 Every other role is unbound and schedules no work. The `Participants:` line
 (printed only when the scenario declares participants) shows the split, and a
@@ -143,24 +161,36 @@ future-version guarantee.
 
 ## 5. Read fault declarations literally
 
-The third fixture declares partition, clock-skew, heal, cancellation, network,
-and participant data:
+The third fixture declares a ten-participant saga, a partition of
+participants 7-9 from 200 ms to 800 ms, clock skew, heavy chaos, and network
+and cancellation data:
 
 ```bash
 frankenlab run frankenlab/examples/scenarios/03_saga_partition.yaml
 ```
 
-Today, every fault declaration produces a timed trace entry. Disk
-pressure/recovery, delayed cleanup, and process stall/resume also affect a
-synthetic effect summary. Partition/heal, host crash/restart, and clock
-skew/reset are recorded but do not simulate those behaviors. Network and
-cancellation sections are validation-only, and participant names validate
-fault references. This fixture's `saga-coordinator` and `saga-participant`
-roles are unbound, so the run prints `Steps: 0 (no workload ran)` and
-`Participants: 0 bound, 11 unbound (saga-coordinator, saga-participant)`.
+```text
+Scenario: example-saga-partition [PASS]
+Seed: 314159
+Steps: 61
+Participants: 11 bound (saga-coordinator, saga-participant), 0 unbound
+Faults injected: 8
+Oracles: 24/24 passed (16 not fed by the lab runtime)
+```
 
-The fixture is therefore useful for schema and trace-shape authoring, but its
-name and comments are not proof of a partitioned saga execution.
+The coordinator asks one participant every 50 ms of virtual time. Without
+chaos it reaches participant-7 at 400 ms, its request is lost on the cut link,
+the coordinator times out at 450 ms, and the saga compensates participants 7
+to 0 in reverse; participants 8 and 9 are never asked. Heavy chaos can cancel
+the coordinator earlier, which aborts the saga the same way. Either way the
+run fails if a step stays applied after the abort.
+
+Every fault declaration also produces a timed trace entry. Partition and heal
+between two participants cut and restore saga links. Disk pressure/recovery,
+delayed cleanup, and process stall/resume affect a synthetic effect summary.
+Host crash/restart and clock skew/reset are recorded but do not simulate those
+behaviors. Network and cancellation sections are validation-only, and
+participant names validate fault references.
 
 ## JSON result output
 
@@ -231,13 +261,13 @@ Current field-consumption boundaries:
 | `lab.*` | Builds the lab configuration, including seed and step limit |
 | `chaos.*` | Builds the current chaos policy |
 | `oracles` | Selects registered runner checks; unknown names are rejected |
-| `faults` | Produces timed trace entries; only a subset affects the synthetic effect summary |
+| `faults` | Produces timed trace entries; only a subset affects the synthetic effect summary; `partition`/`heal` between two participants cut and restore saga links |
 | `resource_caps` | Partially consumed for post-parse/runtime artifact limits |
 | `minimization` | Partially consumed by minimization/report paths |
 | `include` | Paths are validated only; referenced files are not read or merged |
 | `network` | Validated only; not consumed by `ScenarioRunner` |
 | `cancellation` | Validated only; not consumed by `ScenarioRunner` |
-| `participants` | Names validate fault references; `sender`/`receiver` (`messages`/`capacity`), `swarm` (`tasks`), `supervisor` (`max_restarts`) and `worker` (`fail_times`) roles run as lab tasks; other roles are unused |
+| `participants` | Names validate fault references; `sender`/`receiver` (`messages`/`capacity`), `swarm` (`tasks`), `supervisor` (`max_restarts`), `worker` (`fail_times`), `saga-coordinator` (`step_ms`) and `saga-participant` roles run as lab tasks; other roles are unused |
 | `expected_invariants` | Validated only; does not select or enforce runner checks |
 | `golden_projection` | `format` is unused; `canonicalized` and `redacted` do not transform output |
 
@@ -303,8 +333,7 @@ Detailed routing and review rules are documented in
 ## Next steps
 
 - Inspect the [partition_heal](../../examples/scenarios/partition_heal.yaml)
-  fixture as a typed partition/heal declaration, while retaining the trace-only
-  fault boundary above
+  fixture, a two-participant saga with a partition on one participant's link
 - Read the [replay debugging guide](../replay-debugging.md) for trace
   analysis techniques
 - Check the [cancellation testing guide](../cancellation-testing.md) for

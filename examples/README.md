@@ -78,11 +78,14 @@ These 13 YAML files are typed `Scenario` fixtures. Their filenames, comments,
 and descriptions are authoring narratives, not evidence that the runner simulates
 every declared network, cancellation, or fault effect or schedules the named
 workload. Include paths are validated but not merged. Only participants whose
-role is exactly `sender`, `receiver`, `swarm`, `supervisor` or `worker` run:
-senders and receivers as lab tasks on bounded two-phase `mpsc` channels, a
-swarm as many short lab tasks, and supervisors as managed supervisors that
-restart failing workers. Other roles run nothing
-(`Steps: 0 (no workload ran)`). See the
+role is exactly `sender`, `receiver`, `swarm`, `supervisor`, `worker`,
+`saga-coordinator` or `saga-participant` run: senders and receivers as lab
+tasks on bounded two-phase `mpsc` channels, a swarm as many short lab tasks,
+supervisors as managed supervisors that restart failing workers, and saga
+coordinators as `remote::Saga` runs that compensate in reverse when a
+participant refuses or its request is lost. `partition` and `heal` faults
+between two participants cut and restore saga links; no other fault changes
+the workload. Other roles run nothing (`Steps: 0 (no workload ran)`). See the
 [author guide](../docs/adoption/getting_started.md) for the field boundaries.
 
 - [`scenarios/smoke_happy_path.yaml`](scenarios/smoke_happy_path.yaml) — small
@@ -103,8 +106,9 @@ restart failing workers. Other roles run nothing
 - [`scenarios/host_crash_restart.yaml`](scenarios/host_crash_restart.yaml) —
   supervision fixture; its `supervisor` restarts each `worker` after one
   failure, while the crash and restart actions stay trace records.
-- [`scenarios/partition_heal.yaml`](scenarios/partition_heal.yaml) — network
-  partition/heal declaration fixture; those actions are trace records today.
+- [`scenarios/partition_heal.yaml`](scenarios/partition_heal.yaml) — saga
+  partition/heal fixture; its coordinator runs a saga over two participants
+  while the declared partition cuts one of their links.
 - [`scenarios/stress_10k_tasks.yaml`](scenarios/stress_10k_tasks.yaml) —
   stress fixture; one `swarm` participant runs 1,000 short lab tasks under
   chaos.
@@ -117,4 +121,5 @@ covered by [`metadata.json`](metadata.json):
 - [`02_obligation_leak.yaml`](../frankenlab/examples/scenarios/02_obligation_leak.yaml)
   — obligation fixture; one `sender` and four `receiver` tasks under light chaos.
 - [`03_saga_partition.yaml`](../frankenlab/examples/scenarios/03_saga_partition.yaml)
-  — partitioned-saga narrative; its saga roles are unbound, so no workload runs.
+  — ten-participant saga under heavy chaos; without chaos, the partition of
+  participants 7-9 makes the coordinator time out and compensate its steps.
