@@ -6752,8 +6752,8 @@ impl RuntimeState {
 
     /// Returns the number of non-terminal tasks.
     ///
-    /// O(1) — delegates to [`TaskTable::live_task_count`] which keeps
-    /// an incremental sum across `phase_counts` (br-asupersync-afv6z4).
+    /// O(1) — delegates to [`TaskTable::live_task_count`], a counter each
+    /// record's phase cell keeps exact (br-asupersync-afv6z4, bzict6).
     /// Pre-fix this method scanned the arena via `tasks_iter()` and
     /// filtered by `state.is_terminal()` on every call, costing O(N)
     /// in the arena's high-water-mark size — silently O(N²) when a
