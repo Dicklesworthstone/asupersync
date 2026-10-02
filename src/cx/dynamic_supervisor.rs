@@ -385,6 +385,8 @@ struct Child<E> {
     closing: Option<CloseFuture>,
     closed: Option<Result<DynamicRegionOutcome, Arc<ChildRegionError>>>,
     stop_requested: bool,
+    // next_completed already returned this quarantined child's failure.
+    unclean_reported: bool,
 }
 
 impl<E> Child<E> {
@@ -686,7 +688,7 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
         // No await after submission and before retaining ownership/publication.
         self.children.insert(name, Child {
             id: id.clone(), handle: Some(handle), region: Some(region), joined: None,
-            closing: None, closed: None, stop_requested: false,
+            closing: None, closed: None, stop_requested: false, unclean_reported: false,
         });
         Ok(id)
     }
@@ -767,18 +769,30 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
     /// Wait for a reaped completion; an empty collection returns None immediately.
     /// Ready ties use lexical name order. Each poll scans at most the configured
     /// child ceiling. Every pending join/close registers the current waker.
+    ///
+    /// A child whose cleanup failed stays quarantined until shutdown. Its
+    /// failure is returned once; later calls skip it and wait for the other
+    /// children, returning None once only reported quarantined children remain.
     pub async fn next_completed(
         &mut self,
     ) -> Result<Option<DynamicChildCompletion<E>>, DynamicSupervisorError> {
         let id = poll_fn(|cx| {
             self.observe_cancellation(cx);
-            if self.children.is_empty() { return Poll::Ready(None); }
+            let mut waiting = false;
             for child in self.children.values_mut() {
+                if child.unclean_reported { continue; }
+                waiting = true;
                 if child.poll_terminal(cx).is_ready() { return Poll::Ready(Some(child.id.clone())); }
             }
-            Poll::Pending
+            if waiting { Poll::Pending } else { Poll::Ready(None) }
         }).await;
-        id.as_ref().map(|id| self.reap(id)).transpose()
+        let Some(id) = id else { return Ok(None); };
+        let reaped = self.reap(&id);
+        if reaped.is_err() {
+            self.children.get_mut(id.name.as_str()).expect("quarantined child is retained")
+                .unclean_reported = true;
+        }
+        reaped.map(Some)
     }
 
     /// Stop every tree, attempt EVERY drain, then close the enclosing root.
