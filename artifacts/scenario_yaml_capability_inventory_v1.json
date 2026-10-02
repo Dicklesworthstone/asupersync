@@ -794,9 +794,9 @@
     {
       "corpus_id": "SCN-CORPUS-ROOT-STRESS",
       "path": "examples/scenarios/stress_10k_tasks.yaml",
-      "sha256": "77ba16b5d6d3187a2ace672a3bc0717f3da282db903889dfbedab79ce7af8185",
+      "sha256": "49a98f0433af8a8a4771fbb4f158bedcf53c1b47993306887291f7fdf3caa890",
       "line_count": 50,
-      "byte_count": 1120
+      "byte_count": 1094
     },
     {
       "corpus_id": "SCN-CORPUS-FRANKEN-RACE",

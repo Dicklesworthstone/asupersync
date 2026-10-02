@@ -1,10 +1,10 @@
-# FrankenLab Scenario: task-swarm stress test (id kept from its 10K target)
-# One `swarm` participant spawns 1,000 short lab tasks; 10,000 took ~100 s
-# per run because lab step cost grows with live tasks (br-asupersync-bzict6).
+# FrankenLab Scenario: task-swarm stress test
+# One `swarm` participant spawns 10,000 short lab tasks (a few seconds per
+# debug run since the lab stopped scaling quadratically, br-asupersync-bzict6).
 schema_version: 1
 id: stress-10k-tasks
 description: >
-  Stress test: 1,000 concurrent swarm tasks under custom chaos. Every task
+  Stress test: 10,000 concurrent swarm tasks under custom chaos. Every task
   must complete or end cancelled, and the lab must reach quiescence.
 
 lab:
@@ -37,7 +37,7 @@ participants:
   - name: swarm
     role: swarm
     properties:
-      tasks: 1000
+      tasks: 10000
 
 oracles:
   - obligation_leak

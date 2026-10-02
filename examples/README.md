@@ -110,7 +110,7 @@ the workload. Other roles run nothing (`Steps: 0 (no workload ran)`). See the
   partition/heal fixture; its coordinator runs a saga over two participants
   while the declared partition cuts one of their links.
 - [`scenarios/stress_10k_tasks.yaml`](scenarios/stress_10k_tasks.yaml) —
-  stress fixture; one `swarm` participant runs 1,000 short lab tasks under
+  stress fixture; one `swarm` participant runs 10,000 short lab tasks under
   chaos.
 
 The standalone FrankenLab CLI also ships three typed scenario fixtures, all
