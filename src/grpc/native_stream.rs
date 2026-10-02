@@ -616,8 +616,28 @@ where
         {
             return Err(Status::deadline_exceeded("native gRPC stream deadline exceeded"));
         }
-        if let Some(keepalive) = &mut self.keepalive {
-            keepalive.poll(task)?;
+        let expired = self.keepalive.as_mut().and_then(|keepalive| keepalive.poll(task).err());
+        if let Some(error) = expired {
+            // The peer may already have ended the response, its trailers unread
+            // while the owner consumed buffered messages. A finished call needs
+            // no liveness verdict, and UNAVAILABLE would invite a retry of a
+            // completed call. Read what has already arrived (without blocking,
+            // and only while the body can take another frame), and fail only
+            // if the response is still open.
+            self.keepalive = None;
+            for _ in 0..POLL_STEPS {
+                if self.response.ended
+                    || self.body.len().saturating_add(FRAME_BYTES) > self.body_limit
+                {
+                    break;
+                }
+                match self.poll_received(task) {
+                    Poll::Ready(Ok(())) => {}
+                    Poll::Ready(Err(read)) => return Err(read),
+                    Poll::Pending => break,
+                }
+            }
+            if !self.response.ended { return Err(error); }
         }
         Ok(())
     }

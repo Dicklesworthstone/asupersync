@@ -355,6 +355,39 @@ mod keepalive {
             .unwrap_err().code(), Code::Unavailable);
     }
 
+    // br-asupersync-ymueix scenario C: the server finished the call (messages
+    // and grpc-status 0 already sent) while the owner was slow to consume them.
+    // An expired probe must not turn that completed call into a retryable
+    // UNAVAILABLE: the owner reads the trailers that already arrived instead.
+    #[test]
+    fn keepalive_expiry_does_not_fail_a_call_whose_trailers_already_arrived() {
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(20)));
+        let cx = timed_cx(&clock);
+        let mut bytes = start();
+        let mut payload = message(b"one");
+        payload.extend(message(b"two"));
+        payload.extend(message(b"three"));
+        bytes.extend(frame(0, 0, &payload));
+        bytes.extend(headers(&[("grpc-status", "0")], true));
+        let (io, probe) = fixture(bytes, FRAME_BYTES, false);
+        let mut stream = NativeServerStream::new(&cx, io, "localhost", "/svc/Watch",
+            Request::new(Bytes::new()), IdentityCodec, NativeStreamConfig::default())
+            .unwrap().with_keepalive(policy()).unwrap();
+        assert_eq!(run(stream.message()).unwrap().unwrap().as_ref(), b"one");
+        assert!(!stream.response.ended, "the trailers are still unread");
+        // The owner pauses past the idle interval: the probe is admitted.
+        clock.advance_to(Time::from_secs(23));
+        assert_eq!(run(stream.message()).unwrap().unwrap().as_ref(), b"two");
+        // ... and past the probe's acknowledgement deadline.
+        clock.advance_to(Time::from_secs(30));
+        assert_eq!(run(stream.message()).unwrap().unwrap().as_ref(), b"three");
+        assert!(run(stream.message()).unwrap().is_none());
+        assert_eq!(stream.status().unwrap().code(), Code::Ok);
+        assert!(stream.keepalive.is_none());
+        assert!(!cx.is_cancel_requested());
+        assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn keepalive_unpolled_owner_is_idle_and_probe_never_splits_a_header_block() {
         let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(20)));
