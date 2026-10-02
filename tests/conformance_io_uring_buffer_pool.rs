@@ -22,7 +22,10 @@ mod linux_io_uring_tests {
     }
 
     fn skip(reason: &str) {
-        assert!(!require_kernel(), "io_uring required but unavailable: {reason}");
+        assert!(
+            !require_kernel(),
+            "io_uring required but unavailable: {reason}"
+        );
         eprintln!("SKIP conformance_io_uring_buffer_pool: {reason}");
     }
 

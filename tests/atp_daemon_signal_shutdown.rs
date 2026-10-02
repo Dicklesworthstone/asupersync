@@ -1269,7 +1269,12 @@ fn atpd_stop_command_finds_a_started_daemon_and_drains_it() {
     let mut daemon = start_atpd(&root, &data, &[]);
     atpd_ready(&mut daemon, false);
     let recorded = std::fs::read_to_string(&pid_file).ok();
-    let expected = daemon.child.as_ref().expect("child is owned").id().to_string();
+    let expected = daemon
+        .child
+        .as_ref()
+        .expect("child is owned")
+        .id()
+        .to_string();
 
     // The daemon is this test's child: reap it while `atpd stop` waits, or
     // its zombie would look alive to the stop command.
@@ -1370,7 +1375,11 @@ fn atpd_stop_never_signals_a_process_that_is_not_an_atp_daemon() {
             String::from_utf8_lossy(&zero.stderr)
         ));
     }
-    assert!(problems.is_empty(), "{problems:#?}\nscratch root: {}", root.display());
+    assert!(
+        problems.is_empty(),
+        "{problems:#?}\nscratch root: {}",
+        root.display()
+    );
 }
 
 /// An idle diagnostics client does not keep atpd from exiting on SIGTERM

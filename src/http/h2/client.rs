@@ -1026,7 +1026,9 @@ mod tests {
             client.get("http://localhost/a\rb"),
             // asupersync-e427ys: RFC 9113 §8.2.1 malformed field values.
             client.get("http://localhost/").header("x-pad", " leading"),
-            client.get("http://localhost/").header("x-pad", "trailing\t"),
+            client
+                .get("http://localhost/")
+                .header("x-pad", "trailing\t"),
             client.request(Method::Extension("G ET".into()), "http://localhost/"),
             client.request(Method::Connect, "http://localhost/"),
         ] {

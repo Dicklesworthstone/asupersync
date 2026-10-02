@@ -246,7 +246,8 @@ fn lab_monitor_alarms_on_a_leaked_obligation_and_counts_it_once() {
 #[test]
 fn lab_monitor_alarms_on_a_leak_the_recover_policy_aborts() {
     let mut lab = LabRuntime::new(LabConfig::new(6).panic_on_leak(false));
-    lab.state.set_obligation_leak_response(ObligationLeakResponse::Recover);
+    lab.state
+        .set_obligation_leak_response(ObligationLeakResponse::Recover);
     lab.state.enable_obligation_leak_monitor(FAST, HORIZON);
     let region = lab.state.create_root_region(Budget::INFINITE);
     let (task, _handle) = lab
@@ -268,7 +269,10 @@ fn lab_monitor_alarms_on_a_leak_the_recover_policy_aborts() {
         format!("leak_count={} {snapshot:?}", lab.state.leak_count()),
     );
     assert_eq!(lab.state.leak_count(), 1);
-    assert_eq!(snapshot.observations, 1, "a recovered leak is observed once");
+    assert_eq!(
+        snapshot.observations, 1,
+        "a recovered leak is observed once"
+    );
     assert_eq!(snapshot.alert_state, AlertState::Alert, "{snapshot:?}");
     assert!(snapshot.e_value.is_infinite(), "{snapshot:?}");
     assert_eq!(snapshot.alert_count, 1);

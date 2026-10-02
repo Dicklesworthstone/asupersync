@@ -542,9 +542,7 @@ fn peer_frame(kind: u8, flags: u8, fields: &[(&str, &str)], data: &[u8]) -> Vec<
 
 // The atomic witness is set when the preface has been read, BEFORE any peer
 // bytes can wake the client, so a Pending seen after it belongs to setup.
-fn scripted_peer(
-    script: PeerScript,
-) -> (SocketAddr, Arc<AtomicBool>, std::thread::JoinHandle<()>) {
+fn scripted_peer(script: PeerScript) -> (SocketAddr, Arc<AtomicBool>, std::thread::JoinHandle<()>) {
     use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -576,7 +574,11 @@ fn scripted_peer(
         // A silent peer sends only the first four bytes of its SETTINGS frame
         // header: they wake the client, which cannot complete the handshake.
         let settings = [0, 0, 0, 4, 0, 0, 0, 0, 0];
-        let sent = if matches!(script, PeerScript::Silent) { 4 } else { settings.len() };
+        let sent = if matches!(script, PeerScript::Silent) {
+            4
+        } else {
+            settings.len()
+        };
         socket.write_all(&settings[..sent]).unwrap();
         if let PeerScript::LazyResponse(delay) = script {
             std::thread::sleep(delay);
@@ -656,7 +658,10 @@ fn native_setup_timeout_does_not_bound_a_lazy_first_response() {
             .await
             .expect("setup ends with the server's SETTINGS, not its first response");
         let connected = Duration::from_nanos(timer.now().duration_since(started));
-        assert!(stream.initial_metadata().is_none(), "connected after {connected:?}");
+        assert!(
+            stream.initial_metadata().is_none(),
+            "connected after {connected:?}"
+        );
         let message = stream.message().await;
         let waited = Duration::from_nanos(timer.now().duration_since(started));
         let message = message
