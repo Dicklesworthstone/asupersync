@@ -405,6 +405,56 @@ fn native_driver_admission_respects_runtime_io_restriction() {
 }
 
 #[test]
+fn a_grpc_timeout_rewritten_after_the_call_started_cannot_extend_its_deadline() {
+    // GrpcClient captures the call deadline before its interceptors run. An
+    // interceptor that rewrites grpc-timeout to a longer value must not move
+    // the deadline that endpoint admission gives the connected stream.
+    for multithread in [false, true] {
+        runtime_case(multithread, |cx| async move {
+            let endpoint = NativeStreamEndpoint::new(
+                "127.0.0.1:9".parse().unwrap(),
+                "localhost",
+                Duration::from_secs(30),
+            )
+            .unwrap();
+            let started =
+                CallDeadline::capture(&cx, &Metadata::new(), Some(Duration::from_secs(5))).unwrap();
+            let original = started.at.expect("a five-second call has a deadline");
+            let mut request = Request::new(Bytes::new());
+            assert!(
+                request
+                    .metadata_mut()
+                    .insert_or_replace("grpc-timeout", "50S")
+            );
+            let rewritten = CallDeadline::capture(&cx, request.metadata(), None)
+                .unwrap()
+                .at
+                .expect("the rewritten grpc-timeout is a deadline");
+            assert!(
+                rewritten > original,
+                "the rewritten grpc-timeout must ask for more time than the call has"
+            );
+            let (admitted, setup) = endpoint
+                .admit_started(
+                    &cx,
+                    "/svc/Watch",
+                    &request,
+                    &NativeStreamConfig::default(),
+                    Some(started),
+                )
+                .expect("the call is admitted within its original deadline");
+            assert_eq!(
+                admitted.at,
+                Some(original),
+                "the connected stream's deadline"
+            );
+            assert_eq!(setup.until, original, "the setup deadline");
+            assert!(!cx.is_cancel_requested());
+        });
+    }
+}
+
+#[test]
 fn native_endpoint_dials_health_watch_and_closes_its_owned_connection() {
     use crate::grpc::health::{HealthAuthMode, HealthService, ServingStatus};
     use crate::grpc::server::{Server, ServerStreamingConfig};
