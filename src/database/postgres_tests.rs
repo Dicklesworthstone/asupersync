@@ -5674,6 +5674,14 @@ mod tests {
                 assert!(PgConnectOptions::parse(&url).is_ok(), "{query}");
                 assert!(PgConnectionManager::from_url(&url).is_ok(), "{query}");
             }
+            // sslmode=disable uses no TLS, so it drops no trust policy even
+            // with sslrootcert. (The legacy parse refuses sslrootcert itself.)
+            let url = format!(
+                "postgres://localhost/db?sslmode=disable&sslrootcert=ca.pem&{key}=revoked.pem"
+            );
+            let parsed = PgConnectOptions::parse_with_tls(&url);
+            assert!(parsed.is_ok(), "{url}: {:?}", parsed.err());
+            assert!(PgConnectionManager::from_url(&url).is_ok(), "{url}");
         }
     }
 

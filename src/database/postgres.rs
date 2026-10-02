@@ -2584,9 +2584,11 @@ impl PgConnectOptions {
         // v0.4.3 could not express (verify-ca, verify-full or sslrootcert) is
         // refused rather than having its revocation list dropped silently.
         // Other URLs ignore the list, as v0.4.3 did: `PgConnection::connect`
-        // parses with this function, and those URLs must keep connecting.
+        // parses with this function, and those URLs must keep connecting. So
+        // does sslmode=disable, which uses no TLS and so drops no policy.
         if let Some(key) = revocation_list
             && extended_tls
+            && ssl_mode != SslMode::Disable
             && (verification.is_some() || explicit_roots)
         {
             return Err(PgError::InvalidUrl(format!(
