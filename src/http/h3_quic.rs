@@ -591,10 +591,14 @@ impl NativeH3Session {
     /// opt-in dynamic state machine.
     #[must_use]
     pub fn with_config(config: H3ConnectionConfig) -> Self {
+        let mut state = H3ConnectionState::with_config(config);
+        // This adapter never sends MAX_PUSH_ID and refuses push streams, so a
+        // push ID in a server's CANCEL_PUSH or PUSH_PROMISE is out of range.
+        state.refuse_server_push();
         Self {
             role: config.endpoint_role,
             config,
-            state: H3ConnectionState::with_config(config),
+            state,
             local_control: H3ControlState::new(),
             local_control_stream: None,
             incoming: BTreeMap::new(),

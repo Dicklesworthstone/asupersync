@@ -1793,14 +1793,88 @@ mod tests {
             .expect("the maximum itself may be cancelled");
         assert_eq!(server.on_control_frame(&H3Frame::CancelPush(6)), above);
 
-        // A client receiving CANCEL_PUSH is not bounded by MAX_PUSH_ID here.
+        // A client that declared nothing about push keeps the unbounded
+        // behavior; client_bounds_received_push_ids_by_its_declared_limit
+        // covers the declared cases.
         let mut client = H3ConnectionState::new_client();
         client
             .on_control_frame(&H3Frame::Settings(H3Settings::default()))
             .expect("settings");
         client
             .on_control_frame(&H3Frame::CancelPush(7))
-            .expect("client accepts CANCEL_PUSH");
+            .expect("an undeclared client does not bound CANCEL_PUSH");
+    }
+
+    /// RFC 9114 §4.6 and §7.2.3: every push ID a client receives, in a
+    /// CANCEL_PUSH, a PUSH_PROMISE or a push-stream header, is bounded by the
+    /// MAX_PUSH_ID it sent. A client that refuses server push, as
+    /// NativeH3Session does, rejects them all (asupersync-z0p77e).
+    #[test]
+    fn client_bounds_received_push_ids_by_its_declared_limit() {
+        let above = Err(H3NativeError::ControlProtocol(
+            "push ID above the MAX_PUSH_ID this client sent",
+        ));
+        let promise = |push_id| H3Frame::PushPromise {
+            push_id,
+            field_block: vec![0x00, 0x00],
+        };
+        let declared = |limit: Option<u64>| {
+            let mut client = H3ConnectionState::new_client();
+            match limit {
+                None => client.refuse_server_push(),
+                Some(max) => client.on_local_max_push_id(max).expect("client MAX_PUSH_ID"),
+            }
+            client
+                .on_control_frame(&H3Frame::Settings(H3Settings::default()))
+                .expect("settings");
+            client
+                .on_remote_uni_stream_type(11, H3_STREAM_TYPE_PUSH)
+                .expect("push stream type");
+            client
+        };
+
+        let mut refusing = declared(None);
+        assert_eq!(refusing.on_control_frame(&H3Frame::CancelPush(0)), above);
+        assert_eq!(refusing.on_request_stream_frame(0, &promise(0)), above);
+        assert_eq!(refusing.on_push_stream_header(11, 0), above);
+
+        let mut allowing = declared(Some(5));
+        allowing
+            .on_control_frame(&H3Frame::CancelPush(5))
+            .expect("the maximum itself");
+        assert_eq!(allowing.on_control_frame(&H3Frame::CancelPush(6)), above);
+        allowing
+            .on_request_stream_frame(0, &promise(5))
+            .expect("PUSH_PROMISE at the maximum");
+        assert_eq!(allowing.on_request_stream_frame(0, &promise(6)), above);
+        assert_eq!(allowing.on_push_stream_header(11, 6), above);
+        allowing
+            .on_push_stream_header(11, 5)
+            .expect("push stream at the maximum");
+
+        // The declared maximum cannot decrease, a server cannot declare one,
+        // and refusing after allowing changes nothing.
+        let mut client = H3ConnectionState::new_client();
+        client.on_local_max_push_id(5).expect("first maximum");
+        assert_eq!(
+            client.on_local_max_push_id(4),
+            Err(H3NativeError::ControlProtocol(
+                "MAX_PUSH_ID must not decrease"
+            ))
+        );
+        client.refuse_server_push();
+        client
+            .on_control_frame(&H3Frame::Settings(H3Settings::default()))
+            .expect("settings");
+        client
+            .on_control_frame(&H3Frame::CancelPush(5))
+            .expect("refusal after a declared maximum is ignored");
+        assert_eq!(
+            H3ConnectionState::new_server().on_local_max_push_id(1),
+            Err(H3NativeError::ControlProtocol(
+                "server must not send MAX_PUSH_ID"
+            ))
+        );
     }
 
     #[test]
