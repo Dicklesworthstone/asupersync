@@ -1,11 +1,11 @@
-# FrankenLab Scenario: 10K task stress test
-# Spawns many concurrent tasks with random obligations to verify
-# no leaks at scale.
+# FrankenLab Scenario: task-swarm stress test (id kept from its 10K target)
+# One `swarm` participant spawns 1,000 short lab tasks; 10,000 took ~100 s
+# per run because lab step cost grows with live tasks (br-asupersync-bzict6).
 schema_version: 1
 id: stress-10k-tasks
 description: >
-  Stress test: 10,000 tasks with random SendPermit/Lease obligations,
-  heavy chaos, WAN conditions.  Verifies zero obligation leaks.
+  Stress test: 1,000 concurrent swarm tasks under custom chaos. Every task
+  must complete or end cancelled, and the lab must reach quiescence.
 
 lab:
   seed: 999
@@ -32,6 +32,12 @@ network:
 cancellation:
   strategy: probabilistic
   probability: 0.01
+
+participants:
+  - name: swarm
+    role: swarm
+    properties:
+      tasks: 1000
 
 oracles:
   - obligation_leak

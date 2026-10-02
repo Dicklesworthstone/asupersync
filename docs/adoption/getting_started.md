@@ -55,8 +55,9 @@ does feed.
 
 `lab.seed` feeds the deterministic scheduler. The YAML schema itself does not
 create application tasks, messages, leases, or saga work. The runner binds
-only participants whose `role` is exactly `sender` or `receiver` (the match is
-case-sensitive) and spawns a lab task for each:
+only participants whose `role` is exactly `sender`, `receiver`, `swarm`,
+`supervisor` or `worker` (the match is case-sensitive) and spawns lab tasks
+for them:
 
 - a receiver owns a bounded `mpsc` channel (`properties.capacity`, default 4,
   at most 4096) and drains it until every sender is gone;
@@ -65,14 +66,27 @@ case-sensitive) and spawns a lab task for each:
   is a runtime-tracked `SendPermit` obligation that the obligation oracle sees;
 - senders without any receiver, as in `01_race_condition.yaml`, race on one
   shared channel drained by an implicit sink task, and receivers without
-  senders see a closed channel at once.
+  senders see a closed channel at once;
+- a swarm spawns `properties.tasks` short tasks (default 100, from 1 to
+  20000); each yields twice and bumps a counter all of them share;
+- a supervisor runs a `ManagedSupervisor` from `asupersync::supervision`.
+  Workers go to the supervisors round-robin in declaration order, and workers
+  without a supervisor share an implicit one. Each worker is a transient
+  one-for-one child that fails `properties.fail_times` times (default 1, at
+  most 1000) and then succeeds. The supervisor allows
+  `properties.max_restarts` restarts per minute across its workers, by
+  default the sum of their `fail_times`, and stops a worker that exhausts it.
 
-Lab chaos can cancel these tasks mid-protocol; a cancelled send or receive is
-counted and ends that task. A run fails with a `workload:` invariant violation
-if a bound task cannot be spawned, receives one sender's values out of order,
-drains its channel to close without receiving every committed value, or meets
-an outcome the channel contract rules out. A malformed `messages` or `capacity`
-value on a bound participant is a run-time validation error.
+Lab chaos can cancel these tasks mid-protocol; a cancelled send, receive,
+swarm task, worker generation or supervisor is counted and stops. A run fails
+with a `workload:` invariant violation if a bound task cannot be spawned,
+receives one sender's values out of order, drains its channel to close without
+receiving every committed value, or meets an outcome its contract rules out. It
+also fails if a swarm task neither completes nor ends cancelled, a worker never
+succeeds or succeeds after a restart count other than its `fail_times`, or a
+supervisor exits with an error. A malformed `messages`, `capacity`, `tasks`,
+`max_restarts` or `fail_times` value on a bound participant is a run-time
+validation error.
 
 Every other role is unbound and schedules no work. The `Participants:` line
 (printed only when the scenario declares participants) shows the split, and a
@@ -88,9 +102,9 @@ frankenlab run frankenlab/examples/scenarios/01_race_condition.yaml --seed 99
 
 ## 3. Explore scheduler seeds
 
-Sweep through seeds for the workload the runner actually has: the bound
-`sender`/`receiver` tasks, if any. Exploration does not synthesize work for
-unbound roles or from a scenario description.
+Sweep through seeds for the workload the runner actually has: the tasks of the
+bound participants, if any. Exploration does not synthesize work for unbound
+roles or from a scenario description.
 
 ```bash
 frankenlab explore frankenlab/examples/scenarios/02_obligation_leak.yaml --seeds 200
@@ -223,7 +237,7 @@ Current field-consumption boundaries:
 | `include` | Paths are validated only; referenced files are not read or merged |
 | `network` | Validated only; not consumed by `ScenarioRunner` |
 | `cancellation` | Validated only; not consumed by `ScenarioRunner` |
-| `participants` | Names validate fault references; `sender`/`receiver` roles (with `messages`/`capacity` properties) run as lab tasks; other roles are unused |
+| `participants` | Names validate fault references; `sender`/`receiver` (`messages`/`capacity`), `swarm` (`tasks`), `supervisor` (`max_restarts`) and `worker` (`fail_times`) roles run as lab tasks; other roles are unused |
 | `expected_invariants` | Validated only; does not select or enforce runner checks |
 | `golden_projection` | `format` is unused; `canonicalized` and `redacted` do not transform output |
 
