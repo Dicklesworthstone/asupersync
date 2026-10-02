@@ -5644,16 +5644,37 @@ mod tests {
     #[test]
     fn parse_with_tls_refuses_certificate_revocation_lists() {
         for key in ["sslcrl", "sslcrldir"] {
-            let url = format!(
-                "postgres://localhost/db?sslmode=verify-full&sslrootcert=ca.pem&{key}=revoked.pem"
-            );
-            match PgConnectOptions::parse_with_tls(&url) {
-                Err(PgError::InvalidUrl(msg)) => assert!(msg.contains(key), "got: {msg}"),
-                Err(other) => panic!("expected InvalidUrl for {key}, got {other:?}"),
-                Ok(_) => panic!("{key} was accepted and would be ignored"),
+            // The list is refused wherever the URL selects a trust policy
+            // v0.4.3 could not express, whatever the parameter order.
+            for query in [
+                format!("sslmode=verify-full&sslrootcert=ca.pem&{key}=revoked.pem"),
+                format!("{key}=revoked.pem&sslmode=verify-ca&sslrootcert=ca.pem"),
+                format!("sslmode=verify-full&{key}=revoked.pem"),
+                format!("sslrootcert=ca.pem&{key}=revoked.pem"),
+            ] {
+                let url = format!("postgres://localhost/db?{query}");
+                match PgConnectOptions::parse_with_tls(&url) {
+                    Err(PgError::InvalidUrl(msg)) => assert!(msg.contains(key), "got: {msg}"),
+                    Err(other) => panic!("expected InvalidUrl for {query}, got {other:?}"),
+                    Ok(_) => panic!("{query} was accepted and its {key} would be ignored"),
+                }
+            }
+            // v0.4.3 accepted (and ignored) a revocation list with any sslmode
+            // it knew. PgConnection::connect and PgConnectionManager::from_url
+            // parse with parse_with_tls, so those URLs must keep parsing.
+            for query in [
+                format!("{key}=revoked.pem"),
+                format!("sslmode=disable&{key}=revoked.pem"),
+                format!("sslmode=prefer&{key}=revoked.pem"),
+                format!("{key}=revoked.pem&sslmode=require"),
+            ] {
+                let url = format!("postgres://localhost/db?{query}");
+                let parsed = PgConnectOptions::parse_with_tls(&url);
+                assert!(parsed.is_ok(), "{query}: {:?}", parsed.err());
+                assert!(PgConnectOptions::parse(&url).is_ok(), "{query}");
+                assert!(PgConnectionManager::from_url(&url).is_ok(), "{query}");
             }
         }
-        assert!(PgConnectOptions::parse("postgres://localhost/db?sslcrl=revoked.pem").is_ok());
     }
 
     #[test]

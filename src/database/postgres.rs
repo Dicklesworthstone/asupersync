@@ -2446,6 +2446,10 @@ impl PgConnectOptions {
     /// The returned pair is accepted by [`PgConnection::connect_with_tls_options`].
     /// `verify-ca` and `verify-full` both require TLS; `sslrootcert` is a
     /// percent-decoded PEM file path. Other existing URL options are preserved.
+    /// Certificate revocation lists are not checked, so `sslcrl` and
+    /// `sslcrldir` are refused when the URL also selects `verify-ca`,
+    /// `verify-full` or `sslrootcert`. Without those, they are ignored, as in
+    /// v0.4.3.
     pub fn parse_with_tls(url: &str) -> Result<(Self, PgTlsOptions), PgError> {
         Self::parse_url(url, true)
     }
@@ -2522,6 +2526,8 @@ impl PgConnectOptions {
         let mut connect_timeout = None;
         let mut tls = PgTlsOptions::default();
         let mut verification = None;
+        let mut explicit_roots = false;
+        let mut revocation_list = None;
         for kv in params.split('&').filter(|s| !s.is_empty()) {
             if let Some((key, value)) = kv.split_once('=') {
                 match key {
@@ -2557,6 +2563,7 @@ impl PgConnectOptions {
                             return Err(PgError::InvalidUrl("sslrootcert path is empty".into()));
                         }
                         tls = tls.root_certificate_file(path);
+                        explicit_roots = true;
                     }
                     "application_name" => {
                         application_name = Some(percent_decode(value));
@@ -2567,17 +2574,24 @@ impl PgConnectOptions {
                         })?;
                         connect_timeout = Some(std::time::Duration::from_secs(secs));
                     }
-                    // Revocation lists are not checked. Refusing them keeps a
-                    // trust policy from being dropped silently; the legacy
-                    // parser still ignores them, as it always has.
-                    "sslcrl" | "sslcrldir" if extended_tls => {
-                        return Err(PgError::InvalidUrl(format!(
-                            "{key} is not supported: certificate revocation lists are not checked"
-                        )));
-                    }
+                    "sslcrl" | "sslcrldir" => revocation_list = Some(key),
                     _ => {} // ignore unknown parameters
                 }
             }
+        }
+
+        // Revocation lists are not checked. A URL that selects a trust policy
+        // v0.4.3 could not express (verify-ca, verify-full or sslrootcert) is
+        // refused rather than having its revocation list dropped silently.
+        // Other URLs ignore the list, as v0.4.3 did: `PgConnection::connect`
+        // parses with this function, and those URLs must keep connecting.
+        if let Some(key) = revocation_list
+            && extended_tls
+            && (verification.is_some() || explicit_roots)
+        {
+            return Err(PgError::InvalidUrl(format!(
+                "{key} is not supported: certificate revocation lists are not checked"
+            )));
         }
 
         if let Some(verification) = verification {
