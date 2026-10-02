@@ -831,7 +831,15 @@ where
                 }
                 Poll::Pending => {}
             }
-            if stream_id.is_none() && connection.state() == ConnectionState::Open {
+            // RFC 9113 §6.5.2: a peer may set SETTINGS_MAX_CONCURRENT_STREAMS
+            // to zero, and is expected to raise it again shortly. This
+            // connection carries one request, so it waits, within the
+            // request's deadline, for a SETTINGS that admits a stream instead
+            // of reporting a legal setting as a protocol error.
+            if stream_id.is_none()
+                && connection.state() == ConnectionState::Open
+                && connection.remote_settings().max_concurrent_streams != 0
+            {
                 let request_headers = headers
                     .take()
                     .ok_or_else(|| protocol("request headers already consumed"))?;
