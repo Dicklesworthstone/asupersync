@@ -5405,6 +5405,18 @@ impl<F: Future> Future for CatchUnwind<F> {
     }
 }
 
+/// The outcome a handle-spawned task records for the runtime. A caught panic
+/// is recorded Panicked, as for `Cx::spawn`, while the payload itself goes to
+/// the `JoinHandle`, which re-raises it (asupersync-6hewgp).
+fn handle_spawn_outcome<T>(result: &std::thread::Result<T>) -> crate::types::Outcome<(), ()> {
+    match result {
+        Ok(_) => crate::types::Outcome::Ok(()),
+        Err(payload) => crate::types::Outcome::Panicked(crate::types::PanicPayload::new(
+            crate::cx::scope::payload_to_string(payload),
+        )),
+    }
+}
+
 struct RuntimeShutdownCompletion {
     completed_at: Mutex<Option<Instant>>,
     condvar: Condvar,
@@ -6170,16 +6182,14 @@ impl RuntimeInner {
 
         let wrapped = async move {
             let result = CatchUnwind { inner: future }.await;
+            let outcome = handle_spawn_outcome(&result);
             task_producer.complete(result);
+            outcome
         };
 
         let provisional = self.next_request_task_id();
-        let factory: crate::runtime::spawn_mailbox::LocalSpawnFactoryFn = Box::new(move |_cx| {
-            Box::pin(async move {
-                wrapped.await;
-                crate::types::Outcome::Ok(())
-            })
-        });
+        let factory: crate::runtime::spawn_mailbox::LocalSpawnFactoryFn =
+            Box::new(move |_cx| Box::pin(wrapped));
 
         let cancel_producer = JoinProducer::new(Arc::clone(&join_state));
         let error_producer = JoinProducer::new(Arc::clone(&join_state));
@@ -6236,9 +6246,12 @@ impl RuntimeInner {
 
         let wrapped = async move {
             // Ensure panics in the spawned task don't take down a worker thread. If the join
-            // handle is awaited, we re-raise the original panic payload on the awaiter.
+            // handle is awaited, we re-raise the original panic payload on the awaiter. The
+            // task record still gets the Panicked outcome (metrics, capture, region close).
             let result = CatchUnwind { inner: future }.await;
+            let outcome = handle_spawn_outcome(&result);
             task_producer.complete(result);
+            outcome
         };
 
         // Mailbox admission mode (br-asupersync-dx-core-api-v2-u1z5hn.1.3):
@@ -6255,15 +6268,11 @@ impl RuntimeInner {
                 .map(|counter| counter.reserve());
             let cancel_producer = JoinProducer::new(Arc::clone(&join_state));
             let provisional = mailbox.allocate_task_id();
-            let outcome_wrapped = async move {
-                wrapped.await;
-                crate::types::Outcome::Ok(())
-            };
             let mut request = crate::runtime::spawn_mailbox::SpawnRequest::new(
                 provisional,
                 self.root_region,
                 Budget::new(),
-                crate::runtime::stored_task::StoredTask::new_with_id(outcome_wrapped, provisional),
+                crate::runtime::stored_task::StoredTask::new_with_id(wrapped, provisional),
             )
             .with_unadmitted_cancel(Box::new(move |reason| {
                 // Keep admission cancellation distinct from generic runtime
@@ -6304,14 +6313,24 @@ impl RuntimeInner {
                     )
                 },
             );
-            let (task_id, _handle, spawn_effects) = guard
-                .create_task_with_deferred_spawn_effects_in(
+            // Store `wrapped` itself so the record keeps its outcome. The
+            // state-task wrapper would record Ok for the panic `wrapped`
+            // already caught; its TaskHandle here was always discarded.
+            let system_cx = guard.create_system_cx();
+            let (task_id, _handle, _cx, _result_tx, spawn_effects) = guard
+                .create_task_infrastructure_in::<()>(
+                    &system_cx,
                     self.root_region,
                     Budget::new(),
-                    wrapped,
+                    false,
                     &mut target,
                     &crate::runtime::state::AdmissionRegionTarget::Embedded,
                 )?;
+            guard.store_spawned_task_in(
+                &mut target,
+                task_id,
+                crate::runtime::StoredTask::new_with_id(wrapped, task_id),
+            );
             (task_id, spawn_effects)
         };
 
