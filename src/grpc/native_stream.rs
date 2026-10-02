@@ -647,6 +647,13 @@ where
         }
         for _ in 0..POLL_STEPS {
             if let Err(error) = self.gate(task) { return Poll::Ready(Err(self.finish(error))); }
+            // The server has answered, so it received the request headers.
+            // Setup is over: message() decodes the response, which bounds its
+            // retention, and keeps flushing the rest of the request. Reading
+            // further here would keep appending undecoded DATA to the body.
+            if self.response.initial.is_some() || self.response.ended {
+                return Poll::Ready(Ok(()));
+            }
             if self.connection.as_ref()
                 .is_some_and(|connection| connection.state() != ConnectionState::Handshaking)
             {

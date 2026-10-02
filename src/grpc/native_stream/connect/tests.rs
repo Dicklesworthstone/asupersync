@@ -43,6 +43,19 @@ fn ready<T>(future: impl Future<Output = T>) -> T {
     }
 }
 
+fn ready_within_two_polls<T>(future: impl Future<Output = T>) -> T {
+    let mut future = std::pin::pin!(future);
+    for _ in 0..2 {
+        if let Poll::Ready(value) = future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        {
+            return value;
+        }
+    }
+    panic!("expected fixture completion within two polls")
+}
+
 #[test]
 fn setup_uses_one_inclusive_deadline_across_stages_and_rejects_late_values() {
     let (cx, clock, timer) = virtual_cx();
@@ -227,6 +240,91 @@ fn expired_admission_drops_transport_without_codec_or_wire_work() {
     );
     assert_eq!(result.unwrap_err().code(), Code::DeadlineExceeded);
     assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
+
+// A transport whose writes park, like a socket whose send buffer is full, and
+// whose reads return the server's bytes that are already in flight.
+struct ParkedWrites {
+    inbound: Vec<u8>,
+    read: usize,
+}
+impl AsyncRead for ParkedWrites {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let read = self.read;
+        let count = buf.remaining().min(self.inbound.len() - read);
+        if count == 0 {
+            return Poll::Pending;
+        }
+        buf.put_slice(&self.inbound[read..read + count]);
+        self.read += count;
+        Poll::Ready(Ok(()))
+    }
+}
+impl AsyncWrite for ParkedWrites {
+    fn poll_write(self: Pin<&mut Self>, _: &mut Context<'_>, _: &[u8]) -> Poll<io::Result<usize>> {
+        Poll::Pending
+    }
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Pending
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+// The server answers before it reads the request, while the client's request
+// write is parked: response HEADERS, then two full DATA frames of 64-byte
+// messages. With a 64-byte max_recv_message_size, the body may retain only one
+// frame before it is decoded, so setup must end at the response HEADERS and
+// leave the DATA to message(), which decodes it.
+#[test]
+fn setup_ends_at_the_response_headers_while_the_request_write_is_parked() {
+    let (cx, _clock, _) = virtual_cx();
+    let config = NativeStreamConfig {
+        max_recv_message_size: 64,
+        ..Default::default()
+    };
+    let mut inbound = vec![0, 0, 0, 4, 0, 0, 0, 0, 0];
+    inbound.extend(peer_frame(
+        1,
+        4,
+        &[(":status", "200"), ("content-type", "application/grpc")],
+        &[],
+    ));
+    let mut packed = Vec::new();
+    for _ in 0..256 {
+        packed.extend_from_slice(&[0, 0, 0, 0, 59]);
+        packed.extend_from_slice(&[7; 59]);
+    }
+    assert_eq!(packed.len(), 16 * 1024);
+    inbound.extend(peer_frame(0, 0, &[], &packed));
+    inbound.extend(peer_frame(0, 0, &[], &packed));
+    let mut stream = NativeServerStream::new_admitted(
+        &cx,
+        ParkedWrites { inbound, read: 0 },
+        "localhost",
+        "/test.Service/Watch",
+        Request::new(Bytes::new()),
+        IdentityCodec,
+        config,
+        None,
+    )
+    .unwrap();
+    ready(stream.establish()).expect("setup ends once the server has answered");
+    assert!(stream.initial_metadata().is_some());
+    for index in 0..512 {
+        // message() yields once after a run of ready messages; the bytes are
+        // all in memory, so a second poll completes it.
+        let message = ready_within_two_polls(stream.message())
+            .unwrap_or_else(|status| panic!("message {index}: {status:?}"))
+            .unwrap_or_else(|| panic!("message {index} missing"));
+        assert_eq!(message.as_ref(), &[7; 59][..], "message {index}");
+    }
+    assert!(!cx.is_cancel_requested());
 }
 
 #[test]
