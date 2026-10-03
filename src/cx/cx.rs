@@ -4316,8 +4316,11 @@ impl Cx<cap::All> {
     /// Because branches run as spawned tasks, each must be `Send + 'static` and
     /// the output `T` must be `Send + 'static`, and this context must be
     /// runtime-wired (carry a spawn gateway). A branch that fails admission
-    /// fails the race closed with [`JoinError::Cancelled`]; already-spawned
-    /// siblings are cancelled as the race future unwinds.
+    /// fails the race closed with [`JoinError::Cancelled`]. A region limit or
+    /// closing region refuses through the branch's handle, and every admitted
+    /// sibling is cancelled and drained first. When the runtime itself refuses
+    /// the spawn (its spawn gateway is gone), the already-spawned siblings are
+    /// asked to cancel but are not awaited.
     ///
     /// **A branch must use its own context to observe loser cancellation.**
     /// Cancellation targets the branch's spawned task. A prebuilt future that
@@ -4355,14 +4358,19 @@ impl Cx<cap::All> {
             match self.spawn_in(&scope, move |_child| future) {
                 Ok(handle) => handles.push(handle),
                 Err(_spawn_err) => {
-                    // Fail closed: dropping the already-spawned handles requests
-                    // their cancellation. Surface the admission failure as a
-                    // cancellation so the `race!` caller never observes a
-                    // partially-built race silently succeeding.
-                    drop(handles);
-                    return Err(JoinError::Cancelled(CancelReason::user(
-                        "race! branch spawn failed",
-                    )));
+                    // Fail closed, and ask the branches that did spawn to
+                    // cancel: dropping a TaskHandle does not cancel its task.
+                    // A synchronous refusal means the runtime's spawn gateway
+                    // is gone (or this context cannot spawn), so they are not
+                    // awaited: nothing guarantees that they can still
+                    // finish. Region limits and closing regions refuse through
+                    // the branch's handle instead, which race_all handles by
+                    // draining (br-asupersync-issue65-criticisms-kpmoy5.2.1).
+                    let reason = CancelReason::user("race! branch spawn failed");
+                    for handle in &handles {
+                        handle.abort_with_reason(reason.clone());
+                    }
+                    return Err(JoinError::Cancelled(reason));
                 }
             }
         }
