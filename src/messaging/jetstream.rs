@@ -48,7 +48,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use std::collections::HashSet;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 
@@ -66,12 +65,6 @@ const MAX_CONSUMER_NAME_CHARS: usize = 128;
 /// JetStream stream subjects are regular NATS subscription patterns and share
 /// the same practical size ceiling as the underlying NATS parser.
 const MAX_STREAM_SUBJECT_BYTES: usize = 4 * 1024;
-
-/// Anti-replay token timeout in seconds - ack tokens expire after this duration
-const ACK_TOKEN_TIMEOUT_SECS: u64 = 300; // 5 minutes
-
-/// Maximum number of recent ack tokens to track for replay prevention
-const MAX_ACK_TOKEN_HISTORY: usize = 10000;
 
 /// Pull rate limiting: minimum interval between consecutive pull requests per consumer (ms)
 const MIN_PULL_INTERVAL_MS: u64 = 50; // 20 requests/second max per consumer
@@ -102,14 +95,6 @@ const GLOBAL_PULL_RATE_LIMIT: u64 = 1000;
 /// recommendation.
 const MAX_PULL_BATCH: usize = 1024;
 
-/// Anti-replay tracker for JetStream acknowledgment tokens.
-/// Maintains a set of recently used ack tokens to prevent replay attacks.
-#[derive(Debug)]
-struct AckTokenTracker {
-    /// Set of recently used ack tokens with their expiry timestamps
-    used_tokens: Mutex<HashSet<(String, u64)>>, // (token_hash, expires_at)
-}
-
 /// Pull request rate limiter to prevent DoS via rapid pull requests.
 /// Implements per-consumer rate limiting with exponential backoff.
 #[derive(Debug)]
@@ -138,66 +123,6 @@ struct GlobalPullRateTracker {
 /// Global pull rate tracker for system-wide DoS protection
 static GLOBAL_PULL_RATE_TRACKER: std::sync::LazyLock<Mutex<GlobalPullRateTracker>> =
     std::sync::LazyLock::new(|| Mutex::new(GlobalPullRateTracker::new()));
-
-/// Global token tracker for anti-replay protection
-#[allow(dead_code)]
-static GLOBAL_ACK_TOKEN_TRACKER: std::sync::LazyLock<AckTokenTracker> =
-    std::sync::LazyLock::new(AckTokenTracker::new);
-
-impl AckTokenTracker {
-    fn new() -> Self {
-        Self {
-            used_tokens: Mutex::new(HashSet::new()),
-        }
-    }
-
-    /// Check if a token has been used and mark it as used if not.
-    /// Returns true if the token is valid (not replayed), false if it's a replay.
-    fn validate_and_mark_token(&self, token: &str, timestamp: u64) -> bool {
-        let now = wall_now().as_nanos() / 1_000_000_000; // Current time in seconds
-        let token_hash = self.hash_token(token);
-
-        // Clean expired tokens first
-        self.cleanup_expired_tokens(now);
-
-        let mut tokens = self.used_tokens.lock().unwrap();
-
-        // Check if token is already used (replay attempt)
-        if tokens.iter().any(|(hash, _)| hash == &token_hash) {
-            return false; // Replay detected
-        }
-
-        // Check if token is expired
-        if now > timestamp + ACK_TOKEN_TIMEOUT_SECS {
-            return false; // Expired token
-        }
-
-        // Mark token as used
-        if tokens.len() >= MAX_ACK_TOKEN_HISTORY {
-            // Remove oldest entries to prevent unbounded growth
-            let min_timestamp = tokens.iter().map(|(_, ts)| *ts).min().unwrap_or(0);
-            tokens.retain(|(_, ts)| *ts > min_timestamp);
-        }
-
-        tokens.insert((token_hash, timestamp + ACK_TOKEN_TIMEOUT_SECS));
-        true
-    }
-
-    fn cleanup_expired_tokens(&self, now: u64) {
-        let mut tokens = self.used_tokens.lock().unwrap();
-        tokens.retain(|(_, expires_at)| *expires_at > now);
-    }
-
-    fn hash_token(&self, token: &str) -> String {
-        // Simple hash for token deduplication
-        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-        for byte in token.as_bytes() {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        format!("{hash:016x}")
-    }
-}
 
 impl PullRateLimiter {
     fn new() -> Self {
@@ -314,22 +239,41 @@ impl GlobalPullRateTracker {
         self.buffer_position = (self.buffer_position + 1) % self.recent_pulls.len();
         self.estimated_memory_usage = new_memory_usage;
 
-        // Cleanup old memory usage estimates (rough approximation)
-        if self.buffer_position % 100 == 0 {
-            self.estimated_memory_usage = self
-                .estimated_memory_usage
-                .saturating_sub(estimated_batch_memory * 50);
-        }
-
         Ok(())
+    }
+
+    /// Give back a finished pull's estimate. The estimate used to be trimmed
+    /// by only half a pull's worth per pull, so it grew without bound and,
+    /// after a few thousand pulls, refused every pull in the process.
+    fn release(&mut self, estimated_batch_memory: u64) {
+        self.estimated_memory_usage = self
+            .estimated_memory_usage
+            .saturating_sub(estimated_batch_memory);
     }
 }
 
-/// Global ack token tracker to prevent replay attacks across all consumers
-static ACK_TOKEN_TRACKER: std::sync::OnceLock<AckTokenTracker> = std::sync::OnceLock::new();
+/// The local flow-control bound for a consumer's `max_ack_pending`.
+/// JetStream uses -1 for "unlimited" (and 0 for "server default"); clamping
+/// those to 1 made each pull keep its first message and drop the rest
+/// without a NAK.
+fn local_max_ack_pending(server_value: i64) -> usize {
+    usize::try_from(server_value)
+        .ok()
+        .filter(|&limit| limit > 0)
+        .unwrap_or(usize::MAX)
+}
 
-fn get_ack_token_tracker() -> &'static AckTokenTracker {
-    ACK_TOKEN_TRACKER.get_or_init(AckTokenTracker::new)
+/// A pull's share of the global memory estimate, released when the pull
+/// completes, fails or is dropped.
+struct GlobalPullReservation(u64);
+
+impl Drop for GlobalPullReservation {
+    fn drop(&mut self) {
+        GLOBAL_PULL_RATE_TRACKER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .release(self.0);
+    }
 }
 
 fn redacted_name_fingerprint(value: &str) -> String {
@@ -1058,7 +1002,11 @@ impl ConsumerConfig {
         if let Some(ref name) = self.name {
             parts.push(format!("\"name\":\"{}\"", json_escape(name)));
         }
-        if let Some(ref durable) = self.durable_name {
+        // The server makes a consumer durable only when durable_name is set;
+        // with name alone it is a named ephemeral consumer, deleted after its
+        // inactivity threshold (5 s by default). A named consumer here is
+        // documented as durable, so it carries durable_name too.
+        if let Some(durable) = self.durable_name.as_ref().or(self.name.as_ref()) {
             parts.push(format!("\"durable_name\":\"{}\"", json_escape(durable)));
         }
         if let Some(ref deliver_subject) = self.deliver_subject {
@@ -1523,7 +1471,7 @@ impl JetStreamContext {
             name,
             prefix: self.prefix.clone(),
             pending_acks: Arc::new(AtomicUsize::new(0)),
-            max_ack_pending: config.max_ack_pending.max(1) as usize,
+            max_ack_pending: local_max_ack_pending(config.max_ack_pending),
             pull_rate_limiter: PullRateLimiter::new(),
         })
     }
@@ -1546,9 +1494,9 @@ impl JetStreamContext {
         }
 
         // Extract max_ack_pending from consumer info response, fallback to default
-        let max_ack_pending = extract_json_i64_simple(&response_str, "max_ack_pending")
-            .unwrap_or(1000)
-            .max(1) as usize;
+        let max_ack_pending = local_max_ack_pending(
+            extract_json_i64_simple(&response_str, "max_ack_pending").unwrap_or(1000),
+        );
 
         Ok(Consumer {
             stream: stream.to_string(),
@@ -1848,6 +1796,7 @@ impl Consumer {
                 )));
             }
         }
+        let _reservation = GlobalPullReservation(estimated_batch_memory);
 
         let subject = format!(
             "{}.CONSUMER.MSG.NEXT.{}.{}",
@@ -2920,20 +2869,12 @@ impl JsMessage {
             }
         }
 
-        // Generate anti-replay protected ack token
-        let (protected_reply_subject, ack_token) = self.generate_protected_ack_token();
-
-        // Validate the ack token to prevent replay attacks
-        let now = wall_now().as_nanos() / 1_000_000_000;
-        let tracker = get_ack_token_tracker();
-        if !tracker.validate_and_mark_token(&ack_token, now) {
-            return Err(JsError::InvalidConfig(
-                "Acknowledgment token replay detected or expired".to_string(),
-            ));
-        }
-
+        // The server takes acks only on the reply subject exactly as delivered:
+        // it subscribes `$JS.ACK.<stream>.<consumer>` plus five tokens. A
+        // subject with anything appended matched no subscription, so every
+        // ack, nak and term was dropped while this call returned Ok.
         match client
-            .publish(cx, &protected_reply_subject, payload.as_ref())
+            .publish(cx, &self.reply_subject, payload.as_ref())
             .await
         {
             Ok(()) => {
@@ -2949,92 +2890,6 @@ impl JsMessage {
                 Err(JsError::Nats(err))
             }
         }
-    }
-
-    /// Generate a cryptographically protected ack token to prevent replay attacks.
-    /// Returns (protected_reply_subject, ack_token).
-    fn generate_protected_ack_token(&self) -> (String, String) {
-        let now = wall_now().as_nanos() / 1_000_000_000; // Current time in seconds
-
-        // Generate a secure random nonce using the system entropy
-        let nonce = self.generate_secure_nonce();
-
-        // Create ack token with timestamp, sequence, delivery count, and nonce
-        let ack_token = format!(
-            "{}.{}.{}.{}.{}",
-            now,
-            self.sequence,
-            self.delivered,
-            nonce,
-            self.hash_reply_subject_components()
-        );
-
-        // Create HMAC-protected reply subject
-        let hmac = self.generate_ack_token_hmac(&ack_token);
-        let protected_reply_subject = format!("{}.{}", self.reply_subject, hmac);
-
-        (protected_reply_subject, ack_token)
-    }
-
-    /// Generate a secure random nonce for anti-replay protection.
-    fn generate_secure_nonce(&self) -> u64 {
-        // Use sequence and delivered count as seed with current time for deterministic but unique nonce
-        let mut hasher = 0xcbf2_9ce4_8422_2325_u64;
-        let now = wall_now().as_nanos();
-
-        // Mix in sequence, delivered count, and current time
-        hasher ^= self.sequence;
-        hasher = hasher.wrapping_mul(0x0000_0100_0000_01b3);
-        hasher ^= u64::from(self.delivered);
-        hasher = hasher.wrapping_mul(0x0000_0100_0000_01b3);
-        hasher ^= now;
-        hasher = hasher.wrapping_mul(0x0000_0100_0000_01b3);
-
-        // Mix in reply subject for additional entropy
-        for byte in self.reply_subject.as_bytes() {
-            hasher ^= u64::from(*byte);
-            hasher = hasher.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-
-        hasher
-    }
-
-    /// Generate HMAC for ack token integrity protection.
-    fn generate_ack_token_hmac(&self, token: &str) -> String {
-        // Simple HMAC-like construction using the reply subject as key
-        let mut hasher = 0xa5a5_a5a5_a5a5_a5a5_u64;
-
-        // Mix in the reply subject as secret key material
-        for byte in self.reply_subject.as_bytes() {
-            hasher ^= u64::from(*byte);
-            hasher = hasher.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-
-        // Mix in the token data
-        for byte in token.as_bytes() {
-            hasher ^= u64::from(*byte);
-            hasher = hasher.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-
-        format!("{hasher:016x}")
-    }
-
-    /// Hash reply subject components for additional verification.
-    fn hash_reply_subject_components(&self) -> u64 {
-        let mut hasher = 0xfeed_face_cafe_babe_u64;
-
-        // Hash subject and reply_subject together
-        for byte in self.subject.as_bytes() {
-            hasher ^= u64::from(*byte);
-            hasher = hasher.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-
-        for byte in self.reply_subject.as_bytes() {
-            hasher ^= u64::from(*byte);
-            hasher = hasher.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-
-        hasher
     }
 }
 
@@ -3497,7 +3352,19 @@ mod tests {
         assert_eq!(cfg.name.as_deref(), Some("worker_1"));
         assert!(cfg.durable_name.is_none());
         assert!(cfg.to_json().contains("\"name\":\"worker_1\""));
-        assert!(!cfg.to_json().contains("durable_name"));
+        // Without durable_name the server creates a named ephemeral consumer
+        // and deletes it after 5 s of inactivity.
+        assert_eq!(
+            cfg.to_json()
+                .matches("\"durable_name\":\"worker_1\"")
+                .count(),
+            1
+        );
+        assert!(
+            !ConsumerConfig::ephemeral()
+                .to_json()
+                .contains("durable_name")
+        );
     }
 
     #[test]
@@ -5089,6 +4956,71 @@ mod tests {
         );
     }
 
+    /// The server subscribes `$JS.ACK.<stream>.<consumer>` plus exactly five
+    /// tokens. Acks went to the reply subject with an extra token appended,
+    /// which matched nothing, so every ack, nak and term was dropped.
+    #[test]
+    fn acks_are_published_to_the_reply_subject_as_delivered() {
+        const REPLY: &str = "$JS.ACK.ORDERS.processor.1.42.7.1713790000000000000.0";
+        let transcript = capture_publish_transcript(3, |cx, addr| async move {
+            let mut client = NatsClient::connect_with_config(
+                &cx,
+                NatsConfig {
+                    host: addr.ip().to_string(),
+                    port: addr.port(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("connect ack protocol server");
+            let message = || JsMessage {
+                subject: "orders.created".to_string(),
+                payload: b"order".to_vec(),
+                sequence: 42,
+                delivered: 1,
+                reply_subject: REPLY.to_string(),
+                ack_state: AtomicU8::new(ACK_STATE_PENDING),
+                pending_acks: None,
+            };
+            message().ack(&mut client, &cx).await.expect("ack");
+            message().nack(&mut client, &cx).await.expect("nak");
+            message().term(&mut client, &cx).await.expect("term");
+        });
+
+        let sent: Vec<_> = transcript
+            .publishes
+            .iter()
+            .map(|publish| (publish.subject.as_str(), publish.payload.as_slice()))
+            .collect();
+        assert_eq!(
+            sent,
+            vec![
+                (REPLY, b"+ACK".as_slice()),
+                (REPLY, b"-NAK".as_slice()),
+                (REPLY, b"+TERM".as_slice()),
+            ]
+        );
+    }
+
+    /// JetStream reports an unlimited max_ack_pending as -1. It was clamped
+    /// to 1, so each pull kept its first message and dropped the rest.
+    #[test]
+    fn unlimited_max_ack_pending_does_not_drop_pulled_messages() {
+        assert_eq!(local_max_ack_pending(-1), usize::MAX);
+        assert_eq!(local_max_ack_pending(0), usize::MAX);
+        assert_eq!(local_max_ack_pending(5), 5);
+        let consumer = Consumer {
+            stream: "ORDERS".to_string(),
+            name: "processor".to_string(),
+            prefix: "$JS.API".to_string(),
+            pending_acks: Arc::new(AtomicUsize::new(0)),
+            max_ack_pending: local_max_ack_pending(-1),
+            pull_rate_limiter: PullRateLimiter::new(),
+        };
+        assert!(consumer.increment_pending());
+        assert!(consumer.increment_pending());
+    }
+
     #[test]
     fn jetstream_api_pub_sub_consume_match_raw_nats_wire_tick122() {
         let publish_reply = br#"{"stream":"ORDERS","seq":7}"#.to_vec();
@@ -6247,6 +6179,22 @@ mod tests {
                 successful_requests <= GLOBAL_PULL_RATE_LIMIT as usize,
                 "Should not exceed global rate limit"
             );
+        }
+
+        #[test]
+        fn global_tracker_estimate_returns_to_zero_as_pulls_finish() {
+            // Each pull's estimate used to be trimmed by only half its size,
+            // so the estimate grew until every pull in the process was refused
+            // (after about 5,000 pulls of 100 messages).
+            let mut tracker = GlobalPullRateTracker::new();
+            let batch_memory = 100 * 2048;
+            for i in 0..10_000_u64 {
+                tracker
+                    .check_global_pull_request(i * 1_000_000_000, batch_memory)
+                    .expect("a finished pull frees its estimate");
+                tracker.release(batch_memory);
+            }
+            assert_eq!(tracker.estimated_memory_usage, 0);
         }
 
         #[test]
