@@ -38,7 +38,8 @@
 //! - **Cancellation** is the calling task's: fibers observe it through the
 //!   task's `Cx` at their own cancellation points, finish their cleanup, and
 //!   the scope drains. Nothing is dropped mid-flight unless the scope future
-//!   itself is dropped, which drops its fibers with it.
+//!   itself is dropped, which drops its fibers with it; a handle that
+//!   outlived it then resolves as [`JoinError::Cancelled`].
 //! - **Panics.** A panicking fiber is caught. Awaiting its handle yields
 //!   [`JoinError::Panicked`]; a panic no handle observed is re-raised when the
 //!   scope finishes, so it cannot vanish silently.
@@ -183,16 +184,16 @@ struct Running<'env> {
     finished: bool,
 }
 
-/// The first panic of the scope that no handle has observed yet, keyed by
-/// the panicking fiber's id.
-type UnobservedPanic = Arc<Mutex<Option<(u64, PanicPayload)>>>;
+/// The panics of the scope that no handle has observed yet, keyed by the
+/// panicking fiber's id, in the order they happened.
+type UnobservedPanics = Arc<Mutex<Vec<(u64, PanicPayload)>>>;
 
 /// State shared by every handle to one scope.
 struct ScopeState<'env> {
     set: Mutex<FiberSet<'env>>,
     queue: Arc<ReadyQueue>,
     next_fiber_id: AtomicU64,
-    unobserved_panic: UnobservedPanic,
+    unobserved_panics: UnobservedPanics,
 }
 
 /// Handle to the fibers of one [`scope`], given to the scope's body.
@@ -215,6 +216,8 @@ impl std::fmt::Debug for FiberScope<'_> {
 enum HandleState<T> {
     Running(Option<Waker>),
     Finished(Result<T, PanicPayload>),
+    /// The fiber was dropped unfinished, with its scope future.
+    Abandoned,
     Taken,
 }
 
@@ -222,22 +225,40 @@ enum HandleState<T> {
 struct Completion<T> {
     id: u64,
     state: Mutex<HandleState<T>>,
-    unobserved_panic: UnobservedPanic,
+    unobserved_panics: UnobservedPanics,
 }
 
 impl<T> Completion<T> {
     fn finish(&self, result: Result<T, PanicPayload>) {
         if let Err(payload) = &result {
-            let mut unobserved = self.unobserved_panic.lock();
-            if unobserved.is_none() {
-                *unobserved = Some((self.id, payload.clone()));
-            }
+            self.unobserved_panics
+                .lock()
+                .push((self.id, payload.clone()));
         }
         let waiter = {
             let mut state = self.state.lock();
             match std::mem::replace(&mut *state, HandleState::Finished(result)) {
                 HandleState::Running(waiter) => waiter,
-                HandleState::Finished(_) | HandleState::Taken => None,
+                HandleState::Finished(_) | HandleState::Abandoned | HandleState::Taken => None,
+            }
+        };
+        if let Some(waiter) = waiter {
+            waiter.wake();
+        }
+    }
+
+    /// Marks a fiber that will never finish and wakes its handle. A no-op
+    /// once the fiber has finished.
+    fn abandon(&self) {
+        let waiter = {
+            let mut state = self.state.lock();
+            match &mut *state {
+                HandleState::Running(waiter) => {
+                    let waiter = waiter.take();
+                    *state = HandleState::Abandoned;
+                    waiter
+                }
+                HandleState::Finished(_) | HandleState::Abandoned | HandleState::Taken => None,
             }
         };
         if let Some(waiter) = waiter {
@@ -246,11 +267,23 @@ impl<T> Completion<T> {
     }
 }
 
+/// A fiber's hold on its completion. If the fiber future is dropped before
+/// it finishes (its scope future was dropped), the fiber is marked abandoned,
+/// so a handle that escaped the scope does not wait forever.
+struct FiberCompletion<T>(Arc<Completion<T>>);
+
+impl<T> Drop for FiberCompletion<T> {
+    fn drop(&mut self) {
+        self.0.abandon();
+    }
+}
+
 /// Awaitable result of one fiber.
 ///
 /// Awaiting yields `Ok(value)`, or [`JoinError::Panicked`] if the fiber
-/// panicked. Dropping the handle does not stop the fiber: the scope still
-/// waits for it.
+/// panicked, or [`JoinError::Cancelled`] if the scope future was dropped
+/// before the fiber finished. Dropping the handle does not stop the fiber:
+/// the scope still waits for it.
 #[must_use = "a fiber keeps running even if its handle is dropped; await it to observe its result"]
 pub struct FiberHandle<T> {
     completion: Arc<Completion<T>>,
@@ -284,15 +317,18 @@ impl<T> Future for FiberHandle<T> {
             HandleState::Finished(result) => {
                 drop(state);
                 Poll::Ready(result.map_err(|payload| {
-                    let mut unobserved = completion.unobserved_panic.lock();
-                    if unobserved
-                        .as_ref()
-                        .is_some_and(|(id, _)| *id == completion.id)
-                    {
-                        *unobserved = None;
-                    }
+                    // This handle observed its fiber's panic; others stay.
+                    completion
+                        .unobserved_panics
+                        .lock()
+                        .retain(|(id, _)| *id != completion.id);
                     JoinError::Panicked(payload)
                 }))
+            }
+            HandleState::Abandoned => {
+                Poll::Ready(Err(JoinError::Cancelled(crate::types::CancelReason::user(
+                    "the fiber scope was dropped before the fiber finished",
+                ))))
             }
             HandleState::Taken => Poll::Ready(Err(JoinError::PolledAfterCompletion)),
         }
@@ -300,7 +336,9 @@ impl<T> Future for FiberHandle<T> {
 }
 
 /// Runs one fiber to completion, catching a panic, and publishes the result.
-async fn run_fiber<F: Future>(future: F, completion: Arc<Completion<F::Output>>) {
+/// `completion` is dropped with this future, which marks the fiber abandoned
+/// if it never finished, even when it was never polled.
+async fn run_fiber<F: Future>(future: F, completion: FiberCompletion<F::Output>) {
     let mut future = pin!(future);
     let result = poll_fn(|cx| {
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| future.as_mut().poll(cx))) {
@@ -314,7 +352,7 @@ async fn run_fiber<F: Future>(future: F, completion: Arc<Completion<F::Output>>)
         }
     })
     .await;
-    completion.finish(result);
+    completion.0.finish(result);
 }
 
 impl<'env> FiberScope<'env> {
@@ -324,7 +362,7 @@ impl<'env> FiberScope<'env> {
                 set: Mutex::new(FiberSet::default()),
                 queue: Arc::new(ReadyQueue::default()),
                 next_fiber_id: AtomicU64::new(0),
-                unobserved_panic: Arc::new(Mutex::new(None)),
+                unobserved_panics: Arc::new(Mutex::new(Vec::new())),
             }),
         }
     }
@@ -347,9 +385,10 @@ impl<'env> FiberScope<'env> {
         let completion = Arc::new(Completion {
             id: self.state.next_fiber_id.fetch_add(1, Ordering::Relaxed),
             state: Mutex::new(HandleState::Running(None)),
-            unobserved_panic: Arc::clone(&self.state.unobserved_panic),
+            unobserved_panics: Arc::clone(&self.state.unobserved_panics),
         });
-        let fiber: FiberFuture<'env> = Box::pin(run_fiber(future, Arc::clone(&completion)));
+        let fiber: FiberFuture<'env> =
+            Box::pin(run_fiber(future, FiberCompletion(Arc::clone(&completion))));
         let index = {
             let mut guard = self.state.set.lock();
             let set = &mut *guard;
@@ -414,36 +453,39 @@ impl ScopeState<'_> {
     /// Polls every ready fiber once. Returns whether any fiber is still live.
     fn poll_fibers(&self) -> bool {
         let ready = std::mem::take(&mut *self.queue.ready.lock());
-        if !ready.is_empty() {
-            // Take the ready fibers out in one lock acquisition, so polling
-            // never holds the table lock (a fiber may wake itself, or start a
-            // sibling, while it is polled).
-            let mut running = Vec::with_capacity(ready.len());
-            {
-                let mut set = self.set.lock();
-                for index in ready {
-                    let Some(slot) = set.slots.get_mut(index) else {
-                        continue;
-                    };
-                    slot.wake.queued.store(false, Ordering::Release);
-                    if let Some(future) = slot.future.take() {
-                        running.push(Running {
-                            index,
-                            future: Some(future),
-                            waker: slot.waker.take(),
-                            finished: false,
-                        });
-                    }
+        if ready.is_empty() {
+            return self.set.lock().live > 0;
+        }
+        // Take the ready fibers out in one lock acquisition, so polling never
+        // holds the table lock (a fiber may wake itself, or start a sibling,
+        // while it is polled).
+        let mut running = Vec::with_capacity(ready.len());
+        {
+            let mut set = self.set.lock();
+            for index in ready {
+                let Some(slot) = set.slots.get_mut(index) else {
+                    continue;
+                };
+                slot.wake.queued.store(false, Ordering::Release);
+                if let Some(future) = slot.future.take() {
+                    running.push(Running {
+                        index,
+                        future: Some(future),
+                        waker: slot.waker.take(),
+                        finished: false,
+                    });
                 }
             }
-            for fiber in &mut running {
-                if let (Some(future), Some(waker)) = (fiber.future.as_mut(), fiber.waker.as_ref()) {
-                    fiber.finished = future
-                        .as_mut()
-                        .poll(&mut Context::from_waker(waker))
-                        .is_ready();
-                }
+        }
+        for fiber in &mut running {
+            if let (Some(future), Some(waker)) = (fiber.future.as_mut(), fiber.waker.as_ref()) {
+                fiber.finished = future
+                    .as_mut()
+                    .poll(&mut Context::from_waker(waker))
+                    .is_ready();
             }
+        }
+        let live = {
             let mut guard = self.set.lock();
             let set = &mut *guard;
             for fiber in &mut running {
@@ -456,11 +498,11 @@ impl ScopeState<'_> {
                     slot.future = fiber.future.take();
                 }
             }
-            drop(guard);
-            // `running` still owns the finished fibers, dropped here unlocked.
-            drop(running);
-        }
-        self.set.lock().live > 0
+            set.live > 0
+        };
+        // `running` still owns the finished fibers, dropped here unlocked.
+        drop(running);
+        live
     }
 
     /// Closes the scope if no fiber is live.
@@ -544,10 +586,14 @@ where
         }
     })
     .await;
-    let unobserved = state.unobserved_panic.lock().take();
-    if let Some((_, payload)) = unobserved {
+    let unobserved = std::mem::take(&mut *state.unobserved_panics.lock());
+    if let Some((_, payload)) = unobserved.first() {
+        let more = match unobserved.len() - 1 {
+            0 => String::new(),
+            others => format!(" ({others} more unobserved fiber panics)"),
+        };
         panic!(
-            "a fiber panicked and no handle observed it: {}",
+            "a fiber panicked and no handle observed it: {}{more}",
             payload.message()
         );
     }
@@ -694,6 +740,29 @@ mod tests {
         assert!(message.contains("unobserved"), "{message}");
     }
 
+    /// Two fibers panic in the same pass and the body observes only the
+    /// first: the second panic must still surface when the scope finishes.
+    #[test]
+    fn a_second_unobserved_panic_is_raised_after_the_first_is_observed() {
+        let raised = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            block_on(scope(|s| async move {
+                let first = s.spawn(async {
+                    let fail = std::hint::black_box(true);
+                    assert!(!fail, "first");
+                });
+                let second = s.spawn(async {
+                    let fail = std::hint::black_box(true);
+                    assert!(!fail, "second");
+                });
+                assert!(matches!(first.await, Err(JoinError::Panicked(_))));
+                drop(second);
+            }));
+        }));
+        let payload = raised.expect_err("the second, unobserved panic must surface");
+        let message = crate::cx::scope::payload_to_string(&payload);
+        assert!(message.contains("second"), "{message}");
+    }
+
     #[test]
     fn many_fibers_complete_with_slot_reuse() {
         let sum = block_on(scope(|s| async move {
@@ -834,6 +903,47 @@ mod tests {
         );
         let escaped = escaped.into_inner().expect("escaped handle");
         assert_eq!(escaped.live(), 0);
+    }
+
+    /// A handle that outlives its scope future must not wait forever: when
+    /// the scope future is dropped, the fiber's handle is woken and resolves
+    /// as cancelled, whether the fiber had started or not.
+    #[test]
+    fn handles_that_outlive_a_dropped_scope_are_woken_and_cancelled() {
+        let escaped = Mutex::new(None);
+        let escaped_ref = &escaped;
+        let wakes = Arc::new(CountingWake::default());
+        let waker = Waker::from(Arc::clone(&wakes));
+        let (mut started, mut unstarted) = {
+            let mut future = pin!(scope(|s| async move {
+                let started = s.spawn(std::future::pending::<u32>());
+                *escaped_ref.lock() = Some((s.clone(), started));
+                std::future::pending::<()>().await;
+            }));
+            let mut cx = Context::from_waker(Waker::noop());
+            assert!(future.as_mut().poll(&mut cx).is_pending());
+            let (scope_handle, mut started) = escaped_ref.lock().take().expect("escaped");
+            assert!(
+                Pin::new(&mut started)
+                    .poll(&mut Context::from_waker(&waker))
+                    .is_pending(),
+                "the started fiber is parked"
+            );
+            // Spawned from outside the scope's poll: never polled.
+            let unstarted = scope_handle.spawn(async { 7u32 });
+            (started, unstarted)
+        };
+        assert_eq!(
+            wakes.count(),
+            1,
+            "dropping the scope wakes the waiting handle"
+        );
+        for (name, handle) in [("started", &mut started), ("unstarted", &mut unstarted)] {
+            match Pin::new(handle).poll(&mut Context::from_waker(&waker)) {
+                Poll::Ready(Err(JoinError::Cancelled(_))) => {}
+                other => panic!("{name}: expected a cancelled join, got {other:?}"),
+            }
+        }
     }
 
     #[test]
