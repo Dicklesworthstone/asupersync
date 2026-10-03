@@ -530,12 +530,16 @@ pub enum WatchError {
     RuntimeUnavailable,
     /// The waiting task was cancelled.
     Cancelled,
+    /// The task that would hold the monitor or link is not live: its spawn
+    /// was denied, or it finished before the runtime applied the request.
+    WatcherNotFound,
 }
 
 impl std::fmt::Display for WatchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotFound => write!(f, "the target task is not live"),
+            Self::WatcherNotFound => write!(f, "the watching task is not live"),
             Self::RuntimeUnavailable => write!(f, "no running runtime"),
             Self::Cancelled => write!(f, "the waiting task was cancelled"),
         }
@@ -589,6 +593,21 @@ enum TargetResolution {
     Pending { capped: bool },
 }
 
+impl TargetResolution {
+    /// True when the command should wait for the spawn's admission on a
+    /// later drain rather than resolve now.
+    fn retry(&self, attempts: u32) -> bool {
+        matches!(*self, Self::Pending { capped } if !capped || attempts < MAX_UNBARRIERED_WATCH_ATTEMPTS)
+    }
+
+    fn live(self) -> Option<(TaskId, RegionId)> {
+        match self {
+            Self::Live(id, region) => Some((id, region)),
+            Self::Gone | Self::Pending { .. } => None,
+        }
+    }
+}
+
 /// A spawn with a retirement barrier always resolves: admission publishes
 /// the canonical id, and denial or shutdown opens the barrier. A target
 /// without a barrier is retried at most this many times before it resolves
@@ -619,6 +638,21 @@ impl WatchTarget {
         live_region(id).map_or(TargetResolution::Gone, |region| {
             TargetResolution::Live(id, region)
         })
+    }
+
+    /// Resolves the task that will hold a monitor or link. A plain id is the
+    /// requesting task itself and is taken as given, in `region`. A spawn
+    /// handle (a natively spawned GenServer) resolves like a target: the
+    /// request waits for the spawn's admission, and the holder must be live.
+    fn resolve_holder(
+        &self,
+        region: RegionId,
+        live_region: &impl Fn(TaskId) -> Option<RegionId>,
+    ) -> TargetResolution {
+        if self.admitted.is_none() {
+            return TargetResolution::Live(self.id, region);
+        }
+        self.resolve(live_region)
     }
 }
 
@@ -1104,7 +1138,7 @@ impl<Caps> crate::cx::Cx<Caps> {
         let slot = std::sync::Arc::new(MonitorSlot::default());
         let target_id = target.id;
         let command = WatchCommand::Monitor {
-            watcher: self.task_id(),
+            watcher: self.task_id().into(),
             watcher_region: self.region_id(),
             target,
             slot: std::sync::Arc::clone(&slot),
@@ -1130,23 +1164,28 @@ impl<Caps> crate::cx::Cx<Caps> {
 /// A monitor or link request on its way to the runtime state.
 pub(crate) enum WatchCommand {
     Monitor {
-        watcher: TaskId,
+        /// The task holding the monitor; `watcher_region` is its region when
+        /// it is given by id.
+        watcher: WatchTarget,
         watcher_region: RegionId,
         target: WatchTarget,
         slot: std::sync::Arc<MonitorSlot>,
-        /// Drains so far that found the target's spawn unadmitted.
+        /// Drains so far that found the watcher's or target's spawn
+        /// unadmitted.
         attempts: u32,
     },
     Demonitor {
         monitor_ref: MonitorRef,
     },
     Link {
-        task: TaskId,
+        /// The task holding the link; `task_region` is its region when it is
+        /// given by id.
+        task: WatchTarget,
         task_region: RegionId,
         task_policy: crate::link::ExitPolicy,
         peer: WatchTarget,
         slot: std::sync::Arc<crate::link::LinkSlot>,
-        /// Drains so far that found the peer's spawn unadmitted.
+        /// Drains so far that found the task's or peer's spawn unadmitted.
         attempts: u32,
     },
     Unlink {
@@ -1208,8 +1247,8 @@ impl TaskWatches {
 
     /// Applies one command. `live_region` returns a task's owning region while
     /// the task is live, `None` once it finished or if it never existed.
-    /// A command whose target spawn is not admitted yet comes back as
-    /// [`WatchApply::Retry`] for the caller to enqueue again.
+    /// A command whose holder's or target's spawn is not admitted yet comes
+    /// back as [`WatchApply::Retry`] for the caller to enqueue again.
     pub(crate) fn apply(
         &mut self,
         command: WatchCommand,
@@ -1223,23 +1262,21 @@ impl TaskWatches {
                 slot,
                 attempts,
             } => {
-                let monitored = match target.resolve(&live_region) {
-                    TargetResolution::Pending { capped }
-                        if !capped || attempts < MAX_UNBARRIERED_WATCH_ATTEMPTS =>
-                    {
-                        return WatchApply::Retry(WatchCommand::Monitor {
-                            watcher,
-                            watcher_region,
-                            target,
-                            slot,
-                            attempts: attempts.saturating_add(1),
-                        });
-                    }
-                    TargetResolution::Live(id, _) => Some(id),
-                    TargetResolution::Gone | TargetResolution::Pending { .. } => None,
-                };
+                let holder = watcher.resolve_holder(watcher_region, &live_region);
+                let monitored = target.resolve(&live_region);
+                if holder.retry(attempts) || monitored.retry(attempts) {
+                    return WatchApply::Retry(WatchCommand::Monitor {
+                        watcher,
+                        watcher_region,
+                        target,
+                        slot,
+                        attempts: attempts.saturating_add(1),
+                    });
+                }
+                let (holder, monitored) = (holder.live(), monitored.live());
                 WatchApply::Done(slot.establish_with(|| {
-                    let monitored = monitored.ok_or(WatchError::NotFound)?;
+                    let (watcher, watcher_region) = holder.ok_or(WatchError::WatcherNotFound)?;
+                    let (monitored, _) = monitored.ok_or(WatchError::NotFound)?;
                     let monitor_ref = self.monitors.establish(watcher, watcher_region, monitored);
                     self.monitor_slots
                         .insert(monitor_ref, std::sync::Arc::clone(&slot));
@@ -1259,23 +1296,21 @@ impl TaskWatches {
                 slot,
                 attempts,
             } => {
-                let peer = match peer.resolve(&live_region) {
-                    TargetResolution::Pending { capped }
-                        if !capped || attempts < MAX_UNBARRIERED_WATCH_ATTEMPTS =>
-                    {
-                        return WatchApply::Retry(WatchCommand::Link {
-                            task,
-                            task_region,
-                            task_policy,
-                            peer,
-                            slot,
-                            attempts: attempts.saturating_add(1),
-                        });
-                    }
-                    TargetResolution::Live(id, region) => Some((id, region)),
-                    TargetResolution::Gone | TargetResolution::Pending { .. } => None,
-                };
+                let holder = task.resolve_holder(task_region, &live_region);
+                let resolved_peer = peer.resolve(&live_region);
+                if holder.retry(attempts) || resolved_peer.retry(attempts) {
+                    return WatchApply::Retry(WatchCommand::Link {
+                        task,
+                        task_region,
+                        task_policy,
+                        peer,
+                        slot,
+                        attempts: attempts.saturating_add(1),
+                    });
+                }
+                let (holder, peer) = (holder.live(), resolved_peer.live());
                 WatchApply::Done(slot.establish_with(|| {
+                    let (task, task_region) = holder.ok_or(WatchError::WatcherNotFound)?;
                     let (peer, peer_region) = peer.ok_or(WatchError::NotFound)?;
                     let link_ref = self.links.establish_with_policy(
                         task,
@@ -1495,7 +1530,7 @@ mod task_watch_tests {
         let slot = Arc::new(MonitorSlot::default());
         let applied = watches.apply(
             WatchCommand::Monitor {
-                watcher: tid(watcher),
+                watcher: tid(watcher).into(),
                 watcher_region: rid(1),
                 target: tid(target).into(),
                 slot: Arc::clone(&slot),
@@ -1517,7 +1552,7 @@ mod task_watch_tests {
         let slot = Arc::new(LinkSlot::default());
         let applied = watches.apply(
             WatchCommand::Link {
-                task: tid(task),
+                task: tid(task).into(),
                 task_region: rid(1),
                 task_policy,
                 peer: tid(peer).into(),
@@ -1637,7 +1672,7 @@ mod task_watch_tests {
         assert_eq!(slot.abandon(), None);
         let applied = watches.apply(
             WatchCommand::Monitor {
-                watcher: tid(1),
+                watcher: tid(1).into(),
                 watcher_region: rid(1),
                 target: tid(2).into(),
                 slot: Arc::clone(&slot),
@@ -1776,7 +1811,7 @@ mod task_watch_tests {
         let slot = Arc::new(MonitorSlot::default());
         let mut watches = TaskWatches::default();
         let command = WatchCommand::Monitor {
-            watcher: tid(1),
+            watcher: tid(1).into(),
             watcher_region: rid(1),
             target,
             slot: Arc::clone(&slot),
@@ -1799,6 +1834,100 @@ mod task_watch_tests {
         ));
         assert_eq!(established(&slot), Some(Err(WatchError::NotFound)));
         assert!(watches.is_empty());
+    }
+
+    /// A natively spawned GenServer holds its monitors and links through its
+    /// spawn handle: the watch waits for the spawn's admission and is held by
+    /// the admitted id; a denied or finished holder cannot hold one.
+    #[test]
+    fn a_watch_held_through_a_spawn_handle_waits_for_its_admission() {
+        use crate::runtime::spawn_mailbox::{
+            AdmittedTask, AdmittedTaskSlot, SPAWN_ID_GENERATION_TAG,
+        };
+        use crate::runtime::task_handle::RetirementBarrier;
+        let holder = |slot: &Arc<AdmittedTaskSlot>| WatchTarget {
+            id: TaskId::new_for_test(9, SPAWN_ID_GENERATION_TAG),
+            admitted: Some(Arc::clone(slot)),
+        };
+        let mut watches = TaskWatches::default();
+
+        // Monitor: retried while unadmitted, then held by the admitted id.
+        let barrier = RetirementBarrier::pending();
+        let admitted =
+            Arc::new(AdmittedTaskSlot::new().with_retirement_barrier(Arc::clone(&barrier)));
+        let slot = Arc::new(MonitorSlot::default());
+        let command = WatchCommand::Monitor {
+            watcher: holder(&admitted),
+            watcher_region: rid(1),
+            target: tid(2).into(),
+            slot: Arc::clone(&slot),
+            attempts: 0,
+        };
+        let WatchApply::Retry(command) = watches.apply(command, live(&[1, 2])) else {
+            panic!("a watch whose holder is unadmitted must be retried");
+        };
+        assert_eq!(established(&slot), None);
+        assert!(
+            admitted
+                .set(AdmittedTask::pending(tid(1), std::sync::Weak::new()))
+                .is_ok()
+        );
+        assert!(matches!(
+            watches.apply(command, live(&[1, 2])),
+            WatchApply::Done(None)
+        ));
+        let (monitor_ref, monitored) = established(&slot).expect("applied").expect("established");
+        assert_eq!(monitored, tid(2));
+        assert_eq!(
+            watches.monitors.watchers_of(tid(2)),
+            vec![(monitor_ref, tid(1))]
+        );
+
+        // Link: the holder's spawn is denied while the request waits.
+        let barrier = RetirementBarrier::pending();
+        let denied =
+            Arc::new(AdmittedTaskSlot::new().with_retirement_barrier(Arc::clone(&barrier)));
+        let slot = Arc::new(LinkSlot::default());
+        let command = WatchCommand::Link {
+            task: holder(&denied),
+            task_region: rid(1),
+            task_policy: ExitPolicy::Propagate,
+            peer: tid(2).into(),
+            slot: Arc::clone(&slot),
+            attempts: 0,
+        };
+        let WatchApply::Retry(command) = watches.apply(command, live(&[1, 2])) else {
+            panic!("a link whose holder is unadmitted must be retried");
+        };
+        barrier.open_and_wake();
+        assert!(matches!(
+            watches.apply(command, live(&[1, 2])),
+            WatchApply::Done(None)
+        ));
+        assert_eq!(established(&slot), Some(Err(WatchError::WatcherNotFound)));
+
+        // Link: the holder was admitted but already finished.
+        let finished = Arc::new(AdmittedTaskSlot::new());
+        assert!(
+            finished
+                .set(AdmittedTask::pending(tid(3), std::sync::Weak::new()))
+                .is_ok()
+        );
+        let slot = Arc::new(LinkSlot::default());
+        let command = WatchCommand::Link {
+            task: holder(&finished),
+            task_region: rid(1),
+            task_policy: ExitPolicy::Propagate,
+            peer: tid(2).into(),
+            slot: Arc::clone(&slot),
+            attempts: 0,
+        };
+        assert!(matches!(
+            watches.apply(command, live(&[1, 2])),
+            WatchApply::Done(None)
+        ));
+        assert_eq!(established(&slot), Some(Err(WatchError::WatcherNotFound)));
+        assert!(watches.links.is_empty() && watches.link_slots.is_empty());
     }
 
     #[test]

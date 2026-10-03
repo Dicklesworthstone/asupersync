@@ -229,6 +229,10 @@ pub struct ActorHandle<A: Actor> {
     receiver: crate::channel::oneshot::Receiver<Result<A, JoinError>>,
     inner: std::sync::Weak<parking_lot::RwLock<CxInner>>,
     completed: bool,
+    /// The actor task's runtime handle when it was spawned with
+    /// [`Cx::spawn_actor`]. Admission assigns the task's id and context after
+    /// the spawn returns, so the task id, abort and join resolve through it.
+    task: Option<crate::runtime::TaskHandle<()>>,
 }
 
 impl<A: Actor> ActorHandle<A> {
@@ -267,9 +271,16 @@ impl<A: Actor> ActorHandle<A> {
     }
 
     /// Returns the task ID of the actor's underlying task.
+    ///
+    /// For an actor spawned with [`Cx::spawn_actor`] this is the provisional
+    /// spawn id until the runtime admits the task, and the task's runtime id
+    /// afterwards, as for
+    /// [`TaskHandle::task_id`](crate::runtime::TaskHandle::task_id).
     #[must_use]
     pub fn task_id(&self) -> crate::types::TaskId {
-        self.task_id
+        self.task
+            .as_ref()
+            .map_or(self.task_id, crate::runtime::TaskHandle::task_id)
     }
 
     /// Signals the actor to stop gracefully.
@@ -289,13 +300,21 @@ impl<A: Actor> ActorHandle<A> {
     /// Returns true if the actor has finished.
     #[must_use]
     pub fn is_finished(&self) -> bool {
-        self.completed || self.receiver.is_ready() || self.receiver.is_closed()
+        self.completed
+            || ((self.receiver.is_ready() || self.receiver.is_closed())
+                && self
+                    .task
+                    .as_ref()
+                    .is_none_or(crate::runtime::TaskHandle::is_finished))
     }
 
     /// Wait for the actor to finish and return its final state.
     ///
     /// Blocks until the actor loop completes (mailbox closed or cancelled),
-    /// then returns the actor's final state or a join error.
+    /// then returns the actor's final state or a join error. For an actor
+    /// spawned with [`Cx::spawn_actor`], the join also waits for the runtime
+    /// to retire the actor task, as
+    /// [`TaskHandle::join`](crate::runtime::TaskHandle::join) does.
     pub fn join<'a>(&'a mut self, _cx: &'a Cx) -> ActorJoinFuture<'a, A> {
         let cx_inner = self.inner.clone();
         let receiver = &mut self.receiver;
@@ -307,6 +326,8 @@ impl<A: Actor> ActorHandle<A> {
             state: Arc::clone(&self.state),
             terminal_state,
             drop_abort_defused: false,
+            task: self.task.as_mut(),
+            task_exit: None,
         }
     }
 
@@ -330,6 +351,8 @@ impl<A: Actor> ActorHandle<A> {
             for waker in cancel_wakers {
                 waker.wake_by_ref();
             }
+        } else if let Some(task) = &self.task {
+            task.abort_with_reason(crate::types::CancelReason::user("actor aborted"));
         }
     }
 }
@@ -345,6 +368,10 @@ pub struct ActorJoinFuture<'a, A: Actor> {
     state: Arc<ActorStateCell>,
     terminal_state: &'a mut bool,
     drop_abort_defused: bool,
+    /// The actor task's runtime handle, for a natively spawned actor.
+    task: Option<&'a mut crate::runtime::TaskHandle<()>>,
+    /// Set once that task has retired: the task's join error, if any.
+    task_exit: Option<Option<JoinError>>,
 }
 
 impl<A: Actor> ActorJoinFuture<'_, A> {
@@ -370,6 +397,8 @@ impl<A: Actor> ActorJoinFuture<'_, A> {
             for waker in cancel_wakers {
                 waker.wake_by_ref();
             }
+        } else if let Some(task) = self.task.as_deref() {
+            task.abort_with_reason(crate::types::CancelReason::user("actor aborted"));
         }
     }
 }
@@ -385,6 +414,17 @@ impl<A: Actor> std::future::Future for ActorJoinFuture<'_, A> {
         if *this.terminal_state {
             return std::task::Poll::Ready(Err(JoinError::PolledAfterCompletion));
         }
+        // A natively spawned actor publishes its final state before its task
+        // retires. Wait for the retirement first, so a joiner never observes
+        // the actor finished while the runtime still counts its task live.
+        if this.task_exit.is_none()
+            && let Some(task) = this.task.as_deref_mut()
+        {
+            match task.poll_join(cx) {
+                std::task::Poll::Ready(exit) => this.task_exit = Some(exit.err()),
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+            }
+        }
 
         match Pin::new(&mut this.inner).poll(cx) {
             std::task::Poll::Ready(Ok(res)) => {
@@ -395,6 +435,11 @@ impl<A: Actor> std::future::Future for ActorJoinFuture<'_, A> {
             std::task::Poll::Ready(Err(crate::channel::oneshot::RecvError::Closed)) => {
                 *this.terminal_state = true;
                 this.drop_abort_defused = true;
+                // A native actor task that ended without publishing (its
+                // spawn was denied, or the runtime shut down) reports why.
+                if let Some(Some(exit)) = this.task_exit.take() {
+                    return std::task::Poll::Ready(Err(exit));
+                }
                 let reason = this.closed_reason();
                 std::task::Poll::Ready(Err(JoinError::Cancelled(reason)))
             }
@@ -1183,6 +1228,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
             receiver: result_rx,
             inner: inner_weak,
             completed: false,
+            task: None,
         };
 
         Ok((handle, stored))
@@ -1315,10 +1361,154 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
             receiver: result_rx,
             inner: inner_weak,
             completed: false,
+            task: None,
         };
 
         Ok((handle, stored))
     }
+}
+
+impl Cx {
+    /// Spawns an actor as a task in this context's region, on the native
+    /// runtime or the lab runtime alike.
+    ///
+    /// The actor runs the same lifecycle as one spawned with
+    /// [`Scope::spawn_actor`](crate::cx::Scope::spawn_actor):
+    /// [`Actor::on_start`], then messages from a bounded mailbox of
+    /// `mailbox_capacity`, then [`Actor::on_stop`]. The region's close
+    /// cancels the actor.
+    ///
+    /// The runtime admits the task after this returns, as for [`Cx::spawn`]:
+    /// until then the handle's [`task_id`](ActorHandle::task_id) is the
+    /// provisional spawn id. [`actor_id`](ActorHandle::actor_id) is fixed
+    /// here and derives from that provisional id. A denied spawn joins as
+    /// [`JoinError::Cancelled`]. A panic in the actor is the task's outcome
+    /// and joins as [`JoinError::Panicked`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpawnError::RuntimeUnavailable`] when this context is not
+    /// attached to a running runtime or may not spawn.
+    pub fn spawn_actor<A: Actor>(
+        &self,
+        actor: A,
+        mailbox_capacity: usize,
+    ) -> Result<ActorHandle<A>, SpawnError> {
+        self.spawn_actor_task(mailbox_capacity, move |child_cx, mut cell| async move {
+            let result = crate::cx::scope::CatchUnwind {
+                inner: Box::pin(run_actor_loop(actor, child_cx, &mut cell)),
+            }
+            .await;
+            result.map_err(panicked_join_error)
+        })
+    }
+
+    /// Spawns a supervised actor as a task in this context's region, on the
+    /// native runtime or the lab runtime alike.
+    ///
+    /// Supervision is the same as for
+    /// [`Scope::spawn_supervised_actor`](crate::cx::Scope::spawn_supervised_actor):
+    /// `factory` builds the first actor and every restart, the mailbox
+    /// persists across restarts, and `strategy` decides what a crash does.
+    /// When supervision stops or escalates, the crash is the task's outcome
+    /// and joins as [`JoinError::Panicked`]. Admission is as for
+    /// [`Cx::spawn_actor`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpawnError::RuntimeUnavailable`] when this context is not
+    /// attached to a running runtime or may not spawn.
+    pub fn spawn_supervised_actor<A, F>(
+        &self,
+        mut factory: F,
+        strategy: crate::supervision::SupervisionStrategy,
+        mailbox_capacity: usize,
+    ) -> Result<ActorHandle<A>, SpawnError>
+    where
+        A: Actor,
+        F: FnMut() -> A + Send + 'static,
+    {
+        self.spawn_actor_task(mailbox_capacity, move |child_cx, mut cell| async move {
+            let (task_id, region_id) = (child_cx.task_id(), child_cx.region_id());
+            let result = crate::cx::scope::CatchUnwind {
+                inner: Box::pin(async move {
+                    let actor = factory();
+                    run_supervised_loop(
+                        actor,
+                        &mut factory,
+                        child_cx,
+                        &mut cell,
+                        crate::supervision::Supervisor::new(strategy),
+                        task_id,
+                        region_id,
+                    )
+                    .await
+                }),
+            }
+            .await;
+            result.unwrap_or_else(|payload| Err(panicked_join_error(payload)))
+        })
+    }
+
+    /// Spawns the task behind [`Self::spawn_actor`] and
+    /// [`Self::spawn_supervised_actor`]. `run` drives the actor over its
+    /// mailbox and returns the join result, which is published without
+    /// consulting the actor's Cx: aborting the actor cancels that context
+    /// before the final state is returned.
+    fn spawn_actor_task<A, R, Fut>(
+        &self,
+        mailbox_capacity: usize,
+        run: R,
+    ) -> Result<ActorHandle<A>, SpawnError>
+    where
+        A: Actor,
+        R: FnOnce(Cx, ActorCell<A::Message>) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<A, JoinError>> + Send + 'static,
+    {
+        let (msg_tx, msg_rx) = mpsc::channel::<A::Message>(mailbox_capacity);
+        let (result_tx, result_rx) = crate::channel::oneshot::channel::<Result<A, JoinError>>();
+        let actor_state = Arc::new(ActorStateCell::new(ActorState::Created));
+        let cell = ActorCell {
+            mailbox: msg_rx,
+            state: Arc::clone(&actor_state),
+        };
+        let state_for_task = Arc::clone(&actor_state);
+
+        let task = self.spawn(move |child_cx| async move {
+            let result = run(child_cx, cell).await;
+            state_for_task.store(ActorState::Stopped);
+            let panic = match &result {
+                Err(JoinError::Panicked(payload)) => Some(payload.message().to_owned()),
+                _ => None,
+            };
+            let _ = result_tx.send_blocking(result);
+            // Re-raise a crash, so the runtime records the task as panicked:
+            // its monitors see a panic and its links propagate it.
+            if let Some(message) = panic {
+                std::panic::resume_unwind(Box::new(message));
+            }
+        })?;
+
+        let task_id = task.task_id();
+        Ok(ActorHandle {
+            actor_id: ActorId::from_task(task_id),
+            sender: msg_tx,
+            state: actor_state,
+            task_id,
+            receiver: result_rx,
+            inner: std::sync::Weak::new(),
+            completed: false,
+            task: Some(task),
+        })
+    }
+}
+
+/// The join error for an actor whose run panicked. The payload is forgotten
+/// rather than dropped, as in the scope spawns: its destructor could panic.
+fn panicked_join_error(payload: Box<dyn std::any::Any + Send>) -> JoinError {
+    let message = crate::cx::scope::payload_to_string(&payload);
+    std::mem::forget(payload);
+    JoinError::Panicked(crate::types::PanicPayload::new(message))
 }
 
 /// Outcome of a supervised actor run.
@@ -1485,6 +1675,8 @@ mod tests {
             state: Arc::new(ActorStateCell::new(ActorState::Running)),
             terminal_state,
             drop_abort_defused: false,
+            task: None,
+            task_exit: None,
         }
     }
 
@@ -1574,6 +1766,15 @@ mod tests {
             self.stopped = true;
             Box::pin(async {})
         }
+    }
+
+    /// The native spawn's task handle leaves the handle's and the join
+    /// future's auto traits unchanged (br-asupersync-yvs9cx).
+    #[test]
+    fn actor_handle_and_join_future_keep_their_auto_traits() {
+        fn assert_send_sync_unpin<T: Send + Sync + Unpin>() {}
+        assert_send_sync_unpin::<ActorHandle<Counter>>();
+        assert_send_sync_unpin::<ActorJoinFuture<'static, Counter>>();
     }
 
     struct FairnessProbeActor {

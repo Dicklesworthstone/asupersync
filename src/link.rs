@@ -934,7 +934,7 @@ impl<Caps> crate::cx::Cx<Caps> {
         let slot = std::sync::Arc::new(LinkSlot::default());
         let peer_id = peer.id();
         let command = crate::monitor::WatchCommand::Link {
-            task: self.task_id(),
+            task: self.task_id().into(),
             task_region: self.region_id(),
             task_policy,
             peer,

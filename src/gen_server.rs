@@ -933,6 +933,11 @@ pub struct GenServerHandle<S: GenServer> {
     /// Where the runtime delivers the server's DOWN notifications and
     /// trapped exit signals.
     system: Arc<SystemLane<S>>,
+    /// The server task's runtime handle when it was spawned with
+    /// [`Cx::spawn_gen_server`]. Admission assigns the task's id and context
+    /// after the spawn returns, so the task id, abort and join resolve
+    /// through it.
+    task: Option<crate::runtime::TaskHandle<()>>,
 }
 
 /// Error returned when a call fails.
@@ -1317,17 +1322,29 @@ impl<S: GenServer> GenServerHandle<S> {
     }
 
     /// Returns the server's task ID.
+    ///
+    /// For a server spawned with [`Cx::spawn_gen_server`] this is the
+    /// provisional spawn id until the runtime admits the task, and the
+    /// task's runtime id afterwards, as for
+    /// [`TaskHandle::task_id`](crate::runtime::TaskHandle::task_id).
     #[inline]
     #[must_use]
     pub fn task_id(&self) -> TaskId {
-        self.task_id
+        self.task
+            .as_ref()
+            .map_or(self.task_id, crate::runtime::TaskHandle::task_id)
     }
 
     /// Returns true if the server has finished.
     #[inline]
     #[must_use]
     pub fn is_finished(&self) -> bool {
-        self.completed || self.receiver.is_ready() || self.receiver.is_closed()
+        self.completed
+            || ((self.receiver.is_ready() || self.receiver.is_closed())
+                && self
+                    .task
+                    .as_ref()
+                    .is_none_or(crate::runtime::TaskHandle::is_finished))
     }
 
     /// Signals the server to stop gracefully.
@@ -1358,11 +1375,17 @@ impl<S: GenServer> GenServerHandle<S> {
             for waker in cancel_wakers {
                 waker.wake_by_ref();
             }
+        } else if let Some(task) = &self.task {
+            task.abort_with_reason(crate::types::CancelReason::user("server aborted"));
         }
         self.sender.wake_receiver();
     }
 
     /// Wait for the server to finish and return its final state.
+    ///
+    /// For a server spawned with [`Cx::spawn_gen_server`], the join also
+    /// waits for the runtime to retire the server task, as
+    /// [`TaskHandle::join`](crate::runtime::TaskHandle::join) does.
     pub fn join<'a>(&'a mut self, _cx: &'a Cx) -> GenServerJoinFuture<'a, S> {
         let cx_inner = self.inner.clone();
         let receiver = &mut self.receiver;
@@ -1374,6 +1397,8 @@ impl<S: GenServer> GenServerHandle<S> {
             state: Arc::clone(&self.state),
             terminal_state,
             drop_abort_defused: false,
+            task: self.task.as_mut(),
+            task_exit: None,
         }
     }
 }
@@ -1389,6 +1414,10 @@ pub struct GenServerJoinFuture<'a, S: GenServer> {
     state: Arc<GenServerStateCell>,
     terminal_state: &'a mut bool,
     drop_abort_defused: bool,
+    /// The server task's runtime handle, for a natively spawned server.
+    task: Option<&'a mut crate::runtime::TaskHandle<()>>,
+    /// Set once that task has retired: the task's join error, if any.
+    task_exit: Option<Option<JoinError>>,
 }
 
 impl<S: GenServer> GenServerJoinFuture<'_, S> {
@@ -1413,6 +1442,8 @@ impl<S: GenServer> GenServerJoinFuture<'_, S> {
             for waker in cancel_wakers {
                 waker.wake_by_ref();
             }
+        } else if let Some(task) = self.task.as_deref() {
+            task.abort_with_reason(crate::types::CancelReason::user("server aborted"));
         }
         self.sender.wake_receiver();
     }
@@ -1429,6 +1460,17 @@ impl<S: GenServer> std::future::Future for GenServerJoinFuture<'_, S> {
         if *this.terminal_state {
             return std::task::Poll::Ready(Err(JoinError::PolledAfterCompletion));
         }
+        // A natively spawned server publishes its final state before its task
+        // retires. Wait for the retirement first, so a joiner never observes
+        // the server finished while the runtime still counts its task live.
+        if this.task_exit.is_none()
+            && let Some(task) = this.task.as_deref_mut()
+        {
+            match task.poll_join(cx) {
+                std::task::Poll::Ready(exit) => this.task_exit = Some(exit.err()),
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+            }
+        }
 
         match std::pin::Pin::new(&mut this.inner).poll(cx) {
             std::task::Poll::Ready(Ok(res)) => {
@@ -1439,6 +1481,11 @@ impl<S: GenServer> std::future::Future for GenServerJoinFuture<'_, S> {
             std::task::Poll::Ready(Err(oneshot::RecvError::Closed)) => {
                 *this.terminal_state = true;
                 this.drop_abort_defused = true;
+                // A native server task that ended without publishing (its
+                // spawn was denied, or the runtime shut down) reports why.
+                if let Some(Some(exit)) = this.task_exit.take() {
+                    return std::task::Poll::Ready(Err(exit));
+                }
                 let reason = this.closed_reason();
                 std::task::Poll::Ready(Err(JoinError::Cancelled(reason)))
             }
@@ -1787,7 +1834,7 @@ where
                 notification,
             }));
         }));
-        let (watcher, watcher_region) = (self.task_id, self.region_id);
+        let (watcher, watcher_region) = (self.holder(), self.region_id);
         crate::monitor::ServerWatchOpening::open(
             cx.spawn_gateway_handle(),
             target_id,
@@ -1866,7 +1913,7 @@ where
                 }));
             },
         ));
-        let (task, task_region) = (self.task_id, self.region_id);
+        let (task, task_region) = (self.holder(), self.region_id);
         crate::monitor::ServerWatchOpening::open(
             cx.spawn_gateway_handle(),
             peer_id,
@@ -1881,6 +1928,15 @@ where
             },
             |link_ref| crate::monitor::WatchCommand::Unlink { link_ref },
         )
+    }
+
+    /// The server task as the holder of a monitor or link. A natively spawned
+    /// server is named through its spawn handle, so the runtime holds the
+    /// watch under the task's admitted id.
+    fn holder(&self) -> crate::monitor::WatchTarget {
+        self.task
+            .as_ref()
+            .map_or_else(|| self.task_id.into(), crate::monitor::WatchTarget::from)
     }
 }
 
@@ -2147,39 +2203,15 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
                 }
                 Err(payload) => Err(payload),
             };
-            // Teardown result publication must not consult the child Cx: aborting
-            // the server cancels that context before the final state is returned.
-            // Publish Stopped before send_blocking wakes a waiting joiner.
             match result {
                 Ok(server_final) => {
-                    state_for_task.store(ActorState::Stopped);
-                    let _ = result_tx.send_blocking(Ok(server_final));
+                    publish_server_final(&state_for_task, result_tx, server_final);
                     Outcome::Ok(())
                 }
                 Err(payload) => {
-                    // The loop panicked before its graceful Phase-3 drain ran,
-                    // so the mailbox may still hold queued `Envelope::Call`
-                    // envelopes whose reply permits are armed obligations.
-                    // Dropping the receiver (when `cell` drops below) would drop
-                    // them un-aborted, tripping a secondary
-                    // `[ASUP-E101] OBLIGATION TOKEN LEAKED` panic inside the mpsc
-                    // Receiver's Drop during task teardown (a double-fault into
-                    // the executor drop path). Close and abort queued call
-                    // permits here, mirroring the graceful drain.
-                    cell.mailbox.close();
-                    while let Ok(envelope) = cell.mailbox.try_recv() {
-                        if let Envelope::Call { reply_permit, .. } = envelope {
-                            let _ = session::TrackedOneshotPermit::abort(reply_permit);
-                        }
-                    }
-                    // No handler runs after a panic: drop queued system messages.
-                    drop(cell.system.close());
-                    let msg = crate::cx::scope::payload_to_string(&payload);
+                    let panic_payload =
+                        publish_server_panic(&mut cell, &state_for_task, result_tx, &payload);
                     std::mem::forget(payload);
-                    let panic_payload = crate::types::PanicPayload::new(msg);
-                    state_for_task.store(ActorState::Stopped);
-                    let _ =
-                        result_tx.send_blocking(Err(JoinError::Panicked(panic_payload.clone())));
                     Outcome::Panicked(panic_payload)
                 }
             }
@@ -2199,6 +2231,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
             evicted_count: Arc::new(AtomicU64::new(0)),
             region_id,
             system,
+            task: None,
         };
 
         Ok((handle, stored))
@@ -2273,6 +2306,136 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
                 Err(NamedSpawnError::NameTaken(e))
             }
         }
+    }
+}
+
+// Teardown result publication must not consult the server's Cx: aborting the
+// server cancels that context before the final state is returned. Stopped is
+// published before send_blocking wakes a waiting joiner.
+
+/// Publishes the final state of a server whose loop returned.
+fn publish_server_final<S: GenServer>(
+    state: &GenServerStateCell,
+    result_tx: oneshot::Sender<Result<S, JoinError>>,
+    server_final: S,
+) {
+    state.store(ActorState::Stopped);
+    let _ = result_tx.send_blocking(Ok(server_final));
+}
+
+/// Publishes the panic of a server whose loop panicked, after resolving what
+/// it left queued, and returns the panic for the task's outcome.
+fn publish_server_panic<S: GenServer>(
+    cell: &mut GenServerCell<S>,
+    state: &GenServerStateCell,
+    result_tx: oneshot::Sender<Result<S, JoinError>>,
+    payload: &Box<dyn std::any::Any + Send>,
+) -> crate::types::PanicPayload {
+    // The loop panicked before its graceful Phase-3 drain ran, so the mailbox
+    // may still hold queued `Envelope::Call` envelopes whose reply permits are
+    // armed obligations. Dropping the receiver (when `cell` drops) would drop
+    // them un-aborted, tripping a secondary `[ASUP-E101] OBLIGATION TOKEN
+    // LEAKED` panic inside the mpsc Receiver's Drop during task teardown (a
+    // double-fault into the executor drop path). Close and abort queued call
+    // permits here, mirroring the graceful drain.
+    cell.mailbox.close();
+    while let Ok(envelope) = cell.mailbox.try_recv() {
+        if let Envelope::Call { reply_permit, .. } = envelope {
+            let _ = session::TrackedOneshotPermit::abort(reply_permit);
+        }
+    }
+    // No handler runs after a panic: drop queued system messages.
+    drop(cell.system.close());
+    let panic_payload =
+        crate::types::PanicPayload::new(crate::cx::scope::payload_to_string(payload));
+    state.store(ActorState::Stopped);
+    let _ = result_tx.send_blocking(Err(JoinError::Panicked(panic_payload.clone())));
+    panic_payload
+}
+
+impl Cx {
+    /// Spawns a GenServer as a task in this context's region, on the native
+    /// runtime or the lab runtime alike.
+    ///
+    /// The server runs the same lifecycle as one spawned with
+    /// [`Scope::spawn_gen_server`](crate::cx::Scope::spawn_gen_server):
+    /// [`GenServer::on_start`], then calls, casts and info messages from a
+    /// bounded mailbox of `mailbox_capacity`, then a drain and
+    /// [`GenServer::on_stop`]. The region's close cancels the server.
+    ///
+    /// The runtime admits the task after this returns, as for
+    /// [`Cx::spawn`]: until then the handle's
+    /// [`task_id`](GenServerHandle::task_id) is the provisional spawn id.
+    /// [`actor_id`](GenServerHandle::actor_id) is fixed here and derives from
+    /// that provisional id. Monitors and links set up through the handle are
+    /// held by the admitted task. A denied spawn joins as
+    /// [`JoinError::Cancelled`].
+    ///
+    /// Calls must come from a task outside the root region (see
+    /// [`CallError::Cancelled`]), so spawn the server where its callers run,
+    /// for example in a child region.
+    ///
+    /// ```ignore
+    /// let mut counter = cx.spawn_gen_server(Counter::default(), 32)?;
+    /// counter.cast(&cx, Add(2)).await?;
+    /// let total = counter.call(&cx, Get).await?;
+    /// counter.stop();
+    /// let final_state = counter.join(&cx).await?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpawnError::RuntimeUnavailable`] when this context is not
+    /// attached to a running runtime or may not spawn.
+    pub fn spawn_gen_server<S: GenServer>(
+        &self,
+        server: S,
+        mailbox_capacity: usize,
+    ) -> Result<GenServerHandle<S>, SpawnError> {
+        let overflow_policy = server.cast_overflow_policy();
+        let (msg_tx, msg_rx) = mpsc::channel::<Envelope<S>>(mailbox_capacity);
+        let (result_tx, result_rx) = oneshot::channel::<Result<S, JoinError>>();
+        let server_state = Arc::new(GenServerStateCell::new(ActorState::Created));
+        let system = Arc::new(SystemLane::new());
+        let mut cell = GenServerCell {
+            mailbox: msg_rx,
+            state: Arc::clone(&server_state),
+            _keep_alive: msg_tx.clone(),
+            system: Arc::clone(&system),
+        };
+        let state_for_task = Arc::clone(&server_state);
+
+        let task = self.spawn(move |child_cx| async move {
+            let result = crate::cx::scope::CatchUnwind {
+                inner: Box::pin(run_gen_server_loop(server, child_cx, &mut cell)),
+            }
+            .await;
+            match result {
+                Ok(server_final) => publish_server_final(&state_for_task, result_tx, server_final),
+                Err(payload) => {
+                    publish_server_panic(&mut cell, &state_for_task, result_tx, &payload);
+                    // Re-raise, so the runtime records the task as panicked:
+                    // its monitors see a panic and its links propagate it.
+                    std::panic::resume_unwind(payload);
+                }
+            }
+        })?;
+
+        let task_id = task.task_id();
+        Ok(GenServerHandle {
+            actor_id: ActorId::from_task(task_id),
+            sender: msg_tx,
+            state: server_state,
+            task_id,
+            receiver: result_rx,
+            inner: std::sync::Weak::new(),
+            completed: false,
+            overflow_policy,
+            evicted_count: Arc::new(AtomicU64::new(0)),
+            region_id: self.region_id(),
+            system,
+            task: Some(task),
+        })
     }
 }
 
@@ -2730,6 +2893,15 @@ mod tests {
             }
             Box::pin(async {})
         }
+    }
+
+    /// The native spawn's task handle leaves the handle's and the join
+    /// future's auto traits unchanged (br-asupersync-yvs9cx).
+    #[test]
+    fn gen_server_handle_and_join_future_keep_their_auto_traits() {
+        fn assert_send_sync_unpin<T: Send + Sync + Unpin>() {}
+        assert_send_sync_unpin::<GenServerHandle<Counter>>();
+        assert_send_sync_unpin::<GenServerJoinFuture<'static, Counter>>();
     }
 
     struct FairnessProbeServer {
