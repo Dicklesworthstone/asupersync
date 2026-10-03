@@ -183,7 +183,7 @@
       "file": "examples/README.md",
       "loc": {
         "start": 1,
-        "end": 134
+        "end": 135
       },
       "kind": "markdown",
       "demonstrates": [
@@ -703,7 +703,7 @@
       "file": "examples/scenarios/custom_latency_model.yaml",
       "loc": {
         "start": 1,
-        "end": 64
+        "end": 65
       },
       "kind": "scenario-yaml",
       "demonstrates": [

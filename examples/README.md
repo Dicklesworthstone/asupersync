@@ -80,15 +80,16 @@ every declared network, cancellation, or fault effect or schedules the named
 workload. Include paths are validated but not merged. Only participants whose
 role is exactly `sender`, `receiver`, `swarm`, `supervisor`, `worker`,
 `saga-coordinator`, `saga-participant`, `primary`, `replica`,
-`lease-grantor` or `lease-holder` run: senders and receivers as lab tasks on
-bounded two-phase `mpsc` channels, a swarm as many short lab tasks,
-supervisors as managed supervisors that restart failing workers, saga
+`lease-grantor`, `lease-holder`, `hub` or `peer` run: senders and receivers
+as lab tasks on bounded two-phase `mpsc` channels, a swarm as many short lab
+tasks, supervisors as managed supervisors that restart failing workers, saga
 coordinators as `remote::Saga` runs that compensate in reverse when a
 participant refuses or a message is lost, primaries as log shippers that
-catch lagging replicas up, and lease holders that acquire, renew and release
-their grantor's lease while the run checks that no two hold it at once. The
-`network` preset and per-link latency and loss delay or drop saga,
-replication and lease messages; `partition` and `heal` faults between two
+catch lagging replicas up, lease holders that acquire, renew and release
+their grantor's lease while the run checks that no two hold it at once, and
+hubs that ping their peers and time the echoes. The `network` preset and
+per-link latency and loss delay or drop saga, replication, lease and hub
+messages; `partition` and `heal` faults between two
 participants cut and restore their links, and `clock_skew` and `clock_reset`
 move a lease role's clock. No other fault changes the workload. Other roles
 run nothing (`Steps: 0 (no workload ran)`). See the
@@ -110,8 +111,8 @@ run nothing (`Steps: 0 (no workload ran)`). See the
   — replication fixture; `node-b` misses `node-a`'s batches while their link
   is cut and catches up after the heal. Its include is not merged.
 - [`scenarios/custom_latency_model.yaml`](scenarios/custom_latency_model.yaml) —
-  network-latency fixture; its hub and peer roles are unbound, so its links
-  shape no traffic.
+  network-latency fixture; hub `a` pings peers `b`, `c` and `d`, whose round
+  trips follow their fixed, uniform and normal link latencies.
 - [`scenarios/host_crash_restart.yaml`](scenarios/host_crash_restart.yaml) —
   supervision fixture; its `supervisor` restarts each `worker` after one
   failure, while the crash and restart actions stay trace records.
