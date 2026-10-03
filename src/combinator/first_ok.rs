@@ -437,6 +437,26 @@ macro_rules! first_ok {
             let mut __first_ok_index = 0usize;
 
             $(
+                // Never start an attempt once the ambient task is cancelled
+                // (the module docs' "check cancellation before each attempt").
+                if let ::std::option::Option::Some(__first_ok_reason) =
+                    $crate::cx::Cx::current().and_then(|__first_ok_cx| {
+                        __first_ok_cx.checkpoint().err().map(|_| {
+                            __first_ok_cx.cancel_reason().unwrap_or_else(|| {
+                                $crate::types::CancelReason::user("first_ok cancelled")
+                            })
+                        })
+                    })
+                {
+                    __first_ok_failures.push((
+                        __first_ok_index,
+                        $crate::combinator::first_ok::FirstOkFailure::Cancelled(__first_ok_reason),
+                    ));
+                    return $crate::combinator::first_ok::FirstOkResult::failure(
+                        __first_ok_failures,
+                        __first_ok_total,
+                    );
+                }
                 match ($operation).await {
                     $crate::types::Outcome::Ok(__first_ok_value) => {
                         return $crate::combinator::first_ok::FirstOkResult::success(
@@ -859,6 +879,44 @@ mod tests {
         assert!(!result.is_success());
         assert!(result.was_cancelled);
         assert_eq!(result.failures.len(), 2);
+    }
+
+    /// The macro never looked at the caller's cancellation, so a cancelled
+    /// task went on through the whole fallback chain.
+    #[test]
+    fn first_ok_macro_starts_no_attempt_after_the_caller_is_cancelled() {
+        let cx = crate::cx::Cx::for_testing();
+        let _current = crate::cx::Cx::set_current(Some(cx.clone()));
+        let started = Arc::new(AtomicUsize::new(0));
+        let second = Arc::clone(&started);
+
+        let result = futures_lite::future::block_on(first_ok!(
+            async move {
+                cx.set_cancel_reason(CancelReason::shutdown());
+                Outcome::<i32, &str>::Err("e1")
+            },
+            async move {
+                second.fetch_add(1, Ordering::Relaxed);
+                Outcome::<i32, &str>::Ok(2)
+            },
+        ));
+
+        assert_eq!(
+            started.load(Ordering::Relaxed),
+            0,
+            "the second attempt ran after the cancellation"
+        );
+        assert!(!result.is_success());
+        assert!(result.was_cancelled);
+        assert_eq!(result.failures.len(), 2);
+        assert!(matches!(
+            result.failures[0],
+            (0, FirstOkFailure::Error("e1"))
+        ));
+        assert!(matches!(
+            &result.failures[1],
+            (1, FirstOkFailure::Cancelled(reason)) if *reason == CancelReason::shutdown()
+        ));
     }
 
     #[test]
