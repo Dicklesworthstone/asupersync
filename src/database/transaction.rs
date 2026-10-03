@@ -224,8 +224,21 @@ mod pg {
         sync::atomic::{AtomicBool, Ordering},
     };
 
+    const HELPER_ROLLBACK_MASKED_POLLS: u32 = 1024;
+
     fn rollback_required_error() -> PgError {
         PgError::Protocol("transaction must roll back before commit".to_string())
+    }
+
+    /// Roll back before propagating the body's outcome, with cancellation
+    /// masked for a bounded number of polls as in the SQLite helper. The body
+    /// may have cancelled `cx`; `rollback` then stopped at its first
+    /// checkpoint and sent nothing, so the transaction and its locks stayed
+    /// open until the connection's next operation.
+    async fn rollback_before_propagating(tx: PgTransaction<'_>, cx: &Cx) {
+        let _ =
+            crate::combinator::commit_section(cx, HELPER_ROLLBACK_MASKED_POLLS, tx.rollback(cx))
+                .await;
     }
 
     /// Run a closure inside a PostgreSQL transaction.
@@ -260,6 +273,7 @@ mod pg {
         match result {
             Outcome::Ok(value) => {
                 if tx.requires_rollback_before_commit() {
+                    rollback_before_propagating(tx, cx).await;
                     return Outcome::Err(rollback_required_error());
                 }
                 match tx.commit(cx).await {
@@ -271,15 +285,15 @@ mod pg {
             }
             Outcome::Err(e) => {
                 // Best-effort rollback; drop will handle it if this fails.
-                let _ = tx.rollback(cx).await;
+                rollback_before_propagating(tx, cx).await;
                 Outcome::Err(e)
             }
             Outcome::Cancelled(r) => {
-                let _ = tx.rollback(cx).await;
+                rollback_before_propagating(tx, cx).await;
                 Outcome::Cancelled(r)
             }
             Outcome::Panicked(p) => {
-                let _ = tx.rollback(cx).await;
+                rollback_before_propagating(tx, cx).await;
                 Outcome::Panicked(p)
             }
         }
@@ -748,8 +762,18 @@ mod mysql {
         sync::atomic::{AtomicBool, Ordering},
     };
 
+    const HELPER_ROLLBACK_MASKED_POLLS: u32 = 1024;
+
     fn rollback_required_error() -> MySqlError {
         MySqlError::Protocol("transaction must roll back before commit".to_string())
+    }
+
+    /// Roll back with cancellation masked for a bounded number of polls; see
+    /// the PostgreSQL helper.
+    async fn rollback_before_propagating(tx: MySqlTransaction<'_>, cx: &Cx) {
+        let _ =
+            crate::combinator::commit_section(cx, HELPER_ROLLBACK_MASKED_POLLS, tx.rollback(cx))
+                .await;
     }
 
     /// Run a closure inside a MySQL transaction.
@@ -776,6 +800,7 @@ mod mysql {
         match result {
             Outcome::Ok(value) => {
                 if tx.requires_rollback_before_commit() {
+                    rollback_before_propagating(tx, cx).await;
                     return Outcome::Err(rollback_required_error());
                 }
                 match tx.commit(cx).await {
@@ -786,15 +811,15 @@ mod mysql {
                 }
             }
             Outcome::Err(e) => {
-                let _ = tx.rollback(cx).await;
+                rollback_before_propagating(tx, cx).await;
                 Outcome::Err(e)
             }
             Outcome::Cancelled(r) => {
-                let _ = tx.rollback(cx).await;
+                rollback_before_propagating(tx, cx).await;
                 Outcome::Cancelled(r)
             }
             Outcome::Panicked(p) => {
-                let _ = tx.rollback(cx).await;
+                rollback_before_propagating(tx, cx).await;
                 Outcome::Panicked(p)
             }
         }

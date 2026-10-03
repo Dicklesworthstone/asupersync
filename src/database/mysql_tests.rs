@@ -1583,6 +1583,44 @@ mod tests {
         assert_eq!(start_sql, "START TRANSACTION READ ONLY");
     }
 
+    /// with_mysql_transaction rolled back with the body's Cx. Once the body
+    /// had cancelled it, rollback() stopped at its first checkpoint and sent
+    /// nothing, so the transaction and its locks stayed open.
+    #[test]
+    fn transaction_helper_rolls_back_after_its_body_cancelled_the_cx() {
+        const SERVER_STATUS_IN_TRANS: u16 = 0x0001;
+
+        init_test("mysql_transaction_helper_rolls_back_after_its_body_cancelled_the_cx");
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let cx = Cx::for_testing();
+
+        let server = std::thread::spawn(move || {
+            peer.set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+            assert_eq!(
+                command_sql(&read_client_command(&mut peer)),
+                "START TRANSACTION"
+            );
+            write_response_packet(&mut peer, 1, ok_packet_payload(0, SERVER_STATUS_IN_TRANS));
+            assert_eq!(command_sql(&read_client_command(&mut peer)), "ROLLBACK");
+            write_response_packet(&mut peer, 1, ok_packet_payload(0, 0));
+        });
+
+        let outcome = run(crate::database::transaction::with_mysql_transaction(
+            &mut conn,
+            &cx,
+            |_tx: &mut MySqlTransaction<'_>, cx: &Cx| {
+                cx.cancel_fast(CancelKind::User);
+                async { Outcome::<(), MySqlError>::Err(MySqlError::Protocol("body failed".into())) }
+            },
+        ));
+        match outcome {
+            Outcome::Err(MySqlError::Protocol(message)) => assert_eq!(message, "body failed"),
+            other => panic!("the body's error is returned, got {other:?}"),
+        }
+        server.join().expect("the ROLLBACK reached the server");
+    }
+
     /// MariaDB before 11.1 and MySQL before 5.7.20 have no
     /// transaction_isolation variable. Both reads in begin_with_isolation
     /// queried it, so the call always failed there with ERR 1193.
