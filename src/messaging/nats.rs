@@ -3370,7 +3370,6 @@ enum NatsSupervisorCommand {
         reply: oneshot::Sender<Result<(), NatsError>>,
     },
     Process {
-        cx: Cx,
         after_epoch: u64,
         reply: oneshot::Sender<Result<(), NatsError>>,
     },
@@ -3715,8 +3714,7 @@ impl NatsClient {
             NatsClientMode::Supervised(supervisor) => {
                 let after_epoch = self.state.processed_epoch.load(Ordering::Acquire);
                 supervisor
-                    .request(cx, move |cx, reply| NatsSupervisorCommand::Process {
-                        cx,
+                    .request(cx, move |_, reply| NatsSupervisorCommand::Process {
                         after_epoch,
                         reply,
                     })
@@ -3777,6 +3775,7 @@ async fn run_nats_supervisor(
     mut commands: mpsc::Receiver<NatsSupervisorCommand>,
 ) {
     let mut streak = ReconnectStreak::default();
+    let mut process_waiters = Vec::new();
     connection.state.supervised.store(true, Ordering::Release);
     loop {
         let pumped = match connection.flush_dropped_subscriptions(supervisor_cx).await {
@@ -3786,14 +3785,17 @@ async fn run_nats_supervisor(
         match pumped {
             Ok(processed) => {
                 if processed > 0 {
-                    connection
+                    let epoch = connection
                         .state
                         .processed_epoch
-                        .fetch_add(processed, Ordering::AcqRel);
+                        .fetch_add(processed, Ordering::AcqRel)
+                        .saturating_add(processed);
+                    answer_process_waiters(&mut process_waiters, epoch);
                     continue;
                 }
             }
             Err(error) => {
+                fail_process_waiters(&mut process_waiters);
                 if !recover_supervisor_connection(
                     supervisor_cx,
                     &mut connection,
@@ -3821,6 +3823,7 @@ async fn run_nats_supervisor(
         match selected {
             Ok(Either::Left(Ok(()))) => {}
             Ok(Either::Left(Err(error))) => {
+                fail_process_waiters(&mut process_waiters);
                 if !recover_supervisor_connection(
                     supervisor_cx,
                     &mut connection,
@@ -3835,34 +3838,39 @@ async fn run_nats_supervisor(
             Ok(Either::Right(Ok(command))) => {
                 // A subscription dropped while the supervisor waited is
                 // unsubscribed before the command writes anything.
-                if let Err(error) = connection.flush_dropped_subscriptions(supervisor_cx).await
-                    && !recover_supervisor_connection(
+                if let Err(error) = connection.flush_dropped_subscriptions(supervisor_cx).await {
+                    fail_process_waiters(&mut process_waiters);
+                    if !recover_supervisor_connection(
                         supervisor_cx,
                         &mut connection,
                         &mut streak,
                         error,
                     )
                     .await
-                {
-                    break;
+                    {
+                        break;
+                    }
                 }
-                if !handle_supervisor_command(&mut connection, command).await {
+                if !handle_supervisor_command(&mut connection, command, &mut process_waiters).await
+                {
                     break;
                 }
                 // A command cut off mid-exchange (a cancelled or failed write,
                 // or a PING whose PONG never came) leaves the connection marked
                 // unusable. The stream may end in a partial frame that the next
                 // PONG would complete, so replace it instead of reading on.
-                if !connection.connected
-                    && !recover_supervisor_connection(
+                if !connection.connected {
+                    fail_process_waiters(&mut process_waiters);
+                    if !recover_supervisor_connection(
                         supervisor_cx,
                         &mut connection,
                         &mut streak,
                         NatsError::NotConnected,
                     )
                     .await
-                {
-                    break;
+                    {
+                        break;
+                    }
                 }
             }
             Ok(Either::Right(Err(_))) | Err(_) => break,
@@ -3936,9 +3944,35 @@ async fn recover_supervisor_connection(
     reconnected
 }
 
+/// A parked supervised `process()` call: the epoch it saw, and its reply.
+type ProcessWaiter = (u64, oneshot::Sender<Result<(), NatsError>>);
+
+/// Answers each parked `process()` call once the supervisor has handled a
+/// frame after the epoch the call saw, and forgets callers that stopped
+/// waiting.
+fn answer_process_waiters(waiters: &mut Vec<ProcessWaiter>, epoch: u64) {
+    let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(waiters)
+        .into_iter()
+        .filter(|(_, reply)| !reply.is_closed())
+        .partition(|(after_epoch, _)| epoch > *after_epoch);
+    *waiters = waiting;
+    for (_, reply) in ready {
+        let _ = reply.send_blocking(Ok(()));
+    }
+}
+
+/// Fails every parked `process()` call when the connection breaks, as the
+/// read it used to make would have.
+fn fail_process_waiters(waiters: &mut Vec<ProcessWaiter>) {
+    for (_, reply) in waiters.drain(..) {
+        let _ = reply.send_blocking(Err(NatsError::NotConnected));
+    }
+}
+
 async fn handle_supervisor_command(
     connection: &mut NatsConnection,
     command: NatsSupervisorCommand,
+    process_waiters: &mut Vec<ProcessWaiter>,
 ) -> bool {
     if command.caller_gave_up() {
         return true;
@@ -4029,25 +4063,20 @@ async fn handle_supervisor_command(
         NatsSupervisorCommand::Ping { cx, reply } => {
             let _ = reply.send_blocking(connection.ping(&cx).await);
         }
-        NatsSupervisorCommand::Process {
-            cx,
-            after_epoch,
-            reply,
-        } => {
-            let already_processed =
-                connection.state.processed_epoch.load(Ordering::Acquire) > after_epoch;
-            let result = if already_processed {
-                Ok(())
+        NatsSupervisorCommand::Process { after_epoch, reply } => {
+            // The supervisor's own frame loop answers it. Reading the socket
+            // here held the supervisor until the next inbound frame even when
+            // the caller had stopped waiting (a timeout drops the future and
+            // does not cancel its Cx): for a JetStream pull, until the
+            // server's next PING, minutes later, with every command queued.
+            if !connection.connected {
+                let _ = reply.send_blocking(Err(NatsError::NotConnected));
+            } else if connection.state.processed_epoch.load(Ordering::Acquire) > after_epoch {
+                let _ = reply.send_blocking(Ok(()));
             } else {
-                connection.process(&cx).await
-            };
-            if result.is_ok() && !already_processed {
-                connection
-                    .state
-                    .processed_epoch
-                    .fetch_add(1, Ordering::AcqRel);
+                process_waiters.retain(|(_, waiting)| !waiting.is_closed());
+                process_waiters.push((after_epoch, reply));
             }
-            let _ = reply.send_blocking(result);
         }
         NatsSupervisorCommand::Close { cx, reply } => {
             let result = connection.close(&cx).await;

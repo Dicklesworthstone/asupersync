@@ -1166,3 +1166,91 @@ fn nats_supervisor_skips_a_publish_whose_caller_gave_up() {
     assert!(completed.is_ok(), "abandoned client task did not finish");
     assert!(drained, "abandoned runtime did not drain");
 }
+
+/// A supervised `process()` whose caller stopped waiting (a timeout drops
+/// the future; it does not cancel the caller's Cx) kept the supervisor
+/// reading the socket until the next inbound frame, so every later command
+/// waited for it. A JetStream pull ends every round with such a timeout, and
+/// the next frame is often the server's PING, minutes later.
+#[test]
+fn nats_timed_out_process_does_not_hold_the_supervisor() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind process listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = thread::spawn(move || {
+        let mut stream =
+            accept_within(&listener, Duration::from_secs(5)).expect("accept process client");
+        send_info(&mut stream, "process-timeout");
+        let mut reader = BufReader::new(stream);
+        assert!(read_nats_line(&mut reader).starts_with("CONNECT "));
+        // Stay silent. The PUB must arrive without any frame from here; if
+        // it has not after 3 s, a PING releases a supervisor stuck reading,
+        // so the test fails instead of hanging.
+        reader
+            .get_mut()
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .expect("set silent window");
+        let mut needed_ping = false;
+        let publish = loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) => panic!("client closed before publishing"),
+                Ok(_) if line.starts_with("PUB ") => break line.trim_end().to_string(),
+                Ok(_) => {}
+                Err(_) => {
+                    needed_ping = true;
+                    reader
+                        .get_mut()
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .expect("set read timeout");
+                    reader.get_mut().write_all(b"PING\r\n").expect("write PING");
+                    reader.get_mut().flush().expect("flush PING");
+                }
+            }
+        };
+        assert_eq!(read_nats_line(&mut reader), "ok");
+        let closed = closed_by_client(&mut reader, Duration::from_secs(5));
+        (needed_ping, publish, closed)
+    });
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let (done_tx, done_rx) = mpsc::channel();
+    let task = runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("runtime task context");
+        let mut config =
+            NatsConfig::from_url(&format!("nats://{addr}")).expect("parse process URL");
+        config.auto_reconnect = false;
+        let mut client = NatsClient::connect_with_config(&cx, config)
+            .await
+            .expect("connect supervised client");
+        let timed_out =
+            asupersync::time::timeout(cx.now(), Duration::from_millis(100), client.process(&cx))
+                .await;
+        assert!(
+            timed_out.is_err(),
+            "the silent server sent nothing to process"
+        );
+        client
+            .publish(&cx, "after.timeout", b"ok")
+            .await
+            .expect("publish after the timed-out process");
+        client.close(&cx).await.expect("close supervised client");
+        let _ = done_tx.send(());
+    });
+
+    let completed = done_rx.recv_timeout(Duration::from_secs(15));
+    let peer = server.join();
+    drop(task);
+    let drained = runtime.shutdown_timeout(Duration::from_secs(3));
+    let (needed_ping, publish, closed) = peer.expect("process peer joined");
+    assert_eq!(publish, "PUB after.timeout 2");
+    assert!(
+        !needed_ping,
+        "the publish waited until an inbound frame released the supervisor"
+    );
+    assert!(closed, "client did not close");
+    assert!(completed.is_ok(), "process client task did not finish");
+    assert!(drained, "process runtime did not drain");
+}
