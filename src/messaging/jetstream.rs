@@ -1943,10 +1943,21 @@ impl Consumer {
             return None;
         }
 
-        // Parse from the tail: pending(-1), timestamp(-2), consumer_seq(-3),
-        // stream_seq(-4), delivered(-5).
-        let delivered: u32 = parts[parts.len() - 5].parse().ok()?;
-        let sequence: u64 = parts[parts.len() - 4].parse().ok()?;
+        // The v2 form, $JS.ACK.<domain>.<account hash>.<stream>.<consumer>.
+        // <delivered>.<stream_seq>.<consumer_seq>.<timestamp>.<pending>.<token>,
+        // has at least 12 tokens and ends in a random token. Read from the tail,
+        // it put the stream sequence in `delivered` (dropping the message once
+        // it no longer fit a u32) and the consumer sequence in `sequence`. As
+        // nats.go does, 12 or more tokens are read by position. Shorter
+        // subjects are read from the tail: pending(-1), timestamp(-2),
+        // consumer_seq(-3), stream_seq(-4), delivered(-5).
+        let (delivered, sequence) = if parts.len() >= 12 {
+            (parts[6], parts[7])
+        } else {
+            (parts[parts.len() - 5], parts[parts.len() - 4])
+        };
+        let delivered: u32 = delivered.parse().ok()?;
+        let sequence: u64 = sequence.parse().ok()?;
 
         Some(JsMessage {
             subject: msg.subject,
@@ -4548,6 +4559,26 @@ mod tests {
         // delivered=1 (5th from right), stream_seq=42 (4th from right)
         assert_eq!(js_msg.delivered, 1);
         assert_eq!(js_msg.sequence, 42);
+    }
+
+    /// The v2 ack subject carries a domain and an account hash in front and a
+    /// random token at the end. Read from the tail, its stream sequence became
+    /// `delivered` and its consumer sequence became `sequence`.
+    #[test]
+    fn parse_js_message_v2_ack_subject() {
+        let reply =
+            "$JS.ACK.hub.ACC9H4SH.orders.processor.3.4294967396.14.1713790000000001234.2.rTk9";
+        let msg = Message {
+            subject: "orders.created".to_string(),
+            sid: 1,
+            headers: None,
+            payload: b"order".to_vec(),
+            reply_to: Some(reply.to_string()),
+        };
+        let js_msg = Consumer::parse_js_message(msg, None).expect("a v2 ack subject parses");
+        assert_eq!(js_msg.delivered, 3);
+        assert_eq!(js_msg.sequence, 4_294_967_396);
+        assert_eq!(js_msg.reply_subject, reply);
     }
 
     #[test]
