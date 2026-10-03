@@ -549,6 +549,13 @@ fn grpc_request_header_is_allowed(key: &str) -> bool {
         || key.eq_ignore_ascii_case("grpc-encoding")
         || key.eq_ignore_ascii_case("grpc-accept-encoding")
         || key.eq_ignore_ascii_case("grpc-message-type")
+        // Sent by grpc-go and grpc-java on retry and hedging attempts
+        // (gRFC A6); refusing it failed every retried call with a
+        // non-retryable INVALID_ARGUMENT.
+        || key.eq_ignore_ascii_case("grpc-previous-rpc-attempts")
+        // OpenCensus tracing and tag propagation.
+        || key.eq_ignore_ascii_case("grpc-trace-bin")
+        || key.eq_ignore_ascii_case("grpc-tags-bin")
 }
 
 fn matches_media_type_prefix(value: &str, prefix: &str) -> bool {

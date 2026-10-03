@@ -1209,6 +1209,22 @@ mod tests {
         crate::test_complete!("enforce_metadata_size_limit_rejects_reserved_grpc_header");
     }
 
+    /// grpc-go and grpc-java send grpc-previous-rpc-attempts on retries and
+    /// hedged attempts, and OpenCensus sends grpc-trace-bin/grpc-tags-bin.
+    /// All were refused as reserved, failing retried and traced calls.
+    #[test]
+    fn enforce_metadata_size_limit_accepts_request_side_grpc_headers() {
+        init_test("enforce_metadata_size_limit_accepts_request_side_grpc_headers");
+        let mut metadata = super::super::streaming::Metadata::new();
+        metadata.insert("grpc-previous-rpc-attempts", "1");
+        metadata.insert_bin("grpc-trace-bin", Bytes::from_static(&[0, 1, 2]));
+        metadata.insert_bin("grpc-tags-bin", Bytes::from_static(&[3]));
+
+        enforce_metadata_size_limit(&metadata, 8 * 1024)
+            .expect("request-side grpc-* headers are accepted");
+        crate::test_complete!("enforce_metadata_size_limit_accepts_request_side_grpc_headers");
+    }
+
     #[test]
     fn enforce_metadata_size_limit_rejects_non_grpc_content_type() {
         init_test("enforce_metadata_size_limit_rejects_non_grpc_content_type");
