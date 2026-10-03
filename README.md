@@ -317,6 +317,11 @@ async fn my_task(cx: &Cx) {
 ```
 
 Swap `Cx` to change interpretation: production vs. lab vs. distributed.
+The public I/O entry points are not capability-checked today:
+`TcpStream::connect(addr)` and `File::open(path)` take no `Cx`, and
+`spawn_blocking` runs its closure even when the current context's
+capabilities are restricted. Closing that gap is tracked as
+`asupersync-issue65-criticisms-kpmoy5.5`.
 This is not a blanket claim that every internal helper is `Cx`-threaded:
 host-boundary code such as OS entropy for temporary file names, legacy sync DNS
 wall-clock timing, and test/support harnesses must keep their authority
@@ -330,6 +335,14 @@ The lab runtime provides:
 - **Deterministic scheduling**: same seed → same execution
 - **Trace capture/replay**: debug production issues locally
 - **Schedule exploration**: race-guided deterministic seed exploration with Mazurkiewicz/Foata trace-class deduplication
+- **Invariant oracles**: every `LabRuntime` report checks 9 of the 24 built-in
+  oracles from runtime state: task leak, obligation leak, quiescence, loser
+  drain, finalizer, region tree, deadline monotonicity, the cancellation
+  protocol and DOWN-message order
+  (`lab::oracle::LAB_RUNTIME_FED_ORACLE_NAMES`). Nothing in the runtime feeds
+  the other 15 yet (channel atomicity, waker dedup, actor and supervision
+  oracles among them); reports list them as passed and count them as not fed
+  (asupersync-52hxjz).
 
 Concurrency bugs become reproducible test failures.
 
@@ -462,6 +475,8 @@ P_H0(∃ t : E_t ≥ 1/α) ≤ α
 So you can "peek" after every scheduling step and still control type-I error, which is exactly what you want in a deterministic scheduler + oracle setting.
 
 `LabRuntime` feeds the monitor one observation per run that advances the lab (`run_until_quiescent_with_report`); a plain `report()` re-reads the same state and adds no evidence. The rejected invariants are available from `runtime.oracles.eprocess_rejected_invariants()`.
+
+What it does not add: each observation is the oracle's own pass/fail verdict for that run (`EProcessMonitor::observe_report`), and a lab run is deterministic. The e-process can therefore reject only an invariant whose oracle has already reported a violation. It summarizes the violation rate across runs and seeds with an anytime-valid bound. It does not detect anything the oracle verdicts miss.
 
 ### Distribution-Free Conformal Calibration for Lab Metrics
 
@@ -1899,8 +1914,8 @@ Asupersync has formal semantics backing its engineering.
 | **Traces** | Mazurkiewicz equivalence (partial orders) | DPOR-style guided exploration (not certified-optimal DPOR), stable replay |
 | **Cancellation** | Two-player game with budgets | Scoped completeness when modeled responsiveness assumptions hold and budgets are sufficient |
 | **Adaptive scheduling** | Discounted UCB1 over `{4, 8, 16, 32, 64}` | Default-on dynamic preemption control with deterministic epoch updates |
-| **Drain certificates** | Signed-step range bounds + empirical phase diagnostics | Conditional, auditable progress evidence for cancellation drain |
-| **Structural diagnostics** | Spectral graph theory + conformal + e-processes | Early warning on wait-graph fragmentation with calibrated alarms |
+| **Drain certificates** | Signed-step range bounds + empirical phase diagnostics | Conditional, auditable progress evidence for cancellation drain; the current-horizon tail bounds are the trivial `1`, so the phase labels carry the signal |
+| **Structural diagnostics** | Spectral graph theory + conformal + e-processes | Early warning on wait-graph fragmentation with calibrated alarms, computed on demand through `Diagnostics` |
 
 See [`asupersync_v4_formal_semantics.md`](./asupersync_v4_formal_semantics.md) for the complete operational semantics.
 
@@ -1913,8 +1928,8 @@ Asupersync is intentionally "math-forward": it uses advanced math and theory-gra
 | Mechanism | Current status |
 |-----------|----------------|
 | Discounted-UCB1 scheduler control | Implemented, default-on runtime scheduling control surface |
-| Drain progress diagnostics | Implemented cancellation progress diagnostics |
-| Spectral wait-graph health | Implemented observability diagnostic; advisory early warning, not a standalone deadlock proof |
+| Drain progress diagnostics | Implemented cancellation progress diagnostics; the HTTP/1 and HTTP/2 graceful-drain supervisor uses them, and the scheduler only with `enable_governor` (off by default). The current-horizon tail bounds are the trivial `1` |
+| Spectral wait-graph health | Implemented observability diagnostic, computed when `Diagnostics::analyze_structural_health` is called; the scheduler runs its own copy only with `enable_governor` (off by default). Advisory early warning, not a standalone deadlock proof |
 | Mazurkiewicz/Foata trace canonicalization and DPOR | Implemented lab/trace exploration machinery |
 | Persistent homology trace scoring | Implemented lab exploration prototype; used to prioritize interesting schedules, not a production runtime gate |
 | Sheaf-style saga consistency and TLA+ export | Implemented analysis/export APIs for verification workflows; the in-process saga executor does not run the sheaf check |
@@ -1931,7 +1946,7 @@ Asupersync is intentionally "math-forward": it uses advanced math and theory-gra
 
 `src/observability/spectral_health.rs` computes Laplacian-spectrum diagnostics and an early-warning severity model (`none/watch/warning/critical`) over the live wait graph. It combines spectral trend analysis, nonparametric dependence tests, split-conformal next-step bounds, and an anytime-valid e-process, so structural degradation can be detected with calibrated confidence before hard failures.
 
-Status: production-facing observability path. The classification is intentionally advisory: zero or falling spectral connectivity is a topology signal, while explicit trapped-cycle evidence remains a separate deadlock proof.
+Status: an on-demand observability diagnostic. `Diagnostics::analyze_structural_health` computes it when called, and the scheduler runs its own copy only with `enable_governor`, which is off by default. The classification is intentionally advisory: zero or falling spectral connectivity is a topology signal, while explicit trapped-cycle evidence remains a separate deadlock proof.
 
 ### Mazurkiewicz Trace Monoid + Foata Normal Form (DPOR Equivalence Classes)
 
@@ -2351,8 +2366,15 @@ for JavaScript and TypeScript applications via `wasm-bindgen`. Be precise
 about what crosses that boundary today: the wasm ABI exported by
 `asupersync-browser-core` is a structured lifecycle ledger (regions, scopes,
 task handles, capability-gated `fetch`/`WebSocket` calls, and fail-closed
-scope-close ordering), not a scheduler. Browser work runs on the host's own
-promises and event loop; no Rust future is polled inside the wasm module.
+scope-close ordering), not a scheduler. A JavaScript `task_spawn` records a
+handle for work that runs on the host's own promises and event loop. Rust
+futures are polled inside the module in two places only. Each ABI `fetch`
+request runs as a Rust future driven by `wasm-bindgen-futures`. Rust code
+that links `asupersync-browser-core` directly can also run `!Send` futures on
+its bounded, scope-owned local executor (`local::spawn_local_future`, with
+`fetch::fetch_bytes` for awaitable fetches). Neither path is the native `Cx`
+runtime: there is no work stealing, and cancellation drops the future instead
+of draining it.
 
 ### What works today
 
@@ -2579,7 +2601,7 @@ GA.
 | WebSocket | ⚠️ Runtime surface shipped; live RFC6455 conformance coverage now wires extension negotiation plus broader framing/control/close/masking/fragmentation harnesses, with runtime e2e coverage still lane-specific |
 | HTTP/3 (default static-only QPACK; opt-in dynamic QPACK field-section and instruction-stream state machine) | ⚠️ Partial implementation: an established-connection adapter drives control and request/response lifecycle over native QUIC stream bytes, including static-QPACK headers/trailers, informational responses, GOAWAY, cancellation, resets, and reliable STREAM/control-frame recovery. A caller-driven `NativeH3Router` bridge assembles bounded requests through FIN, detaches bounded caller-scoped Router dispatches, and emits validated final responses on the originating stream while isolating per-stream refusal/reset. The feature-gated `NativeH3Listener` adds autonomous multi-peer TLS admission, runtime-owned request tasks, buffered and produced responses, deadlines, and graceful shutdown over native UDP. Opt-in streaming request ingress admits handlers at HEADERS, applies static body policy before admission, and uses bounded request-task-owned DATA queues with per-stream backpressure and FIN validation. The earlier buffered listener compiled; the new request-streaming implementation and native regressions have source review, with full native compilation/execution still unverified. The live request path also carries a bounded final trailer section through the body queue and requires actual FIN before EOF. The native opt-in state machine separately supports dynamic QPACK field sections/tables, Huffman strings, encoder/decoder instruction-stream processing, and bounded blocked-stream scheduling. Deployment readiness, CONNECT, migration, 0-RTT, and external interop evidence remain open, so this is not a claim of h3/quinn drop-in parity or full QUIC deployment parity. |
 | Database clients (SQLite, PostgreSQL, MySQL) | ✅ Implemented |
-| Actor supervision (GenServer, links, monitors) | ⚠️ GenServer and supervisors are implemented. Links and monitors exist as data structures, but no runtime path yet fires a monitor's DOWN message or a link's exit signal when a watched task ends; that wiring is tracked as `asupersync-issue65-criticisms-kpmoy5.6.1`. |
+| Actor supervision (GenServer, links, monitors) | ✅ GenServer and supervisors, plus monitors and links that fire when the watched task ends. `cx.monitor(&handle)` delivers one DOWN with the exit reason; `cx.link(peer)` cancels the other side of an abnormal exit (`CancelKind::LinkedExit`); `cx.link_trapping(peer)` delivers the peer's exit instead. A GenServer gets the same through `GenServerHandle::monitor` / `link` / `link_trapping`, as `SystemMsg::Down` / `SystemMsg::Exit` in `handle_info`. |
 | DPOR-style race-guided seed exploration | ⚠️ Implemented as trace analysis, seed derivation, and equivalence-class telemetry; no exact-prefix backtracking or completeness claim |
 | Distributed runtime (remote tasks, sagas, leases, recovery) | Protocol/state-machine, lease, idempotency, saga, native V3 TCP+mTLS runtime/service, Unix static process host, strict statically linked application-registry hosting, and caller-owned single-destination active discovery implemented; deterministic, in-process, cross-process localhost, and one terminal two-worker RCH mTLS proof shipped. Dynamic plugins/code shipping, route persistence, restart-durable idempotency, and general production-WAN reliability remain open. |
 | RaptorQ fountain coding for snapshot distribution | Codec, replica assignment, quorum recovery, and native `tls`-gated `RemoteSymbolTransport` implemented, with cross-process test scenarios. Current execution evidence and deployment scope must be assessed separately; this is not arbitrary Rust-future migration or general production-WAN reliability. |
