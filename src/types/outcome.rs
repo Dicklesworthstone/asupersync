@@ -98,10 +98,10 @@
 //! ```
 
 use super::cancel::CancelReason;
-#[cfg(feature = "nightly-outcome-try")]
+#[cfg(all(feature = "nightly-outcome-try", asupersync_try_trait))]
 use core::convert::Infallible;
 use core::fmt;
-#[cfg(feature = "nightly-outcome-try")]
+#[cfg(all(feature = "nightly-outcome-try", asupersync_try_trait))]
 use core::ops::{ControlFlow, FromResidual, Residual, Try};
 use serde::{Deserialize, Serialize};
 
@@ -693,7 +693,7 @@ impl<T, E> From<Result<T, E>> for Outcome<T, E> {
     }
 }
 
-#[cfg(feature = "nightly-outcome-try")]
+#[cfg(all(feature = "nightly-outcome-try", asupersync_try_trait))]
 impl<T, E> Try for Outcome<T, E> {
     type Output = T;
     type Residual = Outcome<Infallible, E>;
@@ -714,12 +714,12 @@ impl<T, E> Try for Outcome<T, E> {
     }
 }
 
-#[cfg(feature = "nightly-outcome-try")]
+#[cfg(all(feature = "nightly-outcome-try", asupersync_try_trait))]
 impl<T, E> Residual<T> for Outcome<Infallible, E> {
     type TryType = Outcome<T, E>;
 }
 
-#[cfg(feature = "nightly-outcome-try")]
+#[cfg(all(feature = "nightly-outcome-try", asupersync_try_trait))]
 impl<T, E> FromResidual<Outcome<Infallible, E>> for Outcome<T, E> {
     #[inline]
     fn from_residual(residual: Outcome<Infallible, E>) -> Self {
@@ -732,7 +732,7 @@ impl<T, E> FromResidual<Outcome<Infallible, E>> for Outcome<T, E> {
     }
 }
 
-#[cfg(feature = "nightly-outcome-try")]
+#[cfg(all(feature = "nightly-outcome-try", asupersync_try_trait))]
 impl<T, E> FromResidual<Result<Infallible, E>> for Outcome<T, E> {
     #[inline]
     fn from_residual(residual: Result<Infallible, E>) -> Self {
@@ -812,6 +812,40 @@ mod tests {
         }
 
         scrubbed
+    }
+
+    // =========================================================================
+    // `?` on Outcome (nightly-outcome-try on a compiler that accepts it)
+    // =========================================================================
+
+    #[cfg(all(feature = "nightly-outcome-try", asupersync_try_trait))]
+    fn add_one(input: Outcome<i32, &'static str>) -> Outcome<i32, &'static str> {
+        let value = input?;
+        Outcome::Ok(value + 1)
+    }
+
+    #[cfg(all(feature = "nightly-outcome-try", asupersync_try_trait))]
+    fn from_result(input: Result<i32, &'static str>) -> Outcome<i32, &'static str> {
+        let value = input?;
+        Outcome::Ok(value + 1)
+    }
+
+    #[cfg(all(feature = "nightly-outcome-try", asupersync_try_trait))]
+    #[test]
+    fn question_mark_continues_on_ok_and_propagates_every_other_variant_unchanged() {
+        assert!(matches!(add_one(Outcome::Ok(1)), Outcome::Ok(2)));
+        assert!(matches!(add_one(Outcome::Err("e")), Outcome::Err("e")));
+        let reason = CancelReason::user("stop");
+        match add_one(Outcome::Cancelled(reason.clone())) {
+            Outcome::Cancelled(propagated) => assert_eq!(propagated, reason),
+            other => panic!("cancellation must propagate unchanged, got {other:?}"),
+        }
+        match add_one(Outcome::Panicked(PanicPayload::new("boom"))) {
+            Outcome::Panicked(payload) => assert_eq!(payload.message(), "boom"),
+            other => panic!("a panic must propagate unchanged, got {other:?}"),
+        }
+        assert!(matches!(from_result(Ok(1)), Outcome::Ok(2)));
+        assert!(matches!(from_result(Err("e")), Outcome::Err("e")));
     }
 
     // =========================================================================

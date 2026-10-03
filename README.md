@@ -765,32 +765,38 @@ minisign -Vm asupersync-linux-amd64.tar.gz -p release/keys/asupersync.pub
 
 ### Minimum Supported Rust Version
 
-Asupersync uses **Rust Edition 2024**. Contributor and release lanes track the
-pinned **nightly** toolchain in `rust-toolchain.toml` because the default feature
-set includes `nightly-outcome-try` for `Outcome` `Try`/`?` ergonomics.
+Asupersync uses **Rust Edition 2024** and builds on **stable Rust with its
+default features**. The one nightly-only piece is `?` on `Outcome`, from the
+default `nightly-outcome-try` feature. The build script probes the compiler.
+On nightly, the feature works as it always has. On stable or beta, it is
+inactive: the crate builds without the `Try` impls, and Cargo prints a warning
+for local builds. Contributor and release lanes track the pinned **nightly**
+toolchain in `rust-toolchain.toml`, so the crate's own tests and examples keep
+`?` on `Outcome`.
 
-The audited stable subset is checked with default features disabled and
-`proc-macros` enabled:
+The stable lane checks the default features and the minimal subset (default
+features disabled, `proc-macros` enabled) on Rust 1.95.0. That is the oldest
+stable compiler the dependency graph accepts today (`sysinfo` 0.39 requires
+1.95):
 
 ```bash
 bash scripts/run_stable_lane_e2e.sh
 ```
 
-That runner drives `cargo +stable check`, `clippy`, and the focused `Outcome`
-unit tests through RCH with the shared stable-lane target directory. Stable
-consumers must use `--no-default-features --features proc-macros` until the
-nightly `Outcome` `Try` surface is migrated or disabled by default.
+That runner drives `cargo +1.95.0 check` (default features and the minimal
+subset), `clippy`, and the focused `Outcome` unit tests through RCH with the
+shared stable-lane target directory. Set `STABLE_RUST_TOOLCHAIN` to check
+another stable release.
 
 ### Downstream dependency resolution
 
 Asupersync's repository `Cargo.lock` governs this workspace; it does not pin a
-downstream consumer's resolution. Default-feature consumers should use the
-current contributor/release pin, `nightly-2026-08-31`, from
-`rust-toolchain.toml`. That exact snapshot is a compatibility instruction, not
-a numeric stable MSRV or promised lower bound. The stable subset currently has
-no numeric MSRV claim because `Cargo.toml` does not declare `rust-version`, and
-the stable lane remains limited to `--no-default-features --features
-proc-macros`.
+downstream consumer's resolution. Default-feature consumers on stable Rust
+need 1.95 or newer, the floor that today's dependency graph sets. Consumers who
+want `?` on `Outcome` should use the contributor/release nightly pin,
+`nightly-2026-08-31`, from `rust-toolchain.toml`; another nightly works only if
+its `Try` traits still match. `Cargo.toml` does not declare `rust-version`, so
+1.95 is the lane's checked floor, not a promised lower bound.
 
 Updated entry macros also support older `0.4.x` runtimes. When the runtime
 lacks `Runtime::drain_root_region`, omitting `drain_ms` preserves its legacy
@@ -1993,7 +1999,7 @@ Asupersync is feature-light by default; the lab runtime is available without fla
 | `metrics` | OpenTelemetry metrics provider (Tokio-free normal graph; OTLP protobuf helpers are fuzz/test-only) | No |
 | `tracing-integration` | Tracing spans/logging integration | No |
 | `proc-macros` | `scope!`, `spawn!`, `join!`, `join_all!`, `race!`, `select!`, plus `#[main]`, `#[test]`, and `#[lab_test]` | Yes |
-| `nightly-outcome-try` | Nightly-only `Outcome` `Try`/residual impls that enable `?` ergonomics | Yes |
+| `nightly-outcome-try` | `Outcome` `Try`/residual impls that enable `?`; active only on a nightly compiler (on stable the crate builds without them) | Yes |
 | `runtime-core` | Compatibility marker for the planned runtime module split; gates nothing yet | Yes |
 | `native-runtime` | Compatibility marker for the planned runtime module split; a compile error on wasm32 browser builds, gates nothing else yet | Yes |
 | `tower` | Tower `Service` adapter support | No |
@@ -2051,14 +2057,15 @@ meant for applications: `channel-mpsc-select-e2e`, `cross-subsystem-recovery-e2e
 
 ### Minimum Supported Rust Version
 
-Rust **nightly** remains the default contributor/release toolchain (Edition
-2024, pinned by `rust-toolchain.toml`) because default features include
-`nightly-outcome-try`.
+Default features build on stable Rust 1.95 or newer (Edition 2024). On stable,
+`nightly-outcome-try` is inactive, so `?` on `Outcome` is unavailable. Rust
+**nightly** remains the contributor/release toolchain (pinned by
+`rust-toolchain.toml`), where `nightly-outcome-try` provides `?` on `Outcome`.
 
-The checked stable subset is `cargo +stable` with default features disabled and
-`proc-macros` enabled. Use `scripts/run_stable_lane_e2e.sh` for the canonical
-local/RCH runner; it emits structured per-stage logs and a `summary.json` for
-the stable-lane artifact.
+The stable lane checks default features and the minimal subset (default
+features disabled, `proc-macros` enabled) on Rust 1.95.0. Use
+`scripts/run_stable_lane_e2e.sh` for the canonical local/RCH runner; it emits
+structured per-stage logs and a `summary.json` for the stable-lane artifact.
 
 ### Semver Policy
 
