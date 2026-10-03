@@ -4091,6 +4091,47 @@ mod tests {
         server.join().expect("server join");
     }
 
+    /// RedisClient::connect took only a URL, so RedisConfig's protocol limits
+    /// could not be raised: a GET of a value over the 16 MiB default frame
+    /// limit always failed. connect_with_config takes the whole config.
+    #[test]
+    fn connect_with_config_applies_a_raised_frame_limit() {
+        const LEN: usize = 17 * 1024 * 1024;
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept redis client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            write_hello3_ok(&mut stream);
+            assert_resp_command(read_resp_frame(&mut stream), &[b"GET", b"big"]);
+            stream
+                .write_all(&RespValue::BulkString(Some(vec![b'v'; LEN])).encode())
+                .expect("write the large value");
+            stream.flush().expect("flush the large value");
+        });
+
+        run_test_with_cx(|cx| async move {
+            let url = format!("redis://{}:{}/0", addr.ip(), addr.port());
+            let mut config = RedisConfig::from_url(&url).expect("parse url");
+            config.protocol_limits = config.protocol_limits.max_frame_size(32 * 1024 * 1024);
+            let client = RedisClient::connect_with_config(&cx, config)
+                .await
+                .expect("connect redis client");
+            let value = client
+                .cmd(&cx, &["GET", "big"])
+                .await
+                .expect("GET a value above the default frame limit");
+            assert!(
+                matches!(value, RespValue::BulkString(Some(ref bytes)) if bytes.len() == LEN),
+                "expected the 17 MiB value"
+            );
+        });
+
+        server.join().expect("server join");
+    }
+
     #[test]
     fn redis_resp3_push_pipeline_preserves_response_and_push_order() {
         let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");

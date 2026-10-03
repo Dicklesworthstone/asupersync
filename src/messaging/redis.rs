@@ -3220,7 +3220,21 @@ impl RedisClient {
     #[allow(clippy::unused_async)]
     pub async fn connect(cx: &Cx, url: &str) -> Result<Self, RedisError> {
         cx.checkpoint().map_err(|_| RedisError::Cancelled)?;
-        let config = RedisConfig::from_url(url)?;
+        Self::connect_with_config(cx, RedisConfig::from_url(url)?).await
+    }
+
+    /// Connect to Redis with an explicit [`RedisConfig`].
+    ///
+    /// Use this to change what a URL cannot express: the RESP
+    /// [`protocol_limits`](RedisConfig::protocol_limits) (for example a
+    /// `max_frame_size` above the 16 MiB default, for values up to Redis'
+    /// 512 MB), the Pub/Sub and RESP3 push backlogs, or (with the `tls`
+    /// feature) the `tls_connector` used for `rediss://`, such as one
+    /// trusting a private CA. Start from [`RedisConfig::from_url`] and adjust
+    /// the fields.
+    #[allow(clippy::unused_async)]
+    pub async fn connect_with_config(cx: &Cx, config: RedisConfig) -> Result<Self, RedisError> {
+        cx.checkpoint().map_err(|_| RedisError::Cancelled)?;
         let config_for_factory = config.clone();
         let resp3_push_backlog =
             Arc::new(parking_lot::Mutex::new(RedisResp3PushBacklog::default()));
