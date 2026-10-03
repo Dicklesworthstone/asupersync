@@ -2079,7 +2079,20 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
             .max(self.config.min_idle)
             .min(self.config.max_size);
         self.live_max_size.store(applied, Ordering::Relaxed);
+        // A raised cap is capacity a parked waiter can use now.
+        let mut inner = self.inner.lock();
+        self.wake_next_async_pool_waiter_locked(&mut inner);
         applied
+    }
+
+    /// The caller holds the turn but no capacity is left: the pool shrank
+    /// after its waiter was woken. Clearing `ready` makes the wait park until
+    /// capacity returns; with it set, the wait returned at once and the
+    /// acquire loop spun without yielding or timing out.
+    fn give_back_async_pool_turn(waiter: Option<&Arc<AsyncPoolWaiter>>) {
+        if let Some(waiter) = waiter {
+            waiter.ready.store(false, Ordering::Release);
+        }
     }
 
     /// Apply a managed pool-sizing decision to the live maximum size.
@@ -2404,6 +2417,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                     self.complete_async_pool_turn_locked(&mut inner, granted_waiter.as_ref());
                     AsyncAcquireStep::Idle(idle)
                 } else if inner.total >= self.effective_max_size() {
+                    Self::give_back_async_pool_turn(waiter_guard.slot.as_ref());
                     AsyncAcquireStep::Wait
                 } else {
                     inner.total += 1;
@@ -2667,6 +2681,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                             .or_insert(0) += 1;
                         AsyncAcquireStep::Idle(idle)
                     } else if inner.total >= self.effective_max_size() {
+                        Self::give_back_async_pool_turn(waiter_guard.slot.as_ref());
                         AsyncAcquireStep::Wait
                     } else {
                         inner.total += 1;
@@ -4518,6 +4533,86 @@ mod tests {
             "cancelled retries must not hold active leases"
         );
         crate::test_complete!("async_get_with_retry_observes_cancellation_during_backoff");
+    }
+
+    /// A waiter woken for capacity that a shrink then took was still marked
+    /// ready: its wait returned at once and the acquire loop spun without
+    /// yielding, so it never timed out.
+    #[test]
+    fn async_waiter_whose_capacity_was_shrunk_away_parks_until_timeout() {
+        init_test("async_waiter_whose_capacity_was_shrunk_away_parks_until_timeout");
+        let pool = Arc::new(AsyncDbPool::new(
+            AsyncTestManager::new(),
+            DbPoolConfig::with_max_size(2)
+                .validate_on_checkout(false)
+                .connection_timeout(Duration::from_millis(200)),
+        ));
+        let cx = Cx::for_testing();
+        let first = block_on(pool.get(&cx)).expect("first connection");
+        let second = block_on(pool.get(&cx)).expect("second connection");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiter_pool = Arc::clone(&pool);
+        let waiter = std::thread::spawn(move || {
+            let cx = Cx::for_testing();
+            let result = block_on(waiter_pool.get(&cx)).map(drop);
+            let _ = tx.send(matches!(result, Err(DbPoolError::AcquireTimeout)));
+        });
+        while pool.stats().pending_waiters == 0 {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // What a wake followed by a shrink leaves behind: the front waiter
+        // is ready and the pool has no capacity for it.
+        {
+            let inner = pool.inner.lock();
+            let front = inner.waiters.front().expect("queued waiter");
+            front.ready.store(true, Ordering::Release);
+            front.notify.notify_one();
+        }
+
+        let timed_out = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the acquire must return instead of spinning");
+        assert!(timed_out, "no capacity came back, so the acquire times out");
+        waiter.join().expect("waiter thread");
+        drop((first, second));
+        crate::test_complete!("async_waiter_whose_capacity_was_shrunk_away_parks_until_timeout");
+    }
+
+    /// Raising the cap did not wake anyone, so a parked waiter kept waiting
+    /// for a release while the pool had room for it.
+    #[test]
+    fn raising_the_async_pool_cap_wakes_a_parked_waiter() {
+        init_test("raising_the_async_pool_cap_wakes_a_parked_waiter");
+        let pool = Arc::new(AsyncDbPool::new(
+            AsyncTestManager::new(),
+            DbPoolConfig::with_max_size(2)
+                .validate_on_checkout(false)
+                .connection_timeout(Duration::from_secs(5)),
+        ));
+        assert_eq!(pool.set_max_size(1), 1);
+        let cx = Cx::for_testing();
+        let held = block_on(pool.get(&cx)).expect("held connection");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiter_pool = Arc::clone(&pool);
+        let waiter = std::thread::spawn(move || {
+            let cx = Cx::for_testing();
+            let result = block_on(waiter_pool.get(&cx)).map(drop);
+            let _ = tx.send(result.is_ok());
+        });
+        while pool.stats().pending_waiters == 0 {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(pool.set_max_size(2), 2);
+
+        let acquired = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the raised cap must wake the waiter");
+        assert!(acquired, "the waiter gets a new connection");
+        waiter.join().expect("waiter thread");
+        drop(held);
+        crate::test_complete!("raising_the_async_pool_cap_wakes_a_parked_waiter");
     }
 
     #[test]
