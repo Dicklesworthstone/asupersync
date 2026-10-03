@@ -539,15 +539,15 @@ impl TlsAcceptorBuilder {
                         )));
                     }
 
-                    // Additional validation: check certificate is well-formed
+                    // RFC 5280 4.1.2.6: the subject may be empty when a SAN names it.
                     if cert.subject().iter_common_name().next().is_none()
                         && cert.subject().iter_organizational_unit().next().is_none()
                         && cert.subject().iter_organization().next().is_none()
+                        && !matches!(cert.subject_alternative_name(), Ok(Some(_)))
                     {
                         return Err(TlsError::Configuration(format!(
-                            "certificate {} in chain has empty subject. \
-                             Certificate may be malformed (asupersync-jxzrs4)",
-                            i
+                            "certificate {i} in chain has empty subject and no SAN. \
+                             Certificate may be malformed (asupersync-jxzrs4)"
                         )));
                     }
 
@@ -2428,6 +2428,57 @@ SrXuVI5uunTgPWuOtJOP+KM=
     }
 
     // ── br-asupersync-jxzrs4: Certificate validation security tests ──
+
+    /// Empty subject, critical SAN DNS:localhost, EC P-256, valid to 2126.
+    /// `openssl req -x509 -subj "/" -addext "subjectAltName=critical,DNS:localhost"`.
+    #[cfg(feature = "tls")]
+    const SAN_ONLY_CERT_PEM: &[u8] = b"-----BEGIN CERTIFICATE-----
+MIIBbzCCARagAwIBAgIUWfnf+Qbqhs8Afd0tAR76sZ2za6owCgYIKoZIzj0EAwIw
+ADAgFw0yNjEwMDMwNDE4MzFaGA8yMTI2MDkwOTA0MTgzMVowADBZMBMGByqGSM49
+AgEGCCqGSM49AwEHA0IABFjD0VfSdEWfrlG2OsO1vLRWv1KyLM4ks/aXG0c1Bu2R
+cpL3GI/H+y/TDwVpBSQrOsC++NTajsFg6HgzbV1yIwujbDBqMB0GA1UdDgQWBBRS
+gXY7+GwPh48l2gUlFyTjomcgTzAfBgNVHSMEGDAWgBRSgXY7+GwPh48l2gUlFyTj
+omcgTzAPBgNVHRMBAf8EBTADAQH/MBcGA1UdEQEB/wQNMAuCCWxvY2FsaG9zdDAK
+BggqhkjOPQQDAgNHADBEAiBOO2mJ0xGv/VEt6OGcHYc6mK5OWbuMXcrz2JvYWxAG
+AgIgWKIcqJZDfB9BgKQSbhhx+02tizbl6qi9xTnA8sfkRZU=
+-----END CERTIFICATE-----
+";
+
+    /// The same key with an empty subject and no SAN, valid to 2126.
+    #[cfg(feature = "tls")]
+    const NAMELESS_CERT_PEM: &[u8] = b"-----BEGIN CERTIFICATE-----
+MIIBVzCB/aADAgECAhRMuHqeb1mPWSxLcH2HlbyevLm6KDAKBggqhkjOPQQDAjAA
+MCAXDTI2MTAwMzA0MTgzMVoYDzIxMjYwOTA5MDQxODMxWjAAMFkwEwYHKoZIzj0C
+AQYIKoZIzj0DAQcDQgAEWMPRV9J0RZ+uUbY6w7W8tFa/UrIsziSz9pcbRzUG7ZFy
+kvcYj8f7L9MPBWkFJCs6wL741NqOwWDoeDNtXXIjC6NTMFEwHQYDVR0OBBYEFFKB
+djv4bA+HjyXaBSUXJOOiZyBPMB8GA1UdIwQYMBaAFFKBdjv4bA+HjyXaBSUXJOOi
+ZyBPMA8GA1UdEwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDSQAwRgIhAKJNraBFMdXo
+ZIGTFola531RnBtvG1rCJaou4VpRVmPNAiEA0Pds0nOzs4y3KpKYs4A2fAuRLuLK
+dEUXP8/OsohM4vU=
+-----END CERTIFICATE-----
+";
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn certificate_validation_accepts_a_san_only_certificate() {
+        // RFC 5280 4.1.2.6 lets a certificate name its subject only in a
+        // SAN; Let's Encrypt's tlsserver and shortlived profiles issue such
+        // certificates.
+        let chain = CertificateChain::from_pem(SAN_ONLY_CERT_PEM).unwrap();
+        let result = TlsAcceptorBuilder::validate_certificate_chain(&chain);
+        assert!(
+            result.is_ok(),
+            "a SAN-only certificate is valid: {result:?}"
+        );
+
+        let chain = CertificateChain::from_pem(NAMELESS_CERT_PEM).unwrap();
+        match TlsAcceptorBuilder::validate_certificate_chain(&chain) {
+            Err(TlsError::Configuration(msg)) => {
+                assert!(msg.contains("has empty subject and no SAN"), "{msg}");
+            }
+            other => panic!("a certificate naming no subject must be refused: {other:?}"),
+        }
+    }
 
     #[cfg(feature = "tls")]
     #[test]
