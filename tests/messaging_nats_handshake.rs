@@ -202,7 +202,13 @@ fn nats_handshake_aborts_before_connect_when_tls_required_vynlt0() {
     }));
 
     match outcome {
+        #[cfg(not(feature = "tls"))]
         Err(NatsError::TlsRequired { .. }) => {}
+        // A TLS-capable build upgrades instead of refusing. Against this
+        // plaintext server the upgrade fails (or, without trust roots, cannot
+        // start), and still no CONNECT is sent: the capture below checks that.
+        #[cfg(feature = "tls")]
+        Err(NatsError::Tls(_)) => {}
         other => panic!(
             "expected NatsError::TlsRequired, got: {other:?} (br-asupersync-2kmc12 regression)"
         ),
