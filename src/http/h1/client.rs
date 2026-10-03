@@ -815,25 +815,26 @@ impl Http1Client {
         let (head_bytes, body_bytes) = write_buf.as_ref().split_at(header_end);
         let mut request_body_sent = !expect_continue || body_bytes.is_empty();
 
+        // A body upload that failed because the peer closed. The server may
+        // already have answered (for example 413 or 401, then close), so its
+        // response is read before this error is reported.
+        let mut upload_error: Option<std::io::Error> = None;
+
         // With `Expect: 100-continue`, send only the request head first and
         // wait for either an interim 100 or a final response before sending the
         // body bytes. This prevents eager upload of large/request-smuggling-
         // sensitive payloads when the server intends to reject early.
         if expect_continue {
             io.write_all(head_bytes).await?;
+            io.flush().await?;
         } else {
-            io.write_all(write_buf.as_ref()).await?;
+            upload_error = upload_until_peer_closes(&mut io, write_buf.as_ref()).await?;
         }
-        io.flush().await?;
 
         // Read response head (status line + headers).
         let mut read_buf = BytesMut::with_capacity(8192);
         let mut scratch = [0u8; 8192];
         let mut informational_responses = 0usize;
-        // A deferred body upload that failed because the peer closed. The
-        // server may already have answered (for example 413, then close), so
-        // its response is read before this error is reported.
-        let mut upload_error: Option<std::io::Error> = None;
         loop {
             if let Some(end) = find_headers_end(read_buf.as_ref()) {
                 if end > DEFAULT_MAX_HEADERS_SIZE {
@@ -871,7 +872,7 @@ impl Http1Client {
                         });
                     }
                     if status == 100 && !request_body_sent {
-                        upload_error = upload_deferred_body(&mut io, body_bytes).await?;
+                        upload_error = upload_until_peer_closes(&mut io, body_bytes).await?;
                         request_body_sent = true;
                     }
                     continue;
@@ -944,7 +945,7 @@ impl Http1Client {
                         if let Some(read) = ready {
                             read
                         } else {
-                            upload_error = upload_deferred_body(&mut io, body_bytes).await?;
+                            upload_error = upload_until_peer_closes(&mut io, body_bytes).await?;
                             request_body_sent = true;
                             continue;
                         }
@@ -970,11 +971,12 @@ impl Http1Client {
     }
 }
 
-/// Sends a deferred `Expect: 100-continue` body. When the peer closed during
-/// the upload, it may already have answered (for example 413, then close), so
-/// that error is returned for the caller to report only if no response can be
-/// read. Any other write failure is returned at once.
-async fn upload_deferred_body<T: AsyncWrite + Unpin>(
+/// Writes and flushes request bytes: a whole request, or a deferred
+/// `Expect: 100-continue` body. When the peer closed during the upload, it may
+/// already have answered (for example 413 or 401, then close), so that error is
+/// returned for the caller to report only if no response can be read. Any other
+/// write failure is returned at once.
+async fn upload_until_peer_closes<T: AsyncWrite + Unpin>(
     io: &mut T,
     body: &[u8],
 ) -> std::io::Result<Option<std::io::Error>> {
@@ -1013,8 +1015,8 @@ pub struct ClientStreamingResponse<T> {
     /// returned to a keep-alive pool — the next request written on it would be
     /// consumed by the server as this request's missing body
     /// (br-asupersync-h1-expect-100-pool-h9le7v). Mirrors hyper disabling
-    /// keep-alive in this case. It is also true when the deferred body upload
-    /// failed because the peer closed, and this response was read afterwards.
+    /// keep-alive in this case. It is also true when the body upload failed
+    /// because the peer closed, and this response was read afterwards.
     pub body_withheld: bool,
 }
 
@@ -2118,6 +2120,9 @@ mod tests {
         head_written: bool,
         upload_failed: bool,
         response: std::io::Cursor<Vec<u8>>,
+        // Bytes the first write accepts (all when None). A request written in
+        // one piece then fails partway, after the head.
+        first_write_limit: Option<usize>,
     }
 
     impl AsyncRead for RejectsTheUploadIo {
@@ -2147,7 +2152,9 @@ mod tests {
                 return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
             }
             self.head_written = true;
-            Poll::Ready(Ok(src.len()))
+            Poll::Ready(Ok(self
+                .first_write_limit
+                .map_or(src.len(), |limit| limit.min(src.len()))))
         }
 
         fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
@@ -2170,6 +2177,7 @@ mod tests {
                 b"HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                     .to_vec(),
             ),
+            first_write_limit: None,
         };
         let req = expect_continue_upload(b"hello");
         let (done_tx, done_rx) = std::sync::mpsc::channel();
@@ -2183,6 +2191,64 @@ mod tests {
         assert_eq!(response.status, 413);
         assert!(body_withheld, "the upload did not complete");
         assert!(io.upload_failed);
+    }
+
+    /// Without `Expect: 100-continue` the head and body go out in one write.
+    /// A server that answers 413 (or 401) after the head and closes while the
+    /// body is uploading surfaced as the broken pipe, with its answer unread.
+    #[test]
+    fn request_reports_the_answer_to_an_upload_rejected_mid_write() {
+        let io = RejectsTheUploadIo {
+            head_written: false,
+            upload_failed: false,
+            response: std::io::Cursor::new(
+                b"HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_vec(),
+            ),
+            first_write_limit: Some(64),
+        };
+        let req = Request {
+            method: Method::Post,
+            uri: "/upload".to_string(),
+            version: Version::Http11,
+            headers: vec![("Host".to_string(), "example.com".to_string())],
+            body: vec![b'x'; 4096],
+            trailers: Vec::new(),
+            peer_addr: None,
+        };
+        let (response, io, body_withheld) = block_on(Http1Client::request_with_io(io, req))
+            .expect("the server's answer, not the broken pipe");
+        assert_eq!(response.status, 413);
+        assert!(body_withheld, "the upload did not complete");
+        assert!(io.upload_failed);
+    }
+
+    /// A connection that is already dead (nothing answers) still reports the
+    /// write failure itself, so callers and stale-reuse retries see the same
+    /// error as before.
+    #[test]
+    fn request_reports_the_write_failure_when_no_answer_arrives() {
+        let io = RejectsTheUploadIo {
+            head_written: false,
+            upload_failed: false,
+            response: std::io::Cursor::new(Vec::new()),
+            first_write_limit: Some(64),
+        };
+        let req = Request {
+            method: Method::Post,
+            uri: "/upload".to_string(),
+            version: Version::Http11,
+            headers: vec![("Host".to_string(), "example.com".to_string())],
+            body: vec![b'x'; 4096],
+            trailers: Vec::new(),
+            peer_addr: None,
+        };
+        let error = block_on(Http1Client::request_with_io(io, req))
+            .expect_err("no response, so the write failure is the result");
+        assert!(
+            matches!(error, HttpError::Io(ref io_error) if io_error.kind() == std::io::ErrorKind::BrokenPipe),
+            "unexpected error {error:?}"
+        );
     }
 
     #[test]
