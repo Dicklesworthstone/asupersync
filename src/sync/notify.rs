@@ -308,6 +308,13 @@ impl Notify {
     /// The returned future is cancel-safe: if dropped before completion,
     /// the waiter is cleanly removed.
     ///
+    /// Unlike `tokio::sync::Notify`, the future starts receiving
+    /// [`notify_waiters`](Self::notify_waiters) broadcasts when it is first
+    /// polled, not when it is created: a broadcast in between is not seen.
+    /// To check a condition after enrolling, the tokio pattern, call
+    /// [`Notified::enable`] before the check. Stored
+    /// [`notify_one`](Self::notify_one) permits are not affected.
+    ///
     /// # Example
     ///
     /// ```
@@ -417,6 +424,9 @@ impl Notify {
     ///
     /// If no task is currently waiting, the notification is stored and
     /// will be delivered to the next task that calls `notified().await`.
+    /// Stored notifications accumulate: each call made with no waiter stores
+    /// one, and each later waiter consumes one. `tokio::sync::Notify` stores
+    /// at most one.
     ///
     /// If multiple tasks are waiting, exactly one will be woken.
     ///
@@ -658,6 +668,45 @@ pub struct Notified<'a> {
 }
 
 impl Notified<'_> {
+    /// Makes this future receive every [`Notify::notify_waiters`] broadcast
+    /// sent since [`Notify::notified`] created it, as `tokio::sync::Notify`
+    /// does, instead of only those sent after its first poll.
+    ///
+    /// Call it before checking the condition the notification announces, so a
+    /// broadcast between the check and the first poll is not lost:
+    ///
+    /// ```
+    /// use asupersync::sync::Notify;
+    /// use std::pin::pin;
+    ///
+    /// # futures_lite::future::block_on(async {
+    /// let notify = Notify::new();
+    /// let mut notified = pin!(notify.notified());
+    /// notified.as_mut().enable();
+    /// // The condition is checked here; a broadcast arrives before the wait.
+    /// notify.notify_waiters();
+    /// notified.await;
+    /// # });
+    /// ```
+    ///
+    /// Returns `true` when the future is already complete, or when a broadcast
+    /// since its creation means its next poll completes it. Calling it after
+    /// the first poll, or more than once, changes nothing.
+    pub fn enable(mut self: Pin<&mut Self>) -> bool {
+        if self.state == NotifiedState::Init
+            && self.generation_capture == GenerationCapture::OnFirstPoll
+        {
+            self.generation_capture = GenerationCapture::Armed(self.initial_generation);
+        }
+        match self.state {
+            NotifiedState::Done => true,
+            NotifiedState::Init => {
+                self.notify.generation.load(Ordering::Acquire) != self.initial_generation
+            }
+            NotifiedState::Waiting => false,
+        }
+    }
+
     #[inline]
     fn mark_done(&mut self) -> Poll<()> {
         self.state = NotifiedState::Done;
