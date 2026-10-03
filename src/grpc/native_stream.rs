@@ -71,6 +71,7 @@ use std::time::Duration;
 
 mod response;
 use response::ResponseHead;
+pub(crate) use response::http_fallback;
 mod connect;
 pub use connect::NativeStreamEndpoint;
 mod duplex;
