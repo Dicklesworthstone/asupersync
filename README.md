@@ -47,15 +47,26 @@ controlled schedules deterministic and replayable.
 
 | Guarantee | What It Means |
 |-----------|---------------|
-| **No orphan tasks** | Every spawned task is owned by a region; region close waits for all children |
-| **Cancel-correctness** | Covered primitives use request → drain → finalize and publish their partial-effect boundaries; this is not a blanket guarantee for arbitrary I/O or adapters |
-| **Scoped cleanup bounds** | Budgets are sufficient conditions only where a concrete responsiveness bound is published; non-cooperative work can still delay quiescence indefinitely |
-| **No silent drops** | Covered two-phase primitives use reserve/commit so uncommitted work aborts cleanly and committed sends are never half-sent |
-| **Deterministic testing** | Lab runtime: virtual time, deterministic scheduling, trace replay |
-| **Adaptive preemption fairness** | Default-on discounted UCB1 policy tunes cancel-streak limits over `{4, 8, 16, 32, 64}` at deterministic epoch boundaries |
-| **Drain progress certificates** | Conditional range-bounded Azuma/Freedman candidates accompany deterministic phase and projected-confidence diagnostics |
-| **Spectral early warnings** | Wait-graph spectral monitor combines conformal bounds and anytime-valid evidence |
-| **Capability security** | Runtime effect APIs flow through explicit `Cx` or capability tokens; host-boundary and test-only exceptions stay named and scoped |
+| **No orphan tasks** | Every spawned task is owned by a region; region close waits for all children. Tasks you spawn through a `Cx` belong to that `Cx`'s region. Tasks spawned through a `RuntimeHandle` belong to the root region and are drained when the runtime shuts down. |
+| **Cancellation is a request** | Cancelling a task asks it to stop. It keeps running until it reaches a cancellation point (`cx.checkpoint()` or a cancel-aware await), so it can finish its own async cleanup and return a value. A task that never reaches one is never forcibly stopped, and it holds up its region's close. |
+| **Cleanup bounds** | Cleanup budgets are advisory on the production runtime: a task that keeps running past its budget is not stopped. `Runtime::shutdown_timeout` bounds how long the caller waits for teardown. |
+| **No silent drops** | A channel send can reserve capacity first and commit later, so a cancelled send never loses or half-sends a message. A one-call `send()` exists for the common case. |
+| **Deterministic testing** | Lab runtime: virtual time, deterministic scheduling, trace replay. The same seed reproduces the same schedule. |
+| **Capability-scoped effects** | Spawning, timers and runtime-managed effects go through an explicit `Cx`. Most public I/O entry points (`TcpStream::connect`, `File::open`) take no `Cx` and check no capability today; that work is tracked as `asupersync-issue65-criticisms-kpmoy5.5`. |
+
+These guarantees are enforced by the runtime, not by the type system. They cost
+time per task: see [Measured against tokio](#measured-against-tokio).
+
+**Experimental scheduling policy and diagnostics.** These are not guarantees:
+
+- Adaptive cancel preemption (on by default): a discounted UCB1 policy picks the
+  cancel-streak limit from `{4, 8, 16, 32, 64}` at deterministic epoch
+  boundaries. Whether it beats a fixed limit is still being measured.
+- Drain progress certificates: periodic estimates of how close a draining
+  region is to quiescence, with conditional bounds. They report; they do not
+  change scheduling.
+- Spectral early warnings: a wait-graph spectral monitor that runs only when
+  the scheduling governor is enabled (off by default).
 
 ---
 
@@ -99,6 +110,7 @@ If you already know tokio, this section maps the primitives you use daily to the
 | `tokio::spawn_blocking(f)` | `cx.spawn_blocking(\|cx\| f())` | Same idea when the runtime has a blocking pool: `#[main]`/`#[test]` configure one on demand (`blocking = N`, `0` opts out). A bare `RuntimeBuilder::new()` ships with `blocking_threads(0, 0)`, and without a pool the closure runs inline on the async worker. |
 | `tokio::select!` | `race!(cx, { move \|child\| a(child), move \|child\| b(child) })` or `cx.race_drained_with(...)` | Returns only after the winner is selected and every loser is protocol-cancelled and drained. Each branch receives its own child `Cx`; pass it to the branch's operations. A prebuilt branch that awaits on the caller's `cx` (for example `rx.recv(&cx)`) never sees its cancellation, so the drain waits for it to finish on its own. See [`docs/macro-dsl.md`](./docs/macro-dsl.md#race). |
 | `tokio::join!` | `join!(a, b)`; use `JoinSet::join_all(cx)` for dynamic arity | Inline branches complete together; spawned dynamic members remain region-owned and are collected in spawn order. See [`macros_basic.rs`](./examples/macros_basic.rs). |
+| `FuturesUnordered` / `join_all` over borrowed data | `cx::fiber::scope(\|s\| async move { s.spawn(fut) })` | Fibers run concurrently inside the calling task, may borrow from its stack (no `'static`), and the scope waits for all of them. They are not parallel; use tasks for that. See [`fibers_borrowing.rs`](./examples/fibers_borrowing.rs). |
 | `tokio::time::sleep(dur)` | `sleep(now, dur)` | Takes current `Time` instead of reading the clock implicitly. Works with virtual time in lab runtime. |
 | `tokio::time::timeout(dur, fut)` | `timeout(now, dur, fut)` or `cx.scope().timeout(&cx, dur, \|cx\| op)` | `time::timeout` returns `Result<T, Elapsed>` and drops the inner future when the clock wins; `Scope::timeout` spawns the operation as a region task and cancels **and drains** it on expiry, reporting a late terminal outcome instead of losing it. |
 | `tokio::time::interval(dur)` | `interval(now, dur)` | Same `MissedTickBehavior` options (Burst, Delay, Skip). |
@@ -479,16 +491,17 @@ Determinism is treated as a first-class algorithmic constraint across the codeba
 
 ## How Asupersync Compares
 
-| Feature | Asupersync | async-std | smol |
-|---------|------------|-----------|------|
-| **Structured concurrency** | ✅ Enforced | ❌ Manual | ❌ Manual |
-| **Cancel-correctness** | ⚠️ Protocol on covered surfaces; adapter boundaries are lane-scoped | ⚠️ Drop-based | ⚠️ Drop-based |
-| **No orphan tasks** | ✅ Guaranteed | ❌ spawn detaches | ❌ spawn detaches |
-| **Bounded cleanup** | ⚠️ Published cooperative-path bounds only | ❌ Best-effort | ❌ Best-effort |
-| **Deterministic testing** | ✅ Built-in | ❌ External tools | ❌ External tools |
-| **Obligation tracking** | ✅ Runtime-tracked affine tokens with leak detection | ❌ None | ❌ None |
-| **Ecosystem** | ✅ Broad support-class-scoped built-in surface (runtime, net, HTTP/1.1+H2, TLS, WebSocket, gRPC, DB, distributed primitives; adapter lanes stay explicitly bounded) | ⚠️ Medium | ⚠️ Small |
-| **Maturity** | ⚠️ Experimental, pre-1.0, actively hardened; broad replacement is not independently established | ✅ Production | ✅ Production |
+| Feature | Asupersync | tokio | async-std | smol |
+|---------|------------|-------|-----------|------|
+| **Structured concurrency** | ✅ Built in: every task belongs to a region | ⚠️ Opt-in (`JoinSet`, `TaskTracker`) | ❌ Manual | ❌ Manual |
+| **Cancellation** | ⚠️ Request → drain → finalize on covered surfaces; a cancelled task can finish async cleanup and return a value | ⚠️ Drop-based; `CancellationToken` for cooperative cancellation | ⚠️ Drop-based | ⚠️ Drop-based |
+| **No orphan tasks** | ✅ For `Cx` spawns; `RuntimeHandle` spawns belong to the root region | ❌ `spawn` detaches (`JoinSet` aborts on drop) | ❌ spawn detaches | ❌ spawn detaches |
+| **Bounded cleanup** | ⚠️ Advisory budgets; a non-cooperative task holds up region close | ❌ Best-effort | ❌ Best-effort | ❌ Best-effort |
+| **Deterministic testing** | ✅ Built-in lab runtime | ⚠️ Paused time; schedule exploration via external tools (loom, turmoil) | ❌ External tools | ❌ External tools |
+| **Obligation tracking** | ✅ Runtime-tracked permits and leases with leak detection | ❌ None | ❌ None | ❌ None |
+| **Per-task cost** | ⚠️ Several times tokio's (see [Measured against tokio](#measured-against-tokio)) | ✅ The reference point | — | — |
+| **Ecosystem** | ✅ Broad support-class-scoped built-in surface (runtime, net, HTTP/1.1+H2, TLS, WebSocket, gRPC, DB, distributed primitives; adapter lanes stay explicitly bounded) | ✅ Largest; most async crates assume it | ⚠️ Medium | ⚠️ Small |
+| **Maturity** | ⚠️ Experimental, pre-1.0; used in production by the author's own projects, no known independent production user | ✅ Production | ✅ Production | ✅ Production |
 
 **When to evaluate Asupersync:**
 - Internal or experimental systems that can validate every selected adapter and
@@ -499,6 +512,8 @@ Determinism is treated as a first-class algorithmic constraint across the codeba
   against established runtimes
 
 **When to consider alternatives:**
+- You need the lowest per-task overhead: tokio's spawn, yield and channels cost
+  several times less (measured in [Measured against tokio](#measured-against-tokio))
 - You need strict drop-in compatibility with libraries that are hard-wired to Tokio runtime traits
 - Rapid prototyping where correctness guarantees aren't yet critical
 
@@ -1020,9 +1035,65 @@ Asupersync exposes runtime controls that are usually hidden behind ad hoc instru
 - Warning emission is per-task deduplicated until task removal, so deadline diagnostics stay high-signal under repeated scans (`src/runtime/deadline_monitor.rs`).
 - Deadline warnings carry the most recent checkpoint message when available, which makes stalled-task alerts actionable without digging through a full trace first (`src/runtime/deadline_monitor.rs`).
 
-## How We Made It Fast
+<a id="how-we-made-it-fast"></a>
 
-This runtime got fast through many small, verified runtime changes by the project owner and collaborating coding agents. The method stayed consistent: profile the hot paths, remove one source of contention or allocation at a time, then keep cancellation and determinism guarantees intact.
+## Performance
+
+### Measured against tokio
+
+Asupersync does more work per task than tokio. Every task gets a region
+membership, a cancellation state machine and a terminal-result channel, and
+two-phase permits are tracked as obligations. That bookkeeping costs time.
+These numbers come from one process running both runtimes. The build was a
+release build with default features. The host was one 10-CPU RCH worker. The
+date was 2026-10-03, and the source was that of commit `c2d7715ae`. Each figure
+is p50 per operation at n = 1,000, and the ranges span two runs.
+
+| Operation | Asupersync | tokio | Ratio |
+|-----------|------------|-------|-------|
+| spawn + join from a task, 4 workers | 7.24–7.52 µs | 0.40–0.41 µs | 18× |
+| spawn + join from `block_on`, current-thread | 4.87–5.30 µs | 0.39 µs | 12–14× |
+| `yield_now`, 4 workers | 0.83–1.02 µs | 0.24 µs | 3.4–4.2× |
+| `yield_now`, current-thread | 0.55–0.58 µs | 0.13 µs | 4.3–4.5× |
+| mpsc ping-pong round trip, 4 workers | 2.96–3.04 µs | 0.27–0.28 µs | 11× |
+| mpsc ping-pong round trip, current-thread | 1.85–1.90 µs | 0.24–0.25 µs | 7.6× |
+| fan-out child: `fiber::scope` vs tokio spawn + join, current-thread | 0.44–0.46 µs | 0.39 µs | 1.1–1.2× |
+| fan-out child: `fiber::scope` vs tokio spawn + join, 4 workers | 0.34 µs | 0.40–0.41 µs | 0.8× |
+
+**Reading the table:**
+- Spawning a task, yielding and channel round trips are several times slower
+  than tokio.
+- For most servers, a few microseconds per task is small next to network and
+  disk latency.
+- For workloads that spawn millions of tiny tasks per second, or exchange
+  messages in a tight loop, the difference matters.
+- For fine-grained fan-out inside one task, use `fiber::scope`. It costs about
+  as much as a tokio task, but fibers run concurrently on one thread, not in
+  parallel. Tokio's own in-task equivalent is `futures::stream::FuturesUnordered`.
+
+These numbers already include the October 2026 cuts:
+- an O(1) region task set;
+- verification-only monitors switched off in release builds;
+- an obligation-free one-call `mpsc::send`, which made ping-pong 2.7–4.1× faster;
+- no global-state lock per scheduler dispatch for spawn admission.
+
+The remaining work items are listed under `asupersync-issue65-criticisms-kpmoy5.1`.
+
+To reproduce, run `benches/runtime_vs_tokio.rs`, which puts tokio and asupersync
+side by side in the same Criterion groups:
+
+```text
+cargo bench -p asupersync --bench runtime_vs_tokio --features criterion-benches -- --noplot
+```
+
+The in-repo bench builds asupersync with the test-only features that the
+`conformance` dev-dependency enables. For default-feature numbers like the
+table above, build the same code in a separate crate that depends on
+asupersync normally.
+
+### What has been optimized so far
+
+The method stayed consistent across many small, verified runtime changes: profile the hot paths, remove one source of contention or allocation at a time, then keep cancellation and determinism guarantees intact.
 
 - **Scheduler lock traffic**: dispatch uses a multi-phase path, and local cancel/timed/ready checks run under one local lock acquisition instead of repeated lock round-trips (`src/runtime/scheduler/three_lane.rs`).
 - **Hot-path task isolation**: scheduler queues can run against a dedicated sharded `TaskTable`, so push/pop/steal paths avoid full runtime-state lock pressure (`src/runtime/task_table.rs`, `src/runtime/scheduler/local_queue.rs`, `src/runtime/scheduler/three_lane.rs`).
@@ -1707,7 +1778,7 @@ Current contract:
 - `join!` and `join_all!` pin every branch once and poll all unfinished branches concurrently inside one `poll_fn`; neither macro serializes branches.
 - `race!` expands only to the drain-correct `Cx::race_drained*` family: spawned losers are protocol-cancelled and drained before return. Prefer the factory form (`move |child| work(child)`), where each branch receives its own child `Cx`: loser cancellation targets the branch's task, so a prebuilt branch awaiting on the caller's `cx` never observes it and the drain waits for that branch to finish on its own. On a `race!` `timeout:` expiry, the factory form cancels and drains every branch and returns `Err(JoinError::Cancelled(_))`; the prebuilt form abandons the race by drop.
 - Blocking `select!` is also drain-correct; its `else` form instead polls each branch exactly once in source order, returns immediately, and drops all still-pending branches without draining.
-- Branches used by drain-correct `race!` and blocking `select!` must be `Send + 'static`, and the `Cx` must carry spawn authority. Direct `Cx::race*` calls remain the lower-level drop-on-cancel surface for inline, non-`'static` futures.
+- Branches used by drain-correct `race!` and blocking `select!` must be `Send + 'static`, and the `Cx` must carry spawn authority. The direct `Cx::race`, `race_named`, `race_timeout` and `race_timeout_named` calls also take boxed `Send + 'static` futures; they are the lower-level surface that drops the losing futures when the race ends instead of draining them.
 - Minimal builds without `proc-macros` do not have a usable macro DSL fallback: `join!` and `race!` intentionally fail with `compile_error!`, while `scope!`, `spawn!`, `join_all!`, and `select!` are unavailable until `proc-macros` is re-enabled.
 
 Compile-fail tests (via `trybuild`) verify that incorrect usage produces clear
@@ -2500,7 +2571,7 @@ GA.
 | WebSocket | ⚠️ Runtime surface shipped; live RFC6455 conformance coverage now wires extension negotiation plus broader framing/control/close/masking/fragmentation harnesses, with runtime e2e coverage still lane-specific |
 | HTTP/3 (default static-only QPACK; opt-in dynamic QPACK field-section and instruction-stream state machine) | ⚠️ Partial implementation: an established-connection adapter drives control and request/response lifecycle over native QUIC stream bytes, including static-QPACK headers/trailers, informational responses, GOAWAY, cancellation, resets, and reliable STREAM/control-frame recovery. A caller-driven `NativeH3Router` bridge assembles bounded requests through FIN, detaches bounded caller-scoped Router dispatches, and emits validated final responses on the originating stream while isolating per-stream refusal/reset. The feature-gated `NativeH3Listener` adds autonomous multi-peer TLS admission, runtime-owned request tasks, buffered and produced responses, deadlines, and graceful shutdown over native UDP. Opt-in streaming request ingress admits handlers at HEADERS, applies static body policy before admission, and uses bounded request-task-owned DATA queues with per-stream backpressure and FIN validation. The earlier buffered listener compiled; the new request-streaming implementation and native regressions have source review, with full native compilation/execution still unverified. The live request path also carries a bounded final trailer section through the body queue and requires actual FIN before EOF. The native opt-in state machine separately supports dynamic QPACK field sections/tables, Huffman strings, encoder/decoder instruction-stream processing, and bounded blocked-stream scheduling. Deployment readiness, CONNECT, migration, 0-RTT, and external interop evidence remain open, so this is not a claim of h3/quinn drop-in parity or full QUIC deployment parity. |
 | Database clients (SQLite, PostgreSQL, MySQL) | ✅ Implemented |
-| Actor supervision (GenServer, links, monitors) | ✅ Implemented |
+| Actor supervision (GenServer, links, monitors) | ⚠️ GenServer and supervisors are implemented. Links and monitors exist as data structures, but no runtime path yet fires a monitor's DOWN message or a link's exit signal when a watched task ends; that wiring is tracked as `asupersync-issue65-criticisms-kpmoy5.6.1`. |
 | DPOR-style race-guided seed exploration | ⚠️ Implemented as trace analysis, seed derivation, and equivalence-class telemetry; no exact-prefix backtracking or completeness claim |
 | Distributed runtime (remote tasks, sagas, leases, recovery) | Protocol/state-machine, lease, idempotency, saga, native V3 TCP+mTLS runtime/service, Unix static process host, strict statically linked application-registry hosting, and caller-owned single-destination active discovery implemented; deterministic, in-process, cross-process localhost, and one terminal two-worker RCH mTLS proof shipped. Dynamic plugins/code shipping, route persistence, restart-durable idempotency, and general production-WAN reliability remain open. |
 | RaptorQ fountain coding for snapshot distribution | Codec, replica assignment, quorum recovery, and native `tls`-gated `RemoteSymbolTransport` implemented, with cross-process test scenarios. Current execution evidence and deployment scope must be assessed separately; this is not arbitrary Rust-future migration or general production-WAN reliability. |
@@ -2688,7 +2759,32 @@ Asupersync has its own runtime with explicit capabilities. For code that needs t
 
 ### Is this production-ready?
 
-Asupersync is active development software with a fully implemented core runtime surface (deterministic kernel, parallel scheduler, TCP/HTTP/TLS, database clients, distributed runtime primitives, actor/supervision model, and deterministic verification harnesses), plus a shipped WebSocket runtime lane whose live RFC6455 conformance coverage is still partial. Phase 6 hardening is still active for release gates and external-boundary/browser adapter maturity, so shipped support is lane-specific rather than blanket-GA across every adapter surface; use [`docs/integration.md`](./docs/integration.md) and [`docs/WASM.md`](./docs/WASM.md) as the live source of truth for support class and rollout posture. It is a strong fit for internal systems where correctness guarantees and deterministic debugging are primary requirements.
+Not in the sense tokio is. Asupersync is experimental, pre-1.0 software.
+
+**Who uses it:** the author's own projects run on it in production. No
+independent production user is known.
+
+**What is implemented:**
+- the core runtime: deterministic kernel, parallel scheduler, TCP/HTTP/TLS,
+  database clients, distributed runtime primitives, the actor and supervision
+  model, and the deterministic verification harnesses;
+- a WebSocket runtime lane whose live RFC6455 conformance coverage is still
+  partial.
+
+**What is still in progress:**
+- release gates, and the maturity of external-boundary and browser adapters,
+  are still being hardened;
+- shipped support is lane-specific, not blanket-GA across every adapter
+  surface. Use [`docs/integration.md`](./docs/integration.md) and
+  [`docs/WASM.md`](./docs/WASM.md) as the live source of truth for support class
+  and rollout posture.
+
+**Cost:** a task costs several times what a tokio task costs (see
+[Measured against tokio](#measured-against-tokio)).
+
+**Where it fits:** internal systems where structured cancellation, obligation
+tracking and deterministic debugging matter more than the last microsecond per
+task.
 
 ### How do I report bugs?
 
