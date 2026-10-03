@@ -407,7 +407,13 @@ impl Server {
         let mut encoding = CompressionEncoding::Identity;
         let mut names = BTreeSet::new();
         for (name, value) in &request.head.headers {
-            if !names.insert(name.to_ascii_lowercase()) {
+            // Repeated metadata (grpc-go's metadata.Pairs, split cookies) is
+            // legal, and the unary lane accepts it. Only fields that must have
+            // a single value are refused when repeated.
+            let single_valued = ["content-type", "grpc-encoding", "grpc-timeout", "te"]
+                .iter()
+                .any(|key| name.eq_ignore_ascii_case(key));
+            if single_valued && !names.insert(name.to_ascii_lowercase()) {
                 return Err(Status::invalid_argument(
                     "duplicate gRPC initial metadata key",
                 ));
