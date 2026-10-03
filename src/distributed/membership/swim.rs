@@ -734,10 +734,14 @@ impl Swim {
                 .entry(node.clone())
                 .or_insert_with(|| Member::new(MemberState::Alive, incarnation, now));
             let prev = member.state;
+            let prev_incarnation = member.incarnation;
             member.state = state;
             member.incarnation = incarnation;
             if state == MemberState::Suspect {
-                if prev != MemberState::Suspect {
+                // A suspicion at a newer incarnation is a new suspicion (the
+                // member refuted the old one): it gets its own full window, and
+                // the old accusers do not confirm it.
+                if prev != MemberState::Suspect || prev_incarnation != incarnation {
                     member.suspect_since = now;
                     member.suspect_from.clear();
                 }
@@ -1397,6 +1401,31 @@ mod tests {
         // 5000ms the node is already dead — far sooner than the lone-accuser
         // case (which survives past 10_000ms above).
         let _ = s.tick(5_000);
+        assert_eq!(s.state_of(&node("a")), Some(MemberState::Dead));
+    }
+
+    #[test]
+    fn a_suspicion_at_a_newer_incarnation_gets_its_own_window() {
+        // "a" refuted a Suspect(0) with Alive(1), and this node missed the
+        // refutation. A later Suspect(1) from another accuser is a new
+        // suspicion: it must not inherit the old start time, nor count the old
+        // accuser as a confirmation (which would cut the window to 14_000 ms,
+        // measured from t = 0, and kill "a" one millisecond after it arrives).
+        let mut s = Swim::new(node("self"), cfg(), 5);
+        s.add_peer(0, node("a"));
+        let suspect = |incarnation, accuser: &str| Packet {
+            payload: Payload::Ping { seq: 1 },
+            gossip: vec![Rumor::suspect(node("a"), incarnation, node(accuser))],
+        };
+        let _ = s.handle(0, node("acc1"), suspect(0, "acc1"));
+        let _ = s.handle(20_000, node("acc2"), suspect(1, "acc2"));
+        let _ = s.tick(20_001);
+        assert_eq!(s.state_of(&node("a")), Some(MemberState::Suspect));
+        let member = &s.members[&node("a")];
+        assert_eq!(member.suspect_since, 20_000);
+        assert_eq!(member.suspect_from, BTreeSet::from([node("acc2")]));
+        // The lone accuser's full window (24_000 ms for n < 10) runs from 20_000.
+        let _ = s.tick(44_000);
         assert_eq!(s.state_of(&node("a")), Some(MemberState::Dead));
     }
 

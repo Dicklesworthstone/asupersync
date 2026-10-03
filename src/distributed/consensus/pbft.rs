@@ -490,6 +490,16 @@ impl<T: PbftTransport> PbftNode<T> {
                 return Err(Error::new(ErrorKind::InvalidInput));
             }
             if sequence <= state.last_executed {
+                // A delayed or retried copy of a proposal this replica already
+                // executed must not stop the message pump; only a different
+                // proposal for an executed sequence is an error.
+                if state
+                    .log
+                    .get(&sequence)
+                    .is_some_and(|entry| entry.view == view && entry.digest == digest)
+                {
+                    return Ok(());
+                }
                 return Err(
                     Error::new(ErrorKind::InvalidStateTransition).with_message(format!(
                         "PBFT pre-prepare sequence {sequence} is at or below executed watermark {}",
@@ -1523,6 +1533,45 @@ mod progress_tests {
         assert_eq!(rejected.sequence, SequenceNumber::new(3));
         assert_eq!(*calls.lock().unwrap(), vec![vec![7]]);
         assert_eq!(driver.last_applied().unwrap(), SequenceNumber::new(3));
+    }
+
+    #[test]
+    fn execution_ignores_a_repeated_proposal_for_an_executed_sequence() {
+        // The primary's retry, or a duplicated datagram, can deliver a proposal
+        // after this replica executed it. Returning an error there stops `run`.
+        let cx = Cx::for_testing();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let driver = execution(Arc::clone(&calls));
+        let request = ConsensusRequest::new("client".to_owned(), Time::from_millis(1), vec![7]);
+        let digest = propose(&driver, &cx, 1, vec![request.clone()]);
+        finish(&driver, &cx, 1, &digest);
+        assert_eq!(driver.last_applied().unwrap(), SequenceNumber::new(1));
+
+        let proposal = |requests: Vec<ConsensusRequest>| {
+            let batch = ConsensusBatch::new(requests);
+            PbftMessage::PrePrepare {
+                view: ViewNumber::new(0),
+                sequence: SequenceNumber::new(1),
+                digest: MessageDigest::of(&batch).unwrap(),
+                batch,
+                replica_id: ReplicaId::new("0".to_owned()),
+            }
+        };
+        futures_lite::future::block_on(
+            driver.process_message(&cx, proposal(vec![request.clone()])),
+        )
+        .expect("a repeated proposal for an executed sequence must be ignored");
+        let mut conflicting = request;
+        conflicting.operation = vec![8];
+        assert!(
+            futures_lite::future::block_on(
+                driver.process_message(&cx, proposal(vec![conflicting]))
+            )
+            .is_err(),
+            "a different proposal for an executed sequence is still refused"
+        );
+        assert_eq!(*calls.lock().unwrap(), vec![vec![7]]);
+        assert_eq!(driver.last_applied().unwrap(), SequenceNumber::new(1));
     }
 
     #[test]

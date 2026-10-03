@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Virtual-transport timing for a [`VirtualCluster`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClusterConfig {
-    /// Virtual milliseconds advanced per simulation step.
+    /// Virtual milliseconds advanced per simulation step (0 counts as 1).
     pub tick_ms: Millis,
     /// One-way message delivery latency, in virtual milliseconds. Keep it below
     /// the SWIM probe timeout so probe/ack round-trips can complete.
@@ -214,7 +214,8 @@ impl VirtualCluster {
     }
 
     fn step(&mut self) {
-        self.now = self.now.saturating_add(self.config.tick_ms);
+        // A zero step would never reach `advance`'s target.
+        self.now = self.now.saturating_add(self.config.tick_ms.max(1));
         self.deliver_due();
         self.tick_nodes();
     }
@@ -336,6 +337,24 @@ mod tests {
         cluster.advance(10_000);
         // No deaths: everyone still sees everyone else alive (no false positives).
         assert!(cluster.all_living_agree_alive(&nodes));
+    }
+
+    #[test]
+    fn a_zero_tick_still_advances_virtual_time() {
+        let config = ClusterConfig {
+            tick_ms: 0,
+            ..ClusterConfig::default()
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut cluster = VirtualCluster::new(&ids(3), SwimConfig::default(), config, 7);
+            cluster.advance(50);
+            let _ = tx.send(cluster.now());
+        });
+        let now = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("advance with tick_ms = 0 must return");
+        assert_eq!(now, 50);
     }
 
     #[test]
