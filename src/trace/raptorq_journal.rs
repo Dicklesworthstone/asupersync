@@ -517,17 +517,16 @@ impl ObjectParamsRecord {
         if object_size == 0 || symbol_size == 0 || max_block_size == 0 {
             return (0, 0);
         }
-        let mut blocks: u16 = 0;
-        let mut max_k: u64 = 0;
-        let mut offset: u64 = 0;
-        while offset < object_size {
-            let len = max_block_size.min(object_size - offset);
-            let k = len.div_ceil(symbol_size);
-            max_k = max_k.max(k);
-            offset += len;
-            blocks = blocks.saturating_add(1);
-        }
-        (blocks, u16::try_from(max_k).unwrap_or(u16::MAX))
+        // Closed form of the planner's walk, whose every block but the last is
+        // `max_block_size` long, so the first block is the longest. Walking it
+        // would take `object_size / max_block_size` steps, up to 2^64 for a
+        // record read back from disk.
+        let blocks = object_size.div_ceil(max_block_size);
+        let max_k = object_size.min(max_block_size).div_ceil(symbol_size);
+        (
+            u16::try_from(blocks).unwrap_or(u16::MAX),
+            u16::try_from(max_k).unwrap_or(u16::MAX),
+        )
     }
 }
 
