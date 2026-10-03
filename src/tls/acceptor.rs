@@ -932,8 +932,8 @@ impl TlsAcceptorBuilder {
 
     /// Set maximum TLS fragment size.
     ///
-    /// This limits the size of TLS records. Smaller values may help with
-    /// constrained networks but reduce throughput.
+    /// This limits the size of TLS records to 32..=16389 bytes, checked by
+    /// `build`. Smaller values help constrained networks but cost throughput.
     pub fn max_fragment_size(mut self, size: usize) -> Self {
         self.max_fragment_size = Some(size);
         self
@@ -1212,6 +1212,13 @@ impl TlsAcceptorBuilder {
 
         // Set max fragment size if specified
         if let Some(size) = self.max_fragment_size {
+            // rustls checks this bound only when each connection is created,
+            // so an out-of-range value would fail every accept() instead.
+            if !(32..=16_389).contains(&size) {
+                return Err(TlsError::Configuration(format!(
+                    "max_fragment_size {size} is outside 32..=16389"
+                )));
+            }
             config.max_fragment_size = Some(size);
         }
 
@@ -2527,6 +2534,32 @@ dEUXP8/OsohM4vU=
             "build should succeed with valid certificate: {:?}",
             result
         );
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn build_refuses_a_max_fragment_size_rustls_would_refuse_per_connection() {
+        let build = |size| {
+            let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+            let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+            TlsAcceptorBuilder::new(chain, key)
+                .max_fragment_size(size)
+                .build()
+        };
+        for size in [0, 31, 16_390] {
+            match build(size) {
+                Err(TlsError::Configuration(msg)) => {
+                    assert!(msg.contains("max_fragment_size"), "{msg}");
+                }
+                other => panic!("size {size} must fail build, got {:?}", other.err()),
+            }
+        }
+        for size in [32, 1_024, 16_389] {
+            let acceptor = build(size).expect("an in-range size builds");
+            // The bound matches rustls: a connection can be created.
+            ServerConnection::new(Arc::clone(acceptor.config()))
+                .unwrap_or_else(|e| panic!("size {size}: {e}"));
+        }
     }
 
     #[cfg(feature = "tls")]
