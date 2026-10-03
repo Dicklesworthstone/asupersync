@@ -477,7 +477,7 @@ impl UnixStream {
             match send_with_ancillary_impl(self.inner.as_raw_fd(), buf, ancillary) {
                 Ok(n) => Poll::Ready(Ok(n)),
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    self.pending_on_interest(cx, Interest::WRITABLE)
+                    self.pending_on_shared_interest(cx, Interest::WRITABLE)
                 }
                 Err(e) => Poll::Ready(Err(e)),
             }
@@ -546,7 +546,7 @@ impl UnixStream {
             match recv_with_ancillary_impl(self.inner.as_raw_fd(), buf, ancillary) {
                 Ok(n) => Poll::Ready(Ok(n)),
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    self.pending_on_interest(cx, Interest::READABLE)
+                    self.pending_on_shared_interest(cx, Interest::READABLE)
                 }
                 Err(e) => Poll::Ready(Err(e)),
             }
@@ -916,6 +916,35 @@ fn recvmsg_with_raw_ancillary(
     Ok((bytes, received_fds, truncated))
 }
 
+impl UnixStream {
+    /// `Pending` for the `&self` ancillary methods, which several tasks can
+    /// wait in at once through a shared stream. Each caller joins the
+    /// registration's shared waiter list instead of replacing its waker, so
+    /// a reader parked before a writer is still woken when data arrives
+    /// (br-asupersync-unix-socket-audit-alx18f).
+    fn pending_on_shared_interest<T>(
+        &self,
+        cx: &Context<'_>,
+        interest: Interest,
+    ) -> Poll<io::Result<T>> {
+        let (armed, stranded) =
+            self.registration
+                .lock()
+                .arm_shared(&*self.inner, interest, cx.waker());
+        for waiter in stranded {
+            waiter.wake();
+        }
+        match armed {
+            Ok(Armed::Parked) => Poll::Pending,
+            Ok(Armed::SelfWake) => {
+                crate::net::tcp::stream::fallback_rewake(cx);
+                Poll::Pending
+            }
+            Err(err) => Poll::Ready(Err(err)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -1044,6 +1073,146 @@ mod tests {
                 1,
                 "the ambient driver now owns the stream's readiness waker"
             );
+        }
+    }
+
+    /// br-asupersync-unix-socket-audit-alx18f item 2: several tasks can wait
+    /// in the `&self` ancillary methods of one shared stream. Each wait used
+    /// to replace the registration's single waker, so only the task that
+    /// parked last was woken. These run without a `Cx`, so the waits park on
+    /// the process-global fallback driver and its pump delivers the wakes.
+    mod shared_ancillary_waiters {
+        use super::*;
+        use crate::net::udp::fallback_io_test_support::signal_waker;
+        use crate::net::unix::SocketAncillary;
+        use std::io::Write;
+        use std::time::Duration;
+
+        /// Writes into `stream` until its send direction would block.
+        fn fill_send_buffer(stream: &UnixStream) {
+            let mut writer = &*stream.inner;
+            for chunk_len in [65_536_usize, 1] {
+                let chunk = vec![0u8; chunk_len];
+                loop {
+                    match writer.write(&chunk) {
+                        Ok(_) => {}
+                        Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
+                        Err(err) => panic!("filling the send buffer: {err}"),
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn a_reader_is_woken_although_a_writer_parked_after_it() {
+            assert!(
+                Cx::current().is_none(),
+                "test must run without an ambient Cx"
+            );
+            let (stream, peer) = UnixStream::pair().expect("socket pair");
+            fill_send_buffer(&stream);
+            let (_reader_signal, reader_waker, reader_rx) = signal_waker();
+            let (_writer_signal, writer_waker, _writer_rx) = signal_waker();
+            let mut read_buf = [0u8; 16];
+            let mut read_ancillary = SocketAncillary::new(64);
+            let mut write_ancillary = SocketAncillary::new(64);
+            let payload = [7u8; 64];
+
+            let mut recv = Box::pin(stream.recv_with_ancillary(&mut read_buf, &mut read_ancillary));
+            assert!(
+                recv.as_mut()
+                    .poll(&mut Context::from_waker(&reader_waker))
+                    .is_pending()
+            );
+            let mut send = Box::pin(stream.send_with_ancillary(&payload, &mut write_ancillary));
+            assert!(
+                send.as_mut()
+                    .poll(&mut Context::from_waker(&writer_waker))
+                    .is_pending(),
+                "the send buffer is full, so the writer parks after the reader"
+            );
+
+            (&*peer.inner).write_all(b"wake").expect("peer write");
+            reader_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the reader is woken when data arrives, although the writer parked later");
+            let len = match recv.as_mut().poll(&mut Context::from_waker(&reader_waker)) {
+                Poll::Ready(Ok(len)) => len,
+                other => panic!("expected the bytes after the wake, got {other:?}"),
+            };
+            drop(recv);
+            assert_eq!(&read_buf[..len], b"wake");
+            drop(send);
+        }
+
+        #[test]
+        fn two_readers_are_both_woken_and_the_one_left_waiting_is_woken_again() {
+            assert!(
+                Cx::current().is_none(),
+                "test must run without an ambient Cx"
+            );
+            let (stream, peer) = UnixStream::pair().expect("socket pair");
+            let (_first_signal, first_waker, first_rx) = signal_waker();
+            let (_second_signal, second_waker, second_rx) = signal_waker();
+            let mut first_buf = [0u8; 16];
+            let mut second_buf = [0u8; 16];
+            let mut first_ancillary = SocketAncillary::new(64);
+            let mut second_ancillary = SocketAncillary::new(64);
+
+            let mut first =
+                Box::pin(stream.recv_with_ancillary(&mut first_buf, &mut first_ancillary));
+            let mut second =
+                Box::pin(stream.recv_with_ancillary(&mut second_buf, &mut second_ancillary));
+            assert!(
+                first
+                    .as_mut()
+                    .poll(&mut Context::from_waker(&first_waker))
+                    .is_pending()
+            );
+            assert!(
+                second
+                    .as_mut()
+                    .poll(&mut Context::from_waker(&second_waker))
+                    .is_pending()
+            );
+
+            (&*peer.inner).write_all(b"wake").expect("peer write");
+            first_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the reader that parked first is woken");
+            second_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the reader that parked second is woken");
+
+            let first_len = match first.as_mut().poll(&mut Context::from_waker(&first_waker)) {
+                Poll::Ready(Ok(len)) => len,
+                other => panic!("the first reader takes the bytes, got {other:?}"),
+            };
+            assert!(
+                second
+                    .as_mut()
+                    .poll(&mut Context::from_waker(&second_waker))
+                    .is_pending(),
+                "nothing is left for the second reader, so it parks again"
+            );
+
+            (&*peer.inner)
+                .write_all(b"more")
+                .expect("second peer write");
+            second_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the reader that parked again is woken by the next data");
+            let second_len = match second
+                .as_mut()
+                .poll(&mut Context::from_waker(&second_waker))
+            {
+                Poll::Ready(Ok(len)) => len,
+                other => panic!("the second reader takes the next bytes, got {other:?}"),
+            };
+            drop(first);
+            drop(second);
+            assert_eq!(&first_buf[..first_len], b"wake");
+            assert_eq!(&second_buf[..second_len], b"more");
         }
     }
 

@@ -1722,6 +1722,67 @@ pub struct ReactorRegistration {
     /// re-made on the ambient driver the next time the socket is polled under
     /// a `Cx` that carries one.
     on_fallback: bool,
+    /// Waiters of the socket's `&self` methods, made on the first
+    /// [`arm_shared`](Self::arm_shared).
+    #[cfg(unix)]
+    shared_waiters: Option<Arc<SharedWaiters>>,
+}
+
+/// Tasks parked in a socket's `&self` methods, which several tasks can call
+/// at once (br-asupersync-unix-socket-audit-alx18f). The reactor holds one
+/// waker per registration, so the registration is armed with this list
+/// instead: a readiness event wakes every waiter, and each one re-polls and
+/// re-arms if it is still blocked. The listeners' `AcceptWaiters` work the
+/// same way.
+#[cfg(unix)]
+#[derive(Debug, Default)]
+struct SharedWaiters {
+    waiters: parking_lot::Mutex<Vec<std::task::Waker>>,
+}
+
+#[cfg(unix)]
+impl SharedWaiters {
+    /// Adds `waker` unless it is already listed. A waiter whose future was
+    /// dropped stays listed until the next event; past 32 entries the oldest
+    /// is woken and evicted, so a live one re-registers and a stale one goes.
+    fn register(&self, waker: &std::task::Waker) {
+        let mut waiters = self.waiters.lock();
+        if waiters.iter().any(|existing| existing.will_wake(waker)) {
+            return;
+        }
+        if waiters.len() >= 32 {
+            let evicted = waiters.remove(0);
+            drop(waiters);
+            evicted.wake();
+            waiters = self.waiters.lock();
+        }
+        waiters.push(waker.clone());
+    }
+
+    /// Removes every waiter and returns all but `current`.
+    fn take_others(&self, current: &std::task::Waker) -> Vec<std::task::Waker> {
+        let mut waiters = std::mem::take(&mut *self.waiters.lock());
+        waiters.retain(|waiter| !waiter.will_wake(current));
+        waiters
+    }
+
+    fn wake_all(&self) {
+        let waiters = std::mem::take(&mut *self.waiters.lock());
+        for waiter in waiters {
+            waiter.wake();
+        }
+    }
+}
+
+#[cfg(unix)]
+impl std::task::Wake for SharedWaiters {
+    fn wake(self: Arc<Self>) {
+        self.wake_all();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.wake_all();
+    }
 }
 
 /// Outcome of [`ReactorRegistration::arm`].
@@ -1742,6 +1803,8 @@ impl ReactorRegistration {
         Self {
             registration: None,
             on_fallback: false,
+            #[cfg(unix)]
+            shared_waiters: None,
         }
     }
 
@@ -1752,6 +1815,8 @@ impl ReactorRegistration {
         Self {
             registration,
             on_fallback: false,
+            #[cfg(unix)]
+            shared_waiters: None,
         }
     }
 
@@ -1836,6 +1901,32 @@ impl ReactorRegistration {
             }
             FreshRegistration::SelfWake => Ok(Armed::SelfWake),
         }
+    }
+
+    /// Like [`arm`](Self::arm), for a `&self` socket method that several
+    /// tasks can wait in at once (br-asupersync-unix-socket-audit-alx18f).
+    /// `waker` joins the shared waiter list and the registration is armed
+    /// with the list, so arming for one caller never drops another caller's
+    /// wakeup. When no reactor will deliver a wake (`SelfWake` or an error),
+    /// the other listed waiters are returned: the caller wakes them after
+    /// releasing the lock that guards `self`, so each re-polls on its own.
+    #[cfg(unix)]
+    pub(crate) fn arm_shared(
+        &mut self,
+        source: &dyn crate::runtime::reactor::Source,
+        interest: Interest,
+        waker: &std::task::Waker,
+    ) -> (io::Result<Armed>, Vec<std::task::Waker>) {
+        let waiters = Arc::clone(self.shared_waiters.get_or_insert_with(Default::default));
+        waiters.register(waker);
+        let dispatch = std::task::Waker::from(Arc::clone(&waiters));
+        let armed = self.arm(source, interest, &dispatch);
+        let stranded = if matches!(armed, Ok(Armed::Parked)) {
+            Vec::new()
+        } else {
+            waiters.take_others(waker)
+        };
+        (armed, stranded)
     }
 
     /// Hands the live registration and its fallback flag to another owner of
