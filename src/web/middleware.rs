@@ -100,6 +100,9 @@ pub use crate::service::Layer;
 use crate::tracing_compat::{debug, error, warn};
 use crate::types::Time;
 
+use super::compress::{
+    RequestCompressionSensitivity, compression_oracle_sensitive, is_partial_content,
+};
 use super::extract::Request;
 use super::handler::Handler;
 use super::response::{IntoResponse, Redirect, Response, StatusCode};
@@ -958,16 +961,36 @@ impl Default for CompressionConfig {
 /// Uses [`negotiate_encoding`] to select the best encoding from the
 /// client's Accept-Encoding header against the server's supported set.
 /// Only compresses when the response body exceeds `min_body_size`.
+///
+/// Like [`crate::web::compress`], it leaves uncompressed a response that a
+/// BREACH-style length oracle could probe: one to a request carrying Cookie,
+/// Authorization, X-CSRF-Token or X-XSRF-Token, or one that sets a cookie or
+/// is marked `Cache-Control: private`/`no-store`/`no-cache`. It never
+/// compresses a 206 (its Content-Range describes the uncompressed bytes).
 pub struct CompressionMiddleware<H> {
     inner: H,
     config: CompressionConfig,
+    compress_sensitive: bool,
 }
 
 impl<H: Handler> CompressionMiddleware<H> {
     /// Wrap a handler with response compression.
     #[must_use]
     pub fn new(inner: H, config: CompressionConfig) -> Self {
-        Self { inner, config }
+        Self {
+            inner,
+            config,
+            compress_sensitive: false,
+        }
+    }
+
+    /// Also compress the responses the BREACH guard leaves uncompressed.
+    /// Enable this only when such responses never mix secrets with
+    /// attacker-influenced content.
+    #[must_use]
+    pub fn compress_sensitive_responses(mut self, enabled: bool) -> Self {
+        self.compress_sensitive = enabled;
+        self
     }
 }
 
@@ -980,6 +1003,7 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
         let cx = cx.clone();
         Box::pin(async move {
             let accept_encoding = header_value(&req, "accept-encoding");
+            let sensitivity = RequestCompressionSensitivity::from_request(&req);
             let mut resp = self.inner.call(&cx, req).await;
 
             if resp.status == StatusCode::NO_CONTENT || resp.status == StatusCode::NOT_MODIFIED {
@@ -988,6 +1012,10 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
 
             if let Some(existing_encoding) = resp.remove_header("content-encoding") {
                 resp.set_header("content-encoding", existing_encoding);
+                return resp;
+            }
+
+            if is_partial_content(&resp) {
                 return resp;
             }
 
@@ -1002,6 +1030,18 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
             let identity_acceptable =
                 negotiate_encoding(accept_encoding.as_deref(), &[ContentEncoding::Identity])
                     == Some(ContentEncoding::Identity);
+
+            if !self.compress_sensitive && compression_oracle_sensitive(sensitivity, &resp) {
+                if !identity_acceptable {
+                    return Response::new(
+                        StatusCode::from_u16(406),
+                        b"No acceptable response encoding".to_vec(),
+                    );
+                }
+                append_vary_header(&mut resp, "accept-encoding");
+                sensitivity.append_vary_tokens(&mut resp);
+                return resp;
+            }
 
             let body_below_minimum = resp.body.len() < self.config.min_body_size;
             if body_below_minimum && identity_acceptable {
@@ -2615,13 +2655,24 @@ impl<H: Handler> Layer<H> for RetryLayer {
 #[derive(Debug, Clone)]
 pub struct CompressionLayer {
     config: CompressionConfig,
+    compress_sensitive: bool,
 }
 
 impl CompressionLayer {
     /// Create a compression layer from the given config.
     #[must_use]
     pub fn new(config: CompressionConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            compress_sensitive: false,
+        }
+    }
+
+    /// See [`CompressionMiddleware::compress_sensitive_responses`].
+    #[must_use]
+    pub fn compress_sensitive_responses(mut self, enabled: bool) -> Self {
+        self.compress_sensitive = enabled;
+        self
     }
 }
 
@@ -2636,6 +2687,7 @@ impl<H: Handler> Layer<H> for CompressionLayer {
 
     fn layer(&self, inner: H) -> Self::Service {
         CompressionMiddleware::new(inner, self.config.clone())
+            .compress_sensitive_responses(self.compress_sensitive)
     }
 }
 
@@ -4683,6 +4735,51 @@ mod tests {
 
         #[cfg(not(feature = "compression"))]
         assert!(!resp.headers.contains_key("content-encoding"));
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn compression_leaves_breach_sensitive_and_partial_responses_alone() {
+        fn large_handler() -> Response {
+            Response::new(StatusCode::OK, vec![b'x'; 1024])
+        }
+        fn partial_handler() -> Response {
+            Response::new(StatusCode::PARTIAL_CONTENT, vec![b'x'; 1024])
+                .header("content-range", "bytes 0-1023/4096")
+        }
+        let gzip = || make_request().with_header("Accept-Encoding", "gzip");
+        let encoding = |resp: &Response| resp.headers.get("content-encoding").cloned();
+        let mw =
+            CompressionMiddleware::new(FnHandler::new(large_handler), CompressionConfig::default());
+
+        assert_eq!(encoding(&mw.call(gzip())), Some("gzip".to_string()));
+        // A secret in the response would leak through the compressed length.
+        let sensitive = mw.call(gzip().with_header("Cookie", "session=s3cret"));
+        assert_eq!(encoding(&sensitive), None);
+        assert_eq!(
+            sensitive.headers.get("vary"),
+            Some(&"accept-encoding, cookie".to_string())
+        );
+        assert_eq!(
+            encoding(&mw.call(gzip().with_header("Authorization", "Bearer t"))),
+            None
+        );
+
+        let opted_in =
+            CompressionMiddleware::new(FnHandler::new(large_handler), CompressionConfig::default())
+                .compress_sensitive_responses(true);
+        assert_eq!(
+            encoding(&opted_in.call(gzip().with_header("Cookie", "session=s3cret"))),
+            Some("gzip".to_string())
+        );
+
+        let partial = CompressionMiddleware::new(
+            FnHandler::new(partial_handler),
+            CompressionConfig::default(),
+        );
+        let resp = partial.call(gzip());
+        assert_eq!(encoding(&resp), None, "a 206 is never compressed");
+        assert_eq!(resp.body.len(), 1024);
     }
 
     #[cfg(feature = "compression")]

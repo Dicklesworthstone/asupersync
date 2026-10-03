@@ -156,6 +156,9 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
             if resp.status == StatusCode::NO_CONTENT || resp.status == StatusCode::NOT_MODIFIED {
                 return resp;
             }
+            if is_partial_content(&resp) {
+                return resp;
+            }
 
             // Skip if the response already has content-encoding.
             if let Some(existing_encoding) = resp.remove_header("content-encoding") {
@@ -288,7 +291,7 @@ fn content_encoding_available(encoding: ContentEncoding) -> bool {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct RequestCompressionSensitivity {
+pub(super) struct RequestCompressionSensitivity {
     cookie: bool,
     authorization: bool,
     csrf_token: bool,
@@ -296,7 +299,7 @@ struct RequestCompressionSensitivity {
 }
 
 impl RequestCompressionSensitivity {
-    fn from_request(req: &Request) -> Self {
+    pub(super) fn from_request(req: &Request) -> Self {
         Self {
             cookie: req.header("cookie").is_some(),
             authorization: req.header("authorization").is_some(),
@@ -309,7 +312,7 @@ impl RequestCompressionSensitivity {
         self.cookie || self.authorization || self.csrf_token || self.xsrf_token
     }
 
-    fn append_vary_tokens(self, resp: &mut Response) {
+    pub(super) fn append_vary_tokens(self, resp: &mut Response) {
         if self.cookie {
             append_vary_token(resp, "cookie");
         }
@@ -325,7 +328,17 @@ impl RequestCompressionSensitivity {
     }
 }
 
-fn compression_oracle_sensitive(request: RequestCompressionSensitivity, resp: &Response) -> bool {
+/// A 206 body and its Content-Range (and strong ETag) describe bytes of the
+/// selected representation (RFC 9110 sections 8.8.3 and 14.4); compressing
+/// the body would leave both describing bytes the client never receives.
+pub(super) fn is_partial_content(resp: &Response) -> bool {
+    resp.status == StatusCode::PARTIAL_CONTENT || resp.has_header("content-range")
+}
+
+pub(super) fn compression_oracle_sensitive(
+    request: RequestCompressionSensitivity,
+    resp: &Response,
+) -> bool {
     request.any()
         || resp.has_header("set-cookie")
         || resp
@@ -471,6 +484,25 @@ mod tests {
         let resp = mw.call(req);
         assert_eq!(resp.status, StatusCode::NO_CONTENT);
         assert!(!resp.headers.contains_key("content-encoding"));
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn skips_compression_for_partial_content() {
+        // Content-Range and the strong ETag describe the uncompressed bytes.
+        fn partial_handler() -> Response {
+            Response::new(
+                StatusCode::PARTIAL_CONTENT,
+                "Hello, World! ".repeat(100).into_bytes(),
+            )
+            .header("content-range", "bytes 0-1399/9000")
+        }
+        let policy = CompressionPolicy::default();
+        let mw = CompressionMiddleware::new(FnHandler::new(partial_handler), policy);
+        let resp = mw.call(make_request_with_encoding("gzip"));
+        assert_eq!(resp.status, StatusCode::PARTIAL_CONTENT);
+        assert!(!resp.headers.contains_key("content-encoding"));
+        assert_eq!(resp.body.len(), 1400);
     }
 
     #[test]
