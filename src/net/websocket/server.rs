@@ -564,6 +564,12 @@ where
                                 return Err(super::heartbeat::timeout_error());
                             }
                             self.close_handshake.mark_response_sent();
+                            // RFC 6455 section 5.5.1: once both Close frames
+                            // have been exchanged the server MUST close the
+                            // TCP connection at once. The handshake is
+                            // complete, so a failed shutdown changes nothing
+                            // the caller could act on.
+                            let _ = self.io.shutdown().await;
                         }
                         let reason = CloseReason::parse(&frame.payload).ok();
                         return Ok(Some(Message::Close(reason)));
@@ -611,7 +617,8 @@ where
 
     /// Initiate a close handshake.
     ///
-    /// Sends a close frame and waits for the peer's response.
+    /// Sends a close frame, waits for the peer's response, then shuts down the
+    /// transport.
     pub async fn close(&mut self, cx: &crate::cx::Cx, reason: CloseReason) -> Result<(), WsError> {
         self.initiate_close_with_cx(Some(cx), reason).await?;
 
@@ -676,6 +683,9 @@ where
             }
         }
 
+        // RFC 6455 section 5.5.1: the server closes the TCP connection once
+        // the close handshake ends (the client waits for it to).
+        self.io.shutdown().await.map_err(WsError::Io)?;
         Ok(())
     }
 
@@ -1119,6 +1129,7 @@ mod tests {
         write_behavior: WriteBehavior,
         pending_first_flush: bool,
         flush_calls: usize,
+        shutdown_calls: usize,
     }
 
     impl TestIo {
@@ -1136,6 +1147,7 @@ mod tests {
                 write_behavior: WriteBehavior::Immediate,
                 pending_first_flush: false,
                 flush_calls: 0,
+                shutdown_calls: 0,
             }
         }
 
@@ -1248,9 +1260,10 @@ mod tests {
         }
 
         fn poll_shutdown(
-            self: Pin<&mut Self>,
+            mut self: Pin<&mut Self>,
             _cx: &mut std::task::Context<'_>,
         ) -> Poll<io::Result<()>> {
+            self.shutdown_calls += 1;
             Poll::Ready(Ok(()))
         }
     }
@@ -1848,6 +1861,51 @@ mod tests {
                 encode_server_frame(Frame::close(Some(1000), None)),
                 "retrying close after a cancelled recv must not append a second close frame"
             );
+        });
+    }
+
+    // RFC 6455 section 5.5.1: the server MUST close the TCP connection once
+    // the close handshake is complete. Neither close() nor a recv that echoed
+    // the client's Close shut the transport down, so it stayed open until the
+    // value was dropped while the client waited for it.
+    #[test]
+    fn server_shuts_down_the_transport_after_the_close_handshake() {
+        future::block_on(async {
+            let accept = || AcceptResponse {
+                accept_key: String::new(),
+                protocol: None,
+                extensions: Vec::new(),
+            };
+            let cx = Cx::for_testing();
+            let client_close = encode_client_frame(Frame::close(Some(1000), None));
+
+            // The client starts the close: recv echoes it, then shuts down.
+            let mut ws = ServerWebSocket::from_upgraded(
+                TestIo::with_read_data(client_close.clone()),
+                WebSocketConfig::default(),
+                accept(),
+                &[],
+            );
+            let message = ws.recv(&cx).await.expect("recv the client's close");
+            assert!(matches!(message, Some(Message::Close(_))), "{message:?}");
+            assert_eq!(
+                ws.io.written,
+                encode_server_frame(Frame::close(Some(1000), None))
+            );
+            assert_eq!(ws.io.shutdown_calls, 1);
+
+            // The server starts the close: close() shuts down after the reply.
+            let mut ws = ServerWebSocket::from_upgraded(
+                TestIo::with_read_data(client_close),
+                WebSocketConfig::default(),
+                accept(),
+                &[],
+            );
+            ws.close(&cx, CloseReason::normal())
+                .await
+                .expect("close handshake");
+            assert!(ws.is_closed());
+            assert_eq!(ws.io.shutdown_calls, 1);
         });
     }
 
