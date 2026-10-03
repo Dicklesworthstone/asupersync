@@ -180,8 +180,8 @@ impl Resolver {
     /// Returns addresses suitable for connecting to the host.
     /// Results are cached according to TTL.
     pub async fn lookup_ip(&self, host: &str) -> Result<LookupIp, DnsError> {
-        // Literal IPs do not require resolver selection.
-        if let Ok(ip) = host.parse::<IpAddr>() {
+        // Literal IPs (IPv6 also in URL brackets) need no resolver selection.
+        if let Some(ip) = parse_ip_literal(host) {
             return Ok(LookupIp::new(vec![ip], Duration::from_secs(0)));
         }
 
@@ -771,13 +771,13 @@ fn is_valid_lookup_hostname_label(label: &str) -> bool {
     let Some(first) = bytes.next() else {
         return false;
     };
-    if !first.is_ascii_alphanumeric() {
+    if !(first.is_ascii_alphanumeric() || first == b'_') {
         return false;
     }
 
     let mut last = first;
     for byte in bytes {
-        if !(byte.is_ascii_alphanumeric() || byte == b'-') {
+        if !(byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_') {
             return false;
         }
         last = byte;
@@ -1556,6 +1556,16 @@ struct AbandonOnDrop(Arc<std::sync::atomic::AtomicBool>);
 impl Drop for AbandonOnDrop {
     fn drop(&mut self) {
         self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Parses an IP literal, accepting an IPv6 address in URL brackets
+/// ("[::1]", RFC 3986 section 3.2.2) as `lookup_ip` callers often pass the
+/// host part of a URL.
+fn parse_ip_literal(host: &str) -> Option<IpAddr> {
+    match host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+        Some(inner) => inner.parse::<Ipv6Addr>().ok().map(IpAddr::V6),
+        None => host.parse().ok(),
     }
 }
 
@@ -2970,6 +2980,52 @@ mod tests {
         }
 
         crate::test_complete!("resolver_rejects_hostname_with_hyphen_edge_label");
+    }
+
+    // getaddrinfo resolves names with underscores (Docker Compose service
+    // names such as proj_db_1), and URL hosts carry IPv6 literals in
+    // brackets. lookup_ip refused both as InvalidHost.
+    #[test]
+    fn lookup_ip_accepts_underscore_names_and_bracketed_ipv6_literals() {
+        init_test("lookup_ip_accepts_underscore_names_and_bracketed_ipv6_literals");
+
+        let mut zone = BTreeMap::new();
+        zone.insert(
+            ("proj_db_1.example.test".to_string(), 1),
+            vec![TestDnsRecord::A {
+                ttl: 30,
+                addr: Ipv4Addr::new(192, 0, 2, 7),
+            }],
+        );
+        let server = TestDnsServer::start(zone, false);
+        let resolver = Resolver::with_config(ResolverConfig {
+            nameservers: vec![server.addr],
+            cache_enabled: false,
+            retries: 0,
+            timeout: Duration::from_secs(2),
+            ..ResolverConfig::default()
+        });
+
+        let lookup = future::block_on(async { resolver.lookup_ip("proj_db_1.example.test").await })
+            .expect("an underscore name resolves");
+        assert_eq!(
+            lookup.addresses(),
+            &[IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7))]
+        );
+
+        let lookup = future::block_on(async { resolver.lookup_ip("[::1]").await })
+            .expect("a bracketed IPv6 literal needs no DNS");
+        assert_eq!(lookup.addresses(), &[IpAddr::V6(Ipv6Addr::LOCALHOST)]);
+
+        for host in ["[127.0.0.1]", "[::1", "_db-.example"] {
+            let result = future::block_on(async { resolver.lookup_ip(host).await });
+            assert!(
+                matches!(result, Err(DnsError::InvalidHost(ref bad)) if bad == host),
+                "{host}: {result:?}"
+            );
+        }
+
+        crate::test_complete!("lookup_ip_accepts_underscore_names_and_bracketed_ipv6_literals");
     }
 
     #[test]
