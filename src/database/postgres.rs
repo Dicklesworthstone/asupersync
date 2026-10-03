@@ -1243,11 +1243,17 @@ impl PgRowStream<'_> {
                     return Outcome::Ok(None);
                 }
                 b'E' => {
-                    // ErrorResponse
-                    match self.connection.parse_error_response(&data) {
-                        Ok(err) => return Outcome::Err(err),
-                        Err(parse_err) => return Outcome::Err(parse_err),
+                    // ErrorResponse. The server still answers Sync with
+                    // ReadyForQuery; read up to it so the connection is in
+                    // step (and open) again before the error is reported.
+                    let err = match self.connection.parse_error_response(&data) {
+                        Ok(err) | Err(err) => err,
+                    };
+                    self.finished = true;
+                    if let Err(drain_err) = self.connection.drain_to_ready(cx).await {
+                        return self.connection.fail_in_flight(drain_err);
                     }
+                    return Outcome::Err(err);
                 }
                 _ => {
                     if let Err(err) = self
@@ -1377,6 +1383,13 @@ impl PgConnection {
             Ok(msg) => msg,
             Err(e) => return Outcome::Err(e),
         };
+        // Execute never sends a RowDescription. Without this Describe the
+        // stream met its first DataRow with no column metadata and failed
+        // every query that returns rows.
+        let describe_msg = match build_describe_msg(b'P', portal_name) {
+            Ok(msg) => msg,
+            Err(e) => return Outcome::Err(e),
+        };
         let execute_msg = match build_execute_msg(portal_name, 0) {
             Ok(msg) => msg,
             Err(e) => return Outcome::Err(e),
@@ -1390,11 +1403,13 @@ impl PgConnection {
         let total = parse_msg
             .len()
             .saturating_add(bind_msg.len())
+            .saturating_add(describe_msg.len())
             .saturating_add(execute_msg.len())
             .saturating_add(sync_msg.len());
         let mut combined = Vec::with_capacity(total);
         combined.extend_from_slice(&parse_msg);
         combined.extend_from_slice(&bind_msg);
+        combined.extend_from_slice(&describe_msg);
         combined.extend_from_slice(&execute_msg);
         combined.extend_from_slice(&sync_msg);
 
@@ -1795,20 +1810,73 @@ impl ScramChannelBinding {
 
 /// Compute the `tls-server-end-point` channel-binding data per RFC 5929.
 ///
-/// Implementation note (br-asupersync-7n2xsi): RFC 5929 specifies that the
-/// hash function matches the cert's signature algorithm hash, normalised to
-/// SHA-256 if the signature uses MD5 or SHA-1. This implementation always
-/// uses SHA-256, which is correct for the dominant case (modern PostgreSQL
-/// servers with SHA-256-signed certs) and for the legacy MD5/SHA-1 cases.
-/// Certificates signed with SHA-384 or SHA-512 would require this hash to
-/// match the signature algorithm; that's a follow-up if production deployment
-/// hits non-SHA-256 cert chains.
+/// The hash is the one in the certificate's signature algorithm, with MD5
+/// and SHA-1 replaced by SHA-256 (RFC 5929 section 4.1), as libpq and the
+/// server compute it. An algorithm without its own hash (Ed25519, RSA-PSS)
+/// or a certificate that does not parse also gets SHA-256. Hashing every
+/// certificate with SHA-256 failed each `-PLUS` login to a server whose
+/// certificate is signed with SHA-384 or SHA-512 (such as the ECDSA P-384
+/// chains of Let's Encrypt and RDS).
 #[cfg(feature = "tls")]
 fn tls_server_end_point_cbind(cert_der: &[u8]) -> Vec<u8> {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(cert_der);
-    h.finalize().to_vec()
+    use sha2::Digest;
+    const RSA: [u8; 8] = [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01];
+    const ECDSA: [u8; 7] = [0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03];
+    // The last arc of {sha224,sha384,sha512}WithRSAEncryption is 14, 12, 13
+    // and of ecdsa-with-SHA{224,384,512} 1, 3, 4.
+    let suffix = certificate_signature_algorithm(cert_der).and_then(|oid| match oid.split_last() {
+        Some((&last, arcs)) if arcs == RSA || arcs == ECDSA => Some((arcs == RSA, last)),
+        _ => None,
+    });
+    match suffix {
+        Some((true, 14) | (false, 1)) => sha2::Sha224::digest(cert_der).to_vec(),
+        Some((true, 12) | (false, 3)) => sha2::Sha384::digest(cert_der).to_vec(),
+        Some((true, 13) | (false, 4)) => sha2::Sha512::digest(cert_der).to_vec(),
+        _ => sha2::Sha256::digest(cert_der).to_vec(),
+    }
+}
+
+/// The DER contents of a certificate's outer `signatureAlgorithm` OID, or
+/// `None` if the bytes do not start with a well-formed `Certificate`.
+#[cfg(feature = "tls")]
+fn certificate_signature_algorithm(cert_der: &[u8]) -> Option<&[u8]> {
+    let (0x30, certificate, _) = der_tlv(cert_der)? else {
+        return None;
+    };
+    let (0x30, _tbs_certificate, rest) = der_tlv(certificate)? else {
+        return None;
+    };
+    let (0x30, algorithm, _) = der_tlv(rest)? else {
+        return None;
+    };
+    match der_tlv(algorithm)? {
+        (0x06, oid, _) => Some(oid),
+        _ => None,
+    }
+}
+
+/// Split one DER element off `input`: its tag, contents and what follows.
+#[cfg(feature = "tls")]
+fn der_tlv(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+    let (&tag, rest) = input.split_first()?;
+    let (&first, rest) = rest.split_first()?;
+    let (len, rest) = if first < 0x80 {
+        (usize::from(first), rest)
+    } else {
+        let count = usize::from(first & 0x7F);
+        if count == 0 || count > std::mem::size_of::<usize>() || rest.len() < count {
+            return None;
+        }
+        let (bytes, rest) = rest.split_at(count);
+        let len = bytes
+            .iter()
+            .fold(0_usize, |len, &byte| (len << 8) | usize::from(byte));
+        (len, rest)
+    };
+    (rest.len() >= len).then(|| {
+        let (contents, rest) = rest.split_at(len);
+        (tag, contents, rest)
+    })
 }
 
 /// Constant-time equality for a secret expected byte string against an
@@ -3025,8 +3093,13 @@ struct PgConnectionInner {
     /// returning to a pool) still get the ROLLBACK on the next op; the
     /// pool case (drop-then-return) gets a clean conn close instead.
     needs_discard: bool,
-    /// Counter for generating unique prepared statement names.
+    /// Counter for generating unique prepared statement names. It carries
+    /// over a transparent reconnect, so a name is never reused.
     next_stmt_id: u32,
+    /// Bumped by every transparent reconnect. A `PgStatement` prepared on
+    /// an earlier session is re-prepared before use instead of binding a
+    /// name that, on the new backend, names nothing or another statement.
+    session_generation: u64,
     /// Maximum number of rows to accept per result set before closing the
     /// connection. Prevents unbounded memory growth from runaway queries or
     /// a malicious server sending an endless DataRow stream.
@@ -3076,6 +3149,13 @@ struct PgConnectionInner {
     /// `None` means the session is at its server-side default (we never set
     /// it, or we restored it with `SET statement_timeout TO DEFAULT`).
     applied_statement_timeout_ms: Option<u64>,
+    /// The session's `statement_timeout` may differ from
+    /// `applied_statement_timeout_ms`: a managed SET did not complete, or
+    /// one sent inside a transaction block was kept or undone when the block
+    /// ended. The next query sends its SET even if the value is unchanged.
+    statement_timeout_uncertain: bool,
+    /// A managed SET ran inside the current transaction block.
+    statement_timeout_set_in_block: bool,
 }
 
 /// Coordinates needed to send a PG `CancelRequest` on a fresh socket.
@@ -4099,6 +4179,10 @@ impl PgConnection {
 
         let PgConnection { inner } = fresh;
         let mut inner = inner;
+        // Statement names keep counting, and handles prepared before this
+        // reconnect are recognised as stale (see `session_generation`).
+        inner.next_stmt_id = self.inner.next_stmt_id;
+        inner.session_generation = self.inner.session_generation.wrapping_add(1);
         let fresh_notifications = std::mem::take(&mut inner.notifications);
         inner.notifications = std::mem::take(&mut self.inner.notifications);
         for notification in fresh_notifications.queue {
@@ -4152,7 +4236,14 @@ impl PgConnection {
     }
 
     fn handle_ready_for_query(&mut self, data: &[u8]) -> Result<(), PgError> {
-        self.inner.transaction_status = Self::parse_ready_for_query_transaction_status(data)?;
+        let status = Self::parse_ready_for_query_transaction_status(data)?;
+        // A SET inside a transaction block is kept if the block commits and
+        // undone if it rolls back, so the cached value is no longer known.
+        if status == b'I' && self.inner.statement_timeout_set_in_block {
+            self.inner.statement_timeout_set_in_block = false;
+            self.inner.statement_timeout_uncertain = true;
+        }
+        self.inner.transaction_status = status;
         Ok(())
     }
 
@@ -4363,6 +4454,7 @@ impl PgConnection {
                 needs_rollback: false,
                 needs_discard: false,
                 next_stmt_id: 0,
+                session_generation: 0,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_cache: PreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
                 deallocate_retry_queue: VecDeque::new(),
@@ -4373,6 +4465,8 @@ impl PgConnection {
                 backend_frame: BackendFrame::default(),
                 statement_timeout_override: None,
                 applied_statement_timeout_ms: None,
+                statement_timeout_uncertain: false,
+                statement_timeout_set_in_block: false,
             },
         };
 
@@ -4592,6 +4686,11 @@ impl PgConnection {
             buf.write_startup_cstring("startup parameter name", "application_name")?;
             buf.write_startup_cstring("startup application_name", app_name)?;
         }
+
+        // Text is decoded as UTF-8, so ask the server to convert from the
+        // database encoding instead of sending its bytes unchanged.
+        buf.write_startup_cstring("startup parameter name", "client_encoding")?;
+        buf.write_startup_cstring("startup client_encoding", "UTF8")?;
 
         // Terminating null
         buf.write_byte(0);
@@ -5105,7 +5204,9 @@ impl PgConnection {
     async fn apply_statement_timeout(&mut self, cx: &Cx) -> Outcome<(), PgError> {
         let override_timeout = self.inner.statement_timeout_override;
         let effective_ms = crate::database::wire_statement_timeout_ms(cx, override_timeout);
-        if effective_ms == self.inner.applied_statement_timeout_ms {
+        if effective_ms == self.inner.applied_statement_timeout_ms
+            && !self.inner.statement_timeout_uncertain
+        {
             return Outcome::Ok(());
         }
         let remaining_ns = crate::database::remaining_budget(cx)
@@ -5132,9 +5233,14 @@ impl PgConnection {
         };
         // Session state is uncertain until the exchange completes cleanly.
         self.inner.applied_statement_timeout_ms = None;
+        self.inner.statement_timeout_uncertain = true;
         match self.run_managed_statement_timeout_set(cx, &sql).await {
             Outcome::Ok(()) => {
                 self.inner.applied_statement_timeout_ms = effective_ms;
+                self.inner.statement_timeout_uncertain = false;
+                if self.inner.transaction_status != b'I' {
+                    self.inner.statement_timeout_set_in_block = true;
+                }
                 Outcome::Ok(())
             }
             Outcome::Err(err) => Outcome::Err(err),
@@ -6633,6 +6739,7 @@ impl PgConnection {
             sql: sql.to_string(),
             param_oids,
             columns,
+            session_generation: self.inner.session_generation,
         };
 
         // br-asupersync-cvkoe9 + br-asupersync-7v80ju: insert into the
@@ -6676,6 +6783,7 @@ impl PgConnection {
             sql: String::new(),
             param_oids: Vec::new(),
             columns: Vec::new(),
+            session_generation: self.inner.session_generation,
         };
         match self.close_statement_exchange(cx, &victim_stmt).await {
             Outcome::Ok(()) => {
@@ -6765,6 +6873,7 @@ impl PgConnection {
                 sql: String::new(),
                 param_oids: Vec::new(),
                 columns: Vec::new(),
+                session_generation: self.inner.session_generation,
             };
             match self.close_statement_exchange(cx, &stmt).await {
                 Outcome::Ok(()) => {
@@ -6935,8 +7044,15 @@ impl PgConnection {
             );
         }
         let rebound_stmt = match self.ensure_open_for_request(cx).await {
-            Outcome::Ok(PgOpenState::AlreadyOpen) => None,
-            Outcome::Ok(PgOpenState::Reconnected) => {
+            Outcome::Ok(PgOpenState::AlreadyOpen)
+                if stmt.session_generation == self.inner.session_generation =>
+            {
+                None
+            }
+            // Reconnected in this call or an earlier one: the handle's name
+            // means nothing on this backend, or another statement, so
+            // prepare its SQL again.
+            Outcome::Ok(PgOpenState::AlreadyOpen | PgOpenState::Reconnected) => {
                 if stmt.sql.is_empty() {
                     return Outcome::Err(PgError::ConnectionClosed);
                 }
@@ -7030,8 +7146,15 @@ impl PgConnection {
             );
         }
         let rebound_stmt = match self.ensure_open_for_request(cx).await {
-            Outcome::Ok(PgOpenState::AlreadyOpen) => None,
-            Outcome::Ok(PgOpenState::Reconnected) => {
+            Outcome::Ok(PgOpenState::AlreadyOpen)
+                if stmt.session_generation == self.inner.session_generation =>
+            {
+                None
+            }
+            // Reconnected in this call or an earlier one: the handle's name
+            // means nothing on this backend, or another statement, so
+            // prepare its SQL again.
+            Outcome::Ok(PgOpenState::AlreadyOpen | PgOpenState::Reconnected) => {
                 if stmt.sql.is_empty() {
                     return Outcome::Err(PgError::ConnectionClosed);
                 }
@@ -8006,6 +8129,9 @@ impl PgConnection {
                 self.handle_ready_for_query(&data)?;
                 return Ok(());
             }
+            // A notification or ParameterStatus can still arrive before
+            // ReadyForQuery; keep it rather than skipping it with the rest.
+            self.handle_async_backend_message(msg_type, &data)?;
         }
     }
 }
@@ -9204,6 +9330,20 @@ impl PgTransaction<'_> {
             return Outcome::Err(PgError::TransactionFinished);
         }
         trace_database_transaction(cx, "postgres", "commit", "start");
+        // A failed transaction block (status 'E'), or one poisoned by a
+        // cancelled operation, cannot commit. PostgreSQL answers COMMIT in
+        // such a block with the command tag ROLLBACK and no error, so Ok here
+        // told a caller that had swallowed a statement error that its writes
+        // were saved. Refuse, as `with_pg_transaction` does; Drop rolls back.
+        // needs_discard alone (set by any session-changing statement, such as
+        // SET LOCAL) keeps the connection out of the pool but does not stop a
+        // commit.
+        if self.conn.inner.needs_rollback || self.conn.inner.transaction_status == b'E' {
+            trace_database_transaction(cx, "postgres", "commit", "err");
+            return Outcome::Err(PgError::Protocol(
+                "transaction must roll back before commit".to_string(),
+            ));
+        }
         match self.conn.execute_unchecked(cx, "COMMIT").await {
             Outcome::Ok(_) => {
                 self.finished = true;
@@ -9386,6 +9526,8 @@ pub struct PgStatement {
     param_oids: Vec<u32>,
     /// Result column metadata from RowDescription (empty for non-SELECT).
     columns: Vec<PgColumn>,
+    /// The connection session this statement was prepared on.
+    session_generation: u64,
 }
 
 impl PgStatement {
@@ -9632,6 +9774,7 @@ fn fuzz_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
                 needs_rollback: false,
                 needs_discard: false,
                 next_stmt_id: 0,
+                session_generation: 0,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_cache: PreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
                 deallocate_retry_queue: VecDeque::new(),
@@ -9642,6 +9785,8 @@ fn fuzz_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
                 backend_frame: BackendFrame::default(),
                 statement_timeout_override: None,
                 applied_statement_timeout_ms: None,
+                statement_timeout_uncertain: false,
+                statement_timeout_set_in_block: false,
             },
         },
         peer_stream,

@@ -1171,6 +1171,7 @@ mod tests {
                 needs_rollback: false,
                 needs_discard: false,
                 next_stmt_id: 0,
+                session_generation: 0,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_cache: PreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
                 deallocate_retry_queue: VecDeque::new(),
@@ -1181,6 +1182,8 @@ mod tests {
                 backend_frame: BackendFrame::default(),
                 statement_timeout_override: None,
                 applied_statement_timeout_ms: None,
+                statement_timeout_uncertain: false,
+                statement_timeout_set_in_block: false,
             },
         }
     }
@@ -1209,6 +1212,7 @@ mod tests {
                     needs_rollback: false,
                     needs_discard: false,
                     next_stmt_id: 0,
+                    session_generation: 0,
                     max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                     prepared_cache: PreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
                     deallocate_retry_queue: VecDeque::new(),
@@ -1219,6 +1223,8 @@ mod tests {
                     backend_frame: BackendFrame::default(),
                     statement_timeout_override: None,
                     applied_statement_timeout_ms: None,
+                    statement_timeout_uncertain: false,
+                    statement_timeout_set_in_block: false,
                 },
             },
             peer_stream,
@@ -5354,6 +5360,7 @@ mod tests {
                 type_modifier: -1,
                 format_code: 0,
             }],
+            session_generation: 0,
         };
         assert_eq!(stmt.param_types(), &[oid::INT4, oid::TEXT]);
         assert_eq!(stmt.columns().len(), 1);
@@ -5491,6 +5498,7 @@ mod tests {
             sql: "SELECT $1".to_string(),
             param_oids: vec![oid::INT4],
             columns: vec![],
+            session_generation: 0,
         };
 
         assert_user_cancelled(run(conn.query_unchecked(&cx, "SELECT 1")));
@@ -5519,6 +5527,7 @@ mod tests {
             sql: "SELECT $1, $2".to_string(),
             param_oids: vec![oid::INT4, oid::TEXT],
             columns: vec![],
+            session_generation: 0,
         };
 
         match run(conn.query_prepared(&cx, &stmt, &params)) {
@@ -5549,6 +5558,7 @@ mod tests {
             sql: "SELECT 1".to_string(),
             param_oids: Vec::new(),
             columns: vec![],
+            session_generation: 0,
         };
 
         match run(conn.execute_prepared(&cx, &stmt, &params)) {
@@ -5966,6 +5976,32 @@ mod tests {
             Outcome::Ok(rows) => assert!(rows.is_empty(), "unexpected rows: {rows:?}"),
             other => panic!("expected successful query, got {other:?}"),
         }
+        assert_notification(run(conn.notifications().next(&cx)), 42, "jobs", "done");
+    }
+
+    /// After an ErrorResponse the reply is skipped up to ReadyForQuery. A
+    /// notification in that stretch was skipped too, although notifications
+    /// met during queries are documented to stay queued.
+    #[test]
+    fn notification_after_a_query_error_stays_queued() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        for frame in [
+            error_response_message("42P01", "relation \"missing\" does not exist"),
+            notification_response_message(42, "jobs", "done"),
+            parameter_status_message("TimeZone", "UTC"),
+            ready_for_query(b'I'),
+        ] {
+            std::io::Write::write_all(&mut peer, &frame).unwrap();
+        }
+
+        let cx = crate::cx::Cx::for_testing();
+        match run(conn.query_unchecked(&cx, "SELECT * FROM missing")) {
+            Outcome::Err(PgError::Server { code, .. }) => assert_eq!(code, "42P01"),
+            other => panic!("expected the server error, got {other:?}"),
+        }
+        assert_eq!(conn.parameter("TimeZone"), Some("UTC"));
+        // Checked first: with nothing queued, next() would wait on the socket.
+        assert_eq!(conn.inner.notifications.queue.len(), 1);
         assert_notification(run(conn.notifications().next(&cx)), 42, "jobs", "done");
     }
 
@@ -7018,6 +7054,101 @@ mod tests {
 
         assert!(user_trace_messages(&trace, "client.budget_forwarded proto=postgres ").is_empty());
         assert_eq!(conn.inner.applied_statement_timeout_ms, None);
+    }
+
+    /// A SET inside a transaction block is undone by ROLLBACK. The cached
+    /// value still said it was applied, so the next query sent no SET and
+    /// ran with no server-side limit.
+    #[test]
+    fn statement_timeout_is_sent_again_after_its_transaction_block_ends() {
+        init_test("statement_timeout_is_sent_again_after_its_transaction_block_ends");
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let (cx, _trace) = budgeted_traced_cx(std::time::Duration::from_secs(30));
+        conn.set_statement_timeout_override(Some(std::time::Duration::from_millis(500)));
+        // As after BEGIN.
+        conn.inner.transaction_status = b'T';
+
+        let responder = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let reply = |peer: &mut std::net::TcpStream, tag: &[u8], status: u8| {
+                peer.write_all(&backend_message(b'C', tag))
+                    .expect("write command complete");
+                peer.write_all(&ready_for_query(status))
+                    .expect("write ready");
+            };
+            let _ = read_until_contains(&mut peer, b"SET statement_timeout = 500");
+            reply(&mut peer, b"SET\0", b'T');
+            let _ = read_until_contains(&mut peer, b"INSERT INTO t VALUES (1)");
+            reply(&mut peer, b"INSERT 0 1\0", b'T');
+            let _ = read_until_contains(&mut peer, b"ROLLBACK");
+            reply(&mut peer, b"ROLLBACK\0", b'I');
+
+            let mut header = [0u8; 5];
+            peer.read_exact(&mut header).expect("next query header");
+            let len = u32::from_be_bytes([header[1], header[2], header[3], header[4]]);
+            let mut body = vec![0u8; usize::try_from(len).expect("frame length") - 4];
+            peer.read_exact(&mut body).expect("next query body");
+            assert!(
+                contains_subslice(&body, b"SET statement_timeout = 500"),
+                "the SET must be sent again after the block ended, got {:?}",
+                String::from_utf8_lossy(&body)
+            );
+            reply(&mut peer, b"SET\0", b'I');
+            let _ = read_until_contains(&mut peer, b"INSERT INTO t VALUES (2)");
+            reply(&mut peer, b"INSERT 0 1\0", b'I');
+        });
+
+        for sql in [
+            "INSERT INTO t VALUES (1)",
+            "ROLLBACK",
+            "INSERT INTO t VALUES (2)",
+        ] {
+            match run(conn.execute_unchecked(&cx, sql)) {
+                Outcome::Ok(_) => {}
+                other => panic!("{sql}: {other:?}"),
+            }
+        }
+        responder.join().expect("responder thread");
+        assert_eq!(conn.inner.applied_statement_timeout_ms, Some(500));
+    }
+
+    /// PostgreSQL answers COMMIT in a failed transaction block with the
+    /// command tag ROLLBACK and no error. commit() returned Ok, telling a
+    /// caller that had swallowed a statement error that its writes were saved.
+    #[test]
+    fn commit_of_a_failed_transaction_block_is_an_error() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let cx = crate::cx::Cx::for_testing();
+        let responder = std::thread::spawn(move || {
+            let _ = read_until_contains(&mut peer, b"BEGIN");
+            std::io::Write::write_all(&mut peer, &backend_message(b'C', b"BEGIN\0"))
+                .expect("BEGIN complete");
+            std::io::Write::write_all(&mut peer, &ready_for_query(b'T')).expect("ready");
+            // What the server sends for COMMIT inside a failed block.
+            std::io::Write::write_all(&mut peer, &backend_message(b'C', b"ROLLBACK\0"))
+                .expect("ROLLBACK complete");
+            std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).expect("ready");
+            peer
+        });
+
+        let tx = match run(conn.begin(&cx)) {
+            Outcome::Ok(tx) => tx,
+            Outcome::Err(err) => panic!("BEGIN failed: {err}"),
+            _ => panic!("BEGIN did not complete"),
+        };
+        // A statement failed and the caller ignored its error.
+        tx.conn.inner.transaction_status = b'E';
+        match run(tx.commit(&cx)) {
+            Outcome::Err(PgError::Protocol(message)) => {
+                assert!(message.contains("roll back"), "{message}");
+            }
+            other => panic!("commit of an aborted transaction must fail, got {other:?}"),
+        }
+        let _peer = responder.join().expect("responder exits");
+        assert!(
+            conn.inner.needs_rollback,
+            "the dropped transaction leaves its rollback to the connection"
+        );
     }
 
     #[test]
@@ -8226,6 +8357,7 @@ mod tests {
             sql: format!("SELECT {name}"),
             param_oids: Vec::new(),
             columns: Vec::new(),
+            session_generation: 0,
         }
     }
 
@@ -10671,6 +10803,169 @@ mod tests {
         responder.join().expect("responder thread should complete");
     }
 
+    /// Execute never sends a RowDescription, so a streaming parameterised
+    /// query must Describe its portal. Without it, the first DataRow arrived
+    /// with no column metadata and every row-returning query failed. An
+    /// ErrorResponse must also be read through to ReadyForQuery, or the
+    /// connection stays closed and out of step.
+    #[test]
+    fn streaming_params_query_yields_rows_and_stays_in_step_after_an_error() {
+        use std::io::Write;
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let cx = Cx::for_testing();
+        let describe_portal: &[u8] = &[b'D', 0, 0, 0, 6, b'P', 0];
+        let sync: &[u8] = &[b'S', 0, 0, 0, 4];
+
+        // Like a real server: a RowDescription only when the portal was
+        // described.
+        let responder = std::thread::spawn(move || {
+            let written = read_until_contains(&mut peer, sync);
+            let described = written
+                .windows(describe_portal.len())
+                .any(|w| w == describe_portal);
+            let mut reply = Vec::new();
+            reply.extend_from_slice(&backend_message(b'1', &[]));
+            reply.extend_from_slice(&backend_message(b'2', &[]));
+            if described {
+                reply.extend_from_slice(&single_text_row_description());
+            }
+            reply.extend_from_slice(&data_row_text_message(&["42"]));
+            reply.extend_from_slice(&backend_message(b'C', b"SELECT 1\0"));
+            reply.extend_from_slice(&ready_for_query(b'I'));
+            peer.write_all(&reply).expect("first reply");
+
+            let _ = read_until_contains(&mut peer, sync);
+            let mut reply = Vec::new();
+            reply.extend_from_slice(&backend_message(
+                b'E',
+                b"SERROR\0C42P01\0Mrelation \"missing\" does not exist\0\0",
+            ));
+            reply.extend_from_slice(&ready_for_query(b'I'));
+            peer.write_all(&reply).expect("second reply");
+            peer
+        });
+
+        let value: i32 = 42;
+        let params: [&dyn ToSql; 1] = [&value];
+        let mut stream = match run(conn.query_stream_params(&cx, "SELECT $1::int4", &params)) {
+            Outcome::Ok(stream) => stream,
+            Outcome::Err(err) => panic!("stream setup failed: {err}"),
+            _ => panic!("stream setup did not complete"),
+        };
+        match run(stream.next(&cx)) {
+            Outcome::Ok(Some(row)) => {
+                assert!(matches!(row.get("value"), Ok(PgValue::Text(v)) if v == "42"));
+            }
+            other => panic!("expected the row, got {other:?}"),
+        }
+        assert!(matches!(run(stream.next(&cx)), Outcome::Ok(None)));
+        drop(stream);
+
+        let mut stream = match run(conn.query_stream_params(&cx, "SELECT * FROM missing", &[])) {
+            Outcome::Ok(stream) => stream,
+            Outcome::Err(err) => panic!("stream setup failed: {err}"),
+            _ => panic!("stream setup did not complete"),
+        };
+        match run(stream.next(&cx)) {
+            Outcome::Err(PgError::Server { code, .. }) => assert_eq!(code, "42P01"),
+            other => panic!("expected the server error, got {other:?}"),
+        }
+        drop(stream);
+        assert!(
+            !conn.inner.closed,
+            "the error was read through to ReadyForQuery, so the connection stays usable"
+        );
+        let _peer = responder.join().expect("responder exits");
+    }
+
+    /// Rows are decoded as UTF-8. Without client_encoding the server sends
+    /// text in the database encoding, so a LATIN1 database returned bytes
+    /// that failed to decode or decoded to the wrong characters.
+    #[test]
+    fn startup_requests_utf8_client_encoding() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("listener addr").port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept postgres client");
+            let startup = read_startup_packet(&mut stream);
+            write_startup_ready(&mut stream);
+            startup
+        });
+
+        let cx = Cx::for_testing();
+        let options = deterministic_postgres_options(port);
+        match run(PgConnection::connect_with_options(&cx, options)) {
+            Outcome::Ok(_conn) => {}
+            Outcome::Err(err) => panic!("connect failed: {err}"),
+            _ => panic!("connect did not complete"),
+        }
+        let startup = server.join().expect("server exits");
+        assert!(
+            startup
+                .windows(b"client_encoding\0UTF8\0".len())
+                .any(|w| w == b"client_encoding\0UTF8\0"),
+            "startup packet should request client_encoding UTF8"
+        );
+    }
+
+    /// tls-server-end-point hashes the certificate with its signature hash.
+    /// SHA-256 for every certificate failed each -PLUS login to a server
+    /// whose certificate is signed with SHA-384 or SHA-512.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn channel_binding_hashes_the_certificate_with_its_signature_hash() {
+        use sha2::Digest;
+        fn tlv(tag: u8, contents: &[u8]) -> Vec<u8> {
+            let mut out = vec![tag];
+            if contents.len() < 0x80 {
+                out.push(u8::try_from(contents.len()).expect("short length"));
+            } else {
+                let len = u16::try_from(contents.len()).expect("test length");
+                out.push(0x82);
+                out.extend_from_slice(&len.to_be_bytes());
+            }
+            out.extend_from_slice(contents);
+            out
+        }
+        // Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm,
+        // signatureValue }, with a 300-byte stand-in for tbsCertificate so
+        // the long length form is read too.
+        let certificate = |oid: &[u8]| {
+            let body = [
+                tlv(0x30, &[0_u8; 300]),
+                tlv(0x30, &tlv(0x06, oid)),
+                tlv(0x03, &[0x00, 0xAA]),
+            ]
+            .concat();
+            tlv(0x30, &body)
+        };
+        let ecdsa = |last: u8| [0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, last];
+        let rsa = |last: u8| [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, last];
+
+        let der = certificate(&ecdsa(3));
+        assert_eq!(
+            tls_server_end_point_cbind(&der),
+            sha2::Sha384::digest(&der).to_vec()
+        );
+        let der = certificate(&rsa(13));
+        assert_eq!(
+            tls_server_end_point_cbind(&der),
+            sha2::Sha512::digest(&der).to_vec()
+        );
+        // SHA-256, SHA-1 and an unparseable certificate all use SHA-256.
+        for der in [
+            certificate(&ecdsa(2)),
+            certificate(&rsa(11)),
+            certificate(&rsa(5)),
+            b"not a certificate".to_vec(),
+        ] {
+            assert_eq!(
+                tls_server_end_point_cbind(&der),
+                sha2::Sha256::digest(&der).to_vec()
+            );
+        }
+    }
+
     #[test]
     fn regression_postgres_streaming_params_writes_extended_protocol_frames() {
         let (mut conn, mut peer) = make_test_connection_with_peer();
@@ -11352,6 +11647,99 @@ mod tests {
 
             server.join().expect("deterministic postgres server exits");
             test_complete!("idle_disconnect_reconnects_and_retries_parameterized_query");
+        }
+
+        /// A fresh session used to restart statement numbering at 0. After a
+        /// reconnect re-prepared handle B there as `__asupersync_s0`, handle A
+        /// (also `s0`, from the old session) bound that name and ran B's SQL
+        /// with A's parameters. Every handle from an earlier session must be
+        /// prepared again, under a name the new session has not used.
+        #[test]
+        fn a_statement_prepared_before_a_reconnect_is_prepared_again() {
+            init_test("a_statement_prepared_before_a_reconnect_is_prepared_again");
+            let sql_a = "SELECT $1::text AS value /* statement a */";
+            let sql_b = "SELECT $1::text AS value /* statement b */";
+
+            let (options, server) = spawn_deterministic_postgres_server(move |stream| {
+                use std::io::Write;
+                let prepare_response = || {
+                    let mut parameter_description = Vec::new();
+                    parameter_description.extend_from_slice(&1i16.to_be_bytes());
+                    parameter_description.extend_from_slice(&(oid::TEXT as i32).to_be_bytes());
+                    let mut response = Vec::new();
+                    response.extend_from_slice(&backend_message(b'1', &[]));
+                    response.extend_from_slice(&backend_message(b't', &parameter_description));
+                    response.extend_from_slice(&single_text_row_description());
+                    response.extend_from_slice(&ready_for_query(b'I'));
+                    response
+                };
+                let query_response = |value: &str| {
+                    let mut response = Vec::new();
+                    response.extend_from_slice(&backend_message(b'2', &[]));
+                    response.extend_from_slice(&single_text_row_description());
+                    response.extend_from_slice(&data_row_text_message(&[value]));
+                    response.extend_from_slice(&backend_message(b'C', b"SELECT 1\0"));
+                    response.extend_from_slice(&ready_for_query(b'I'));
+                    response
+                };
+
+                // B reconnects, then is prepared again under the next name.
+                let parse_b = read_until_contains(stream, b"statement b");
+                let next_name = b"__asupersync_s2\0";
+                assert!(
+                    parse_b.windows(next_name.len()).any(|w| w == next_name),
+                    "B is prepared under a name the old session never used"
+                );
+                stream.write_all(&prepare_response()).expect("prepare B");
+                let _ = read_until_contains(stream, b"bravo");
+                stream
+                    .write_all(&query_response("bravo"))
+                    .expect("execute B");
+
+                // A, prepared on the old session, is parsed again; binding
+                // its old name would run B's statement.
+                let parse_a = read_until_contains(stream, b"statement a");
+                assert_eq!(parse_a[0], b'P', "A must be parsed again, not bound");
+                stream.write_all(&prepare_response()).expect("prepare A");
+                let _ = read_until_contains(stream, b"alpha");
+                stream
+                    .write_all(&query_response("alpha"))
+                    .expect("execute A");
+            });
+
+            let mut conn = make_test_connection();
+            conn.inner.options = options;
+            conn.inner.cancel_target = CancelTarget::from_options(&conn.inner.options);
+            conn.inner.next_stmt_id = 2;
+            conn.inner.closed = true;
+            let old_handle = |name: &str, sql: &str| PgStatement {
+                name: name.to_string(),
+                sql: sql.to_string(),
+                param_oids: vec![oid::TEXT],
+                columns: vec![],
+                session_generation: 0,
+            };
+            let a = old_handle("__asupersync_s0", sql_a);
+            let b = old_handle("__asupersync_s1", sql_b);
+            let cx = crate::cx::Cx::for_testing();
+
+            let bravo = "bravo".to_string();
+            let params_b: [&dyn ToSql; 1] = [&bravo];
+            let rows = match run(conn.query_prepared(&cx, &b, &params_b)) {
+                Outcome::Ok(rows) => rows,
+                other => panic!("B after the reconnect: {other:?}"),
+            };
+            assert!(matches!(rows[0].get("value"), Ok(PgValue::Text(v)) if v == "bravo"));
+            let alpha = "alpha".to_string();
+            let params_a: [&dyn ToSql; 1] = [&alpha];
+            let rows = match run(conn.query_prepared(&cx, &a, &params_a)) {
+                Outcome::Ok(rows) => rows,
+                other => panic!("A after the reconnect: {other:?}"),
+            };
+            assert!(matches!(rows[0].get("value"), Ok(PgValue::Text(v)) if v == "alpha"));
+
+            server.join().expect("deterministic postgres server exits");
+            test_complete!("a_statement_prepared_before_a_reconnect_is_prepared_again");
         }
 
         #[test]
