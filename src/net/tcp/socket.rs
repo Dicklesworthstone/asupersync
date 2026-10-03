@@ -30,6 +30,8 @@ struct TcpSocketState {
     reuseaddr: bool,
     nodelay: Option<bool>,
     keepalive: KeepaliveConfig,
+    /// `TCP_USER_TIMEOUT`; `None` leaves the kernel default.
+    user_timeout: Option<Duration>,
     #[cfg(unix)]
     reuseport: bool,
 }
@@ -45,6 +47,7 @@ impl TcpSocket {
                 reuseaddr: false,
                 nodelay: None,
                 keepalive: KeepaliveConfig::Default,
+                user_timeout: None,
                 #[cfg(unix)]
                 reuseport: false,
             }),
@@ -61,6 +64,7 @@ impl TcpSocket {
                 reuseaddr: false,
                 nodelay: None,
                 keepalive: KeepaliveConfig::Default,
+                user_timeout: None,
                 #[cfg(unix)]
                 reuseport: false,
             }),
@@ -96,6 +100,21 @@ impl TcpSocket {
     pub fn set_keepalive_config(&self, keepalive: Option<TcpKeepaliveConfig>) -> io::Result<()> {
         self.state.lock().keepalive =
             keepalive.map_or(KeepaliveConfig::Disabled, KeepaliveConfig::Enabled);
+        Ok(())
+    }
+
+    /// Sets `TCP_USER_TIMEOUT` for the stream or listener created from this
+    /// handle; see [`TcpStream::set_user_timeout`]. It is applied at
+    /// `connect` or `listen`, and streams accepted from the listener inherit
+    /// it. `None` leaves the kernel default.
+    ///
+    /// # Errors
+    ///
+    /// `io::ErrorKind::Unsupported` on platforms without the option (it exists
+    /// on Linux, Android, Fuchsia and Cygwin).
+    pub fn set_user_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        super::user_timeout::check_supported("TcpSocket::set_user_timeout")?;
+        self.state.lock().user_timeout = timeout;
         Ok(())
     }
 
@@ -228,6 +247,10 @@ fn apply_socket_options(socket: &socket2::Socket, state: &TcpSocketState) -> io:
         }
         KeepaliveConfig::Disabled => socket.set_keepalive(false)?,
         KeepaliveConfig::Default => {}
+    }
+
+    if let Some(timeout) = state.user_timeout {
+        super::user_timeout::set_socket_user_timeout(socket, Some(timeout))?;
     }
 
     Ok(())
