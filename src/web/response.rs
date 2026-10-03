@@ -1482,11 +1482,22 @@ fn validate_redirect_uri(uri: &str, allowed_hosts: Option<&[&str]>) -> Result<()
             scheme: scheme.clone(),
         }
     })?;
-    let host_with_port = after_slashes.split(['/', '?', '#']).next().unwrap_or("");
-    let host = host_with_port
-        .rsplit_once(':')
-        .map_or(host_with_port, |(h, _)| h);
-    let host = host.trim_start_matches('[').trim_end_matches(']'); // IPv6 brackets
+    let authority = after_slashes.split(['/', '?', '#']).next().unwrap_or("");
+    // A redirect never needs userinfo, and a browser takes the host after
+    // the last '@': "https://example.com:443@attacker.com/" goes to
+    // attacker.com. Refuse it rather than parse it.
+    if authority.contains('@') {
+        return Err(RedirectError::HostNotAllowed {
+            host: authority.to_string(),
+        });
+    }
+    let host = match authority.strip_prefix('[') {
+        // IPv6 literal: "[addr]" or "[addr]:port".
+        Some(bracketed) => bracketed.split_once(']').map_or("", |(addr, _)| addr),
+        None => authority
+            .split_once(':')
+            .map_or(authority, |(host, _)| host),
+    };
     if host.is_empty() {
         return Err(RedirectError::HostNotAllowed {
             host: String::new(),
@@ -2259,6 +2270,26 @@ mod tests {
         let err =
             Redirect::to_with_allowed_hosts("https://evil.example.com/", allowed).unwrap_err();
         assert!(matches!(err, RedirectError::HostNotAllowed { .. }));
+
+        // Userinfo: browsers go to the host after the last '@'. The host was
+        // taken from before the last ':', so these passed the allowlist.
+        for uri in [
+            "https://example.com:443@attacker.com/",
+            "https://example.com:@attacker.com/",
+            "https://example.com@attacker.com/",
+            "https://user:pass@example.com/",
+        ] {
+            let err = Redirect::to_with_allowed_hosts(uri, allowed).unwrap_err();
+            assert!(
+                matches!(err, RedirectError::HostNotAllowed { .. }),
+                "{uri} must be refused, got {err:?}"
+            );
+        }
+        // Ports and IPv6 literals still resolve to their host.
+        assert!(Redirect::to_with_allowed_hosts("https://example.com:8443/x", allowed).is_ok());
+        let ipv6 = &["::1"];
+        assert!(Redirect::to_with_allowed_hosts("https://[::1]:8443/x", ipv6).is_ok());
+        assert!(Redirect::to_with_allowed_hosts("https://[::1]/x", ipv6).is_ok());
 
         // Protocol-relative even with allowlist — still rejected.
         let err = Redirect::to_with_allowed_hosts("//example.com/path", allowed).unwrap_err();
