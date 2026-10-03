@@ -589,6 +589,7 @@ pub struct Error {
     message: Option<String>,
     source: Option<Arc<dyn std::error::Error + Send + Sync>>,
     context: ErrorContext,
+    cancel_reason: Option<Box<CancelReason>>,
 }
 
 impl Error {
@@ -601,6 +602,7 @@ impl Error {
             message: None,
             source: None,
             context: ErrorContext::new(),
+            cancel_reason: None,
         }
     }
 
@@ -705,10 +707,47 @@ impl Error {
     }
 
     /// Creates a cancellation error from a structured reason.
+    ///
+    /// The reason is kept whole: [`Error::cancel_reason`] returns it.
     #[must_use]
     #[inline]
     pub fn cancelled(reason: &CancelReason) -> Self {
-        Self::new(ErrorKind::Cancelled).with_message(reason.to_string())
+        Self::new(ErrorKind::Cancelled)
+            .with_message(reason.to_string())
+            .with_cancel_reason(reason.clone())
+    }
+
+    /// Attaches the structured reason for a cancellation, without changing
+    /// the error's kind, message or `Display` text.
+    #[must_use]
+    #[inline]
+    pub fn with_cancel_reason(mut self, reason: CancelReason) -> Self {
+        self.cancel_reason = Some(Box::new(reason));
+        self
+    }
+
+    /// [`Error::with_cancel_reason`] for a reason that may be absent.
+    #[must_use]
+    pub(crate) fn with_cancel_reason_from(mut self, reason: Option<&CancelReason>) -> Self {
+        if let Some(reason) = reason {
+            self.cancel_reason = Some(Box::new(reason.clone()));
+        }
+        self
+    }
+
+    /// Returns the structured cancellation reason this error carries: its
+    /// kind, origin and cause chain.
+    ///
+    /// [`Cx::checkpoint`](crate::cx::Cx::checkpoint) and
+    /// [`Error::cancelled`] attach it. This keeps the reason available to
+    /// whoever receives the error, after the task's `Cx` is gone. A task that
+    /// returns `cx.checkpoint()?`'s error joins as `Ok(Err(error))`, and this
+    /// accessor recovers why it was cancelled. Returns `None` for other errors,
+    /// and for cancellation errors built without a reason.
+    #[must_use]
+    #[inline]
+    pub fn cancel_reason(&self) -> Option<&CancelReason> {
+        self.cancel_reason.as_deref()
     }
 
     /// Returns the error category.
@@ -1400,6 +1439,32 @@ mod tests {
         let err: Error = cancelled.into();
         assert_eq!(err.kind(), ErrorKind::Cancelled);
         assert!(err.to_string().contains("Cancelled"));
+        assert_eq!(
+            err.cancel_reason(),
+            Some(&CancelReason::user("test cancel"))
+        );
+    }
+
+    #[test]
+    fn cancel_reason_is_carried_without_changing_display() {
+        let reason = CancelReason::new(crate::types::CancelKind::Shutdown)
+            .with_cause(CancelReason::user("operator stop"));
+        let plain = Error::new(ErrorKind::Cancelled);
+        assert_eq!(plain.cancel_reason(), None);
+        let display = plain.to_string();
+
+        let carried = plain.with_cancel_reason(reason.clone());
+        assert_eq!(carried.cancel_reason(), Some(&reason));
+        assert_eq!(carried.to_string(), display);
+        assert_eq!(carried.clone().cancel_reason(), Some(&reason));
+
+        let unchanged = Error::new(ErrorKind::Cancelled).with_cancel_reason_from(None);
+        assert_eq!(unchanged.cancel_reason(), None);
+        assert_eq!(
+            Error::new(ErrorKind::Internal).cancel_reason(),
+            None,
+            "only errors built with a reason carry one"
+        );
     }
 
     #[test]

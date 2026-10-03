@@ -1020,6 +1020,7 @@ Asupersync exposes runtime controls that are usually hidden behind ad hoc instru
 |---------|-----|------------------|
 | Logical clock mode | `RuntimeBuilder::logical_clock_mode(...)` | Select Lamport, Vector, or Hybrid logical clocks for causal ordering; defaults are chosen from runtime context and carried into event timelines (`src/runtime/config.rs`, `src/trace/distributed/vclock.rs`, `src/runtime/state.rs`) |
 | Cancel attribution bounds | `RuntimeBuilder::cancel_attribution_config(...)` | Bound cancellation cause-chain depth and memory while preserving root-cause lineage and explicit truncation metadata when limits are hit (`src/types/cancel.rs`, `src/runtime/state.rs`) |
+| Cancel reason on errors | `Error::cancel_reason()` | The error from `cx.checkpoint()` (and `Error::cancelled`) carries the structured `CancelReason`: kind, origin and cause chain. A joiner that only sees the task's `Ok(Err(error))` can still tell why it was cancelled (`src/error.rs`) |
 | Deadline monitor | `RuntimeBuilder::deadline_monitoring(...)` | Run a background monitor with configurable check cadence, warning thresholds, adaptive history percentiles, and custom warning callbacks (`src/runtime/deadline_monitor.rs`, `src/runtime/builder.rs`) |
 
 - Deadline checks are logical-time aware and fall back to wall-clock progression when logical time is stable, so stalled-task warnings work in both lab and production-style runs (`src/runtime/deadline_monitor.rs`).

@@ -2541,3 +2541,78 @@ mod stock_responsiveness_runtime {
         );
     }
 }
+
+/// Spec 3.3 at the join site: a task that returns `cx.checkpoint()`'s error
+/// joins as `Ok(Err(error))`, and that error carries the abort reason, the
+/// same one the task's `Cx` reported
+/// (br-asupersync-issue65-criticisms-kpmoy5.3.6).
+mod checkpoint_error_cancel_reason {
+    use asupersync::Cx;
+    use asupersync::error::Error;
+    use asupersync::runtime::{Runtime, RuntimeBuilder, yield_now};
+    use asupersync::types::{CancelKind, CancelReason};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    fn joined_checkpoint_error_carries_the_abort_reason(runtime: Runtime) {
+        let started = Arc::new(AtomicBool::new(false));
+        let seen = Arc::new(Mutex::new(None));
+        let started_for_task = Arc::clone(&started);
+        let seen_for_task = Arc::clone(&seen);
+        let joined = runtime.block_on(async move {
+            let cx = Cx::current().expect("root cx");
+            let mut handle = cx
+                .spawn(move |task_cx| async move {
+                    started_for_task.store(true, Ordering::SeqCst);
+                    loop {
+                        if let Err(error) = task_cx.checkpoint() {
+                            *seen_for_task.lock().unwrap() = task_cx.cancel_reason();
+                            return Err::<(), Error>(error);
+                        }
+                        yield_now().await;
+                    }
+                })
+                .expect("spawn");
+            let mut yields = 0_u32;
+            while !started.load(Ordering::SeqCst) {
+                yields += 1;
+                assert!(yields < 100_000, "the task never started");
+                yield_now().await;
+            }
+            handle.abort_with_reason(CancelReason::user("checkpoint reason probe"));
+            handle.join(&cx).await
+        });
+        let error = joined
+            .expect("the task acknowledged cancellation and returned its own result")
+            .expect_err("the task returned checkpoint's error");
+        assert!(error.is_cancelled());
+        let reason = error
+            .cancel_reason()
+            .expect("the checkpoint error carries its cancel reason");
+        assert_eq!(reason.kind, CancelKind::User);
+        assert_eq!(reason.message.as_deref(), Some("checkpoint reason probe"));
+        assert_eq!(
+            seen.lock().unwrap().as_ref(),
+            Some(reason),
+            "the error carries the reason the task's Cx reported"
+        );
+    }
+
+    #[test]
+    fn joined_checkpoint_error_carries_the_abort_reason_current_thread() {
+        joined_checkpoint_error_carries_the_abort_reason(
+            RuntimeBuilder::current_thread()
+                .build()
+                .expect("build runtime"),
+        );
+    }
+
+    #[test]
+    fn joined_checkpoint_error_carries_the_abort_reason_multi_thread() {
+        joined_checkpoint_error_carries_the_abort_reason(
+            RuntimeBuilder::multi_thread()
+                .build()
+                .expect("build runtime"),
+        );
+    }
+}

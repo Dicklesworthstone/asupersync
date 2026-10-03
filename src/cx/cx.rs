@@ -3030,7 +3030,11 @@ impl<Caps> Cx<Caps> {
                     budget_priority = budget.priority,
                     "cancel observed at checkpoint"
                 );
+                // The reason rides on the error, because the joiner may only
+                // ever see the error (br-asupersync-issue65-criticisms-kpmoy5.3.6).
+                // The `Err(...)` expression stays whole: source audits pin it.
                 Err(crate::error::Error::new(crate::error::ErrorKind::Cancelled))
+                    .map_err(|error| error.with_cancel_reason_from(cancel_reason))
             } else {
                 trace!(
                     task_id = ?task,
