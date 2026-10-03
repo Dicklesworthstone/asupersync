@@ -24,10 +24,11 @@
 //! - each receiver owns a bounded [`mpsc`] channel
 //!   (`properties.capacity`, default 4, at most 4096) and drains it until
 //!   every sender is gone;
-//! - each sender sends `properties.messages` values (default 16) to the
-//!   receivers in round-robin order through the two-phase `reserve` and
-//!   `send` API, so every value is a runtime-tracked `SendPermit`
-//!   obligation;
+//! - each sender sends `properties.messages` values (default 16, at most
+//!   1000000) to the receivers in round-robin order through the two-phase
+//!   `reserve` and `send` API, so every value is a runtime-tracked
+//!   `SendPermit` obligation. It yields once while it holds each permit, so
+//!   a cancellation can arrive mid-protocol; it then aborts the permit;
 //! - senders without any receiver race on one shared channel that an
 //!   implicit sink task drains, and receivers without senders observe a
 //!   closed channel at once.
@@ -1528,6 +1529,9 @@ struct WorkloadCounters {
     /// while this sender, which holds a sending handle, was still alive. A
     /// correct channel cannot produce one.
     premature_disconnects: AtomicU64,
+    /// Sender: cancellations that arrived while it held a reserved permit,
+    /// which it then aborted.
+    cancelled_holding: AtomicU64,
     /// Drain: values that arrived out of their sender's order.
     out_of_order: AtomicU64,
     /// Outcomes the channel contract rules out, or a missing task context.
@@ -2356,12 +2360,13 @@ impl BoundTask {
     fn counter_summary(&self) -> String {
         let c = &self.counters;
         format!(
-            "planned={},committed={},delivered={},received={},cancelled={},disconnected={},out_of_order={},unexpected={},drained_to_close={},finished={}",
+            "planned={},committed={},delivered={},received={},cancelled={},cancelled_holding={},disconnected={},out_of_order={},unexpected={},drained_to_close={},finished={}",
             self.planned,
             count(&c.committed),
             count(&c.delivered),
             count(&c.received),
             count(&c.cancelled),
+            count(&c.cancelled_holding),
             count(&c.disconnected),
             count(&c.out_of_order),
             count(&c.unexpected),
@@ -4331,25 +4336,21 @@ async fn run_sender(
                 // Two-phase send: the permit is a runtime obligation from the
                 // reserve until `send` commits it.
                 let stop = match tx.reserve(&cx).await {
-                    Ok(permit) => match permit.send(message) {
-                        Outcome::Ok(()) => {
-                            bump(&counters.committed);
-                            bump(&drain.delivered);
-                            false
-                        }
-                        Outcome::Err(SendError::Disconnected(_)) => {
-                            note_disconnect(&counters, drain);
-                            false
-                        }
-                        Outcome::Err(SendError::Cancelled(_)) | Outcome::Cancelled(_) => {
+                    Ok(permit) => {
+                        // Hold the permit across a scheduling point, so lab
+                        // chaos can cancel the sender while its obligation is
+                        // live; the sender then aborts the permit
+                        // (br-asupersync-nq2dgn).
+                        yield_now().await;
+                        if cx.checkpoint().is_err() {
+                            permit.abort();
                             bump(&counters.cancelled);
+                            bump(&counters.cancelled_holding);
                             true
+                        } else {
+                            send_reserved(permit, message, &counters, drain)
                         }
-                        Outcome::Err(SendError::Full(_)) | Outcome::Panicked(_) => {
-                            bump(&counters.unexpected);
-                            false
-                        }
-                    },
+                    }
                     Err(SendError::Cancelled(())) => {
                         bump(&counters.cancelled);
                         true
@@ -4372,6 +4373,35 @@ async fn run_sender(
         _ => bump(&counters.unexpected),
     }
     counters.finished.store(true, Ordering::Relaxed);
+}
+
+/// Commits `message` through a reserved permit. Returns true when the
+/// sender must stop.
+fn send_reserved(
+    permit: mpsc::SendPermit<'_, WorkloadMessage>,
+    message: WorkloadMessage,
+    counters: &WorkloadCounters,
+    drain: &WorkloadCounters,
+) -> bool {
+    match permit.send(message) {
+        Outcome::Ok(()) => {
+            bump(&counters.committed);
+            bump(&drain.delivered);
+            false
+        }
+        Outcome::Err(SendError::Disconnected(_)) => {
+            note_disconnect(counters, drain);
+            false
+        }
+        Outcome::Err(SendError::Cancelled(_)) | Outcome::Cancelled(_) => {
+            bump(&counters.cancelled);
+            true
+        }
+        Outcome::Err(SendError::Full(_)) | Outcome::Panicked(_) => {
+            bump(&counters.unexpected);
+            false
+        }
+    }
 }
 
 /// Body of a bound `receiver` task or the implicit sink.
@@ -6066,11 +6096,13 @@ mod tests {
         ];
 
         let mut cancelled = 0_u64;
+        let mut cancelled_holding = 0_u64;
         for seed in 0..8 {
             let (result, tasks) = ScenarioRunner::run_seeded(&scenario, Some(seed)).unwrap();
             assert!(result.passed(), "seed {seed}: {}", failure_detail(&result));
             let sender = &tasks[0];
             let c = &sender.counters;
+            cancelled_holding += count(&c.cancelled_holding);
             let committed = count(&c.committed);
             assert!(
                 committed + count(&c.cancelled) + count(&c.disconnected) <= sender.planned,
@@ -6096,6 +6128,16 @@ mod tests {
         assert!(
             cancelled > 0,
             "a 10% per-dispatch cancel rate must cancel some reserve or receive across eight seeds"
+        );
+        // The sender yields while it holds each permit, so some cancellations
+        // land on a live obligation, and every run above still passed the
+        // obligation-leak oracle. The sender aborts such a permit, but a run
+        // whose cancelled sender forgets it instead reports no leak either:
+        // this check proves that cancellation reaches a held permit, not the
+        // abort.
+        assert!(
+            cancelled_holding > 0,
+            "some cancellation must arrive while a permit is held"
         );
         crate::test_complete!("cancellation_mid_protocol_still_resolves_every_obligation");
     }

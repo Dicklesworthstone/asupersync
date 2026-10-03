@@ -65,7 +65,8 @@ case-sensitive) and spawns lab tasks for them:
 - a sender sends `properties.messages` values (default 16, at most 1000000) to
   the receivers in round-robin order through the two-phase `reserve`/`send`
   API, so each value is a runtime-tracked `SendPermit` obligation that the
-  obligation oracle sees;
+  obligation oracle sees. It yields once while it holds each permit, so lab
+  chaos can cancel it mid-protocol, and a cancelled sender aborts the permit;
 - senders without any receiver, as in `01_race_condition.yaml`, race on one
   shared channel drained by an implicit sink task, and receivers without
   senders see a closed channel at once;
