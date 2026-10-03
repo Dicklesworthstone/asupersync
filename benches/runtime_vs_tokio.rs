@@ -23,6 +23,11 @@
 //! - `yield_storm`: `tasks` tasks each yield 1000 times.
 //! - `join_set`: a parent spawns `n` trivial members into a `JoinSet` and
 //!   collects them in completion order with `join_next`.
+//! - `tcp_rr`: `conns` loopback TCP connections, one server echo task and one
+//!   client task per connection, each client making 200 round trips of a
+//!   64-byte request. Throughput comes from Criterion. Round-trip p50/p99
+//!   are printed as `tcp_rr latency ...` lines before the group runs (only
+//!   when no filter is given or a filter names `tcp_rr`).
 //!
 //! Timing starts inside the parent future: runtime construction and
 //! `block_on` entry are excluded on both sides. Run with:
@@ -79,6 +84,17 @@ fn tokio_multi() -> tokio::runtime::Runtime {
         .worker_threads(WORKERS)
         .build()
         .expect("build tokio multi-thread runtime")
+}
+
+/// The multi-thread tokio runtime with its I/O driver, for `tcp_rr`. The
+/// other rows keep `tokio_multi`, which has none. asupersync's default
+/// runtime always builds its platform reactor.
+fn tokio_multi_io() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(WORKERS)
+        .enable_io()
+        .build()
+        .expect("build tokio multi-thread runtime with I/O")
 }
 
 fn tokio_current() -> tokio::runtime::Runtime {
@@ -370,6 +386,172 @@ fn tokio_join_set(rt: &tokio::runtime::Runtime, n: usize) -> Duration {
     })
 }
 
+/// Bytes in each `tcp_rr` request and in its echoed response.
+const TCP_RR_MESSAGE: usize = 64;
+/// Round trips each `tcp_rr` connection makes per batch.
+const TCP_RR_ROUND_TRIPS: usize = 200;
+/// Batches whose per-round-trip latencies are pooled for the p50/p99 report.
+const TCP_RR_LATENCY_BATCHES: usize = 10;
+
+/// One `tcp_rr` batch: its wall time, plus each round trip's latency in
+/// nanoseconds when the batch records them.
+type RrBatch = (Duration, Vec<u64>);
+
+fn nanos(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+}
+
+/// `conns` loopback connections, each served by its own echo task. Every
+/// client task makes `TCP_RR_ROUND_TRIPS` request/response round trips.
+/// Connection setup is outside the timed span.
+fn asup_tcp_rr(rt: &Runtime, conns: usize, record: bool) -> RrBatch {
+    use asupersync::io::{AsyncReadExt, AsyncWriteExt};
+    use asupersync::net::{TcpListener, TcpStream};
+
+    rt.block_on(rt.handle().spawn(async move {
+        let cx = Cx::current().expect("a spawned task has a Cx");
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("listener address");
+        let mut server = cx
+            .spawn(move |cx| async move {
+                let mut echoes = Vec::with_capacity(conns);
+                for _ in 0..conns {
+                    let (mut stream, _) = listener.accept().await.expect("accept");
+                    stream.set_nodelay(true).expect("server nodelay");
+                    let echo = cx.spawn(move |_| async move {
+                        let mut buf = [0u8; TCP_RR_MESSAGE];
+                        while stream.read_exact(&mut buf).await.is_ok() {
+                            if stream.write_all(&buf).await.is_err() {
+                                break;
+                            }
+                        }
+                    });
+                    echoes.push(echo.expect("spawn echo task"));
+                }
+                for mut echo in echoes {
+                    let _ = echo.join(&cx).await;
+                }
+            })
+            .expect("spawn server task");
+        let mut streams = Vec::with_capacity(conns);
+        for _ in 0..conns {
+            let stream = TcpStream::connect(addr).await.expect("connect");
+            stream.set_nodelay(true).expect("client nodelay");
+            streams.push(stream);
+        }
+
+        let start = Instant::now();
+        let mut clients = Vec::with_capacity(conns);
+        for mut stream in streams {
+            let client = cx.spawn(move |_| async move {
+                let mut latencies = Vec::with_capacity(if record { TCP_RR_ROUND_TRIPS } else { 0 });
+                let mut buf = [7u8; TCP_RR_MESSAGE];
+                for _ in 0..TCP_RR_ROUND_TRIPS {
+                    let sent = Instant::now();
+                    stream.write_all(&buf).await.expect("request");
+                    stream.read_exact(&mut buf).await.expect("response");
+                    if record {
+                        latencies.push(nanos(sent.elapsed()));
+                    }
+                }
+                latencies
+            });
+            clients.push(client.expect("spawn client task"));
+        }
+        let mut latencies = Vec::new();
+        for mut client in clients {
+            latencies.extend(client.join(&cx).await.expect("client task"));
+        }
+        let elapsed = start.elapsed();
+        let _ = server.join(&cx).await;
+        (elapsed, latencies)
+    }))
+}
+
+fn tokio_tcp_rr(rt: &tokio::runtime::Runtime, conns: usize, record: bool) -> RrBatch {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    rt.block_on(async move {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            let mut echoes = Vec::with_capacity(conns);
+            for _ in 0..conns {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                stream.set_nodelay(true).expect("server nodelay");
+                echoes.push(tokio::spawn(async move {
+                    let mut buf = [0u8; TCP_RR_MESSAGE];
+                    while stream.read_exact(&mut buf).await.is_ok() {
+                        if stream.write_all(&buf).await.is_err() {
+                            break;
+                        }
+                    }
+                }));
+            }
+            for echo in echoes {
+                let _ = echo.await;
+            }
+        });
+        let mut streams = Vec::with_capacity(conns);
+        for _ in 0..conns {
+            let stream = TcpStream::connect(addr).await.expect("connect");
+            stream.set_nodelay(true).expect("client nodelay");
+            streams.push(stream);
+        }
+
+        let start = Instant::now();
+        let mut clients = Vec::with_capacity(conns);
+        for mut stream in streams {
+            clients.push(tokio::spawn(async move {
+                let mut latencies = Vec::with_capacity(if record { TCP_RR_ROUND_TRIPS } else { 0 });
+                let mut buf = [7u8; TCP_RR_MESSAGE];
+                for _ in 0..TCP_RR_ROUND_TRIPS {
+                    let sent = Instant::now();
+                    stream.write_all(&buf).await.expect("request");
+                    stream.read_exact(&mut buf).await.expect("response");
+                    if record {
+                        latencies.push(nanos(sent.elapsed()));
+                    }
+                }
+                latencies
+            }));
+        }
+        let mut latencies = Vec::new();
+        for client in clients {
+            latencies.extend(client.await.expect("client task"));
+        }
+        let elapsed = start.elapsed();
+        let _ = server.await;
+        (elapsed, latencies)
+    })
+}
+
+/// Prints the pooled round-trip latency percentiles of
+/// `TCP_RR_LATENCY_BATCHES` recorded batches. Criterion reports throughput;
+/// it has no percentile output.
+fn report_tcp_rr_latency(row: &str, conns: usize, mut batch: impl FnMut() -> RrBatch) {
+    let mut elapsed = Duration::ZERO;
+    let mut latencies = Vec::new();
+    for _ in 0..TCP_RR_LATENCY_BATCHES {
+        let (batch_elapsed, batch_latencies) = batch();
+        elapsed += batch_elapsed;
+        latencies.extend(batch_latencies);
+    }
+    latencies.sort_unstable();
+    let at = |percent: usize| {
+        let index = (latencies.len() * percent / 100).min(latencies.len() - 1);
+        Duration::from_nanos(latencies[index]).as_secs_f64() * 1e6
+    };
+    println!(
+        "tcp_rr latency {row}/{conns}: {} round trips, p50 {:.1} us, p99 {:.1} us, {:.0} round trips/s",
+        latencies.len(),
+        at(50),
+        at(99),
+        latencies.len() as f64 / elapsed.as_secs_f64(),
+    );
+}
+
 /// Times `iters` batches of `n` operations with the clock inside the parent.
 fn timed(iters: u64, mut batch: impl FnMut() -> Duration) -> Duration {
     (0..iters).map(|_| batch()).sum()
@@ -530,6 +712,42 @@ fn bench_join_set(c: &mut Criterion) {
     group.finish();
 }
 
+/// Whether this run's benchmark filters (the positional arguments) can
+/// select `tcp_rr`; the latency report runs only then.
+fn tcp_rr_selected() -> bool {
+    let filters: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|arg| !arg.starts_with('-'))
+        .collect();
+    filters.is_empty()
+        || filters
+            .iter()
+            .any(|filter| filter.contains("tcp_rr") || "tcp_rr".starts_with(filter.as_str()))
+}
+
+fn bench_tcp_rr(c: &mut Criterion) {
+    let asup = asup_multi();
+    let tokio = tokio_multi_io();
+    if tcp_rr_selected() {
+        for conns in [1usize, 64] {
+            report_tcp_rr_latency("tokio", conns, || tokio_tcp_rr(&tokio, conns, true));
+            report_tcp_rr_latency("asupersync", conns, || asup_tcp_rr(&asup, conns, true));
+        }
+    }
+    let mut group = c.benchmark_group("tcp_rr");
+    group.sample_size(20);
+    for conns in [1usize, 64] {
+        group.throughput(Throughput::Elements((conns * TCP_RR_ROUND_TRIPS) as u64));
+        group.bench_function(BenchmarkId::new("tokio", conns), |b| {
+            b.iter_custom(|iters| timed(iters, || tokio_tcp_rr(&tokio, conns, false).0));
+        });
+        group.bench_function(BenchmarkId::new("asupersync", conns), |b| {
+            b.iter_custom(|iters| timed(iters, || asup_tcp_rr(&asup, conns, false).0));
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     runtime_vs_tokio,
     bench_spawn_join,
@@ -539,6 +757,7 @@ criterion_group!(
     bench_fan_out,
     bench_mutex_contended,
     bench_yield_storm,
-    bench_join_set
+    bench_join_set,
+    bench_tcp_rr
 );
 criterion_main!(runtime_vs_tokio);
