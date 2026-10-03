@@ -998,10 +998,10 @@ impl TlsConnectorBuilder {
     ///   a fresh `TlsConnector`. Long-lived processes connecting to
     ///   slowly-rotating PKIs should periodically rebuild the
     ///   connector with a current CRL.
-    /// * **Coverage**: a CRL covers only the certs issued by the
-    ///   matching CA. Mixing CRLs from multiple CAs is supported;
-    ///   each CRL applies to its issuer. CRLs for CAs that do not
-    ///   appear in the configured roots are silently inert.
+    /// * **Coverage**: a CRL covers only the certs its CA issued, and a
+    ///   cert whose issuer has no configured CRL is still accepted. CRLs
+    ///   from several CAs can be mixed. CRLs for CAs that do not appear
+    ///   in the configured roots are silently inert.
     /// * **OCSP**: rustls 0.23 does not surface OCSP-stapling
     ///   *enforcement*, only OCSP-response *acceptance* during the
     ///   handshake. CRL is the more reliable revocation primitive
@@ -1153,8 +1153,13 @@ impl TlsConnectorBuilder {
                         .into(),
                 ));
             }
+            // rustls defaults to refusing any certificate whose issuer has
+            // no configured CRL (UnknownRevocationStatus). A CRL covers only
+            // its issuer, as documented on `with_crl_pem`, so a chain from a
+            // CA without one is accepted and a listed serial is still refused.
             let verifier = rustls::client::WebPkiServerVerifier::builder(Arc::new(roots))
                 .with_crls(crl_ders)
+                .allow_unknown_revocation_status()
                 .build()
                 .map_err(|e| TlsError::Configuration(format!("CRL verifier build: {e}")))?;
             // The dangerous() name reflects that callers can plug in

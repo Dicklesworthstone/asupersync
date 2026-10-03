@@ -965,4 +965,122 @@ mod tests {
         );
         assert!(runtime.is_quiescent());
     }
+
+    /// Public parser fixture from rustls-pemfile 2.2.0 tests/data/crl.pem
+    /// (Apache-2.0 / ISC / MIT), issued by "ponytown RSA CA", which did not
+    /// issue the test certificate.
+    #[cfg(feature = "tls")]
+    const OTHER_ISSUER_CRL_PEM: &[u8] = b"-----BEGIN X509 CRL-----\n\
+MIICiTBzAgEBMA0GCSqGSIb3DQEBCwUAMBoxGDAWBgNVBAMMD3Bvbnl0b3duIFJT\n\
+QSBDQRcNMjMwNjI3MDgyODEyWhcNMjMwNzI3MDgyODEyWjAVMBMCAgHIFw0yMzA2\n\
+MjcwODI3NTlaoA4wDDAKBgNVHRQEAwIBAjANBgkqhkiG9w0BAQsFAAOCAgEAP6EX\n\
+9+hxjx/AqdBpynZXjGkEqigBcLcJ2PADOXngdQI1jC0WuYnZymUimemeULtt8X+1\n\
+ai2KxAuF1m4NEKZsrGKvO+/9s/X1xbGroyHSAMKtZafFopFpoB2aNbYlx7yIyLtD\n\
+BBIZIF50g20U+3izqpHutTD10itdk9TLsSceJHpwTkNJtaWMkOfBV28nKzEzVutV\n\
+f6WzRpURGzui6nQy7aIqImeanpoBoz323psMfC32U0uMBCZltyHNqsX58/2Uhucx\n\
+0IPnitNuhv4scCPf/jeRfGIWDrTf1/25LDzRxyg1S4z9aa+3GM4O3dqy4igZEhgT\n\
+q3pjlJ2hUL5E0oqbZDIQD1SN8UUUv5N2AjwZcxVBNnYeGyuO7YpTBYiu62o73iL2\n\
+CjgElfaMq/9hEr9GR9kJozh7VTxtQPbnr4DiucQvhv8o/A1z+zkC0gj8iCLFtDbO\n\
+8bvDowcdle9LKkrLaBe6sO+fSH/I9Wj8vrEJKsuwaEraIdEaq2VrIMUPEWN0/MH9\n\
+vTwHyadGSMK4CWtrn9fCAgSLw6NX74D7Cx1IaS8vstMjpeUqOS0dk5ThiW47HceB\n\
+DTko7rV5N+RGH2nW1ynLoZKCJQqqZcLilFMyKPui3jifJnQlMFi54jGVgg/D6UQn\n\
+7dA7wb2ux/1hSiaarp+mi7ncVOyByz6/WQP8mfc=\n\
+-----END X509 CRL-----\n";
+
+    /// A CRL from the self-signed test certificate's own key that revokes
+    /// that certificate (serial 319CCC27...6C4B), next update 2126. Made with
+    /// `openssl ca -gencrl -keyfile server.key -cert server.crt` from an
+    /// index.txt holding one revoked entry for that serial.
+    #[cfg(feature = "tls")]
+    const TEST_CERT_REVOKED_CRL_PEM: &[u8] = b"-----BEGIN X509 CRL-----\n\
+MIIB3TCBxgIBATANBgkqhkiG9w0BAQsFADBZMQswCQYDVQQGEwJVUzENMAsGA1UE\n\
+CAwEVGVzdDENMAsGA1UEBwwEVGVzdDEYMBYGA1UECgwPQXN1cGVyU3luYyBUZXN0\n\
+MRIwEAYDVQQDDAlsb2NhbGhvc3QXDTI2MTAwMzA0MTUwM1oYDzIxMjYwOTA5MDQx\n\
+NTAzWjAnMCUCFDGczCdzSv8IrxFdAMI2QzZLLGxLFw0yNjEwMDMwMDAwMDBaoA4w\n\
+DDAKBgNVHRQEAwIBATANBgkqhkiG9w0BAQsFAAOCAQEAczvy8Gclb2L+egBA3XVH\n\
+iEb9PUNXFIm0BdsaN0dEpaQ+x1TTzIqrjcIuPWJjum0v5mmgeWXJyVHtJUrWB5B1\n\
+bXyCqElzV/hKSqJLhGKUwhWOIZLd5kWOPGmSoO291xbsOcaDEG4DsOhobduBjP/z\n\
+mj+NAAVGjaJKuGdbrzT1NVH6qkW4G0n+ZOuZf5CH3E90H0Bu+6lcJpYPpNGSFY0f\n\
+4ZR9OkSx0eA+5EF7ThORH1LUGGbGpz5mLM6PSLN0571E3/pO7djtbceRr0rASxGG\n\
+A4sj3J3HjUEnUUo0RKuVI+krlZN2dhvYvdazj/6Bcp05YiMVCJpGuoNADgg6KxKY\n\
+jg==\n\
+-----END X509 CRL-----\n";
+
+    /// Handshakes against the test certificate with `crl_pem` configured on
+    /// the client, and returns the client's and the server's results.
+    #[cfg(feature = "tls")]
+    fn handshake_with_client_crl(
+        seed: u64,
+        crl_pem: &'static [u8],
+    ) -> (Result<(), TlsError>, Result<(), TlsError>) {
+        let config = TestConfig::new().with_seed(seed).with_max_steps(20_000);
+        let mut runtime = LabRuntimeTarget::create_runtime(config);
+        let results = LabRuntimeTarget::block_on(&mut runtime, async move {
+            let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+            let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+            let acceptor = TlsAcceptorBuilder::new(chain, key).build().unwrap();
+            let certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
+            let connector = TlsConnectorBuilder::new()
+                .add_root_certificates(certs)
+                .with_crl_pem(crl_pem)
+                .build()
+                .unwrap();
+
+            let server_name = ServerName::try_from("localhost".to_string()).unwrap();
+            let client_conn =
+                ClientConnection::new(Arc::clone(connector.config()), server_name).unwrap();
+            let server_conn = ServerConnection::new(Arc::clone(acceptor.config())).unwrap();
+            let (client_io, server_io) = VirtualTcpStream::pair(
+                "127.0.0.1:5220".parse().unwrap(),
+                "127.0.0.1:5221".parse().unwrap(),
+            );
+            let mut client_stream = TlsStream::new_client(client_io, client_conn);
+            let mut server_stream = TlsStream::new_server(server_io, server_conn);
+            // Both streams stay open until both handshakes return: a TLS 1.3
+            // server writes its session tickets after the client's Finished,
+            // and a client that had already closed would fail that write.
+            let client = async move {
+                let result = poll_fn(|cx| client_stream.poll_handshake(cx)).await;
+                (result, client_stream)
+            };
+            let server = async move {
+                let result = poll_fn(|cx| server_stream.poll_handshake(cx)).await;
+                (result, server_stream)
+            };
+            let ((client_result, client_stream), (server_result, server_stream)) =
+                zip(client, server).await;
+            drop((client_stream, server_stream));
+            (client_result, server_result)
+        });
+        assert!(runtime.is_quiescent());
+        results
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn a_crl_for_another_issuer_does_not_refuse_the_handshake() {
+        init_test_logging();
+        // A CRL covers only the certificates its issuer signed. Configuring
+        // one CA's CRL must not refuse servers whose CA has none, or a CRL
+        // for a private CA would break every public host.
+        let (client, server) = handshake_with_client_crl(0xC41_0001, OTHER_ISSUER_CRL_PEM);
+        tracing::info!(client = ?client, server = ?server, "tls_crl_other_issuer");
+        client.expect("a certificate whose issuer has no CRL is accepted");
+        server.expect("the server handshake completes");
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn a_certificate_revoked_by_its_issuers_crl_is_refused() {
+        init_test_logging();
+        let (client, _server) = handshake_with_client_crl(0xC41_0002, TEST_CERT_REVOKED_CRL_PEM);
+        let error = client
+            .expect_err("a revoked certificate must be refused")
+            .to_string();
+        tracing::info!(%error, "tls_crl_revoked");
+        assert!(
+            error.contains("Revoked"),
+            "the refusal must name the revocation: {error}"
+        );
+    }
 }
