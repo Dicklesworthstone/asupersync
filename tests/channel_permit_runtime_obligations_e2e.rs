@@ -220,6 +220,29 @@ fn mpsc_permit_sent_or_dropped_is_resolved_not_leaked() {
     assert_clean(&mut lab, 3, 1, 2);
 }
 
+/// The one-call `Sender::send` commits its internal permit in the same poll
+/// that reserves it, so it posts no obligation at all; an explicit
+/// `reserve` still posts its reservation and commit. Both paths deliver
+/// (br-asupersync-issue65-criticisms-kpmoy5.1.16).
+#[test]
+fn mpsc_one_call_send_posts_no_transient_obligation_but_reserve_still_does() {
+    let mut lab = lab(0xC5_0010);
+    run_task(&mut lab, async {
+        let cx = Cx::current().expect("lab task installs a current Cx");
+        let (tx, mut rx) = mpsc::channel::<u8>(4);
+
+        tx.send(&cx, 1).await.expect("one-call send");
+        tx.send(&cx, 2).await.expect("one-call send");
+        let permit = tx.reserve(&cx).await.expect("reserve capacity");
+        permit.try_send(3).expect("receiver is live");
+
+        for expected in 1..=3 {
+            assert_eq!(rx.recv(&cx).await.expect("receive"), expected);
+        }
+    });
+    assert_clean(&mut lab, 1, 1, 0);
+}
+
 // ---------------------------------------------------------------------------
 // oneshot
 // ---------------------------------------------------------------------------

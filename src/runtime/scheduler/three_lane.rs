@@ -2178,6 +2178,7 @@ impl ThreeLaneScheduler {
                 parker,
                 coordinator: Arc::clone(&coordinator),
                 spawn_mailbox: None,
+                obligation_mailbox: None,
                 rng: DetRng::new(id as u64),
                 shutdown: Arc::clone(&shutdown),
                 io_driver: io_driver.clone(),
@@ -2235,10 +2236,19 @@ impl ThreeLaneScheduler {
                     None
                 },
                 decision_sequence: 0,
-                fairness_monitor: Mutex::new(FairnessMonitor::with_defaults()),
+                fairness_monitor: Mutex::new(FairnessMonitor::new(FairnessConfig {
+                    enable_per_task_tracking: SCHEDULER_VERIFICATION_DEFAULT,
+                    ..FairnessConfig::default()
+                })),
                 invariant_monitor: Mutex::new(
-                    super::invariant_monitor::SchedulerInvariantMonitor::with_defaults(),
+                    super::invariant_monitor::SchedulerInvariantMonitor::new(
+                        super::invariant_monitor::InvariantConfig {
+                            enable_verification: SCHEDULER_VERIFICATION_DEFAULT,
+                            ..super::invariant_monitor::InvariantConfig::default()
+                        },
+                    ),
                 ),
+                scheduler_verification: SCHEDULER_VERIFICATION_DEFAULT,
                 fast_queue_dispatch_streak: 0,
                 fast_queue_fairness_limit: 4, // Allow max 4 consecutive stolen work dispatches
                 timed_dispatch_streak: 0,
@@ -3159,6 +3169,19 @@ impl ThreeLaneScheduler {
         self.spawn_mailbox = Some(mailbox);
     }
 
+    /// Gives every worker the runtime's obligation-post mailbox so an idle
+    /// dispatch checks it with one atomic load instead of locking
+    /// RuntimeState (br-asupersync-issue65-criticisms-kpmoy5.1.2). Workers
+    /// without it keep the locked check.
+    pub fn attach_obligation_mailbox(
+        &mut self,
+        mailbox: &Arc<crate::runtime::obligation_mailbox::ObligationMailbox>,
+    ) {
+        for worker in &mut self.workers {
+            worker.obligation_mailbox = Some(Arc::clone(mailbox));
+        }
+    }
+
     /// Wakes one worker after a producer enqueued a spawn request, closing
     /// the lost-wakeup race against a fully parked fleet (enqueue happens
     /// outside the scheduler, so park-side rechecks alone cannot see it).
@@ -3238,6 +3261,19 @@ impl StealerLocality {
     }
 }
 
+/// Whether workers run the fairness and invariant monitors per task.
+///
+/// Both monitors are verification instruments: nothing in the runtime acts on
+/// what they record, and their reports are read only by tests and
+/// diagnostics. Recording costs two mutex acquisitions, map updates (the
+/// invariant monitor allocates per new task), and a clock read on every local
+/// enqueue. Worse, the fairness map is per worker while tasks migrate by
+/// stealing, so entries of stolen tasks are never removed; once the map hits
+/// its 10,000-entry cap, every new enqueue scans the whole map to evict.
+/// They therefore run in this crate's tests and in debug builds, and stay off
+/// in release builds (br-asupersync-issue65-criticisms-kpmoy5.1.6).
+const SCHEDULER_VERIFICATION_DEFAULT: bool = cfg!(any(test, debug_assertions));
+
 /// A worker thread for the 3-lane scheduler.
 #[derive(Debug)]
 pub struct ThreeLaneWorker {
@@ -3312,6 +3348,9 @@ pub struct ThreeLaneWorker {
     pub(crate) coordinator: Arc<WorkerCoordinator>,
     /// Lock-free spawn intake to drain at dispatch time (mailbox mode only).
     pub(crate) spawn_mailbox: Option<Arc<crate::runtime::spawn_mailbox::SpawnMailbox>>,
+    /// Obligation-post mailbox checked lock-free before draining posts.
+    pub(crate) obligation_mailbox:
+        Option<Arc<crate::runtime::obligation_mailbox::ObligationMailbox>>,
     /// Deterministic RNG for stealing decisions.
     pub rng: DetRng,
     /// Shutdown signal.
@@ -3383,6 +3422,10 @@ pub struct ThreeLaneWorker {
     fairness_monitor: Mutex<FairnessMonitor>,
     /// Scheduler invariant monitor for comprehensive correctness verification.
     invariant_monitor: Mutex<super::invariant_monitor::SchedulerInvariantMonitor>,
+    /// Whether the fairness and invariant monitors record per-task events
+    /// ([`SCHEDULER_VERIFICATION_DEFAULT`]). When false, enqueue, steal and
+    /// completion paths skip both monitor mutexes and the clock read.
+    scheduler_verification: bool,
     /// Number of consecutive fast_queue (stolen work) dispatches.
     ///
     /// Tracks fairness between stolen work and local work to prevent starvation.
@@ -4600,6 +4643,43 @@ impl ThreeLaneWorker {
     #[inline]
     fn record_scheduler_evidence_enqueue(&self, task: TaskId) {
         self.record_scheduler_evidence_enqueue_at(task, self.current_time_ns());
+    }
+
+    /// Bookkeeping for a task this worker just queued locally: the
+    /// fairness and invariant monitors when [`Self::scheduler_verification`]
+    /// is on, and the opt-in scheduler-evidence collector. The clock is read
+    /// only when one of them consumes it. `requeue` selects the invariant
+    /// monitor's requeue record (cancel promotion) over a fresh enqueue.
+    #[inline]
+    fn note_local_enqueue(
+        &self,
+        task: TaskId,
+        priority: u8,
+        lane: u8,
+        queue: &'static str,
+        requeue: bool,
+    ) {
+        if !self.scheduler_verification {
+            if self.scheduler_evidence.is_some() {
+                self.record_scheduler_evidence_enqueue(task);
+            }
+            return;
+        }
+        let current_time = self.current_time_ns();
+        self.fairness_monitor
+            .lock()
+            .record_task_enqueue(task, priority, current_time, lane);
+        let at = Time::from_nanos(current_time);
+        if requeue {
+            self.invariant_monitor
+                .lock()
+                .record_task_requeue(task, queue, priority, at);
+        } else {
+            self.invariant_monitor
+                .lock()
+                .record_task_enqueue(task, queue, priority, at);
+        }
+        self.record_scheduler_evidence_enqueue_at(task, current_time);
     }
 
     /// Executes a closure with access to the fairness monitor for this worker.
@@ -6050,8 +6130,17 @@ impl ThreeLaneWorker {
 
         // Obligation posts (br-asupersync-bi2462.13) are applied here, next
         // to spawn admissions, so a token's reserve/commit/abort/leak reaches
-        // `RuntimeState` in post order on the same cadence as spawns.
-        {
+        // `RuntimeState` in post order on the same cadence as spawns. With the
+        // mailbox attached, an empty queue skips the RuntimeState lock: this
+        // runs on every dispatch of every worker, so locking unconditionally
+        // serialized the whole fleet on one mutex
+        // (br-asupersync-issue65-criticisms-kpmoy5.1.2). A post racing this
+        // check is applied on a later dispatch, as with the locked check.
+        let obligation_posts_may_be_pending = self
+            .obligation_mailbox
+            .as_ref()
+            .is_none_or(|mailbox| !mailbox.is_empty());
+        if obligation_posts_may_be_pending {
             let mut state = self
                 .state
                 .lock()
@@ -6812,12 +6901,15 @@ impl ThreeLaneWorker {
         if blocked_priority <= executing_priority {
             return;
         }
-        let timestamp = Time::from_nanos(self.current_time_ns());
         self.preemption_metrics.ready_priority_inversions += 1;
         let gap = blocked_priority.saturating_sub(executing_priority);
         if gap > self.preemption_metrics.max_ready_priority_inversion_gap {
             self.preemption_metrics.max_ready_priority_inversion_gap = gap;
         }
+        if !self.scheduler_verification {
+            return;
+        }
+        let timestamp = Time::from_nanos(self.current_time_ns());
         {
             let mut invariant_monitor = self.invariant_monitor.lock();
             invariant_monitor.record_task_requeue(
@@ -6856,16 +6948,24 @@ impl ThreeLaneWorker {
 
     #[inline]
     fn finish_dispatch(&mut self, task: TaskId) -> TaskId {
-        // Record task dispatch for fairness monitoring
+        // Every dispatch passes here: with verification off and no evidence
+        // collector there is nothing to record and no reason to read the
+        // clock (br-asupersync-issue65-criticisms-kpmoy5.1.6).
+        if !self.scheduler_verification && self.scheduler_evidence.is_none() {
+            return task;
+        }
         let current_time = self.current_time_ns();
-        self.fairness_monitor
-            .lock()
-            .record_task_dispatch(task, current_time);
+        if self.scheduler_verification {
+            // Record task dispatch for fairness monitoring
+            self.fairness_monitor
+                .lock()
+                .record_task_dispatch(task, current_time);
 
-        // Record task dequeue for invariant verification
-        self.invariant_monitor
-            .lock()
-            .record_task_dispatch(task, Time::from_nanos(current_time));
+            // Record task dequeue for invariant verification
+            self.invariant_monitor
+                .lock()
+                .record_task_dispatch(task, Time::from_nanos(current_time));
+        }
 
         if let Some(collector) = &self.scheduler_evidence {
             let ready_backlog = self.ready_queue_depth_signal();
@@ -7494,9 +7594,12 @@ impl ThreeLaneWorker {
                         } else {
                             self.steal_locality_counters.remote_fast_steals += 1;
                         }
-                        self.invariant_monitor
-                            .lock()
-                            .record_task_dispatch(task, Time::from_nanos(self.current_time_ns()));
+                        if self.scheduler_verification {
+                            self.invariant_monitor.lock().record_task_dispatch(
+                                task,
+                                Time::from_nanos(self.current_time_ns()),
+                            );
+                        }
 
                         return Some(task);
                     }
@@ -7522,9 +7625,12 @@ impl ThreeLaneWorker {
                         } else {
                             self.steal_locality_counters.remote_fast_steals += 1;
                         }
-                        self.invariant_monitor
-                            .lock()
-                            .record_task_dispatch(task, Time::from_nanos(self.current_time_ns()));
+                        if self.scheduler_verification {
+                            self.invariant_monitor.lock().record_task_dispatch(
+                                task,
+                                Time::from_nanos(self.current_time_ns()),
+                            );
+                        }
 
                         return Some(task);
                     }
@@ -7586,10 +7692,13 @@ impl ThreeLaneWorker {
                             self.steal_locality_counters.remote_heap_steals += 1;
                         }
 
-                        self.invariant_monitor.lock().record_task_dispatch(
-                            first_task,
-                            Time::from_nanos(self.current_time_ns()),
-                        );
+                        let verification = self.scheduler_verification;
+                        if verification {
+                            self.invariant_monitor.lock().record_task_dispatch(
+                                first_task,
+                                Time::from_nanos(self.current_time_ns()),
+                            );
+                        }
 
                         let steal_back_into_local_ready =
                             stolen_count > 1 && self.local.lock().peek_ready_priority().is_some();
@@ -7599,24 +7708,28 @@ impl ThreeLaneWorker {
                                 let mut local = self.local.lock();
                                 for &(task, priority) in &self.steal_buffer[1..stolen_count] {
                                     local.schedule(task, priority);
-                                    self.invariant_monitor.lock().record_task_requeue(
-                                        task,
-                                        "local_ready_stolen",
-                                        priority,
-                                        Time::from_nanos(self.current_time_ns()),
-                                    );
+                                    if verification {
+                                        self.invariant_monitor.lock().record_task_requeue(
+                                            task,
+                                            "local_ready_stolen",
+                                            priority,
+                                            Time::from_nanos(self.current_time_ns()),
+                                        );
+                                    }
                                 }
                             } else {
                                 for &(task, priority) in
                                     self.steal_buffer[1..stolen_count].iter().rev()
                                 {
                                     self.fast_queue.push(task);
-                                    self.invariant_monitor.lock().record_task_requeue(
-                                        task,
-                                        "fast_queue_stolen",
-                                        priority,
-                                        Time::from_nanos(self.current_time_ns()),
-                                    );
+                                    if verification {
+                                        self.invariant_monitor.lock().record_task_requeue(
+                                            task,
+                                            "fast_queue_stolen",
+                                            priority,
+                                            Time::from_nanos(self.current_time_ns()),
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -7658,25 +7771,8 @@ impl ThreeLaneWorker {
         if should_schedule {
             let mut local = self.local.lock();
             local.schedule(task, priority);
-
-            // Record task enqueue for fairness monitoring
-            let current_time = self.current_time_ns();
-            self.fairness_monitor.lock().record_task_enqueue(
-                task,
-                priority,
-                current_time,
-                2, // Ready lane = 2
-            );
-
-            // Record task enqueue for invariant verification
-            self.invariant_monitor.lock().record_task_enqueue(
-                task,
-                "local_ready_heap",
-                priority,
-                Time::from_nanos(current_time),
-            );
-
-            self.record_scheduler_evidence_enqueue_at(task, current_time);
+            // Ready lane = 2.
+            self.note_local_enqueue(task, priority, 2, "local_ready_heap", false);
             self.parker.unpark();
         }
     }
@@ -7697,25 +7793,8 @@ impl ThreeLaneWorker {
             }
         });
         move_local_ready_task_to_cancel_lane(&self.local, &self.local_ready, task, priority);
-
-        // Record task enqueue for fairness monitoring
-        let current_time = self.current_time_ns();
-        self.fairness_monitor.lock().record_task_enqueue(
-            task,
-            priority,
-            current_time,
-            0, // Cancel lane = 0
-        );
-
-        // Record task enqueue for invariant verification
-        self.invariant_monitor.lock().record_task_requeue(
-            task,
-            "local_cancel_queue",
-            priority,
-            Time::from_nanos(current_time),
-        );
-
-        self.record_scheduler_evidence_enqueue_at(task, current_time);
+        // Cancel lane = 0.
+        self.note_local_enqueue(task, priority, 0, "local_cancel_queue", true);
         self.parker.unpark();
     }
 
@@ -7740,25 +7819,8 @@ impl ThreeLaneWorker {
         if should_schedule {
             let mut local = self.local.lock();
             local.schedule_timed(task, deadline);
-
-            // Record task enqueue for fairness monitoring
-            let current_time = self.current_time_ns();
-            self.fairness_monitor.lock().record_task_enqueue(
-                task,
-                0, // Timed tasks don't have explicit priority, use 0
-                current_time,
-                1, // Timed lane = 1
-            );
-
-            // Record task enqueue for invariant verification
-            self.invariant_monitor.lock().record_task_enqueue(
-                task,
-                "local_timed_queue",
-                0, // Timed tasks use priority 0
-                Time::from_nanos(current_time),
-            );
-
-            self.record_scheduler_evidence_enqueue_at(task, current_time);
+            // Timed lane = 1; timed tasks have no explicit priority, use 0.
+            self.note_local_enqueue(task, 0, 1, "local_timed_queue", false);
             self.parker.unpark();
         }
     }

@@ -198,7 +198,10 @@ fn lab_runtime_oracle_feeding_census() {
         .create_task(root, Budget::INFINITE, async {
             let cx = Cx::current().expect("lab task installs a current Cx");
             let (tx, mut rx) = mpsc::channel::<u32>(2);
-            tx.send(&cx, 7).await.expect("send into an open channel");
+            // An explicit two-phase permit: the one-call `send` commits its
+            // internal permit within one poll and registers no obligation.
+            let permit = tx.reserve(&cx).await.expect("reserve capacity");
+            permit.try_send(7).expect("send into an open channel");
             let received = rx.recv(&cx).await.expect("receive the sent value");
             assert_eq!(received, 7);
         })

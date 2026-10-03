@@ -63,6 +63,7 @@ pub mod child_region;
 pub mod cx;
 pub mod dynamic_service;
 pub mod dynamic_supervisor;
+pub mod fiber;
 pub mod macaroon;
 pub mod registry;
 pub mod resource_bracket;
@@ -99,6 +100,7 @@ pub use dynamic_supervisor::{
     DynamicRegionOutcome, DynamicSupervisor, DynamicSupervisorConfig, DynamicSupervisorError,
     DynamicSupervisorReport, DynamicWorkerConfig, SharedRestartConfig, SharedRestartStatus,
 };
+pub use fiber::{FiberHandle, FiberScope};
 pub use macaroon::{
     BindError, CaveatPredicate, MacaroonKeyRing, MacaroonToken, VerificationContext,
     VerificationError,

@@ -2172,8 +2172,16 @@ impl RuntimeState {
             state_verifier: Arc::new(super::state_verifier::StateTransitionVerifier::new(
                 super::state_verifier::StateVerifierConfig::default(),
             )),
+            // Protocol validation feeds violation diagnostics only. It tracks
+            // every task in this crate's tests and debug builds; release builds
+            // keep an untracked validator so spawn and completion skip its map
+            // work (br-asupersync-issue65-criticisms-kpmoy5.1.8).
             cancel_protocol_validator: Arc::new(parking_lot::Mutex::new(
-                CancelProtocolValidator::new(CancelValidationLevel::Basic),
+                if cfg!(any(test, debug_assertions)) {
+                    CancelProtocolValidator::new(CancelValidationLevel::Basic)
+                } else {
+                    CancelProtocolValidator::untracked()
+                },
             )),
             debt_monitor: Arc::new(crate::observability::CancellationDebtMonitor::default()),
             resource_monitor,
@@ -3880,6 +3888,22 @@ impl RuntimeState {
         )
     }
 
+    /// Shared value for [`Self::create_task_infrastructure_in`]'s caller
+    /// argument, which admission never reads. Runtime spawn paths pass this
+    /// instead of minting a throwaway system `Cx` (several allocations and a
+    /// global id draw) on every spawn
+    /// (br-asupersync-issue65-criticisms-kpmoy5.1.9).
+    pub(crate) fn unread_caller_cx() -> &'static crate::cx::Cx {
+        static CALLER: std::sync::OnceLock<crate::cx::Cx> = std::sync::OnceLock::new();
+        CALLER.get_or_init(|| {
+            crate::cx::Cx::new(
+                next_bootstrap_region_id(),
+                next_bootstrap_task_id(),
+                Budget::INFINITE,
+            )
+        })
+    }
+
     /// Creates the infrastructure for a task (record, context, channel) without storing the future.
     ///
     /// This helper allows `create_task` and `spawn_local` to share the same setup logic
@@ -4226,9 +4250,9 @@ impl RuntimeState {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        let system_cx = self.create_system_cx();
+        let system_cx = Self::unread_caller_cx();
         let (task_id, handle, cx, result_tx, spawn_effects) =
-            self.create_task_infrastructure_in(&system_cx, region, budget, false, tasks, regions)?;
+            self.create_task_infrastructure_in(system_cx, region, budget, false, tasks, regions)?;
         let wrapped_future = run_state_task_to_terminal(future, cx, result_tx);
 
         tasks
@@ -4935,7 +4959,6 @@ impl RuntimeState {
     }
 
     pub(crate) fn notify_runtime_epoch_advance(&mut self, module: super::epoch_tracker::ModuleId) {
-        let now = self.current_runtime_time();
         let cursor = match module {
             super::epoch_tracker::ModuleId::RegionTable => &mut self.region_table_epoch,
             super::epoch_tracker::ModuleId::TaskTable => &mut self.task_table_epoch,
@@ -4945,8 +4968,13 @@ impl RuntimeState {
         let from_epoch = *cursor;
         let to_epoch = from_epoch.next();
         *cursor = to_epoch;
-        self.epoch_tracker
-            .notify_epoch_transition(module, from_epoch, to_epoch, now);
+        // The counters always advance; only the tracker's bookkeeping (and
+        // the clock read it needs) is skipped when the tracker is disabled.
+        if self.epoch_tracker.is_enabled() {
+            let now = self.current_runtime_time();
+            self.epoch_tracker
+                .notify_epoch_transition(module, from_epoch, to_epoch, now);
+        }
     }
 
     /// Creates one bounded epoch telemetry delivery token for use after
@@ -7483,10 +7511,10 @@ impl RuntimeState {
         // in an external TaskTable and remove the id from the region only at
         // the cross-cutting completion boundary.
         let tasks = tasks.resolve_ref(&self.tasks);
+        // Iterate in place: cloning the member list on every completion of a
+        // closing region made draining N tasks O(N^2) in allocation and copy.
         let all_tasks_done = region
-            .task_ids()
-            .iter()
-            .all(|&task_id| tasks.task(task_id).is_some_and(|t| t.state.is_terminal()));
+            .tasks_completed(&|task_id| tasks.task(task_id).is_some_and(|t| t.state.is_terminal()));
 
         // Check all child regions are closed
         let all_children_closed = region.child_ids().iter().all(|&child_id| {

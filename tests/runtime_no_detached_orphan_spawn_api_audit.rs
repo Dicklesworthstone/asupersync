@@ -319,8 +319,12 @@ fn can_region_finalize_requires_all_tasks_terminal_for_quiescence() {
     // E2 S4b-1a (br-asupersync-m9wsza) split the finalize gate into a
     // target-threaded core: the public wrapper delegates to
     // can_region_finalize_in, which owns the per-task terminal scan. Pin
-    // both links so the chain public-entry → core → task_ids/is_terminal
-    // stays intact regardless of the wrapper/core split.
+    // both links so the chain public-entry → core → member scan/is_terminal
+    // stays intact regardless of the wrapper/core split. The core scans the
+    // members in place through RegionRecord::tasks_completed instead of
+    // cloning task_ids() on every completion of a closing region
+    // (br-asupersync-issue65-criticisms-kpmoy5.1.4), so that link is pinned
+    // in region.rs too.
     let fn_marker = "pub fn can_region_finalize(&self, region_id: RegionId) -> bool {";
     let start = source.find(fn_marker).expect("can_region_finalize fn");
     let wrapper_end = source[start..]
@@ -344,9 +348,10 @@ fn can_region_finalize_requires_all_tasks_terminal_for_quiescence() {
     let body = &source[core_start..core_start + core_end];
 
     assert!(
-        body.contains("task_ids()"),
-        "REGRESSION: the finalize gate no longer iterates \
-         region.task_ids(). Region close no longer waits \
+        body.contains("region\n            .tasks_completed(")
+            || body.contains("region.tasks_completed("),
+        "REGRESSION: the finalize gate no longer scans the \
+         region's member tasks. Region close no longer waits \
          for all owned tasks to reach terminal state — \
          orphan pathway opened.",
     );
@@ -356,6 +361,22 @@ fn can_region_finalize_requires_all_tasks_terminal_for_quiescence() {
         "REGRESSION: the finalize gate no longer checks \
          is_terminal() on each owned task. Detached tasks \
          could outlive the region.",
+    );
+
+    let region_source = read("src/record/region.rs");
+    let scan_marker = "pub fn tasks_completed(&self, completed: &dyn Fn(TaskId) -> bool) -> bool {";
+    let scan_start = region_source
+        .find(scan_marker)
+        .expect("RegionRecord::tasks_completed");
+    let scan_end = region_source[scan_start..]
+        .find("\n    }\n")
+        .expect("tasks_completed close");
+    let scan = &region_source[scan_start..scan_start + scan_end];
+    assert!(
+        scan.contains("inner.tasks.iter().all(completed)"),
+        "REGRESSION: tasks_completed no longer applies the \
+         terminal check to every member task, so the finalize \
+         gate can pass with a live task still owned.",
     );
 }
 

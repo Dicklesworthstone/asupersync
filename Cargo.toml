@@ -677,7 +677,7 @@ redis = "1.2"
 # External RFC 6330 decoder for byte-level RaptorQ interoperability checks
 raptorq = "2.0"
 # Tokio for differential semaphore fairness conformance testing
-tokio = { version = "1.0", features = ["rt", "sync", "time"] }
+tokio = { version = "1.0", features = ["rt", "rt-multi-thread", "sync", "time"] }
 
 [target.'cfg(not(windows))'.dev-dependencies]
 # Criterion 0.8 depends on `alloca` on Windows, which requires a C compiler
@@ -1648,6 +1648,12 @@ required-features = ["test-internals", "criterion-benches"]
 name = "spawn_throughput"
 harness = false
 required-features = ["test-internals", "criterion-benches"]
+
+# Same-process asupersync vs tokio head-to-head (br-asupersync-issue65-criticisms-kpmoy5.1.1).
+[[bench]]
+name = "runtime_vs_tokio"
+harness = false
+required-features = ["criterion-benches"]
 
 [[bench]]
 name = "injector_throughput"

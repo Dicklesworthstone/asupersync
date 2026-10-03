@@ -6053,12 +6053,12 @@ impl RuntimeInner {
                 clock.clone(),
                 Arc::downgrade(&spawn_liveness),
             )));
-            // Obligation mailbox (br-asupersync-bi2462.13): same notifier and
-            // liveness token as the spawn gateway; drained by the workers
-            // next to spawn admissions.
+            // Obligation mailbox (bi2462.13), drained next to spawn admissions; checked lock-free.
+            let om = Arc::new(crate::runtime::obligation_mailbox::ObligationMailbox::new());
+            scheduler.attach_obligation_mailbox(&om);
             guard.set_obligation_gateway(Arc::new(
                 crate::runtime::obligation_mailbox::ObligationGateway::new(
-                    Arc::new(crate::runtime::obligation_mailbox::ObligationMailbox::new()),
+                    Arc::clone(&om),
                     scheduler.spawn_enqueued_notifier(),
                     Arc::downgrade(&spawn_liveness),
                 ),
@@ -6316,10 +6316,10 @@ impl RuntimeInner {
             // Store `wrapped` itself so the record keeps its outcome. The
             // state-task wrapper would record Ok for the panic `wrapped`
             // already caught; its TaskHandle here was always discarded.
-            let system_cx = guard.create_system_cx();
+            let system_cx = crate::runtime::RuntimeState::unread_caller_cx();
             let (task_id, _handle, _cx, _result_tx, spawn_effects) = guard
                 .create_task_infrastructure_in::<()>(
-                    &system_cx,
+                    system_cx,
                     self.root_region,
                     Budget::new(),
                     false,
@@ -6373,10 +6373,10 @@ impl RuntimeInner {
                 },
             );
 
-            let system_cx = guard.create_system_cx();
+            let system_cx = crate::runtime::RuntimeState::unread_caller_cx();
             let (task_id, _handle, cx, _result_tx, spawn_effects) = guard
                 .create_task_infrastructure_in::<()>(
-                    &system_cx,
+                    system_cx,
                     self.root_region,
                     Budget::new(),
                     false,
