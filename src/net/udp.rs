@@ -2521,7 +2521,12 @@ impl UdpSocket {
             let address_family =
                 local_addr.map_or(UdpAddressFamily::Unknown, UdpAddressFamily::from);
             let dual_stack = match address_family {
-                UdpAddressFamily::Ipv6 => UdpCapability::Unknown,
+                // IPV6_V6ONLY off means the socket also carries IPv4 traffic.
+                UdpAddressFamily::Ipv6 => match sock.only_v6() {
+                    Ok(false) => UdpCapability::Supported,
+                    Ok(true) => UdpCapability::Unsupported,
+                    Err(_) => UdpCapability::Unknown,
+                },
                 UdpAddressFamily::Ipv4 => UdpCapability::Unsupported,
                 UdpAddressFamily::Unknown => UdpCapability::Unknown,
             };
