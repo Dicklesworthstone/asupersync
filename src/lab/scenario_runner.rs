@@ -4,7 +4,8 @@
 //!
 //! - Participant workloads: `sender`, `receiver`, `swarm`, `supervisor`,
 //!   `worker`, `saga-coordinator`, `saga-participant`, `primary`, `replica`,
-//!   `lease-grantor` and `lease-holder` roles become real lab tasks
+//!   `lease-grantor`, `lease-holder`, `hub` and `peer` roles become real lab
+//!   tasks
 //! - Timed fault injection based on scenario fault events
 //! - Oracle filtering (only check oracles listed in the scenario)
 //! - Seed exploration (run the same scenario across multiple seeds)
@@ -15,7 +16,8 @@
 //! Before any fault fires, the runner spawns lab tasks for every participant
 //! whose `role` is exactly `sender`, `receiver`, `swarm`, `supervisor`,
 //! `worker`, `saga-coordinator`, `saga-participant`, `primary`, `replica`,
-//! `lease-grantor` or `lease-holder` (case-sensitive), all in one root region.
+//! `lease-grantor`, `lease-holder`, `hub` or `peer` (case-sensitive), all in
+//! one root region.
 //!
 //! Channel roles:
 //!
@@ -87,17 +89,26 @@
 //! `host`'s clock offset to `skew_ms`, and `clock_reset` sets it back to
 //! zero; only lease roles read participant clocks.
 //!
-//! Saga, replication and lease messages cross a simulated network. The scenario's
-//! `network` preset sets every link's latency, jitter and packet loss (the
+//! Hub roles: each `hub` pings its peers in turn every round, for
+//! `properties.rounds` rounds (default 10, at most 10000) that start
+//! `properties.interval_ms` apart (default 100), and waits at most
+//! `properties.timeout_ms` (default 1000) for each echo. Peers go to the
+//! hubs round-robin, and peers without any hub share one implicit hub. Each
+//! `peer` echoes the ping's sequence number. The hub records each echo's
+//! round trip and counts a lost or late ping or echo as lost.
+//!
+//! Saga, replication, lease and hub messages cross a simulated network. The
+//! scenario's `network` preset sets every link's latency, jitter and packet
+//! loss (the
 //! [`crate::lab::network::NetworkConditions`] of the same name), and a
 //! `links` entry keyed `"from->to"` overrides one direction's `latency` and
 //! `packet_loss`; the other link fields are not modeled. `partition` and
 //! `heal` faults whose `from` and `to` name two participants cut and restore
 //! the link between them. A message that is dropped or sent over a cut link
-//! is lost, and a coordinator, primary or holder whose request or reply is
-//! lost times out. When saga, replication or lease roles are bound, the
-//! runner fires due timers on its way to each fault and runs with automatic
-//! virtual-time advance after the last one.
+//! is lost, and a coordinator, primary, holder or hub whose request or reply
+//! is lost times out. When saga, replication, lease or hub roles are bound,
+//! the runner fires due timers on its way to each fault and runs with
+//! automatic virtual-time advance after the last one.
 //!
 //! Lab chaos may cancel these tasks mid-protocol. A send or receive, swarm
 //! member, worker generation, supervisor or saga task that ends in
@@ -120,11 +131,13 @@
 //! - a replica's applied log is not a prefix of its primary's log, or a
 //!   primary that was not cancelled never finished;
 //! - two holders of one grantor believed they held its lease at the same
-//!   virtual time, or a holder that was not cancelled never finished.
+//!   virtual time, or a holder that was not cancelled never finished;
+//! - a peer echoed another ping's sequence number, or a hub that was not
+//!   cancelled never finished.
 //!
-//! Apart from cutting saga, replication and lease links and skewing lease
-//! clocks, timed faults stay trace and effect-summary records; they do not
-//! partition the bound channels or crash the supervised workers.
+//! Apart from cutting saga, replication, lease and hub links and skewing
+//! lease clocks, timed faults stay trace and effect-summary records; they do
+//! not partition the bound channels or crash the supervised workers.
 //!
 //! Every other role is unbound: the runner validates the participant and
 //! schedules no work for it. A scenario without bound participants still
@@ -924,6 +937,20 @@ const DEFAULT_LEASE_MARGIN_MS: u64 = 10;
 const MAX_ACQUIRE_ATTEMPTS: u32 = 100;
 /// Name of the grantor that serves holders no grantor owns.
 const IMPLICIT_GRANTOR_NAME: &str = "<implicit-grantor>";
+/// Role of a participant that pings each of its peers every round and times the echoes.
+const HUB_ROLE: &str = "hub";
+/// Role of a participant that echoes its hub's pings.
+const PEER_ROLE: &str = "peer";
+/// Default number of rounds a hub pings its peers.
+const DEFAULT_HUB_ROUNDS: u64 = 10;
+/// Largest accepted `rounds`.
+const MAX_HUB_ROUNDS: u64 = 10_000;
+/// Default virtual time a hub waits before each round.
+const DEFAULT_HUB_INTERVAL_MS: u64 = 100;
+/// Default virtual time a hub waits for each echo.
+const DEFAULT_HUB_TIMEOUT_MS: u64 = 1_000;
+/// Name of the hub that pings peers no hub owns.
+const IMPLICIT_HUB_NAME: &str = "<implicit-hub>";
 
 /// One declared participant and its role.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -957,6 +984,8 @@ pub struct ParticipantBindings {
     pub implicit_primary: bool,
     /// True when lease holders have no grantor, so the runner adds one.
     pub implicit_grantor: bool,
+    /// True when peers have no hub, so the runner adds one.
+    pub implicit_hub: bool,
 }
 
 impl ParticipantBindings {
@@ -973,6 +1002,8 @@ impl ParticipantBindings {
         REPLICA_ROLE,
         LEASE_GRANTOR_ROLE,
         LEASE_HOLDER_ROLE,
+        HUB_ROLE,
+        PEER_ROLE,
     ];
 
     /// Returns true when the scenario declares no participants.
@@ -1046,6 +1077,18 @@ enum PlannedWork {
     Grant { lease_ms: u64 },
     /// Acquire, renew and release the assigned grantor's lease.
     Hold(LeaseTerms),
+    /// Ping the assigned peers every round and time their echoes.
+    Ping(PingPlan),
+    /// Echo the pings of a hub.
+    Echo,
+}
+
+/// How a hub pings its peers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PingPlan {
+    rounds: u64,
+    interval_ms: u64,
+    timeout_ms: u64,
 }
 
 /// How a lease holder uses its grantor's lease.
@@ -1104,6 +1147,8 @@ impl WorkloadPlan {
                     Self::lease_ms(participant).map(|lease_ms| PlannedWork::Grant { lease_ms })
                 }
                 LEASE_HOLDER_ROLE => Self::lease_terms(participant).map(PlannedWork::Hold),
+                HUB_ROLE => Self::ping_plan(participant).map(PlannedWork::Ping),
+                PEER_ROLE => Ok(PlannedWork::Echo),
                 _ => continue,
             };
             match work {
@@ -1329,6 +1374,41 @@ impl WorkloadPlan {
         })
     }
 
+    fn ping_plan(participant: &Participant) -> Result<PingPlan, ValidationError> {
+        let rounds = match participant.properties.get("rounds") {
+            None => DEFAULT_HUB_ROUNDS,
+            Some(value) => value
+                .as_u64()
+                .filter(|rounds| *rounds <= MAX_HUB_ROUNDS)
+                .ok_or_else(|| {
+                    Self::property_error(
+                        participant,
+                        "rounds",
+                        format!(
+                            "a bound hub's round count must be an integer from 0 to {MAX_HUB_ROUNDS}"
+                        ),
+                    )
+                })?,
+        };
+        Ok(PingPlan {
+            rounds,
+            interval_ms: Self::bounded_ms(
+                participant,
+                "interval_ms",
+                DEFAULT_HUB_INTERVAL_MS,
+                1,
+                "a bound hub's round interval",
+            )?,
+            timeout_ms: Self::bounded_ms(
+                participant,
+                "timeout_ms",
+                DEFAULT_HUB_TIMEOUT_MS,
+                1,
+                "a bound hub's echo timeout",
+            )?,
+        })
+    }
+
     /// Reads a millisecond property from `min` to [`MAX_SAGA_STEP_MS`].
     fn bounded_ms(
         participant: &Participant,
@@ -1354,8 +1434,9 @@ impl WorkloadPlan {
             })
     }
 
-    /// True when the plan runs a saga coordinator, a primary or a lease
-    /// holder, declared or implicit; their rounds wait on virtual-time timers.
+    /// True when the plan runs a saga coordinator, a primary, a lease holder
+    /// or a hub, declared or implicit; their rounds wait on virtual-time
+    /// timers.
     fn is_timed(&self) -> bool {
         self.participants.iter().any(|participant| {
             matches!(
@@ -1366,6 +1447,8 @@ impl WorkloadPlan {
                     | PlannedWork::Follow
                     | PlannedWork::Grant { .. }
                     | PlannedWork::Hold(_)
+                    | PlannedWork::Ping(_)
+                    | PlannedWork::Echo
             )
         })
     }
@@ -1399,6 +1482,8 @@ enum WorkloadRole {
     Replica,
     LeaseGrantor,
     LeaseHolder,
+    Hub,
+    Peer,
 }
 
 impl WorkloadRole {
@@ -1416,6 +1501,8 @@ impl WorkloadRole {
             Self::Replica => REPLICA_ROLE,
             Self::LeaseGrantor => LEASE_GRANTOR_ROLE,
             Self::LeaseHolder => LEASE_HOLDER_ROLE,
+            Self::Hub => HUB_ROLE,
+            Self::Peer => PEER_ROLE,
         }
     }
 }
@@ -2157,6 +2244,67 @@ impl LeaseRecord {
     }
 }
 
+/// A hub's ping; the peer echoes its sequence number.
+#[derive(Debug)]
+struct Ping {
+    seq: u64,
+    reply: oneshot::Sender<u64>,
+}
+
+/// One peer as its hub pings it.
+#[derive(Debug)]
+struct PeerTarget {
+    name: String,
+    pings: mpsc::Sender<Ping>,
+}
+
+/// What a hub saw of one peer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct PeerStats {
+    /// Pings whose echo came back in time.
+    echoed: u64,
+    /// Pings or echoes lost, late, or refused by a peer that was gone.
+    lost: u64,
+    /// Echoes that carried another ping's sequence number.
+    mismatched: u64,
+    /// Round trips of the echoed pings, in virtual time.
+    round_trips: Vec<Duration>,
+}
+
+/// A bound hub's peers and what it saw of each.
+#[derive(Debug, Default)]
+struct HubRecord {
+    /// Peer names and their statistics, in assignment order.
+    peers: Vec<(String, Mutex<PeerStats>)>,
+    /// Pings and echoes lost on a cut link or dropped by the network.
+    lost: AtomicU64,
+}
+
+impl HubRecord {
+    /// Appends this hub's anomalies: an echo of the wrong ping, or a hub
+    /// that never finished although it was not cancelled.
+    fn collect_violations(
+        &self,
+        label: &str,
+        finished: bool,
+        cancelled: bool,
+        violations: &mut Vec<String>,
+    ) {
+        for (name, stats) in &self.peers {
+            let stats = stats.lock();
+            if stats.mismatched > 0 {
+                violations.push(format!(
+                    "{label}:echo_mismatch:{name}:mismatched={},echoed={}",
+                    stats.mismatched, stats.echoed
+                ));
+            }
+        }
+        if !finished && !cancelled {
+            violations.push(format!("{label}:no_end:lost={}", count(&self.lost)));
+        }
+    }
+}
+
 /// Role-specific state of one bound task.
 #[derive(Debug)]
 enum BoundDetail {
@@ -2180,6 +2328,10 @@ enum BoundDetail {
     LeaseGrantor(Arc<LeaseRecord>),
     /// A lease holder; its grantor's record holds its tenure.
     LeaseHolder,
+    /// A hub and what it saw of its peers.
+    Hub(Arc<HubRecord>),
+    /// A peer; its hub's record holds what the hub saw of it.
+    Peer,
 }
 
 /// One bound task and its counters.
@@ -2306,6 +2458,30 @@ impl BoundTask {
                     count(&c.cancelled) > 0 || self.joins.first() == Some(&JoinState::Cancelled);
                 if !c.finished.load(Ordering::Relaxed) && !cancelled {
                     violations.push(format!("{label}:no_end:grants={}", count(&c.received)));
+                }
+            }
+            BoundDetail::Hub(record) => {
+                let c = &self.counters;
+                if count(&c.unexpected) > 0 {
+                    violations.push(format!("{label}:unexpected_outcome:no_task_context"));
+                }
+                let cancelled =
+                    count(&c.cancelled) > 0 || self.joins.first() == Some(&JoinState::Cancelled);
+                record.collect_violations(
+                    &label,
+                    c.finished.load(Ordering::Relaxed),
+                    cancelled,
+                    violations,
+                );
+            }
+            BoundDetail::Peer => {
+                let c = &self.counters;
+                if count(&c.unexpected) > 0 {
+                    violations.push(format!(
+                        "{label}:unexpected_outcome:pings={},unexpected={}",
+                        count(&c.received),
+                        count(&c.unexpected),
+                    ));
                 }
             }
         }
@@ -2496,6 +2672,12 @@ enum Endpoint {
         /// Index of the holder's grantor, chosen once every grantor exists.
         grantor: usize,
     },
+    Ping {
+        plan: PingPlan,
+    },
+    Echo {
+        pings: mpsc::Receiver<Ping>,
+    },
 }
 
 /// A replica's shipping endpoint and applied log, before its primary is spawned.
@@ -2559,6 +2741,15 @@ impl ParticipantWorkload {
             .filter(|participant| matches!(participant.work, PlannedWork::Grant { .. }))
             .count();
         let mut grantors: Vec<GrantorTarget> = Vec::with_capacity(grantor_count.max(1));
+        // Peers go to the hubs the same way.
+        let hub_count = plan
+            .participants
+            .iter()
+            .filter(|participant| matches!(participant.work, PlannedWork::Ping(_)))
+            .count();
+        let mut pinged: Vec<Vec<PeerTarget>> = (0..hub_count).map(|_| Vec::new()).collect();
+        let mut unpinged = Vec::new();
+        let mut peer_total = 0_usize;
         let mut lanes = Vec::new();
         let mut endpoints = Vec::with_capacity(plan.participants.len());
         let mut sender_total = 0_usize;
@@ -2657,6 +2848,21 @@ impl ParticipantWorkload {
                     });
                     holder_total += 1;
                 }
+                PlannedWork::Ping(plan) => endpoints.push(Endpoint::Ping { plan }),
+                PlannedWork::Echo => {
+                    let (tx, pings) = mpsc::channel(1);
+                    let target = PeerTarget {
+                        name: participant.name.clone(),
+                        pings: tx,
+                    };
+                    if hub_count == 0 {
+                        unpinged.push(target);
+                    } else {
+                        pinged[peer_total % hub_count].push(target);
+                    }
+                    peer_total += 1;
+                    endpoints.push(Endpoint::Echo { pings });
+                }
             }
         }
         let implicit_grantor = if grantor_count == 0 && holder_total > 0 {
@@ -2689,6 +2895,7 @@ impl ParticipantWorkload {
         let mut supervised = supervised.into_iter();
         let mut coordinated = coordinated.into_iter();
         let mut led = led.into_iter();
+        let mut pinged = pinged.into_iter();
         for ((participant, endpoint), task_counters) in
             plan.participants.iter().zip(endpoints).zip(counters)
         {
@@ -2836,6 +3043,30 @@ impl ParticipantWorkload {
                         workload.tasks[owner].spawn_refusal = Some(refusal);
                     }
                 }
+                Endpoint::Ping { plan } => {
+                    let peers = pinged.next().unwrap_or_default();
+                    workload.spawn_hub(
+                        runtime,
+                        root,
+                        &participant.name,
+                        plan,
+                        peers,
+                        task_counters,
+                    );
+                }
+                Endpoint::Echo { pings } => {
+                    let owner = workload.push_task(
+                        &participant.name,
+                        WorkloadRole::Peer,
+                        0,
+                        Arc::clone(&task_counters),
+                        BoundDetail::Peer,
+                    );
+                    let body = run_peer(pings, task_counters);
+                    if let Err(refusal) = workload.spawn_owned(runtime, root, owner, body) {
+                        workload.tasks[owner].spawn_refusal = Some(refusal);
+                    }
+                }
             }
         }
         if let Some((rx, drain)) = sink {
@@ -2889,6 +3120,20 @@ impl ParticipantWorkload {
                 DEFAULT_LEASE_MS,
                 requests,
                 record,
+                Arc::new(WorkloadCounters::default()),
+            );
+        }
+        if !unpinged.is_empty() {
+            workload.spawn_hub(
+                runtime,
+                root,
+                IMPLICIT_HUB_NAME,
+                PingPlan {
+                    rounds: DEFAULT_HUB_ROUNDS,
+                    interval_ms: DEFAULT_HUB_INTERVAL_MS,
+                    timeout_ms: DEFAULT_HUB_TIMEOUT_MS,
+                },
+                unpinged,
                 Arc::new(WorkloadCounters::default()),
             );
         }
@@ -3097,6 +3342,44 @@ impl ParticipantWorkload {
             name.to_owned(),
             targets,
             Replication { writes, write_ms },
+            Arc::clone(&self.partitions),
+            Arc::clone(&self.network),
+            record,
+            counters,
+        );
+        if let Err(refusal) = self.spawn_owned(runtime, root, owner, body) {
+            self.tasks[owner].spawn_refusal = Some(refusal);
+        }
+    }
+
+    /// Spawns one lab task that pings `peers`, in their order, every round.
+    fn spawn_hub(
+        &mut self,
+        runtime: &mut LabRuntime,
+        root: RegionId,
+        name: &str,
+        plan: PingPlan,
+        peers: Vec<PeerTarget>,
+        counters: Arc<WorkloadCounters>,
+    ) {
+        let record = Arc::new(HubRecord {
+            peers: peers
+                .iter()
+                .map(|peer| (peer.name.clone(), Mutex::new(PeerStats::default())))
+                .collect(),
+            ..HubRecord::default()
+        });
+        let owner = self.push_task(
+            name,
+            WorkloadRole::Hub,
+            plan.rounds,
+            Arc::clone(&counters),
+            BoundDetail::Hub(Arc::clone(&record)),
+        );
+        let body = run_hub(
+            name.to_owned(),
+            peers,
+            plan,
             Arc::clone(&self.partitions),
             Arc::clone(&self.network),
             record,
@@ -3934,6 +4217,100 @@ async fn hold_lease(
     }
 }
 
+/// Body of a bound `hub`, or of the implicit one.
+///
+/// Each of its `rounds` rounds it sleeps `interval_ms` of virtual time and
+/// then pings its peers in turn, waiting at most `timeout_ms` for each echo.
+/// It records each echo's round trip, and counts a lost or late ping or echo
+/// as lost.
+async fn run_hub(
+    name: String,
+    peers: Vec<PeerTarget>,
+    plan: PingPlan,
+    partitions: Arc<PartitionTable>,
+    network: Arc<NetworkModel>,
+    record: Arc<HubRecord>,
+    counters: Arc<WorkloadCounters>,
+) {
+    let Some(cx) = Cx::current() else {
+        bump(&counters.unexpected);
+        counters.finished.store(true, Ordering::Relaxed);
+        return;
+    };
+    let link = HubLink {
+        hub: &name,
+        partitions: &partitions,
+        network: &network,
+    };
+    let interval = Duration::from_millis(plan.interval_ms);
+    let timeout = Duration::from_millis(plan.timeout_ms);
+    'rounds: for seq in 0..plan.rounds {
+        crate::time::sleep(cx.now(), interval).await;
+        if cx.checkpoint().is_err() {
+            bump(&counters.cancelled);
+            break;
+        }
+        for (peer, (_, stats)) in peers.iter().zip(&record.peers) {
+            let sent = cx.now();
+            let cx_ref = &cx;
+            let pings = &peer.pings;
+            let outcome = link
+                .exchange(&cx, &peer.name, timeout, &record.lost, move |reply| {
+                    send_request(cx_ref, pings, Ping { seq, reply })
+                })
+                .await;
+            let mut stats = stats.lock();
+            match outcome {
+                Exchange::Replied(echo) if echo == seq => {
+                    stats.echoed += 1;
+                    stats
+                        .round_trips
+                        .push(Duration::from_nanos(cx.now().duration_since(sent)));
+                }
+                Exchange::Replied(_) => stats.mismatched += 1,
+                Exchange::TimedOut | Exchange::NoReply | Exchange::Gone => stats.lost += 1,
+                Exchange::Cancelled => {
+                    drop(stats);
+                    bump(&counters.cancelled);
+                    break 'rounds;
+                }
+            }
+        }
+    }
+    counters.finished.store(true, Ordering::Relaxed);
+    // Dropping `peers` closes every peer's ping channel.
+}
+
+/// Body of a bound `peer`: it echoes each ping's sequence number.
+async fn run_peer(mut pings: mpsc::Receiver<Ping>, counters: Arc<WorkloadCounters>) {
+    if let Some(cx) = Cx::current() {
+        loop {
+            match pings.recv(&cx).await {
+                Ok(ping) => {
+                    bump(&counters.received);
+                    // The hub may have stopped waiting for this echo.
+                    let _ = ping.reply.send(&cx, ping.seq);
+                }
+                Err(RecvError::Disconnected) => {
+                    counters.drained_to_close.store(true, Ordering::Relaxed);
+                    break;
+                }
+                Err(RecvError::Cancelled) => {
+                    bump(&counters.cancelled);
+                    break;
+                }
+                Err(RecvError::Empty) => {
+                    bump(&counters.unexpected);
+                    break;
+                }
+            }
+        }
+    } else {
+        bump(&counters.unexpected);
+    }
+    counters.finished.store(true, Ordering::Relaxed);
+}
+
 /// Body of a bound `sender` task.
 ///
 /// Value `seq` goes to lane `(sender + seq) % lanes`, so senders start on
@@ -4159,6 +4536,8 @@ impl ScenarioRunner {
         let mut has_replica = false;
         let mut has_grantor = false;
         let mut has_holder = false;
+        let mut has_hub = false;
+        let mut has_peer = false;
         for participant in &scenario.participants {
             let binding = ParticipantBinding {
                 name: participant.name.clone(),
@@ -4205,6 +4584,14 @@ impl ScenarioRunner {
                     has_holder = true;
                     bindings.bound.push(binding);
                 }
+                HUB_ROLE => {
+                    has_hub = true;
+                    bindings.bound.push(binding);
+                }
+                PEER_ROLE => {
+                    has_peer = true;
+                    bindings.bound.push(binding);
+                }
                 SWARM_ROLE => bindings.bound.push(binding),
                 _ => bindings.unbound.push(binding),
             }
@@ -4214,6 +4601,7 @@ impl ScenarioRunner {
         bindings.implicit_coordinator = has_saga_participant && !has_coordinator;
         bindings.implicit_primary = has_replica && !has_primary;
         bindings.implicit_grantor = has_holder && !has_grantor;
+        bindings.implicit_hub = has_peer && !has_hub;
         bindings
     }
 
@@ -5358,7 +5746,9 @@ mod tests {
                 "primary",
                 "replica",
                 "lease-grantor",
-                "lease-holder"
+                "lease-holder",
+                "hub",
+                "peer"
             ]
         );
 
@@ -5373,12 +5763,12 @@ mod tests {
             Some("Participants: 2 bound (sender), 0 unbound")
         );
 
-        scenario.participants = vec![participant("a", "hub")];
+        scenario.participants = vec![participant("b", "local-peer")];
         assert_eq!(
             ScenarioRunner::participant_bindings(&scenario)
                 .summary_line()
                 .as_deref(),
-            Some("Participants: 0 bound, 1 unbound (hub)")
+            Some("Participants: 0 bound, 1 unbound (local-peer)")
         );
         crate::test_complete!("participant_bindings_classify_roles_exactly");
     }
@@ -5389,7 +5779,7 @@ mod tests {
         let baseline = ScenarioRunner::run(&minimal_scenario()).unwrap();
         let mut scenario = minimal_scenario();
         scenario.participants = vec![
-            participant("node-a", "hub"),
+            participant("node-a", "local-peer"),
             participant("node-b", "Receiver"),
         ];
         let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
@@ -6890,6 +7280,173 @@ mod tests {
             other => panic!("expected a participant property validation error, got {other:?}"),
         }
         crate::test_complete!("lease_properties_are_validated");
+    }
+
+    fn hub_record<'a>(tasks: &'a [BoundTask], name: &str) -> &'a HubRecord {
+        tasks
+            .iter()
+            .find_map(|task| match &task.detail {
+                BoundDetail::Hub(record) if task.name == name => Some(&**record),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no hub named {name}"))
+    }
+
+    fn peer_stats(record: &HubRecord, peer: &str) -> PeerStats {
+        record
+            .peers
+            .iter()
+            .find(|(name, _)| name == peer)
+            .map(|(_, stats)| stats.lock().clone())
+            .unwrap_or_else(|| panic!("hub has no peer named {peer}"))
+    }
+
+    /// Hub `h` pings p0 and p1 three times. The h->p0 link takes 10 ms and the
+    /// p1->h link 30 ms; every other link is instant. A link that drops every
+    /// ping loses each round's ping after the echo timeout.
+    #[test]
+    fn hub_pings_every_peer_and_times_the_echoes() {
+        init_test("hub_pings_every_peer_and_times_the_echoes");
+        let run = |p1_link: (&str, crate::lab::scenario::LinkConditions)| {
+            let mut scenario = minimal_scenario();
+            scenario.id = "test-hub".to_string();
+            let mut hub = participant_with("h", "hub", "rounds", serde_json::json!(3));
+            hub.properties
+                .insert("timeout_ms".to_string(), serde_json::json!(50));
+            scenario.participants = vec![hub, participant("p0", "peer"), participant("p1", "peer")];
+            scenario
+                .network
+                .links
+                .insert("h->p0".to_owned(), link(Some(10), None));
+            scenario
+                .network
+                .links
+                .insert(p1_link.0.to_owned(), p1_link.1);
+            let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+            assert!(result.passed(), "{}", failure_detail(&result));
+            let record = hub_record(&tasks, "h");
+            (
+                peer_stats(record, "p0"),
+                peer_stats(record, "p1"),
+                count(&record.lost),
+            )
+        };
+        let ms = Duration::from_millis;
+        let (p0, p1, lost) = run(("p1->h", link(Some(30), None)));
+        assert_eq!(
+            (p0.echoed, p0.lost, p0.round_trips),
+            (3, 0, vec![ms(10); 3])
+        );
+        assert_eq!(
+            (p1.echoed, p1.lost, p1.round_trips),
+            (3, 0, vec![ms(30); 3])
+        );
+        assert_eq!(lost, 0);
+
+        let (p0, p1, lost) = run(("h->p1", link(None, Some(1.0))));
+        assert_eq!((p0.echoed, p0.lost), (3, 0));
+        assert_eq!((p1.echoed, p1.lost, p1.mismatched), (0, 3, 0));
+        assert_eq!(lost, 3);
+        crate::test_complete!("hub_pings_every_peer_and_times_the_echoes");
+    }
+
+    /// The shipped fixture: with chaos off, each peer's round trips follow
+    /// the a->peer link model (b fixed 1 ms, c uniform 20-80 ms, d normal
+    /// 600 +- 50 ms; the echoes cross instant links). As shipped, under light
+    /// chaos, the run passes.
+    #[test]
+    fn custom_latency_model_fixture_round_trips_follow_its_links() {
+        init_test("custom_latency_model_fixture_round_trips_follow_its_links");
+        let yaml = include_str!("../../examples/scenarios/custom_latency_model.yaml");
+        let shipped: Scenario = serde_yaml::from_str(yaml).expect("parse latency fixture");
+        let (result, _) = ScenarioRunner::run_seeded(&shipped, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+
+        let mut calm = shipped;
+        calm.chaos = ChaosSection::Off;
+        let (result, tasks) = ScenarioRunner::run_seeded(&calm, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+        let record = hub_record(&tasks, "a");
+        let ms = Duration::from_millis;
+        for (peer, low, high) in [
+            ("b", ms(1), ms(1)),
+            ("c", ms(20), ms(80)),
+            ("d", ms(400), ms(800)),
+        ] {
+            let stats = peer_stats(record, peer);
+            assert_eq!(
+                stats.echoed + stats.lost,
+                DEFAULT_HUB_ROUNDS,
+                "{peer}: {stats:?}"
+            );
+            assert!(stats.echoed > 0, "{peer}: {stats:?}");
+            assert!(
+                stats
+                    .round_trips
+                    .iter()
+                    .all(|trip| (low..=high).contains(trip)),
+                "{peer}: {stats:?}"
+            );
+        }
+        crate::test_complete!("custom_latency_model_fixture_round_trips_follow_its_links");
+    }
+
+    #[test]
+    fn hub_checker_flags_mismatched_echoes_and_a_missing_end() {
+        init_test("hub_checker_flags_mismatched_echoes_and_a_missing_end");
+        let record = HubRecord {
+            peers: vec![
+                ("p0".to_owned(), Mutex::new(PeerStats::default())),
+                (
+                    "p1".to_owned(),
+                    Mutex::new(PeerStats {
+                        mismatched: 1,
+                        ..PeerStats::default()
+                    }),
+                ),
+            ],
+            ..HubRecord::default()
+        };
+        let mut violations = Vec::new();
+        record.collect_violations("workload:hub:h", true, false, &mut violations);
+        assert_eq!(
+            violations,
+            ["workload:hub:h:echo_mismatch:p1:mismatched=1,echoed=0"]
+        );
+        let mut violations = Vec::new();
+        record.collect_violations("workload:hub:h", false, true, &mut violations);
+        assert_eq!(violations.len(), 1, "cancelled: no no_end");
+        let mut violations = Vec::new();
+        record.collect_violations("workload:hub:h", false, false, &mut violations);
+        assert_eq!(violations.len(), 2);
+        assert!(violations[1].starts_with("workload:hub:h:no_end"));
+        crate::test_complete!("hub_checker_flags_mismatched_echoes_and_a_missing_end");
+    }
+
+    #[test]
+    fn hub_properties_are_validated() {
+        init_test("hub_properties_are_validated");
+        let mut scenario = minimal_scenario();
+        scenario.participants = vec![
+            participant_with("h0", "hub", "rounds", serde_json::json!(MAX_HUB_ROUNDS + 1)),
+            participant_with("h1", "hub", "interval_ms", serde_json::json!(0)),
+            participant_with("h2", "hub", "timeout_ms", serde_json::json!("soon")),
+        ];
+        match ScenarioRunner::run(&scenario) {
+            Err(ScenarioRunnerError::Validation { errors, .. }) => {
+                let fields: Vec<_> = errors.iter().map(|error| error.field.as_str()).collect();
+                assert_eq!(
+                    fields,
+                    [
+                        "participants.h0.properties.rounds",
+                        "participants.h1.properties.interval_ms",
+                        "participants.h2.properties.timeout_ms",
+                    ]
+                );
+            }
+            other => panic!("expected a participant property validation error, got {other:?}"),
+        }
+        crate::test_complete!("hub_properties_are_validated");
     }
 
     #[test]
