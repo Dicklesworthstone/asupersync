@@ -501,6 +501,14 @@ fn dispatcher_for(kind: SignalKind) -> Result<&'static SignalDispatcher, SignalE
     }
 }
 
+/// Whether the dispatcher runs and has a slot for `kind`, without
+/// registering an OS handler for it. A registered handler stays for the
+/// life of the process, so an availability probe must not install one.
+#[cfg(any(unix, windows))]
+pub(super) fn dispatcher_has_slot(kind: SignalKind) -> bool {
+    dispatcher_for(kind).is_ok_and(|dispatcher| dispatcher.slot(kind).is_some())
+}
+
 /// An async stream that receives signals of a particular kind.
 ///
 /// # Example
