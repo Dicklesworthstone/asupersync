@@ -346,8 +346,15 @@ impl<H: Handler> Handler for CorsMiddleware<H> {
     ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
         let cx = cx.clone();
         Box::pin(async move {
+            // A response without CORS headers still depends on the request's
+            // Origin: a shared cache must not serve it to an allowed origin,
+            // which would then be blocked. Mark it `Vary: Origin` as well.
+            let without_cors = |mut resp: Response| {
+                append_vary_header(&mut resp, "origin");
+                resp
+            };
             let Some(origin) = header_value(&req, "origin") else {
-                return self.inner.call(&cx, req).await;
+                return without_cors(self.inner.call(&cx, req).await);
             };
 
             if Self::is_malformed_origin_value(&origin) {
@@ -355,12 +362,12 @@ impl<H: Handler> Handler for CorsMiddleware<H> {
                     origin = %origin,
                     "CorsMiddleware: dropping malformed multi-origin request header"
                 );
-                return self.inner.call(&cx, req).await;
+                return without_cors(self.inner.call(&cx, req).await);
             }
 
             let Some(allow_origin) = self.allowed_origin_value(&origin) else {
                 // Origin not allowed: pass through without CORS headers.
-                return self.inner.call(&cx, req).await;
+                return without_cors(self.inner.call(&cx, req).await);
             };
 
             if Self::is_preflight(&req) {
@@ -4022,6 +4029,26 @@ mod tests {
             allowed.headers.get("access-control-allow-origin"),
             Some(&"https://allowed.example".to_string())
         );
+    }
+
+    #[test]
+    fn cors_varies_on_origin_even_when_it_adds_no_cors_headers() {
+        // A shared cache that stored the no-Origin or blocked-Origin variant
+        // without `Vary: Origin` would serve it to allowed origins, whose
+        // browsers would then block the response.
+        let policy = CorsPolicy::with_exact_origins(vec!["https://allowed.example".to_string()]);
+        let mw = CorsMiddleware::new(FnHandler::new(ok_handler), policy);
+        let requests = [
+            Request::new("GET", "/cors"),
+            Request::new("GET", "/cors").with_header("Origin", "https://blocked.example"),
+            Request::new("GET", "/cors")
+                .with_header("Origin", "https://allowed.example, https://other.example"),
+        ];
+        for request in requests {
+            let resp = mw.call(request);
+            assert!(!resp.headers.contains_key("access-control-allow-origin"));
+            assert_eq!(resp.headers.get("vary"), Some(&"origin".to_string()));
+        }
     }
 
     #[test]
