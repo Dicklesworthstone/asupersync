@@ -211,6 +211,34 @@ starts during cleanup (spawned tasks, scopes and regions) does not inherit the
 cleanup budget's poll quota. A cancellation already requested on a task's
 `Cx` keeps its reason when the quota runs out (`asupersync-0fvvq9`).
 
+### Behavior change — I/O without the IO capability is refused
+
+The I/O entry points that take no `Cx` used to ignore the calling task's
+capabilities, so a task narrowed to exclude IO could still connect, bind,
+open files, spawn processes and register signal handlers. They now check the
+calling task's context. Without the IO capability they return an
+`io::Error` of kind `PermissionDenied` whose inner error is
+`asupersync::cx::IoCapabilityDenied` (`[ASUP-E009]`). This applies to
+`TcpStream::connect`, `TcpListener::bind`, `UdpSocket::bind`, the Unix
+socket types, `net::lookup_all`, the `fs` path functions and `File::open`,
+`process::Command::spawn`, `signal::signal` and the HTTP client
+(`asupersync-issue65-criticisms-kpmoy5.5.3`).
+
+Unaffected: threads outside the runtime, and every context that carries IO
+(the default for tasks, `block_on` and request contexts). Affected: code
+under `Cx::push_restriction` or `set_current_restricted` without IO, and
+AppSpec work units that require neither the io nor the net capability. Grant
+the capability, or run the call under an explicit context with
+`cx.with_ambient(future)`.
+
+### Native GenServers and actors
+
+`Cx::spawn_gen_server`, `Cx::spawn_actor` and `Cx::spawn_supervised_actor`
+run GenServers and actors as tasks on the native runtime, where only the lab
+could spawn them before. Their handles report the admitted task id, abort and
+join through the runtime task, and their monitors and links fire in
+production (`asupersync-yvs9cx`).
+
 ### Durable ATP resume and journaling
 
 - Sender checkpoints are persisted in bounded, append-only journals before EOF,
