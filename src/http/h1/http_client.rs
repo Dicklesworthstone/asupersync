@@ -3062,13 +3062,13 @@ fn socks5_reply_message(code: u8) -> &'static str {
 }
 
 fn connection_can_be_reused(response: &Response, req_method: &Method) -> bool {
-    if response.status == 101
-        || response
-            .headers
-            .iter()
-            .any(|(name, _)| name.eq_ignore_ascii_case("upgrade"))
-        || header_has_token(&response.headers, "connection", "upgrade")
-    {
+    // Only a 101 switches protocols (RFC 9110 section 7.8). A server may
+    // advertise Upgrade on any other response, with Connection: Upgrade
+    // marking that header hop-by-hop: Apache's mod_http2 sends
+    // "Upgrade: h2,h2c" on ordinary responses. That connection is still
+    // HTTP/1.1. A request that asked to upgrade is never pooled
+    // (request_forbids_connection_reuse).
+    if response.status == 101 {
         return false;
     }
 
@@ -6145,6 +6145,34 @@ mod tests {
             trailers: Vec::new(),
         };
         assert!(!connection_can_be_reused(&response, &Method::Get));
+    }
+
+    // Apache's mod_http2 advertises "Upgrade: h2,h2c" with "Connection:
+    // Upgrade, Keep-Alive" on ordinary responses. Any Upgrade header used to
+    // disable reuse, so every request to such a server paid a new TCP and TLS
+    // handshake. Only a 101 switches protocols.
+    #[test]
+    fn an_upgrade_advertisement_on_an_ordinary_response_keeps_the_connection() {
+        let response = Response {
+            version: Version::Http11,
+            status: 200,
+            reason: "OK".into(),
+            headers: vec![
+                ("Upgrade".into(), "h2,h2c".into()),
+                ("Connection".into(), "Upgrade, Keep-Alive".into()),
+                ("Content-Length".into(), "2".into()),
+            ],
+            body: b"ok".to_vec(),
+            trailers: Vec::new(),
+        };
+        assert!(connection_can_be_reused(&response, &Method::Get));
+
+        let switching = Response {
+            status: 101,
+            reason: "Switching Protocols".into(),
+            ..response
+        };
+        assert!(!connection_can_be_reused(&switching, &Method::Get));
     }
 
     #[test]
