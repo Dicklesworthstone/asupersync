@@ -313,10 +313,17 @@ impl MethodRouter {
         }
         // Slow path: case-insensitive fallback (allocates only if needed).
         let upper = req.method.to_uppercase();
-        match self.handlers.get(&upper) {
-            Some(handler) => handler.call(cx, req).await,
-            None => self.method_not_allowed.call(cx, req).await,
+        if let Some(handler) = self.handlers.get(&upper) {
+            return handler.call(cx, req).await;
         }
+        // A server answers HEAD as it would GET (RFC 9110 §9.1, §9.3.2); the
+        // HTTP transports send the response without its content.
+        if upper == METHOD_HEAD
+            && let Some(handler) = self.handlers.get(METHOD_GET)
+        {
+            return handler.call(cx, req).await;
+        }
+        self.method_not_allowed.call(cx, req).await
     }
 }
 
@@ -5962,6 +5969,36 @@ mod tests {
         let resp = router.handle(Request::new("POST", "/"));
         assert_eq!(resp.status, StatusCode::METHOD_NOT_ALLOWED);
         assert_eq!(resp.header_value("allow"), Some("GET"));
+    }
+
+    #[test]
+    fn head_is_answered_by_the_get_handler_when_none_is_registered() {
+        // RFC 9110 §9.1: all general-purpose servers MUST support GET and
+        // HEAD. A GET-only route answered HEAD with 405.
+        let router = Router::new()
+            .route("/", get(FnHandler::new(ok_handler)))
+            .route("/post-only", post(FnHandler::new(created_handler)))
+            .route(
+                "/both",
+                get(FnHandler::new(ok_handler)).head(FnHandler::new(created_handler)),
+            );
+        assert_eq!(
+            router.handle(Request::new("HEAD", "/")).status,
+            StatusCode::OK
+        );
+        assert_eq!(
+            router.handle(Request::new("head", "/")).status,
+            StatusCode::OK
+        );
+        // An explicit HEAD handler still wins, and a route without GET still
+        // refuses HEAD.
+        assert_eq!(
+            router.handle(Request::new("HEAD", "/both")).status,
+            StatusCode::CREATED
+        );
+        let resp = router.handle(Request::new("HEAD", "/post-only"));
+        assert_eq!(resp.status, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(resp.header_value("allow"), Some("POST"));
     }
 
     #[test]

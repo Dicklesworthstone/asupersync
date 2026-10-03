@@ -169,8 +169,14 @@ fn integration_router_method_dispatch_all_verbs() {
         );
     }
 
-    // HEAD on a route with no HEAD handler should return 405
+    // HEAD on a route with no HEAD handler is answered by its GET handler
+    // (RFC 9110 §9.1: servers MUST support HEAD); the transports drop the body.
     let resp = router.handle(Request::new("HEAD", "/res"));
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(std::str::from_utf8(&resp.body).unwrap(), "GET");
+
+    // A method the route does not register is still refused.
+    let resp = router.handle(Request::new("OPTIONS", "/res"));
     assert_eq!(resp.status, StatusCode::METHOD_NOT_ALLOWED);
 
     test_complete!("router_method_dispatch_all_verbs");

@@ -7,11 +7,13 @@
 //!
 //! ```
 //! use asupersync::web::static_files::StaticFiles;
-//! use asupersync::web::{Router, get};
+//! use asupersync::web::Router;
 //!
+//! // The handler resolves the request path against the root, so mount it
+//! // where the router strips the prefix: `GET /static/app.js` serves
+//! // `./public/app.js`.
 //! let statics = StaticFiles::new("./public");
-//! let app = Router::new()
-//!     .route("/static/*path", get(statics.handler()));
+//! let app = Router::new().nest("/static", Router::new().fallback(statics.handler()));
 //! ```
 //!
 //! # Security
@@ -271,9 +273,24 @@ impl StaticFiles {
 
     /// Resolve a request path to a file, applying security checks.
     fn resolve_path(&self, request_path: &str) -> Option<PathBuf> {
-        // Strip leading slash and URL decode.
+        // Strip leading slash and URL decode each segment on its own, after
+        // splitting on the literal `/` (RFC 3986 §2.4). The router keeps a
+        // `%2F` inside one segment, so `/files/admin%2Fsecret` never reaches a
+        // mount at `/files/admin`; decoding the whole path here would then
+        // serve `admin/secret` from an outer mount's root, past whatever
+        // guards the inner mount.
         let cleaned = request_path.trim_start_matches('/');
-        let decoded = percent_decode(cleaned);
+        let mut decoded = String::with_capacity(cleaned.len());
+        for (index, segment) in cleaned.split('/').enumerate() {
+            let segment = percent_decode(segment);
+            if segment.contains('/') {
+                return None;
+            }
+            if index > 0 {
+                decoded.push('/');
+            }
+            decoded.push_str(&segment);
+        }
 
         // Reject traversal, ambiguous Windows separators, and hidden files.
         // Repeat the same policy after bounded additional decoding so a proxy
@@ -993,6 +1010,33 @@ mod tests {
             sf.resolve_path("/index.html").is_some(),
             "normal files still served"
         );
+    }
+
+    #[test]
+    fn resolve_path_keeps_an_encoded_slash_inside_its_segment() {
+        let dir = setup_dir();
+        let sf = StaticFiles::new(dir.path());
+        assert!(sf.resolve_path("/sub/page.html").is_some());
+        assert!(sf.resolve_path("/sub%2Fpage.html").is_none());
+        assert!(sf.resolve_path("/sub%2fpage.html").is_none());
+    }
+
+    #[test]
+    fn an_encoded_slash_cannot_reach_files_below_a_more_specific_mount() {
+        // `/files/sub%2Fpage.html` is one segment to the router, so it misses
+        // a mount at `/files/sub` (which may carry auth) and lands on the
+        // outer `/files` mount, which must not serve `sub/page.html` for it.
+        let dir = setup_dir();
+        let app = crate::web::Router::new().nest(
+            "/files",
+            crate::web::Router::new().fallback(StaticFiles::new(dir.path()).handler()),
+        );
+        let get = |path: &str| {
+            app.handle(super::super::extract::Request::new("GET", path))
+                .status
+        };
+        assert_eq!(get("/files/sub/page.html"), StatusCode::OK);
+        assert_eq!(get("/files/sub%2Fpage.html"), StatusCode::NOT_FOUND);
     }
 
     #[test]
