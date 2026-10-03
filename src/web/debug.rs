@@ -480,6 +480,23 @@ fn handle_websocket(
             "unsupported websocket version",
         ));
     }
+    // A browser sends Origin on every WebSocket upgrade and enforces no
+    // same-origin policy on the result. Only the dashboard this server
+    // serves may read the runtime snapshot; a page on any other origin
+    // could otherwise reach it over loopback.
+    if let Some(origin) = header_value(headers, "origin") {
+        let host = header_value(headers, "host").unwrap_or_default();
+        let same_origin = origin
+            .trim()
+            .strip_prefix("http://")
+            .is_some_and(|authority| authority.eq_ignore_ascii_case(host.trim()));
+        if !same_origin {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "cross-origin websocket upgrade refused",
+            ));
+        }
+    }
 
     let accept = websocket_accept_key(key.trim());
     write!(
@@ -522,7 +539,6 @@ fn write_response(
          Content-Type: {content_type}\r\n\
          Content-Length: {}\r\n\
          Connection: close\r\n\
-         Access-Control-Allow-Origin: *\r\n\
          \r\n",
         body.len(),
     )?;
@@ -844,6 +860,62 @@ mod tests {
         );
 
         server.stop();
+    }
+
+    /// Sends one raw request to a fresh server and returns the whole reply.
+    fn exchange(request: &str) -> String {
+        let snapshot_fn: SnapshotFn = Arc::new(test_snapshot);
+        let mut server = DebugServer::with_config(
+            0,
+            snapshot_fn,
+            DebugServerConfig {
+                print_url: false,
+                ..Default::default()
+            },
+        );
+        server.start().unwrap();
+        let mut stream = TcpStream::connect(server.local_addr.unwrap()).unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        stream.flush().unwrap();
+        let mut buf = Vec::new();
+        let _ = stream.read_to_end(&mut buf);
+        server.stop();
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    #[test]
+    fn responses_carry_no_wildcard_cors_header() {
+        // With `Access-Control-Allow-Origin: *` any web page the developer
+        // visited could read the runtime snapshot from loopback.
+        let reply = exchange("GET /debug/snapshot HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        assert!(reply.contains("200 OK"), "reply: {reply}");
+        assert!(
+            !reply
+                .to_ascii_lowercase()
+                .contains("access-control-allow-origin"),
+            "reply: {reply}"
+        );
+    }
+
+    #[test]
+    fn websocket_upgrade_refuses_a_foreign_origin() {
+        let upgrade = |origin: &str| {
+            exchange(&format!(
+                "GET /debug/ws HTTP/1.1\r\n\
+                 Host: localhost:9999\r\n\
+                 Origin: {origin}\r\n\
+                 Upgrade: websocket\r\n\
+                 Connection: Upgrade\r\n\
+                 Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+                 Sec-WebSocket-Version: 13\r\n\
+                 \r\n"
+            ))
+        };
+        let foreign = upgrade("https://evil.example");
+        assert!(!foreign.contains("101 Switching Protocols"), "{foreign}");
+        assert!(foreign.contains("400 Bad Request"), "{foreign}");
+        let same = upgrade("http://localhost:9999");
+        assert!(same.contains("101 Switching Protocols"), "{same}");
     }
 
     #[test]
