@@ -621,10 +621,10 @@ impl<H: Handler> Handler for CircuitBreakerMiddleware<H> {
     ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
         let cx = cx.clone();
         Box::pin(async move {
-            let now = (self.time_getter)();
-
-            // Get permit from circuit breaker
-            let permit = match self.breaker.should_allow(now) {
+            // The guard frees a half-open probe slot if this future is dropped
+            // (client gone, timeout) or the handler panics; a bare permit kept
+            // the slot taken for good, so every later request got 503.
+            let permit = match self.breaker.acquire_guarded((self.time_getter)()) {
                 Ok(permit) => permit,
                 Err(crate::combinator::circuit_breaker::CircuitBreakerError::Open {
                     remaining,
@@ -649,10 +649,14 @@ impl<H: Handler> Handler for CircuitBreakerMiddleware<H> {
 
             // Call the handler
             let resp = self.inner.call(&cx, req).await;
+            // The outcome is stamped when the call ends: with the start time, a
+            // failure that took longer than open_duration opened the breaker
+            // already that long ago, so the open phase was skipped.
+            let now = (self.time_getter)();
             if resp.status.is_server_error() {
-                self.breaker.record_failure(permit, "server_error", now);
+                permit.record_failure("server_error", now);
             } else {
-                self.breaker.record_success(permit, now);
+                permit.record_success(now);
             }
             resp
         })
@@ -3355,6 +3359,128 @@ mod tests {
         set_circuit_test_time(11_000);
         let recovered = ok_mw.call(make_request());
         assert_eq!(recovered.status, StatusCode::OK);
+    }
+
+    /// A half-open probe whose request was abandoned (client gone, timeout)
+    /// kept its probe slot, so every later request got 503 HalfOpenFull.
+    #[test]
+    fn abandoned_request_releases_the_half_open_probe() {
+        struct NeverHandler;
+        impl Handler for NeverHandler {
+            fn call(
+                &self,
+                _cx: &crate::Cx,
+                _req: Request,
+            ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+                Box::pin(std::future::pending())
+            }
+        }
+
+        let policy = CircuitBreakerPolicy {
+            failure_threshold: 1,
+            success_threshold: 1,
+            open_duration: Duration::ZERO,
+            ..Default::default()
+        };
+        let breaker = Arc::new(CircuitBreaker::new(policy));
+        let fail_mw = CircuitBreakerMiddleware::shared_with_time_getter(
+            FnHandler::new(error_handler),
+            Arc::clone(&breaker),
+            circuit_test_time,
+        );
+        let never_mw = CircuitBreakerMiddleware::shared_with_time_getter(
+            NeverHandler,
+            Arc::clone(&breaker),
+            circuit_test_time,
+        );
+        let ok_mw = CircuitBreakerMiddleware::shared_with_time_getter(
+            FnHandler::new(ok_handler),
+            Arc::clone(&breaker),
+            circuit_test_time,
+        );
+
+        set_circuit_test_time(1_000);
+        assert_eq!(
+            fail_mw.call(make_request()).status,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+
+        let cx = crate::Cx::for_testing();
+        let mut probe = Handler::call(&never_mw, &cx, make_request());
+        let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(probe.as_mut().poll(&mut task_cx).is_pending());
+        assert!(
+            matches!(
+                breaker.state(),
+                crate::combinator::circuit_breaker::State::HalfOpen {
+                    probes_active: 1,
+                    ..
+                }
+            ),
+            "the abandoned request must hold the probe: {:?}",
+            breaker.state()
+        );
+        drop(probe);
+
+        let next = ok_mw.call(make_request());
+        assert_eq!(next.status, StatusCode::OK, "the probe slot was leaked");
+        assert!(matches!(
+            breaker.state(),
+            crate::combinator::circuit_breaker::State::Closed { .. }
+        ));
+    }
+
+    /// The outcome was stamped with the request's start time, so a failure
+    /// that took longer than open_duration opened the breaker in the past and
+    /// the next request went straight to half-open.
+    #[test]
+    fn a_slow_failure_opens_the_breaker_when_it_ends() {
+        struct SlowFailureHandler;
+        impl Handler for SlowFailureHandler {
+            fn call(
+                &self,
+                _cx: &crate::Cx,
+                _req: Request,
+            ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+                Box::pin(async {
+                    set_circuit_test_time(21_000);
+                    Response::new(StatusCode::INTERNAL_SERVER_ERROR, b"late".to_vec())
+                })
+            }
+        }
+
+        let policy = CircuitBreakerPolicy {
+            failure_threshold: 1,
+            success_threshold: 1,
+            open_duration: Duration::from_secs(10),
+            ..Default::default()
+        };
+        let breaker = Arc::new(CircuitBreaker::new(policy));
+        let slow_mw = CircuitBreakerMiddleware::shared_with_time_getter(
+            SlowFailureHandler,
+            Arc::clone(&breaker),
+            circuit_test_time,
+        );
+        let ok_mw = CircuitBreakerMiddleware::shared_with_time_getter(
+            FnHandler::new(ok_handler),
+            Arc::clone(&breaker),
+            circuit_test_time,
+        );
+
+        set_circuit_test_time(1_000);
+        assert_eq!(
+            slow_mw.call(make_request()).status,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            breaker.state(),
+            crate::combinator::circuit_breaker::State::Open {
+                since_millis: 21_000
+            }
+        );
+
+        let rejected = ok_mw.call(make_request());
+        assert_eq!(rejected.status, StatusCode::SERVICE_UNAVAILABLE);
     }
 
     // --- RateLimitMiddleware ---
