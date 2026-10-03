@@ -35,10 +35,10 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 fn connect_in_progress(err: &io::Error) -> bool {
-    matches!(
-        err.kind(),
-        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-    ) || err.raw_os_error() == Some(libc::EINPROGRESS)
+    // A full AF_UNIX backlog returns EAGAIN and abandons the attempt, so it is
+    // returned as WouldBlock, as tokio does; waiting for writability waited,
+    // spinning, for a connection that would never be made.
+    err.kind() == io::ErrorKind::Interrupted || err.raw_os_error() == Some(libc::EINPROGRESS)
 }
 
 fn cancelled_poll<T>() -> Poll<io::Result<T>> {
@@ -841,8 +841,28 @@ fn recvmsg_with_raw_ancillary(
             )
         })?;
 
+        // Received descriptors are close-on-exec, as std makes them, so they
+        // do not leak into every child process the receiver spawns.
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd",
+            target_os = "dragonfly",
+        ))]
+        let flags = libc::MSG_CMSG_CLOEXEC;
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd",
+            target_os = "dragonfly",
+        )))]
+        let flags = 0;
         let bytes = loop {
-            let rc = libc::recvmsg(fd, &mut msg, 0);
+            let rc = libc::recvmsg(fd, &mut msg, flags);
             if rc >= 0 {
                 break usize::try_from(rc).map_err(|_| {
                     io::Error::new(io::ErrorKind::InvalidData, "recvmsg byte count overflow")
@@ -870,6 +890,17 @@ fn recvmsg_with_raw_ancillary(
                     for index in 0..fd_count {
                         let received_fd = std::ptr::read_unaligned(data.add(index));
                         if received_fd >= 0 {
+                            // No MSG_CMSG_CLOEXEC here (macOS): set the flag
+                            // on each descriptor instead.
+                            #[cfg(not(any(
+                                target_os = "linux",
+                                target_os = "android",
+                                target_os = "freebsd",
+                                target_os = "netbsd",
+                                target_os = "openbsd",
+                                target_os = "dragonfly",
+                            )))]
+                            libc::fcntl(received_fd, libc::F_SETFD, libc::FD_CLOEXEC);
                             received_fds.push(received_fd);
                         }
                     }
@@ -1367,6 +1398,81 @@ mod tests {
             nix::unistd::close(fd).expect("close received fd");
         });
         crate::test_complete!("test_send_recv_with_ancillary");
+    }
+
+    /// Received descriptors were not close-on-exec, so every child process
+    /// the receiver spawned inherited them. std passes MSG_CMSG_CLOEXEC.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn received_fds_are_close_on_exec() {
+        use crate::net::unix::{AncillaryMessage, SocketAncillary};
+        use std::os::unix::io::AsRawFd;
+
+        futures_lite::future::block_on(async {
+            let (tx, rx) = UnixStream::pair().expect("pair");
+            let (pipe_read, _pipe_write) = nix::unistd::pipe().expect("pipe");
+            let mut send = SocketAncillary::new(128);
+            assert!(send.add_fds(&[pipe_read.as_raw_fd()]));
+            tx.send_with_ancillary(b"fd", &mut send)
+                .await
+                .expect("send_with_ancillary");
+            let mut buf = [0_u8; 8];
+            let mut recv = SocketAncillary::new(128);
+            rx.recv_with_ancillary(&mut buf, &mut recv)
+                .await
+                .expect("recv_with_ancillary");
+            let mut received = None;
+            for message in recv.messages() {
+                let AncillaryMessage::ScmRights(fds) = message;
+                for fd in fds {
+                    received = Some(fd);
+                }
+            }
+            let fd = received.expect("a descriptor was received");
+            // /proc/self/fdinfo reports O_CLOEXEC in `flags` for a
+            // close-on-exec descriptor.
+            let fdinfo =
+                std::fs::read_to_string(format!("/proc/self/fdinfo/{fd}")).expect("read fdinfo");
+            let flags = fdinfo
+                .lines()
+                .find_map(|line| line.strip_prefix("flags:"))
+                .map(|value| u32::from_str_radix(value.trim(), 8).expect("octal flags"))
+                .expect("fdinfo flags line");
+            nix::unistd::close(fd).expect("close received fd");
+            assert_ne!(
+                flags & libc::O_CLOEXEC as u32,
+                0,
+                "the received descriptor must be close-on-exec"
+            );
+        });
+    }
+
+    /// A full AF_UNIX backlog makes connect return EAGAIN and abandon the
+    /// attempt. connect treated that as "in progress" and waited, spinning,
+    /// for a connection that would never be made, even after the server
+    /// drained its backlog.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn connect_to_a_full_backlog_returns_would_block_instead_of_hanging() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("full.sock");
+        let listener = Socket::new(Domain::UNIX, Type::STREAM, None).expect("socket");
+        listener
+            .bind(&SockAddr::unix(&path).expect("socket address"))
+            .expect("bind");
+        listener.listen(0).expect("listen");
+        let _queued = net::UnixStream::connect(&path).expect("the first connect fills the backlog");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let target = path.clone();
+        std::thread::spawn(move || {
+            let result = futures_lite::future::block_on(UnixStream::connect(&target));
+            let _ = tx.send(result.map(drop).map_err(|err| err.kind()));
+        });
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("connect must return rather than wait for a connection that never comes");
+        assert_eq!(result, Err(io::ErrorKind::WouldBlock));
     }
 
     #[test]
