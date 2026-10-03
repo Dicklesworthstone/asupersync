@@ -815,9 +815,7 @@ impl<'a, Caps> Future for AcquireFuture<'a, '_, Caps> {
 
     #[inline]
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        self.poll_with_registration(context, false, |cx| {
-            Ok(reserve_runtime_permit_obligation(cx))
-        })
+        self.poll_with_registration(context, |cx| Ok(reserve_runtime_permit_obligation(cx)))
     }
 }
 
@@ -825,7 +823,6 @@ impl<'a, Caps> AcquireFuture<'a, '_, Caps> {
     fn poll_with_registration<E: From<AcquireError>>(
         &mut self,
         context: &mut Context<'_>,
-        checked: bool,
         register: impl FnOnce(
             &Cx<Caps>,
         )
@@ -877,7 +874,11 @@ impl<'a, Caps> AcquireFuture<'a, '_, Caps> {
             // This must be declared before `state`: unwind drops locals in
             // reverse order, releasing the mutex before rollback re-locks it.
             let mut rollback = AcquisitionRollbackGuard::new(self.semaphore, self.count);
-            rollback.notify_on_rollback = checked;
+            // A rollback wakes the waiter its restored permits make runnable,
+            // for the unchecked path too. Without the wake, an unwind after
+            // the permits were taken (a stored Waker whose Drop panics) left
+            // the next waiter parked with capacity available.
+            rollback.notify_on_rollback = true;
             let mut state = self.semaphore.state.lock();
 
             if state.closed {
@@ -1000,7 +1001,7 @@ impl<'a, Caps> Future for CheckedAcquireFuture<'a, '_, Caps> {
     type Output = Result<SemaphorePermit<'a>, CheckedAcquireError>;
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        self.inner.poll_with_registration(context, true, |cx| {
+        self.inner.poll_with_registration(context, |cx| {
             cx.try_register_obligation_checked(
                 crate::record::ObligationKind::SemaphorePermit,
                 cx.task_id(),
@@ -3516,6 +3517,69 @@ mod tests {
         #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_ordering::clear_held_locks();
         crate::test_complete!("borrowed_acquire_rolls_back_when_cascade_wake_panics");
+    }
+
+    /// A Waker whose payload panics when its last reference is dropped.
+    struct DropPanicsWaker;
+
+    #[allow(clippy::manual_noop_waker)]
+    impl std::task::Wake for DropPanicsWaker {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for DropPanicsWaker {
+        fn drop(&mut self) {
+            panic!("semaphore waiter waker panics when dropped");
+        }
+    }
+
+    /// c11v6v item 9: the unchecked acquire's rollback did not wake a
+    /// successor. A takes the only permit, and dropping its own stored Waker
+    /// unwinds; the rollback restores the permit, which makes B runnable, but
+    /// B's waker was discarded and B stayed parked with capacity available.
+    #[test]
+    fn unchecked_acquire_rollback_wakes_the_waiter_it_makes_runnable() {
+        init_test("unchecked_acquire_rollback_wakes_the_waiter_it_makes_runnable");
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+        lock_ordering::clear_held_locks();
+
+        let semaphore = Semaphore::new(0);
+        let cx_a = test_cx();
+        let cx_b = test_cx();
+        let mut future_a = semaphore.acquire(&cx_a, 1);
+        let mut future_b = semaphore.acquire(&cx_b, 1);
+        let dropping = Waker::from(Arc::new(DropPanicsWaker));
+        assert!(poll_once_with_waker(&mut future_a, &dropping).is_none());
+        // The semaphore now holds the last reference to A's waker.
+        drop(dropping);
+        let counter_b = CountingWaker::new();
+        let waker_b = Waker::from(Arc::clone(&counter_b));
+        assert!(poll_once_with_waker(&mut future_b, &waker_b).is_none());
+
+        semaphore.add_permits(1);
+        let unwound =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| poll_once(&mut future_a)));
+        assert!(unwound.is_err(), "dropping A's stored waker must unwind");
+        assert_eq!(
+            semaphore.available_permits(),
+            1,
+            "A's interrupted acquisition restores its permit"
+        );
+        assert_eq!(
+            counter_b.count(),
+            1,
+            "the rollback must wake B, which the restored permit made runnable"
+        );
+
+        drop(future_a);
+        let permit_b = poll_once_with_waker(&mut future_b, &waker_b)
+            .expect("B is runnable")
+            .expect("B acquires the restored permit");
+        drop(permit_b);
+        assert_eq!(semaphore.available_permits(), 1);
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+        lock_ordering::clear_held_locks();
+        crate::test_complete!("unchecked_acquire_rollback_wakes_the_waiter_it_makes_runnable");
     }
 
     #[test]
