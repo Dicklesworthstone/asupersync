@@ -222,8 +222,8 @@ impl Resolver {
     ///
     /// # Cancellation Safety
     ///
-    /// This function is cancel-safe. If the future is dropped, the underlying
-    /// DNS query continues on the blocking pool but the result is discarded.
+    /// This function is cancel-safe. If the future is dropped or times out, the
+    /// system lookup in progress finishes on its thread; no further retry starts.
     async fn do_lookup_ip(&self, host: &str) -> Result<LookupIp, DnsError> {
         validate_lookup_hostname(host)?;
 
@@ -233,25 +233,25 @@ impl Resolver {
         }
         let host = host.to_string();
 
+        // Each blocking attempt can take seconds in a DNS outage: none starts
+        // after the caller gave up (timeout or drop).
+        let abandoned = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop = Arc::clone(&abandoned);
+        let deadline = Instant::now().checked_add(self.config.timeout);
+
         // Keep DNS resolution off the runtime thread even when a current `Cx`
         // exists without a blocking pool handle.
         let lookup = Box::pin(spawn_blocking_dns(move || {
-            let mut last_error = None;
-
-            for _attempt in 0..=retries {
-                match Self::query_ip_sync(&host) {
-                    Ok(result) => return Ok(result),
-                    Err(e) => {
-                        if matches!(e, DnsError::NoRecords(_)) {
-                            return Err(e);
-                        }
-                        last_error = Some(e);
-                    }
-                }
-            }
-
-            Err(last_error.unwrap_or(DnsError::Timeout))
+            retry_system_lookup(
+                retries,
+                || {
+                    stop.load(std::sync::atomic::Ordering::Relaxed)
+                        || deadline.is_some_and(|deadline| Instant::now() >= deadline)
+                },
+                || Self::query_ip_sync(&host),
+            )
         }));
+        let _abandon = AbandonOnDrop(abandoned);
 
         self.timeout_future(self.config.timeout, lookup)
             .await
@@ -275,7 +275,7 @@ impl Resolver {
                 &host,
                 &nameservers,
                 retries,
-                timeout,
+                query_budget(timeout),
                 entropy.as_ref(),
             )
         }));
@@ -1517,6 +1517,48 @@ fn select_records_for_query(
     }
 }
 
+/// The budget of the blocking nameserver query loop behind `lookup_ip`: the
+/// resolver timeout less a margin (a tenth of it, at most 100 ms). The loop
+/// gives its last query whatever time is left, so with the full timeout it
+/// ended together with the `ResolverTimeout` around it, and a lookup whose
+/// one family answered while the other timed out was always reported as
+/// Timeout instead of returning the answered family.
+fn query_budget(timeout: Duration) -> Duration {
+    timeout.saturating_sub((timeout / 10).min(Duration::from_millis(100)))
+}
+
+/// Runs a blocking system lookup up to `retries + 1` times. A definitive
+/// `NoRecords` ends it at once. No further attempt starts once `should_stop`
+/// reports that the caller no longer waits for the result.
+fn retry_system_lookup(
+    retries: u32,
+    should_stop: impl Fn() -> bool,
+    mut query: impl FnMut() -> Result<LookupIp, DnsError>,
+) -> Result<LookupIp, DnsError> {
+    let mut last_error = None;
+    for _attempt in 0..=retries {
+        match query() {
+            Ok(result) => return Ok(result),
+            Err(error @ DnsError::NoRecords(_)) => return Err(error),
+            Err(error) => last_error = Some(error),
+        }
+        if should_stop() {
+            break;
+        }
+    }
+    Err(last_error.unwrap_or(DnsError::Timeout))
+}
+
+/// Sets the flag when dropped: the caller of a blocking lookup has stopped
+/// waiting for it.
+struct AbandonOnDrop(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for AbandonOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Time-source abstraction for sync DNS query timing.
 ///
 /// br-asupersync-4p1vr3: the legacy sync path (`SyncTimeSource::Wall`)
@@ -1650,13 +1692,20 @@ impl Resolver {
             ));
         }
 
-        let attempts = nameservers.len().saturating_mul(retries as usize + 1);
         let mut last_error = None;
         let mut saw_no_records = false;
         let mut deferred_alias = None;
+        // A server that answered NXDOMAIN, no data or an alias has answered:
+        // asking it again cannot change that. Only servers that failed or
+        // timed out are retried, and the loop ends once every server has
+        // answered.
+        let mut answered = vec![false; nameservers.len()];
 
-        for _attempt in 0..=retries {
-            for nameserver in nameservers.iter().copied() {
+        for attempt in 0..=retries {
+            for (index, nameserver) in nameservers.iter().copied().enumerate() {
+                if answered[index] {
+                    continue;
+                }
                 let remaining = context
                     .timeout
                     .checked_sub(context.time.elapsed())
@@ -1665,7 +1714,13 @@ impl Resolver {
                     return Err(DnsError::Timeout);
                 }
 
-                let query_timeout = per_attempt_timeout(remaining, attempts).min(remaining);
+                // Share the remaining time among the queries this loop may
+                // still send, so later queries do not get ever smaller slices.
+                let unanswered = answered.iter().filter(|done| !**done).count();
+                let left_in_pass = answered[index..].iter().filter(|done| !**done).count();
+                let queries_left =
+                    left_in_pass.saturating_add((retries - attempt) as usize * unanswered);
+                let query_timeout = per_attempt_timeout(remaining, queries_left).min(remaining);
                 let query_id = dns_query_id(context.entropy);
                 let query = build_dns_query(name, query_type, query_id)?;
 
@@ -1677,13 +1732,16 @@ impl Resolver {
                                 if deferred_alias.is_none() {
                                     deferred_alias = Some(alias);
                                 }
+                                answered[index] = true;
                             }
                             QuerySelection::NoRecords => {
                                 saw_no_records = true;
+                                answered[index] = true;
                             }
                         },
                         3 => {
                             saw_no_records = true;
+                            answered[index] = true;
                         }
                         rcode => {
                             last_error = Some(DnsError::ServerError(format!(
@@ -1698,6 +1756,9 @@ impl Resolver {
                         last_error = Some(err);
                     }
                 }
+            }
+            if answered.iter().all(|done| *done) {
+                break;
             }
         }
 
@@ -1776,6 +1837,11 @@ impl Resolver {
 
         if addresses.is_empty() {
             Err(last_error.unwrap_or_else(|| DnsError::NoRecords(host.to_string())))
+        } else if last_error.is_some() {
+            // One family answered and the other failed (timeout, SERVFAIL).
+            // Return what was found, with TTL 0 so it is not cached: caching
+            // it would hide the missing family for the whole TTL.
+            Ok(LookupIp::new(addresses, Duration::ZERO))
         } else {
             Ok(LookupIp::new(
                 addresses,
@@ -1950,6 +2016,7 @@ mod tests {
     struct TestDnsServer {
         addr: SocketAddr,
         stop: Arc<AtomicBool>,
+        udp_queries: Arc<AtomicUsize>,
         udp_handle: Option<JoinHandle<()>>,
         tcp_handle: Option<JoinHandle<()>>,
     }
@@ -1967,6 +2034,8 @@ mod tests {
             let stop = Arc::new(AtomicBool::new(false));
             let udp_stop = Arc::clone(&stop);
             let tcp_stop = Arc::clone(&stop);
+            let udp_queries = Arc::new(AtomicUsize::new(0));
+            let udp_counter = Arc::clone(&udp_queries);
             let udp_zone = zone.clone();
             let tcp_zone = zone;
 
@@ -1975,6 +2044,7 @@ mod tests {
                 while !udp_stop.load(Ordering::Relaxed) {
                     match udp_socket.recv_from(&mut buf) {
                         Ok((n, peer)) => {
+                            udp_counter.fetch_add(1, Ordering::Relaxed);
                             let response =
                                 build_test_dns_response(&buf[..n], &udp_zone, truncate_udp);
                             let _ = udp_socket.send_to(&response, peer);
@@ -2029,9 +2099,15 @@ mod tests {
             Self {
                 addr,
                 stop,
+                udp_queries,
                 udp_handle: Some(udp_handle),
                 tcp_handle: Some(tcp_handle),
             }
+        }
+
+        /// UDP queries received so far.
+        fn udp_queries(&self) -> usize {
+            self.udp_queries.load(Ordering::Relaxed)
         }
     }
 
@@ -3266,6 +3342,143 @@ mod tests {
         );
 
         crate::test_complete!("resolver_tries_later_nameserver_after_early_nxdomain");
+    }
+
+    // Once a server has answered NXDOMAIN or no data, asking it again cannot
+    // change the answer. The loop re-sent every query to every server
+    // retries+1 times: with two servers and three retries an IPv4-only name
+    // cost 8 AAAA queries before its A query. It now asks each server once
+    // for AAAA (the later server is still asked after an early NXDOMAIN),
+    // then once for A.
+    #[test]
+    fn resolver_does_not_requery_servers_that_answered() {
+        init_test("resolver_does_not_requery_servers_that_answered");
+
+        let mut zone = BTreeMap::new();
+        zone.insert(
+            ("v4.example.test".to_string(), 1),
+            vec![TestDnsRecord::A {
+                ttl: 30,
+                addr: Ipv4Addr::new(192, 0, 2, 9),
+            }],
+        );
+        let first = TestDnsServer::start(zone.clone(), false);
+        let second = TestDnsServer::start(zone, false);
+
+        let resolver = Resolver::with_config(ResolverConfig {
+            nameservers: vec![first.addr, second.addr],
+            cache_enabled: false,
+            retries: 3,
+            timeout: Duration::from_secs(2),
+            ..ResolverConfig::default()
+        });
+
+        let lookup = future::block_on(async { resolver.lookup_ip("v4.example.test").await })
+            .expect("the A record resolves");
+        assert_eq!(
+            lookup.addresses(),
+            &[IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9))]
+        );
+        // AAAA: one NXDOMAIN from each server. A: the first server answers.
+        assert_eq!(first.udp_queries(), 2);
+        assert_eq!(second.udp_queries(), 1);
+
+        crate::test_complete!("resolver_does_not_requery_servers_that_answered");
+    }
+
+    // A server that answers AAAA but never A: the lookup returns the IPv6
+    // address, but must not cache it, or IPv4-only callers would get no
+    // usable address for the whole TTL.
+    #[test]
+    fn resolver_does_not_cache_an_answer_missing_a_failed_family() {
+        init_test("resolver_does_not_cache_an_answer_missing_a_failed_family");
+
+        let socket = UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("bind");
+        socket
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .expect("set UDP timeout");
+        let addr = socket.local_addr().expect("local addr");
+        let mut zone = BTreeMap::new();
+        zone.insert(
+            ("dual.example.test".to_string(), 28),
+            vec![TestDnsRecord::Aaaa {
+                ttl: 300,
+                addr: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 7),
+            }],
+        );
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_stop = Arc::clone(&stop);
+        let server = thread::spawn(move || {
+            let mut buf = [0u8; 2048];
+            while !server_stop.load(Ordering::Relaxed) {
+                if let Ok((n, peer)) = socket.recv_from(&mut buf) {
+                    let (_, _, qtype) = parse_test_dns_question(&buf[..n]);
+                    // Answer AAAA; let every A query time out.
+                    if qtype == 28 {
+                        let response = build_test_dns_response(&buf[..n], &zone, false);
+                        let _ = socket.send_to(&response, peer);
+                    }
+                }
+            }
+        });
+
+        let resolver = Resolver::with_config(ResolverConfig {
+            nameservers: vec![addr],
+            cache_enabled: true,
+            retries: 0,
+            timeout: Duration::from_millis(600),
+            ..ResolverConfig::default()
+        });
+        let lookup = future::block_on(async { resolver.lookup_ip("dual.example.test").await })
+            .expect("the AAAA record is returned");
+        stop.store(true, Ordering::Relaxed);
+        server.join().expect("server thread");
+
+        assert_eq!(
+            lookup.addresses(),
+            &[IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 7))]
+        );
+        assert_eq!(lookup.ttl(), Duration::ZERO);
+        assert!(
+            resolver.cache.get_ip_result("dual.example.test").is_none(),
+            "an answer missing a failed family is not cached"
+        );
+
+        crate::test_complete!("resolver_does_not_cache_an_answer_missing_a_failed_family");
+    }
+
+    // The system lookup retried getaddrinfo up to retries+1 times on its
+    // thread after the caller had timed out or gone away. In a DNS outage
+    // each attempt can take about 10 s, so a thread stayed busy for about
+    // 40 s per abandoned lookup.
+    #[test]
+    fn system_lookup_retries_stop_once_the_caller_gave_up() {
+        let calls = std::cell::Cell::new(0_u32);
+        let transient = || {
+            calls.set(calls.get() + 1);
+            Err(DnsError::Timeout)
+        };
+
+        let result = retry_system_lookup(3, || false, transient);
+        assert!(matches!(result, Err(DnsError::Timeout)));
+        assert_eq!(calls.get(), 4, "a caller still waiting gets every retry");
+
+        calls.set(0);
+        let result = retry_system_lookup(3, || true, transient);
+        assert!(matches!(result, Err(DnsError::Timeout)));
+        assert_eq!(calls.get(), 1, "no retry after the caller gave up");
+
+        calls.set(0);
+        let result = retry_system_lookup(
+            3,
+            || false,
+            || {
+                calls.set(calls.get() + 1);
+                Err(DnsError::NoRecords("gone.test".to_string()))
+            },
+        );
+        assert!(matches!(result, Err(DnsError::NoRecords(_))));
+        assert_eq!(calls.get(), 1, "NoRecords is definitive");
     }
 
     #[test]
