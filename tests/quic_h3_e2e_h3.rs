@@ -1836,6 +1836,124 @@ fn native_h3_session_routes_real_stream_bytes_and_survives_reset() {
     ));
 }
 
+// A body was written as one DATA frame, so a request or response body larger
+// than the receiver's max_frame_payload_size (1 MiB by default) closed the
+// connection: this crate's own client could not POST more than that to its own
+// server. Bodies now go out as DATA frames of at most the sender's limit.
+#[test]
+#[cfg(feature = "http3")]
+fn native_h3_bodies_larger_than_the_frame_limit_go_out_as_bounded_data_frames() {
+    const LIMIT: usize = 4096;
+    let cx = test_cx();
+    let config = NativeQuicConnectionConfig {
+        max_local_bidi: 16,
+        max_local_uni: 8,
+        send_window: 1 << 18,
+        recv_window: 1 << 18,
+        connection_send_limit: 4 << 20,
+        connection_recv_limit: 4 << 20,
+        ..NativeQuicConnectionConfig::default()
+    };
+    let mut client = QuicConnection::client(config);
+    let mut server = QuicConnection::server(config);
+    client.record_verified_server_identity();
+    establish_loopback(&cx, &mut client, &mut server).expect("establish native QUIC pair");
+    let bounded = |endpoint_role| H3ConnectionConfig {
+        endpoint_role,
+        max_frame_payload_size: LIMIT,
+        ..H3ConnectionConfig::default()
+    };
+    let mut client_h3 =
+        NativeH3Session::with_config(bounded(asupersync::http::h3_native::H3EndpointRole::Client));
+    let mut server_h3 =
+        NativeH3Session::with_config(bounded(asupersync::http::h3_native::H3EndpointRole::Server));
+    client_h3
+        .initialize(&cx, &mut client, H3Settings::default())
+        .expect("initialize client H3");
+    server_h3
+        .initialize(&cx, &mut server, H3Settings::default())
+        .expect("initialize server H3");
+    let _ = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    let _ = pump_h3_events(&cx, &mut server, &mut client, &mut client_h3);
+
+    let body = Bytes::from(
+        (0..20_000_u32)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>(),
+    );
+    let data_on = |events: &[NativeH3Event], stream| {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                NativeH3Event::Data { stream_id, bytes } if *stream_id == stream => {
+                    Some(bytes.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    // Within the receiver's limit each frame arrives whole, as one event.
+    let expected_frames = [LIMIT, LIMIT, LIMIT, LIMIT, 20_000 - 4 * LIMIT];
+
+    let request = H3RequestHead::new(
+        H3PseudoHeaders {
+            method: Some("POST".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("api.example.test".to_string()),
+            path: Some("/upload".to_string()),
+            ..H3PseudoHeaders::default()
+        },
+        vec![],
+    )
+    .expect("valid request");
+    let stream = client_h3
+        .send_request(&cx, &mut client, &request, body.clone())
+        .expect("send request");
+    let (server_events, _) = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    let request_data = data_on(&server_events, stream);
+    assert_eq!(
+        request_data
+            .iter()
+            .map(|bytes| bytes.len())
+            .collect::<Vec<_>>(),
+        expected_frames,
+        "request DATA frames: {server_events:?}"
+    );
+    assert_eq!(
+        request_data
+            .iter()
+            .flat_map(|bytes| bytes.iter().copied())
+            .collect::<Vec<_>>(),
+        body.to_vec()
+    );
+    assert!(server_events.iter().any(|event| matches!(
+        event,
+        NativeH3Event::Finished { stream_id } if *stream_id == stream
+    )));
+
+    let response = H3ResponseHead::new(200, vec![]).expect("valid response");
+    server_h3
+        .send_response(&cx, &mut server, stream, &response, body.clone())
+        .expect("send response");
+    let (client_events, _) = pump_h3_events(&cx, &mut server, &mut client, &mut client_h3);
+    let response_data = data_on(&client_events, stream);
+    assert_eq!(
+        response_data
+            .iter()
+            .map(|bytes| bytes.len())
+            .collect::<Vec<_>>(),
+        expected_frames,
+        "response DATA frames: {client_events:?}"
+    );
+    assert_eq!(
+        response_data
+            .iter()
+            .flat_map(|bytes| bytes.iter().copied())
+            .collect::<Vec<_>>(),
+        body.to_vec()
+    );
+}
+
 #[test]
 #[cfg(feature = "http3")]
 fn native_h3_router_dispatches_completed_streams_and_refuses_invalid_messages() {

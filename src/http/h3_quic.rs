@@ -548,6 +548,20 @@ fn encode_frame(frame: H3Frame) -> Result<Bytes, NativeH3SessionError> {
     Ok(Bytes::from(wire))
 }
 
+/// Append `body` as DATA frames of at most `max_payload` bytes each. A peer
+/// with the same frame limit, such as this crate's sessions, refuses a larger
+/// DATA frame as a connection error.
+fn encode_body_frames(
+    body: &[u8],
+    max_payload: usize,
+    wire: &mut Vec<u8>,
+) -> Result<(), NativeH3SessionError> {
+    for chunk in body.chunks(max_payload.max(1)) {
+        H3Frame::Data(chunk.to_vec()).encode(wire)?;
+    }
+    Ok(())
+}
+
 /// Static-QPACK HTTP/3 mapping over one established native QUIC connection.
 #[derive(Debug, Clone)]
 pub struct NativeH3Session {
@@ -770,9 +784,7 @@ impl NativeH3Session {
         self.next_local_request_stream_id = self.next_local_request_stream_id.saturating_add(4);
         let mut wire = Vec::new();
         H3Frame::Headers(qpack_encode_request_field_section(head)?).encode(&mut wire)?;
-        if !body.is_empty() {
-            H3Frame::Data(body.to_vec()).encode(&mut wire)?;
-        }
+        encode_body_frames(&body, self.config.max_frame_payload_size, &mut wire)?;
         connection.write_stream(cx, stream_id, Bytes::from(wire), true)?;
         Ok(stream_id)
     }
@@ -894,9 +906,7 @@ impl NativeH3Session {
 
         let mut wire = Vec::new();
         H3Frame::Headers(qpack_encode_response_field_section(head)?).encode(&mut wire)?;
-        if !body.is_empty() {
-            H3Frame::Data(body.to_vec()).encode(&mut wire)?;
-        }
+        encode_body_frames(&body, self.config.max_frame_payload_size, &mut wire)?;
         connection.write_stream(cx, stream_id, Bytes::from(wire), true)?;
         Ok(())
     }
