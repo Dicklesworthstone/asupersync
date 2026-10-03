@@ -26,9 +26,9 @@ use std::time::Instant;
 pub const ATP_UDP_DEFAULT_MAX_PACKET_SIZE: usize = 1500;
 /// Default ATP UDP batch bound.
 ///
-/// One default batch fills a Linux UDP GSO super-packet when packet payloads are
-/// fixed-size, while variable-sized packets still fall back to one sendmmsg
-/// batch through the portable UDP planner.
+/// One default batch of fixed-size packets goes out as Linux UDP GSO
+/// super-packets in one sendmmsg call, each under the 64 KiB datagram limit;
+/// variable-sized packets fall back to one plain sendmmsg batch.
 pub const ATP_UDP_DEFAULT_BATCH_SIZE: usize = UDP_MAX_GSO_SEGMENTS;
 
 /// ATP UDP socket configuration.

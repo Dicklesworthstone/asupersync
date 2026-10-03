@@ -1765,7 +1765,7 @@ fn rq_pending_send_batch_flushes_on_single_socket_bound() {
 }
 
 #[test]
-fn rq_default_authenticated_datagrams_plan_as_one_gso_super_packet() {
+fn rq_default_authenticated_datagrams_plan_as_gso_super_packets_in_one_syscall() {
     let dst_addr: SocketAddr = "127.0.0.1:9000".parse().expect("socket address");
     let ctx = SecurityContext::for_testing(77);
     let payloads = (0..RQ_SEND_BATCH_PER_SOCKET)
@@ -1806,9 +1806,11 @@ fn rq_default_authenticated_datagrams_plan_as_one_gso_super_packet() {
         crate::net::UdpSendBatchStrategy::default(),
     );
 
-    assert_eq!(plan.path, crate::net::UdpSendBatchPath::Gso);
+    // A window is 64 x 1,456 bytes, more than one UDP datagram carries, so it
+    // goes out as two super-packets (44 + 20 segments) in one sendmmsg call.
+    assert_eq!(plan.path, crate::net::UdpSendBatchPath::GsoSendmmsg);
     assert_eq!(plan.estimated_syscalls, 1);
-    assert_eq!(plan.gso_segments_per_packet, Some(RQ_SEND_BATCH_PER_SOCKET));
+    assert_eq!(plan.gso_segments_per_packet, Some(44));
     assert_eq!(
         plan.gso_segment_bytes,
         Some(AUTH_DGRAM_HEADER + usize::from(DEFAULT_SYMBOL_SIZE))

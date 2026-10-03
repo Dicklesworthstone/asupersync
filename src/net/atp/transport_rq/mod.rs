@@ -160,8 +160,8 @@ const TARGET_SOURCE_SYMBOLS_PER_BLOCK: usize = 512;
 const TARGET_STREAMING_BLOCK_BYTES: usize = 4 * 1024 * 1024;
 /// Maximum encoded ATP-RQ symbols sent in one connected UDP batch.
 ///
-/// Match the UDP GSO segment budget so fixed-size RQ symbols fill one
-/// super-packet before the sender flushes. Fanout must not multiply this
+/// Match the UDP GSO segment budget: one flush is one sendmmsg call carrying
+/// GSO super-packets of fixed-size RQ symbols. Fanout must not multiply this
 /// aggregate burst, or a clean round-0 ramp can overrun the receiver despite
 /// aggregate pacing.
 const RQ_SEND_BATCH_PER_SOCKET: usize = UDP_MAX_GSO_SEGMENTS;
