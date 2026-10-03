@@ -327,9 +327,29 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
                     }
                 }
             }
+            // A transport may hold written bytes until flushed (a buffered
+            // writer, a tunnel that frames on flush), and the peer cannot
+            // answer a flight it never received.
+            if !write_would_block {
+                match Pin::new(&mut self.io).poll_flush(cx) {
+                    Poll::Ready(Ok(())) => {}
+                    Poll::Ready(Err(e)) => {
+                        self.state = TlsState::Closed;
+                        return Poll::Ready(Err(TlsError::Io(e)));
+                    }
+                    Poll::Pending => write_would_block = true,
+                }
+            }
 
             // Check if handshake is complete (after flushing writes)
             if !self.conn.is_handshaking() {
+                // The final flight (a TLS 1.3 client's Finished, a TLS 1.2
+                // server's ChangeCipherSpec and Finished) must reach the
+                // transport first: a caller that then only reads would wait
+                // for a peer that is waiting for these bytes.
+                if write_would_block {
+                    return Poll::Pending;
+                }
                 self.state = TlsState::Ready;
                 #[cfg(feature = "tracing-integration")]
                 debug!("TLS handshake complete");
@@ -1082,5 +1102,187 @@ jg==\n\
             error.contains("Revoked"),
             "the refusal must name the revocation: {error}"
         );
+    }
+
+    /// Reports `Pending` on its second write call, as a bounded transport
+    /// does while its buffer is full, and wakes the task at once.
+    #[cfg(feature = "tls")]
+    struct StallsSecondWrite<IO> {
+        inner: IO,
+        writes: usize,
+    }
+
+    /// Holds written bytes until flushed, like a buffered writer.
+    #[cfg(feature = "tls")]
+    struct SendsOnFlush<IO> {
+        inner: IO,
+        held: Vec<u8>,
+    }
+
+    #[cfg(feature = "tls")]
+    impl<IO: AsyncRead + Unpin> AsyncRead for StallsSecondWrite<IO> {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_read(cx, buf)
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    impl<IO: AsyncWrite + Unpin> AsyncWrite for StallsSecondWrite<IO> {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.writes += 1;
+            if self.writes == 2 {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            Pin::new(&mut self.inner).poll_write(cx, buf)
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    impl<IO: AsyncRead + Unpin> AsyncRead for SendsOnFlush<IO> {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_read(cx, buf)
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    impl<IO: AsyncWrite + Unpin> AsyncWrite for SendsOnFlush<IO> {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.held.extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            let this = &mut *self;
+            while !this.held.is_empty() {
+                match Pin::new(&mut this.inner).poll_write(cx, &this.held) {
+                    Poll::Ready(Ok(0)) => return Poll::Ready(Err(io::ErrorKind::WriteZero.into())),
+                    Poll::Ready(Ok(n)) => {
+                        this.held.drain(..n);
+                    }
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+            Pin::new(&mut this.inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    /// Runs a client handshake over `wrap(client transport)` against a plain
+    /// server, drops the client as soon as its handshake returns, and
+    /// reports the client's result, whether TLS bytes were still unsent at
+    /// that point, and the server's result.
+    #[cfg(feature = "tls")]
+    fn handshake_through<W>(
+        seed: u64,
+        wrap: impl FnOnce(VirtualTcpStream) -> W + Send + 'static,
+    ) -> (Result<(), TlsError>, bool, Result<(), TlsError>)
+    where
+        W: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let config = TestConfig::new().with_seed(seed).with_max_steps(20_000);
+        let mut runtime = LabRuntimeTarget::create_runtime(config);
+        let (client, server) = LabRuntimeTarget::block_on(&mut runtime, async move {
+            let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+            let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+            let acceptor = TlsAcceptorBuilder::new(chain, key).build().unwrap();
+            let certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
+            let connector = TlsConnectorBuilder::new()
+                .add_root_certificates(certs)
+                .build()
+                .unwrap();
+
+            let server_name = ServerName::try_from("localhost".to_string()).unwrap();
+            let client_conn =
+                ClientConnection::new(Arc::clone(connector.config()), server_name).unwrap();
+            let server_conn = ServerConnection::new(Arc::clone(acceptor.config())).unwrap();
+            let (client_io, server_io) = VirtualTcpStream::pair(
+                "127.0.0.1:5230".parse().unwrap(),
+                "127.0.0.1:5231".parse().unwrap(),
+            );
+            let mut client_stream = TlsStream::new_client(wrap(client_io), client_conn);
+            let mut server_stream = TlsStream::new_server(server_io, server_conn);
+            let client = async move {
+                let result = poll_fn(|cx| client_stream.poll_handshake(cx)).await;
+                // A caller that only reads next would not send anything
+                // more, so the server must get the whole flight on its own.
+                let unsent = client_stream.conn.wants_write();
+                (result, unsent, client_stream)
+            };
+            let server = async move {
+                let result = poll_fn(|cx| server_stream.poll_handshake(cx)).await;
+                (result, server_stream)
+            };
+            // The client stays open, writing nothing more, until the server
+            // finishes: a flight left unsent leaves the server waiting, and
+            // the lab then ends with "task did not complete".
+            let ((client_result, unsent, client_stream), (server_result, server_stream)) =
+                zip(client, server).await;
+            drop((client_stream, server_stream));
+            ((client_result, unsent), server_result)
+        });
+        assert!(runtime.is_quiescent());
+        (client.0, client.1, server)
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn handshake_completes_only_after_its_final_flight_is_written() {
+        init_test_logging();
+        // The second write is the client's last flight (after the
+        // ClientHello); the transport refuses it once.
+        let (client, unsent, server) = handshake_through(0xF117_0001, |io| StallsSecondWrite {
+            inner: io,
+            writes: 0,
+        });
+        tracing::info!(client = ?client, unsent, server = ?server, "tls_final_flight");
+        client.expect("the client handshake completes");
+        assert!(
+            !unsent,
+            "the handshake reported done with its final flight unsent"
+        );
+        server.expect("the server receives the client's Finished");
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn handshake_flushes_a_transport_that_holds_writes() {
+        init_test_logging();
+        let (client, unsent, server) = handshake_through(0xF117_0002, |io| SendsOnFlush {
+            inner: io,
+            held: Vec::new(),
+        });
+        tracing::info!(client = ?client, unsent, server = ?server, "tls_flush_transport");
+        client.expect("the client handshake completes");
+        assert!(!unsent);
+        server.expect("the server handshake completes");
     }
 }
