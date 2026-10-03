@@ -446,7 +446,7 @@ impl NativeThreadHostServices {
                     let guard = dm_state
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let now = guard.now;
+                    let (logical_now, driver) = (guard.now, guard.timer_driver_handle());
                     let mut tasks = guard
                         .tasks_iter()
                         .map(|(_, record)| DeadlineTaskSnapshot::from_task_record(record))
@@ -466,7 +466,7 @@ impl NativeThreadHostServices {
                                 .map(|(_, record)| DeadlineTaskSnapshot::from_task_record(record)),
                         );
                     }
-                    monitor.check_snapshots(now, tasks);
+                    monitor.check_snapshots(driver.map_or(logical_now, |d| d.now()), tasks);
                 }
             })
             .ok();
