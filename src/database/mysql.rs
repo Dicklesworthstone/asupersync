@@ -4203,8 +4203,14 @@ impl MySqlConnection {
         let year = value_reader.read_u16_le()?;
         let month = value_reader.read_byte()?;
         let day = value_reader.read_byte()?;
-        if column_type == column_type::MYSQL_TYPE_DATE || len == 4 {
+        if column_type == column_type::MYSQL_TYPE_DATE {
             return Ok(MySqlValue::Text(format!("{year:04}-{month:02}-{day:02}")));
+        }
+        if len == 4 {
+            // A DATETIME or TIMESTAMP at midnight is sent without its time.
+            return Ok(MySqlValue::Text(format!(
+                "{year:04}-{month:02}-{day:02} 00:00:00"
+            )));
         }
 
         let hour = value_reader.read_byte()?;
@@ -4664,6 +4670,22 @@ impl MySqlConnection {
         }
     }
 
+    /// Read the session isolation level. MariaDB before 11.1 and MySQL
+    /// before 5.7.20 have no `transaction_isolation` variable (ERR 1193,
+    /// unknown system variable) and report the level as `tx_isolation`.
+    async fn read_session_isolation(&mut self, cx: &Cx) -> Outcome<Vec<MySqlRow>, MySqlError> {
+        match self
+            .query_unchecked_internal(cx, "SELECT @@SESSION.transaction_isolation AS isolation")
+            .await
+        {
+            Outcome::Err(MySqlError::Server { code: 1193, .. }) => {
+                self.query_unchecked_internal(cx, "SELECT @@SESSION.tx_isolation AS isolation")
+                    .await
+            }
+            other => other,
+        }
+    }
+
     /// br-asupersync-rsifm3 — Begin a transaction with explicit isolation
     /// level and read-only configuration.
     ///
@@ -4698,10 +4720,7 @@ impl MySqlConnection {
         // only ever pass when `level` equalled the session default. Setting
         // the SESSION level makes the verification meaningful; the previous
         // level is put back on commit/rollback/abandon-drain.
-        let previous_level = match self
-            .query_unchecked_internal(cx, "SELECT @@SESSION.transaction_isolation AS isolation")
-            .await
-        {
+        let previous_level = match self.read_session_isolation(cx).await {
             Outcome::Ok(rows) => rows
                 .first()
                 .and_then(|r| r.get_str("isolation").ok())
@@ -4768,10 +4787,7 @@ impl MySqlConnection {
         // requests SERIALIZABLE could be silently transacting at
         // REPEATABLE READ or worse, breaking correctness assumptions
         // for read-modify-write workloads.
-        let observed_level = match self
-            .query_unchecked_internal(cx, "SELECT @@SESSION.transaction_isolation AS isolation")
-            .await
-        {
+        let observed_level = match self.read_session_isolation(cx).await {
             Outcome::Ok(rows) => match rows
                 .first()
                 .and_then(|r| r.get_str("isolation").ok())
