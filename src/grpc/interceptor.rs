@@ -884,6 +884,13 @@ struct RateLimitLease {
     released: std::sync::atomic::AtomicBool,
 }
 
+/// Every rate-limit lease a request holds, one per limiter in the chain.
+/// Request extensions keep one value per type, so a lease stored on its own
+/// was replaced by the next limiter's, and dropping it released the first
+/// limiter's slot while the request was still in flight.
+#[derive(Debug)]
+struct RateLimitLeases(Vec<std::sync::Arc<RateLimitLease>>);
+
 fn rate_limit_pack(generation: u32, count: u32) -> u64 {
     (u64::from(generation) << 32) | u64::from(count)
 }
@@ -978,8 +985,14 @@ impl RateLimitInterceptor {
     }
 
     fn release_slot_from_request(&self, request: &Request<Bytes>) {
-        if let Some(lease) = request.extensions().get_typed::<RateLimitLease>() {
-            lease.release();
+        if let Some(leases) = request.extensions().get_typed::<RateLimitLeases>() {
+            for lease in leases
+                .0
+                .iter()
+                .filter(|lease| std::sync::Arc::ptr_eq(&lease.state, &self.state))
+            {
+                lease.release();
+            }
         }
     }
 
@@ -1011,10 +1024,17 @@ impl RateLimitInterceptor {
 impl Interceptor for RateLimitInterceptor {
     fn intercept_request(&self, request: &mut Request<Bytes>) -> Result<(), Status> {
         if let Some(generation) = self.try_acquire_slot() {
-            request.extensions_mut().insert_typed(RateLimitLease::new(
+            let mut leases = request
+                .extensions()
+                .get_typed::<RateLimitLeases>()
+                .map_or_else(Vec::new, |held| held.0.clone());
+            leases.push(std::sync::Arc::new(RateLimitLease::new(
                 std::sync::Arc::clone(&self.state),
                 generation,
-            ));
+            )));
+            request
+                .extensions_mut()
+                .insert_typed(RateLimitLeases(leases));
             Ok(())
         } else {
             Err(Status::resource_exhausted("rate limit exceeded"))
@@ -1543,6 +1563,43 @@ mod tests {
         let count = interceptor.current_count();
         crate::assert_with_log!(count == 0, "count after drop", 0, count);
         crate::test_complete!("rate_limiter_allows_under_limit");
+    }
+
+    /// Chained limiters shared one typed extension entry. The second
+    /// limiter's lease replaced the first, which released the first
+    /// limiter's slot at once, so the outer limit stopped being enforced.
+    #[test]
+    fn chained_rate_limiters_each_hold_their_own_slot() {
+        init_test("chained_rate_limiters_each_hold_their_own_slot");
+        let outer = rate_limiter(1);
+        let inner = rate_limiter(5);
+        let mut first = Request::new(Bytes::new());
+        outer.intercept_request(&mut first).expect("outer admits");
+        inner.intercept_request(&mut first).expect("inner admits");
+        assert_eq!((outer.current_count(), inner.current_count()), (1, 1));
+
+        let mut second = Request::new(Bytes::new());
+        let status = outer
+            .intercept_request(&mut second)
+            .expect_err("the outer limit of 1 still holds");
+        assert_eq!(status.code(), Code::ResourceExhausted);
+
+        let mut response = Response::new(Bytes::new());
+        inner
+            .intercept_response_with_request(&first, &mut response)
+            .expect("inner release");
+        assert_eq!(
+            (outer.current_count(), inner.current_count()),
+            (1, 0),
+            "each limiter releases only its own slot"
+        );
+        drop(first);
+        assert_eq!(
+            outer.current_count(),
+            0,
+            "dropping the request releases the rest"
+        );
+        crate::test_complete!("chained_rate_limiters_each_hold_their_own_slot");
     }
 
     #[test]
