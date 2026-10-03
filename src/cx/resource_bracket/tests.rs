@@ -124,6 +124,27 @@ fn use_error_and_cleanup_error_are_both_retained() {
 }
 
 #[test]
+fn a_contained_panic_payload_is_dropped_not_leaked() {
+    struct Witness(#[allow(dead_code)] Arc<()>);
+    let witness = Arc::new(());
+    let held = Arc::clone(&witness);
+    run_case(move |cx| async move {
+        let mut handle = cx.spawn_bracket(BracketConfig::new(4),
+            |_| async { Outcome::<_, &'static str>::Ok(Resource(Cell::new(0))) },
+            move |_, _| -> BracketUseFuture<'_, (), &'static str> {
+                let held = Arc::clone(&held);
+                Box::pin(async move { std::panic::panic_any(Witness(held)) })
+            },
+            |_, _| async { Outcome::<(), ()>::Ok(()) },
+        ).unwrap();
+        let report = handle.join().await.unwrap();
+        assert!(report.usage.as_ref().unwrap().outcome.is_panicked());
+    });
+    // Every caught payload used to be forgotten, so its Arc was never released.
+    assert_eq!(Arc::strong_count(&witness), 1);
+}
+
+#[test]
 fn use_factory_and_poll_panics_still_release_once() {
     for factory_panic in [true, false] {
         run_case(move |cx| async move {
