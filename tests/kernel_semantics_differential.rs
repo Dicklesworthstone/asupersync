@@ -2115,10 +2115,17 @@ fn aborted_rwlock_writer_admits_the_queued_reader(cx: Cx) -> ScenarioFuture {
 /// when cancelled. The other waiter must still finish: the dropped waiter
 /// passes the notification on, or, if it consumed the notification before
 /// the abort landed, a second notification wakes the other.
+///
+/// Whether the first waiter consumed the notification is recorded by the
+/// waiter itself. Its join result cannot say: when the abort lands during the
+/// poll that consumes the notification, the join reports the unacknowledged
+/// abort (v0.4.3 task-level attribution) and discards "notified", so the root
+/// would never wake the second waiter (br-asupersync-5uf9cq).
 fn aborted_notified_waiter_passes_the_notification_on(cx: Cx) -> ScenarioFuture {
     Box::pin(async move {
         let notify = Arc::new(Notify::new());
-        let spawn_waiter = || {
+        let first_consumed = Arc::new(AtomicBool::new(false));
+        let spawn_waiter = |consumed: Arc<AtomicBool>| {
             let n = Arc::clone(&notify);
             cx.spawn(move |task_cx| async move {
                 let (_hold, mut never) = mpsc::channel::<u32>(1);
@@ -2129,6 +2136,7 @@ fn aborted_notified_waiter_passes_the_notification_on(cx: Cx) -> ScenarioFuture 
                         return std::task::Poll::Ready("cancelled");
                     }
                     if notified.as_mut().poll(poll_cx).is_ready() {
+                        consumed.store(true, Ordering::SeqCst);
                         return std::task::Poll::Ready("notified");
                     }
                     std::task::Poll::Pending
@@ -2137,18 +2145,18 @@ fn aborted_notified_waiter_passes_the_notification_on(cx: Cx) -> ScenarioFuture 
             })
             .expect("spawn waiter")
         };
-        let mut first = spawn_waiter();
+        let mut first = spawn_waiter(Arc::clone(&first_consumed));
         while notify.waiter_count() < 1 {
             yield_now().await;
         }
-        let mut second = spawn_waiter();
+        let mut second = spawn_waiter(Arc::new(AtomicBool::new(false)));
         while notify.waiter_count() < 2 {
             yield_now().await;
         }
         notify.notify_one();
         first.abort();
         let first_joined = first.join(&cx).await;
-        if matches!(first_joined, Ok("notified")) {
+        if first_consumed.load(Ordering::SeqCst) {
             notify.notify_one();
         }
         let second_joined = second.join(&cx).await;
