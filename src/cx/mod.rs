@@ -102,7 +102,7 @@ pub use dynamic_supervisor::{
     DynamicSupervisorReport, DynamicWorkerConfig, SharedRestartConfig, SharedRestartStatus,
 };
 pub use fiber::{FiberHandle, FiberScope};
-pub use io_gate::IoCapabilityDenied;
+pub use io_gate::{IoCapabilityDenied, WithAmbient};
 pub use macaroon::{
     BindError, CaveatPredicate, MacaroonKeyRing, MacaroonToken, VerificationContext,
     VerificationError,

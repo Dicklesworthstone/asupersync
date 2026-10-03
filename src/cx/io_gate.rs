@@ -10,8 +10,11 @@
 //! code whose context carries IO are unaffected.
 
 use crate::cx::Cx;
-use crate::cx::cap::CapMask;
+use crate::cx::cap::{CapMask, CapSetRuntimeMask};
+use std::future::Future;
 use std::io;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 /// An ambient I/O entry point refused because the calling task's [`Cx`]
 /// lacks the IO capability (`[ASUP-E009]`).
@@ -79,4 +82,53 @@ where
 {
     require_ambient_io("fs")?;
     crate::runtime::spawn_blocking_io(f).await
+}
+
+impl<Caps: CapSetRuntimeMask> Cx<Caps> {
+    /// Runs `future` with this context as the ambient context during each of
+    /// its polls, so the I/O entry points that take no `Cx` inside it
+    /// (`TcpStream::connect`, `fs::read`, `process::Command::spawn`, ...) are
+    /// checked against this context instead of the calling task's.
+    ///
+    /// This is the explicit form of those entry points: the authority they
+    /// use is the context passed here, exactly as narrow as its capability
+    /// type and its runtime mask (see [`Cx::set_current_restricted`]). A
+    /// context without the IO capability makes them refuse with
+    /// [`IoCapabilityDenied`].
+    ///
+    /// ```ignore
+    /// let stream = cx.with_ambient(TcpStream::connect(addr)).await?;
+    /// let bytes = cx.with_ambient(asupersync::fs::read(path)).await?;
+    /// ```
+    pub fn with_ambient<F: Future>(&self, future: F) -> WithAmbient<Caps, F> {
+        WithAmbient {
+            cx: self.clone(),
+            future,
+        }
+    }
+}
+
+/// Future returned by [`Cx::with_ambient`].
+#[pin_project::pin_project]
+#[must_use = "futures do nothing unless polled"]
+pub struct WithAmbient<Caps, F> {
+    cx: Cx<Caps>,
+    #[pin]
+    future: F,
+}
+
+impl<Caps, F> std::fmt::Debug for WithAmbient<Caps, F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WithAmbient").finish_non_exhaustive()
+    }
+}
+
+impl<Caps: CapSetRuntimeMask, F: Future> Future for WithAmbient<Caps, F> {
+    type Output = F::Output;
+
+    fn poll(self: Pin<&mut Self>, task_cx: &mut Context<'_>) -> Poll<F::Output> {
+        let this = self.project();
+        let _ambient = this.cx.clone().set_current_restricted();
+        this.future.poll(task_cx)
+    }
 }

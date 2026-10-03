@@ -25,6 +25,9 @@ whose `Cx` carries IO are not affected.
   `io` or `net` capability on the work unit that needs it.
 - If the narrowing is intended, keep the I/O out of the restricted code: do
   it outside and pass the results in.
+- To use a specific context's authority, run the I/O under
+  `cx.with_ambient(future)`: the entry points inside it are checked against
+  `cx`, not the calling task's context.
 
 ## Example
 

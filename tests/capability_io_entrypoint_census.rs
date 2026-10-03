@@ -381,3 +381,42 @@ fn the_refusal_carries_the_typed_denial() {
         Some("net::TcpListener::bind")
     );
 }
+
+/// `Cx::with_ambient` is the explicit form of the entry points: inside it
+/// they are checked against the context passed, not the calling task's.
+#[test]
+fn with_ambient_checks_against_the_supplied_context() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build runtime");
+    let (granted, narrowed_by_type) = runtime.block_on(async {
+        let cx = Cx::current().expect("root cx");
+        let full = cx.clone();
+        let mut handle = {
+            let _no_io = Cx::push_restriction(<NoIo as CapSetRuntimeMask>::MASK);
+            Cx::current()
+                .expect("narrowed ambient cx")
+                .spawn(move |_| async move {
+                    let own = asupersync::net::TcpListener::bind("127.0.0.1:0").await;
+                    assert!(own.is_err(), "the task itself has no IO");
+                    // The full context it was handed carries IO.
+                    full.with_ambient(asupersync::net::TcpListener::bind("127.0.0.1:0"))
+                        .await
+                        .map(|_| ())
+                })
+                .expect("spawn")
+        };
+        let granted = handle.join(&cx).await.expect("join");
+        // A context narrowed by its capability type alone has no IO either.
+        let narrowed_by_type = cx
+            .clone()
+            .restrict::<NoIo>()
+            .with_ambient(asupersync::net::TcpListener::bind("127.0.0.1:0"))
+            .await
+            .map(|_| ());
+        (granted, narrowed_by_type)
+    });
+    assert!(granted.is_ok(), "{granted:?}");
+    let error = narrowed_by_type.expect_err("a type-narrowed context refuses");
+    assert!(error.to_string().contains("[ASUP-E009]"), "{error}");
+}
