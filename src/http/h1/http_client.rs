@@ -2367,21 +2367,31 @@ impl HttpClient {
         self.cleanup_expired_idle_connections(now);
 
         if reuse_idle {
-            let mut pool = self.pool.lock();
-            let mut idle = self.idle_connections.lock();
-            match pool.try_acquire(&key, now) {
-                Some(pool_id) => {
-                    if let Some(io) = Self::take_idle_connection_locked(&mut idle, &key, pool_id) {
-                        return Ok(AcquiredConnection {
-                            pool_id: Some(pool_id),
-                            io,
-                            fresh: false,
-                        });
-                    }
-                    // Metadata can be stale if a prior request failed before reinserting.
-                    pool.remove(&key, pool_id);
+            loop {
+                let taken = {
+                    let mut pool = self.pool.lock();
+                    let mut idle = self.idle_connections.lock();
+                    let Some(pool_id) = pool.try_acquire(&key, now) else {
+                        break;
+                    };
+                    let Some(io) = Self::take_idle_connection_locked(&mut idle, &key, pool_id)
+                    else {
+                        // Metadata can be stale if a prior request failed before reinserting.
+                        pool.remove(&key, pool_id);
+                        break;
+                    };
+                    (pool_id, io)
+                };
+                let (pool_id, mut io) = taken;
+                if idle_connection_is_reusable(&mut io) {
+                    return Ok(AcquiredConnection {
+                        pool_id: Some(pool_id),
+                        io,
+                        fresh: false,
+                    });
                 }
-                None => {}
+                // The server closed it, or sent something, while it was idle.
+                self.pool.lock().remove(&key, pool_id);
             }
         }
 
@@ -2535,6 +2545,27 @@ struct AcquiredConnection {
     pool_id: Option<u64>,
     io: ClientIo,
     fresh: bool,
+}
+
+/// Whether an idle pooled connection can carry another request, judged by
+/// one read that must not complete.
+///
+/// - EOF: the server closed the connection while it was idle. Keep-alive
+///   timeouts of a few seconds are common, well under the pool's idle timeout.
+/// - Bytes: the server sent something unsolicited, such as a 408 before
+///   closing.
+///
+/// Either way a request written there would fail, or read a response that is
+/// not its own. TLS bookkeeping such as a session ticket is consumed by the
+/// TLS layer and still reads as pending.
+fn idle_connection_is_reusable(io: &mut ClientIo) -> bool {
+    let mut task_cx = Context::from_waker(std::task::Waker::noop());
+    let mut probe = [0_u8; 1];
+    let mut buf = ReadBuf::new(&mut probe);
+    matches!(
+        Pin::new(io).poll_read(&mut task_cx, &mut buf),
+        Poll::Pending
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6379,6 +6410,136 @@ mod tests {
             stats.connections_created >= 2,
             "client should establish a fresh connection after stale pooled reuse fails"
         );
+    }
+
+    fn read_stale_test_request_head(stream: &mut std::net::TcpStream) {
+        use std::io::Read;
+        let mut buf = [0_u8; 1024];
+        let mut request = Vec::new();
+        loop {
+            let n = stream.read(&mut buf).expect("read request");
+            assert!(n > 0, "request must arrive before peer closes");
+            request.extend_from_slice(&buf[..n]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+    }
+
+    // A POST is not retried after a failed reuse, so a pooled connection the
+    // server closed while idle (keep-alive timeouts of a few seconds are
+    // common) failed every such POST with "connection closed before response
+    // headers". An idle connection is now checked before it is reused.
+    #[test]
+    fn post_after_the_server_closed_the_idle_pooled_connection_uses_a_fresh_one() {
+        use std::io::Write;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = std::thread::spawn(move || {
+            let (mut first, _) = listener.accept().expect("accept first connection");
+            read_stale_test_request_head(&mut first);
+            first
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok",
+                )
+                .expect("write first response");
+            first.flush().expect("flush first response");
+            std::thread::sleep(Duration::from_millis(50));
+            drop(first);
+
+            let (mut second, _) = listener.accept().expect("accept second connection");
+            read_stale_test_request_head(&mut second);
+            second
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nfresh",
+                )
+                .expect("write second response");
+            second.flush().expect("flush second response");
+        });
+
+        let client = HttpClient::builder()
+            .max_connections_per_host(1)
+            .max_total_connections(1)
+            .build();
+        let cx = Cx::for_testing();
+        let url = format!("http://{addr}/submit");
+
+        let first = block_on(client.send_post(&cx, &url, b"a".to_vec()))
+            .expect("first POST should succeed");
+        assert_eq!(first.body, b"ok");
+
+        std::thread::sleep(Duration::from_millis(100));
+
+        let second = block_on(client.send_post(&cx, &url, b"b".to_vec()))
+            .expect("a POST after the idle connection closed uses a fresh connection");
+        assert_eq!(second.status, 200);
+        assert_eq!(second.body, b"fresh");
+
+        server.join().expect("server thread should join");
+        assert_eq!(client.pool_stats().connections_created, 2);
+    }
+
+    // A server may answer an idle keep-alive connection with a 408 before it
+    // closes it. Reusing that connection returned the 408 as the response to
+    // the next request.
+    #[test]
+    fn an_unsolicited_408_on_an_idle_pooled_connection_is_not_the_next_response() {
+        use std::io::Write;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = std::thread::spawn(move || {
+            let (mut first, _) = listener.accept().expect("accept first connection");
+            read_stale_test_request_head(&mut first);
+            first
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok",
+                )
+                .expect("write first response");
+            first.flush().expect("flush first response");
+            std::thread::sleep(Duration::from_millis(20));
+            first
+                .write_all(
+                    b"HTTP/1.1 408 Request Timeout\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                )
+                .expect("write unsolicited 408");
+            first.flush().expect("flush unsolicited 408");
+
+            let (mut second, _) = listener.accept().expect("accept second connection");
+            read_stale_test_request_head(&mut second);
+            second
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nfresh",
+                )
+                .expect("write second response");
+            second.flush().expect("flush second response");
+            drop(first);
+        });
+
+        let client = HttpClient::builder()
+            .max_connections_per_host(1)
+            .max_total_connections(1)
+            .build();
+        let cx = Cx::for_testing();
+        let url = format!("http://{addr}/healthz");
+
+        let first = block_on(client.send_get(&cx, &url)).expect("first GET should succeed");
+        assert_eq!(first.body, b"ok");
+
+        std::thread::sleep(Duration::from_millis(100));
+
+        let second = block_on(client.send_get(&cx, &url)).expect("second GET should succeed");
+        assert_eq!(
+            second.status, 200,
+            "the idle connection's 408 is not this response"
+        );
+        assert_eq!(second.body, b"fresh");
+
+        server.join().expect("server thread should join");
+        assert_eq!(client.pool_stats().connections_created, 2);
     }
 
     #[test]
