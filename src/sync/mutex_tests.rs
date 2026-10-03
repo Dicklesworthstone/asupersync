@@ -4234,4 +4234,51 @@ mod tests {
         );
         crate::test_complete!("unlock_baton_suppresses_wake_panic_during_unwind");
     }
+
+    /// A waiter whose grant was revoked (its wake panicked) kept its waiter
+    /// id. Polled again on the now-free mutex, it queued itself again and
+    /// returned Pending with nothing left to wake it, and `try_lock` reported
+    /// the unlocked mutex as locked.
+    #[test]
+    fn revoked_grantee_polled_again_takes_the_free_mutex() {
+        init_test("revoked_grantee_polled_again_takes_the_free_mutex");
+        let cx = test_cx();
+        let mutex = Mutex::new(0u32);
+
+        let noop = std::task::Waker::noop();
+        let mut noop_context = std::task::Context::from_waker(noop);
+        let mut holder = Box::pin(mutex.lock(&cx));
+        let guard = match holder.as_mut().poll(&mut noop_context) {
+            std::task::Poll::Ready(Ok(guard)) => guard,
+            other => panic!("holder must acquire immediately, got {other:?}"),
+        };
+
+        let panic_waker = std::task::Waker::from(Arc::new(BatonPanickingWaker));
+        let mut panic_context = std::task::Context::from_waker(&panic_waker);
+        let mut waiter = Box::pin(mutex.lock(&cx));
+        assert!(
+            waiter.as_mut().poll(&mut panic_context).is_pending(),
+            "the waiter parks"
+        );
+
+        // The unlock grants the waiter; waking it panics, so the grant is
+        // revoked and, with no other waiter, the mutex is left free.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(guard)));
+        assert!(result.is_err(), "the grantee's wake panic resumes");
+        assert!(!mutex.is_locked());
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let count_waker = std::task::Waker::from(Arc::new(BatonCountingWaker(Arc::clone(&count))));
+        let mut count_context = std::task::Context::from_waker(&count_waker);
+        match waiter.as_mut().poll(&mut count_context) {
+            std::task::Poll::Ready(Ok(guard)) => drop(guard),
+            other => panic!("the revoked waiter must take the free mutex, got {other:?}"),
+        }
+        assert!(!mutex.is_locked());
+        assert!(
+            mutex.try_lock().is_ok(),
+            "no stale waiter may stay queued on the free mutex"
+        );
+        crate::test_complete!("revoked_grantee_polled_again_takes_the_free_mutex");
+    }
 }
