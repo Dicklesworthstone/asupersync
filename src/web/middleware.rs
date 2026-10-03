@@ -1949,6 +1949,15 @@ fn normalization_redirect_response(path: &str) -> Response {
     }
 }
 
+/// Keeps the request's query on a normalized redirect target, so
+/// `GET /search/?q=x` redirects to `/search?q=x` rather than `/search`.
+fn with_request_query(path: String, query: Option<&str>) -> String {
+    match query {
+        Some(query) if !query.is_empty() => format!("{path}?{query}"),
+        _ => path,
+    }
+}
+
 fn invalid_normalized_redirect_response(path: &str, err: impl std::fmt::Display) -> Response {
     let _ = (&path, &err);
     warn!(
@@ -2001,14 +2010,15 @@ impl<H: Handler> Handler for NormalizePathMiddleware<H> {
                         if trimmed.is_empty() {
                             trimmed = "/".to_string();
                         }
-                        return normalization_redirect_response(&trimmed);
+                        let target = with_request_query(trimmed, req.query.as_deref());
+                        return normalization_redirect_response(&target);
                     }
                     self.inner.call(&cx, req).await
                 }
                 TrailingSlash::RedirectAlways => {
                     if !path.ends_with('/') && !path.contains('.') {
-                        let with_slash = format!("{path}/");
-                        return normalization_redirect_response(&with_slash);
+                        let target = with_request_query(format!("{path}/"), req.query.as_deref());
+                        return normalization_redirect_response(&target);
                     }
                     self.inner.call(&cx, req).await
                 }
@@ -5284,6 +5294,26 @@ mod tests {
         assert_eq!(
             resp.headers.get("location"),
             Some(&"/api/users".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_path_redirects_keep_the_query_string() {
+        let mw =
+            NormalizePathMiddleware::new(FnHandler::new(ok_handler), TrailingSlash::RedirectTrim);
+        let resp = mw.call(Request::new("GET", "/search/").with_query("q=x&page=2"));
+        assert_eq!(resp.status, StatusCode::MOVED_PERMANENTLY);
+        assert_eq!(
+            resp.headers.get("location"),
+            Some(&"/search?q=x&page=2".to_string())
+        );
+
+        let mw =
+            NormalizePathMiddleware::new(FnHandler::new(ok_handler), TrailingSlash::RedirectAlways);
+        let resp = mw.call(Request::new("GET", "/search").with_query("q=x"));
+        assert_eq!(
+            resp.headers.get("location"),
+            Some(&"/search/?q=x".to_string())
         );
     }
 
