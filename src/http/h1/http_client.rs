@@ -598,8 +598,9 @@ pub enum RetryPolicy {
     /// Retry idempotent methods on retryable response status codes.
     ///
     /// A valid `Retry-After` delta-seconds header is honored before the retry;
-    /// a response asking for more than 60 seconds is returned instead. The same
-    /// policy also keeps the stale pooled-connection retry enabled.
+    /// a response asking for more than 60 seconds, or giving `Retry-After` in
+    /// another form such as an HTTP-date, is returned instead. The same policy
+    /// also keeps the stale pooled-connection retry enabled.
     IdempotentStatusCodes {
         /// Maximum number of response-status retries after the first attempt.
         max_retries: u32,
@@ -632,7 +633,13 @@ impl RetryPolicy {
             return None;
         }
 
-        let delay = retry_after_delay(&response.headers).unwrap_or(std::time::Duration::ZERO);
+        // A Retry-After that is not delta-seconds, such as an HTTP-date, asks
+        // for a wait this client does not compute, so the response is returned
+        // rather than retried at once.
+        let delay = match get_header(&response.headers, "Retry-After") {
+            None => std::time::Duration::ZERO,
+            Some(value) => parse_retry_after_delta(&value)?,
+        };
         // A server asking for a longer wait than the client will sleep gets its
         // response returned, not a request parked for that long.
         (delay <= MAX_RETRY_AFTER).then_some(delay)
@@ -751,9 +758,10 @@ impl HttpClientBuilder {
     /// Retries idempotent methods on retryable response status codes.
     ///
     /// Valid `Retry-After` delta-seconds response headers are honored before
-    /// retrying. A response asking for more than 60 seconds is returned
-    /// without a retry. Use [`Self::no_retries`] when no automatic retry
-    /// behavior is desired.
+    /// retrying. A response asking for more than 60 seconds, or giving
+    /// `Retry-After` in another form such as an HTTP-date, is returned without
+    /// a retry. Use [`Self::no_retries`] when no automatic retry behavior is
+    /// desired.
     #[must_use]
     pub fn retry_idempotent_statuses(mut self, max_retries: u32) -> Self {
         self.config.retry_policy = RetryPolicy::IdempotentStatusCodes { max_retries };
@@ -3116,10 +3124,6 @@ fn method_is_idempotent_for_response_retry(method: &Method) -> bool {
 
 fn status_is_retriable_response(status: u16) -> bool {
     matches!(status, 408 | 425 | 429 | 500 | 502 | 503 | 504)
-}
-
-fn retry_after_delay(headers: &[(String, String)]) -> Option<std::time::Duration> {
-    get_header(headers, "Retry-After").and_then(|value| parse_retry_after_delta(&value))
 }
 
 fn parse_retry_after_delta(value: &str) -> Option<std::time::Duration> {
@@ -5806,6 +5810,39 @@ mod tests {
                 "Retry-After: {too_long} must not park the request"
             );
         }
+    }
+
+    // An HTTP-date Retry-After (RFC 9110 section 10.2.3) was read as "no
+    // delay", so a 503 asking clients to come back in an hour was retried
+    // back to back. A Retry-After the client cannot read now returns the
+    // response.
+    #[test]
+    fn retry_after_that_is_not_delta_seconds_returns_the_response() {
+        let policy = RetryPolicy::IdempotentStatusCodes { max_retries: 3 };
+        let response = |headers: Vec<(String, String)>| Response {
+            version: Version::Http11,
+            status: 503,
+            reason: "Service Unavailable".to_owned(),
+            headers,
+            body: Vec::new(),
+            trailers: Vec::new(),
+        };
+        for retry_after in ["Wed, 21 Oct 2015 07:28:00 GMT", "soon", "-1", ""] {
+            assert_eq!(
+                policy.response_retry_delay(
+                    &Method::Get,
+                    &response(vec![("Retry-After".to_owned(), retry_after.to_owned())]),
+                    0
+                ),
+                None,
+                "Retry-After: {retry_after:?} must not retry at once"
+            );
+        }
+        assert_eq!(
+            policy.response_retry_delay(&Method::Get, &response(Vec::new()), 0),
+            Some(std::time::Duration::ZERO),
+            "without Retry-After the retry is immediate, as before"
+        );
     }
 
     #[test]
