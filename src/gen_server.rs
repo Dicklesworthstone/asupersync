@@ -761,6 +761,106 @@ struct GenServerCell<S: GenServer> {
     mailbox: mpsc::Receiver<Envelope<S>>,
     state: Arc<GenServerStateCell>,
     _keep_alive: mpsc::Sender<Envelope<S>>,
+    /// DOWN notifications and trapped exit signals from the runtime.
+    system: Arc<SystemLane<S>>,
+}
+
+/// System messages the runtime delivers to a server outside its bounded
+/// mailbox: DOWN notifications of its monitors and exit signals of its
+/// trapping links (br-asupersync-issue65-criticisms-kpmoy5.6.1). A full
+/// mailbox never loses one. The server loop takes them ahead of the mailbox
+/// and drains what is left when it stops.
+///
+/// Parameterized by the server, not by `S::Info`: a field type naming
+/// `S::Info` would make `#[derive(Debug)]` on [`GenServerHandle`] require
+/// `S::Info: Debug`, narrowing its public `Debug` impl.
+struct SystemLane<S: GenServer> {
+    inner: parking_lot::Mutex<SystemLaneInner<S::Info>>,
+}
+
+struct SystemLaneInner<I> {
+    queue: std::collections::VecDeque<I>,
+    waker: Option<std::task::Waker>,
+    closed: bool,
+}
+
+impl<S: GenServer> std::fmt::Debug for SystemLane<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let inner = self.inner.lock();
+        f.debug_struct("SystemLane")
+            .field("queued", &inner.queue.len())
+            .field("closed", &inner.closed)
+            .finish()
+    }
+}
+
+impl<S: GenServer> SystemLane<S> {
+    fn new() -> Self {
+        Self {
+            inner: parking_lot::Mutex::new(SystemLaneInner {
+                queue: std::collections::VecDeque::new(),
+                waker: None,
+                closed: false,
+            }),
+        }
+    }
+
+    /// Queues `msg` for the server and wakes it. Dropped once the server
+    /// has stopped.
+    fn push(&self, msg: S::Info) {
+        let waker = {
+            let mut inner = self.inner.lock();
+            if inner.closed {
+                return;
+            }
+            inner.queue.push_back(msg);
+            inner.waker.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+
+    /// Takes the next message, or registers `waker` to hear about one.
+    fn poll_next(&self, waker: &std::task::Waker) -> Option<S::Info> {
+        let current = {
+            let mut inner = self.inner.lock();
+            if let Some(msg) = inner.queue.pop_front() {
+                return Some(msg);
+            }
+            inner
+                .waker
+                .as_ref()
+                .is_some_and(|stored| stored.will_wake(waker))
+        };
+        if current {
+            return None;
+        }
+        // Clone outside the lock (a Waker clone may run arbitrary code), then
+        // re-check: a push may have landed in between.
+        let incoming = waker.clone();
+        let mut inner = self.inner.lock();
+        if let Some(msg) = inner.queue.pop_front() {
+            drop(inner);
+            drop(incoming);
+            return Some(msg);
+        }
+        let retired = inner.waker.replace(incoming);
+        drop(inner);
+        drop(retired);
+        None
+    }
+
+    /// Stops accepting messages and returns the ones still queued.
+    fn close(&self) -> std::collections::VecDeque<S::Info> {
+        let (queue, waker) = {
+            let mut inner = self.inner.lock();
+            inner.closed = true;
+            (std::mem::take(&mut inner.queue), inner.waker.take())
+        };
+        drop(waker);
+        queue
+    }
 }
 
 #[derive(Debug)]
@@ -827,6 +927,12 @@ pub struct GenServerHandle<S: GenServer> {
     /// is available — the previous Cx-only `cx.trace(...)` route was
     /// invisible to sync callers, masking SLO-relevant lossiness.
     evicted_count: Arc<AtomicU64>,
+    /// The server's region; a monitor or link set up through this handle is
+    /// held by the server task in it.
+    region_id: crate::types::RegionId,
+    /// Where the runtime delivers the server's DOWN notifications and
+    /// trapped exit signals.
+    system: Arc<SystemLane<S>>,
 }
 
 /// Error returned when a call fails.
@@ -1648,6 +1754,136 @@ impl<S: GenServer> GenServerHandle<S> {
     }
 }
 
+/// Monitors and links held by the server
+/// (br-asupersync-issue65-criticisms-kpmoy5.6.1). Notifications reach the
+/// server's [`GenServer::handle_info`] as [`SystemMsg`] values through a lane
+/// outside the bounded mailbox, so a full mailbox never loses one. They end
+/// when the server stops. `cx` supplies the runtime to send the request
+/// through; the server task holds the monitor or link.
+impl<S: GenServer> GenServerHandle<S>
+where
+    S::Info: From<SystemMsg>,
+{
+    /// Makes the server monitor `target` (a [`TaskId`] or a reference to a
+    /// [`TaskHandle`](crate::runtime::TaskHandle)): when that task finishes,
+    /// for any reason, `handle_info` receives one [`SystemMsg::Down`] whose
+    /// [`DownReason`] maps its outcome.
+    ///
+    /// The future resolves to the monitor's reference once the runtime has
+    /// registered it, or fails with
+    /// [`WatchError::NotFound`](crate::monitor::WatchError::NotFound) if the
+    /// task already finished.
+    pub fn monitor(
+        &self,
+        cx: &Cx,
+        target: impl Into<crate::monitor::WatchTarget>,
+    ) -> crate::monitor::ServerMonitorOpening {
+        let target = target.into();
+        let target_id = target.id();
+        let system = Arc::clone(&self.system);
+        let slot = crate::monitor::MonitorSlot::with_sink(Box::new(move |at, notification| {
+            system.push(S::Info::from(SystemMsg::Down {
+                completion_vt: at,
+                notification,
+            }));
+        }));
+        let (watcher, watcher_region) = (self.task_id, self.region_id);
+        crate::monitor::ServerWatchOpening::open(
+            cx.spawn_gateway_handle(),
+            target_id,
+            slot,
+            |slot| crate::monitor::WatchCommand::Monitor {
+                watcher,
+                watcher_region,
+                target,
+                slot,
+                attempts: 0,
+            },
+            |monitor_ref| crate::monitor::WatchCommand::Demonitor { monitor_ref },
+        )
+    }
+
+    /// Removes a monitor made with [`Self::monitor`]: no DOWN for it is
+    /// delivered afterwards.
+    pub fn demonitor(&self, cx: &Cx, monitor_ref: crate::monitor::MonitorRef) {
+        if let Some(gateway) = cx.spawn_gateway_handle() {
+            let _ = gateway.enqueue_region_command(
+                crate::runtime::spawn_mailbox::RegionCommand::Watch(
+                    crate::monitor::WatchCommand::Demonitor { monitor_ref },
+                ),
+            );
+        }
+    }
+
+    /// Links the server with `peer`: when either finishes abnormally, the
+    /// runtime requests cancellation of the other. A normal exit removes the
+    /// link.
+    pub fn link(
+        &self,
+        cx: &Cx,
+        peer: impl Into<crate::monitor::WatchTarget>,
+    ) -> crate::monitor::ServerLinkOpening {
+        self.open_link(cx, peer.into(), crate::link::ExitPolicy::Propagate)
+    }
+
+    /// Links the server with `peer`, trapping the peer's exits: when `peer`
+    /// finishes, for any reason, `handle_info` receives a [`SystemMsg::Exit`]
+    /// and the server keeps running. When the server finishes abnormally,
+    /// `peer` is still cancelled.
+    pub fn link_trapping(
+        &self,
+        cx: &Cx,
+        peer: impl Into<crate::monitor::WatchTarget>,
+    ) -> crate::monitor::ServerLinkOpening {
+        self.open_link(cx, peer.into(), crate::link::ExitPolicy::Trap)
+    }
+
+    /// Removes a link made with [`Self::link`] or [`Self::link_trapping`].
+    pub fn unlink(&self, cx: &Cx, link_ref: crate::link::LinkRef) {
+        if let Some(gateway) = cx.spawn_gateway_handle() {
+            let _ = gateway.enqueue_region_command(
+                crate::runtime::spawn_mailbox::RegionCommand::Watch(
+                    crate::monitor::WatchCommand::Unlink { link_ref },
+                ),
+            );
+        }
+    }
+
+    fn open_link(
+        &self,
+        cx: &Cx,
+        peer: crate::monitor::WatchTarget,
+        task_policy: crate::link::ExitPolicy,
+    ) -> crate::monitor::ServerLinkOpening {
+        let peer_id = peer.id();
+        let system = Arc::clone(&self.system);
+        let slot = crate::link::LinkSlot::with_sink(Box::new(
+            move |at, signal: crate::link::ExitSignal| {
+                system.push(S::Info::from(SystemMsg::Exit {
+                    exit_vt: at,
+                    from: signal.from,
+                    reason: signal.reason,
+                }));
+            },
+        ));
+        let (task, task_region) = (self.task_id, self.region_id);
+        crate::monitor::ServerWatchOpening::open(
+            cx.spawn_gateway_handle(),
+            peer_id,
+            slot,
+            |slot| crate::monitor::WatchCommand::Link {
+                task,
+                task_region,
+                task_policy,
+                peer,
+                slot,
+                attempts: 0,
+            },
+            |link_ref| crate::monitor::WatchCommand::Unlink { link_ref },
+        )
+    }
+}
+
 // ============================================================================
 // GenServer runtime loop
 // ============================================================================
@@ -1693,6 +1929,10 @@ async fn run_gen_server_loop<S: GenServer>(
         }
 
         let recv_result = std::future::poll_fn(|task_cx| {
+            // DOWN notifications and trapped exit signals go first.
+            if let Some(msg) = cell.system.poll_next(task_cx.waker()) {
+                return std::task::Poll::Ready(Ok(Envelope::Info { msg }));
+            }
             match cell.mailbox.poll_recv(&cx, task_cx) {
                 std::task::Poll::Pending if cell.state.load() == ActorState::Stopping => {
                     // Graceful stop requested and mailbox is empty. Break the loop.
@@ -1754,11 +1994,17 @@ async fn run_gen_server_loop<S: GenServer>(
     // Phase 3: Drain remaining messages.
     // Calls during drain: reply with error (caller should not depend on drain).
     // Casts during drain: process normally if gracefully stopped, skip if aborted.
+    // System messages still queued are info messages, drained first.
     cell.mailbox.close();
+    let mut pending_system = cell.system.close();
 
     let mut drained: u64 = 0;
     let mut drain_yield_counter = 0u32;
-    while let Ok(envelope) = cell.mailbox.try_recv() {
+    while let Some(envelope) = pending_system
+        .pop_front()
+        .map(|msg| Envelope::Info { msg })
+        .or_else(|| cell.mailbox.try_recv().ok())
+    {
         match envelope {
             Envelope::Call {
                 request: _,
@@ -1866,11 +2112,13 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
 
         let inner_weak = Arc::downgrade(&child_cx.inner);
         let state_for_task = Arc::clone(&server_state);
+        let system = Arc::new(SystemLane::new());
 
         let mut cell = GenServerCell {
             mailbox: msg_rx,
             state: Arc::clone(&server_state),
             _keep_alive: msg_tx.clone(),
+            system: Arc::clone(&system),
         };
 
         let wrapped = async move {
@@ -1924,6 +2172,8 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
                             let _ = session::TrackedOneshotPermit::abort(reply_permit);
                         }
                     }
+                    // No handler runs after a panic: drop queued system messages.
+                    drop(cell.system.close());
                     let msg = crate::cx::scope::payload_to_string(&payload);
                     std::mem::forget(payload);
                     let panic_payload = crate::types::PanicPayload::new(msg);
@@ -1947,6 +2197,8 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
             completed: false,
             overflow_policy,
             evicted_count: Arc::new(AtomicU64::new(0)),
+            region_id,
+            system,
         };
 
         Ok((handle, stored))
@@ -2535,6 +2787,7 @@ mod tests {
             mailbox,
             state: Arc::clone(&state),
             _keep_alive: sender.clone(),
+            system: Arc::new(SystemLane::new()),
         };
         let cx = Cx::for_testing();
         let mut server_loop = Box::pin(run_gen_server_loop(server, cx, &mut cell));
@@ -7667,6 +7920,168 @@ mod tests {
         };
         let err = TimeoutMsg::try_from(exit).expect_err("exit is not timeout");
         assert!(matches!(err, SystemMsg::Exit { .. }));
+    }
+
+    // ---- Monitors and links held by a server (kpmoy5.6.1) ----
+
+    /// Records every system message `handle_info` receives.
+    #[derive(Debug)]
+    struct SystemRecorder {
+        seen: Arc<Mutex<Vec<SystemMsg>>>,
+    }
+
+    impl GenServer for SystemRecorder {
+        type Call = ();
+        type Reply = ();
+        type Cast = ();
+        type Info = SystemMsg;
+
+        fn handle_call(
+            &mut self,
+            _cx: &Cx,
+            _request: (),
+            reply: Reply<()>,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            let _ = reply.send(());
+            Box::pin(async {})
+        }
+
+        fn handle_info(
+            &mut self,
+            _cx: &Cx,
+            msg: SystemMsg,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            self.seen.lock().push(msg);
+            Box::pin(async {})
+        }
+    }
+
+    /// Runs a lab scenario: a `SystemRecorder` server, a target task that
+    /// panics once `gate` opens, and a driver task that calls `watch` on the
+    /// server handle, opens the gate, waits for a system message, then stops
+    /// the server. Returns the recorded messages, the target id and the
+    /// server's state just before the stop.
+    fn run_watch_scenario<W, Fut>(watch: W) -> (Vec<SystemMsg>, TaskId, ActorState)
+    where
+        W: FnOnce(GenServerHandle<SystemRecorder>, Cx, TaskId) -> Fut + Send + 'static,
+        Fut: Future<Output = GenServerHandle<SystemRecorder>> + Send + 'static,
+    {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
+        let (handle, stored) = scope
+            .spawn_gen_server(
+                &mut runtime.state,
+                &cx,
+                SystemRecorder {
+                    seen: Arc::clone(&seen),
+                },
+                8,
+            )
+            .expect("spawn recorder server");
+        let server = handle.task_id();
+        runtime.state.store_spawned_task(server, stored);
+        runtime.scheduler.lock().schedule(server, 0);
+
+        let gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let target_gate = Arc::clone(&gate);
+        let (target, target_handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                while !target_gate.load(Ordering::Acquire) {
+                    yield_now().await;
+                }
+                panic!("watched task panics");
+            })
+            .expect("create target task");
+        runtime.scheduler.lock().schedule(target, 0);
+
+        let driver_seen = Arc::clone(&seen);
+        let state_before_stop = Arc::new(Mutex::new(None));
+        let driver_state = Arc::clone(&state_before_stop);
+        let (driver, driver_handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("a lab task has a Cx");
+                let handle = watch(handle, cx, target).await;
+                gate.store(true, Ordering::Release);
+                while driver_seen.lock().is_empty() {
+                    yield_now().await;
+                }
+                // Room for a duplicate to show up before the server stops.
+                for _ in 0..32 {
+                    yield_now().await;
+                }
+                *driver_state.lock() = Some(handle.state.load());
+                handle.stop();
+            })
+            .expect("create driver task");
+        runtime.scheduler.lock().schedule(driver, 0);
+        runtime.run_until_quiescent();
+        drop((target_handle, driver_handle));
+
+        let seen = seen.lock().clone();
+        let state = state_before_stop.lock().expect("driver ran to the stop");
+        (seen, target, state)
+    }
+
+    #[test]
+    fn gen_server_monitor_delivers_one_down_through_handle_info() {
+        init_test("gen_server_monitor_delivers_one_down_through_handle_info");
+        let monitor_ref = Arc::new(Mutex::new(None));
+        let recorded_ref = Arc::clone(&monitor_ref);
+        let (seen, target, _) = run_watch_scenario(move |handle, cx, target| async move {
+            let reference = handle
+                .monitor(&cx, target)
+                .await
+                .expect("the server monitors the live target");
+            *recorded_ref.lock() = Some(reference);
+            handle
+        });
+        assert_eq!(seen.len(), 1, "exactly one DOWN: {seen:?}");
+        match &seen[0] {
+            SystemMsg::Down { notification, .. } => {
+                assert_eq!(notification.monitored, target);
+                assert_eq!(Some(notification.monitor_ref), *monitor_ref.lock());
+                assert!(
+                    notification.reason.is_panicked(),
+                    "{:?}",
+                    notification.reason
+                );
+            }
+            other => panic!("expected a DOWN, got {other:?}"),
+        }
+        crate::test_complete!("gen_server_monitor_delivers_one_down_through_handle_info");
+    }
+
+    #[test]
+    fn gen_server_trapping_link_delivers_the_exit_and_keeps_the_server_running() {
+        init_test("gen_server_trapping_link_delivers_the_exit_and_keeps_the_server_running");
+        let (seen, target, state) = run_watch_scenario(|handle, cx, target| async move {
+            handle
+                .link_trapping(&cx, target)
+                .await
+                .expect("the server links to the live target");
+            handle
+        });
+        assert_eq!(seen.len(), 1, "exactly one exit signal: {seen:?}");
+        match &seen[0] {
+            SystemMsg::Exit { from, reason, .. } => {
+                assert_eq!(*from, target);
+                assert!(reason.is_panicked(), "{reason:?}");
+            }
+            other => panic!("expected an exit signal, got {other:?}"),
+        }
+        assert_eq!(
+            state,
+            ActorState::Running,
+            "a trapping server is not cancelled by its peer's exit"
+        );
+        crate::test_complete!(
+            "gen_server_trapping_link_delivers_the_exit_and_keeps_the_server_running"
+        );
     }
 }
 

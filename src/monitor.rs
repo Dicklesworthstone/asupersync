@@ -634,9 +634,25 @@ pub(crate) enum WatchApply {
 /// runtime, which establishes the watch with a reference `R` and later
 /// delivers one notice `N`: a [`DownNotification`] for a monitor, an
 /// [`ExitSignal`](crate::link::ExitSignal) for a trapping link.
-#[derive(Debug)]
+///
+/// A slot with a sink forwards the notice, with the virtual time of the exit
+/// that produced it, instead of storing it for an awaiting handle: a
+/// GenServer's monitors and trapped links feed its system-message lane.
 pub(crate) struct WatchSlot<R, N> {
     inner: parking_lot::Mutex<WatchSlotInner<R, N>>,
+    sink: Option<WatchSink<N>>,
+}
+
+/// Forwards a delivered notice and the virtual time of the exit behind it.
+pub(crate) type WatchSink<N> = Box<dyn Fn(Time, N) + Send + Sync>;
+
+impl<R: std::fmt::Debug, N: std::fmt::Debug> std::fmt::Debug for WatchSlot<R, N> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WatchSlot")
+            .field("inner", &self.inner)
+            .field("sink", &self.sink.is_some())
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -658,6 +674,17 @@ impl<R, N> Default for WatchSlot<R, N> {
                 abandoned: false,
                 waker: None,
             }),
+            sink: None,
+        }
+    }
+}
+
+impl<R, N> WatchSlot<R, N> {
+    /// A slot whose notice goes to `sink` instead of an awaiting handle.
+    pub(crate) fn with_sink(sink: WatchSink<N>) -> Self {
+        Self {
+            sink: Some(sink),
+            ..Self::default()
         }
     }
 }
@@ -683,8 +710,13 @@ impl<R: Copy, N: Clone> WatchSlot<R, N> {
         inner.waker.take()
     }
 
-    /// Stores the notice and wakes the task waiting on it.
-    pub(crate) fn deliver(&self, notice: N) {
+    /// Forwards the notice to the sink, or stores it and wakes the task
+    /// waiting on it. `at` is the virtual time of the exit behind it.
+    pub(crate) fn deliver(&self, at: Time, notice: N) {
+        if let Some(sink) = self.sink.as_ref() {
+            sink(at, notice);
+            return;
+        }
         let waker = {
             let mut inner = self.inner.lock();
             inner.notice = Some(notice);
@@ -814,6 +846,112 @@ impl MonitorOpening {
         Self {
             pending: None,
             failed: Some(error),
+        }
+    }
+}
+
+/// Future that sets up a monitor or link for a [`GenServer`](crate::gen_server::GenServer).
+///
+/// A [`GenServerHandle`](crate::gen_server::GenServerHandle) returns it for its
+/// server. It resolves to the reference once the runtime has established the
+/// watch, and the server then receives the notification in `handle_info` as a
+/// [`SystemMsg`](crate::gen_server::SystemMsg). Dropping it before it resolves
+/// withdraws the request.
+#[must_use = "futures do nothing unless polled"]
+pub struct ServerWatchOpening<R: Copy, N: Clone> {
+    pending: Option<PendingWatch<WatchSlot<(R, TaskId), N>>>,
+    failed: Option<WatchError>,
+    withdraw: fn(R) -> WatchCommand,
+}
+
+/// [`ServerWatchOpening`] for a monitor.
+pub type ServerMonitorOpening = ServerWatchOpening<MonitorRef, DownNotification>;
+
+/// [`ServerWatchOpening`] for a link.
+pub type ServerLinkOpening = ServerWatchOpening<crate::link::LinkRef, crate::link::ExitSignal>;
+
+impl<R: Copy + std::fmt::Debug, N: Clone> std::fmt::Debug for ServerWatchOpening<R, N> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerWatchOpening")
+            .field("target", &self.pending.as_ref().map(|p| p.target))
+            .field("failed", &self.failed)
+            .finish()
+    }
+}
+
+impl<R: Copy, N: Clone> ServerWatchOpening<R, N> {
+    /// Sends `command(slot)` through `gateway` and returns the future that
+    /// waits for its establishment. `withdraw` turns an established
+    /// reference back into the command that removes it.
+    pub(crate) fn open(
+        gateway: Option<std::sync::Arc<crate::runtime::spawn_mailbox::SpawnGateway>>,
+        target: TaskId,
+        slot: WatchSlot<(R, TaskId), N>,
+        command: impl FnOnce(std::sync::Arc<WatchSlot<(R, TaskId), N>>) -> WatchCommand,
+        withdraw: fn(R) -> WatchCommand,
+    ) -> Self {
+        let failed = |error| Self {
+            pending: None,
+            failed: Some(error),
+            withdraw,
+        };
+        let Some(gateway) = gateway else {
+            return failed(WatchError::RuntimeUnavailable);
+        };
+        let slot = std::sync::Arc::new(slot);
+        if gateway
+            .enqueue_region_command(crate::runtime::spawn_mailbox::RegionCommand::Watch(
+                command(std::sync::Arc::clone(&slot)),
+            ))
+            .is_err()
+        {
+            return failed(WatchError::RuntimeUnavailable);
+        }
+        Self {
+            pending: Some(PendingWatch {
+                target,
+                slot,
+                gateway,
+            }),
+            failed: None,
+            withdraw,
+        }
+    }
+}
+
+impl<R: Copy, N: Clone> std::future::Future for ServerWatchOpening<R, N> {
+    type Output = Result<R, WatchError>;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        task_cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let this = self.get_mut();
+        if let Some(error) = this.failed.take() {
+            return std::task::Poll::Ready(Err(error));
+        }
+        let Some(pending) = this.pending.as_ref() else {
+            return std::task::Poll::Ready(Err(WatchError::RuntimeUnavailable));
+        };
+        let result = std::task::ready!(
+            pending
+                .slot
+                .poll_established(&pending.gateway, task_cx.waker())
+        );
+        this.pending = None;
+        std::task::Poll::Ready(result.map(|(reference, _)| reference))
+    }
+}
+
+impl<R: Copy, N: Clone> Drop for ServerWatchOpening<R, N> {
+    fn drop(&mut self) {
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        if let Some((reference, _)) = pending.slot.abandon() {
+            let _ = pending.gateway.enqueue_region_command(
+                crate::runtime::spawn_mailbox::RegionCommand::Watch((self.withdraw)(reference)),
+            );
         }
     }
 }
@@ -1174,7 +1312,10 @@ impl TaskWatches {
             || DownReason::Error("the task finished without a recorded outcome".to_string()),
             DownReason::from_task_outcome,
         );
-        let mut effects = WatchEffects::default();
+        let mut effects = WatchEffects {
+            at: now,
+            ..WatchEffects::default()
+        };
 
         // DOWN for every monitor on `task`, in DOWN-ORDER.
         let watchers = self.monitors.watchers_of(task);
@@ -1263,6 +1404,8 @@ impl TaskWatches {
 /// runtime state lock is released.
 #[derive(Default)]
 pub(crate) struct WatchEffects {
+    /// Virtual time of the exit.
+    at: Time,
     downs: Vec<(std::sync::Arc<MonitorSlot>, DownNotification)>,
     exits: Vec<(
         std::sync::Arc<crate::link::LinkSlot>,
@@ -1281,17 +1424,18 @@ impl WatchEffects {
     /// linked cancellations through the task-handle cancel lane (which both
     /// runtime state shapes and the lab drain). Waker panics are contained.
     pub(crate) fn dispatch(self) {
+        let at = self.at;
         for (slot, down) in self.downs {
             if let Err(payload) =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| slot.deliver(down)))
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| slot.deliver(at, down)))
             {
                 std::mem::forget(payload);
             }
         }
         for (slot, signal) in self.exits {
-            if let Err(payload) =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| slot.deliver(signal)))
-            {
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                slot.deliver(at, signal);
+            })) {
                 std::mem::forget(payload);
             }
         }
