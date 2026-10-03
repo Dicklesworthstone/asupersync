@@ -983,6 +983,9 @@ where
                 .initiate_close_with_cx(Some(cx), reason.unwrap_or_else(CloseReason::normal))
                 .await;
         }
+        if let Message::Ping(payload) | Message::Pong(payload) = &msg {
+            super::frame::check_control_payload_len(payload.len())?;
+        }
 
         let (enabled, max_message, max_encoded) = {
             let shared = self.shared.lock();
@@ -1005,6 +1008,8 @@ where
 
     /// Send a ping frame.
     pub async fn ping(&mut self, payload: impl Into<Bytes>) -> Result<(), WsError> {
+        let payload: Bytes = payload.into();
+        super::frame::check_control_payload_len(payload.len())?;
         let frame = Frame::ping(payload);
         Self::send_frame(self, &frame).await
     }
@@ -1433,6 +1438,37 @@ mod tests {
                 ws.io.written, expected,
                 "the whole frame, then the Close echo"
             );
+        });
+    }
+
+    // A Ping or Pong payload over 125 bytes made the write half's send and
+    // ping panic in Frame::ping / Frame::pong. They now return
+    // ControlFrameTooLarge and write nothing.
+    #[test]
+    fn split_oversized_control_payloads_are_errors_not_panics() {
+        future::block_on(async {
+            let ws = WebSocket::from_upgraded(TestIo::new(vec![]), WebSocketConfig::default());
+            let (read, mut write) = ws.split();
+            let cx = Cx::for_testing();
+            let big = Bytes::from(vec![0_u8; 126]);
+            let results = [
+                write.send(&cx, Message::Ping(big.clone())).await,
+                write.send(&cx, Message::Pong(big.clone())).await,
+                write.ping(big.clone()).await,
+            ];
+            for result in results {
+                assert!(
+                    matches!(result, Err(WsError::ControlFrameTooLarge(126))),
+                    "unexpected result {result:?}"
+                );
+            }
+            write
+                .ping(Bytes::from(vec![0_u8; 125]))
+                .await
+                .expect("a 125-byte ping is allowed");
+            let ws = read.reunite(write).expect("split halves must reunite");
+            // Client frames are masked: 2 header bytes and a 4-byte key.
+            assert_eq!(ws.io.written.len(), 6 + 125);
         });
     }
 

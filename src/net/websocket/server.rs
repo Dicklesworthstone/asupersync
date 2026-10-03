@@ -396,6 +396,9 @@ where
                 .initiate_close_with_cx(Some(cx), reason.unwrap_or_else(CloseReason::normal))
                 .await;
         }
+        if let Message::Ping(payload) | Message::Pong(payload) = &msg {
+            super::frame::check_control_payload_len(payload.len())?;
+        }
 
         let frame = super::compression::outgoing(
             Frame::from(msg), self.codec.permessage_deflate_enabled(),
@@ -700,6 +703,8 @@ where
             )));
         }
 
+        let payload: crate::bytes::Bytes = payload.into();
+        super::frame::check_control_payload_len(payload.len())?;
         let frame = Frame::ping(payload);
         match self.send_frame_with_cx(Some(cx), frame).await {
             Err(WsError::Io(e))
@@ -1457,6 +1462,44 @@ mod tests {
                 matches!(err, WsError::Io(ref e) if e.kind() == io::ErrorKind::NotConnected),
                 "expected NotConnected after close initiation, got {err:?}"
             );
+        });
+    }
+
+    // A Ping or Pong payload over 125 bytes made send and ping panic in
+    // Frame::ping / Frame::pong. They now return ControlFrameTooLarge and
+    // write nothing.
+    #[test]
+    fn oversized_control_payloads_are_errors_not_panics() {
+        future::block_on(async {
+            let accept = AcceptResponse {
+                accept_key: String::new(),
+                protocol: None,
+                extensions: Vec::new(),
+            };
+            let mut ws = ServerWebSocket::from_upgraded(
+                TestIo::new(),
+                WebSocketConfig::default(),
+                accept,
+                &[],
+            );
+            let cx = Cx::for_testing();
+            let big = crate::bytes::Bytes::from(vec![0_u8; 126]);
+            let results = [
+                ws.send(&cx, Message::Ping(big.clone())).await,
+                ws.send(&cx, Message::Pong(big.clone())).await,
+                ws.ping(&cx, big.clone()).await,
+            ];
+            for result in results {
+                assert!(
+                    matches!(result, Err(WsError::ControlFrameTooLarge(126))),
+                    "unexpected result {result:?}"
+                );
+            }
+            assert!(ws.io.written.is_empty());
+            ws.ping(&cx, crate::bytes::Bytes::from(vec![0_u8; 125]))
+                .await
+                .expect("a 125-byte ping is allowed");
+            assert_eq!(ws.io.written.len(), 2 + 125);
         });
     }
 

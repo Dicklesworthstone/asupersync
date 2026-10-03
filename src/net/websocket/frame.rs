@@ -251,6 +251,16 @@ fn assert_control_payload_len(frame_kind: &str, payload_len: usize) {
     );
 }
 
+/// Refuses a Ping or Pong payload over the 125-byte control frame limit, so
+/// `send` and `ping` report [`WsError::ControlFrameTooLarge`] instead of
+/// panicking in [`Frame::ping`] or [`Frame::pong`].
+pub(super) fn check_control_payload_len(payload_len: usize) -> Result<(), WsError> {
+    if payload_len > CONTROL_FRAME_MAX_PAYLOAD_LEN {
+        return Err(WsError::ControlFrameTooLarge(payload_len));
+    }
+    Ok(())
+}
+
 /// WebSocket codec errors.
 #[derive(Debug)]
 pub enum WsError {
