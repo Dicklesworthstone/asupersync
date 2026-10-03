@@ -152,10 +152,12 @@ pub const ALL_REPORTED_ORACLE_NAMES: &[&str] = &[
 ///
 /// `LabRuntime::report` hydrates these from the runtime state and its
 /// histories (`OracleSuite::hydrate_temporal_from_state`), and the lab
-/// scheduler also drives `cancellation_protocol` live. No runtime code path
-/// sends events to the other entries of [`ALL_REPORTED_ORACLE_NAMES`]. They
-/// observe only what a caller feeds them by hand, so in a `LabRuntime`
-/// report they pass without having checked anything (br-asupersync-52hxjz).
+/// scheduler also drives `cancellation_protocol` live. `down_order` replays
+/// the DOWN deliveries of runtime monitors (`Cx::monitor`,
+/// `GenServerHandle::monitor`). No runtime code path sends events to the
+/// other entries of [`ALL_REPORTED_ORACLE_NAMES`]. They observe only what a
+/// caller feeds them by hand, so in a `LabRuntime` report they pass without
+/// having checked anything (br-asupersync-52hxjz).
 pub const LAB_RUNTIME_FED_ORACLE_NAMES: &[&str] = &[
     INVARIANT_TASK_LEAK,
     INVARIANT_OBLIGATION_LEAK,
@@ -165,6 +167,7 @@ pub const LAB_RUNTIME_FED_ORACLE_NAMES: &[&str] = &[
     INVARIANT_REGION_TREE,
     INVARIANT_DEADLINE_MONOTONE,
     INVARIANT_CANCELLATION_PROTOCOL,
+    INVARIANT_DOWN_ORDER,
 ];
 
 /// Function pointer for oracles that can be constructed behind the common

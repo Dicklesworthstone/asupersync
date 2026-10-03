@@ -394,6 +394,18 @@ impl OracleSuite {
         self.cancel_signal_ordering.reset();
         self.runtime_epoch.reset();
 
+        // DOWN deliveries of runtime monitors (kpmoy5.6.1), replayed whole on
+        // every hydration. A suite fed by hand, with no runtime monitor, keeps
+        // its events.
+        let mut downs = state.down_history().peekable();
+        if downs.peek().is_some() {
+            self.down_order.reset();
+            for (watcher, monitored, completion_vt) in downs {
+                self.down_order
+                    .on_down_delivered_at(watcher, monitored, completion_vt);
+            }
+        }
+
         if !self.loser_drain.has_observed_events() {
             for event in state.loser_drain_history() {
                 match event {

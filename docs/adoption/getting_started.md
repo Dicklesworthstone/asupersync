@@ -44,7 +44,7 @@ Seed: 42
 Steps: <N>
 Participants: 2 bound (sender), 0 unbound
 Faults injected: 0
-Oracles: 24/24 passed (16 not fed by the lab runtime)
+Oracles: 24/24 passed (15 not fed by the lab runtime)
 Certificate: event_hash=<u64>, schedule_hash=<u64>
 ```
 
@@ -218,7 +218,7 @@ Seed: 314159
 Steps: 54
 Participants: 11 bound (saga-coordinator, saga-participant), 0 unbound
 Faults injected: 8
-Oracles: 24/24 passed (16 not fed by the lab runtime)
+Oracles: 24/24 passed (15 not fed by the lab runtime)
 ```
 
 The coordinator asks one participant every 50 ms of virtual time, plus the

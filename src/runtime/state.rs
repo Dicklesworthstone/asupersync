@@ -1900,6 +1900,12 @@ pub struct RuntimeState {
     /// (br-asupersync-issue65-criticisms-kpmoy5.6.1). Empty unless a task
     /// called `Cx::monitor`, `Cx::link` or `Cx::link_trapping`.
     task_watches: crate::monitor::TaskWatches,
+    /// `(watcher, monitored, completion time)` per delivered DOWN, oldest
+    /// first, for post-run oracle hydration (the lab's `down_order`).
+    /// Bounded by [`RuntimeState::bound_oracle_histories`] on native
+    /// runtimes; empty unless monitors fire.
+    down_history: VecDeque<(TaskId, TaskId, Time)>,
+    down_history_limit: Option<usize>,
     /// Shard-table handle bundle for `with_sharded_state` builds
     /// (E2 S4c-2c-iv, br-asupersync-m9wsza).
     ///
@@ -2168,6 +2174,8 @@ impl RuntimeState {
             pending_cancel_dispatch_ready: Arc::new(AtomicBool::new(false)),
             pending_cancel_dispatch_coordinator: None,
             task_watches: crate::monitor::TaskWatches::default(),
+            down_history: VecDeque::new(),
+            down_history_limit: None,
             shard_tables: None,
             // br-asupersync-qp2tfx: internal constructors Panic on obligation
             // leak so the lab/test paths surface bugs the same way the
@@ -7845,8 +7853,18 @@ impl RuntimeState {
                 .as_ref()
                 .map_or(self.now, TimerDriverHandle::now);
             let gateway = self.spawn_gateway.clone();
-            self.task_watches
-                .on_task_completed(task_id, close_outcome.as_ref(), now, gateway)
+            let effects =
+                self.task_watches
+                    .on_task_completed(task_id, close_outcome.as_ref(), now, gateway);
+            if let Some(effects) = effects.as_ref() {
+                self.down_history.extend(effects.down_deliveries());
+                if let Some(limit) = self.down_history_limit {
+                    while self.down_history.len() > limit {
+                        self.down_history.pop_front();
+                    }
+                }
+            }
+            effects
         };
         match self.shard_tables.clone() {
             Some(shards) => {
@@ -8848,6 +8866,16 @@ impl RuntimeState {
     pub(crate) fn bound_oracle_histories(&mut self, limit: usize) {
         self.closed_region_history_limit = Some(limit);
         self.loser_drain_history.retain_completed_races(limit);
+        self.down_history_limit = Some(limit);
+        while self.down_history.len() > limit {
+            self.down_history.pop_front();
+        }
+    }
+
+    /// `(watcher, monitored, completion time)` per delivered DOWN, oldest
+    /// first (kpmoy5.6.1).
+    pub(crate) fn down_history(&self) -> impl Iterator<Item = (TaskId, TaskId, Time)> + '_ {
+        self.down_history.iter().copied()
     }
 
     fn pop_tracked_finalizer(

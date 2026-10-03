@@ -1321,7 +1321,7 @@ impl TaskWatches {
         let watchers = self.monitors.watchers_of(task);
         if !watchers.is_empty() {
             let mut batch = DownBatch::new();
-            for (monitor_ref, _watcher) in watchers {
+            for &(monitor_ref, _watcher) in &watchers {
                 batch.push(
                     now,
                     DownNotification {
@@ -1333,8 +1333,14 @@ impl TaskWatches {
             }
             self.monitors.remove_monitored(task);
             for down in batch.into_sorted() {
-                if let Some(slot) = self.monitor_slots.remove(&down.monitor_ref) {
-                    effects.downs.push((slot, down));
+                let watcher = watchers
+                    .iter()
+                    .find(|(monitor_ref, _)| *monitor_ref == down.monitor_ref)
+                    .map(|&(_, watcher)| watcher);
+                if let (Some(slot), Some(watcher)) =
+                    (self.monitor_slots.remove(&down.monitor_ref), watcher)
+                {
+                    effects.downs.push((slot, watcher, down));
                 }
             }
         }
@@ -1406,7 +1412,8 @@ impl TaskWatches {
 pub(crate) struct WatchEffects {
     /// Virtual time of the exit.
     at: Time,
-    downs: Vec<(std::sync::Arc<MonitorSlot>, DownNotification)>,
+    /// The slot, the watcher it belongs to, and the DOWN to deliver.
+    downs: Vec<(std::sync::Arc<MonitorSlot>, TaskId, DownNotification)>,
     exits: Vec<(
         std::sync::Arc<crate::link::LinkSlot>,
         crate::link::ExitSignal,
@@ -1420,12 +1427,21 @@ impl WatchEffects {
         self.downs.is_empty() && self.exits.is_empty() && self.cancels.is_empty()
     }
 
+    /// `(watcher, monitored task, completion time)` for every DOWN this exit
+    /// delivers, in delivery order. The lab replays them into its
+    /// `down_order` oracle.
+    pub(crate) fn down_deliveries(&self) -> impl Iterator<Item = (TaskId, TaskId, Time)> + '_ {
+        self.downs
+            .iter()
+            .map(|(_, watcher, down)| (*watcher, down.monitored, self.at))
+    }
+
     /// Delivers the DOWN notifications and exit signals, then requests the
     /// linked cancellations through the task-handle cancel lane (which both
     /// runtime state shapes and the lab drain). Waker panics are contained.
     pub(crate) fn dispatch(self) {
         let at = self.at;
-        for (slot, down) in self.downs {
+        for (slot, _watcher, down) in self.downs {
             if let Err(payload) =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| slot.deliver(at, down)))
             {
@@ -1645,7 +1661,23 @@ mod task_watch_tests {
         let effects = watches
             .on_task_completed(tid(3), Some(&Outcome::Ok(())), Time::ZERO, None)
             .expect("effects");
-        let refs: Vec<MonitorRef> = effects.downs.iter().map(|(_, d)| d.monitor_ref).collect();
+        let refs: Vec<MonitorRef> = effects
+            .downs
+            .iter()
+            .map(|(_, _, d)| d.monitor_ref)
+            .collect();
+        let watchers: Vec<TaskId> = effects
+            .down_deliveries()
+            .map(|(watcher, monitored, _)| {
+                assert_eq!(monitored, tid(3));
+                watcher
+            })
+            .collect();
+        assert_eq!(
+            watchers,
+            vec![tid(1), tid(2), tid(1)],
+            "watchers follow the refs"
+        );
         let mut sorted = refs.clone();
         sorted.sort();
         assert_eq!(refs.len(), 3);

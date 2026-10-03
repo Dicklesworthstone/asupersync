@@ -296,13 +296,22 @@ impl std::error::Error for DownOrderViolation {}
 
 /// Oracle for verifying deterministic DOWN message delivery order.
 ///
-/// When multiple monitored tasks exit simultaneously, the DOWN messages
-/// must be delivered in a deterministic order (sorted by task index).
-/// This oracle records DOWN delivery sequences and verifies ordering.
+/// Two kinds of record:
+/// - [`Self::on_down_delivered`] records DOWNs that became ready together
+///   (one simultaneous batch): they must arrive sorted by task index.
+/// - [`Self::on_down_delivered_at`] records a DOWN with the completion time
+///   of its subject, as the runtime delivers them: one completion at a time,
+///   so a monitor's DOWNs must never go back in completion time. Completions
+///   at the same virtual time are separate batches and keep the order in
+///   which they completed.
+///
+/// `LabRuntime` feeds the timed form from the runtime's DOWN deliveries
+/// (br-asupersync-issue65-criticisms-kpmoy5.6.1).
 #[derive(Debug, Default)]
 pub struct DownOrderOracle {
-    /// For each monitor task, the ordered sequence of DOWN subjects received.
-    delivery_sequences: HashMap<TaskId, Vec<TaskId>>,
+    /// For each monitor task, the ordered sequence of
+    /// `(completion time if known, DOWN subject)` received.
+    delivery_sequences: HashMap<TaskId, Vec<(Option<Time>, TaskId)>>,
     /// Total number of DOWN events recorded.
     down_count: usize,
 }
@@ -314,34 +323,62 @@ impl DownOrderOracle {
         Self::default()
     }
 
-    /// Record a DOWN message being delivered to a monitor.
+    /// Record a DOWN message being delivered to a monitor, as part of one
+    /// simultaneous batch (ordered by task index).
     pub fn on_down_delivered(&mut self, monitor: TaskId, subject: TaskId) {
+        self.record(monitor, subject, None);
+    }
+
+    /// Record a DOWN message about `subject`, which completed at
+    /// `completion_vt`, being delivered to `monitor`.
+    pub fn on_down_delivered_at(&mut self, monitor: TaskId, subject: TaskId, completion_vt: Time) {
+        self.record(monitor, subject, Some(completion_vt));
+    }
+
+    fn record(&mut self, monitor: TaskId, subject: TaskId, completion_vt: Option<Time>) {
         self.delivery_sequences
             .entry(monitor)
             .or_default()
-            .push(subject);
+            .push((completion_vt, subject));
         self.down_count += 1;
     }
 
-    /// Check that all DOWN delivery sequences are in deterministic order.
-    ///
-    /// The expected order is sorted by task index (deterministic tiebreak).
+    /// Check every monitor's DOWN sequence: batch records sorted by task
+    /// index, timed records nondecreasing in completion time.
     pub fn check(&self) -> Result<(), DownOrderViolation> {
         let mut monitors: Vec<_> = self.delivery_sequences.keys().copied().collect();
         monitors.sort();
 
         for monitor in monitors {
-            if let Some(actual) = self.delivery_sequences.get(&monitor) {
-                let mut expected = actual.clone();
-                expected.sort();
-
-                if *actual != expected {
-                    return Err(DownOrderViolation {
-                        monitor,
-                        expected,
-                        actual: actual.clone(),
-                    });
-                }
+            let Some(sequence) = self.delivery_sequences.get(&monitor) else {
+                continue;
+            };
+            let batch: Vec<TaskId> = sequence
+                .iter()
+                .filter(|(at, _)| at.is_none())
+                .map(|&(_, subject)| subject)
+                .collect();
+            let mut expected = batch.clone();
+            expected.sort();
+            if batch != expected {
+                return Err(DownOrderViolation {
+                    monitor,
+                    expected,
+                    actual: batch,
+                });
+            }
+            let timed: Vec<(Time, TaskId)> = sequence
+                .iter()
+                .filter_map(|&(at, subject)| at.map(|at| (at, subject)))
+                .collect();
+            if timed.windows(2).any(|pair| pair[1].0 < pair[0].0) {
+                let mut expected = timed.clone();
+                expected.sort_by_key(|&(at, _)| at);
+                return Err(DownOrderViolation {
+                    monitor,
+                    expected: expected.into_iter().map(|(_, subject)| subject).collect(),
+                    actual: timed.into_iter().map(|(_, subject)| subject).collect(),
+                });
             }
         }
         Ok(())
@@ -642,6 +679,33 @@ mod tests {
         oracle.on_down_delivered(task(10), task(1));
         let err = oracle.check().unwrap_err();
         assert_eq!(err.monitor, task(10));
+    }
+
+    #[test]
+    fn timed_downs_must_not_go_back_in_completion_time() {
+        // Exits in time order pass, whatever the task indexes; completions at
+        // the same time keep their completion order.
+        let mut oracle = DownOrderOracle::new();
+        oracle.on_down_delivered_at(task(10), task(3), Time::from_millis(1));
+        oracle.on_down_delivered_at(task(10), task(2), Time::from_millis(2));
+        oracle.on_down_delivered_at(task(10), task(1), Time::from_millis(2));
+        assert!(oracle.check().is_ok());
+        assert_eq!(oracle.down_count(), 3);
+
+        // Planted negative: an earlier exit delivered after a later one.
+        let mut oracle = DownOrderOracle::new();
+        oracle.on_down_delivered_at(task(10), task(1), Time::from_millis(2));
+        oracle.on_down_delivered_at(task(10), task(2), Time::from_millis(1));
+        let err = oracle.check().unwrap_err();
+        assert_eq!(err.monitor, task(10));
+        assert_eq!(err.actual, vec![task(1), task(2)]);
+        assert_eq!(err.expected, vec![task(2), task(1)]);
+
+        // Each monitor is checked on its own.
+        let mut oracle = DownOrderOracle::new();
+        oracle.on_down_delivered_at(task(10), task(1), Time::from_millis(2));
+        oracle.on_down_delivered_at(task(11), task(2), Time::from_millis(1));
+        assert!(oracle.check().is_ok());
     }
 
     #[test]

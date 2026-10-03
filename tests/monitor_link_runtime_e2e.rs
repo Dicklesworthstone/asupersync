@@ -254,7 +254,9 @@ fn a_trapping_link_delivers_the_peer_exit_and_keeps_the_caller_running() {
 
 #[test]
 fn monitors_and_links_are_deterministic_under_the_lab() {
-    fn scenario(seed: u64) -> (Vec<String>, bool) {
+    /// DOWN lines, quiescence, and the `down_order` oracle's
+    /// (passed, events recorded).
+    fn scenario(seed: u64) -> (Vec<String>, bool, (bool, usize)) {
         let (downs, report) = asupersync::lab::run_async_under_lab(seed, |cx| async move {
             let gate = Arc::new(AtomicBool::new(false));
             let mut monitors = Vec::new();
@@ -287,10 +289,18 @@ fn monitors_and_links_are_deterministic_under_the_lab() {
             }
             downs
         });
-        (downs, report.quiescent)
+        let down_order = report
+            .oracle_report
+            .entry("down_order")
+            .expect("down_order is reported");
+        (
+            downs,
+            report.quiescent,
+            (down_order.passed, down_order.stats.events_recorded),
+        )
     }
-    let (first, quiescent) = scenario(0x5eed);
-    let (second, _) = scenario(0x5eed);
+    let (first, quiescent, down_order) = scenario(0x5eed);
+    let (second, _, _) = scenario(0x5eed);
     assert!(quiescent, "the lab run reaches quiescence");
     assert_eq!(first.len(), 4);
     assert_eq!(first, second, "same seed, same DOWN sequence");
@@ -298,4 +308,10 @@ fn monitors_and_links_are_deterministic_under_the_lab() {
         let expected = if i % 2 == 0 { "normal" } else { "cancelled" };
         assert!(line.contains(expected), "child {i}: {line}");
     }
+    // The lab feeds its down_order oracle from the runtime's DOWN deliveries.
+    assert_eq!(
+        down_order,
+        (true, 4),
+        "down_order checked all four DOWNs and found them in order"
+    );
 }

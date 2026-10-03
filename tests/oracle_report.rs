@@ -162,7 +162,6 @@ const LAB_UNFED_ORACLES: &[&str] = &[
     "rref_access",
     "reply_linearity",
     "registry_lease",
-    "down_order",
     "supervisor_quiescence",
 ];
 
