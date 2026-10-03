@@ -292,7 +292,17 @@ impl<T: PbftTransport> PbftNode<T> {
     }
 
     /// Submit a client request for consensus.
+    ///
+    /// On the primary, a request already proposed in a batch that has not
+    /// executed is not batched again: that exact proposal is broadcast again,
+    /// since its first broadcast may have failed, timed out or been cancelled
+    /// before reaching every replica.
     pub async fn submit_request(&self, cx: &Cx, request: ConsensusRequest) -> Result<()> {
+        if self.is_primary()
+            && let Some(message) = self.retained_proposal(&request)
+        {
+            return self.broadcast_preprepare(cx, message).await;
+        }
         {
             let mut state = self.state.lock().unwrap();
             state.pending_requests.push_back(request);
@@ -306,84 +316,83 @@ impl<T: PbftTransport> PbftNode<T> {
         Ok(())
     }
 
+    /// The lowest unexecuted proposal whose batch carries `request`.
+    fn retained_proposal(&self, request: &ConsensusRequest) -> Option<PbftMessage> {
+        let state = self.state.lock().unwrap();
+        let (sequence, entry) = state
+            .log
+            .iter()
+            .filter(|(sequence, entry)| {
+                **sequence > state.last_executed
+                    && entry.batch.requests.iter().any(|existing| {
+                        existing.client_id == request.client_id
+                            && existing.timestamp == request.timestamp
+                            && existing.operation == request.operation
+                    })
+            })
+            .min_by_key(|(sequence, _)| **sequence)?;
+        Some(PbftMessage::PrePrepare {
+            view: entry.view,
+            sequence: *sequence,
+            digest: entry.digest.clone(),
+            batch: entry.batch.clone(),
+            replica_id: self.replica_id.clone(),
+        })
+    }
+
     /// Try to create a batch of pending requests.
+    ///
+    /// The sequence is reserved, logged and advanced in one critical section,
+    /// and never rolled back: a broadcast that failed, timed out or was
+    /// cancelled may already have reached some replicas, so giving its
+    /// sequence to another batch would equivocate, and a rollback racing a
+    /// concurrent proposal left every later proposal colliding with a logged
+    /// sequence. The batch stays logged; retrying one of its requests
+    /// broadcasts it again (see [`Self::submit_request`]).
     async fn try_create_batch(&self, cx: &Cx) -> Result<()> {
-        let (batch, sequence, view) = {
-            let mut state = self.state.lock().unwrap();
-
-            if state.pending_requests.is_empty() {
-                return Ok(()); // No requests to batch
-            }
-
-            // Collect requests for batch
-            let mut requests = Vec::new();
-            while requests.len() < self.config.max_batch_size && !state.pending_requests.is_empty()
-            {
-                if let Some(request) = state.pending_requests.pop_front() {
-                    requests.push(request);
-                }
-            }
-
-            let batch = ConsensusBatch::new(requests);
-            let sequence = state.sequence;
-            let view = state.view;
-
-            (batch, sequence, view)
-        };
-
-        let result = self
-            .send_preprepare(cx, view, sequence, batch.clone())
-            .await;
-        let mut state = self.state.lock().unwrap();
-        match result {
-            Ok(()) => {
-                if state.sequence == sequence {
-                    state.sequence = state.sequence.next();
-                }
-                Ok(())
-            }
-            Err(err) => {
-                if state.sequence == sequence.next() {
-                    state.sequence = sequence;
-                }
-                if let Ok(digest) = MessageDigest::of(&batch) {
-                    if state
-                        .log
-                        .get(&sequence)
-                        .is_some_and(|entry| entry.view == view && entry.digest == digest)
-                    {
-                        state.log.remove(&sequence);
-                    }
-                }
-                for request in batch.requests.iter().rev() {
-                    state.pending_requests.push_front(request.clone());
-                }
-                Err(err)
-            }
+        match self.reserve_proposal()? {
+            Some(message) => self.broadcast_preprepare(cx, message).await,
+            None => Ok(()), // No requests to batch
         }
     }
 
-    /// Send pre-prepare message as primary.
-    async fn send_preprepare(
-        &self,
-        cx: &Cx,
-        view: ViewNumber,
-        sequence: SequenceNumber,
-        batch: ConsensusBatch,
-    ) -> Result<()> {
-        let digest = MessageDigest::of(&batch)?;
+    /// Batch the pending requests under the next sequence, log the batch and
+    /// advance the sequence, all under one lock.
+    fn reserve_proposal(&self) -> Result<Option<PbftMessage>> {
+        let mut state = self.state.lock().unwrap();
+        if state.pending_requests.is_empty() {
+            return Ok(None);
+        }
+        let sequence = state.sequence;
+        if state.log.contains_key(&sequence) {
+            return Err(
+                Error::new(ErrorKind::InvalidStateTransition).with_message(format!(
+                    "PBFT pre-prepare sequence {sequence} already has a log entry"
+                )),
+            );
+        }
+        let next = sequence.0.checked_add(1).ok_or_else(|| {
+            Error::new(ErrorKind::InvalidStateTransition)
+                .with_message("PBFT proposal sequence space is exhausted")
+        })?;
 
-        // Create log entry
-        {
-            let mut state = self.state.lock().unwrap();
-            if state.log.contains_key(&sequence) {
-                return Err(
-                    Error::new(ErrorKind::InvalidStateTransition).with_message(format!(
-                        "PBFT pre-prepare sequence {sequence} already has a log entry"
-                    )),
-                );
+        // Collect requests for batch
+        let take = self.config.max_batch_size.min(state.pending_requests.len());
+        let batch = ConsensusBatch::new(state.pending_requests.drain(..take).collect());
+        let digest = match MessageDigest::of(&batch) {
+            Ok(digest) => digest,
+            Err(err) => {
+                // Nothing was reserved: the requests stay pending.
+                for request in batch.requests.into_iter().rev() {
+                    state.pending_requests.push_front(request);
+                }
+                return Err(err);
             }
-            let entry = LogEntry {
+        };
+        let view = state.view;
+        state.log.insert(
+            sequence,
+            LogEntry {
                 batch: batch.clone(),
                 digest: digest.clone(),
                 view,
@@ -391,18 +400,20 @@ impl<T: PbftTransport> PbftNode<T> {
                 prepare_msgs: HashMap::new(),
                 commit_msgs: HashMap::new(),
                 result: None,
-            };
-            state.log.insert(sequence, entry);
-        }
-
-        let message = PbftMessage::PrePrepare {
+            },
+        );
+        state.sequence = SequenceNumber::new(next);
+        Ok(Some(PbftMessage::PrePrepare {
             view,
             sequence,
             digest,
             batch,
             replica_id: self.replica_id.clone(),
-        };
+        }))
+    }
 
+    /// Broadcast a logged proposal as primary, then execute whatever is ready.
+    async fn broadcast_preprepare(&self, cx: &Cx, message: PbftMessage) -> Result<()> {
         // Broadcast pre-prepare to all replicas
         timeout(
             cx.now(),
@@ -1187,6 +1198,90 @@ mod progress_tests {
         fn receive(&self) -> impl Future<Output = Result<PbftMessage>> + Send {
             ready(Err(Error::new(ErrorKind::ChannelEmpty)))
         }
+    }
+
+    /// Records every broadcast but the first, which never completes.
+    #[derive(Default)]
+    struct FirstBroadcastHangs {
+        broadcasts: Mutex<usize>,
+        sent: Mutex<Vec<PbftMessage>>,
+    }
+
+    impl PbftTransport for FirstBroadcastHangs {
+        fn send_to_replica(
+            &self,
+            _replica_id: &ReplicaId,
+            _message: PbftMessage,
+        ) -> impl Future<Output = Result<()>> + Send {
+            ready(Ok(()))
+        }
+
+        fn broadcast(&self, message: PbftMessage) -> impl Future<Output = Result<()>> + Send {
+            let first = {
+                let mut broadcasts = self.broadcasts.lock().unwrap();
+                *broadcasts += 1;
+                *broadcasts == 1
+            };
+            if !first {
+                self.sent.lock().unwrap().push(message);
+            }
+            async move {
+                if first {
+                    std::future::pending::<()>().await;
+                }
+                Ok(())
+            }
+        }
+
+        fn receive(&self) -> impl Future<Output = Result<PbftMessage>> + Send {
+            ready(Err(Error::new(ErrorKind::ChannelEmpty)))
+        }
+    }
+
+    #[test]
+    fn a_cancelled_proposal_neither_wedges_the_primary_nor_loses_its_request() {
+        // The primary's first proposal is dropped mid-broadcast (a caller
+        // timeout or select). It used to keep sequence 1 logged without
+        // advancing past it, so every later proposal collided with the log
+        // entry and failed, and the cancelled request was gone.
+        let cx = Cx::for_testing();
+        let node = PbftNode::new(
+            ReplicaId::new("0".to_owned()),
+            PbftConfig::new(4, 1).unwrap(),
+            FirstBroadcastHangs::default(),
+        )
+        .unwrap();
+        let request = |operation: u8| {
+            ConsensusRequest::new(
+                "client".to_owned(),
+                Time::from_millis(u64::from(operation)),
+                vec![operation],
+            )
+        };
+        {
+            let mut cancelled = std::pin::pin!(node.submit_request(&cx, request(1)));
+            let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+            assert!(cancelled.as_mut().poll(&mut task_cx).is_pending());
+        }
+        futures_lite::future::block_on(node.submit_request(&cx, request(2)))
+            .expect("a later proposal must not collide with the cancelled one");
+        // Retrying the cancelled request broadcasts its retained proposal.
+        futures_lite::future::block_on(node.submit_request(&cx, request(1)))
+            .expect("retry the cancelled request");
+        let proposals: Vec<(u64, Vec<u8>)> = node
+            .transport
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|message| match message {
+                PbftMessage::PrePrepare {
+                    sequence, batch, ..
+                } => Some((sequence.0, batch.requests[0].operation.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(proposals, vec![(2, vec![2]), (1, vec![1])]);
     }
 
     fn backup() -> PbftNode<RecordingTransport> {
