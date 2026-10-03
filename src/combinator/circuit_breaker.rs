@@ -598,7 +598,7 @@ impl CircuitBreaker {
             let current_bits = self.state_bits.load(Ordering::Acquire);
             if State::from_bits(current_bits) == (State::Closed { failures: 0 }) {
                 // Already clean, just check sliding window
-                self.check_sliding_window_success(now_millis);
+                self.check_sliding_window_success(now_millis, permit);
                 return;
             }
         }
@@ -695,7 +695,7 @@ impl CircuitBreaker {
             }
         }
 
-        self.check_sliding_window_success(now_millis);
+        self.check_sliding_window_success(now_millis, permit);
     }
 
     /// Helper to update metrics on state change.
@@ -769,9 +769,23 @@ impl CircuitBreaker {
         Ok(())
     }
 
-    fn check_sliding_window_success(&self, now_millis: u64) {
+    /// Whether a finished call's outcome goes into the sliding window: a
+    /// probe's always (it is the recovery sample), an ordinary call's only
+    /// while Closed. Call it with the window lock held; opening clears the
+    /// window under the same lock. Calls admitted while Closed that finish
+    /// after the breaker opened belong to the period the open already
+    /// judged. Recording their failures refilled the cleared window, so the
+    /// half-open probe's successful close tripped the breaker again at once.
+    fn window_records_outcomes(&self, permit: Permit) -> bool {
+        matches!(permit, Permit::Probe { .. }) || matches!(self.state(), State::Closed { .. })
+    }
+
+    fn check_sliding_window_success(&self, now_millis: u64, permit: Permit) {
         let window_triggered = self.sliding_window.as_ref().is_some_and(|window| {
             let mut w = window.write();
+            if !self.window_records_outcomes(permit) {
+                return false;
+            }
             w.record_success(now_millis);
             w.should_open()
         });
@@ -912,6 +926,9 @@ impl CircuitBreaker {
         // Check sliding window if enabled
         let window_triggered = self.sliding_window.as_ref().is_some_and(|window| {
             let mut w = window.write();
+            if !self.window_records_outcomes(permit) {
+                return false;
+            }
             w.record_failure(now_millis);
             w.should_open()
         });
@@ -2388,6 +2405,53 @@ mod tests {
         assert!(
             post.is_ok(),
             "circuit should stay closed after half-open recovery when open already cleared the window, got {post:?}"
+        );
+    }
+
+    /// Calls admitted while Closed that failed after the breaker opened were
+    /// written into the window the open had just cleared, so the half-open
+    /// probe's success closed the breaker and the window opened it again.
+    #[test]
+    fn late_failures_from_before_the_open_do_not_reopen_after_recovery() {
+        let policy = CircuitBreakerPolicy {
+            failure_threshold: 1000,
+            success_threshold: 1,
+            open_duration: Duration::from_secs(10),
+            sliding_window: Some(SlidingWindowConfig {
+                window_duration: Duration::from_secs(60),
+                minimum_calls: 4,
+                failure_rate_threshold: 0.5,
+            }),
+            ..CircuitBreakerPolicy::default()
+        };
+        let cb = CircuitBreaker::new(policy);
+        let start = Time::from_millis(1_000);
+        let permits: Vec<_> = (0..8)
+            .map(|_| cb.should_allow(start).expect("closed"))
+            .collect();
+        let mut permits = permits.into_iter();
+
+        // Four failures fill the window at a 100% failure rate: it opens and
+        // the window is cleared.
+        for permit in permits.by_ref().take(4) {
+            cb.record_failure(permit, "err", start);
+        }
+        assert!(cb.should_allow(start).is_err(), "should be open");
+
+        // The other four calls fail later, while the breaker is open.
+        let late = Time::from_millis(2_000);
+        for permit in permits {
+            cb.record_failure(permit, "err", late);
+        }
+
+        let recovery = Time::from_millis(11_500);
+        let probe = cb.should_allow(recovery).expect("half-open probe");
+        cb.record_success(probe, recovery);
+        assert_eq!(cb.state(), State::Closed { failures: 0 });
+        assert_eq!(
+            cb.metrics().times_opened,
+            1,
+            "the probe's success must not re-open the breaker"
         );
     }
 
