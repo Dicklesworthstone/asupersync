@@ -3203,6 +3203,24 @@ fn compare_owned_otlp_attributes(
         }))
 }
 
+/// The tracestate list without its empty members. W3C Trace Context allows
+/// empty and whitespace-only list members (`list-member = (key "=" value) /
+/// OWS`), which HTTP stacks produce when they join several tracestate
+/// headers. The OTLP encoder accepts only non-empty members, so one stray
+/// comma failed the whole trace collection. Other members are kept verbatim.
+#[cfg(not(target_arch = "wasm32"))]
+fn canonical_trace_state(trace_state: &str) -> String {
+    let is_empty = |member: &str| member.trim_matches([' ', '\t']).is_empty();
+    if !trace_state.split(',').any(is_empty) {
+        return trace_state.to_owned();
+    }
+    trace_state
+        .split(',')
+        .filter(|member| !is_empty(member))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn owned_otlp_trace_span(
     span: &OtlpTraceSpanInput<'_>,
@@ -3244,7 +3262,7 @@ fn owned_otlp_trace_span(
             Ok(SpanLink {
                 trace_id: link.trace_id.to_vec(),
                 span_id: link.span_id.to_vec(),
-                trace_state: link.trace_state.to_owned(),
+                trace_state: canonical_trace_state(link.trace_state),
                 attributes: owned_otlp_attributes(link.attributes)
                     .map_err(|_| OwnedOtlpTraceError::InvalidAttributes)?,
                 dropped_attributes_count: link.dropped_attributes_count,
@@ -3275,7 +3293,7 @@ fn owned_otlp_trace_span(
         trace_id: span.trace_id.to_vec(),
         span_id: span.span_id.to_vec(),
         parent_span_id: span.parent_span_id.map_or_else(Vec::new, |id| id.to_vec()),
-        trace_state: span.trace_state.to_owned(),
+        trace_state: canonical_trace_state(span.trace_state),
         name: span.name.to_owned(),
         kind: span.kind.as_raw(),
         start_time_unix_nano: span.start_time_unix_nano,
@@ -3578,6 +3596,33 @@ mod owned_otlp_trace_tests {
         );
 
         let malformed = basic_span(ROOT_ID, "root").with_trace_state("Vendor=value");
+        assert_eq!(
+            mapper().collect(&[malformed], &[]).unwrap_err(),
+            OwnedOtlpTraceError::InvalidTraceState
+        );
+    }
+
+    /// W3C Trace Context allows empty tracestate list members, such as a
+    /// trailing comma or ",," left where HTTP stacks join several headers.
+    /// One of them failed the whole collection with InvalidTraceState.
+    #[test]
+    fn empty_trace_state_members_are_dropped_instead_of_failing_the_collection() {
+        for (trace_state, expected) in [
+            ("rojo=00f067aa0ba902b7,", "rojo=00f067aa0ba902b7"),
+            ("a=1,,b=2", "a=1,b=2"),
+            ("a=1, \t,b=2", "a=1,b=2"),
+            ("vendor=value", "vendor=value"),
+        ] {
+            assert_eq!(canonical_trace_state(trace_state), expected);
+            let span = basic_span(ROOT_ID, "root").with_trace_state(trace_state);
+            let collection = mapper()
+                .collect(&[span], &[])
+                .unwrap_or_else(|error| panic!("{trace_state:?}: {error:?}"));
+            assert_eq!(collection.sampled_spans(), 1, "{trace_state:?}");
+        }
+
+        // A malformed non-empty member is still refused.
+        let malformed = basic_span(ROOT_ID, "root").with_trace_state("a=1,,Vendor=value");
         assert_eq!(
             mapper().collect(&[malformed], &[]).unwrap_err(),
             OwnedOtlpTraceError::InvalidTraceState
