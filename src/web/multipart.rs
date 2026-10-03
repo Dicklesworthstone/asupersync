@@ -2207,12 +2207,25 @@ fn parse_multipart(
         // Check for close delimiter at current position (might have been found
         // as next delimiter in the previous iteration).
         // Find the end of this part's headers (blank line).
-        let headers_end = find_blank_line(body, pos).ok_or_else(|| {
-            malformed_multipart_error(
-                StatusCode::BAD_REQUEST,
-                "multipart part missing header terminator",
-            )
-        })?;
+        // Look for the terminator only as far as an allowed header block can
+        // reach. Scanning the whole remaining body for every part made a body
+        // of many tiny parts followed by megabytes of data quadratic in CPU.
+        let header_window = limits.max_part_headers.saturating_add(4);
+        let headers_end = match find_blank_line_within(body, pos, header_window) {
+            Some(found) => found,
+            None if body.len() - pos > header_window => {
+                return Err(multipart_field_limit_error(
+                    StatusCode::BAD_REQUEST,
+                    "multipart part headers too large",
+                ));
+            }
+            None => {
+                return Err(malformed_multipart_error(
+                    StatusCode::BAD_REQUEST,
+                    "multipart part missing header terminator",
+                ));
+            }
+        };
         last_progress = wall_now(); // Mark progress after finding headers
 
         let headers_section = &body[pos..headers_end.0];
@@ -2365,6 +2378,12 @@ fn find_blank_line(data: &[u8], pos: usize) -> Option<(usize, usize)> {
         (Some(_) | None, Some(l)) => Some((pos + l, pos + l + 2)),
         (None, None) => None,
     }
+}
+
+/// [`find_blank_line`] limited to the `limit` bytes from `pos`.
+fn find_blank_line_within(data: &[u8], pos: usize, limit: usize) -> Option<(usize, usize)> {
+    let end = data.len().min(pos.saturating_add(limit));
+    find_blank_line(&data[..end], pos)
 }
 
 /// Skip a CRLF or LF at the given position.
@@ -3019,6 +3038,43 @@ mod tests {
         assert_eq!(fields[0].name(), "a");
         assert_eq!(fields[1].name(), "b");
         assert_eq!(fields[2].name(), "c");
+    }
+
+    #[test]
+    fn buffered_parse_scans_part_headers_in_bounded_windows() {
+        // 1000 tiny CRLF parts and an 8 MiB final part. Each part used to
+        // scan the rest of the body for "\n\n", which a CRLF body never
+        // contains, so the work grew as parts x body size (about 8e9
+        // comparisons here) and only the parse timeout ended it.
+        let mut body = Vec::new();
+        for i in 0..1000 {
+            body.extend_from_slice(
+                format!("--B\r\nContent-Disposition: form-data; name=\"f{i}\"\r\n\r\nx\r\n")
+                    .as_bytes(),
+            );
+        }
+        body.extend_from_slice(b"--B\r\nContent-Disposition: form-data; name=\"tail\"\r\n\r\n");
+        body.resize(body.len() + 8 * 1024 * 1024 - 4096, b'y');
+        body.extend_from_slice(b"\r\n--B--\r\n");
+
+        let limits = MultipartLimits::default().request_timeout_secs(5);
+        let fields = parse_multipart(&Bytes::from(body), "B", &limits, wall_now())
+            .expect("parses well within the timeout");
+        assert_eq!(fields.len(), 1001);
+
+        // A header block longer than the limit is still reported as such.
+        let oversized = format!(
+            "--B\r\nX-Pad: {}\r\n\r\nv\r\n--B--\r\n",
+            "p".repeat(DEFAULT_MAX_PART_HEADERS)
+        );
+        let err = parse_multipart(
+            &Bytes::from(oversized),
+            "B",
+            &MultipartLimits::default(),
+            wall_now(),
+        )
+        .expect_err("oversized headers");
+        assert!(err.message.contains("headers too large"), "{err:?}");
     }
 
     #[test]
