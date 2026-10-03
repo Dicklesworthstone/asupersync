@@ -719,6 +719,72 @@ fn nats_supervisor_keeps_the_connection_after_a_permissions_violation() {
     assert!(drained, "permissions runtime did not drain");
 }
 
+/// Publish-then-ping is the usual flush. A permissions violation for the
+/// publish arrives before the PONG; ping() returned it as an error and the
+/// supervisor reconnected, dropping in-flight messages, although the server
+/// keeps the connection open.
+#[test]
+fn nats_ping_after_a_denied_publish_succeeds_without_reconnecting() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind flush listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = thread::spawn(move || {
+        let mut stream =
+            accept_within(&listener, Duration::from_secs(5)).expect("accept flush client");
+        send_info(&mut stream, "flush");
+        let mut reader = BufReader::new(stream);
+        assert!(read_nats_line(&mut reader).starts_with("CONNECT "));
+        assert_eq!(read_nats_line(&mut reader), "PUB events.denied 1");
+        assert_eq!(read_nats_line(&mut reader), "x");
+        assert_eq!(read_nats_line(&mut reader), "PING");
+        reader
+            .get_mut()
+            .write_all(b"-ERR 'Permissions Violation for Publish to \"events.denied\"'\r\nPONG\r\n")
+            .expect("write refusal and PONG");
+        reader.get_mut().flush().expect("flush refusal and PONG");
+        let closed = closed_by_client(&mut reader, Duration::from_secs(5));
+        let reconnected = accept_within(&listener, Duration::from_millis(300)).is_some();
+        (closed, reconnected)
+    });
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let (done_tx, done_rx) = mpsc::channel();
+    let task = runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("runtime task context");
+        let mut config = NatsConfig::from_url(&format!("nats://{addr}")).expect("parse flush URL");
+        config.reconnect_delay = Duration::ZERO;
+        config.max_reconnect_delay = Duration::ZERO;
+        let mut client = NatsClient::connect_with_config(&cx, config)
+            .await
+            .expect("connect supervised client");
+        client
+            .publish(&cx, "events.denied", b"x")
+            .await
+            .expect("the PUB is written before the server refuses it");
+        let flushed = client.ping(&cx).await;
+        client.close(&cx).await.expect("close supervised client");
+        let _ = done_tx.send(flushed.is_ok());
+    });
+
+    let flushed = done_rx.recv_timeout(Duration::from_secs(5));
+    let peer = server.join();
+    drop(task);
+    let drained = runtime.shutdown_timeout(Duration::from_secs(3));
+    assert_eq!(
+        flushed,
+        Ok(true),
+        "ping must succeed after a permissions violation"
+    );
+    assert_eq!(
+        peer.expect("flush peer joined"),
+        (true, false),
+        "(closed only by the client's close, reconnected)"
+    );
+    assert!(drained, "flush runtime did not drain");
+}
+
 #[test]
 fn nats_supervisor_backs_off_across_connections_the_server_refuses_after_connect() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind refusing listener");

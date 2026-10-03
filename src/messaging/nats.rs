@@ -3154,6 +3154,15 @@ impl NatsConnection {
                         self.connected = true;
                         return Ok(());
                     }
+                    // The server keeps the connection after a permissions
+                    // violation and sends the PONG next. Failing here broke
+                    // the publish-then-ping flush idiom and reconnected,
+                    // dropping in-flight messages.
+                    NatsMessage::Err(e) if server_error_keeps_connection(&e) => {
+                        cx.trace(&format!(
+                            "nats: server reported {e:?} before PONG; the connection stays open"
+                        ));
+                    }
                     NatsMessage::Err(e) => return Err(NatsError::Server(e)),
                     NatsMessage::Ping => {
                         self.send_server_pong(cx).await?;
