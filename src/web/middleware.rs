@@ -1189,6 +1189,12 @@ impl<H: Handler> Handler for RequestBodyLimitMiddleware<H> {
                     .into_bytes(),
                 );
             }
+            // A streaming body (StreamingRawBody) is not in `req.body`, and a
+            // chunked upload declares no Content-Length: neither check above
+            // sees it. Cap the stream itself, as the router's body policy
+            // does, so reading past the limit fails with BodyTooLarge.
+            #[cfg(not(target_arch = "wasm32"))]
+            super::extract::tighten_streaming_raw_body(&req, self.max_bytes);
             self.inner.call(&cx, req).await
         })
     }
@@ -4969,6 +4975,65 @@ mod tests {
         req.body = vec![0u8; 100].into();
         let resp = mw.call(req);
         assert_eq!(resp.status, StatusCode::OK);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn body_limit_caps_a_streaming_chunked_body() {
+        use crate::http::h1::stream::{BodyKind, IncomingBodyError, IncomingRequestBody};
+        use crate::web::extract::{
+            FromRequest, StreamingRawBody, StreamingRawBodyCollectError, insert_streaming_raw_body,
+        };
+
+        // Collects the streaming body and answers with what it saw.
+        struct CollectStreaming;
+        impl Handler for CollectStreaming {
+            fn call(
+                &self,
+                cx: &Cx,
+                req: Request,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>>
+            {
+                let cx = cx.clone();
+                Box::pin(async move {
+                    let body = StreamingRawBody::from_request(req).expect("streaming body");
+                    match body.collect_bounded_with_cx(&cx, 1024).await {
+                        Ok(collected) => Response::new(
+                            StatusCode::OK,
+                            collected.data().len().to_string().into_bytes(),
+                        ),
+                        Err(StreamingRawBodyCollectError::Body(
+                            IncomingBodyError::BodyTooLarge { .. },
+                        )) => Response::empty(StatusCode::PAYLOAD_TOO_LARGE),
+                        Err(other) => Response::new(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("{other:?}").into_bytes(),
+                        ),
+                    }
+                })
+            }
+        }
+
+        // A chunked upload carries no Content-Length and leaves req.body
+        // empty, so the 6-byte limit used to let all 8 bytes through.
+        let cx = Cx::for_testing();
+        let (mut writer, incoming) = IncomingRequestBody::channel(&cx, BodyKind::Chunked);
+        let mut req = Request::new("POST", "/upload");
+        let control = insert_streaming_raw_body(&mut req, incoming).expect("install body");
+        futures_lite::future::block_on(
+            writer.push_bytes(&cx, b"4\r\nABCD\r\n4\r\nEFGH\r\n0\r\n\r\n"),
+        )
+        .expect("publish chunked body");
+
+        let mw = RequestBodyLimitMiddleware::new(CollectStreaming, 6);
+        let resp = mw.call(req);
+        assert_eq!(
+            resp.status,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "{}",
+            String::from_utf8_lossy(&resp.body)
+        );
+        drop(control);
     }
 
     #[test]
