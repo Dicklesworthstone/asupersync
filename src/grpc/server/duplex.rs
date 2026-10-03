@@ -321,7 +321,8 @@ impl Server {
     {
         config.response.validate()?;
         self.validate_http2_transport_config()?;
-        self.streaming_output_codec().map_err(io::Error::other)?;
+        self.streaming_output_codec(self.config.send_compression)
+            .map_err(io::Error::other)?;
         if self.services.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -488,7 +489,8 @@ impl Server {
             let mut inner = cx.inner.write();
             inner.budget = deadline.budget(inner.budget);
         }
-        let (codec, encoding) = match self.streaming_output_codec() {
+        let compression = self.response_compression(request.metadata());
+        let (codec, encoding) = match self.streaming_output_codec(compression) {
             Ok(codec) => codec,
             Err(status) => {
                 return Http2ProducedResponse::buffered(Self::http2_status_response(&status));

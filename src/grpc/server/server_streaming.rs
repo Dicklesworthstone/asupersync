@@ -194,7 +194,8 @@ impl Server {
                 "no registered gRPC service",
             ));
         }
-        self.streaming_output_codec().map_err(io::Error::other)?;
+        self.streaming_output_codec(self.config.send_compression)
+            .map_err(io::Error::other)?;
         let server = Arc::clone(self);
         let handler = move |request: HttpRequest| -> ProducedGrpcFuture {
             let server = Arc::clone(&server);
@@ -285,7 +286,8 @@ impl Server {
             ));
         };
         let deadline = StreamDeadline::capture(&request_cx, request.metadata(), &self.config);
-        let (codec, encoding) = match self.streaming_output_codec() {
+        let compression = self.response_compression(request.metadata());
+        let (codec, encoding) = match self.streaming_output_codec(compression) {
             Ok(codec) => codec,
             Err(status) => {
                 return Http2ProducedResponse::buffered(Self::http2_status_response(&status));
@@ -312,11 +314,14 @@ impl Server {
         )
     }
 
+    /// Output codec for `encoding`: the configured `send_compression` at bind
+    /// time, or [`Self::response_compression`] for a request.
     pub(super) fn streaming_output_codec(
         &self,
+        encoding: Option<CompressionEncoding>,
     ) -> Result<(FramedCodec<IdentityCodec>, Option<&'static str>), Status> {
         let mut codec = self.framed_codec(IdentityCodec);
-        let encoding = match self.config.send_compression {
+        let encoding = match encoding {
             Some(CompressionEncoding::Gzip) => {
                 let compressor = CompressionEncoding::Gzip
                     .frame_compressor()
