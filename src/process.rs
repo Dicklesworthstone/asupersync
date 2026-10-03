@@ -2490,46 +2490,46 @@ impl Child {
     /// of this drain is to leave no zombie behind.
     /// (br-asupersync-nhk8ur)
     async fn cancel_drain_child(&mut self) {
-        // Step 1: graceful-termination request.
-        #[cfg(unix)]
-        {
+        'drain: {
+            // Step 1: graceful-termination request.
+            #[cfg(unix)]
             let _ = self.signal(libc::SIGTERM);
-        }
-        #[cfg(not(unix))]
-        {
+            #[cfg(not(unix))]
             let _ = self.kill();
-        }
 
-        // Step 2: poll for graceful exit. Cap is 2 seconds total so a
-        // misbehaving child cannot stall the cancel path indefinitely.
-        let mut polls = 0u32;
-        let mut backoff_ms = 1u64;
-        while polls < GRACEFUL_KILL_POLLS {
-            polls += 1;
-            match self.try_wait() {
-                Ok(Some(_)) => return,
-                Ok(None) => {}
-                Err(_) => return, // child gone or already reaped — done.
+            // Step 2: poll for graceful exit. Cap is 2 seconds total so a
+            // misbehaving child cannot stall the cancel path indefinitely.
+            let mut polls = 0u32;
+            let mut backoff_ms = 1u64;
+            while polls < GRACEFUL_KILL_POLLS {
+                polls += 1;
+                // Exited, or the child is gone or already reaped.
+                if !matches!(self.try_wait(), Ok(None)) {
+                    break 'drain;
+                }
+                cancel_drain_delay(std::time::Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms * 2).min(GRACEFUL_KILL_POLL_MAX_BACKOFF_MS);
             }
-            cancel_drain_delay(std::time::Duration::from_millis(backoff_ms)).await;
-            backoff_ms = (backoff_ms * 2).min(GRACEFUL_KILL_POLL_MAX_BACKOFF_MS);
-        }
 
-        // Step 3: force-kill.
-        let _ = self.kill();
-
-        // Step 4: reap. The child has been SIGKILL'd; this loop is bounded
-        // by the kernel's delivery of the kill signal, which is essentially
-        // immediate. We still cap reap polls so a kernel quirk cannot
-        // deadlock the cancel path.
-        let mut reap_polls = 0u32;
-        while reap_polls < REAP_AFTER_KILL_POLLS {
-            reap_polls += 1;
-            match self.try_wait() {
-                Ok(Some(_)) | Err(_) => return,
-                Ok(None) => {}
+            // Step 3: force-kill, then reap. The kernel delivers SIGKILL
+            // essentially at once; the reap poll cap only keeps a kernel
+            // quirk from stalling the cancel path.
+            let _ = self.kill();
+            let mut reap_polls = 0u32;
+            while reap_polls < REAP_AFTER_KILL_POLLS {
+                reap_polls += 1;
+                if !matches!(self.try_wait(), Ok(None)) {
+                    break 'drain;
+                }
+                cancel_drain_delay(std::time::Duration::from_millis(2)).await;
             }
-            cancel_drain_delay(std::time::Duration::from_millis(2)).await;
+        }
+        // A process group is the cancellation scope: members that ignored
+        // SIGTERM or outlived the leader go too. The group id is not reused
+        // while a member lives; ESRCH just means none is left.
+        #[cfg(unix)]
+        if matches!(self.signal_target, ChildSignalTarget::ProcessGroup(_)) {
+            let _ = self.signal_target.send(libc::SIGKILL);
         }
     }
 
@@ -5282,6 +5282,80 @@ mod tests {
             "status_async() must use the configured stdio"
         );
         crate::test_complete!("status_uses_the_configured_stdio");
+    }
+
+    /// The cancel drain of a process-group target returned once the leader
+    /// was reaped after SIGTERM, so a member that ignores SIGTERM kept
+    /// running, and kill(), signal() and kill_on_drop could no longer reach it.
+    #[test]
+    fn cancelled_wait_kills_the_rest_of_the_process_group() {
+        init_test("cancelled_wait_kills_the_rest_of_the_process_group");
+        if !std::path::Path::new("/proc/self/stat").exists() {
+            return;
+        }
+        let pid_file = std::env::temp_dir().join(format!(
+            "asupersync-group-member-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&pid_file);
+        // The member ignores SIGTERM and records its pid only after its trap
+        // is set; the leader exits on SIGTERM.
+        let script = format!(
+            r#"sh -c 'trap "" TERM; echo $$ > "{}"; exec sleep 30' & wait"#,
+            pid_file.display()
+        );
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .process_group_mode(ProcessGroupMode::NewProcessGroup)
+            .signal_target(ProcessSignalTarget::ProcessGroup)
+            .spawn()
+            .expect("spawn group leader");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let member: u32 = loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+            {
+                break pid;
+            }
+            assert!(std::time::Instant::now() < deadline, "member never started");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        let _ = std::fs::remove_file(&pid_file);
+
+        let cx = Cx::for_testing();
+        cx.cancel_with(crate::types::CancelKind::User, Some("cancel the group"));
+        let result = futures_lite::future::block_on(child.wait_async(&cx));
+        assert!(result.is_err(), "a cancelled wait reports the cancellation");
+
+        // Gone, or a zombie waiting for init to reap it, counts as dead.
+        let alive = || {
+            std::fs::read_to_string(format!("/proc/{member}/stat"))
+                .ok()
+                .and_then(|stat| {
+                    let state = stat.rsplit_once(") ")?.1.chars().next()?;
+                    Some(state != 'Z' && state != 'X')
+                })
+                .unwrap_or(false)
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while alive() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let survived = alive();
+        if survived {
+            let _ = std_process::Command::new("kill")
+                .args(["-9", &member.to_string()])
+                .status();
+        }
+        assert!(
+            !survived,
+            "group member {member} outlived the cancelled wait"
+        );
+        crate::test_complete!("cancelled_wait_kills_the_rest_of_the_process_group");
     }
 }
 
