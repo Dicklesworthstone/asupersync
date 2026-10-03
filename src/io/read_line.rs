@@ -298,8 +298,9 @@ where
 // struct that owns the underlying reader. Each `LineReader::read_line` call
 // borrows the wrapper's `pending` field, so cancelling the future leaves
 // the partial prefix in the wrapper for the next call. The user holds a
-// `LineReader` across multiple read_line invocations and gets bit-exact
-// resumption on cancel.
+// `LineReader` and the same `String` across read_line invocations and gets
+// bit-exact resumption on cancel: complete codepoints are already in the
+// String, only the partial one waits in the wrapper.
 // ============================================================================
 
 /// Cancel-safe wrapper that holds the partial UTF-8 prefix for a sequence of
@@ -315,13 +316,15 @@ where
 /// use asupersync::io::{BufReader, LineReader};
 ///
 /// let mut reader = LineReader::new(BufReader::new(socket));
+/// // Keep the String across calls. A read cancelled mid-line leaves the
+/// // complete part of the line here and the partial codepoint in `reader`;
+/// // a fresh String per call would drop the start of the line.
+/// let mut line = String::new();
 /// loop {
-///     let mut line = String::new();
-///     // Even if this future is cancelled mid-codepoint, the prefix
-///     // is preserved in `reader` for the next iteration.
 ///     let n = reader.read_line(&mut line).await?;
 ///     if n == 0 { break; }
 ///     handle_line(&line);
+///     line.clear();
 /// }
 /// ```
 #[derive(Debug)]
