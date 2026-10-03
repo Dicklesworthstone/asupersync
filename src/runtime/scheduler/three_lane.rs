@@ -6456,6 +6456,8 @@ impl ThreeLaneWorker {
             >,
         )> = Vec::with_capacity(commands.len());
         let mut finalizer_publications = Vec::new();
+        let mut watch_wakers = Vec::new();
+        let mut watch_retries = Vec::new();
         {
             let mut state = self
                 .state
@@ -6466,6 +6468,14 @@ impl ThreeLaneWorker {
                     crate::runtime::spawn_mailbox::RegionCommand::Create(request) => {
                         let (slot, outcome) = state.open_child_region_command(request);
                         publications.push((slot, outcome));
+                    }
+                    crate::runtime::spawn_mailbox::RegionCommand::Watch(command) => {
+                        match state.apply_watch_command(command, self.task_table.as_ref()) {
+                            crate::monitor::WatchApply::Done(waker) => watch_wakers.extend(waker),
+                            crate::monitor::WatchApply::Retry(command) => {
+                                watch_retries.push(command);
+                            }
+                        }
                     }
                     crate::runtime::spawn_mailbox::RegionCommand::RegisterFinalizer(request) => {
                         finalizer_publications.push(request.apply(&mut state));
@@ -6510,6 +6520,16 @@ impl ThreeLaneWorker {
         }
         for publication in finalizer_publications {
             publication.publish();
+        }
+        for waker in watch_wakers {
+            waker.wake();
+        }
+        // A watch on a spawn that is not admitted yet goes to the back of
+        // the lane; the spawn's admission is drained ahead of it.
+        for command in watch_retries {
+            mailbox.enqueue_region_command(crate::runtime::spawn_mailbox::RegionCommand::Watch(
+                command,
+            ));
         }
         count
     }

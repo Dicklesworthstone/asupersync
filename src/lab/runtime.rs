@@ -4106,11 +4106,19 @@ impl LabRuntime {
             >,
         )> = Vec::with_capacity(commands.len());
         let mut finalizer_publications = Vec::new();
+        let mut watch_wakers = Vec::new();
+        let mut watch_retries = Vec::new();
         for command in commands {
             match command {
                 crate::runtime::spawn_mailbox::RegionCommand::Create(request) => {
                     let (slot, outcome) = self.state.open_child_region_command(request);
                     publications.push((slot, outcome));
+                }
+                crate::runtime::spawn_mailbox::RegionCommand::Watch(command) => {
+                    match self.state.apply_watch_command(command, None) {
+                        crate::monitor::WatchApply::Done(waker) => watch_wakers.extend(waker),
+                        crate::monitor::WatchApply::Retry(command) => watch_retries.push(command),
+                    }
                 }
                 crate::runtime::spawn_mailbox::RegionCommand::RegisterFinalizer(request) => {
                     finalizer_publications.push(request.apply(&mut self.state));
@@ -4141,6 +4149,14 @@ impl LabRuntime {
         }
         for publication in finalizer_publications {
             publication.publish();
+        }
+        for waker in watch_wakers {
+            waker.wake();
+        }
+        for command in watch_retries {
+            self.spawn_mailbox.enqueue_region_command(
+                crate::runtime::spawn_mailbox::RegionCommand::Watch(command),
+            );
         }
     }
 

@@ -1449,6 +1449,9 @@ pub(crate) enum RegionCommand {
     /// `Drop` backstop for abandoned handles (whose body may still be
     /// running; the close protocol cancels whatever remains).
     Close { region_id: RegionId },
+    /// Establish or remove a runtime monitor or link
+    /// (br-asupersync-issue65-criticisms-kpmoy5.6.1).
+    Watch(crate::monitor::WatchCommand),
 }
 
 /// Crate-private finalizer admission with an owned acknowledgment. A rejected

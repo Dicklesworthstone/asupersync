@@ -744,6 +744,224 @@ impl ExitBatch {
 }
 
 // ============================================================================
+// Runtime links (br-asupersync-issue65-criticisms-kpmoy5.6.1)
+// ============================================================================
+
+/// The slot behind a [`Link`]: the link reference and the peer's canonical
+/// id, then, for a trapping link, the peer's exit signal.
+pub(crate) type LinkSlot = crate::monitor::WatchSlot<(LinkRef, TaskId), ExitSignal>;
+
+/// Future returned by [`Cx::link`](crate::cx::Cx::link) and
+/// [`Cx::link_trapping`](crate::cx::Cx::link_trapping): resolves once the
+/// runtime has established the link.
+///
+/// Dropping it before it resolves withdraws the request.
+#[must_use = "futures do nothing unless polled"]
+pub struct LinkOpening {
+    pending: Option<crate::monitor::PendingWatch<LinkSlot>>,
+    failed: Option<crate::monitor::WatchError>,
+}
+
+impl std::fmt::Debug for LinkOpening {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LinkOpening")
+            .field("peer", &self.pending.as_ref().map(|p| p.target))
+            .field("failed", &self.failed)
+            .finish()
+    }
+}
+
+impl std::future::Future for LinkOpening {
+    type Output = Result<Link, crate::monitor::WatchError>;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        task_cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let this = self.get_mut();
+        if let Some(error) = this.failed.take() {
+            return std::task::Poll::Ready(Err(error));
+        }
+        let Some(pending) = this.pending.as_ref() else {
+            return std::task::Poll::Ready(Err(crate::monitor::WatchError::RuntimeUnavailable));
+        };
+        let result = std::task::ready!(
+            pending
+                .slot
+                .poll_established(&pending.gateway, task_cx.waker())
+        );
+        let pending = this.pending.take().expect("pending link opening");
+        std::task::Poll::Ready(result.map(|(link_ref, peer)| Link {
+            link_ref,
+            peer,
+            slot: pending.slot,
+            gateway: pending.gateway,
+        }))
+    }
+}
+
+impl Drop for LinkOpening {
+    fn drop(&mut self) {
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        if let Some((link_ref, _)) = pending.slot.abandon() {
+            let _ = pending.gateway.enqueue_region_command(
+                crate::runtime::spawn_mailbox::RegionCommand::Watch(
+                    crate::monitor::WatchCommand::Unlink { link_ref },
+                ),
+            );
+        }
+    }
+}
+
+/// A runtime link between the calling task and a peer, returned by
+/// [`Cx::link`](crate::cx::Cx::link) and
+/// [`Cx::link_trapping`](crate::cx::Cx::link_trapping).
+///
+/// When either task finishes abnormally (error, cancellation or panic), the
+/// runtime requests cancellation of the other, with a
+/// [`CancelKind::LinkedExit`] reason that carries the cause. A link made
+/// with `link_trapping` instead delivers the peer's exit to this handle as an
+/// [`ExitSignal`] (including a normal exit), and the calling task keeps
+/// running; await it with [`Link::exit`].
+///
+/// The link lasts until either task finishes or [`Link::unlink`] is called.
+/// Dropping this handle does not unlink.
+pub struct Link {
+    link_ref: LinkRef,
+    peer: TaskId,
+    slot: std::sync::Arc<LinkSlot>,
+    gateway: std::sync::Arc<crate::runtime::spawn_mailbox::SpawnGateway>,
+}
+
+impl std::fmt::Debug for Link {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Link")
+            .field("link_ref", &self.link_ref)
+            .field("peer", &self.peer)
+            .field("exit", &self.try_exit())
+            .finish()
+    }
+}
+
+impl Link {
+    /// The reference the runtime assigned to this link; it is repeated in an
+    /// [`ExitSignal`].
+    #[must_use]
+    pub fn link_ref(&self) -> LinkRef {
+        self.link_ref
+    }
+
+    /// The linked task.
+    #[must_use]
+    pub fn peer(&self) -> TaskId {
+        self.peer
+    }
+
+    /// Returns the peer's exit signal if this is a trapping link and the
+    /// peer has finished.
+    #[must_use]
+    pub fn try_exit(&self) -> Option<ExitSignal> {
+        self.slot.notice()
+    }
+
+    /// Waits for the peer's exit signal on a trapping link. Once delivered,
+    /// later calls return the same signal immediately.
+    ///
+    /// On a non-trapping link the peer's abnormal exit cancels this task
+    /// instead, so this returns [`WatchError::Cancelled`](crate::monitor::WatchError::Cancelled)
+    /// then; after a normal peer exit it does not resolve.
+    ///
+    /// # Errors
+    ///
+    /// [`WatchError::Cancelled`](crate::monitor::WatchError::Cancelled) if
+    /// the waiting task is cancelled first, and
+    /// [`WatchError::RuntimeUnavailable`](crate::monitor::WatchError::RuntimeUnavailable)
+    /// if the runtime shuts down first.
+    pub async fn exit<Caps>(
+        &self,
+        cx: &crate::cx::Cx<Caps>,
+    ) -> Result<ExitSignal, crate::monitor::WatchError> {
+        std::future::poll_fn(|task_cx| self.slot.poll_notice(cx, &self.gateway, task_cx.waker()))
+            .await
+    }
+
+    /// Removes the link. Exits after this point are not propagated.
+    pub fn unlink(self) {
+        let _ = self.gateway.enqueue_region_command(
+            crate::runtime::spawn_mailbox::RegionCommand::Watch(
+                crate::monitor::WatchCommand::Unlink {
+                    link_ref: self.link_ref,
+                },
+            ),
+        );
+    }
+}
+
+impl<Caps> crate::cx::Cx<Caps> {
+    /// Links the calling task with `peer`, OTP style: when either finishes
+    /// abnormally (error, cancellation or panic), the runtime requests
+    /// cancellation of the other. A normal exit just removes the link.
+    ///
+    /// `peer` is a [`TaskId`] or a reference to a
+    /// [`TaskHandle`](crate::runtime::TaskHandle); pass the handle of a task
+    /// you just spawned. The returned future
+    /// resolves once the runtime has established the link. It fails with
+    /// [`WatchError::NotFound`](crate::monitor::WatchError::NotFound) if the
+    /// peer already finished (or its spawn was denied), and with
+    /// [`WatchError::RuntimeUnavailable`](crate::monitor::WatchError::RuntimeUnavailable)
+    /// if this context has no running runtime.
+    pub fn link(&self, peer: impl Into<crate::monitor::WatchTarget>) -> LinkOpening {
+        self.open_link(peer.into(), ExitPolicy::Propagate)
+    }
+
+    /// Links the calling task with `peer`, trapping the peer's exits: when
+    /// `peer` finishes, for any reason, the returned [`Link`] receives an
+    /// [`ExitSignal`] and the calling task keeps running. When the calling
+    /// task finishes abnormally, `peer` is still cancelled.
+    pub fn link_trapping(&self, peer: impl Into<crate::monitor::WatchTarget>) -> LinkOpening {
+        self.open_link(peer.into(), ExitPolicy::Trap)
+    }
+
+    fn open_link(&self, peer: crate::monitor::WatchTarget, task_policy: ExitPolicy) -> LinkOpening {
+        let Some(gateway) = self.spawn_gateway_handle() else {
+            return LinkOpening {
+                pending: None,
+                failed: Some(crate::monitor::WatchError::RuntimeUnavailable),
+            };
+        };
+        let slot = std::sync::Arc::new(LinkSlot::default());
+        let peer_id = peer.id();
+        let command = crate::monitor::WatchCommand::Link {
+            task: self.task_id(),
+            task_region: self.region_id(),
+            task_policy,
+            peer,
+            slot: std::sync::Arc::clone(&slot),
+            attempts: 0,
+        };
+        if gateway
+            .enqueue_region_command(crate::runtime::spawn_mailbox::RegionCommand::Watch(command))
+            .is_err()
+        {
+            return LinkOpening {
+                pending: None,
+                failed: Some(crate::monitor::WatchError::RuntimeUnavailable),
+            };
+        }
+        LinkOpening {
+            pending: Some(crate::monitor::PendingWatch {
+                target: peer_id,
+                slot,
+                gateway,
+            }),
+            failed: None,
+        }
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

@@ -2453,3 +2453,18 @@ mod tests {
         crate::test_complete!("task_handle_snapshot_scrubs_ids");
     }
 }
+
+// Monitor and link targets (br-asupersync-issue65-criticisms-kpmoy5.6.1).
+impl<T> TaskHandle<T> {
+    /// The id this handle reports now and, for a mailbox spawn, the slot that
+    /// admission fills with the canonical id. A monitor or link made right
+    /// after the spawn resolves the canonical id through the slot.
+    pub(crate) fn watch_target_parts(
+        &self,
+    ) -> (
+        TaskId,
+        Option<Arc<crate::runtime::spawn_mailbox::AdmittedTaskSlot>>,
+    ) {
+        (self.task_id(), self.admitted.clone())
+    }
+}

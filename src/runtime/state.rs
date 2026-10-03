@@ -724,6 +724,9 @@ pub struct TaskCompletionObserver {
     panic_count: Option<Arc<AtomicU64>>,
     retired_cancel_wakers: TaskCompletionRetirements,
     epoch_telemetry: Option<super::epoch_tracker::EpochTelemetryDispatch>,
+    /// Monitor and link effects of this task's exit
+    /// (br-asupersync-issue65-criticisms-kpmoy5.6.1).
+    watch_effects: Option<crate::monitor::WatchEffects>,
 }
 
 enum TaskCompletionObserverPayload {
@@ -765,6 +768,7 @@ impl TaskCompletionObserver {
             panic_count: Some(Arc::clone(panic_count)),
             retired_cancel_wakers: TaskCompletionRetirements::empty(),
             epoch_telemetry: None,
+            watch_effects: None,
         }
     }
 
@@ -774,6 +778,7 @@ impl TaskCompletionObserver {
             panic_count: Some(Arc::clone(panic_count)),
             retired_cancel_wakers: TaskCompletionRetirements::empty(),
             epoch_telemetry: None,
+            watch_effects: None,
         }
     }
 
@@ -781,6 +786,13 @@ impl TaskCompletionObserver {
         if !telemetry.is_empty() {
             debug_assert!(self.epoch_telemetry.is_none());
             self.epoch_telemetry = Some(telemetry);
+        }
+    }
+
+    fn attach_watch_effects(&mut self, effects: Option<crate::monitor::WatchEffects>) {
+        if effects.is_some() {
+            debug_assert!(self.watch_effects.is_none());
+            self.watch_effects = effects;
         }
     }
 
@@ -792,6 +804,12 @@ impl TaskCompletionObserver {
     /// caught panic increments this runtime's callback-free atomic failure
     /// counter once for this dispatch without invoking another observer.
     pub fn dispatch(mut self) {
+        // Monitors and links first: the caller released the runtime-state
+        // lock, and DOWN delivery, exit signals and linked cancellation
+        // requests contain their own waker panics.
+        if let Some(effects) = self.watch_effects.take() {
+            effects.dispatch();
+        }
         let Some(panic_count) = self.panic_count.take() else {
             return;
         };
@@ -876,6 +894,12 @@ impl TaskCompletionObserver {
 
 impl Drop for TaskCompletionObserver {
     fn drop(&mut self) {
+        // Undelivered watch effects hold slot Arcs whose stored Wakers may run
+        // arbitrary destructors; an abandoned token may sit under the
+        // runtime-state lock, so leak them like the payload.
+        if let Some(effects) = self.watch_effects.take() {
+            std::mem::forget(effects);
+        }
         let Some(payload) = self.payload.take() else {
             return;
         };
@@ -1872,6 +1896,10 @@ pub struct RuntimeState {
     /// remain outside this notification boundary.
     pending_cancel_dispatch_coordinator:
         Option<std::sync::Weak<crate::runtime::scheduler::three_lane::WorkerCoordinator>>,
+    /// Live runtime monitors and links, fired when a watched task finishes
+    /// (br-asupersync-issue65-criticisms-kpmoy5.6.1). Empty unless a task
+    /// called `Cx::monitor`, `Cx::link` or `Cx::link_trapping`.
+    task_watches: crate::monitor::TaskWatches,
     /// Shard-table handle bundle for `with_sharded_state` builds
     /// (E2 S4c-2c-iv, br-asupersync-m9wsza).
     ///
@@ -2139,6 +2167,7 @@ impl RuntimeState {
             pending_cancel_dispatches: Vec::new(),
             pending_cancel_dispatch_ready: Arc::new(AtomicBool::new(false)),
             pending_cancel_dispatch_coordinator: None,
+            task_watches: crate::monitor::TaskWatches::default(),
             shard_tables: None,
             // br-asupersync-qp2tfx: internal constructors Panic on obligation
             // leak so the lab/test paths surface bugs the same way the
@@ -4567,6 +4596,46 @@ impl RuntimeState {
 
     /// Scheduler routing includes its external-only task table, which need
     /// not install a complete ShardedState bundle.
+    /// Applies a monitor or link command (kpmoy5.6.1). A target is live while
+    /// its record exists and is not terminal; it is looked up in the table
+    /// that owns task records for this runtime shape (shard A, the worker's
+    /// external dispatch table, or the embedded table), locked after this
+    /// state in canonical B -> A order. The caller wakes a returned waker,
+    /// and enqueues a returned retry again, after releasing the state lock.
+    pub(crate) fn apply_watch_command(
+        &mut self,
+        command: crate::monitor::WatchCommand,
+        task_table: Option<&Arc<crate::sync::ContendedMutex<TaskTable>>>,
+    ) -> crate::monitor::WatchApply {
+        fn live_owner(table: &TaskTable, task: TaskId) -> Option<RegionId> {
+            table
+                .task(task)
+                .filter(|record| !record.state.is_terminal())
+                .map(|record| record.owner)
+        }
+        let shards = self.shard_tables.clone();
+        let external = match (shards.as_ref(), task_table) {
+            (Some(shards), _) => Some(
+                shards
+                    .tasks
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ),
+            (None, Some(table)) => Some(
+                table
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ),
+            (None, None) => None,
+        };
+        let embedded = &self.tasks;
+        self.task_watches
+            .apply(command, |task| match external.as_deref() {
+                Some(table) => live_owner(table, task),
+                None => live_owner(embedded, task),
+            })
+    }
+
     pub(crate) fn close_region_command_in_task_table(
         &mut self,
         region_id: RegionId,
@@ -7763,6 +7832,22 @@ impl RuntimeState {
         // was either detached from shard A before entry (external arm) or
         // still lives embedded (unified arm) — identical logical-time
         // observations either way.
+        //
+        // Monitors and links (kpmoy5.6.1) are resolved first, while the
+        // outcome is still borrowed: the effects ride the completion observer
+        // and are delivered after the lock is released. No watch means one
+        // emptiness check.
+        let watch_effects = if self.task_watches.is_empty() {
+            None
+        } else {
+            let now = self
+                .timer_driver
+                .as_ref()
+                .map_or(self.now, TimerDriverHandle::now);
+            let gateway = self.spawn_gateway.clone();
+            self.task_watches
+                .on_task_completed(task_id, close_outcome.as_ref(), now, gateway)
+        };
         match self.shard_tables.clone() {
             Some(shards) => {
                 let mut deferred = Vec::new();
@@ -7842,6 +7927,7 @@ impl RuntimeState {
 
         let mut observer = observer;
         observer.attach_epoch_telemetry(self.take_epoch_telemetry());
+        observer.attach_watch_effects(watch_effects);
         TaskCompletionEffects {
             waiters,
             observer,
