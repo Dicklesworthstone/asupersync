@@ -22,11 +22,27 @@ use asupersync::channel::mpsc;
 use asupersync::cx::Cx;
 use asupersync::lab::run_async_under_lab;
 use asupersync::runtime::yield_now;
-use asupersync::stream::{for_each_concurrent, iter, try_for_each_concurrent};
+use asupersync::stream::{Stream, for_each_concurrent, iter, try_for_each_concurrent};
 use asupersync::sync::{OwnedSemaphorePermit, Semaphore};
 use asupersync::types::Outcome;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll};
+
+/// Yields its items, then stays pending without ever waking its reader, like
+/// a channel nobody sends on any more.
+struct QuietAfter(std::ops::Range<usize>);
+
+impl Stream for QuietAfter {
+    type Item = usize;
+
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<usize>> {
+        self.0
+            .next()
+            .map_or(Poll::Pending, |item| Poll::Ready(Some(item)))
+    }
+}
 
 /// Parks cooperatively until cancellation is observed, then records it.
 ///
@@ -455,6 +471,97 @@ fn concurrent_terminal_drains_in_flight_items_when_the_caller_is_cancelled() {
         MEMBERS,
         "every in-flight item must observe cancellation - if this is short, the \
          items were abandoned rather than drained"
+    );
+    assert!(
+        report.quiescent && report.invariant_violations.is_empty(),
+        "run must reach quiescence with no invariant violations: quiescent={} violations={:?}",
+        report.quiescent,
+        report.invariant_violations
+    );
+}
+
+/// While waiting for the next item the drive loop must still see members
+/// finish. Parked on the source alone, it never saw item 0 fail, so a quiet
+/// source kept the call from ever returning.
+#[test]
+fn a_member_failure_ends_the_call_while_the_source_is_quiet() {
+    let (outcome, report) = run_async_under_lab(0xB09, |cx| async move {
+        try_for_each_concurrent(&cx, QuietAfter(0..1), 2, |_item_cx, _item| async move {
+            Err::<(), &'static str>("first item fails")
+        })
+        .await
+    });
+
+    assert!(
+        matches!(outcome, Outcome::Err("first item fails")),
+        "the failure must end the call although no further item arrives: {outcome:?}"
+    );
+    assert!(
+        report.quiescent && report.invariant_violations.is_empty(),
+        "run must reach quiescence with no invariant violations: quiescent={} violations={:?}",
+        report.quiescent,
+        report.invariant_violations
+    );
+}
+
+/// The caller-cancellation drain, with the source quiet and room for one more
+/// item: the drive loop waits on the source, not on a completion, when the
+/// cancellation lands.
+#[test]
+fn cancelling_the_caller_drains_items_while_the_source_is_quiet() {
+    const MEMBERS: usize = 3;
+
+    let started = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::new(AtomicUsize::new(0));
+
+    let (_joined, report) = run_async_under_lab(0xB0A, {
+        let started = Arc::clone(&started);
+        let observed = Arc::clone(&observed);
+        move |cx| async move {
+            let driver_started = Arc::clone(&started);
+            let driver_observed = Arc::clone(&observed);
+            let outer_started = Arc::clone(&started);
+
+            let mut handle = cx
+                .spawn(move |task_cx| async move {
+                    try_for_each_concurrent(
+                        &task_cx,
+                        QuietAfter(0..MEMBERS),
+                        MEMBERS + 1,
+                        move |item_cx, _item| {
+                            let started = Arc::clone(&driver_started);
+                            let observed = Arc::clone(&driver_observed);
+                            async move {
+                                started.fetch_add(1, Ordering::SeqCst);
+                                parks_until_cancelled(item_cx, observed).await
+                            }
+                        },
+                    )
+                    .await
+                })
+                .expect("spawn driver task");
+
+            let mut guard = 0usize;
+            while outer_started.load(Ordering::SeqCst) < MEMBERS {
+                yield_now().await;
+                guard += 1;
+                assert!(guard < 10_000, "items never reached the in-flight state");
+            }
+
+            handle.abort();
+            handle.join(&cx).await
+        }
+    });
+
+    assert_eq!(
+        started.load(Ordering::SeqCst),
+        MEMBERS,
+        "every item must have been in flight when the cancellation landed"
+    );
+    assert_eq!(
+        observed.load(Ordering::SeqCst),
+        MEMBERS,
+        "every in-flight item must observe cancellation although the source is quiet"
     );
     assert!(
         report.quiescent && report.invariant_violations.is_empty(),
