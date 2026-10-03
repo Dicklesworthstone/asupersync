@@ -106,7 +106,9 @@ where
         assert!(limit > 0, "try_buffered limit must be non-zero");
         Self {
             stream,
-            in_flight: VecDeque::with_capacity(limit),
+            // `limit` may be a huge "unbounded" value: reserving it up front
+            // overflowed the capacity (usize::MAX) or aborted the allocation.
+            in_flight: VecDeque::with_capacity(limit.min(TRY_BUFFERED_ADMISSION_BUDGET)),
             limit,
             done: false,
             failed: false,
@@ -224,8 +226,18 @@ where
         let stale = epoch.wrapping_sub(1);
         let mut budget_exhausted = false;
 
+        // An `Err` already waiting at the front ends the stream on this poll:
+        // admitting first would take more items from the source only to drop
+        // them unpolled.
+        let front_failed = matches!(
+            self.in_flight.front(),
+            Some(TryBufferedEntry {
+                output: Some(Err(_)),
+                ..
+            })
+        );
         let mut admitted_this_poll = 0usize;
-        while !self.done && self.in_flight.len() < self.limit {
+        while !front_failed && !self.done && self.in_flight.len() < self.limit {
             if admitted_this_poll >= TRY_BUFFERED_ADMISSION_BUDGET {
                 budget_exhausted = true;
                 break;
@@ -636,6 +648,39 @@ mod tests {
     fn try_buffered_rejects_zero_limit() {
         let futures: Vec<DelayedResult> = Vec::new();
         let _ = TryBuffered::new(iter(futures), 0);
+    }
+
+    #[test]
+    fn try_buffered_stops_taking_items_once_an_err_waits_at_the_front() {
+        init_test("try_buffered_stops_taking_items_once_an_err_waits_at_the_front");
+        // After Ok(1) is yielded, the Err is already ready at the front. The
+        // next poll used to admit Ok(4) from the source first, then drop it.
+        let futures = vec![
+            DelayedResult::new(0, Ok(1)),
+            DelayedResult::new(0, Err("boom")),
+            DelayedResult::new(0, Ok(3)),
+            DelayedResult::new(0, Ok(4)),
+        ];
+        let mut stream = TryBuffered::new(iter(futures), 3);
+        assert_eq!(next_item(&mut stream), Some(Ok(1)));
+        assert_eq!(next_item(&mut stream), Some(Err("boom")));
+        assert_eq!(
+            stream.get_ref().size_hint(),
+            (1, Some(1)),
+            "Ok(4) must still be in the source"
+        );
+        crate::test_complete!("try_buffered_stops_taking_items_once_an_err_waits_at_the_front");
+    }
+
+    #[test]
+    fn try_buffered_accepts_an_unbounded_limit() {
+        init_test("try_buffered_accepts_an_unbounded_limit");
+        let futures = vec![DelayedResult::new(1, Ok(1)), DelayedResult::new(0, Ok(2))];
+        let mut stream = TryBuffered::new(iter(futures), usize::MAX);
+        assert_eq!(next_item(&mut stream), Some(Ok(1)));
+        assert_eq!(next_item(&mut stream), Some(Ok(2)));
+        assert_eq!(next_item(&mut stream), None);
+        crate::test_complete!("try_buffered_accepts_an_unbounded_limit");
     }
 
     #[test]

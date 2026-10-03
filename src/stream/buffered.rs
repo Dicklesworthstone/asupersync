@@ -81,7 +81,9 @@ where
         assert!(limit > 0, "buffered limit must be non-zero");
         Self {
             stream,
-            in_flight: VecDeque::with_capacity(limit),
+            // `limit` may be a huge "unbounded" value: reserving it up front
+            // overflowed the capacity (usize::MAX) or aborted the allocation.
+            in_flight: VecDeque::with_capacity(limit.min(BUFFERED_ADMISSION_BUDGET)),
             limit,
             done: false,
             next_poll_index: 0,
@@ -339,7 +341,7 @@ where
         assert!(limit > 0, "buffer_unordered limit must be non-zero");
         Self {
             stream,
-            in_flight: VecDeque::with_capacity(limit),
+            in_flight: VecDeque::with_capacity(limit.min(BUFFERED_ADMISSION_BUDGET)),
             limit,
             done: false,
             poll_epoch: 0,
@@ -766,6 +768,21 @@ mod tests {
         let is_none = matches!(poll, Poll::Ready(None));
         crate::assert_with_log!(is_none, "empty stream yields None", true, is_none);
         crate::test_complete!("buffered_empty_stream_terminates");
+    }
+
+    /// An "unbounded" limit used to be reserved up front and overflowed.
+    #[test]
+    fn buffered_and_buffer_unordered_accept_an_unbounded_limit() {
+        init_test("buffered_and_buffer_unordered_accept_an_unbounded_limit");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut ordered = Buffered::new(iter(vec![std::future::ready(7)]), usize::MAX);
+        let poll = Pin::new(&mut ordered).poll_next(&mut cx);
+        assert!(matches!(poll, Poll::Ready(Some(7))), "{poll:?}");
+        let mut unordered = BufferUnordered::new(iter(vec![std::future::ready(8)]), usize::MAX);
+        let poll = Pin::new(&mut unordered).poll_next(&mut cx);
+        assert!(matches!(poll, Poll::Ready(Some(8))), "{poll:?}");
+        crate::test_complete!("buffered_and_buffer_unordered_accept_an_unbounded_limit");
     }
 
     /// Invariant: `BufferUnordered` on an empty stream yields `None` immediately.
