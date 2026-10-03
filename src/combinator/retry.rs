@@ -209,12 +209,15 @@ pub fn calculate_delay(policy: &RetryPolicy, attempt: u32, rng: Option<&mut DetR
     // Safely compute multiplier^exponent, avoiding overflow and non-finite results
     let multiplier_factor = if exponent == 0 {
         1.0
-    } else if exponent > 60 || policy.multiplier <= 0.0 || !policy.multiplier.is_finite() {
-        // Avoid extremely large exponents or invalid multipliers
+    } else if policy.multiplier <= 0.0 || !policy.multiplier.is_finite() {
+        // Avoid invalid multipliers
         f64::INFINITY
     } else {
-        // Limit exponent to reasonable range for powi()
-        let safe_exponent = exponent.min(60) as i32;
+        // powi saturates to infinity (or to 0 for a multiplier below 1), so
+        // no exponent needs special-casing. Forcing exponents above 60 to
+        // infinity made a constant (multiplier 1.0) backoff jump to
+        // max_delay at the 62nd attempt.
+        let safe_exponent = i32::try_from(exponent).unwrap_or(i32::MAX);
         let factor = policy.multiplier.powi(safe_exponent);
         if !factor.is_finite() {
             f64::INFINITY
@@ -460,6 +463,11 @@ impl RetryTokenBucket {
 
     /// Refills the bucket based on time elapsed.
     fn refill(&mut self, now: Time) {
+        // A time before the last refill adds nothing and must not move the
+        // mark back: the same interval would then be credited twice.
+        if now <= self.last_refill {
+            return;
+        }
         let elapsed_nanos = now.duration_since(self.last_refill);
         let elapsed_secs = elapsed_nanos as f64 / 1_000_000_000.0;
 
@@ -1065,6 +1073,43 @@ mod tests {
         let policy = RetryPolicy::new();
         let delay = calculate_delay(&policy, 0, None);
         assert_eq!(delay, Duration::ZERO);
+    }
+
+    /// With multiplier 1.0 the delay is the same at every attempt. Exponents
+    /// above 60 were forced to infinity, so the 62nd attempt jumped to
+    /// max_delay.
+    #[test]
+    fn constant_backoff_stays_constant_past_attempt_61() {
+        let policy = RetryPolicy::new()
+            .with_initial_delay(Duration::from_millis(100))
+            .with_max_delay(Duration::from_secs(30))
+            .with_multiplier(1.0)
+            .no_jitter();
+        for attempt in [1, 61, 62, 1000, u32::MAX] {
+            assert_eq!(
+                calculate_delay(&policy, attempt, None),
+                Duration::from_millis(100),
+                "attempt {attempt}"
+            );
+        }
+    }
+
+    /// A refill at a time before the last one moved the mark back, so the
+    /// next refill credited the same interval a second time.
+    #[test]
+    fn token_bucket_refill_ignores_a_clock_rewind() {
+        let mut bucket = RetryTokenBucket::new(10, 1.0, Time::from_secs(100));
+        assert!(bucket.try_consume(10, Time::from_secs(100)));
+        assert!(bucket.try_consume(1, Time::from_secs(105)));
+        assert_eq!(bucket.available_tokens(), 4);
+
+        assert!(bucket.try_consume(0, Time::from_secs(102)));
+        assert!(bucket.try_consume(0, Time::from_secs(105)));
+        assert_eq!(
+            bucket.available_tokens(),
+            4,
+            "the 102-105 s interval must not be credited twice"
+        );
     }
 
     #[test]
