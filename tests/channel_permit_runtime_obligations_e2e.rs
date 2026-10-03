@@ -688,3 +688,106 @@ fn native_region_close_aborts_a_permit_held_by_a_task_inside_it() {
         });
     }
 }
+
+/// Workers check the obligation mailbox with a lock-free emptiness test
+/// instead of locking RuntimeState on every dispatch
+/// (br-asupersync-issue65-criticisms-kpmoy5.1.2). A post that races the check
+/// must still be applied on a later dispatch. Eight producers on four workers
+/// reserve, commit and abort concurrently while spinner tasks keep the other
+/// workers dispatching. Every reservation must be resolved (none live, none a
+/// confirmed leak once its holder finished), and each producer's committed
+/// messages must arrive complete and in order.
+#[test]
+fn native_four_workers_concurrent_permits_all_resolve() {
+    const PRODUCERS: usize = 8;
+    const ROUNDS: u64 = 200;
+    let runtime = RuntimeBuilder::multi_thread()
+        .worker_threads(4)
+        .obligation_leak_response(ObligationLeakResponse::Log)
+        .build()
+        .expect("build four-worker runtime");
+    let diagnostics = runtime.diagnostics();
+    let (received, holders, settled) = runtime.block_on(async {
+        let cx = Cx::current().expect("block_on installs a root Cx");
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut spinners = Vec::new();
+        for _ in 0..4 {
+            let stop = Arc::clone(&stop);
+            spinners.push(
+                cx.spawn(move |_| async move {
+                    while !stop.load(std::sync::atomic::Ordering::Acquire) {
+                        yield_now().await;
+                    }
+                })
+                .expect("spawn spinner"),
+            );
+        }
+        let (tx, mut rx) = mpsc::channel::<(usize, u64)>(64);
+        let mut producers = Vec::new();
+        for producer in 0..PRODUCERS {
+            let tx = tx.clone();
+            producers.push(
+                cx.spawn(move |task_cx| async move {
+                    for round in 0..ROUNDS {
+                        let permit = tx.reserve(&task_cx).await.expect("reserve capacity");
+                        if round % 3 == 2 {
+                            drop(permit); // abort
+                        } else {
+                            permit
+                                .try_send((producer, round))
+                                .expect("receiver is live");
+                        }
+                        if round % 7 == 0 {
+                            yield_now().await;
+                        }
+                    }
+                    task_cx.task_id()
+                })
+                .expect("spawn producer"),
+            );
+        }
+        drop(tx);
+        let mut received = Vec::new();
+        while let Ok(message) = rx.recv(&cx).await {
+            received.push(message);
+        }
+        let mut holders = Vec::new();
+        for mut producer in producers {
+            holders.push(producer.join(&cx).await.expect("producer finishes"));
+        }
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        for mut spinner in spinners {
+            spinner.join(&cx).await.expect("spinner finishes");
+        }
+        let settled = yield_until(|| {
+            holders
+                .iter()
+                .all(|holder| live(&diagnostics, *holder, ObligationKind::SendPermit).is_empty())
+        })
+        .await;
+        (received, holders, settled)
+    });
+
+    assert!(settled, "every reservation's obligation is resolved");
+    for holder in &holders {
+        assert!(
+            confirmed(&diagnostics, *holder, ObligationKind::SendPermit).is_empty(),
+            "no producer leaks a permit; confirmed = {:?}",
+            diagnostics.find_confirmed_obligation_leaks()
+        );
+    }
+    let committed_per_producer = (0..ROUNDS).filter(|round| round % 3 != 2).count();
+    assert_eq!(received.len(), PRODUCERS * committed_per_producer);
+    for producer in 0..PRODUCERS {
+        let rounds: Vec<u64> = received
+            .iter()
+            .filter(|(p, _)| *p == producer)
+            .map(|(_, round)| *round)
+            .collect();
+        let expected: Vec<u64> = (0..ROUNDS).filter(|round| round % 3 != 2).collect();
+        assert_eq!(
+            rounds, expected,
+            "producer {producer}: every committed message, in order"
+        );
+    }
+}

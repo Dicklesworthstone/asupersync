@@ -436,6 +436,10 @@ pub struct TimerDriver<T: TimeSource = VirtualClock> {
     /// Conservative deadline observed by reactor pollers. Accessed only while
     /// holding `wheel`; cancellation may leave an earlier, harmless value.
     observed_deadline: AtomicU64,
+    /// True while the wheel holds an active timer. Written only while holding
+    /// `wheel`, after every change to its active set, so `process_timers` can
+    /// skip the lock when nothing can expire.
+    armed: AtomicBool,
     /// Weak registrations avoid cycles through reactor task wakers and allow
     /// an explicitly shared timer driver to notify more than one runtime.
     deadline_reactors: Mutex<Vec<Weak<dyn Reactor>>>,
@@ -450,8 +454,16 @@ impl<T: TimeSource> TimerDriver<T> {
             clock,
             wheel: Mutex::new(TimerWheel::new_at(now)),
             observed_deadline: AtomicU64::new(u64::MAX),
+            armed: AtomicBool::new(false),
             deadline_reactors: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Publishes whether `wheel` (whose lock the caller holds) has an active
+    /// timer.
+    #[inline]
+    fn publish_armed(&self, wheel: &TimerWheel) {
+        self.armed.store(!wheel.is_empty(), Ordering::Release);
     }
 
     /// Returns the current time from the underlying clock.
@@ -472,6 +484,7 @@ impl<T: TimeSource> TimerDriver<T> {
         wheel.synchronize(now);
         crate::runtime::metrics::record_timer_registered();
         let handle = wheel.register(deadline, waker);
+        self.publish_armed(&wheel);
         let earlier = self.advance_reactor_deadline(&mut wheel, deadline);
         drop(wheel);
         if earlier {
@@ -498,6 +511,7 @@ impl<T: TimeSource> TimerDriver<T> {
         } else {
             (*handle, false)
         };
+        self.publish_armed(&wheel);
         drop(wheel);
         if earlier {
             self.wake_deadline_reactors();
@@ -563,7 +577,12 @@ impl<T: TimeSource> TimerDriver<T> {
     ///
     /// Returns true if the timer was active and is now cancelled.
     pub fn cancel(&self, handle: &TimerHandle) -> bool {
-        let cancelled = self.wheel.lock().cancel(handle);
+        let cancelled = {
+            let mut wheel = self.wheel.lock();
+            let cancelled = wheel.cancel(handle);
+            self.publish_armed(&wheel);
+            cancelled
+        };
         if cancelled {
             crate::runtime::metrics::record_timer_cancelled();
         }
@@ -607,18 +626,27 @@ impl<T: TimeSource> TimerDriver<T> {
     /// Helper to collect expired wakers while holding the lock.
     ///
     /// Schedulers process timers before every dispatch. With no timer
-    /// registered nothing can expire, so the clock is not read: every
-    /// registration synchronizes the wheel to the clock itself, and an empty
-    /// wheel jumps straight to the new time
-    /// (br-asupersync-issue65-criticisms-kpmoy5.1.3).
+    /// registered nothing can expire, so neither the lock nor the clock is
+    /// taken: every registration synchronizes the wheel to the clock itself,
+    /// and an empty wheel jumps straight to the new time
+    /// (br-asupersync-issue65-criticisms-kpmoy5.1.3). A registration that
+    /// races this check is seen by a later dispatch, exactly as if this check
+    /// had taken the lock just before it. Workers size their park with
+    /// [`Self::next_deadline`], which takes the lock, so the race cannot
+    /// strand a timer behind a park.
     #[inline]
     #[allow(clippy::significant_drop_tightening)]
     fn collect_expired(&self) -> WakerBatch {
+        if !self.armed.load(Ordering::Acquire) {
+            return WakerBatch::new();
+        }
         let mut wheel = self.wheel.lock();
         if wheel.is_empty() {
             return WakerBatch::new();
         }
-        wheel.collect_expired(self.clock.now())
+        let expired = wheel.collect_expired(self.clock.now());
+        self.publish_armed(&wheel);
+        expired
     }
 
     /// Returns the number of pending timers.
@@ -637,7 +665,9 @@ impl<T: TimeSource> TimerDriver<T> {
 
     /// Clears all pending timers without firing them.
     pub fn clear(&self) {
-        self.wheel.lock().clear();
+        let mut wheel = self.wheel.lock();
+        wheel.clear();
+        self.publish_armed(&wheel);
     }
 }
 
@@ -1520,6 +1550,7 @@ mod tests {
         let driver = TimerDriver {
             clock: clock.clone(),
             observed_deadline: AtomicU64::new(u64::MAX),
+            armed: AtomicBool::new(false),
             deadline_reactors: Mutex::new(Vec::new()),
             wheel: Mutex::new(TimerWheel::with_config(
                 Time::ZERO,
@@ -1648,6 +1679,87 @@ mod tests {
             cancelled_after_fire
         );
         crate::test_complete!("timer_driver_register_resamples_clock_after_waiting_for_wheel_lock");
+    }
+
+    /// Runs `process_timers` on another thread while this thread holds the
+    /// wheel lock. Returns its result if it finished within `wait`.
+    fn process_timers_while_wheel_locked(
+        driver: &Arc<TimerDriver>,
+        wait: Duration,
+    ) -> Option<usize> {
+        let wheel_guard = driver.wheel.lock();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let driver_for_thread = Arc::clone(driver);
+        let worker = std::thread::spawn(move || {
+            let _ = tx.send(driver_for_thread.process_timers());
+        });
+        let fired = rx.recv_timeout(wait).ok();
+        drop(wheel_guard);
+        worker.join().expect("process_timers thread");
+        fired
+    }
+
+    #[test]
+    fn timer_driver_idle_process_timers_takes_no_wheel_lock() {
+        init_test("timer_driver_idle_process_timers_takes_no_wheel_lock");
+        let clock = Arc::new(VirtualClock::new());
+        let driver = Arc::new(TimerDriver::with_clock(clock.clone()));
+
+        // Never armed: an idle dispatch returns without waiting for the lock.
+        let idle = process_timers_while_wheel_locked(&driver, Duration::from_secs(5));
+        crate::assert_with_log!(
+            idle == Some(0),
+            "process_timers on a never-armed wheel finishes while the wheel lock is held",
+            Some(0usize),
+            idle
+        );
+
+        // Armed: the same call must take the lock (planted negative; it shows
+        // the probe observes the locking path).
+        let handle = driver.register(Time::from_secs(1), futures_waker());
+        let armed = process_timers_while_wheel_locked(&driver, Duration::from_millis(200));
+        crate::assert_with_log!(
+            armed.is_none(),
+            "process_timers with an armed timer waits for the wheel lock",
+            None::<usize>,
+            armed
+        );
+
+        // Cancelled: idle again.
+        let cancelled = driver.cancel(&handle);
+        crate::assert_with_log!(cancelled, "the armed timer cancels", true, cancelled);
+        let after_cancel = process_timers_while_wheel_locked(&driver, Duration::from_secs(5));
+        crate::assert_with_log!(
+            after_cancel == Some(0),
+            "process_timers after the last timer is cancelled takes no lock",
+            Some(0usize),
+            after_cancel
+        );
+
+        // Fired: idle again once the last timer has expired.
+        let _ = driver.register(Time::from_secs(1), futures_waker());
+        clock.advance(2_000_000_000);
+        let fired = driver.process_timers();
+        crate::assert_with_log!(fired == 1, "the due timer fires", 1usize, fired);
+        let after_fire = process_timers_while_wheel_locked(&driver, Duration::from_secs(5));
+        crate::assert_with_log!(
+            after_fire == Some(0),
+            "process_timers after the last timer fired takes no lock",
+            Some(0usize),
+            after_fire
+        );
+
+        // Cleared: idle again.
+        let _ = driver.register(Time::from_secs(10), futures_waker());
+        driver.clear();
+        let after_clear = process_timers_while_wheel_locked(&driver, Duration::from_secs(5));
+        crate::assert_with_log!(
+            after_clear == Some(0),
+            "process_timers after clear takes no lock",
+            Some(0usize),
+            after_clear
+        );
+        crate::test_complete!("timer_driver_idle_process_timers_takes_no_wheel_lock");
     }
 
     #[test]

@@ -7,8 +7,9 @@
 //!
 //! - `spawn_join`: a parent spawns `n` trivial tasks, keeps every handle, and
 //!   awaits them all. Tokio's parent is the `block_on` future; the asupersync
-//!   rows use `RuntimeHandle::spawn` (Direct admission, the default) and the
-//!   structured `Cx::spawn` + `TaskHandle::join` path users are told to use.
+//!   rows use `RuntimeHandle::spawn` (Direct admission, the default, plus
+//!   Mailbox admission as an informational row) and the structured
+//!   `Cx::spawn` + `TaskHandle::join` path users are told to use.
 //! - `spawn_join_current_thread`: the same on single-threaded runtimes.
 //! - `yield`: one task yields `n` times.
 //! - `mpsc_ping_pong`: two tasks exchange a value `n` times over capacity-1
@@ -20,6 +21,8 @@
 //! - `mutex_contended`: `tasks` tasks each take the runtime's async mutex
 //!   1000 times.
 //! - `yield_storm`: `tasks` tasks each yield 1000 times.
+//! - `join_set`: a parent spawns `n` trivial members into a `JoinSet` and
+//!   collects them in completion order with `join_next`.
 //!
 //! Timing starts inside the parent future: runtime construction and
 //! `block_on` entry are excluded on both sides. Run with:
@@ -53,6 +56,16 @@ fn asup_multi() -> Runtime {
         .worker_threads(WORKERS)
         .build()
         .expect("build asupersync multi-thread runtime")
+}
+
+/// The same multi-thread runtime with spawns admitted through the spawn
+/// mailbox; informational next to the default Direct admission.
+fn asup_multi_mailbox() -> Runtime {
+    RuntimeBuilder::new()
+        .worker_threads(WORKERS)
+        .spawn_admission(asupersync::runtime::config::SpawnAdmissionMode::Mailbox)
+        .build()
+        .expect("build asupersync multi-thread runtime with mailbox admission")
 }
 
 fn asup_current() -> Runtime {
@@ -323,6 +336,40 @@ fn tokio_yield_storm(rt: &tokio::runtime::Runtime, tasks: usize) -> Duration {
     })
 }
 
+fn asup_join_set(rt: &Runtime, n: usize) -> Duration {
+    rt.block_on(rt.handle().spawn(async move {
+        let cx = Cx::current().expect("a spawned task has a Cx");
+        let start = Instant::now();
+        let mut set = asupersync::combinator::JoinSet::in_cx(&cx);
+        for i in 0..n {
+            set.spawn(&cx, move |_| async move { Ok::<usize, ()>(i) })
+                .expect("JoinSet::spawn");
+        }
+        let mut sum = 0usize;
+        while let Some(outcome) = set.join_next(&cx).await {
+            sum = sum.wrapping_add(outcome.expect("member ok"));
+        }
+        black_box(sum);
+        start.elapsed()
+    }))
+}
+
+fn tokio_join_set(rt: &tokio::runtime::Runtime, n: usize) -> Duration {
+    rt.block_on(async move {
+        let start = Instant::now();
+        let mut set = tokio::task::JoinSet::new();
+        for i in 0..n {
+            set.spawn(async move { i });
+        }
+        let mut sum = 0usize;
+        while let Some(result) = set.join_next().await {
+            sum = sum.wrapping_add(result.expect("tokio member"));
+        }
+        black_box(sum);
+        start.elapsed()
+    })
+}
+
 /// Times `iters` batches of `n` operations with the clock inside the parent.
 fn timed(iters: u64, mut batch: impl FnMut() -> Duration) -> Duration {
     (0..iters).map(|_| batch()).sum()
@@ -330,6 +377,7 @@ fn timed(iters: u64, mut batch: impl FnMut() -> Duration) -> Duration {
 
 fn bench_spawn_join(c: &mut Criterion) {
     let asup = asup_multi();
+    let asup_mailbox = asup_multi_mailbox();
     let tokio = tokio_multi();
     let mut group = c.benchmark_group("spawn_join");
     for n in [100usize, 1_000, 10_000] {
@@ -339,6 +387,9 @@ fn bench_spawn_join(c: &mut Criterion) {
         });
         group.bench_function(BenchmarkId::new("asupersync_handle", n), |b| {
             b.iter_custom(|iters| timed(iters, || asup_handle_spawn_join(&asup, n)));
+        });
+        group.bench_function(BenchmarkId::new("asupersync_handle_mailbox", n), |b| {
+            b.iter_custom(|iters| timed(iters, || asup_handle_spawn_join(&asup_mailbox, n)));
         });
         group.bench_function(BenchmarkId::new("asupersync_cx", n), |b| {
             b.iter_custom(|iters| timed(iters, || asup_cx_spawn_join(&asup, n)));
@@ -463,6 +514,22 @@ fn bench_yield_storm(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_join_set(c: &mut Criterion) {
+    let asup = asup_multi();
+    let tokio = tokio_multi();
+    let mut group = c.benchmark_group("join_set");
+    for n in [1_000usize, 10_000] {
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_function(BenchmarkId::new("tokio", n), |b| {
+            b.iter_custom(|iters| timed(iters, || tokio_join_set(&tokio, n)));
+        });
+        group.bench_function(BenchmarkId::new("asupersync", n), |b| {
+            b.iter_custom(|iters| timed(iters, || asup_join_set(&asup, n)));
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     runtime_vs_tokio,
     bench_spawn_join,
@@ -471,6 +538,7 @@ criterion_group!(
     bench_ping_pong,
     bench_fan_out,
     bench_mutex_contended,
-    bench_yield_storm
+    bench_yield_storm,
+    bench_join_set
 );
 criterion_main!(runtime_vs_tokio);

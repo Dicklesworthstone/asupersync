@@ -1165,6 +1165,17 @@ impl TaskRecord {
     pub(crate) fn consume_checkpoint_cancel_ack(
         &mut self,
     ) -> CancellationEffects<Option<CheckpointCancelAck>> {
+        // Every pending poll lands here, and almost none carries an
+        // acknowledgement: answer that case from a shared read without
+        // cloning the Arc (br-asupersync-issue65-criticisms-kpmoy5.1.3). The
+        // flag is re-checked under the write lock below.
+        if !self
+            .cx_inner
+            .as_ref()
+            .is_some_and(|inner| inner.read().cancel_acknowledged)
+        {
+            return CancellationEffects::ready(None);
+        }
         let Some(inner) = self.cx_inner.clone() else {
             return CancellationEffects::ready(None);
         };
