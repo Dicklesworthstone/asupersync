@@ -3967,9 +3967,9 @@ impl<Caps> Cx<Caps> {
 
     /// Races multiple futures, waiting for the first to complete.
     ///
-    /// This method is used by the `race!` macro. It runs the provided futures
-    /// concurrently (inline, not spawned) and returns the result of the first
-    /// one to complete. Losers are dropped (cancelled).
+    /// It runs the provided futures concurrently (inline, not spawned) and
+    /// returns the result of the first one to complete. Losers are dropped
+    /// (cancelled). The `race!` macro does not use it: see [`Cx::race_drained`].
     ///
     /// # Cancellation vs Draining
     ///

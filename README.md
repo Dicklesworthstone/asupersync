@@ -9,7 +9,7 @@
 <img src="asupersync_diagram.webp" alt="Asupersync Architecture - Regions, Tasks, and Quiescence" width="700">
 
 [![License: MIT+Rider](https://img.shields.io/badge/License-MIT%2BOpenAI%2FAnthropic%20Rider-blue.svg)](./LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-nightly-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-stable_1.95%2B-orange.svg)](#minimum-supported-rust-version)
 [![Status: Active Development](https://img.shields.io/badge/Status-Active%20Development-brightgreen)](https://github.com/Dicklesworthstone/asupersync)
 [![Live Demo](https://img.shields.io/badge/Live_Demo-WASM_Interactive-blueviolet)](https://dicklesworthstone.github.io/asupersync/asupersync_web_demo.html)
 
@@ -964,7 +964,6 @@ impl Cx {
 │  │    SendPermit ──→ send() or abort()                                 │   │
 │  │    Ack        ──→ commit() or nack()                                │   │
 │  │    Lease      ──→ renew() or expire()                               │   │
-│  │    IoOp       ──→ complete() or cancel()                            │   │
 │  │                                                                     │   │
 │  │    Invariant: region_close requires all obligations resolved        │   │
 │  │                                                                     │   │
@@ -1023,7 +1022,7 @@ Scheduler behavior is intentionally explicit:
 
 ### Sharded Runtime State and Lock Discipline
 
-Runtime state is split into independently locked shards so hot-path polling can proceed without serializing every region or obligation mutation.
+Runtime state can be split into independently locked shards, so hot-path polling can proceed without serializing every region or obligation mutation. This is opt-in (`RuntimeBuilder::with_sharded_state(true)`); the default keeps the state behind one lock.
 
 - Shard A (`tasks`): task table, stored futures, intrusive queue links.
 - Shard B (`regions`): region ownership tree and state transitions.
@@ -1031,7 +1030,7 @@ Runtime state is split into independently locked shards so hot-path polling can 
 - Shard D (`instrumentation`): trace and metrics surfaces.
 - Shard E (`config`): immutable runtime config.
 
-Multi-shard operations use `ShardGuard` with canonical acquisition order `E -> D -> B -> A -> C`, and debug checks enforce that order to prevent deadlocks (`src/runtime/sharded_state.rs`). Shard locks are `ContendedMutex` instances, and optional `lock-metrics` instrumentation can measure wait/hold behavior (`src/sync/contended_mutex.rs`).
+Multi-shard operations take shard locks in the canonical order `E -> D -> B -> A -> C` to prevent deadlocks. `ShardGuard` (`src/runtime/sharded_state.rs`) checks that order in debug builds, but only tests use it today; the sharded runtime paths lock shards directly, so in production the order is a convention, not a checked one. Shard locks are `ContendedMutex` instances, and optional `lock-metrics` instrumentation can measure wait/hold behavior (`src/sync/contended_mutex.rs`).
 
 ### Region Heap Handles and Quiescent Reclamation
 
@@ -1130,7 +1129,7 @@ The method stayed consistent across many small, verified runtime changes: profil
 - **Steal-path locality shortcuts**: local queues track whether any pinned local tasks are present; when none are present, stealers take a no-branch non-local path, and when locals do exist they are skipped/restored with `SmallVec` to keep the common path allocation-free (`src/runtime/scheduler/local_queue.rs`, `src/runtime/scheduler/intrusive.rs`).
 - **Backpressure without silent drops**: global ready-queue limits emit capacity warnings while still scheduling work, preserving structured-concurrency guarantees instead of dropping tasks (`src/runtime/scheduler/three_lane.rs`, `src/runtime/config.rs`).
 - **Reactor fast paths**: I/O registration rearm paths cache waker state, and stale token/fd cleanup is explicit, which keeps event loops moving under churn (`src/runtime/io_driver.rs`, `src/runtime/reactor/*`).
-- **Timer wheel tuned for real cancellation workloads**: timer cancel is generation-based O(1), long deadlines spill into overflow and are promoted back in range, and coalescing windows can batch nearby wakeups with minimum-group gating (`src/time/wheel.rs`, `src/time/driver.rs`).
+- **Timer wheel tuned for real cancellation workloads**: timer cancel is generation-based O(1), long deadlines spill into overflow and are promoted back in range, and the wheel supports coalescing windows that batch nearby wakeups with minimum-group gating, though no runtime setting enables them yet (`src/time/wheel.rs`, `src/time/driver.rs`).
 - **Panic containment on worker threads**: task polling is guarded so panics are converted into terminal `Outcome::Panicked`, dependents/finalizers are still driven, and one bad task does not take down a worker lane (`src/runtime/scheduler/three_lane.rs`, `src/runtime/builder.rs`).
 - **Timer behavior measured where it matters**: the timer benchmark corpus includes direct wheel-vs-`BTreeMap`/`BinaryHeap` comparisons; the documented 10K corpus (release-perf profile, 2026-06-01) records a ~27x cancel-path advantage over `BTreeMap`, and the wheel now also wins the mixed insert/cancel/expire workload outright (`benches/timer_wheel.rs`).
 - **Stable memory handles with deterministic reuse**: region-heap generation indices prevent ABA-style stale-handle reuse while preserving deterministic allocation/reuse patterns (`src/runtime/region_heap.rs`).
@@ -1881,14 +1880,14 @@ deterministic lab runtime.
 | Supervisor | A compiled, deterministic restart *topology* over regions (boot ordering, dependencies, shutdown budgets). `CompiledSupervisor::bind_managed` runs it live: a failed child is cancelled, drained and restarted one-for-one, one-for-all or rest-for-one under a shared intensity/backoff policy (`src/supervision.rs`, used by `src/app.rs`). Actors also restart on failure individually (`src/actor.rs`) |
 | Link | Failure propagation rule (sibling/parent coupling; deterministic) |
 | Monitor + DOWN | Observation without coupling: deterministic notifications |
-| Registry | Names as lease obligations: reserve/commit or abort (no stale names) |
+| Registry | Names as leases: reserve/commit or abort; dropping an unresolved lease panics (the lease is not yet a runtime-ledger obligation, so region close does not wait for it) |
 | call/cast | Request/response and mailbox protocols with bounded drain on cancel |
 
 ### Why Spork Is Strictly Stronger
 
 - Determinism: the lab runtime makes OTP-style debugging reproducible (seeded schedules, trace capture/replay, schedule exploration).
 - Cancel-correctness: cancellation is a protocol (request -> drain -> finalize), so covered OTP-style shutdown paths carry explicit budgets and can publish concrete cleanup bounds; non-cooperative paths retain the no-universal-bound caveat above.
-- No silent leaks for runtime-tracked obligations: regions cannot close with live children or unresolved registered permits/acks/leases, so "forgot to reply" and "stale name" become runtime or test-oracle failures instead of silent success.
+- No silent leaks for runtime-tracked obligations: regions cannot close with live children or unresolved registered permits/acks/leases, so "forgot to reply" becomes a runtime or test-oracle failure instead of silent success. A name lease is a standalone drop-bomb token today: dropping it unresolved panics, but region close does not check it.
 
 ### Where To Look In The Repo
 
