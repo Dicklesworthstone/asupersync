@@ -974,3 +974,104 @@ fn lab_and_native_drain_a_parked_loser_before_a_panicking_winner_returns() {
         "scenario=panicking-winner-drain seeds=17,41,93 lab=drained native=drained loser_kind=RaceLost"
     );
 }
+
+#[derive(Default)]
+struct PrebuiltBranch {
+    started: AtomicBool,
+    cancelled: AtomicBool,
+    dropped: AtomicBool,
+}
+
+struct BranchDropped(Arc<PrebuiltBranch>);
+impl Drop for BranchDropped {
+    fn drop(&mut self) {
+        self.0.dropped.store(true, Ordering::Release);
+    }
+}
+
+/// A prebuilt `race_drained` branch that never completes on its own: only its
+/// task's cancellation ends it. The drop guard is moved into the future, so
+/// it records the future's retirement even if the branch never runs.
+fn prebuilt_branch(seen: Arc<PrebuiltBranch>) -> Pin<Box<dyn Future<Output = u8> + Send>> {
+    let guard = BranchDropped(Arc::clone(&seen));
+    Box::pin(async move {
+        let _guard = guard;
+        seen.started.store(true, Ordering::Release);
+        let cx = Cx::current().expect("branch runs as an admitted task");
+        cx.cancelled().await;
+        seen.cancelled.store(true, Ordering::Release);
+        0
+    })
+}
+
+/// Sixteen prebuilt branches race in a root region that admits eight tasks.
+/// The region refuses the rest asynchronously: a refused branch's handle
+/// completes with a User-kind "spawn admission failed" cancellation, and the
+/// race fails closed with it. When `race_drained` returns, every admitted
+/// branch must have been cancelled and drained, so no branch future is left
+/// (br-asupersync-issue65-criticisms-kpmoy5.2.1). This path was already sound
+/// before that change; the synchronous refusal it fixed (the spawn gateway
+/// going away between two spawns) has no deterministic public-API trigger.
+#[test]
+fn race_drained_fails_closed_and_drains_admitted_branches_at_the_task_limit() {
+    for workers in [1, 4] {
+        let limits = asupersync::runtime::RegionLimits {
+            max_tasks: Some(8),
+            ..asupersync::runtime::RegionLimits::unlimited()
+        };
+        let runtime = if workers == 1 {
+            RuntimeBuilder::current_thread()
+        } else {
+            RuntimeBuilder::new().worker_threads(workers)
+        }
+        .root_region_limits(limits)
+        .build()
+        .unwrap();
+        let seen: Vec<Arc<PrebuiltBranch>> = (0..16)
+            .map(|_| Arc::new(PrebuiltBranch::default()))
+            .collect();
+        let branches: Vec<_> = seen
+            .iter()
+            .map(|s| prebuilt_branch(Arc::clone(s)))
+            .collect();
+        let witnesses = seen.clone();
+        runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("real admitted native task");
+            let result = asupersync::time::timeout(
+                cx.now(),
+                Duration::from_secs(10),
+                cx.race_drained(branches),
+            )
+            .await
+            .expect("race_drained must return once its admitted branches are drained");
+            // Sampled at the instant race_drained returns, before any
+            // assertion: a lazy read could see a later retirement.
+            #[allow(clippy::needless_collect)]
+            let at_return: Vec<(bool, bool, bool)> = witnesses
+                .iter()
+                .map(|branch| {
+                    (
+                        branch.started.load(Ordering::Acquire),
+                        branch.cancelled.load(Ordering::Acquire),
+                        branch.dropped.load(Ordering::Acquire),
+                    )
+                })
+                .collect();
+            assert!(
+                matches!(&result, Err(JoinError::Cancelled(reason)) if reason.kind == CancelKind::User),
+                "workers={workers}: a refused branch fails the race closed: {result:?}"
+            );
+            for (index, (started, cancelled, dropped)) in at_return.into_iter().enumerate() {
+                assert!(
+                    dropped,
+                    "workers={workers}: branch {index} still alive when race_drained returned"
+                );
+                assert!(
+                    !started || cancelled,
+                    "workers={workers}: branch {index} started but never observed cancellation"
+                );
+            }
+        }));
+        assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+    }
+}

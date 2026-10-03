@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 # Stable Rust lane E2E runner (br-asupersync-stable-rust-track-tq3ajf.2).
 #
-# All Cargo stages are executed through RCH. The lane intentionally uses an
-# audited stable feature subset: default features are disabled so the
-# default-on nightly-outcome-try gate is not selected.
+# All Cargo stages are executed through RCH. stable-default-check checks the
+# default features, whose nightly-outcome-try impls the build script leaves
+# inactive on a stable compiler (br-asupersync-issue65-criticisms-kpmoy5.3.5).
+# It runs second, so a red clippy stage cannot hide it. The other stages use
+# an audited stable feature subset (default features disabled).
+#
+# The toolchain is pinned, like rust-toolchain.toml pins nightly, so every
+# worker checks the same compiler: 1.95.0 is the oldest stable that the
+# dependency graph accepts (sysinfo 0.39 requires 1.95). A floating "stable"
+# resolves to whatever each worker last installed.
 
 set -euo pipefail
 
@@ -20,17 +27,20 @@ RCH_BIN="${RCH_BIN:-rch}"
 RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
 STABLE_TARGET_DIR="${STABLE_RUST_CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_asupersync_stable_lane}"
 RUSTFLAGS_VALUE="${STABLE_RUST_RUSTFLAGS:--C debuginfo=0}"
+STABLE_TOOLCHAIN="${STABLE_RUST_TOOLCHAIN:-1.95.0}"
 
 STAGE_IDS=(
     "stable-check"
+    "stable-default-check"
     "stable-clippy"
     "stable-outcome-unit"
 )
 
 STAGE_DESCRIPTIONS=(
-    "cargo +stable check on the audited stable feature subset"
-    "cargo +stable clippy on the audited stable feature subset"
-    "cargo +stable test for Outcome semantics on the audited stable feature subset"
+    "cargo +${STABLE_TOOLCHAIN} check on the audited stable feature subset"
+    "cargo +${STABLE_TOOLCHAIN} check with default features"
+    "cargo +${STABLE_TOOLCHAIN} clippy on the audited stable feature subset"
+    "cargo +${STABLE_TOOLCHAIN} test for Outcome semantics on the audited stable feature subset"
 )
 
 usage() {
@@ -43,6 +53,7 @@ Environment:
   STABLE_RUST_LANE_RUN_ID       Stable run id used under target/e2e-results.
   STABLE_RUST_LANE_OUTPUT_ROOT  Output root for summary.json and events.ndjson.
   STABLE_RUST_CARGO_TARGET_DIR  Shared Cargo target dir for the RCH worker.
+  STABLE_RUST_TOOLCHAIN         Stable toolchain to check, default: 1.95.0.
   RCH_BIN                       RCH executable, default: rch.
   RCH_REQUIRE_REMOTE            Remote-only RCH policy, default: 1.
 USAGE
@@ -124,6 +135,7 @@ run_stage() {
         "CARGO_TARGET_DIR=${STABLE_TARGET_DIR}"
         "CARGO_INCREMENTAL=0"
         "CARGO_PROFILE_TEST_DEBUG=0"
+        "RUSTUP_AUTO_INSTALL=1"
         "RUSTFLAGS=${RUSTFLAGS_VALUE}"
         "${cargo_cmd[@]}"
     )
@@ -156,7 +168,7 @@ failed_stage=""
 if ! run_stage \
     "${STAGE_IDS[0]}" \
     "${STAGE_DESCRIPTIONS[0]}" \
-    cargo +stable check -p asupersync --no-default-features --features proc-macros; then
+    cargo "+${STABLE_TOOLCHAIN}" check -p asupersync --no-default-features --features proc-macros; then
     overall_status="failed"
     failed_stage="${STAGE_IDS[0]}"
 fi
@@ -165,7 +177,7 @@ if [[ "$overall_status" == "passed" ]]; then
     if ! run_stage \
         "${STAGE_IDS[1]}" \
         "${STAGE_DESCRIPTIONS[1]}" \
-        cargo +stable clippy -p asupersync --no-default-features --features proc-macros -- -D warnings; then
+        cargo "+${STABLE_TOOLCHAIN}" check -p asupersync --lib; then
         overall_status="failed"
         failed_stage="${STAGE_IDS[1]}"
     fi
@@ -175,9 +187,19 @@ if [[ "$overall_status" == "passed" ]]; then
     if ! run_stage \
         "${STAGE_IDS[2]}" \
         "${STAGE_DESCRIPTIONS[2]}" \
-        cargo +stable test -p asupersync --lib --no-default-features --features proc-macros types::outcome; then
+        cargo "+${STABLE_TOOLCHAIN}" clippy -p asupersync --no-default-features --features proc-macros -- -D warnings; then
         overall_status="failed"
         failed_stage="${STAGE_IDS[2]}"
+    fi
+fi
+
+if [[ "$overall_status" == "passed" ]]; then
+    if ! run_stage \
+        "${STAGE_IDS[3]}" \
+        "${STAGE_DESCRIPTIONS[3]}" \
+        cargo "+${STABLE_TOOLCHAIN}" test -p asupersync --lib --no-default-features --features proc-macros types::outcome; then
+        overall_status="failed"
+        failed_stage="${STAGE_IDS[3]}"
     fi
 fi
 
@@ -196,8 +218,8 @@ cat > "$SUMMARY_JSON" <<EOF_SUMMARY
   "artifact_path": "${OUTPUT_DIR}",
   "run_id": "${RUN_ID}",
   "target_dir": "${STABLE_TARGET_DIR}",
-  "toolchain": "stable",
-  "feature_subset": "--no-default-features --features proc-macros",
+  "toolchain": "${STABLE_TOOLCHAIN}",
+  "feature_subset": "--no-default-features --features proc-macros; default features (check)",
   "failed_stage": "${failed_stage}",
   "events_ndjson": "${EVENTS_NDJSON}"
 }

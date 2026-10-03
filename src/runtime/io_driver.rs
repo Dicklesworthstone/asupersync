@@ -922,6 +922,7 @@ impl IoRegistration {
     /// write wait that is still pending, or the reverse. An event resets the
     /// union, so a direction the caller stopped waiting on drops out at the
     /// next re-arm instead of waking it again and again.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn rearm_accumulating(
         &mut self,
         interest: Interest,
