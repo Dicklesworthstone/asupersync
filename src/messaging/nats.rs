@@ -2538,65 +2538,7 @@ impl NatsConnection {
     }
 
     fn reply_status_error(message: &Message) -> Option<NatsError> {
-        if !message.payload.is_empty() {
-            return None;
-        }
-
-        let headers = message.headers.as_deref()?;
-        let header_text = std::str::from_utf8(headers).ok()?;
-        let mut lines = header_text.split("\r\n");
-        let first_line = lines.next()?;
-        if first_line != "NATS/1.0" && !first_line.starts_with("NATS/1.0 ") {
-            return None;
-        }
-
-        let (mut status, mut description) =
-            if let Some(status_line) = first_line.strip_prefix("NATS/1.0 ") {
-                let status_line = status_line.trim();
-                let mut parts = status_line.splitn(2, char::is_whitespace);
-                (
-                    parts.next().and_then(|value| value.parse::<u16>().ok()),
-                    parts
-                        .next()
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .map(ToOwned::to_owned),
-                )
-            } else {
-                (None, None)
-            };
-
-        for line in lines {
-            if line.is_empty() {
-                break;
-            }
-            let Some((name, value)) = line.split_once(':') else {
-                continue;
-            };
-            let value = value.trim();
-            if name.eq_ignore_ascii_case("Status") {
-                status = value.parse::<u16>().ok();
-            } else if name.eq_ignore_ascii_case("Description") {
-                description = Some(value.to_string());
-            }
-        }
-
-        let status = status?;
-        if status < 300 {
-            return None;
-        }
-
-        // nats-server answers a request with no subscribers with a bare
-        // `NATS/1.0 503` header and no Description line (real-server suite,
-        // nats:2.10). Supply the protocol's well-known wording for that code
-        // so callers can recognise the condition the way other clients
-        // (`ErrNoResponders`) surface it; unknown bare codes keep the numeric
-        // fallback.
-        let detail = description.unwrap_or_else(|| match status {
-            503 => "No Responders".to_string(),
-            _ => format!("status {status}"),
-        });
-        Some(NatsError::Server(format!("status {status}: {detail}")))
+        status_reply(message).map(|(_, error)| error)
     }
 
     /// Publish a message to a subject.
@@ -4089,6 +4031,74 @@ async fn handle_supervisor_command(
         .connected
         .store(connection.connected, Ordering::Release);
     true
+}
+
+/// The server status carried by a message that is only a `NATS/1.0` header
+/// block (`NATS/1.0 503`, `NATS/1.0 409 Consumer Deleted`): its code and the
+/// error it means. `None` for an ordinary message or a status below 300.
+pub(crate) fn status_reply(message: &Message) -> Option<(u16, NatsError)> {
+    if !message.payload.is_empty() {
+        return None;
+    }
+
+    let headers = message.headers.as_deref()?;
+    let header_text = std::str::from_utf8(headers).ok()?;
+    let mut lines = header_text.split("\r\n");
+    let first_line = lines.next()?;
+    if first_line != "NATS/1.0" && !first_line.starts_with("NATS/1.0 ") {
+        return None;
+    }
+
+    let (mut status, mut description) =
+        if let Some(status_line) = first_line.strip_prefix("NATS/1.0 ") {
+            let status_line = status_line.trim();
+            let mut parts = status_line.splitn(2, char::is_whitespace);
+            (
+                parts.next().and_then(|value| value.parse::<u16>().ok()),
+                parts
+                    .next()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned),
+            )
+        } else {
+            (None, None)
+        };
+
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        if name.eq_ignore_ascii_case("Status") {
+            status = value.parse::<u16>().ok();
+        } else if name.eq_ignore_ascii_case("Description") {
+            description = Some(value.to_string());
+        }
+    }
+
+    let status = status?;
+    if status < 300 {
+        return None;
+    }
+
+    // nats-server answers a request with no subscribers with a bare
+    // `NATS/1.0 503` header and no Description line (real-server suite,
+    // nats:2.10). Supply the protocol's well-known wording for that code
+    // so callers can recognise the condition the way other clients
+    // (`ErrNoResponders`) surface it; unknown bare codes keep the numeric
+    // fallback.
+    let detail = description.unwrap_or_else(|| match status {
+        503 => "No Responders".to_string(),
+        _ => format!("status {status}"),
+    });
+    Some((
+        status,
+        NatsError::Server(format!("status {status}: {detail}")),
+    ))
 }
 
 fn parse_hmsg_frame(

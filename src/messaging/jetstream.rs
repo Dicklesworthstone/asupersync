@@ -1848,6 +1848,24 @@ impl Consumer {
                 let Some(msg) = sub.try_next() else {
                     break;
                 };
+                // Status replies carry no reply subject, so they were taken
+                // for foreign messages and the pull waited out its timeout,
+                // returning no error even for a deleted consumer.
+                match super::nats::status_reply(&msg) {
+                    // No messages (404), or the request expired on the server
+                    // (408): the pull is over and returns what it has.
+                    Some((404 | 408, _)) => {
+                        pull_state.observe_request_end();
+                        continue;
+                    }
+                    // 409 (consumer deleted, a pull limit exceeded), 503 (no
+                    // JetStream responders) and the rest fail the pull.
+                    Some((_, error)) => {
+                        pull_state.observe_error(JsError::Nats(error));
+                        continue;
+                    }
+                    None => {}
+                }
                 if let Some(js_msg) = Self::parse_js_message(msg, Some(self.pending_acks.clone())) {
                     // Flow control: check if we can accept this message
                     if self.increment_pending() {
@@ -2003,6 +2021,13 @@ impl PullSubscriberState {
     }
 
     fn observe_ignored_message(&mut self) {}
+
+    /// The server ended the pull request (no messages, or it expired).
+    fn observe_request_end(&mut self) {
+        if self.is_active() {
+            self.termination = PullSubscriberTermination::Completed;
+        }
+    }
 
     fn observe_process_ready(&mut self) {}
 
@@ -2869,6 +2894,15 @@ impl JsMessage {
             }
         }
 
+        // If this future is dropped mid-publish (a timeout, a cancelled
+        // select), the reservation is rolled back: left in flight, every later
+        // ack returned AlreadyAcknowledged and the pending credit was never
+        // released.
+        let _reservation = InFlightAck {
+            state: &self.ack_state,
+            in_flight,
+        };
+
         // The server takes acks only on the reply subject exactly as delivered:
         // it subscribes `$JS.ACK.<stream>.<consumer>` plus five tokens. A
         // subject with anything appended matched no subscription, so every
@@ -2890,6 +2924,26 @@ impl JsMessage {
                 Err(JsError::Nats(err))
             }
         }
+    }
+}
+
+/// Returns a terminal-ack reservation to pending when it is dropped still in
+/// flight, that is, when the publishing future was dropped before the publish
+/// finished. A finished publish has already stored the outcome, so the guard
+/// then does nothing.
+struct InFlightAck<'a> {
+    state: &'a AtomicU8,
+    in_flight: u8,
+}
+
+impl Drop for InFlightAck<'_> {
+    fn drop(&mut self) {
+        let _ = self.state.compare_exchange(
+            self.in_flight,
+            ACK_STATE_PENDING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
 }
 
@@ -4648,6 +4702,8 @@ mod tests {
             reply_subject: String,
             payload: Vec<u8>,
         },
+        /// A header-only status reply such as `NATS/1.0 409 Consumer Deleted`.
+        Status(&'static str),
     }
 
     fn read_crlf_line(stream: &mut std::net::TcpStream) -> Vec<u8> {
@@ -4884,6 +4940,17 @@ mod tests {
                         .expect("write pull response terminator");
                     stream.flush().expect("flush pull response");
                 }
+                DeterministicServerReply::Status(status_line) => {
+                    let headers = format!("{status_line}\r\n\r\n");
+                    let frame = format!(
+                        "HMSG {inbox} {sid} {len} {len}\r\n{headers}\r\n",
+                        len = headers.len()
+                    );
+                    stream
+                        .write_all(frame.as_bytes())
+                        .expect("write status reply");
+                    stream.flush().expect("flush status reply");
+                }
             }
 
             let unsubscribe = String::from_utf8(read_crlf_line(&mut stream)).expect("UNSUB utf8");
@@ -5000,6 +5067,157 @@ mod tests {
                 (REPLY, b"+TERM".as_slice()),
             ]
         );
+    }
+
+    /// A pull answered with a status reply waited out its whole timeout and
+    /// returned Ok with no messages, even for a deleted consumer: status
+    /// replies carry no reply subject and were skipped as foreign messages.
+    #[test]
+    fn pull_ends_on_a_jetstream_status_reply() {
+        let pull = |status: &'static str| {
+            let outcome = Arc::new(parking_lot::Mutex::new(None));
+            let seen = Arc::clone(&outcome);
+            capture_wire_transcript(
+                DeterministicServerReply::Status(status),
+                move |cx, addr| async move {
+                    let mut client = NatsClient::connect_with_config(
+                        &cx,
+                        NatsConfig {
+                            host: addr.ip().to_string(),
+                            port: addr.port(),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .expect("connect status server");
+                    let consumer = Consumer {
+                        stream: "ORDERS".to_string(),
+                        name: "processor".to_string(),
+                        prefix: "$JS.API".to_string(),
+                        pending_acks: Arc::new(AtomicUsize::new(0)),
+                        max_ack_pending: 1000,
+                        pull_rate_limiter: PullRateLimiter::new(),
+                    };
+                    let started = Instant::now();
+                    let result = consumer
+                        .pull_with_timeout(&mut client, &cx, 1, Duration::from_secs(4))
+                        .await
+                        .map(|messages| messages.len());
+                    *seen.lock() = Some((result, started.elapsed()));
+                },
+            );
+            outcome.lock().take().expect("pull finished")
+        };
+
+        let (deleted, _) = pull("NATS/1.0 409 Consumer Deleted");
+        match deleted {
+            Err(JsError::Nats(NatsError::Server(text))) => {
+                assert!(text.contains("409"), "{text}");
+            }
+            other => panic!("a deleted consumer must fail the pull, got {other:?}"),
+        }
+
+        let (expired, waited) = pull("NATS/1.0 408 Request Timeout");
+        assert_eq!(expired.expect("an expired request ends the pull"), 0);
+        assert!(
+            waited < Duration::from_secs(2),
+            "the pull waited {waited:?} after the server ended the request"
+        );
+    }
+
+    /// A dropped ack() (a timeout, a lost select) left the message in
+    /// flight: every later ack returned AlreadyAcknowledged and the pending
+    /// credit was never released.
+    #[test]
+    fn a_dropped_ack_can_be_sent_again() {
+        use std::io::{BufRead, Write};
+        const REPLY: &str = "$JS.ACK.ORDERS.processor.1.42.7.1713790000000000000.0";
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ack listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept ack client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(15)))
+                .expect("set read timeout");
+            stream
+                .write_all(
+                    b"INFO {\"server_id\":\"test\",\"version\":\"2.9.0\",\"proto\":1,\"max_payload\":1048576}\r\n",
+                )
+                .expect("write INFO");
+            stream.flush().expect("flush INFO");
+            let mut reader = std::io::BufReader::new(stream);
+            let mut lines = Vec::new();
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break lines,
+                    Ok(_) => lines.push(line.trim_end().to_string()),
+                }
+            }
+        });
+
+        let runtime = crate::runtime::RuntimeBuilder::new()
+            .worker_threads(1)
+            .build()
+            .expect("build runtime");
+        let pending = Arc::new(AtomicUsize::new(1));
+        let task_pending = Arc::clone(&pending);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let task = runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("runtime task context");
+            let mut client = NatsClient::connect_with_config(
+                &cx,
+                NatsConfig {
+                    host: addr.ip().to_string(),
+                    port: addr.port(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("connect supervised client");
+            let message = JsMessage {
+                subject: "orders.created".to_string(),
+                payload: b"order".to_vec(),
+                sequence: 42,
+                delivered: 1,
+                reply_subject: REPLY.to_string(),
+                ack_state: AtomicU8::new(ACK_STATE_PENDING),
+                pending_acks: Some(task_pending),
+            };
+            {
+                let mut ack = std::pin::pin!(message.ack(&mut client, &cx));
+                let mut poll_cx = std::task::Context::from_waker(std::task::Waker::noop());
+                assert!(
+                    std::future::Future::poll(ack.as_mut(), &mut poll_cx).is_pending(),
+                    "the ack waits for the supervisor"
+                );
+            }
+            let acked_after_drop = message.is_acked();
+            let again = message.ack(&mut client, &cx).await;
+            client.close(&cx).await.expect("close supervised client");
+            let _ = done_tx.send((acked_after_drop, again.is_ok()));
+        });
+
+        let outcome = done_rx.recv_timeout(Duration::from_secs(10));
+        let lines = server.join().expect("ack server joined");
+        drop(task);
+        let drained = runtime.shutdown_timeout(Duration::from_secs(3));
+        assert_eq!(
+            outcome,
+            Ok((false, true)),
+            "(acked after the dropped ack, the second ack succeeded)"
+        );
+        assert_eq!(
+            pending.load(Ordering::SeqCst),
+            0,
+            "the pending credit is released once"
+        );
+        let publishes = lines
+            .iter()
+            .filter(|line| line.starts_with(&format!("PUB {REPLY} ")))
+            .count();
+        assert_eq!(publishes, 1, "{lines:?}");
+        assert!(drained, "ack runtime did not drain");
     }
 
     /// JetStream reports an unlimited max_ack_pending as -1. It was clamped
