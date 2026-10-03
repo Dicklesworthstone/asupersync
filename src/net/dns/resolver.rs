@@ -2,7 +2,7 @@
 //!
 //! # Cancel Safety
 //!
-//! - `lookup_ip`: Cancel-safe, DNS query can be cancelled at any point.
+//! - `lookup_ip`: Cancel-safe; a cancelled task gets `DnsError::Cancelled` at once.
 //! - `happy_eyeballs_connect`: Cancel-safe, connection attempts are cancelled on drop.
 //!
 //! # Implementation Notes
@@ -234,7 +234,7 @@ impl Resolver {
         let host = host.to_string();
 
         // Each blocking attempt can take seconds in a DNS outage: none starts
-        // after the caller gave up (timeout or drop).
+        // after the caller gave up (timeout, drop or cancellation).
         let abandoned = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop = Arc::clone(&abandoned);
         let deadline = Instant::now().checked_add(self.config.timeout);
@@ -739,9 +739,9 @@ where
     F: FnOnce() -> Result<T, DnsError> + Send + 'static,
     T: Send + 'static,
 {
-    // Keep resolver behavior independent from any ambient current `Cx`.
-    // This phase-0 path always uses a dedicated thread for synchronous DNS/connect work.
-    spawn_blocking_on_thread(f).await
+    // Always a dedicated thread, whatever the ambient `Cx`'s blocking pool
+    // (phase 0); a cancelled caller stops waiting for it.
+    unless_cancelled(crate::cx::Cx::current(), spawn_blocking_on_thread(f)).await
 }
 
 fn validate_lookup_hostname(host: &str) -> Result<(), DnsError> {
@@ -1557,6 +1557,28 @@ impl Drop for AbandonOnDrop {
     fn drop(&mut self) {
         self.0.store(true, std::sync::atomic::Ordering::Relaxed);
     }
+}
+
+/// Waits for a blocking lookup unless the calling task is cancelled first,
+/// as `net::resolve` does (asupersync-bi2462.119). A cancelled caller gets
+/// [`DnsError::Cancelled`] at once; the lookup finishes on its thread and
+/// its result is dropped.
+async fn unless_cancelled<T>(
+    cx: Option<crate::cx::Cx>,
+    lookup: impl Future<Output = Result<T, DnsError>>,
+) -> Result<T, DnsError> {
+    let Some(cx) = cx else {
+        return lookup.await;
+    };
+    let mut lookup = std::pin::pin!(lookup);
+    let mut cancelled = std::pin::pin!(cx.cancelled());
+    std::future::poll_fn(|task| {
+        if cancelled.as_mut().poll(task).is_ready() && cx.checkpoint().is_err() {
+            return Poll::Ready(Err(DnsError::Cancelled));
+        }
+        lookup.as_mut().poll(task)
+    })
+    .await
 }
 
 /// Time-source abstraction for sync DNS query timing.
@@ -3479,6 +3501,46 @@ mod tests {
         );
         assert!(matches!(result, Err(DnsError::NoRecords(_))));
         assert_eq!(calls.get(), 1, "NoRecords is definitive");
+    }
+
+    // A lookup whose task is cancelled returns Cancelled at once instead of
+    // waiting for the blocking query, as net::resolve does
+    // (asupersync-bi2462.119).
+    #[test]
+    fn lookup_ip_returns_cancelled_promptly_when_the_caller_is_cancelled() {
+        init_test("lookup_ip_returns_cancelled_promptly_when_the_caller_is_cancelled");
+
+        // A nameserver that never answers keeps the blocking query waiting.
+        let silent = UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("bind");
+        let resolver = Resolver::with_config(ResolverConfig {
+            nameservers: vec![silent.local_addr().expect("local addr")],
+            retries: 0,
+            timeout: Duration::from_secs(5),
+            ..ResolverConfig::default()
+        });
+
+        let cx = Cx::for_testing();
+        let _current = Cx::set_current(Some(cx.clone()));
+        let mut lookup = Box::pin(resolver.lookup_ip("slow.example.test"));
+        let mut task = Context::from_waker(Waker::noop());
+        assert!(
+            lookup.as_mut().poll(&mut task).is_pending(),
+            "the query waits for the nameserver"
+        );
+
+        cx.cancel_with(crate::types::CancelKind::User, Some("dns caller cancelled"));
+        let result = lookup.as_mut().poll(&mut task);
+        assert!(
+            matches!(result, Poll::Ready(Err(DnsError::Cancelled))),
+            "a cancelled caller gets Cancelled without waiting, got {result:?}"
+        );
+        drop(lookup);
+        assert!(
+            resolver.cache.get_ip_result("slow.example.test").is_none(),
+            "a cancelled lookup is not cached"
+        );
+
+        crate::test_complete!("lookup_ip_returns_cancelled_promptly_when_the_caller_is_cancelled");
     }
 
     #[test]
