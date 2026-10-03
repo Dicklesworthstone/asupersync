@@ -365,18 +365,21 @@ impl Future for DeliveryReceiver {
             return Poll::Ready(Err(KafkaError::PolledAfterCompletion));
         }
 
-        if self.cx.checkpoint().is_err() {
-            state.closed = true;
-            state.completed = true;
-            state.waker = None;
-            return Poll::Ready(Err(KafkaError::Cancelled));
-        }
-
+        // A delivery report that has already arrived wins over cancellation.
+        // librdkafka delivers an enqueued record regardless; reporting
+        // Cancelled for a delivered record made the caller send it again.
         if let Some(value) = state.value.take() {
             state.closed = true;
             state.completed = true;
             state.waker = None;
-            Poll::Ready(value)
+            return Poll::Ready(value);
+        }
+
+        if self.cx.checkpoint().is_err() {
+            state.closed = true;
+            state.completed = true;
+            state.waker = None;
+            Poll::Ready(Err(KafkaError::Cancelled))
         } else {
             if !state
                 .waker
@@ -5493,6 +5496,31 @@ mod tests {
             receiver.as_mut().poll(&mut task_cx),
             Poll::Ready(Err(KafkaError::PolledAfterCompletion))
         ));
+    }
+
+    /// The receiver checked cancellation before the delivery report, so a
+    /// record librdkafka had already delivered was reported Cancelled and a
+    /// retrying caller produced it twice.
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn delivered_record_is_reported_even_after_cancellation() {
+        let cx = Cx::for_testing();
+        let (sender, receiver) = delivery_channel(&cx);
+        sender.complete(Ok(RecordMetadata {
+            topic: "orders".to_string(),
+            partition: 1,
+            offset: 7,
+            timestamp: None,
+        }));
+        cx.set_cancel_requested(true);
+
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+        let mut receiver = std::pin::pin!(receiver);
+        match receiver.as_mut().poll(&mut task_cx) {
+            Poll::Ready(Ok(metadata)) => assert_eq!(metadata.offset, 7),
+            other => panic!("a delivered record must be reported, got {other:?}"),
+        }
     }
 
     #[cfg(feature = "kafka")]
