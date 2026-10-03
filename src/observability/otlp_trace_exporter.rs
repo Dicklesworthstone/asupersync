@@ -15,9 +15,10 @@ use crate::runtime::resource_monitor::{
 };
 use crossbeam_queue::ArrayQueue;
 use parking_lot::Mutex;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Default maximum length for OTLP span attribute values per OTLP §2.5.3.
 /// Values exceeding this length are truncated with ellipsis suffix.
@@ -410,6 +411,9 @@ pub trait TraceExporter: Send + Sync + std::fmt::Debug {
 pub struct LoadSheddingTraceExporter {
     inner: Box<dyn TraceExporter>,
     export_queue: BoundedExportQueue<SpanBatch>,
+    /// Batches whose export failed with a retryable error, exported again
+    /// before the queue.
+    retry: Mutex<VecDeque<SpanBatch>>,
     batch_timeout: Duration,
     dropped_spans_metric: Arc<AtomicU64>,
     brownout_state: Mutex<OtlpBrownoutPolicyState>,
@@ -433,6 +437,7 @@ impl LoadSheddingTraceExporter {
         Self {
             inner,
             export_queue: BoundedExportQueue::new(batch_capacity),
+            retry: Mutex::new(VecDeque::new()),
             batch_timeout,
             dropped_spans_metric: Arc::new(AtomicU64::new(0)),
             brownout_state: Mutex::new(OtlpBrownoutPolicyState::default()),
@@ -445,7 +450,7 @@ impl LoadSheddingTraceExporter {
     #[must_use]
     pub fn load_shedding_stats(&self) -> LoadSheddingStats {
         LoadSheddingStats {
-            queue_depth: self.export_queue.len(),
+            queue_depth: self.pending_batches(),
             queue_capacity: self.export_queue.capacity(),
             dropped_batches: self.export_queue.dropped_count(),
             brownout_dropped_spans: self.brownout_dropped_spans_count(),
@@ -533,14 +538,32 @@ impl LoadSheddingTraceExporter {
         })
     }
 
+    /// Batches waiting for export: queued, plus those kept for retry.
+    fn pending_batches(&self) -> usize {
+        self.export_queue.len() + self.retry.lock().len()
+    }
+
     /// Process all queued span batches (called by background export task).
+    ///
+    /// Exports for at most `batch_timeout` from the call. A batch whose export
+    /// fails with a retryable error is kept, ahead of the queue, for the next
+    /// call; one refused as invalid data is counted as dropped.
     ///
     /// Returns the number of batches successfully processed.
     pub fn process_queue(&self) -> Result<usize, ExportError> {
+        self.drain(usize::MAX, Instant::now().checked_add(self.batch_timeout))
+    }
+
+    /// Exports up to `max_batches`, oldest first, stopping at `deadline`.
+    fn drain(&self, max_batches: usize, deadline: Option<Instant>) -> Result<usize, ExportError> {
         let mut processed = 0;
         let mut _total_spans_processed = 0;
 
-        while let Some(batch) = self.export_queue.dequeue() {
+        while processed < max_batches {
+            let next = self.retry.lock().pop_front();
+            let Some(batch) = next.or_else(|| self.export_queue.dequeue()) else {
+                break;
+            };
             // Track aging of batches (warn if spans are getting stale)
             let batch_age = batch.created_at.elapsed();
             if batch_age > Duration::from_secs(30) {
@@ -553,13 +576,27 @@ impl LoadSheddingTraceExporter {
                 );
             }
 
-            // Export the batch
-            self.inner.export(&batch)?;
+            // A failed export used to drop the batch it had taken off the
+            // queue, uncounted: an outage emptied the queue one flush at a time.
+            if let Err(error) = self.inner.export(&batch) {
+                if matches!(error, ExportError::InvalidData(_)) {
+                    // The receiver will refuse it again; count it as dropped.
+                    self.dropped_spans_metric
+                        .fetch_add(batch.spans.len() as u64, Ordering::Relaxed);
+                    self.export_queue
+                        .dropped_count
+                        .fetch_add(1, Ordering::Relaxed);
+                } else {
+                    self.retry.lock().push_front(batch);
+                }
+                return Err(error);
+            }
             processed += 1;
             _total_spans_processed += batch.spans.len();
 
-            // Apply batch timeout to prevent blocking export thread too long
-            if batch.created_at.elapsed() > self.batch_timeout {
+            // Bound the time spent here from the start of the call. Measuring
+            // each batch's age instead stopped after one batch of a backlog.
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 break;
             }
         }
@@ -665,8 +702,10 @@ impl TraceExporter for LoadSheddingTraceExporter {
     }
 
     fn flush(&self) -> Result<(), ExportError> {
-        // Process all queued batches then flush underlying exporter
-        self.process_queue()?;
+        // Export every batch pending when the flush began (not ones producers
+        // add meanwhile, which could keep it going forever), then flush the
+        // underlying exporter.
+        self.drain(self.pending_batches(), None)?;
         self.inner.flush()
     }
 }
@@ -691,7 +730,7 @@ impl Drop for LoadSheddingTraceExporter {
     fn drop(&mut self) {
         const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 
-        let queue_depth = self.export_queue.len();
+        let queue_depth = self.pending_batches();
         if queue_depth == 0 {
             return; // No pending spans to flush
         }
@@ -716,13 +755,14 @@ impl Drop for LoadSheddingTraceExporter {
                     target: "asupersync::observability::otlp_trace",
                     "OTLP exporter shutdown timeout ({:?}): abandoning {} pending batches to prevent deadlock",
                     SHUTDOWN_TIMEOUT,
-                    self.export_queue.len()
+                    self.pending_batches()
                 );
                 break Err(ExportError::Transport("shutdown timeout".to_string()));
             }
 
             // Process a single batch with short timeout to avoid blocking
-            if let Some(batch) = self.export_queue.dequeue() {
+            let next = self.retry.get_mut().pop_front();
+            if let Some(batch) = next.or_else(|| self.export_queue.dequeue()) {
                 match self.inner.export(&batch) {
                     Ok(()) => {
                         // Successfully exported, continue with next batch
@@ -751,7 +791,7 @@ impl Drop for LoadSheddingTraceExporter {
         };
 
         let _flush_duration = flush_start.elapsed();
-        let final_queue_depth = self.export_queue.len();
+        let final_queue_depth = self.pending_batches();
         let _batches_flushed = queue_depth.saturating_sub(final_queue_depth);
 
         match flush_result {
@@ -1044,5 +1084,79 @@ mod tests {
             total - len as u64,
             "dropped count must equal total minus retained",
         );
+    }
+
+    /// Fails every export while `fail` is set, then records into `inner`.
+    #[derive(Debug)]
+    struct FlakyExporter {
+        fail: Arc<std::sync::atomic::AtomicBool>,
+        inner: InMemoryOtlpHttpExporter,
+    }
+
+    impl TraceExporter for FlakyExporter {
+        fn export(&self, batch: &SpanBatch) -> Result<(), ExportError> {
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(ExportError::Unavailable);
+            }
+            self.inner.export(batch)
+        }
+
+        fn flush(&self) -> Result<(), ExportError> {
+            Ok(())
+        }
+    }
+
+    /// A batch whose export failed had already been taken off the queue and
+    /// was dropped uncounted, so each flush during an outage silently lost
+    /// one more batch.
+    #[test]
+    fn a_failed_export_keeps_its_batch_for_the_next_flush() {
+        let fail = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let memory = InMemoryOtlpHttpExporter::new(Duration::ZERO);
+        let exporter = LoadSheddingTraceExporter::new(
+            Box::new(FlakyExporter {
+                fail: Arc::clone(&fail),
+                inner: memory.clone(),
+            }),
+            10,
+            Duration::from_secs(1),
+        );
+        for id in 0..3 {
+            exporter.export(&create_test_batch(id, 2)).unwrap();
+        }
+        for _ in 0..3 {
+            assert!(exporter.flush().is_err(), "the collector is down");
+        }
+        assert_eq!(
+            exporter.load_shedding_stats().queue_depth,
+            3,
+            "the batches that failed are still pending"
+        );
+        assert_eq!(exporter.dropped_spans_count(), 0);
+
+        fail.store(false, Ordering::SeqCst);
+        exporter.flush().expect("the collector is back");
+        assert_eq!(memory.exported_span_count(), 6);
+        assert_eq!(exporter.load_shedding_stats().queue_depth, 0);
+    }
+
+    /// process_queue stopped as soon as a batch was older than batch_timeout,
+    /// so after an outage flush exported one batch of the backlog and
+    /// returned Ok with the rest still queued.
+    #[test]
+    fn flush_exports_a_backlog_of_old_batches() {
+        let memory = InMemoryOtlpHttpExporter::new(Duration::ZERO);
+        let exporter =
+            LoadSheddingTraceExporter::new(Box::new(memory.clone()), 10, Duration::from_secs(1));
+        for id in 0..3 {
+            let mut batch = create_test_batch(id, 2);
+            batch.created_at = Instant::now()
+                .checked_sub(Duration::from_secs(2))
+                .expect("an instant 2 s ago");
+            exporter.export(&batch).unwrap();
+        }
+        exporter.flush().expect("flush");
+        assert_eq!(memory.exported_batches().len(), 3);
+        assert_eq!(exporter.load_shedding_stats().queue_depth, 0);
     }
 }
