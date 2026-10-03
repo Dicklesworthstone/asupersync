@@ -356,3 +356,89 @@ fn drain_root_region_times_out_within_bound_for_non_cooperative_work() {
         "the drain must give up at its bound, not wait for the blocking task; waited {waited:?}"
     );
 }
+
+/// A task inside a child region that spawns through the runtime handle
+/// spawns into the ROOT region: the child region's close neither waits for
+/// nor cancels that task, and only the root drain cancels and drains it
+/// (br-asupersync-issue65-criticisms-kpmoy5.2.3).
+fn handle_spawn_escapes_the_callers_child_region(runtime: asupersync::runtime::Runtime) {
+    let started = Arc::new(AtomicBool::new(false));
+    let polls = Arc::new(AtomicUsize::new(0));
+    let cancel_kind = Arc::new(std::sync::Mutex::new(None));
+    let started_for_task = Arc::clone(&started);
+    let polls_for_task = Arc::clone(&polls);
+    let kind_for_task = Arc::clone(&cancel_kind);
+    let kind_for_check = Arc::clone(&cancel_kind);
+    let kind_after_child_close = runtime.block_on(async move {
+        let cx = Cx::current().expect("root cx");
+        let child = cx
+            .open_child_region(asupersync::cx::ChildRegionSpec::inherit())
+            .await
+            .expect("child region");
+        let mut spawner = child
+            .cx()
+            .spawn(move |_inner| async move {
+                let handle = asupersync::runtime::Runtime::current_handle()
+                    .expect("a runtime task can reach its runtime handle");
+                handle.spawn_with_cx(move |escaped| async move {
+                    started_for_task.store(true, Ordering::SeqCst);
+                    while escaped.checkpoint().is_ok() {
+                        polls_for_task.fetch_add(1, Ordering::SeqCst);
+                        yield_now().await;
+                    }
+                    *kind_for_task.lock().unwrap() = escaped.cancel_reason().map(|r| r.kind);
+                });
+            })
+            .expect("spawn in the child region");
+        spawner
+            .join(child.cx())
+            .await
+            .expect("the spawning task finishes");
+        wait_started(&started).await;
+        child
+            .close()
+            .await
+            .expect("the child region closes without waiting for the escaped task");
+        let kind = *kind_for_check.lock().unwrap();
+        // Still running after the close: it keeps passing checkpoints.
+        let polls_at_close = polls.load(Ordering::SeqCst);
+        for _ in 0..100_000 {
+            if polls.load(Ordering::SeqCst) > polls_at_close {
+                return kind;
+            }
+            yield_now().await;
+        }
+        panic!("the escaped task stopped running when its spawner's region closed");
+    });
+    assert_eq!(
+        kind_after_child_close, None,
+        "closing the child region must not cancel a root-region task"
+    );
+    assert_eq!(
+        runtime.drain_root_region(Duration::from_secs(5)),
+        RootDrainOutcome::Quiescent
+    );
+    assert_eq!(
+        *cancel_kind.lock().unwrap(),
+        Some(asupersync::CancelKind::Shutdown),
+        "the root drain cancels the escaped task"
+    );
+}
+
+#[test]
+fn handle_spawn_escapes_the_callers_child_region_until_root_drain() {
+    handle_spawn_escapes_the_callers_child_region(
+        RuntimeBuilder::multi_thread()
+            .build()
+            .expect("build runtime"),
+    );
+}
+
+#[test]
+fn handle_spawn_escapes_the_callers_child_region_until_root_drain_current_thread() {
+    handle_spawn_escapes_the_callers_child_region(
+        RuntimeBuilder::current_thread()
+            .build()
+            .expect("build runtime"),
+    );
+}

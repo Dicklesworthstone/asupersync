@@ -5042,11 +5042,11 @@ impl RuntimeHandle {
         Some(inner.scheduler.preemption_fairness_certificates())
     }
 
-    /// Spawn a task from outside async context.
+    /// Spawn a task into the runtime's root region, from outside async context.
     ///
-    /// Panics if the runtime is no longer available or if the root region
-    /// rejects admission. Use [`RuntimeHandle::try_spawn`] to handle those
-    /// failures explicitly.
+    /// Called inside a task, it escapes that task's region (prefer `Cx::spawn` there):
+    /// only root drain or shutdown cancels it. Panics if the runtime is unavailable or
+    /// admission is rejected; [`RuntimeHandle::try_spawn`] returns those errors instead.
     pub fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
     where
         F: Future + Send + 'static,
@@ -5056,8 +5056,8 @@ impl RuntimeHandle {
             .expect("failed to create runtime task")
     }
 
-    /// Spawn a task from outside async context, returning runtime-availability
-    /// or admission errors instead of panicking.
+    /// Like [`RuntimeHandle::spawn`] (root region, cancelled only by root drain or
+    /// shutdown), but returns runtime-availability or admission errors instead of panicking.
     pub fn try_spawn<F>(&self, future: F) -> Result<JoinHandle<F::Output>, SpawnError>
     where
         F: Future + Send + 'static,
@@ -5090,10 +5090,10 @@ impl RuntimeHandle {
             .and_then(|inner| inner.browser_pump.get().map(Arc::clone))
     }
 
-    /// Spawns a local `!Send` future pinned to the runtime's single worker thread.
+    /// Spawns a local `!Send` future pinned to the runtime's single worker thread, into
+    /// the root region: like [`RuntimeHandle::spawn`], it outlives the caller's region.
     ///
     /// # Panics
-    ///
     /// Panics if the runtime is no longer available or admission is denied.
     pub fn spawn_local<F>(&self, future: F) -> LocalJoinHandle<F::Output>
     where
@@ -5104,7 +5104,7 @@ impl RuntimeHandle {
             .expect("failed to spawn local task")
     }
 
-    /// Tries to spawn a local `!Send` future pinned to the runtime's single worker thread.
+    /// Tries to spawn a local `!Send` root-region task; see [`RuntimeHandle::spawn_local`].
     ///
     /// # Errors
     ///
@@ -5120,8 +5120,8 @@ impl RuntimeHandle {
 
 /// Spawn a task with a [`Cx`](crate::cx::Cx) from outside async context.
     ///
-    /// Creates a child Cx in the runtime's root region and passes it to the
-    /// factory closure. The Cx observes shutdown cancellation when
+    /// Creates a Cx in the runtime's root region (never the caller's region) and
+    /// passes it to the factory closure. The Cx observes shutdown cancellation when
     /// [`Runtime::shutdown_drained`] or [`Runtime::drain_root_region`] runs.
     /// Dropping a runtime or calling `shutdown_timeout` alone does not run
     /// cooperative cancellation cleanup.
@@ -5152,8 +5152,8 @@ impl RuntimeHandle {
 /// Spawn a task with a [`Cx`](crate::cx::Cx) from outside async context,
     /// returning runtime-availability or admission errors instead of panicking.
     ///
-    /// Creates a child Cx in the runtime's root region and passes it to the
-    /// factory closure. The Cx observes shutdown cancellation when
+    /// Creates a Cx in the runtime's root region (never the caller's region) and
+    /// passes it to the factory closure. The Cx observes shutdown cancellation when
     /// [`Runtime::shutdown_drained`] or [`Runtime::drain_root_region`] runs.
     /// Dropping a runtime or calling `shutdown_timeout` alone does not run
     /// cooperative cancellation cleanup.
