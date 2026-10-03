@@ -199,10 +199,69 @@ enum IncomingStreamKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IncomingStream {
     kind: IncomingStreamKind,
-    bytes: Vec<u8>,
+    bytes: RecvBuf,
     header_blocks_seen: u8,
     final_response_headers_seen: bool,
     data_frame: Option<DataFrameCursor>,
+}
+
+/// Received stream bytes, consumed from the front. Decoding removes items one
+/// at a time; `Vec::drain(..n)` shifted the rest of the buffer on every
+/// removal, so a peer sending a large run of one-byte instructions or tiny
+/// frames cost quadratic copying and stalled every connection on the
+/// listener's loop. Consumption moves a start offset instead, and the buffer
+/// is compacted only once the consumed prefix is at least half of it.
+#[derive(Debug, Clone, Default)]
+struct RecvBuf {
+    data: Vec<u8>,
+    start: usize,
+}
+
+impl PartialEq for RecvBuf {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl Eq for RecvBuf {}
+
+impl RecvBuf {
+    fn extend_from_slice(&mut self, bytes: &[u8]) {
+        self.data.extend_from_slice(bytes);
+    }
+
+    /// Drops the first `n` unconsumed bytes.
+    fn consume(&mut self, n: usize) {
+        self.start += n;
+        debug_assert!(self.start <= self.data.len());
+        if self.start >= self.data.len() {
+            self.data.clear();
+            self.start = 0;
+        } else if self.start >= self.data.len() / 2 {
+            self.data.drain(..self.start);
+            self.start = 0;
+        }
+    }
+
+    /// Removes and returns the first `n` unconsumed bytes.
+    fn take_front(&mut self, n: usize) -> Vec<u8> {
+        let taken = self[..n].to_vec();
+        self.consume(n);
+        taken
+    }
+
+    fn clear(&mut self) {
+        self.data.clear();
+        self.start = 0;
+    }
+}
+
+impl std::ops::Deref for RecvBuf {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.data[self.start..]
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -313,7 +372,7 @@ impl IncomingStream {
         };
         Self {
             kind,
-            bytes: Vec::new(),
+            bytes: RecvBuf::default(),
             header_blocks_seen: 0,
             final_response_headers_seen: false,
             data_frame: None,
@@ -1361,7 +1420,7 @@ impl NativeH3Session {
         let mut prefix = self
             .incoming
             .get(&stream_id)
-            .map_or_else(Vec::new, |incoming| incoming.bytes.clone());
+            .map_or_else(Vec::new, |incoming| incoming.bytes.to_vec());
         prefix.extend_from_slice(&connection.reset_stream_buffered_prefix(stream_id)?);
         let Some((stream_type, _)) = decode_prefix(&prefix)? else {
             return Ok(Some(IncomingStreamKind::AwaitingUniType));
@@ -1411,7 +1470,7 @@ impl NativeH3Session {
                     .incoming
                     .get_mut(&stream_id)
                     .expect("stream checked above");
-                stream.bytes.drain(..consumed);
+                stream.bytes.consume(consumed);
                 stream.kind = match decoded {
                     H3UniStreamType::Control => IncomingStreamKind::Control,
                     H3UniStreamType::QpackEncoder => IncomingStreamKind::QpackEncoder,
@@ -1443,7 +1502,7 @@ impl NativeH3Session {
                             QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 0 },
                             n,
                         )) => {
-                            stream.bytes.drain(..n);
+                            stream.bytes.consume(n);
                         }
                         Ok(_) => {
                             return Err(NativeH3SessionError::Protocol(
@@ -1471,7 +1530,7 @@ impl NativeH3Session {
                 while !stream.bytes.is_empty() {
                     match qpack_decode_decoder_instruction(&stream.bytes) {
                         Ok((QpackDecoderInstruction::StreamCancellation { .. }, n)) => {
-                            stream.bytes.drain(..n);
+                            stream.bytes.consume(n);
                         }
                         Ok(_) => {
                             return Err(NativeH3SessionError::Protocol(
@@ -1513,7 +1572,7 @@ impl NativeH3Session {
                     if len == 0 && !cursor.is_complete() {
                         return Ok(());
                     }
-                    let bytes = Bytes::from(stream.bytes.drain(..len).collect::<Vec<_>>());
+                    let bytes = Bytes::from(stream.bytes.take_front(len));
                     if cursor.is_complete() {
                         stream.data_frame = None;
                     }
@@ -1534,7 +1593,7 @@ impl NativeH3Session {
                         .incoming
                         .get_mut(&stream_id)
                         .expect("stream checked above");
-                    stream.bytes.drain(..header.header_len);
+                    stream.bytes.consume(header.header_len);
                     stream.data_frame = Some(DataFrameCursor::new(header.payload_len));
                     continue;
                 }
@@ -1558,7 +1617,7 @@ impl NativeH3Session {
                     .expect("stream checked above");
                 let (frame, consumed) = H3Frame::decode(&stream.bytes[..frame_len], &self.config)?;
                 debug_assert_eq!(consumed, frame_len);
-                stream.bytes.drain(..consumed);
+                stream.bytes.consume(consumed);
                 frame
             };
             self.on_frame(stream_id, kind, frame)?;
@@ -2114,5 +2173,47 @@ mod tests {
             H3NativeError::ControlProtocol("terminal stream tracking window exceeded")
         );
         assert_eq!(tracker.ensure_healthy(), Err(error));
+    }
+
+    /// Decoding removed each item from the front of a Vec, which shifted the
+    /// rest of the buffer every time. A peer's run of one-byte QPACK decoder
+    /// instructions (or of tiny frames) cost quadratic copying and blocked the
+    /// listener loop that serves every connection.
+    #[test]
+    fn decoding_a_long_run_of_one_byte_instructions_is_linear() {
+        let cx = Cx::for_testing();
+        let (mut session, _connection) = server_with_request_limit(&cx, 1);
+        let stream_id = StreamId(11);
+        let mut incoming = IncomingStream::new(stream_id);
+        incoming.kind = IncomingStreamKind::QpackDecoder;
+        // 0x40 is a Stream Cancellation for stream 0, one byte long.
+        incoming.bytes.extend_from_slice(&vec![0x40; 1 << 20]);
+        session.incoming.insert(stream_id, incoming);
+
+        let started = std::time::Instant::now();
+        session
+            .decode_stream(stream_id)
+            .expect("each instruction is legal");
+        let elapsed = started.elapsed();
+        assert!(session.incoming[&stream_id].bytes.is_empty());
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "1 MiB of one-byte instructions took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn recv_buf_consumes_from_the_front_and_compacts() {
+        let mut buf = RecvBuf::default();
+        buf.extend_from_slice(b"abcdef");
+        buf.consume(1);
+        assert_eq!(&*buf, b"bcdef");
+        assert_eq!(buf.take_front(2), b"bc".to_vec());
+        assert_eq!(&*buf, b"def");
+        assert_eq!(buf.start, 0, "consuming half the buffer compacts it");
+        buf.extend_from_slice(b"gh");
+        buf.consume(5);
+        assert!(buf.is_empty());
+        assert_eq!((buf.start, buf.data.len()), (0, 0));
     }
 }
