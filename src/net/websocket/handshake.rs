@@ -118,7 +118,22 @@ fn is_http_header_name_byte(byte: u8) -> bool {
     )
 }
 
-fn insert_unique_header(
+/// Header names a handshake may carry only once. A second Host or
+/// Sec-WebSocket-Version would make the request ambiguous, and RFC 6455
+/// forbids repeating Sec-WebSocket-Key and Sec-WebSocket-Accept.
+fn is_singleton_handshake_header(name: &str) -> bool {
+    matches!(
+        name,
+        "host" | "sec-websocket-key" | "sec-websocket-accept" | "sec-websocket-version"
+    )
+}
+
+/// Records one header line. A repeated header, other than a singleton, is
+/// joined to the earlier value with ", " (RFC 9110 section 5.3). RFC 6455
+/// allows repeating Sec-WebSocket-Protocol and Sec-WebSocket-Extensions, and
+/// proxies and load balancers add their own repeated lines, such as Set-Cookie
+/// or X-Forwarded-For.
+fn insert_header(
     headers: &mut BTreeMap<String, String>,
     raw_name: &str,
     raw_value: &str,
@@ -140,10 +155,15 @@ fn insert_unique_header(
             entry.insert(raw_value.trim().to_string());
             Ok(())
         }
-        Entry::Occupied(entry) => Err(HandshakeError::InvalidRequest(format!(
-            "duplicate HTTP header: {}",
-            entry.key()
-        ))),
+        Entry::Occupied(entry) if is_singleton_handshake_header(entry.key()) => Err(
+            HandshakeError::InvalidRequest(format!("duplicate HTTP header: {}", entry.key())),
+        ),
+        Entry::Occupied(mut entry) => {
+            let joined = entry.get_mut();
+            joined.push_str(", ");
+            joined.push_str(raw_value.trim());
+            Ok(())
+        }
     }
 }
 
@@ -886,7 +906,7 @@ impl HttpRequest {
                 break;
             }
             if let Some((name, value)) = line.split_once(':') {
-                insert_unique_header(&mut headers, name, value)?;
+                insert_header(&mut headers, name, value)?;
             }
         }
 
@@ -909,7 +929,8 @@ impl HttpRequest {
         Self::parse_with_trailing(data).map(|(req, _)| req)
     }
 
-    /// Get a header value by name (case-insensitive).
+    /// Get a header value by name (case-insensitive). The values of a
+    /// repeated header are joined with ", ".
     #[must_use]
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
@@ -965,7 +986,7 @@ impl HttpResponse {
                 break;
             }
             if let Some((name, value)) = line.split_once(':') {
-                insert_unique_header(&mut headers, name, value)?;
+                insert_header(&mut headers, name, value)?;
             }
         }
 
@@ -976,7 +997,8 @@ impl HttpResponse {
         })
     }
 
-    /// Get a header value by name (case-insensitive).
+    /// Get a header value by name (case-insensitive). The values of a
+    /// repeated header are joined with ", ".
     #[must_use]
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
@@ -1690,6 +1712,101 @@ mod tests {
             matches!(err, HandshakeError::InvalidRequest(ref msg) if msg.contains("duplicate HTTP header: sec-websocket-accept")),
             "unexpected error: {err:?}"
         );
+    }
+
+    // A load balancer's 101 often carries two Set-Cookie lines (stickiness
+    // plus session). Every repeated header used to be refused, so the client's
+    // connect failed with "duplicate HTTP header: set-cookie".
+    #[test]
+    fn client_accepts_a_101_with_repeated_ordinary_headers() {
+        let handshake = ClientHandshake {
+            url: WsUrl::parse("ws://example.com/chat").unwrap(),
+            key: "dGhlIHNhbXBsZSBub25jZQ==".to_string(),
+            protocols: vec![],
+            extensions: vec![],
+            headers: BTreeMap::new(),
+        };
+
+        let response = HttpResponse::parse(
+            b"HTTP/1.1 101 Switching Protocols\r\n\
+              Upgrade: websocket\r\n\
+              Connection: Upgrade\r\n\
+              Set-Cookie: lb=a1; Path=/\r\n\
+              Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\
+              Set-Cookie: session=b2; Path=/\r\n\
+              \r\n",
+        )
+        .expect("repeated Set-Cookie lines are valid HTTP");
+
+        assert_eq!(
+            response.header("set-cookie"),
+            Some("lb=a1; Path=/, session=b2; Path=/")
+        );
+        assert!(handshake.validate_response(&response).is_ok());
+    }
+
+    // RFC 6455 section 11.3.4 lets Sec-WebSocket-Protocol span several lines,
+    // and proxies repeat X-Forwarded-For.
+    #[test]
+    fn server_accepts_repeated_protocol_and_proxy_headers() {
+        let server = ServerHandshake::new().protocol("superchat");
+
+        let request = HttpRequest::parse(
+            b"GET /chat HTTP/1.1\r\n\
+              Host: example.com\r\n\
+              Upgrade: websocket\r\n\
+              Connection: Upgrade\r\n\
+              X-Forwarded-For: 192.0.2.1\r\n\
+              X-Forwarded-For: 198.51.100.7\r\n\
+              Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+              Sec-WebSocket-Version: 13\r\n\
+              Sec-WebSocket-Protocol: chat\r\n\
+              Sec-WebSocket-Protocol: superchat\r\n\
+              \r\n",
+        )
+        .expect("repeated list headers are valid HTTP");
+
+        assert_eq!(
+            request.header("x-forwarded-for"),
+            Some("192.0.2.1, 198.51.100.7")
+        );
+        let accept = server.accept(&request).unwrap();
+        assert_eq!(accept.accept_key, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+        assert_eq!(accept.protocol, Some("superchat".to_string()));
+    }
+
+    #[test]
+    fn handshake_parse_still_rejects_repeated_host_and_version() {
+        for (name, request) in [
+            (
+                "host",
+                &b"GET /chat HTTP/1.1\r\n\
+                   Host: example.com\r\n\
+                   Host: attacker.example\r\n\
+                   Upgrade: websocket\r\n\
+                   Connection: Upgrade\r\n\
+                   Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+                   Sec-WebSocket-Version: 13\r\n\
+                   \r\n"[..],
+            ),
+            (
+                "sec-websocket-version",
+                &b"GET /chat HTTP/1.1\r\n\
+                   Host: example.com\r\n\
+                   Upgrade: websocket\r\n\
+                   Connection: Upgrade\r\n\
+                   Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+                   Sec-WebSocket-Version: 13\r\n\
+                   Sec-WebSocket-Version: 8\r\n\
+                   \r\n"[..],
+            ),
+        ] {
+            let err = HttpRequest::parse(request).expect_err("singleton header repeated");
+            assert!(
+                matches!(err, HandshakeError::InvalidRequest(ref msg) if msg == &format!("duplicate HTTP header: {name}")),
+                "unexpected error for {name}: {err:?}"
+            );
+        }
     }
 
     #[test]
