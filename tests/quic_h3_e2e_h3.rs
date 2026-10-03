@@ -3590,6 +3590,76 @@ fn native_h3_session_rejects_a_malformed_request_without_ending_its_siblings() {
 
 #[test]
 #[cfg(feature = "http3")]
+fn native_h3_session_rejects_malformed_trailers_without_ending_its_siblings() {
+    let cx = test_cx();
+    let (mut client, mut server, mut server_h3) = static_h3_server_after_settings(&cx);
+    let request_head = |path: &str| {
+        H3RequestHead::new(
+            H3PseudoHeaders {
+                method: Some("GET".to_string()),
+                scheme: Some("https".to_string()),
+                authority: Some("example.test".to_string()),
+                path: Some(path.to_string()),
+                ..H3PseudoHeaders::default()
+            },
+            vec![],
+        )
+        .expect("valid request head")
+    };
+
+    // A valid request whose trailer section QPACK decodes but HTTP/3 forbids:
+    // a literal field line with the uppercase name X-Bad.
+    let trailed = request_head("/trailed");
+    let mut wire = Vec::new();
+    H3Frame::Headers(qpack_encode_request_field_section(&trailed).expect("encode request head"))
+        .encode(&mut wire)
+        .expect("encode request HEADERS");
+    H3Frame::Headers(vec![
+        0x00, 0x00, 0x25, b'X', b'-', b'B', b'a', b'd', 0x01, b'v',
+    ])
+    .encode(&mut wire)
+    .expect("encode malformed trailers");
+    let first = client
+        .open_bidi_stream(&cx)
+        .expect("open the request stream with malformed trailers");
+    client
+        .write_stream(&cx, first, Bytes::from(wire), true)
+        .expect("send the request with malformed trailers");
+
+    let sibling = request_head("/ok");
+    let mut valid = Vec::new();
+    H3Frame::Headers(qpack_encode_request_field_section(&sibling).expect("encode request head"))
+        .encode(&mut valid)
+        .expect("encode valid HEADERS");
+    let second = client
+        .open_bidi_stream(&cx)
+        .expect("open valid request stream");
+    client
+        .write_stream(&cx, second, Bytes::from(valid), true)
+        .expect("send valid request");
+
+    // RFC 9114 section 4.1.2: the malformed trailers make that request
+    // malformed, a stream error. They used to close the whole connection.
+    let (events, _) = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    assert_eq!(events.len(), 4, "{events:?}");
+    assert!(events.contains(&NativeH3Event::RequestHeaders {
+        stream_id: first,
+        head: trailed,
+    }));
+    assert!(events.contains(&NativeH3Event::StreamReset {
+        stream_id: first,
+        error_code: 0x10e,
+        final_size: 0,
+    }));
+    assert!(events.contains(&NativeH3Event::RequestHeaders {
+        stream_id: second,
+        head: sibling,
+    }));
+    assert!(events.contains(&NativeH3Event::Finished { stream_id: second }));
+}
+
+#[test]
+#[cfg(feature = "http3")]
 fn native_h3_session_rejects_a_request_path_with_whitespace_as_malformed() {
     let cx = test_cx();
     let (mut client, mut server, mut server_h3) = static_h3_server_after_settings(&cx);

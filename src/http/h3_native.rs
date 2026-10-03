@@ -3180,7 +3180,15 @@ pub fn qpack_decode_trailer_field_section(
 ) -> Result<Vec<(String, String)>, H3NativeError> {
     let plan = qpack_decode_field_section_with_context(input, mode, qpack_context)?;
     let fields = qpack_plan_to_header_fields(&plan, qpack_context)?;
-    for (name, value) in &fields {
+    validate_trailer_fields(&fields)?;
+    Ok(fields)
+}
+
+/// The HTTP-level checks on a decoded trailer section: valid field names and
+/// values, and no pseudo-headers. A section that fails them is malformed, a
+/// stream error, unlike one QPACK cannot decode.
+pub(crate) fn validate_trailer_fields(fields: &[(String, String)]) -> Result<(), H3NativeError> {
+    for (name, value) in fields {
         validate_header_name(name)?;
         validate_header_value(value)?;
         if name.starts_with(':') {
@@ -3189,7 +3197,7 @@ pub fn qpack_decode_trailer_field_section(
             ));
         }
     }
-    Ok(fields)
+    Ok(())
 }
 
 /// Decode a wire-level response field section with optional size limit enforcement.

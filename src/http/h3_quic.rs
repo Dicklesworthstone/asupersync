@@ -35,7 +35,7 @@ use super::h3_native::{
     qpack_decode_field_section_with_context, qpack_plan_to_header_fields,
     qpack_decode_response_field_section, qpack_decode_trailer_field_section,
     qpack_encode_request_field_section, qpack_encode_response_field_section,
-    qpack_encode_trailer_field_section,
+    qpack_encode_trailer_field_section, validate_trailer_fields,
 };
 
 /// RFC 9114 application error code `H3_REQUEST_CANCELLED`.
@@ -1682,11 +1682,19 @@ impl NativeH3Session {
                             .push_back(NativeH3Event::RequestHeaders { stream_id, head });
                         return Ok(());
                     }
-                    let fields = qpack_decode_trailer_field_section(
+                    // Likewise for trailers: one that decodes but HTTP/3
+                    // forbids (an uppercase or connection-specific name, a
+                    // control character, a pseudo-header) makes only this
+                    // request malformed. It used to end the whole connection.
+                    let plan = qpack_decode_field_section_with_context(
                         &field_section,
                         H3QpackMode::StaticOnly,
                         None,
                     )?;
+                    let fields = qpack_plan_to_header_fields(&plan, None)?;
+                    if validate_trailer_fields(&fields).is_err() {
+                        return self.reject_malformed_request(stream_id);
+                    }
                     self.state
                         .on_request_stream_frame(stream_id.0, &H3Frame::Headers(field_section))?;
                     self.incoming
