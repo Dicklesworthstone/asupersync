@@ -1412,6 +1412,11 @@ path = "tests/rwlock_test.rs"
 required-features = ["test-internals"]
 
 [[test]]
+name = "scheduler_idle_dispatch_lock_free"
+path = "tests/scheduler_idle_dispatch_lock_free.rs"
+required-features = ["lock-metrics"]
+
+[[test]]
 name = "scheduler_loom"
 path = "tests/scheduler_loom.rs"
 required-features = ["loom-tests"]
