@@ -2288,7 +2288,7 @@ impl Command {
 
     /// Spawns the command and waits for it to complete, returning status.
     ///
-    /// Stdin, stdout, and stderr are inherited.
+    /// Stdin, stdout, and stderr are as configured, inherited by default.
     ///
     /// # Errors
     ///
@@ -2305,8 +2305,8 @@ impl Command {
     /// }
     /// ```
     pub fn status(&mut self) -> Result<ExitStatus, ProcessError> {
-        let mut child =
-            self.spawn_with_temporary_stdio(Stdio::Inherit, Stdio::Inherit, Stdio::Inherit)?;
+        // As in std, the configured stdio applies; unset streams are inherited.
+        let mut child = self.spawn()?;
         child.wait()
     }
 
@@ -2315,8 +2315,8 @@ impl Command {
     /// Uses cooperative polling to avoid blocking the runtime thread while
     /// waiting for process exit. (br-asupersync-nhk8ur)
     pub async fn status_async(&mut self, cx: &Cx) -> Result<ExitStatus, ProcessError> {
-        let mut child =
-            self.spawn_with_temporary_stdio(Stdio::Inherit, Stdio::Inherit, Stdio::Inherit)?;
+        // As in std, the configured stdio applies; unset streams are inherited.
+        let mut child = self.spawn()?;
         child.wait_async(cx).await
     }
 }
@@ -5253,6 +5253,35 @@ mod tests {
         }
 
         crate::test_complete!("test_exit_code_preservation");
+    }
+
+    /// status() and status_async() forced every stream to Inherit, so a
+    /// command told to read null stdin read the parent's terminal and one
+    /// told to discard its output printed it.
+    #[test]
+    fn status_uses_the_configured_stdio() {
+        init_test("status_uses_the_configured_stdio");
+        // Exits 0 only when stdin and stdout are /dev/null.
+        let script = r#"[ "$(readlink /proc/$$/fd/0)" = /dev/null ] && [ "$(readlink /proc/$$/fd/1)" = /dev/null ]"#;
+        if !std::path::Path::new("/proc/self/fd/0").exists() {
+            return;
+        }
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg(script)
+            .stdin(Stdio::Null)
+            .stdout(Stdio::Null);
+
+        let status = cmd.status().expect("status");
+        assert!(status.success(), "status() must use the configured stdio");
+
+        let cx = Cx::for_testing();
+        let status = futures_lite::future::block_on(cmd.status_async(&cx)).expect("status_async");
+        assert!(
+            status.success(),
+            "status_async() must use the configured stdio"
+        );
+        crate::test_complete!("status_uses_the_configured_stdio");
     }
 }
 
