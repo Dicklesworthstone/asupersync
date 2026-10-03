@@ -1137,13 +1137,13 @@ impl TlsAcceptorBuilder {
             // has no documented stability guarantee).
             // TLS 1.2 = 0x0303, TLS 1.3 = 0x0304.
             fn version_ordinal(v: rustls::ProtocolVersion) -> u16 {
-                match v {
-                    rustls::ProtocolVersion::TLSv1_2 => 0x0303,
-                    rustls::ProtocolVersion::TLSv1_3 => 0x0304,
-                    // Unknown / future versions sort high so they're
-                    // excluded by an explicit floor.
-                    _ => 0xFFFF,
-                }
+                // The wire value orders every TLS version, so a bound below
+                // TLS 1.2 is honoured: a TLS 1.1 ceiling leaves no version
+                // (a build error) and a TLS 1.0 floor admits 1.2 and 1.3.
+                // Mapping them to 0xFFFF made the ceiling a no-op and the
+                // floor an error. Unknown values keep their own number, and
+                // DTLS values (0xFEFF and below) sort above every TLS one.
+                u16::from(v)
             }
 
             let min = self.min_protocol.map(version_ordinal);
@@ -2064,6 +2064,52 @@ SrXuVI5uunTgPWuOtJOP+KM=
             }
             other => panic!("expected Configuration error, got {other:?}"),
         }
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn protocol_bounds_below_tls12_are_honoured_on_both_builders() {
+        // Every version but 1.2 and 1.3 used to compare as 0xFFFF, so a
+        // TLS 1.1 ceiling capped nothing (the build offered 1.2 and 1.3) and
+        // a TLS 1.0 floor excluded everything.
+        let acceptor = |min: Option<rustls::ProtocolVersion>, max| {
+            let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+            let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+            let mut builder = TlsAcceptorBuilder::new(chain, key);
+            if let Some(min) = min {
+                builder = builder.min_protocol_version(min);
+            }
+            if let Some(max) = max {
+                builder = builder.max_protocol_version(max);
+            }
+            builder.build()
+        };
+        let connector = |min: Option<rustls::ProtocolVersion>, max| {
+            let mut builder = crate::tls::TlsConnectorBuilder::new()
+                .add_root_certificates(Certificate::from_pem(TEST_CERT_PEM).unwrap());
+            if let Some(min) = min {
+                builder = builder.min_protocol_version(min);
+            }
+            if let Some(max) = max {
+                builder = builder.max_protocol_version(max);
+            }
+            builder.build()
+        };
+        let tls11 = Some(rustls::ProtocolVersion::TLSv1_1);
+        let tls10 = Some(rustls::ProtocolVersion::TLSv1_0);
+        assert!(
+            matches!(acceptor(None, tls11), Err(TlsError::Configuration(_))),
+            "a TLS 1.1 ceiling leaves the acceptor no version"
+        );
+        assert!(
+            matches!(connector(None, tls11), Err(TlsError::Configuration(_))),
+            "a TLS 1.1 ceiling leaves the connector no version"
+        );
+        assert!(acceptor(tls10, None).is_ok(), "a TLS 1.0 floor admits 1.2+");
+        assert!(
+            connector(tls10, None).is_ok(),
+            "a TLS 1.0 floor admits 1.2+"
+        );
     }
 
     #[cfg(feature = "tls")]
