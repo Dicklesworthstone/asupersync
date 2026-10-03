@@ -95,6 +95,16 @@ const GLOBAL_PULL_RATE_LIMIT: u64 = 1000;
 /// recommendation.
 const MAX_PULL_BATCH: usize = 1024;
 
+/// Inbox room for a pull's status replies (404/408/409...) beyond its batch.
+const PULL_INBOX_STATUS_SLACK: usize = 8;
+
+/// Messages a pull's inbox buffers: the whole batch plus its status replies,
+/// since a supervised client dispatches what the server sends before the pull
+/// drains the inbox, and a full inbox drops messages.
+fn pull_inbox_capacity(batch: usize) -> usize {
+    batch.saturating_add(PULL_INBOX_STATUS_SLACK)
+}
+
 /// Pull request rate limiter to prevent DoS via rapid pull requests.
 /// Implements per-consumer rate limiting with exponential backoff.
 #[derive(Debug)]
@@ -1812,9 +1822,14 @@ impl Consumer {
         };
         let request = build_pull_request_json(effective_batch, expires, None);
 
-        // Subscribe to get batch responses
+        // Subscribe to get batch responses. A message dropped by a full inbox
+        // is redelivered only after ack_wait, or lost with AckNone.
         let mut sub = client
-            .subscribe(cx, &format!("_INBOX.{}", random_id(cx)))
+            .subscribe_with_capacity(
+                cx,
+                &format!("_INBOX.{}", random_id(cx)),
+                pull_inbox_capacity(effective_batch),
+            )
             .await?;
         let sid = sub.sid();
         if let Err(err) = client
@@ -4559,6 +4574,16 @@ mod tests {
         // delivered=1 (5th from right), stream_seq=42 (4th from right)
         assert_eq!(js_msg.delivered, 1);
         assert_eq!(js_msg.sequence, 42);
+    }
+
+    /// The pull inbox used the subscription default of 256 messages, so a
+    /// supervised client that dispatched a larger batch before the pull drained
+    /// the inbox dropped the rest.
+    #[test]
+    fn a_pull_inbox_holds_a_whole_batch_and_its_status_replies() {
+        for batch in [1, 256, 257, MAX_PULL_BATCH] {
+            assert!(pull_inbox_capacity(batch) > batch, "batch {batch}");
+        }
     }
 
     /// The v2 ack subject carries a domain and an account hash in front and a

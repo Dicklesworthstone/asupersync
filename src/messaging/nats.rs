@@ -2941,6 +2941,17 @@ impl NatsConnection {
     ///
     /// Returns a `Subscription` that can be used to receive messages.
     pub async fn subscribe(&mut self, cx: &Cx, subject: &str) -> Result<Subscription, NatsError> {
+        self.subscribe_with_capacity(cx, subject, DEFAULT_SUBSCRIPTION_CAPACITY)
+            .await
+    }
+
+    /// Subscribe to a subject, buffering up to `capacity` messages (at least 1).
+    pub async fn subscribe_with_capacity(
+        &mut self,
+        cx: &Cx,
+        subject: &str,
+        capacity: usize,
+    ) -> Result<Subscription, NatsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
         if !self.connected {
@@ -2949,7 +2960,8 @@ impl NatsConnection {
         validate_nats_subscription_pattern(subject, "subject")?;
 
         let sid = self.next_sid.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = mpsc::channel(256); // Bounded for backpressure
+        // Bounded: a message that arrives while the buffer is full is dropped.
+        let (tx, rx) = mpsc::channel(capacity.max(1));
 
         // Register subscription
         {
@@ -3009,7 +3021,7 @@ impl NatsConnection {
         validate_nats_token(queue_group, "queue group")?;
 
         let sid = self.next_sid.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = mpsc::channel(256);
+        let (tx, rx) = mpsc::channel(DEFAULT_SUBSCRIPTION_CAPACITY);
 
         {
             let mut subs = self.state.subscriptions.lock();
@@ -3237,6 +3249,10 @@ impl Drop for NatsConnection {
 
 const NATS_SUPERVISOR_COMMAND_CAPACITY: usize = 64;
 
+/// Messages a subscription buffers before further ones are dropped; see
+/// [`NatsClient::subscribe_with_capacity`].
+const DEFAULT_SUBSCRIPTION_CAPACITY: usize = 256;
+
 /// NATS client with Cx integration.
 ///
 /// When the supplied [`Cx`] is backed by an asupersync runtime, the client
@@ -3300,6 +3316,7 @@ enum NatsSupervisorCommand {
         cx: Cx,
         subject: String,
         queue_group: Option<String>,
+        capacity: usize,
         reply: oneshot::Sender<Result<Subscription, NatsError>>,
     },
     Unsubscribe {
@@ -3573,9 +3590,33 @@ impl NatsClient {
     }
 
     /// Subscribe to a subject.
+    ///
+    /// The subscription buffers up to 256 messages; one that arrives while the
+    /// buffer is full is dropped with a warning. Use
+    /// [`Self::subscribe_with_capacity`] for a larger buffer.
     pub async fn subscribe(&mut self, cx: &Cx, subject: &str) -> Result<Subscription, NatsError> {
+        self.subscribe_with_capacity(cx, subject, DEFAULT_SUBSCRIPTION_CAPACITY)
+            .await
+    }
+
+    /// Subscribe to a subject, buffering up to `capacity` messages (at least
+    /// 1) until they are received.
+    ///
+    /// A message that arrives while the buffer is full is dropped with a
+    /// warning, so size the buffer to the largest burst the subscriber must
+    /// absorb between receives, such as a request expecting that many replies.
+    pub async fn subscribe_with_capacity(
+        &mut self,
+        cx: &Cx,
+        subject: &str,
+        capacity: usize,
+    ) -> Result<Subscription, NatsError> {
         match &mut self.mode {
-            NatsClientMode::Direct(connection) => connection.subscribe(cx, subject).await,
+            NatsClientMode::Direct(connection) => {
+                connection
+                    .subscribe_with_capacity(cx, subject, capacity)
+                    .await
+            }
             NatsClientMode::Supervised(supervisor) => {
                 let subject = subject.to_string();
                 supervisor
@@ -3583,6 +3624,7 @@ impl NatsClient {
                         cx,
                         subject,
                         queue_group: None,
+                        capacity,
                         reply,
                     })
                     .await
@@ -3609,6 +3651,7 @@ impl NatsClient {
                         cx,
                         subject,
                         queue_group,
+                        capacity: DEFAULT_SUBSCRIPTION_CAPACITY,
                         reply,
                     })
                     .await
@@ -3988,6 +4031,7 @@ async fn handle_supervisor_command(
             cx,
             subject,
             queue_group,
+            capacity,
             reply,
         } => {
             let result = if let Some(queue_group) = queue_group {
@@ -3995,7 +4039,9 @@ async fn handle_supervisor_command(
                     .queue_subscribe(&cx, &subject, &queue_group)
                     .await
             } else {
-                connection.subscribe(&cx, &subject).await
+                connection
+                    .subscribe_with_capacity(&cx, &subject, capacity)
+                    .await
             };
             let _ = reply.send_blocking(result);
         }
@@ -4707,6 +4753,74 @@ mod tests {
             connect_line
         });
         (addr, server)
+    }
+
+    /// Messages the burst server sends ahead of its PONG.
+    const BURST: usize = 300;
+
+    /// Answers the client's first PING with `BURST` messages for the client's
+    /// subscription, then the PONG, so every message is dispatched before
+    /// `ping` returns and none is received in between.
+    fn spawn_burst_server() -> (SocketAddr, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind burst listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept burst client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            stream
+                .write_all(b"INFO {\"server_id\":\"burst\",\"max_payload\":1048576}\r\n")
+                .expect("write INFO line");
+            let mut reader = BufReader::new(stream);
+            assert!(read_protocol_line(&mut reader).starts_with("CONNECT "));
+            let subscribe = read_protocol_line(&mut reader);
+            let sid = subscribe
+                .split_whitespace()
+                .nth(2)
+                .expect("SUB sid")
+                .to_string();
+            assert_eq!(trim_protocol_line(read_protocol_line(&mut reader)), "PING");
+            let mut burst = String::new();
+            for index in 0..BURST {
+                burst.push_str(&format!("MSG burst {sid} 4\r\n{index:04}\r\n"));
+            }
+            burst.push_str("PONG\r\n");
+            let stream = reader.get_mut();
+            stream.write_all(burst.as_bytes()).expect("write burst");
+            stream.flush().expect("flush burst");
+        });
+        (addr, server)
+    }
+
+    #[test]
+    fn a_subscription_sized_for_a_burst_keeps_every_message() {
+        // Frames that arrive while the subscriber is not receiving (here, all
+        // of them before the PONG) are dispatched into its buffer, and the
+        // buffer used to hold 256 whatever the burst.
+        let (addr, server) = spawn_burst_server();
+        run_test_with_cx(|cx| async move {
+            let config = NatsConfig {
+                host: addr.ip().to_string(),
+                port: addr.port(),
+                ..Default::default()
+            };
+            let mut client = NatsClient::connect_with_config(&cx, config)
+                .await
+                .expect("connect burst server");
+            let mut sub = client
+                .subscribe_with_capacity(&cx, "burst", BURST)
+                .await
+                .expect("subscribe");
+            client.ping(&cx).await.expect("ping");
+            let mut received = Vec::new();
+            while let Some(msg) = sub.try_next() {
+                received.push(msg.payload);
+            }
+            assert_eq!(received.len(), BURST, "every burst message is kept");
+            assert_eq!(received[BURST - 1], b"0299".to_vec());
+        });
+        server.join().expect("join burst server");
     }
 
     fn deterministic_user_seed(byte: u8) -> String {
