@@ -3660,6 +3660,106 @@ fn native_h3_session_rejects_malformed_trailers_without_ending_its_siblings() {
 
 #[test]
 #[cfg(feature = "http3")]
+fn native_h3_client_resets_only_the_stream_with_a_malformed_response() {
+    let cx = test_cx();
+    let config = NativeQuicConnectionConfig::default();
+    let mut client = QuicConnection::client(config);
+    let mut server = QuicConnection::server(config);
+    client.record_verified_server_identity();
+    establish_loopback(&cx, &mut client, &mut server).expect("establish native QUIC pair");
+    let mut client_h3 = NativeH3Session::client();
+    let mut server_h3 = NativeH3Session::server();
+    client_h3
+        .initialize(&cx, &mut client, H3Settings::default())
+        .expect("initialize static client H3");
+    server_h3
+        .initialize(&cx, &mut server, H3Settings::default())
+        .expect("initialize static server H3");
+    let _ = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    let _ = pump_h3_events(&cx, &mut server, &mut client, &mut client_h3);
+
+    let request = |path: &str| {
+        H3RequestHead::new(
+            H3PseudoHeaders {
+                method: Some("GET".to_string()),
+                scheme: Some("https".to_string()),
+                authority: Some("example.test".to_string()),
+                path: Some(path.to_string()),
+                ..H3PseudoHeaders::default()
+            },
+            vec![],
+        )
+        .expect("valid request head")
+    };
+    let mut send = |path: &str| {
+        client_h3
+            .send_request(&cx, &mut client, &request(path), Bytes::new())
+            .expect("send H3 request")
+    };
+    let (bad_head, bad_trailers, ok) = (send("/a"), send("/b"), send("/c"));
+    let _ = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+
+    // A field section QPACK decodes but HTTP/3 forbids: :status 200 (static
+    // index 25), then a literal field line with the uppercase name X-Bad.
+    let uppercase = |with_status: bool| {
+        let mut section = vec![0x00, 0x00];
+        if with_status {
+            section.push(0xD9);
+        }
+        section.extend_from_slice(&[0x25, b'X', b'-', b'B', b'a', b'd', 0x01, b'v']);
+        section
+    };
+    let mut wire = Vec::new();
+    H3Frame::Headers(uppercase(true))
+        .encode(&mut wire)
+        .expect("encode malformed response HEADERS");
+    server
+        .write_stream(&cx, bad_head, Bytes::from(wire), true)
+        .expect("send malformed response");
+    let head = H3ResponseHead::new(200, vec![]).expect("valid response head");
+    let mut wire = Vec::new();
+    H3Frame::Headers(qpack_encode_response_field_section(&head).expect("encode response head"))
+        .encode(&mut wire)
+        .expect("encode response HEADERS");
+    H3Frame::Headers(uppercase(false))
+        .encode(&mut wire)
+        .expect("encode malformed trailers");
+    server
+        .write_stream(&cx, bad_trailers, Bytes::from(wire), true)
+        .expect("send response with malformed trailers");
+    let body = Bytes::from_static(b"still served");
+    server_h3
+        .send_response(&cx, &mut server, ok, &head, body.clone())
+        .expect("send valid response");
+
+    // RFC 9114 section 4.1.2: a malformed response is a stream error of type
+    // H3_MESSAGE_ERROR. It used to close the connection, failing every other
+    // request on it.
+    let (events, _) = pump_h3_events(&cx, &mut server, &mut client, &mut client_h3);
+    let reset = |stream_id| NativeH3Event::StreamReset {
+        stream_id,
+        error_code: 0x10e,
+        final_size: 0,
+    };
+    assert!(events.contains(&reset(bad_head)), "{events:?}");
+    assert!(events.contains(&NativeH3Event::ResponseHeaders {
+        stream_id: bad_trailers,
+        head: head.clone(),
+    }));
+    assert!(events.contains(&reset(bad_trailers)), "{events:?}");
+    assert!(events.contains(&NativeH3Event::ResponseHeaders {
+        stream_id: ok,
+        head,
+    }));
+    assert!(events.contains(&NativeH3Event::Data {
+        stream_id: ok,
+        bytes: body,
+    }));
+    assert!(events.contains(&NativeH3Event::Finished { stream_id: ok }));
+}
+
+#[test]
+#[cfg(feature = "http3")]
 fn native_h3_session_rejects_a_request_path_with_whitespace_as_malformed() {
     let cx = test_cx();
     let (mut client, mut server, mut server_h3) = static_h3_server_after_settings(&cx);

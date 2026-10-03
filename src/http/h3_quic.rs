@@ -31,11 +31,10 @@ use super::h3_native::{
     H3ConnectionConfig, H3ConnectionState, H3ControlState, H3EndpointRole, H3Frame, H3NativeError,
     H3QpackMode, H3RequestHead, H3ResponseHead, H3Settings, H3UniStreamType,
     QpackDecoderInstruction, QpackEncoderInstruction, header_fields_to_request_head,
-    qpack_decode_decoder_instruction, qpack_decode_encoder_instruction,
-    qpack_decode_field_section_with_context, qpack_plan_to_header_fields,
-    qpack_decode_response_field_section, qpack_decode_trailer_field_section,
+    header_fields_to_response_head, qpack_decode_decoder_instruction,
+    qpack_decode_encoder_instruction, qpack_decode_field_section_with_context,
     qpack_encode_request_field_section, qpack_encode_response_field_section,
-    qpack_encode_trailer_field_section, validate_trailer_fields,
+    qpack_encode_trailer_field_section, qpack_plan_to_header_fields, validate_trailer_fields,
 };
 
 /// RFC 9114 application error code `H3_REQUEST_CANCELLED`.
@@ -1364,8 +1363,9 @@ impl NativeH3Session {
         Ok(())
     }
 
-    /// Reject a request whose field section decoded but is malformed: it ends
-    /// only its own stream, with `H3_MESSAGE_ERROR`. The stream is reported as
+    /// Reject a request (or, on a client, a response) whose field section
+    /// decoded but is malformed: it ends only its own stream, with
+    /// `H3_MESSAGE_ERROR`. The stream is reported as
     /// a [`NativeH3Event::StreamReset`] so owners release its per-stream
     /// state, and its later bytes are discarded.
     fn reject_malformed_request(&mut self, stream_id: StreamId) -> Result<(), NativeH3SessionError> {
@@ -1710,12 +1710,20 @@ impl NativeH3Session {
                         .get(&stream_id)
                         .expect("request stream exists while decoding")
                         .final_response_headers_seen;
+                    // A response or trailer section that QPACK decodes but
+                    // HTTP/3 forbids makes only this response malformed, a
+                    // stream error (RFC 9114 section 4.1.2). It used to close
+                    // the connection and every other request on it.
+                    let plan = qpack_decode_field_section_with_context(
+                        &field_section,
+                        H3QpackMode::StaticOnly,
+                        None,
+                    )?;
+                    let fields = qpack_plan_to_header_fields(&plan, None)?;
                     if final_response_headers_seen {
-                        let fields = qpack_decode_trailer_field_section(
-                            &field_section,
-                            H3QpackMode::StaticOnly,
-                            None,
-                        )?;
+                        if validate_trailer_fields(&fields).is_err() {
+                            return self.reject_malformed_request(stream_id);
+                        }
                         self.state.on_request_stream_frame(
                             stream_id.0,
                             &H3Frame::Headers(field_section),
@@ -1729,11 +1737,9 @@ impl NativeH3Session {
                             .push_back(NativeH3Event::Trailers { stream_id, fields });
                         return Ok(());
                     }
-                    let head = qpack_decode_response_field_section(
-                        &field_section,
-                        H3QpackMode::StaticOnly,
-                        None,
-                    )?;
+                    let Ok(head) = header_fields_to_response_head(&fields) else {
+                        return self.reject_malformed_request(stream_id);
+                    };
                     let informational = (100..200).contains(&head.status);
                     if informational {
                         self.state.on_informational_response_headers(stream_id.0)?;

@@ -3542,7 +3542,7 @@ pub(crate) fn header_fields_to_request_head(
     H3RequestHead::new(pseudo, headers)
 }
 
-fn header_fields_to_response_head(
+pub(crate) fn header_fields_to_response_head(
     fields: &[(String, String)],
 ) -> Result<H3ResponseHead, H3NativeError> {
     let mut status: Option<u16> = None;
