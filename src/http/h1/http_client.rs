@@ -3092,7 +3092,12 @@ fn connection_can_be_reused(response: &Response, req_method: &Method) -> bool {
 
     match response.version {
         Version::Http11 => !header_has_token(&response.headers, "connection", "close"),
-        Version::Http10 => header_has_token(&response.headers, "connection", "keep-alive"),
+        // RFC 9112 §6.1: Transfer-Encoding in an HTTP/1.0 message means its
+        // framing is faulty; close the connection after this response.
+        Version::Http10 => {
+            !has_transfer_encoding
+                && header_has_token(&response.headers, "connection", "keep-alive")
+        }
         // Unreachable for this h1 client (responses are parsed from h1 wire
         // text), but HTTP/2 connections are persistent by default and carry
         // no Connection header semantics (RFC 9113 §8.2.2).
@@ -6093,6 +6098,18 @@ mod tests {
             trailers: Vec::new(),
         };
         assert!(connection_can_be_reused(&response, &Method::Get));
+
+        let chunked = Response {
+            headers: vec![
+                ("Transfer-Encoding".into(), "chunked".into()),
+                ("Connection".into(), "keep-alive".into()),
+            ],
+            ..response.clone()
+        };
+        assert!(
+            !connection_can_be_reused(&chunked, &Method::Get),
+            "an HTTP/1.0 response with Transfer-Encoding is never pooled"
+        );
 
         let no_header = Response {
             headers: Vec::new(),
