@@ -7609,4 +7609,30 @@ mod tests {
             Poll::Ready(Err(RedisError::Cancelled))
         ));
     }
+
+    /// A pipeline reads one reply per command. CLIENT REPLY OFF or SKIP hung
+    /// exec, and a multi-channel SUBSCRIBE or MONITOR paired replies with the
+    /// wrong commands. Such a pipeline is refused before a connection is taken
+    /// (the client's factory panics if one is).
+    #[test]
+    fn pipeline_refuses_commands_that_change_the_reply_count() {
+        let refused: [&[&str]; 6] = [
+            &["CLIENT", "REPLY", "OFF"],
+            &["client", "reply", "skip"],
+            &["SUBSCRIBE", "a", "b"],
+            &["MONITOR"],
+            &["psync", "?", "-1"],
+            &["UNSUBSCRIBE"],
+        ];
+        for args in refused {
+            let client = pooled_client_without_acquire();
+            let mut pipeline = client.pipeline();
+            pipeline.cmd(&["PING"]).cmd(args);
+            let result = future::block_on(pipeline.exec(&Cx::for_testing()));
+            assert!(
+                matches!(result, Err(RedisError::Protocol(_))),
+                "{args:?}: {result:?}"
+            );
+        }
+    }
 }

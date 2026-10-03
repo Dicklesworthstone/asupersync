@@ -3698,6 +3698,7 @@ impl RedisClient {
             client: self,
             encoded: Vec::new(),
             changes_connection_state: false,
+            changes_reply_count: false,
         }
     }
 }
@@ -3949,6 +3950,33 @@ fn opens_connection_protocol_state(args: &[&[u8]]) -> bool {
                 .is_some_and(|subcommand| subcommand.eq_ignore_ascii_case(b"REPLY")))
 }
 
+/// Commands after which replies no longer follow one per command: the
+/// subscriber-mode family and MONITOR stream replies, SYNC/PSYNC send a
+/// replication stream, and CLIENT REPLY OFF/SKIP suppresses replies.
+fn changes_reply_count(args: &[&[u8]]) -> bool {
+    let Some(command) = args.first() else {
+        return false;
+    };
+    let streaming = [
+        "SUBSCRIBE",
+        "PSUBSCRIBE",
+        "SSUBSCRIBE",
+        "UNSUBSCRIBE",
+        "PUNSUBSCRIBE",
+        "SUNSUBSCRIBE",
+        "MONITOR",
+        "SYNC",
+        "PSYNC",
+    ];
+    streaming
+        .iter()
+        .any(|name| command.eq_ignore_ascii_case(name.as_bytes()))
+        || (command.eq_ignore_ascii_case(b"CLIENT")
+            && args
+                .get(1)
+                .is_some_and(|subcommand| subcommand.eq_ignore_ascii_case(b"REPLY")))
+}
+
 /// Commands whose effect outlives their reply on the same connection: the
 /// protocol openers plus database, identity, protocol-version, cluster-routing
 /// and client-attribute changes. A pooled connection that ran one is closed
@@ -4136,6 +4164,7 @@ pub struct Pipeline<'a> {
     client: &'a RedisClient,
     encoded: Vec<Vec<u8>>,
     changes_connection_state: bool,
+    changes_reply_count: bool,
 }
 
 impl Pipeline<'_> {
@@ -4154,6 +4183,7 @@ impl Pipeline<'_> {
         encode_command_into(&mut buf, args);
         self.encoded.push(buf);
         self.changes_connection_state |= changes_connection_state(args);
+        self.changes_reply_count |= changes_reply_count(args);
         self
     }
 
@@ -4173,6 +4203,15 @@ impl Pipeline<'_> {
     /// connection — those discard the pooled connection because its
     /// protocol state is no longer reliable. (br-asupersync-pr32li)
     pub async fn exec(self, cx: &Cx) -> Result<Vec<Result<RespValue, RedisError>>, RedisError> {
+        // One reply is read per queued command. A command after which that
+        // no longer holds hung the read (CLIENT REPLY OFF/SKIP) or paired
+        // replies with the wrong commands (multi-channel SUBSCRIBE, MONITOR).
+        if self.changes_reply_count {
+            return Err(RedisError::Protocol(
+                "a pipeline cannot run SUBSCRIBE, MONITOR, SYNC or CLIENT REPLY: they change how many replies follow; use the Pub/Sub API".into(),
+            ));
+        }
+
         let mut conn = DiscardOnDropGuard::new(self.client.acquire(cx).await?);
 
         // Ensure AUTH/SELECT have been run on this connection.
