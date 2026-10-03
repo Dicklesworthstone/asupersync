@@ -520,3 +520,49 @@ fn poll_seek_rejected_with_both_reader_and_file_buffers_preserves_bytes() {
         assert!(runtime.shutdown_timeout(Duration::from_secs(10)));
     }
 }
+
+/// A write or seek whose future was dropped while queued still commits, but
+/// its result belongs to nobody. The next trait call on the handle passed
+/// different bytes or a different position, so it must not receive the
+/// abandoned operation's count. Before this was checked, write_all(b"BBBBBBBB")
+/// received the abandoned write's Ok(4) and wrote only "BBBB", and seek(Start(0))
+/// returned Ok(2) with the cursor left at 2.
+#[test]
+fn abandoned_write_and_seek_are_not_credited_to_the_next_call() {
+    let path = scratch_path("abandoned-write-seek");
+    let std_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .expect("open write fixture");
+    let mut file = File::from_std(std_file);
+    let runtime = RuntimeBuilder::current_thread()
+        .blocking_threads(1, 1)
+        .build()
+        .expect("runtime with a blocking pool");
+    let check_path = path.clone();
+    runtime.block_on(async move {
+        abandon_queued_io(file.write_all(b"AAAA")).await;
+        file.write_all(b"BBBBBBBB")
+            .await
+            .expect("write after an abandoned write");
+        file.flush().await.expect("flush");
+        assert_eq!(
+            std::fs::read(&check_path).expect("read back"),
+            b"AAAABBBBBBBB",
+            "the abandoned write lands and the next write is written in full"
+        );
+
+        abandon_queued_io(AsyncSeekExt::seek(&mut file, SeekFrom::Start(2))).await;
+        let position = AsyncSeekExt::seek(&mut file, SeekFrom::Start(0))
+            .await
+            .expect("seek after an abandoned seek");
+        assert_eq!(position, 0, "the new seek reports its own position");
+        let mut head = [0u8; 4];
+        file.read_exact(&mut head).await.expect("read from 0");
+        assert_eq!(&head, b"AAAA");
+    });
+    assert!(runtime.shutdown_timeout(Duration::from_secs(10)));
+}

@@ -185,9 +185,12 @@ type PollIoFuture<T> = Pin<Box<dyn Future<Output = io::Result<T>> + Send>>;
 
 /// In-flight blocking-pool operation behind the poll-based traits.
 ///
-/// Exactly one operation is outstanding per handle at a time; the trait
-/// contracts already require callers to retry the same operation until it
-/// completes.
+/// Exactly one operation is outstanding per handle at a time. A caller that
+/// retries after `Pending` passes the same bytes or position again. A call
+/// that does not match is a new operation whose predecessor's future was
+/// dropped (a timed-out `write_all`, say): the abandoned syscall still
+/// commits, so it is settled first and its result is not credited to the
+/// new call.
 enum PendingIo {
     Read {
         future: PollIoFuture<Vec<u8>>,
@@ -207,12 +210,16 @@ enum PendingIo {
     },
     Write {
         future: PollIoFuture<usize>,
+        /// The submitted bytes; a retry's buffer starts with them.
+        chunk: Arc<Vec<u8>>,
     },
     Flush {
         future: PollIoFuture<()>,
     },
     Seek {
         future: PollIoFuture<u64>,
+        /// The requested position; a retry asks for the same one.
+        pos: SeekFrom,
     },
 }
 
@@ -473,7 +480,7 @@ impl File {
                 futures_lite::future::block_on(future)?;
                 0
             }
-            Some(PendingIo::Write { future }) => {
+            Some(PendingIo::Write { future, .. }) => {
                 let _ = futures_lite::future::block_on(future);
                 0
             }
@@ -481,7 +488,7 @@ impl File {
                 let _ = futures_lite::future::block_on(future);
                 0
             }
-            Some(PendingIo::Seek { future }) => {
+            Some(PendingIo::Seek { future, .. }) => {
                 let _ = futures_lite::future::block_on(future);
                 0
             }
@@ -491,22 +498,27 @@ impl File {
 
     /// Attempts to sync all OS-internal metadata to disk.
     ///
-    /// A started sync may finish after the returned future is dropped.
+    /// A started sync may finish after the returned future is dropped. A
+    /// poll-trait write still in flight (its future dropped) lands first.
     pub async fn sync_all(&self) -> io::Result<()> {
+        self.settle_trait_pending().await?;
         self.with_inner(|inner| inner.sync_all()).await
     }
 
     /// This function is similar to `sync_all`, except that it will not sync file metadata.
     /// A started sync may finish after the returned future is dropped.
     pub async fn sync_data(&self) -> io::Result<()> {
+        self.settle_trait_pending().await?;
         self.with_inner(|inner| inner.sync_data()).await
     }
 
     /// Truncates or extends the underlying file.
     ///
     /// This uses soft cancellation. A started resize may commit after the
-    /// returned future is dropped.
+    /// returned future is dropped. A poll-trait write still in flight lands
+    /// before the resize.
     pub async fn set_len(&self, size: u64) -> io::Result<()> {
+        self.settle_trait_pending().await?;
         self.with_inner(move |inner| inner.set_len(size)).await
     }
 
@@ -704,9 +716,9 @@ impl File {
                     Poll::Ready(Err(error))
                 }
             },
-            Some(PendingIo::Write { mut future }) => match future.as_mut().poll(poll_cx) {
+            Some(PendingIo::Write { mut future, chunk }) => match future.as_mut().poll(poll_cx) {
                 Poll::Pending => {
-                    *pending = Some(PendingIo::Write { future });
+                    *pending = Some(PendingIo::Write { future, chunk });
                     Poll::Pending
                 }
                 // The abandoned write's byte count has no consumer left; the
@@ -721,9 +733,9 @@ impl File {
                 }
                 Poll::Ready(result) => Poll::Ready(result),
             },
-            Some(PendingIo::Seek { mut future }) => match future.as_mut().poll(poll_cx) {
+            Some(PendingIo::Seek { mut future, pos }) => match future.as_mut().poll(poll_cx) {
                 Poll::Pending => {
-                    *pending = Some(PendingIo::Seek { future });
+                    *pending = Some(PendingIo::Seek { future, pos });
                     Poll::Pending
                 }
                 Poll::Ready(result) => Poll::Ready(result.map(|_| ())),
@@ -826,23 +838,29 @@ impl AsyncWrite for File {
         let mut pending = this.pending.lock();
         loop {
             match pending.take() {
-                Some(PendingIo::Write { mut future }) => match future.as_mut().poll(poll_cx) {
-                    Poll::Pending => {
-                        *pending = Some(PendingIo::Write { future });
-                        return Poll::Pending;
+                // A retry passes the same bytes, so its buffer starts with
+                // the submitted chunk. Anything else is a new write after an
+                // abandoned one, settled below by the catch-all arm.
+                Some(PendingIo::Write { mut future, chunk }) if buf.starts_with(&chunk) => {
+                    match future.as_mut().poll(poll_cx) {
+                        Poll::Pending => {
+                            *pending = Some(PendingIo::Write { future, chunk });
+                            return Poll::Pending;
+                        }
+                        Poll::Ready(result) => return Poll::Ready(result),
                     }
-                    Poll::Ready(result) => return Poll::Ready(result),
-                },
+                }
                 None => {
-                    // The trait contract requires callers to retry with the
-                    // same bytes until `Ready`, so the chunk is copied once and
-                    // the count of that chunk is reported on completion.
-                    let chunk = buf[..buf.len().min(POLL_IO_CHUNK_BYTES)].to_vec();
+                    // A caller retries with the same bytes until `Ready`, so
+                    // the chunk is copied once and the count of that chunk is
+                    // reported on completion.
+                    let chunk = Arc::new(buf[..buf.len().min(POLL_IO_CHUNK_BYTES)].to_vec());
+                    let submitted = Arc::clone(&chunk);
                     let future = this.submit_blocking(move |file| {
                         let mut file_ref: &std::fs::File = file;
-                        Write::write(&mut file_ref, &chunk)
+                        Write::write(&mut file_ref, &submitted)
                     });
-                    *pending = Some(PendingIo::Write { future });
+                    *pending = Some(PendingIo::Write { future, chunk });
                 }
                 Some(PendingIo::ReadAhead { bytes, consumed }) => {
                     // The OS cursor sits past bytes the caller never consumed;
@@ -850,13 +868,14 @@ impl AsyncWrite for File {
                     // caller believes the cursor is.
                     let rewind = i64::try_from(bytes.len() - consumed)
                         .map_err(|_| io::Error::other("read-ahead exceeds seek range"))?;
-                    let chunk = buf[..buf.len().min(POLL_IO_CHUNK_BYTES)].to_vec();
+                    let chunk = Arc::new(buf[..buf.len().min(POLL_IO_CHUNK_BYTES)].to_vec());
+                    let submitted = Arc::clone(&chunk);
                     let future = this.submit_blocking(move |file| {
                         let mut file_ref: &std::fs::File = file;
                         Seek::seek(&mut file_ref, SeekFrom::Current(-rewind))?;
-                        Write::write(&mut file_ref, &chunk)
+                        Write::write(&mut file_ref, &submitted)
                     });
-                    *pending = Some(PendingIo::Write { future });
+                    *pending = Some(PendingIo::Write { future, chunk });
                 }
                 other => {
                     *pending = other;
@@ -924,9 +943,14 @@ impl AsyncSeek for File {
         let mut pending = this.pending.lock();
         loop {
             match pending.take() {
-                Some(PendingIo::Seek { mut future }) => match future.as_mut().poll(poll_cx) {
+                // A retry asks for the same position. A different one is a new
+                // seek after an abandoned one, settled by the catch-all arm.
+                Some(PendingIo::Seek {
+                    mut future,
+                    pos: submitted,
+                }) if submitted == pos => match future.as_mut().poll(poll_cx) {
                     Poll::Pending => {
-                        *pending = Some(PendingIo::Seek { future });
+                        *pending = Some(PendingIo::Seek { future, pos });
                         return Poll::Pending;
                     }
                     Poll::Ready(result) => return Poll::Ready(result),
@@ -936,7 +960,7 @@ impl AsyncSeek for File {
                         let mut file_ref: &std::fs::File = file;
                         Seek::seek(&mut file_ref, pos)
                     });
-                    *pending = Some(PendingIo::Seek { future });
+                    *pending = Some(PendingIo::Seek { future, pos });
                 }
                 Some(read_ahead @ PendingIo::ReadAhead { .. }) => {
                     // Reconcile the physical cursor before the requested
@@ -950,7 +974,7 @@ impl AsyncSeek for File {
                         Seek::seek(&mut file_ref, SeekFrom::Current(-unconsumed))?;
                         Seek::seek(&mut file_ref, pos)
                     });
-                    *pending = Some(PendingIo::Seek { future });
+                    *pending = Some(PendingIo::Seek { future, pos });
                 }
                 other => {
                     *pending = other;
