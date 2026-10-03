@@ -586,12 +586,10 @@ impl<T: TimeSource> TimerDriver<T> {
     ///
     /// Returns the number of timers fired.
     pub fn process_timers(&self) -> usize {
-        let now = self.clock.now();
-
         // Collect expired entries while holding the lock, then release it
         // before waking to prevent potential deadlocks if wakers try to
         // re-enter the timer driver.
-        let expired_wakers = self.collect_expired(now);
+        let expired_wakers = self.collect_expired();
         let fired = expired_wakers.len();
         if fired > 0 {
             crate::runtime::metrics::record_timers_fired(fired as u64);
@@ -607,10 +605,20 @@ impl<T: TimeSource> TimerDriver<T> {
     }
 
     /// Helper to collect expired wakers while holding the lock.
+    ///
+    /// Schedulers process timers before every dispatch. With no timer
+    /// registered nothing can expire, so the clock is not read: every
+    /// registration synchronizes the wheel to the clock itself, and an empty
+    /// wheel jumps straight to the new time
+    /// (br-asupersync-issue65-criticisms-kpmoy5.1.3).
     #[inline]
     #[allow(clippy::significant_drop_tightening)]
-    fn collect_expired(&self, now: Time) -> WakerBatch {
-        self.wheel.lock().collect_expired(now)
+    fn collect_expired(&self) -> WakerBatch {
+        let mut wheel = self.wheel.lock();
+        if wheel.is_empty() {
+            return WakerBatch::new();
+        }
+        wheel.collect_expired(self.clock.now())
     }
 
     /// Returns the number of pending timers.

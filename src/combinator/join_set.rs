@@ -73,8 +73,10 @@
 //!
 //! [`join_next`]: JoinSet
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
-use std::task::Poll;
+use std::sync::Arc;
+use std::task::{Context, Poll, Wake, Waker};
 
 use crate::cx::{Cx, Scope};
 use crate::runtime::JoinError;
@@ -94,10 +96,57 @@ where
     P: Policy,
 {
     scope: Scope<'scope, P>,
-    handles: Vec<TaskHandle<Result<T, E>>>,
+    /// Owned members keyed by spawn index, so spawn-order collection and the
+    /// earliest-spawned tie-break are ordered walks and removal is O(log N).
+    members: BTreeMap<u64, Member<T, E>>,
+    /// Members that may have finished since [`JoinSet::join_next`] last
+    /// polled them: never-polled members, plus members whose waker fired.
+    /// `join_next` polls only these instead of every member
+    /// (br-asupersync-issue65-criticisms-kpmoy5.1.5).
+    ready: Arc<ReadyMembers>,
     summary: JoinSummary,
     set_id: u64,
     next_member_index: u64,
+}
+
+struct Member<T, E> {
+    handle: TaskHandle<Result<T, E>>,
+    /// This member's own waker, created on its first `join_next` poll.
+    waker: Option<Waker>,
+}
+
+/// Candidate members plus the waker of the task waiting in `join_next`.
+#[derive(Default)]
+struct ReadyMembers {
+    candidates: parking_lot::Mutex<BTreeSet<u64>>,
+    waiter: parking_lot::Mutex<Option<Waker>>,
+}
+
+impl ReadyMembers {
+    /// The lowest candidate at or after `from`.
+    fn next_candidate(&self, from: u64) -> Option<u64> {
+        self.candidates.lock().range(from..).next().copied()
+    }
+}
+
+/// A member's waker: marks it a candidate and wakes the collecting task.
+struct MemberWake {
+    index: u64,
+    ready: Arc<ReadyMembers>,
+}
+
+impl Wake for MemberWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.ready.candidates.lock().insert(self.index);
+        let waiter = self.ready.waiter.lock().clone();
+        if let Some(waiter) = waiter {
+            waiter.wake();
+        }
+    }
 }
 
 impl<'scope, T, E, P> JoinSet<'scope, T, E, P>
@@ -114,7 +163,8 @@ where
     pub fn new(scope: &'scope Scope<'scope, P>) -> Self {
         Self {
             scope: clone_scope(scope),
-            handles: Vec::new(),
+            members: BTreeMap::new(),
+            ready: Arc::new(ReadyMembers::default()),
             summary: JoinSummary::default(),
             set_id: scope.region_id().as_u64(),
             next_member_index: 0,
@@ -137,10 +187,8 @@ where
         F: FnOnce(Cx) -> Fut + Send + 'static,
         Fut: Future<Output = Result<T, E>> + Send + 'static,
     {
-        let member_index = self.next_member_index;
         let handle = cx.spawn_in_cancellation_dominant(&self.scope, f)?;
-        self.handles.push(handle);
-        self.next_member_index = self.next_member_index.saturating_add(1);
+        let member_index = self.insert_member(handle);
         self.trace_member_spawn(cx, member_index, "send");
         Ok(())
     }
@@ -159,24 +207,45 @@ where
         F: FnOnce(Cx) -> Fut + 'static,
         Fut: Future<Output = Result<T, E>> + 'static,
     {
-        let member_index = self.next_member_index;
         let handle = cx.spawn_local_in_cancellation_dominant(&self.scope, f)?;
-        self.handles.push(handle);
-        self.next_member_index = self.next_member_index.saturating_add(1);
+        let member_index = self.insert_member(handle);
         self.trace_member_spawn(cx, member_index, "local");
         Ok(())
+    }
+
+    /// Takes ownership of a spawned member and returns its spawn index. A new
+    /// member is a `join_next` candidate until its first poll.
+    fn insert_member(&mut self, handle: TaskHandle<Result<T, E>>) -> u64 {
+        let member_index = self.next_member_index;
+        self.members.insert(
+            member_index,
+            Member {
+                handle,
+                waker: None,
+            },
+        );
+        self.ready.candidates.lock().insert(member_index);
+        self.next_member_index = self.next_member_index.saturating_add(1);
+        member_index
+    }
+
+    /// Removes a collected member and records its outcome.
+    fn take_member(&mut self, member_index: u64, outcome: &Outcome<T, E>) {
+        self.summary.record(outcome);
+        self.members.remove(&member_index);
+        self.ready.candidates.lock().remove(&member_index);
     }
 
     /// Number of members currently owned by the set.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.handles.len()
+        self.members.len()
     }
 
     /// Returns `true` when the set owns no members.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.handles.is_empty()
+        self.members.is_empty()
     }
 
     /// Collects one already-complete member without waiting.
@@ -186,13 +255,26 @@ where
     /// the earliest spawned ready member is returned first. Pending handles are
     /// left owned by the set and are not cancelled by the readiness scan.
     pub fn try_join_next(&mut self) -> Option<Outcome<T, E>> {
-        for index in 0..self.handles.len() {
-            let outcome = try_join_to_outcome(self.handles[index].try_join());
+        // Only candidates can be complete: every other member parked a waker
+        // in an earlier `join_next` poll that has not fired. Candidates stay
+        // candidates here because `try_join` registers no waker.
+        let mut from = 0;
+        while let Some(member_index) = self.ready.next_candidate(from) {
+            let outcome = match self.members.get_mut(&member_index) {
+                Some(member) => try_join_to_outcome(member.handle.try_join()),
+                None => {
+                    self.ready.candidates.lock().remove(&member_index);
+                    None
+                }
+            };
             if let Some(outcome) = outcome {
-                self.summary.record(&outcome);
-                self.handles.remove(index);
+                self.take_member(member_index, &outcome);
                 return Some(outcome);
             }
+            let Some(next) = member_index.checked_add(1) else {
+                break;
+            };
+            from = next;
         }
 
         None
@@ -219,7 +301,10 @@ where
     /// selected as the deterministic tie-break. Pending members are polled
     /// through [`TaskHandle::poll_join`], which registers for wakeup without
     /// requesting cancellation, so scanning for readiness never cancels
-    /// still-running work.
+    /// still-running work. Each call polls only members that may have finished
+    /// since they were last polled (members never polled, and members whose
+    /// wakeup fired), so collecting N members costs O(N log N) in total rather
+    /// than a scan of every member per call.
     ///
     /// The `Cx` parameter is kept for symmetry with [`join_all`](Self::join_all)
     /// and [`cancel_all`](Self::cancel_all). Collection itself is
@@ -232,23 +317,52 @@ where
         }
 
         std::future::poll_fn(|task_cx| {
-            if self.handles.is_empty() {
+            if self.members.is_empty() {
                 return Poll::Ready(None);
             }
+            {
+                let mut waiter = self.ready.waiter.lock();
+                if !waiter
+                    .as_ref()
+                    .is_some_and(|waker| waker.will_wake(task_cx.waker()))
+                {
+                    *waiter = Some(task_cx.waker().clone());
+                }
+            }
 
-            // Poll each member through its handle's own long-lived receiver so
-            // every pending registration SURVIVES this poll
-            // (br-asupersync-tncxj9). Polling a temporary `handle.join(cx)`
-            // future per member instead registered a waiter and then retired it
-            // again as that future dropped, so the scan ended with no waker
-            // registered on any member and nothing ever re-polled this set.
-            for index in 0..self.handles.len() {
-                if let Poll::Ready(joined) = self.handles[index].poll_join(task_cx) {
+            // Poll each candidate, in spawn order, through its handle's own
+            // long-lived receiver with the member's own waker, so every pending
+            // registration SURVIVES this poll (br-asupersync-tncxj9). Polling a
+            // temporary `handle.join(cx)` future per member instead registered a
+            // waiter and then retired it again as that future dropped, so the
+            // scan ended with no waker registered on any member and nothing ever
+            // re-polled this set. A member leaves the candidates before its poll,
+            // and its waker puts it back when its result is published.
+            let mut from = 0;
+            while let Some(member_index) = self.ready.next_candidate(from) {
+                self.ready.candidates.lock().remove(&member_index);
+                let joined = self.members.get_mut(&member_index).and_then(|member| {
+                    let Member { handle, waker } = member;
+                    let waker = waker.get_or_insert_with(|| {
+                        Waker::from(Arc::new(MemberWake {
+                            index: member_index,
+                            ready: Arc::clone(&self.ready),
+                        }))
+                    });
+                    match handle.poll_join(&mut Context::from_waker(waker)) {
+                        Poll::Ready(joined) => Some(joined),
+                        Poll::Pending => None,
+                    }
+                });
+                if let Some(joined) = joined {
                     let outcome = join_to_outcome(joined);
-                    self.summary.record(&outcome);
-                    self.handles.remove(index);
+                    self.take_member(member_index, &outcome);
                     return Poll::Ready(Some(outcome));
                 }
+                let Some(next) = member_index.checked_add(1) else {
+                    break;
+                };
+                from = next;
             }
 
             Poll::Pending
@@ -279,8 +393,8 @@ where
         cx: &Cx,
         reason: CancelReason,
     ) -> Vec<Outcome<T, E>> {
-        for handle in &self.handles {
-            handle.abort_with_reason(reason.clone());
+        for member in self.members.values() {
+            member.handle.abort_with_reason(reason.clone());
         }
         self.drain_all(cx).await
     }
@@ -301,13 +415,14 @@ where
         // the cancellation-owning set across each await, so dropping this
         // drain cannot abandon the not-yet-joined suffix. Iterating in place
         // also preserves linear work for large spawn-order collections.
-        let mut outcomes = Vec::with_capacity(self.handles.len());
-        for handle in &mut self.handles {
-            let outcome = join_to_outcome(handle.join(cx).await);
+        let mut outcomes = Vec::with_capacity(self.members.len());
+        for member in self.members.values_mut() {
+            let outcome = join_to_outcome(member.handle.join(cx).await);
             self.summary.record(&outcome);
             outcomes.push(outcome);
         }
-        self.handles.clear();
+        self.members.clear();
+        self.ready.candidates.lock().clear();
         outcomes
     }
 
@@ -315,7 +430,7 @@ where
         let set_id = self.set_id.to_string();
         let member_index = member_index.to_string();
         let region = self.scope.region_id().to_string();
-        let active_members = self.handles.len().to_string();
+        let active_members = self.members.len().to_string();
         cx.trace_with_fields(
             "join_set.spawn",
             &[
@@ -343,7 +458,8 @@ where
     pub fn in_cx(cx: &Cx) -> Self {
         Self {
             scope: cx.scope(),
-            handles: Vec::new(),
+            members: BTreeMap::new(),
+            ready: Arc::new(ReadyMembers::default()),
             summary: JoinSummary::default(),
             set_id: cx.region_id().as_u64(),
             next_member_index: 0,
@@ -363,9 +479,9 @@ where
         // This also protects completed prefixes retained by drain_all. A
         // member that published its result is terminal even before the
         // scheduler retires its record, which is when is_finished() turns true.
-        for handle in &self.handles {
-            if !handle.terminal_published() {
-                handle.abort();
+        for member in self.members.values() {
+            if !member.handle.terminal_published() {
+                member.handle.abort();
             }
         }
     }
@@ -596,7 +712,7 @@ mod tests {
         let mut set = JoinSet::<u32, &'static str, FailFast>::new(&scope);
         let (_tx, handle) = manual_handle::<Result<u32, &'static str>>(1);
 
-        set.handles.push(handle);
+        set.insert_member(handle);
 
         assert!(set.try_join_next().is_none());
         assert_eq!(set.len(), 1);
@@ -613,8 +729,8 @@ mod tests {
         let (_pending_tx, pending_handle) = manual_handle::<Result<u32, &'static str>>(1);
         let (ready_tx, ready_handle) = manual_handle::<Result<u32, &'static str>>(2);
 
-        set.handles.push(pending_handle);
-        set.handles.push(ready_handle);
+        set.insert_member(pending_handle);
+        set.insert_member(ready_handle);
         ready_tx
             .send(&cx, Ok(Ok(9)))
             .expect("ready member result sends");
@@ -638,7 +754,7 @@ mod tests {
         let mut set = JoinSet::<u32, &'static str, FailFast>::new(&scope);
         let (ready_tx, ready_handle) = manual_handle::<Result<u32, &'static str>>(1);
 
-        set.handles.push(ready_handle);
+        set.insert_member(ready_handle);
         ready_tx
             .send(&cx, Ok(Err("boom")))
             .expect("ready member error sends");
@@ -665,7 +781,7 @@ mod tests {
                 for (index, value) in seed_values.into_iter().enumerate() {
                     let (ready_tx, ready_handle) =
                         manual_handle::<Result<u32, &'static str>>((index + 1) as u32);
-                    set.handles.push(ready_handle);
+                    set.insert_member(ready_handle);
                     ready_tx
                         .send(&cx, Ok(Ok(value)))
                         .expect("ready member result sends");
@@ -717,8 +833,8 @@ mod tests {
         let mut set = JoinSet::<u32, &'static str, FailFast>::new(&scope);
         let (_pending_tx, pending_handle) = manual_handle::<Result<u32, &'static str>>(1);
         let (late_tx, late_handle) = manual_handle::<Result<u32, &'static str>>(2);
-        set.handles.push(pending_handle);
-        set.handles.push(late_handle);
+        set.insert_member(pending_handle);
+        set.insert_member(late_handle);
 
         let wakes = Arc::new(AtomicUsize::new(0));
         let waker = std::task::Waker::from(Arc::new(CountingWaker {
@@ -758,6 +874,115 @@ mod tests {
         assert_eq!(set.summary().worst(), Severity::Ok);
     }
 
+    fn parked_members(
+        set: &mut JoinSet<'_, u32, &'static str, FailFast>,
+        count: u32,
+    ) -> Vec<Option<oneshot::Sender<Result<Result<u32, &'static str>, JoinError>>>> {
+        let mut senders = Vec::new();
+        for slot in 0..count {
+            let (tx, handle) = manual_handle::<Result<u32, &'static str>>(slot + 1);
+            set.insert_member(handle);
+            senders.push(Some(tx));
+        }
+        senders
+    }
+
+    /// `join_next` polls only members that may have finished: after a parking
+    /// poll every pending member waits on its own waker and is no longer a
+    /// candidate, and a completion makes exactly that member a candidate. A
+    /// set collected in completion order therefore never rescans its other
+    /// members (br-asupersync-issue65-criticisms-kpmoy5.1.5).
+    #[test]
+    fn join_next_polls_only_members_whose_wakeup_fired() {
+        const MEMBERS: u32 = 10_000;
+        let cx = Cx::for_testing();
+        let scope = Scope::<FailFast>::new(
+            crate::RegionId::new_for_test(14, 1),
+            crate::Budget::INFINITE,
+        );
+        let mut set = JoinSet::<u32, &'static str, FailFast>::new(&scope);
+        let mut senders = parked_members(&mut set, MEMBERS);
+        assert_eq!(
+            set.ready.candidates.lock().len(),
+            MEMBERS as usize,
+            "members never polled are candidates"
+        );
+
+        let mut poll_cx = std::task::Context::from_waker(std::task::Waker::noop());
+        {
+            let mut join_next = Box::pin(set.join_next(&cx));
+            assert!(join_next.as_mut().poll(&mut poll_cx).is_pending());
+        }
+        assert!(
+            set.ready.candidates.lock().is_empty(),
+            "every parked member waits on its own waker"
+        );
+
+        // Complete members in reverse spawn order: each collection must find
+        // exactly the one member that finished.
+        for slot in (0..MEMBERS).rev() {
+            senders[slot as usize]
+                .take()
+                .expect("unsent member")
+                .send(&cx, Ok(Ok(slot)))
+                .expect("member result sends");
+            assert_eq!(
+                set.ready
+                    .candidates
+                    .lock()
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                vec![u64::from(slot)],
+                "only the finished member is a candidate"
+            );
+            let mut join_next = Box::pin(set.join_next(&cx));
+            match join_next.as_mut().poll(&mut poll_cx) {
+                Poll::Ready(Some(Outcome::Ok(value))) => assert_eq!(value, slot),
+                other => panic!("expected member {slot}, got {other:?}"),
+            }
+        }
+        assert!(set.is_empty());
+        assert_eq!(set.summary().completed(), MEMBERS as usize);
+    }
+
+    /// Dropping a `join_next` future that parked loses no outcome: the next
+    /// call collects every member exactly once, earliest spawned first.
+    #[test]
+    fn a_dropped_pending_join_next_loses_no_outcome() {
+        let cx = Cx::for_testing();
+        let scope = Scope::<FailFast>::new(
+            crate::RegionId::new_for_test(15, 1),
+            crate::Budget::INFINITE,
+        );
+        let mut set = JoinSet::<u32, &'static str, FailFast>::new(&scope);
+        let mut senders = parked_members(&mut set, 3);
+        let mut poll_cx = std::task::Context::from_waker(std::task::Waker::noop());
+        {
+            let mut join_next = Box::pin(set.join_next(&cx));
+            assert!(join_next.as_mut().poll(&mut poll_cx).is_pending());
+        }
+        for slot in [2_u32, 0, 1] {
+            senders[slot as usize]
+                .take()
+                .expect("unsent member")
+                .send(&cx, Ok(Ok(slot)))
+                .expect("member result sends");
+        }
+
+        let mut collected = Vec::new();
+        loop {
+            let mut join_next = Box::pin(set.join_next(&cx));
+            match join_next.as_mut().poll(&mut poll_cx) {
+                Poll::Ready(Some(outcome)) => collected.push(outcome.expect("member ok")),
+                Poll::Ready(None) => break,
+                Poll::Pending => panic!("every member has finished"),
+            }
+        }
+        assert_eq!(collected, vec![0, 1, 2]);
+        assert_eq!(set.summary().completed(), 3);
+    }
+
     #[test]
     fn join_all_collects_members_in_spawn_order() {
         let (outcomes, next_member_index) = run_in_runtime(|cx| async move {
@@ -795,7 +1020,7 @@ mod tests {
             for index in 0..MEMBERS {
                 let (ready_tx, ready_handle) =
                     manual_handle::<Result<u64, &'static str>>((index + 1) as u32);
-                set.handles.push(ready_handle);
+                set.insert_member(ready_handle);
                 ready_tx
                     .send(&cx, Ok(Ok(index as u64)))
                     .expect("ready member result sends");
@@ -849,7 +1074,11 @@ mod tests {
             for mut receipt in prefix_receipts {
                 prefix_contexts.push(receipt.recv(&cx).await.expect("prefix completed"));
             }
-            assert!(set.handles.iter().all(TaskHandle::is_finished));
+            assert!(
+                set.members
+                    .values()
+                    .all(|member| member.handle.is_finished())
+            );
 
             let mut parked_receipts = Vec::new();
             let mut release_senders = Vec::new();
@@ -963,7 +1192,7 @@ mod tests {
                         set.spawn(&cx, factory).expect("send member");
                     }
                     let member_cx = receiver.recv(&cx).await.expect("finished member");
-                    assert!(set.handles[0].is_finished());
+                    assert!(set.members[&0].handle.is_finished());
                     assert!(!member_cx.is_cancel_requested());
                     if unpolled_join {
                         drop(set.join_all(&cx));
@@ -997,25 +1226,23 @@ mod tests {
         let running_cx = Cx::for_testing();
         let (finished_tx, finished_rx) = oneshot::channel();
         let (_running_tx, running_rx) = oneshot::channel();
-        set.handles
-            .push(TaskHandle::with_retirement_barrier_for_test(
-                TaskId::new_for_test(1, 0),
-                finished_rx,
-                Arc::downgrade(&finished_cx.inner),
-                crate::runtime::task_handle::RetirementBarrier::pending(),
-            ));
-        set.handles
-            .push(TaskHandle::with_retirement_barrier_for_test(
-                TaskId::new_for_test(2, 0),
-                running_rx,
-                Arc::downgrade(&running_cx.inner),
-                crate::runtime::task_handle::RetirementBarrier::pending(),
-            ));
+        set.insert_member(TaskHandle::with_retirement_barrier_for_test(
+            TaskId::new_for_test(1, 0),
+            finished_rx,
+            Arc::downgrade(&finished_cx.inner),
+            crate::runtime::task_handle::RetirementBarrier::pending(),
+        ));
+        set.insert_member(TaskHandle::with_retirement_barrier_for_test(
+            TaskId::new_for_test(2, 0),
+            running_rx,
+            Arc::downgrade(&running_cx.inner),
+            crate::runtime::task_handle::RetirementBarrier::pending(),
+        ));
         finished_tx
             .send(&cx, Ok(Ok(7)))
             .expect("the finished member publishes its result");
         assert!(
-            !set.handles[0].is_finished(),
+            !set.members[&0].handle.is_finished(),
             "the closed barrier still gates the published result"
         );
 

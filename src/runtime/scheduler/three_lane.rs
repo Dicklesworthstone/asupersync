@@ -8347,11 +8347,18 @@ impl ThreeLaneWorker {
                         // Schedule to global injector
                         if schedule_cancel {
                             self.global.inject_cancel(task_id, cancel_priority);
+                            self.record_scheduler_evidence_enqueue(task_id);
+                            self.coordinator.wake_one();
                         } else {
+                            // A task that woke itself during its poll needs no
+                            // other worker: this one returns to `next_task`
+                            // and checks the global ready lane before it can
+                            // park. Waking a parker here (and possibly the
+                            // reactor) only moved the task to another thread
+                            // (br-asupersync-issue65-criticisms-kpmoy5.1.11).
                             self.global.inject_ready(task_id, priority);
+                            self.record_scheduler_evidence_enqueue(task_id);
                         }
-                        self.record_scheduler_evidence_enqueue(task_id);
-                        self.coordinator.wake_one();
                     }
                 }
 

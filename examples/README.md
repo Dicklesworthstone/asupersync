@@ -22,6 +22,8 @@ this index.
 - [`hello.rs`](hello.rs) — minimal async entry point with a `Cx` checkpoint.
 - [`spawn_fanout.rs`](spawn_fanout.rs) — small `JoinSet` fan-out with joined
   child outcomes.
+- [`fibers_borrowing.rs`](fibers_borrowing.rs) — `fiber::scope` fan-out over
+  borrowed data inside one task, with no `'static` bound.
 - [`external_consumer.rs`](external_consumer.rs) — public-API smoke program for
   runtime and lab entry points.
 - [`appspec_reference_journey.rs`](appspec_reference_journey.rs) — production

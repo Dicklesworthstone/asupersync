@@ -183,7 +183,7 @@
       "file": "examples/README.md",
       "loc": {
         "start": 1,
-        "end": 135
+        "end": 137
       },
       "kind": "markdown",
       "demonstrates": [
@@ -404,6 +404,23 @@
       "feature_flags": [],
       "run_command": "cargo run --example external_consumer",
       "description": "Small public-API consumer smoke example for runtime and lab entry points."
+    },
+    {
+      "name": "fibers_borrowing",
+      "file": "examples/fibers_borrowing.rs",
+      "loc": {
+        "start": 1,
+        "end": 29
+      },
+      "kind": "rust",
+      "demonstrates": [
+        "fiber-scope",
+        "borrowing-concurrency",
+        "fanout"
+      ],
+      "feature_flags": [],
+      "run_command": "cargo run --example fibers_borrowing",
+      "description": "Fan-out over borrowed data with fiber::scope: concurrent child futures inside one task, no 'static bound."
     },
     {
       "name": "grafana_dashboard",
