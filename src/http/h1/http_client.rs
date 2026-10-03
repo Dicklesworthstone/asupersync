@@ -3208,30 +3208,68 @@ fn resolve_redirect(current: &ParsedUrl, location: &str) -> String {
         };
     }
 
-    // Absolute path
-    if location.starts_with('/') {
-        let scheme = match current.scheme {
-            Scheme::Http => "http",
-            Scheme::Https => "https",
-        };
-        return format!("{scheme}://{}:{}{location}", current.host, current.port);
-    }
-
-    // Relative path (append to current path's directory).
-    // Strip query string and fragment first — rfind('/') must only see the path component.
-    let path_only = current
-        .path
-        .split_once(&['?', '#'][..])
-        .map_or(current.path.as_str(), |(p, _)| p);
-    let base_path = path_only.rfind('/').map_or("/", |i| &path_only[..=i]);
+    // A relative reference resolves against the current URL as RFC 3986
+    // section 5.2.2 describes. The fragment is never sent (RFC 9110 section
+    // 7.1).
     let scheme = match current.scheme {
         Scheme::Http => "http",
         Scheme::Https => "https",
     };
-    format!(
-        "{scheme}://{}:{}{base_path}{location}",
-        current.host, current.port
-    )
+    let location = location.split('#').next().unwrap_or_default();
+    let (base_path, base_query) = match current.path.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (current.path.as_str(), None),
+    };
+    let (ref_path, ref_query) = match location.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (location, None),
+    };
+    let (path, query) = if ref_path.is_empty() {
+        // Same resource; a query in the reference replaces the base query.
+        (base_path.to_owned(), ref_query.or(base_query))
+    } else if ref_path.starts_with('/') {
+        (remove_dot_segments(ref_path), ref_query)
+    } else {
+        // Merge with the base path's directory.
+        let directory = base_path.rfind('/').map_or("/", |i| &base_path[..=i]);
+        (
+            remove_dot_segments(&format!("{directory}{ref_path}")),
+            ref_query,
+        )
+    };
+    let authority = format!("{scheme}://{}:{}", current.host, current.port);
+    match query {
+        Some(query) => format!("{authority}{path}?{query}"),
+        None => format!("{authority}{path}"),
+    }
+}
+
+/// Removes `.` and `..` segments from an absolute path (RFC 3986 section
+/// 5.2.4). A path ending in either keeps its trailing slash, and `..` never
+/// climbs above the root.
+fn remove_dot_segments(path: &str) -> String {
+    let mut segments: Vec<&str> = Vec::new();
+    let mut trailing_slash = false;
+    for segment in path.split('/').skip(1) {
+        trailing_slash = false;
+        match segment {
+            "." => trailing_slash = true,
+            ".." => {
+                segments.pop();
+                trailing_slash = true;
+            }
+            other => segments.push(other),
+        }
+    }
+    let mut resolved = String::with_capacity(path.len());
+    for segment in segments {
+        resolved.push('/');
+        resolved.push_str(segment);
+    }
+    if trailing_slash || resolved.is_empty() {
+        resolved.push('/');
+    }
+    resolved
 }
 
 /// Returns `true` if two parsed URLs share the same origin (scheme + host + port).
@@ -3941,6 +3979,62 @@ mod tests {
         let current = ParsedUrl::parse("http://example.com/dir/old?return=/home").unwrap();
         let result = resolve_redirect(&current, "new");
         assert_eq!(result, "http://example.com:80/dir/new");
+    }
+
+    // RFC 3986 section 5.4's reference resolution examples, base
+    // http://a/b/c/d;p?q (fragments dropped: they are never sent). The
+    // resolver appended every relative Location to the base directory: "?y"
+    // became /b/c/?y, "../g" was sent literally, and "#s" lost the path.
+    #[test]
+    fn resolve_redirect_follows_rfc_3986_reference_resolution() {
+        let base = ParsedUrl::parse("http://a/b/c/d;p?q").unwrap();
+        for (reference, expected) in [
+            // 5.4.1 normal examples
+            ("g", "/b/c/g"),
+            ("./g", "/b/c/g"),
+            ("g/", "/b/c/g/"),
+            ("/g", "/g"),
+            ("?y", "/b/c/d;p?y"),
+            ("g?y", "/b/c/g?y"),
+            ("#s", "/b/c/d;p?q"),
+            ("g#s", "/b/c/g"),
+            ("g?y#s", "/b/c/g?y"),
+            (";x", "/b/c/;x"),
+            ("g;x", "/b/c/g;x"),
+            ("g;x?y#s", "/b/c/g;x?y"),
+            ("", "/b/c/d;p?q"),
+            (".", "/b/c/"),
+            ("./", "/b/c/"),
+            ("..", "/b/"),
+            ("../", "/b/"),
+            ("../g", "/b/g"),
+            ("../..", "/"),
+            ("../../", "/"),
+            ("../../g", "/g"),
+            // 5.4.2 abnormal examples
+            ("../../../g", "/g"),
+            ("../../../../g", "/g"),
+            ("/./g", "/g"),
+            ("/../g", "/g"),
+            ("g.", "/b/c/g."),
+            (".g", "/b/c/.g"),
+            ("g..", "/b/c/g.."),
+            ("..g", "/b/c/..g"),
+            ("./../g", "/b/g"),
+            ("./g/.", "/b/c/g/"),
+            ("g/./h", "/b/c/g/h"),
+            ("g/../h", "/b/c/h"),
+            ("g;x=1/./y", "/b/c/g;x=1/y"),
+            ("g;x=1/../y", "/b/c/y"),
+            ("g?y/./x", "/b/c/g?y/./x"),
+            ("g?y/../x", "/b/c/g?y/../x"),
+        ] {
+            assert_eq!(
+                resolve_redirect(&base, reference),
+                format!("http://a:80{expected}"),
+                "reference {reference:?}"
+            );
+        }
     }
 
     // =========================================================================
