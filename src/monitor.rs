@@ -721,6 +721,33 @@ impl<R, N> WatchSlot<R, N> {
             ..Self::default()
         }
     }
+
+    /// Wakes the task waiting on this slot without settling it, so that its
+    /// re-poll observes a runtime that went away
+    /// (`WatchError::RuntimeUnavailable`).
+    pub(crate) fn wake_waiter(&self) {
+        let waker = self.inner.lock().waker.take();
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+}
+
+impl<R: Send, N: Send> crate::runtime::spawn_mailbox::TeardownWake for WatchSlot<R, N> {
+    fn wake_for_teardown(&self) {
+        self.wake_waiter();
+    }
+}
+
+/// Registers `slot` to be woken when the runtime behind `gateway` is torn
+/// down, for a handle awaiting it outside the runtime
+/// (br-asupersync-werypv).
+pub(crate) fn register_for_teardown<R: Send + 'static, N: Send + 'static>(
+    gateway: &crate::runtime::spawn_mailbox::SpawnGateway,
+    slot: &std::sync::Arc<WatchSlot<R, N>>,
+) {
+    let watch = std::sync::Arc::downgrade(slot);
+    gateway.mailbox().register_teardown_wake(watch);
 }
 
 /// The slot behind a [`Monitor`]: the monitor reference and the monitored
@@ -923,7 +950,11 @@ impl<R: Copy, N: Clone> ServerWatchOpening<R, N> {
         slot: WatchSlot<(R, TaskId), N>,
         command: impl FnOnce(std::sync::Arc<WatchSlot<(R, TaskId), N>>) -> WatchCommand,
         withdraw: fn(R) -> WatchCommand,
-    ) -> Self {
+    ) -> Self
+    where
+        R: Send + 'static,
+        N: Send + 'static,
+    {
         let failed = |error| Self {
             pending: None,
             failed: Some(error),
@@ -933,6 +964,7 @@ impl<R: Copy, N: Clone> ServerWatchOpening<R, N> {
             return failed(WatchError::RuntimeUnavailable);
         };
         let slot = std::sync::Arc::new(slot);
+        register_for_teardown(&gateway, &slot);
         if gateway
             .enqueue_region_command(crate::runtime::spawn_mailbox::RegionCommand::Watch(
                 command(std::sync::Arc::clone(&slot)),
@@ -1136,6 +1168,7 @@ impl<Caps> crate::cx::Cx<Caps> {
             return MonitorOpening::failed(WatchError::RuntimeUnavailable);
         };
         let slot = std::sync::Arc::new(MonitorSlot::default());
+        register_for_teardown(&gateway, &slot);
         let target_id = target.id;
         let command = WatchCommand::Monitor {
             watcher: self.task_id().into(),
@@ -1191,6 +1224,20 @@ pub(crate) enum WatchCommand {
     Unlink {
         link_ref: crate::link::LinkRef,
     },
+}
+
+impl WatchCommand {
+    /// The runtime is retiring this command unapplied (teardown): wake the
+    /// opening waiting on it, so its re-poll reports
+    /// `WatchError::RuntimeUnavailable` instead of waiting forever
+    /// (br-asupersync-fbifws).
+    pub(crate) fn wake_unapplied(&self) {
+        match self {
+            Self::Monitor { slot, .. } => slot.wake_waiter(),
+            Self::Link { slot, .. } => slot.wake_waiter(),
+            Self::Demonitor { .. } | Self::Unlink { .. } => {}
+        }
+    }
 }
 
 impl std::fmt::Debug for WatchCommand {

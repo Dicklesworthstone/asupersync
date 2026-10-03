@@ -1646,6 +1646,21 @@ impl AdmittedRegionSlot {
         }
     }
 
+    /// Wakes every registered opening without publishing. Runtime teardown
+    /// calls this for a Create command it retires unapplied: the runtime's
+    /// liveness token is already gone, so each re-poll finds an empty slot and
+    /// a dead runtime and resolves as `ChildRegionError::RuntimeUnavailable`
+    /// (br-asupersync-fbifws).
+    pub(crate) fn wake_waiters(&self) {
+        let waiters = {
+            let _inner = self.inner.lock();
+            std::mem::take(&mut *self.waiters.lock())
+        };
+        for waker in waiters {
+            waker.wake();
+        }
+    }
+
     /// Marks the slot as abandoned by its only consumer and returns an
     /// outcome that was published but not taken, for the caller to close.
     /// A later publication closes the region it mints instead.
@@ -1658,6 +1673,13 @@ impl AdmittedRegionSlot {
     }
 }
 
+/// A runtime watch (monitor or link) that a task outside the runtime may be
+/// awaiting: runtime teardown wakes it so its re-poll observes the dead
+/// runtime (br-asupersync-werypv).
+pub(crate) trait TeardownWake: Send + Sync {
+    fn wake_for_teardown(&self);
+}
+
 pub struct SpawnMailbox {
     queue: GlobalFifoQueue<SpawnRequest>,
     handle_cancels: GlobalFifoQueue<HandleCancelRequest>,
@@ -1666,6 +1688,9 @@ pub struct SpawnMailbox {
     trace: Option<TraceBufferHandle>,
     total_enqueued: AtomicU64,
     total_dequeued: AtomicU64,
+    /// Runtime watches opened through this mailbox's gateway, woken at
+    /// teardown. Weak: a dropped watch needs nothing.
+    teardown_watches: Mutex<Vec<Weak<dyn TeardownWake>>>,
 }
 
 impl SpawnMailbox {
@@ -1680,7 +1705,16 @@ impl SpawnMailbox {
             trace: None,
             total_enqueued: AtomicU64::new(0),
             total_dequeued: AtomicU64::new(0),
+            teardown_watches: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Registers a runtime watch to be woken at teardown. Watches that were
+    /// dropped are pruned here, so the list stays as long as the live ones.
+    pub(crate) fn register_teardown_wake(&self, watch: Weak<dyn TeardownWake>) {
+        let mut watches = self.teardown_watches.lock();
+        watches.retain(|registered| registered.strong_count() > 0);
+        watches.push(watch);
     }
 
     /// Creates a new mailbox that emits `TaskSpawnEnqueued` trace events to
@@ -1805,12 +1839,32 @@ impl SpawnMailbox {
     /// have stopped. Retained contexts can keep this mailbox alive beyond
     /// runtime teardown, so waiting for its destructor would strand finalizer
     /// acknowledgments. Run only outside runtime and shard locks.
+    ///
+    /// An opening waiting on a retired Create or watch command is woken, and
+    /// so is every registered runtime watch: they check liveness only when
+    /// polled, and the runtime is gone by now (br-asupersync-fbifws,
+    /// br-asupersync-werypv).
     pub(crate) fn retire_region_commands(&self) {
+        let watches = std::mem::take(&mut *self.teardown_watches.lock());
+        for watch in watches.iter().filter_map(Weak::upgrade) {
+            if let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| watch.wake_for_teardown()))
+            {
+                std::mem::forget(payload);
+            }
+        }
         let mut commands = Vec::new();
         while self.dequeue_region_commands_into(64, &mut commands) > 0 {
             for command in commands.drain(..) {
-                if let Err(payload) =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(command)))
+                let retire = || {
+                    match &command {
+                        RegionCommand::Create(request) => request.slot.wake_waiters(),
+                        RegionCommand::Watch(watch) => watch.wake_unapplied(),
+                        _ => {}
+                    }
+                    drop(command);
+                };
+                if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(retire))
                 {
                     // Retention values and panic payloads can have arbitrary
                     // destructors. One failure cannot strand later senders.
@@ -5653,5 +5707,104 @@ mod tests {
             0,
             "credit released on denial"
         );
+    }
+
+    /// An opening whose Create or watch command is still queued when the
+    /// runtime is torn down is woken and resolves as unavailable instead of
+    /// waiting forever (br-asupersync-fbifws).
+    #[test]
+    fn teardown_wakes_openings_whose_commands_were_never_applied() {
+        let mut lab = LabRuntime::new(LabConfig::new(0x00fb_1f05).max_steps(256));
+        let root = lab.state.create_root_region(crate::types::Budget::INFINITE);
+        let (task, mut joined) = lab
+            .state
+            .create_task(root, crate::types::Budget::INFINITE, async {
+                crate::Cx::current().expect("lab task cx")
+            })
+            .expect("create task");
+        lab.scheduler.lock().schedule(task, 0);
+        lab.run_until_idle();
+        let cx = joined
+            .try_join()
+            .expect("join")
+            .expect("the task returned its cx");
+
+        let wakes = Arc::new(CountWakes(AtomicUsize::new(0)));
+        let waker = std::task::Waker::from(Arc::clone(&wakes));
+        let mut context = std::task::Context::from_waker(&waker);
+        // Queued, never applied: the lab does not run again.
+        let mut region = Box::pin(cx.open_child_region(crate::cx::ChildRegionSpec::inherit()));
+        let mut monitor = Box::pin(cx.monitor(TaskId::new_for_test(77, 0)));
+        assert!(region.as_mut().poll(&mut context).is_pending());
+        assert!(monitor.as_mut().poll(&mut context).is_pending());
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 0, "both openings wait");
+
+        drop(lab);
+        assert_eq!(
+            wakes.0.load(Ordering::SeqCst),
+            2,
+            "teardown wakes both openings"
+        );
+        assert!(matches!(
+            region.as_mut().poll(&mut context),
+            std::task::Poll::Ready(Err(crate::cx::ChildRegionError::RuntimeUnavailable))
+        ));
+        assert!(matches!(
+            monitor.as_mut().poll(&mut context),
+            std::task::Poll::Ready(Err(crate::monitor::WatchError::RuntimeUnavailable))
+        ));
+    }
+
+    /// An established monitor whose DOWN is awaited outside the runtime is
+    /// woken at teardown and resolves as unavailable
+    /// (br-asupersync-werypv).
+    #[test]
+    fn teardown_wakes_an_established_monitor_awaited_outside_the_runtime() {
+        let mut lab = LabRuntime::new(LabConfig::new(0x0e7e_4f00).max_steps(1024));
+        let root = lab.state.create_root_region(crate::types::Budget::INFINITE);
+        let (parked, _parked_handle) = lab
+            .state
+            .create_task(
+                root,
+                crate::types::Budget::INFINITE,
+                std::future::pending::<()>(),
+            )
+            .expect("create parked task");
+        lab.scheduler.lock().schedule(parked, 0);
+        let (task, mut joined) = lab
+            .state
+            .create_task(root, crate::types::Budget::INFINITE, async {
+                crate::Cx::current().expect("lab task cx")
+            })
+            .expect("create task");
+        lab.scheduler.lock().schedule(task, 0);
+        lab.run_until_idle();
+        let cx = joined
+            .try_join()
+            .expect("join")
+            .expect("the task returned its cx");
+
+        let wakes = Arc::new(CountWakes(AtomicUsize::new(0)));
+        let waker = std::task::Waker::from(Arc::clone(&wakes));
+        let mut context = std::task::Context::from_waker(&waker);
+        let mut opening = Box::pin(cx.monitor(parked));
+        assert!(opening.as_mut().poll(&mut context).is_pending());
+        lab.run_until_idle();
+        let std::task::Poll::Ready(Ok(monitor)) = opening.as_mut().poll(&mut context) else {
+            panic!("the monitor is established on the parked task");
+        };
+        let mut down = Box::pin(monitor.down(&cx));
+        assert!(down.as_mut().poll(&mut context).is_pending(), "no DOWN yet");
+        let before = wakes.0.load(Ordering::SeqCst);
+
+        drop(lab);
+        assert!(
+            wakes.0.load(Ordering::SeqCst) > before,
+            "teardown wakes the waiting DOWN"
+        );
+        assert!(matches!(
+            down.as_mut().poll(&mut context),
+            std::task::Poll::Ready(Err(crate::monitor::WatchError::RuntimeUnavailable))
+        ));
     }
 }

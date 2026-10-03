@@ -932,6 +932,7 @@ impl<Caps> crate::cx::Cx<Caps> {
             };
         };
         let slot = std::sync::Arc::new(LinkSlot::default());
+        crate::monitor::register_for_teardown(&gateway, &slot);
         let peer_id = peer.id();
         let command = crate::monitor::WatchCommand::Link {
             task: self.task_id().into(),
