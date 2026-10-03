@@ -360,7 +360,14 @@ async fn write_owned_buf_with_permit<IO: AsyncWrite + Unpin>(
                 close_shared_after_outbound_backpressure(&mut guard);
                 return Err(err);
             }
-            guard.write_buf.extend_from_slice(&buf[..]);
+            // The read half queues its Close echo without the permit, so whole
+            // frames may have arrived in write_buf while this one was being
+            // written. Its unsent tail goes ahead of them; appended after,
+            // the wire would carry this frame split around them.
+            let mut ordered = BytesMut::with_capacity(buf.len() + guard.write_buf.len());
+            ordered.extend_from_slice(&buf[..]);
+            ordered.extend_from_slice(&guard.write_buf[..]);
+            guard.write_buf = ordered;
             buf.clear();
         }
         return flush_shared_write_buf_with_permit(shared, op_cx).await;
@@ -870,6 +877,10 @@ where
             .encode_with_entropy(frame, &mut shared.write_buf, entropy)
     }
 
+    /// Queues `frame` before taking the write permit, so it stays queued if
+    /// this wait is cancelled. A writer that holds the permit with part of its
+    /// own frame unsent puts that tail ahead of it
+    /// (`write_owned_buf_with_permit`).
     async fn send_frame_internal_with_entropy(
         &self,
         op_cx: Option<&Cx>,
@@ -1371,6 +1382,58 @@ mod tests {
             .encode_with_entropy(frame, &mut out, entropy)
             .expect("frame encoding should succeed");
         out.to_vec()
+    }
+
+    // The read half echoes a peer Close while the write half's frame is parked
+    // unsent. The writer appended its unsent tail after the queued echo, so
+    // the wire carried X[..n], Close, X[n..] and the peer saw a corrupt frame
+    // instead of a clean close.
+    #[test]
+    fn split_close_echo_never_lands_inside_a_frame_the_writer_is_sending() {
+        future::block_on(async {
+            let peer_close = encode_client_frame_with_entropy(
+                &Frame::close(Some(1000), None),
+                &FixedEntropy([0x11, 0x22, 0x33, 0x44]),
+            );
+            let ws = WebSocket::from_upgraded(
+                TestIo::new(peer_close)
+                    .with_pending_first_write()
+                    .with_partial_first_write(100),
+                WebSocketConfig::default(),
+            );
+            let (mut read, write) = ws.split();
+            read.shared.lock().codec = FrameCodec::server();
+            let cx = Cx::for_testing();
+            let frame = Frame::binary(Bytes::from(vec![0xAB; 1000]));
+
+            let waker = std::task::Waker::noop().clone();
+            let mut poll_cx = Context::from_waker(&waker);
+            let mut send = Box::pin(write.send_frame(&frame));
+            assert!(
+                send.as_mut().poll(&mut poll_cx).is_pending(),
+                "the writer parks in its first write, holding the write permit"
+            );
+            let mut recv = Box::pin(read.recv(&cx));
+            assert!(
+                recv.as_mut().poll(&mut poll_cx).is_pending(),
+                "the Close echo waits for the write permit"
+            );
+
+            let (sent, received) = future::zip(send, recv).await;
+            sent.expect("the writer's frame is sent");
+            assert!(
+                matches!(received, Ok(Some(Message::Close(_)))),
+                "the peer's Close is delivered: {received:?}"
+            );
+
+            let ws = read.reunite(write).expect("split halves must reunite");
+            let mut expected = encode_server_frame(frame);
+            expected.extend_from_slice(&encode_server_frame(Frame::close(Some(1000), None)));
+            assert_eq!(
+                ws.io.written, expected,
+                "the whole frame, then the Close echo"
+            );
+        });
     }
 
     #[test]
