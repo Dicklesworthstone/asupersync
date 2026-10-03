@@ -8870,7 +8870,20 @@ pub async fn send_path(
             )?)
             .await?;
         rqtrace!("sender: sent ObjectComplete, awaiting reply");
-        let reply = control.recv().await?;
+        // The receiver answers each ObjectComplete exactly once, and also echoes
+        // the liveness probes sent while spraying. An echo that arrives after
+        // the round is not that answer: re-sending ObjectComplete for it would
+        // leave the sender acting on every later verdict one round late, and
+        // the receiver could commit while the sender was still spraying
+        // (asupersync-fjg6ng).
+        let reply = loop {
+            let reply = control.recv().await?;
+            if reply.frame_type() != FrameType::KeepAlive {
+                break reply;
+            }
+            adaptive.mark_control_peer_activity();
+            rqtrace!("sender: KeepAlive while awaiting the round verdict");
+        };
         let control_wait = control_wait_started.elapsed();
         let window_probe = RqSenderWindowProbe::new(
             pacer.pacing(),
@@ -8882,7 +8895,6 @@ pub async fn send_path(
         let window_probe_phase = match reply.frame_type() {
             FrameType::Proof => "proof",
             FrameType::ObjectRequest => "need_more",
-            FrameType::KeepAlive => "keep_alive",
             _ => "other",
         };
         peak_sender_window_bytes = peak_sender_window_bytes.max(window_probe.peak_window_bytes());
@@ -8942,9 +8954,6 @@ pub async fn send_path(
                     udp_send_acceleration,
                     peer,
                 });
-            }
-            FrameType::KeepAlive => {
-                adaptive.mark_control_peer_activity();
             }
             FrameType::ObjectRequest => {
                 let need: NeedMore = parse_json(&reply)?;
