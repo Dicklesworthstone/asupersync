@@ -542,6 +542,18 @@ where
                             return Poll::Pending;
                         }
                         Poll::Ready(new_policy) => {
+                            // A cancelled task starts no further attempt, as
+                            // Hedge starts no backup: a backoff Sleep completes
+                            // at once once the task is cancelled, so retrying
+                            // would turn the cancellation into a burst of
+                            // calls. The last attempt's result is returned.
+                            if crate::cx::Cx::current()
+                                .is_some_and(|current| current.is_cancel_requested())
+                            {
+                                let result = result.take().expect("result should exist");
+                                this.state = RetryState::Done;
+                                return Poll::Ready(result.map_err(RetryError::Inner));
+                            }
                             let next_request = if request_consumed {
                                 // After `call()` the original request has been consumed, so
                                 // retries must use a policy-approved backup clone.
@@ -1342,6 +1354,32 @@ mod tests {
         let cloned: Option<i32> = Policy::<i32, (), ()>::clone_request(&policy, &42);
         crate::assert_with_log!(cloned.is_none(), "clone none", true, cloned.is_none());
         crate::test_complete!("no_retry_policy");
+    }
+
+    #[test]
+    fn retry_starts_no_attempt_once_the_task_is_cancelled() {
+        init_test("retry_starts_no_attempt_once_the_task_is_cancelled");
+        let current = Cx::for_testing();
+        let _current = Cx::set_current(Some(current.clone()));
+        current.cancel_with(crate::types::CancelKind::User, Some("caller gave up"));
+
+        let (svc, calls) = FailingService::new(100);
+        let mut retry_svc = Retry::new(svc, LimitedRetry::<i32>::new(3));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let _ = retry_svc.poll_ready(&mut cx);
+        let mut future = retry_svc.call(21);
+        let result = (0..100)
+            .find_map(|_| match Pin::new(&mut future).poll(&mut cx) {
+                Poll::Ready(result) => Some(result),
+                Poll::Pending => None,
+            })
+            .expect("the retry future completes");
+
+        assert!(matches!(result, Err(RetryError::Inner("service error"))));
+        let count = calls.load(Ordering::SeqCst);
+        crate::assert_with_log!(count == 1, "no retry after cancel", 1, count);
+        crate::test_complete!("retry_starts_no_attempt_once_the_task_is_cancelled");
     }
 
     #[test]
