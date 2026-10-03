@@ -2339,67 +2339,67 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 2368,
+          "line": 2388,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2382,
+          "line": 2402,
           "pattern": "let get_result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2730,
+          "line": 2750,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2749,
+          "line": 2769,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2783,
+          "line": 2803,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2801,
+          "line": 2821,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2837,
+          "line": 2857,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2851,
+          "line": 2871,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2865,
+          "line": 2885,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2903,
+          "line": 2923,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2945,
+          "line": 2965,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2990,
+          "line": 3010,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 3006,
+          "line": 3026,
           "pattern": "let result = unsafe {"
         }
       ]

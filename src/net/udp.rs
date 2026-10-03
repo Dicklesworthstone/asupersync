@@ -1661,7 +1661,10 @@ pub fn fallback_io_driver_probe() -> Option<FallbackIoDriverProbe> {
 ///    socket is polled under a `Cx` that carries an ambient driver, so the
 ///    fallback never captures a socket that a runtime later adopts;
 /// 2. an existing registration is re-armed in place (oneshot reactor
-///    interest is re-armed per poll; the `will_wake` guard skips the clone);
+///    interest is re-armed per poll; the `will_wake` guard skips the clone).
+///    The socket has one waiter, so a read wait and a write wait in the same
+///    poll both stay armed until the next event
+///    (`IoRegistration::rearm_accumulating`);
 /// 3. otherwise the fd is registered on the ambient driver when present,
 ///    else on the fallback driver, and only when neither exists (or the
 ///    reactor refuses the fd) does the caller take the legacy self-wake.
@@ -1761,7 +1764,7 @@ impl ReactorRegistration {
         if let Some(registration) = &mut self.registration {
             #[cfg(any(test, feature = "test-internals"))]
             fallback_io_probe::bump_if(self.on_fallback, &fallback_io_probe::REARMS);
-            match registration.rearm(interest, waker) {
+            match registration.rearm_accumulating(interest, waker) {
                 Ok(true) => return Ok(Armed::Parked),
                 // Slab slot gone: fall through to a fresh registration.
                 Ok(false) => self.clear(),
