@@ -2092,11 +2092,16 @@ impl<P: Policy> Scope<'_, P> {
             if let Poll::Ready(joined) = handle.poll_join(poll_cx) {
                 return Poll::Ready(Some(branch_join_to_outcome(joined)));
             }
-            if sleep.as_mut().poll(poll_cx).is_ready() {
-                return Poll::Ready(None);
-            }
+            // The caller's cancellation is checked before the timer, and the
+            // timer is polled for its deadline only. The cancel-aware poll
+            // also completed on the caller's cancellation, so that was
+            // reported as a timeout and the operation aborted with Timeout
+            // instead of the caller's reason.
             if cx.checkpoint().is_err() {
                 caller_cancelled = true;
+                return Poll::Ready(None);
+            }
+            if sleep.as_mut().poll_deadline(poll_cx).is_ready() {
                 return Poll::Ready(None);
             }
             Poll::Pending
