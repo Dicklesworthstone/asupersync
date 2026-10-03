@@ -377,6 +377,7 @@ impl File {
     ///
     /// See [`OpenOptions::open`] for more options.
     pub async fn open(path: impl AsRef<Path>) -> io::Result<Self> {
+        crate::cx::io_gate::require_ambient_io("fs::File::open")?;
         let path = path.as_ref().to_owned();
         let file = spawn_blocking_io(move || std::fs::File::open(&path)).await?;
         Ok(Self::from_std(file))
@@ -387,6 +388,7 @@ impl File {
     /// This function will create a file if it does not exist, and will truncate it if it does.
     /// A started open may create or truncate the path after cancellation.
     pub async fn create(path: impl AsRef<Path>) -> io::Result<Self> {
+        crate::cx::io_gate::require_ambient_io("fs::File::create")?;
         let path = path.as_ref().to_owned();
         let file = spawn_blocking_io(move || std::fs::File::create(&path)).await?;
         Ok(Self::from_std(file))
@@ -398,6 +400,7 @@ impl File {
     /// creators. If this succeeds, the returned file is guaranteed to be new.
     /// A started creation may still commit after the future is dropped.
     pub async fn create_new(path: impl AsRef<Path>) -> io::Result<Self> {
+        crate::cx::io_gate::require_ambient_io("fs::File::create_new")?;
         let path = path.as_ref().to_owned();
         let file = spawn_blocking_io(move || {
             std::fs::OpenOptions::new()

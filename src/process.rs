@@ -664,7 +664,7 @@ impl ExactImageCommand {
                 self.program.display()
             )));
         }
-
+        crate::cx::io_gate::require_ambient_io("process::ExactImageCommand::spawn")?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             spawn_exact_image_unix(self)
@@ -2096,9 +2096,9 @@ impl Command {
     /// let status = child.wait()?;
     /// ```
     pub fn spawn(&mut self) -> Result<Child, ProcessError> {
+        crate::cx::io_gate::require_ambient_io("process::Command::spawn")?;
         self.validate_process_group_configuration()?;
         self.validate_parent_death_signal()?;
-
         // Admit cleanup before creating a process: failure to start the shared
         // reaper must not leave an already-running child without a wait owner.
         #[cfg(unix)]

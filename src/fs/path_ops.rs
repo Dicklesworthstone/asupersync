@@ -5,7 +5,7 @@
 //! Other operations use `spawn_blocking_io` for true async offloading.
 
 use super::metadata::{Metadata, Permissions};
-use crate::runtime::spawn_blocking_io;
+use crate::cx::io_gate::spawn_blocking_io;
 use std::io;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -744,6 +744,7 @@ fn path_to_cstring(path: &Path) -> io::Result<std::ffi::CString> {
 #[cfg(all(target_os = "linux", feature = "io-uring"))]
 fn uring_unlinkat(path: &Path) -> io::Result<()> {
     use io_uring::{opcode, types};
+    crate::cx::io_gate::require_ambient_io("fs")?;
     let c_path = path_to_cstring(path)?;
     let entry = opcode::UnlinkAt::new(types::Fd(libc::AT_FDCWD), c_path.as_ptr())
         .flags(0)
@@ -754,6 +755,7 @@ fn uring_unlinkat(path: &Path) -> io::Result<()> {
 #[cfg(all(target_os = "linux", feature = "io-uring"))]
 fn uring_renameat(from: &Path, to: &Path) -> io::Result<()> {
     use io_uring::{opcode, types};
+    crate::cx::io_gate::require_ambient_io("fs")?;
     let c_from = path_to_cstring(from)?;
     let c_to = path_to_cstring(to)?;
     let entry = opcode::RenameAt::new(
@@ -769,6 +771,7 @@ fn uring_renameat(from: &Path, to: &Path) -> io::Result<()> {
 #[cfg(all(target_os = "linux", feature = "io-uring"))]
 fn uring_symlinkat(target: &Path, linkpath: &Path) -> io::Result<()> {
     use io_uring::{opcode, types};
+    crate::cx::io_gate::require_ambient_io("fs")?;
     let c_target = path_to_cstring(target)?;
     let c_link = path_to_cstring(linkpath)?;
     let entry = opcode::SymlinkAt::new(

@@ -317,11 +317,11 @@ async fn my_task(cx: &Cx) {
 ```
 
 Swap `Cx` to change interpretation: production vs. lab vs. distributed.
-The public I/O entry points are not capability-checked today:
-`TcpStream::connect(addr)` and `File::open(path)` take no `Cx`, and
-`spawn_blocking` runs its closure even when the current context's
-capabilities are restricted. Closing that gap is tracked as
-`asupersync-issue65-criticisms-kpmoy5.5`.
+I/O entry points such as `TcpStream::connect(addr)` and `File::open(path)` take no `Cx`, so they
+check the calling task's context: without the IO capability they refuse with
+[`[ASUP-E009]`](./docs/error_codes/ASUP-E009.md). Threads outside the runtime are not affected.
+`spawn_blocking` still runs its closure under a restricted context, and `Cx`-taking variants of
+these entry points do not exist yet (`asupersync-issue65-criticisms-kpmoy5.5`).
 This is not a blanket claim that every internal helper is `Cx`-threaded:
 host-boundary code such as OS entropy for temporary file names, legacy sync DNS
 wall-clock timing, and test/support harnesses must keep their authority

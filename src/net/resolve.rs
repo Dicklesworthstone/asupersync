@@ -15,6 +15,9 @@ const NO_SOCKET_ADDRESSES_FOUND: &str = "no socket addresses found";
 
 /// Resolve a hostname to the first available socket address.
 ///
+/// Refuses with [`IoCapabilityDenied`](crate::cx::IoCapabilityDenied) when
+/// the calling task's `Cx` lacks the IO capability.
+///
 /// # Cancel Safety
 ///
 /// If this future is cancelled, the DNS resolution continues on the blocking
@@ -25,6 +28,7 @@ pub async fn lookup_one<A>(addr: A) -> io::Result<SocketAddr>
 where
     A: ToSocketAddrs + Send + 'static,
 {
+    crate::cx::io_gate::require_ambient_io("net::lookup_one")?;
     let any_ref = &addr as &dyn std::any::Any;
     if let Some(s) = any_ref.downcast_ref::<SocketAddr>() {
         return Ok(*s);
@@ -53,6 +57,9 @@ where
 
 /// Resolve a hostname to all available socket addresses.
 ///
+/// Refuses with [`IoCapabilityDenied`](crate::cx::IoCapabilityDenied) when
+/// the calling task's `Cx` lacks the IO capability.
+///
 /// # Cancel Safety
 ///
 /// If this future is cancelled, the DNS resolution continues on the blocking
@@ -63,6 +70,7 @@ pub async fn lookup_all<A>(addr: A) -> io::Result<Vec<SocketAddr>>
 where
     A: ToSocketAddrs + Send + 'static,
 {
+    crate::cx::io_gate::require_ambient_io("net::lookup_all")?;
     let any_ref = &addr as &dyn std::any::Any;
     if let Some(s) = any_ref.downcast_ref::<SocketAddr>() {
         return Ok(vec![*s]);

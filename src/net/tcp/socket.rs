@@ -147,6 +147,9 @@ impl TcpSocket {
     }
 
     /// Starts listening, returning a TCP listener.
+    ///
+    /// Refuses with [`IoCapabilityDenied`](crate::cx::IoCapabilityDenied)
+    /// when the calling task's `Cx` lacks the IO capability.
     pub fn listen(self, backlog: u32) -> io::Result<TcpListener> {
         #[cfg(target_arch = "wasm32")]
         {
@@ -157,6 +160,7 @@ impl TcpSocket {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
+            crate::cx::io_gate::require_ambient_io("net::TcpSocket::listen")?;
             let state = self.state.into_inner();
             let addr = state.bound.ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, "socket is not bound")
@@ -188,6 +192,9 @@ impl TcpSocket {
     }
 
     /// Connects this socket, returning a TCP stream.
+    ///
+    /// Refuses with [`IoCapabilityDenied`](crate::cx::IoCapabilityDenied)
+    /// when the calling task's `Cx` lacks the IO capability.
     pub async fn connect(self, addr: SocketAddr) -> io::Result<TcpStream> {
         #[cfg(target_arch = "wasm32")]
         {
@@ -198,6 +205,7 @@ impl TcpSocket {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
+            crate::cx::io_gate::require_ambient_io("net::TcpSocket::connect")?;
             let state = self.state.into_inner();
 
             if !family_matches(state.family, addr) {

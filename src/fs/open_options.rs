@@ -4,7 +4,7 @@
 //! open behavior. The API mirrors `std::fs::OpenOptions`.
 
 use super::File;
-use crate::runtime::spawn_blocking_io;
+use crate::cx::io_gate::spawn_blocking_io;
 use std::io;
 use std::path::Path;
 

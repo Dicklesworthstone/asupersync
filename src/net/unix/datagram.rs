@@ -133,6 +133,7 @@ impl UnixDatagram {
     /// let socket = UnixDatagram::bind("/tmp/my_datagram.sock")?;
     /// ```
     pub fn bind<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        crate::cx::io_gate::require_ambient_io("net::UnixDatagram::bind")?;
         let path = path.as_ref();
 
         super::listener::reject_non_socket_bind_path(path)?;
@@ -162,6 +163,7 @@ impl UnixDatagram {
     pub fn bind_abstract(name: &[u8]) -> io::Result<Self> {
         use std::os::linux::net::SocketAddrExt;
 
+        crate::cx::io_gate::require_ambient_io("net::UnixDatagram::bind_abstract")?;
         let addr = SocketAddr::from_abstract_name(name)?;
         let inner = net::UnixDatagram::bind_addr(&addr)?;
         inner.set_nonblocking(true)?;
@@ -263,6 +265,7 @@ impl UnixDatagram {
     /// socket.send(b"hello").await?;
     /// ```
     pub fn connect<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
+        crate::cx::io_gate::require_ambient_io("net::UnixDatagram::connect")?;
         self.inner.connect(path)
     }
 
@@ -281,6 +284,7 @@ impl UnixDatagram {
     pub fn connect_abstract(&self, name: &[u8]) -> io::Result<()> {
         use std::os::linux::net::SocketAddrExt;
 
+        crate::cx::io_gate::require_ambient_io("net::UnixDatagram::connect_abstract")?;
         let addr = SocketAddr::from_abstract_name(name)?;
         self.inner.connect_addr(&addr)
     }
@@ -338,6 +342,7 @@ impl UnixDatagram {
     /// let n = socket.send_to(b"hello", "/tmp/server.sock").await?;
     /// ```
     pub async fn send_to<P: AsRef<Path>>(&mut self, buf: &[u8], path: P) -> io::Result<usize> {
+        crate::cx::io_gate::require_ambient_io("net::UnixDatagram::send_to")?;
         let path_ref = path.as_ref();
         std::future::poll_fn(|cx| {
             if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {

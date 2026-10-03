@@ -4,7 +4,7 @@
 //! `AT_REMOVEDIR` for true async directory removal. Other operations use
 //! `spawn_blocking_io` to offload to a background thread.
 
-use crate::runtime::spawn_blocking_io;
+use crate::cx::io_gate::spawn_blocking_io;
 use std::io;
 use std::path::Path;
 
@@ -113,6 +113,7 @@ fn path_to_cstring(path: &std::path::Path) -> io::Result<std::ffi::CString> {
 #[cfg(all(target_os = "linux", feature = "io-uring"))]
 fn uring_unlinkat_dir(path: &std::path::Path) -> io::Result<()> {
     use io_uring::{opcode, types};
+    crate::cx::io_gate::require_ambient_io("fs")?;
     let c_path = path_to_cstring(path)?;
     let entry = opcode::UnlinkAt::new(types::Fd(libc::AT_FDCWD), c_path.as_ptr())
         .flags(libc::AT_REMOVEDIR)
@@ -124,6 +125,7 @@ fn uring_unlinkat_dir(path: &std::path::Path) -> io::Result<()> {
 #[cfg(all(target_os = "linux", feature = "io-uring"))]
 fn uring_mkdirat(path: &std::path::Path, mode: libc::mode_t) -> io::Result<()> {
     use io_uring::{opcode, types};
+    crate::cx::io_gate::require_ambient_io("fs")?;
     let c_path = path_to_cstring(path)?;
     let entry = opcode::MkDirAt::new(types::Fd(libc::AT_FDCWD), c_path.as_ptr())
         .mode(mode)

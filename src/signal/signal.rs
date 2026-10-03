@@ -634,7 +634,9 @@ impl Signal {
 ///
 /// # Errors
 ///
-/// Returns an error if signal handling is not available.
+/// Returns an error if signal handling is not available. Refuses with
+/// [`IoCapabilityDenied`](crate::cx::IoCapabilityDenied) when the calling
+/// task's `Cx` lacks the IO capability.
 ///
 /// # Example
 ///
@@ -645,6 +647,7 @@ impl Signal {
 /// sigterm.recv().await;
 /// ```
 pub fn signal(kind: SignalKind) -> io::Result<Signal> {
+    crate::cx::io_gate::require_ambient_io("signal::signal")?;
     Signal::new(kind).map_err(Into::into)
 }
 

@@ -392,8 +392,8 @@ impl TcpStream {
     /// Connects using an existing configured socket.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) async fn connect_from_socket(socket: Socket, addr: SocketAddr) -> io::Result<Self> {
+        crate::cx::io_gate::require_ambient_io("net::TcpStream::connect")?;
         socket.set_nonblocking(true)?;
-
         // 2. Attempt connect (non-blocking)
         let sock_addr = SockAddr::from(addr);
         let registration = match socket.connect(&sock_addr) {

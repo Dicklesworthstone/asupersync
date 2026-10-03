@@ -2095,6 +2095,10 @@ pub struct UdpSocket {
 
 impl UdpSocket {
     /// Bind to the given address.
+    ///
+    /// Refuses with [`IoCapabilityDenied`](crate::cx::IoCapabilityDenied)
+    /// when the calling task's `Cx` lacks the IO capability. `connect` and
+    /// `send_to` refuse the same way, through address resolution.
     pub async fn bind<A: ToSocketAddrs + Send + 'static>(addr: A) -> io::Result<Self> {
         #[cfg(target_arch = "wasm32")]
         {
@@ -2104,6 +2108,7 @@ impl UdpSocket {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
+            crate::cx::io_gate::require_ambient_io("net::UdpSocket::bind")?;
             let addrs = lookup_all(addr).await?;
             if addrs.is_empty() {
                 return Err(io::Error::new(

@@ -230,10 +230,10 @@ impl UnixStream {
     /// let stream = UnixStream::connect("/tmp/my_socket.sock").await?;
     /// ```
     pub async fn connect<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        crate::cx::io_gate::require_ambient_io("net::UnixStream::connect")?;
         let domain = Domain::UNIX;
         let socket = Socket::new(domain, Type::STREAM, None)?;
         socket.set_nonblocking(true)?;
-
         let sock_addr = SockAddr::unix(path)?;
         let registration = match socket.connect(&sock_addr) {
             Ok(()) => None,
@@ -271,7 +271,7 @@ impl UnixStream {
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
         use std::path::PathBuf;
-
+        crate::cx::io_gate::require_ambient_io("net::UnixStream::connect_abstract")?;
         // `socket2::SockAddr` can represent Linux abstract namespace addresses
         // by encoding a leading NUL byte in the AF_UNIX path bytes.
         let mut path_bytes = Vec::with_capacity(name.len() + 1);
