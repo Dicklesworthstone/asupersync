@@ -214,7 +214,7 @@ frankenlab run frankenlab/examples/scenarios/03_saga_partition.yaml
 ```text
 Scenario: example-saga-partition [PASS]
 Seed: 314159
-Steps: 58
+Steps: 54
 Participants: 11 bound (saga-coordinator, saga-participant), 0 unbound
 Faults injected: 8
 Oracles: 24/24 passed (16 not fed by the lab runtime)
