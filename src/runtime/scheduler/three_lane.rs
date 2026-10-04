@@ -352,6 +352,70 @@ enum IoPhaseOutcome {
     NoProgress,
 }
 
+thread_local! {
+    /// Set while this thread, a worker with nothing else to run, drives its
+    /// runtime's reactor: that runtime's coordinator (by address), and whether
+    /// a ready wake raised during the turn was already kept for this worker
+    /// (br-asupersync-issue65-criticisms-kpmoy5.1.11).
+    static IDLE_REACTOR_TURN: Cell<Option<(usize, bool)>> = const { Cell::new(None) };
+}
+
+/// Ready wakes kept by an idle reactor leader, for the test that proves the
+/// path runs.
+#[cfg(test)]
+static IDLE_TURN_KEPT_WAKES: AtomicUsize = AtomicUsize::new(0);
+
+/// Whom a ready wake raised on this thread must notify.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TurnWake {
+    /// This thread is the woken task's runtime's idle reactor leader. It
+    /// dispatches right after the turn, so no other worker needs waking.
+    RunHere,
+    /// The idle leader already kept one wake this turn. Unpark a helper, but
+    /// skip the reactor wake: the leader is the reactor and is not blocked.
+    WakeHelper,
+    /// Any other thread: the ordinary `wake_one`.
+    Elsewhere,
+}
+
+fn claim_turn_wake(coordinator: &Arc<WorkerCoordinator>) -> TurnWake {
+    let key = Arc::as_ptr(coordinator).addr();
+    IDLE_REACTOR_TURN.with(|turn| match turn.get() {
+        Some((owner, false)) if owner == key => {
+            turn.set(Some((owner, true)));
+            #[cfg(test)]
+            IDLE_TURN_KEPT_WAKES.fetch_add(1, Ordering::Relaxed);
+            TurnWake::RunHere
+        }
+        Some((owner, true)) if owner == key => TurnWake::WakeHelper,
+        _ => TurnWake::Elsewhere,
+    })
+}
+
+/// Marks an idle reactor turn on this thread for the guard's lifetime.
+struct IdleReactorTurn {
+    previous: Option<(usize, bool)>,
+}
+
+impl IdleReactorTurn {
+    fn enter(coordinator: &Arc<WorkerCoordinator>) -> Self {
+        let key = Arc::as_ptr(coordinator).addr();
+        let previous = IDLE_REACTOR_TURN.with(|turn| turn.replace(Some((key, false))));
+        Self { previous }
+    }
+
+    /// Whether a ready wake raised during the turn was kept for this worker.
+    fn kept_a_wake() -> bool {
+        IDLE_REACTOR_TURN.with(|turn| matches!(turn.get(), Some((_, true))))
+    }
+}
+
+impl Drop for IdleReactorTurn {
+    fn drop(&mut self) {
+        IDLE_REACTOR_TURN.with(|turn| turn.set(self.previous));
+    }
+}
+
 #[inline]
 fn select_io_poll_timeout(
     idle_timeout: Option<Duration>,
@@ -5181,19 +5245,28 @@ impl ThreeLaneWorker {
             return IoPhaseOutcome::NoProgress;
         }
 
-        match io.try_turn_with(io_timeout, |_, _| {}) {
+        // This worker has nothing else to run, so the first task the turn wakes
+        // is kept for it instead of unparking another worker and re-arming the
+        // reactor (br-asupersync-issue65-criticisms-kpmoy5.1.11). A kept wake
+        // always reports Progress, so the loop dispatches it before parking.
+        let turn = IdleReactorTurn::enter(&self.coordinator);
+        let turned = io.try_turn_with(io_timeout, |_, _| {});
+        let kept_a_wake = IdleReactorTurn::kept_a_wake();
+        drop(turn);
+        match turned {
             Ok(Some(n)) => {
                 // We successfully polled the reactor (we are the leader for this turn).
                 // If n > 0, we woke some tasks.
                 // If n == 0 but we had a non-zero timeout, we spent time blocking,
                 // so we should continue the loop to check queues again.
                 // If n == 0 and timeout was ZERO, we did a quick poll and found nothing.
-                if n > 0 || io_timeout != Some(Duration::ZERO) {
+                if n > 0 || io_timeout != Some(Duration::ZERO) || kept_a_wake {
                     IoPhaseOutcome::Progress
                 } else {
                     IoPhaseOutcome::NoProgress
                 }
             }
+            Ok(None) | Err(_) if kept_a_wake => IoPhaseOutcome::Progress,
             Ok(None) | Err(_) => {
                 // Another thread is already polling (we are a follower).
                 // Do not busy loop. Proceed to backoff/park logic.
@@ -8969,7 +9042,11 @@ impl ThreeLaneWaker {
                     .lock()
                     .record_task_enqueue(self.task_id, crate::time::wall_now().as_nanos());
             }
-            self.coordinator.wake_one();
+            match claim_turn_wake(&self.coordinator) {
+                TurnWake::RunHere => {}
+                TurnWake::WakeHelper => self.coordinator.wake_one_parker(),
+                TurnWake::Elsewhere => self.coordinator.wake_one(),
+            }
         }
     }
 }
@@ -9185,3 +9262,58 @@ mod tests;
 #[cfg(test)]
 #[path = "three_lane_metamorphic.rs"]
 mod three_lane_metamorphic;
+
+#[cfg(test)]
+mod idle_reactor_turn_tests {
+    use super::*;
+    use crate::io::{AsyncReadExt, AsyncWriteExt};
+    use crate::net::{TcpListener, TcpStream};
+    use crate::runtime::RuntimeBuilder;
+
+    /// br-asupersync-issue65-criticisms-kpmoy5.1.11: on a one-worker runtime
+    /// every socket wake is raised while that worker, with nothing else to
+    /// run, drives the reactor. Those wakes are kept for it (no parker unpark,
+    /// no reactor re-arm), and every round trip of the echo exchange is still
+    /// answered, so no kept wake was lost.
+    #[test]
+    fn idle_reactor_leader_keeps_its_own_socket_wakes() {
+        let before = IDLE_TURN_KEPT_WAKES.load(Ordering::Relaxed);
+        let rt = RuntimeBuilder::new()
+            .worker_threads(1)
+            .build()
+            .expect("one-worker runtime");
+        let answered = rt.block_on(rt.handle().spawn(async move {
+            let cx = crate::Cx::current().expect("a spawned task has a Cx");
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let addr = listener.local_addr().expect("listener address");
+            let mut server = cx
+                .spawn(move |_| async move {
+                    let (mut stream, _) = listener.accept().await.expect("accept");
+                    let mut buf = [0u8; 8];
+                    while stream.read_exact(&mut buf).await.is_ok() {
+                        if stream.write_all(&buf).await.is_err() {
+                            break;
+                        }
+                    }
+                })
+                .expect("spawn the echo server");
+            let mut client = TcpStream::connect(addr).await.expect("connect");
+            let mut buf = [7u8; 8];
+            let mut answered = 0usize;
+            for _ in 0..50 {
+                client.write_all(&buf).await.expect("request");
+                client.read_exact(&mut buf).await.expect("response");
+                answered += 1;
+            }
+            drop(client);
+            let _ = server.join(&cx).await;
+            answered
+        }));
+        assert_eq!(answered, 50, "every round trip is answered");
+        let kept = IDLE_TURN_KEPT_WAKES.load(Ordering::Relaxed) - before;
+        assert!(
+            kept > 0,
+            "the idle reactor leader kept none of its socket wakes"
+        );
+    }
+}
