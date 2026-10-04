@@ -1452,6 +1452,59 @@ pub(crate) enum RegionCommand {
     /// Establish or remove a runtime monitor or link
     /// (br-asupersync-issue65-criticisms-kpmoy5.6.1).
     Watch(crate::monitor::WatchCommand),
+    /// Report the live tasks of a region and its descendant regions
+    /// (br-asupersync-issue65-criticisms-kpmoy5.2.4).
+    LiveTasks(RegionLiveTasksQuery),
+}
+
+/// Crate-private query behind [`crate::cx::ChildRegion::close_within`]: the
+/// tasks of a region subtree that have not completed. It is collected under
+/// the runtime state lock and published after the lock is released, like a
+/// finalizer acknowledgment. A completed task leaves its region's task list,
+/// so the list is exactly the region's live tasks.
+pub(crate) struct RegionLiveTasksQuery {
+    region_id: RegionId,
+    reply: crate::channel::oneshot::Sender<Vec<TaskId>>,
+    tasks: Vec<TaskId>,
+}
+
+impl fmt::Debug for RegionLiveTasksQuery {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RegionLiveTasksQuery")
+            .field("region_id", &self.region_id)
+            .field("tasks", &self.tasks)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RegionLiveTasksQuery {
+    pub(crate) fn new(
+        region_id: RegionId,
+        reply: crate::channel::oneshot::Sender<Vec<TaskId>>,
+    ) -> Self {
+        Self {
+            region_id,
+            reply,
+            tasks: Vec::new(),
+        }
+    }
+
+    /// Collects the live tasks of the region subtree, in depth-first order.
+    /// An unknown or reclaimed region contributes nothing.
+    pub(crate) fn apply(mut self, state: &crate::runtime::state::RuntimeState) -> Self {
+        let mut regions = vec![self.region_id];
+        while let Some(region) = regions.pop() {
+            if let Some(record) = state.region(region) {
+                record.copy_task_ids_into(&mut self.tasks);
+                record.copy_child_ids_into(&mut regions);
+            }
+        }
+        self
+    }
+
+    pub(crate) fn publish(self) {
+        let _ = self.reply.send_blocking(self.tasks);
+    }
 }
 
 /// Crate-private finalizer admission with an owned acknowledgment. A rejected

@@ -6456,6 +6456,7 @@ impl ThreeLaneWorker {
             >,
         )> = Vec::with_capacity(commands.len());
         let mut finalizer_publications = Vec::new();
+        let mut live_task_publications = Vec::new();
         let mut watch_wakers = Vec::new();
         let mut watch_retries = Vec::new();
         {
@@ -6479,6 +6480,9 @@ impl ThreeLaneWorker {
                     }
                     crate::runtime::spawn_mailbox::RegionCommand::RegisterFinalizer(request) => {
                         finalizer_publications.push(request.apply(&mut state));
+                    }
+                    crate::runtime::spawn_mailbox::RegionCommand::LiveTasks(query) => {
+                        live_task_publications.push(query.apply(&state));
                     }
                     crate::runtime::spawn_mailbox::RegionCommand::Cancel { region_id, reason } => {
                         state.close_region_command_in_task_table(
@@ -6519,6 +6523,9 @@ impl ThreeLaneWorker {
             slot.publish(outcome);
         }
         for publication in finalizer_publications {
+            publication.publish();
+        }
+        for publication in live_task_publications {
             publication.publish();
         }
         for waker in watch_wakers {
