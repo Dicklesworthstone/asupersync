@@ -183,7 +183,7 @@
       "file": "examples/README.md",
       "loc": {
         "start": 1,
-        "end": 137
+        "end": 140
       },
       "kind": "markdown",
       "demonstrates": [
@@ -597,19 +597,20 @@
       "file": "examples/production_service.rs",
       "loc": {
         "start": 1,
-        "end": 182
+        "end": 206
       },
       "kind": "rust",
       "demonstrates": [
         "http1-listener",
         "sqlite-handler",
-        "graceful-drain"
+        "graceful-drain",
+        "structured-shutdown"
       ],
       "feature_flags": [
         "sqlite"
       ],
       "run_command": "cargo run --example production_service --features sqlite",
-      "description": "Production-style HTTP service fixture with SQLite-backed handler and request-aware graceful drain."
+      "description": "Production-style HTTP service fixture with SQLite-backed handler; the service region owns the listener and every connection, so shutdown is a request-aware drain followed by a bounded region close."
     },
     {
       "name": "prometheus_metrics",
