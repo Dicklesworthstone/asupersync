@@ -339,3 +339,79 @@ fn runbook_and_artifact_keep_authority_narrow() {
         Some("PLANNED")
     );
 }
+
+fn certificate_files(dir: &Path, found: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(dir).expect("fixture directory is readable") {
+        let path = entry.expect("fixture directory entry").path();
+        if path.is_dir() {
+            certificate_files(&path, found);
+        } else if path
+            .extension()
+            .is_some_and(|extension| extension == "crt" || extension == "pem")
+        {
+            found.push(path);
+        }
+    }
+}
+
+/// A committed test certificate expires on a date, not on a code change. The
+/// handshakes that trust it then go red, and a refusal test that asserts only
+/// `is_err()` turns green for the wrong reason (br-asupersync-kjyh84: the
+/// 2027 certificates). Fail eighteen months ahead instead.
+#[test]
+fn committed_fixture_certificates_stay_valid_for_eighteen_months() {
+    // This contract verifies these at FIXTURE_TIME_SECONDS, never at the wall
+    // clock, so their expiry cannot break a handshake.
+    const FIXED_TIME_ONLY: [&str; 3] = [
+        "tests/fixtures/x509_adversarial/allowed.crt",
+        "tests/fixtures/x509_adversarial/blocked.crt",
+        "tests/fixtures/x509_adversarial/wildcard.crt",
+    ];
+    const HORIZON_SECONDS: i64 = 548 * 24 * 60 * 60;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock is after 1970")
+        .as_secs();
+    let deadline = i64::try_from(now).expect("seconds fit i64") + HORIZON_SECONDS;
+    let mut files = Vec::new();
+    certificate_files(&root().join("tests/fixtures"), &mut files);
+    files.sort();
+
+    let mut checked = 0_usize;
+    let mut expiring = Vec::new();
+    for path in files {
+        let relative = path
+            .strip_prefix(root())
+            .expect("fixture under the crate root")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if FIXED_TIME_ONLY.contains(&relative.as_str()) {
+            continue;
+        }
+        let bytes = fs::read(&path).expect("fixture certificate is readable");
+        for pem in x509_parser::pem::Pem::iter_from_buffer(&bytes) {
+            let pem = pem.unwrap_or_else(|error| panic!("{relative}: PEM does not parse: {error}"));
+            if pem.label != "CERTIFICATE" {
+                continue;
+            }
+            let certificate = pem
+                .parse_x509()
+                .unwrap_or_else(|error| panic!("{relative}: certificate does not parse: {error}"));
+            checked += 1;
+            let not_after = certificate.validity().not_after;
+            if not_after.timestamp() < deadline {
+                expiring.push(format!("{relative}: notAfter {not_after}"));
+            }
+        }
+    }
+    assert!(
+        checked >= 6,
+        "the guard parsed only {checked} fixture certificates"
+    );
+    assert!(
+        expiring.is_empty(),
+        "test certificates expire within eighteen months; reissue them (same key, \
+         same subject and extensions) and refresh their pins: {expiring:#?}"
+    );
+}

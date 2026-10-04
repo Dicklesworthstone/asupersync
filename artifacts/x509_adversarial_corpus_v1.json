@@ -17,10 +17,10 @@
       "path": "tests/fixtures/tls/server.crt",
       "subject": "C=US, ST=Test, L=Test, O=AsuperSync Test, CN=localhost",
       "validity_utc": [
-        "2026-04-17T15:35:49Z",
-        "2027-04-17T15:35:49Z"
+        "2026-01-01T00:00:00Z",
+        "2036-01-01T00:00:00Z"
       ],
-      "sha256_fingerprint": "8D856B1A7DB22DC7C560FF69BE2B82F16912715A90871441D378DB9E8A28E05D"
+      "sha256_fingerprint": "0D83C852D9CFE254CEDDAE68A155B12BDBE13BC6293BEC041C3A13D6519BFA4B"
     },
     {
       "provenance_id": "A5-PROV-OPENSSL-20260727",
@@ -295,7 +295,7 @@
     },
     {
       "path": "tests/fixtures/tls/server.crt",
-      "sha256": "a9de13854e63f0a3492a156959b6b89cbb2df056c5d67dc9519307f9d816e004",
+      "sha256": "d1b3a36af7e421903082d8eb1aaa543fb2fff586cd612c1ced322a81f89be2a6",
       "line_count": 21
     },
     {

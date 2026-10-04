@@ -16,8 +16,10 @@ fn valid_fixture_time() -> rustls_pki_types::UnixTime {
     rustls_pki_types::UnixTime::since_unix_epoch(Duration::from_secs(1_780_000_000))
 }
 
+// After the fixture's 2036-01-01 notAfter (br-asupersync-kjyh84 reissued
+// it; the old certificate expired 2027-04-17).
 fn after_fixture_expiration_time() -> rustls_pki_types::UnixTime {
-    rustls_pki_types::UnixTime::since_unix_epoch(Duration::from_secs(1_820_000_000))
+    rustls_pki_types::UnixTime::since_unix_epoch(Duration::from_secs(2_100_000_000))
 }
 
 fn trusted_fixture_material() -> (QuicServerIdentityVerifier, CertificateChain) {
