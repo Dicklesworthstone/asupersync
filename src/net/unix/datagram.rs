@@ -529,14 +529,15 @@ impl UnixDatagram {
     ///
     /// # Note
     ///
-    /// For datagram sockets, peer credentials are only available for connected
-    /// sockets (those that have called [`connect`](Self::connect)). For unconnected
-    /// datagram sockets, this will return an error.
+    /// For datagram sockets, Linux records peer credentials only for a socket
+    /// pair created by [`pair`](Self::pair). An unconnected socket, or one
+    /// connected with [`connect`](Self::connect), has none, and this returns an
+    /// [`io::ErrorKind::NotConnected`] error.
     ///
     /// # Errors
     ///
     /// Returns an error if:
-    /// - The socket is not connected
+    /// - The kernel holds no peer credentials for this socket (see above)
     /// - Retrieving credentials fails for platform-specific reasons
     ///
     /// # Example
@@ -808,6 +809,19 @@ fn datagram_peer_cred_impl(socket: &net::UnixDatagram) -> io::Result<UCred> {
     use nix::sys::socket::sockopt;
     let cred = socket::getsockopt(socket, sockopt::PeerCredentials)
         .map_err(|e| io::Error::from_raw_os_error(e as i32))?;
+    // SO_PEERCRED also succeeds on a datagram socket the kernel holds no peer
+    // credentials for (an unconnected socket, or one connected with connect()
+    // rather than created by pair()). It then reports uid and gid -1, which
+    // must not be handed out as a peer identity
+    // (br-asupersync-unix-socket-audit-alx18f). pid 0 alone is no signal: it
+    // also appears for a peer in another PID namespace.
+    if cred.uid() as u32 == u32::MAX && cred.gid() as u32 == u32::MAX {
+        return Err(io::Error::new(
+            io::ErrorKind::NotConnected,
+            "peer credentials are not available: the kernel records them only for a \
+             unix datagram socket pair created by pair()",
+        ));
+    }
     Ok(UCred {
         uid: cred.uid() as u32,
         gid: cred.gid() as u32,
@@ -1697,6 +1711,32 @@ mod tests {
         }
 
         crate::test_complete!("test_datagram_peer_cred");
+    }
+
+    /// br-asupersync-unix-socket-audit-alx18f item 4: Linux SO_PEERCRED answers
+    /// an unconnected datagram socket, and one connected with connect(), with
+    /// uid and gid -1. peer_cred must refuse them, not return them.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn peer_cred_refuses_sockets_without_kernel_credentials() {
+        init_test("peer_cred_refuses_sockets_without_kernel_credentials");
+        let unbound = UnixDatagram::unbound().expect("unbound socket");
+        let err = unbound
+            .peer_cred()
+            .expect_err("an unconnected socket has no peer credentials");
+        assert_eq!(err.kind(), io::ErrorKind::NotConnected, "{err}");
+
+        let name = format!("asupersync-peer-cred-{}", std::process::id());
+        let _receiver = UnixDatagram::bind_abstract(name.as_bytes()).expect("bind abstract");
+        let sender = UnixDatagram::unbound().expect("unbound sender");
+        sender
+            .connect_abstract(name.as_bytes())
+            .expect("connect to the abstract name");
+        let err = sender
+            .peer_cred()
+            .expect_err("connect() records no peer credentials for a datagram socket");
+        assert_eq!(err.kind(), io::ErrorKind::NotConnected, "{err}");
+        crate::test_complete!("peer_cred_refuses_sockets_without_kernel_credentials");
     }
 
     #[test]
