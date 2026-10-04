@@ -291,6 +291,88 @@ production (`asupersync-yvs9cx`).
   cancellation rule (a cancelled task cannot run cleanup commands by passing a
   fresh `Cx`).
 
+### Fixed by the 2026-10-03 audits
+
+Read-only audits of the protocol, messaging, stream and runtime modules found
+the defects below; each fix landed with a regression test that fails on the
+old code. The commit messages carry the details and receipts.
+
+Security and denial of service:
+
+- `Redirect::to_with_allowed_hosts` refuses a userinfo part, which let
+  `https://allowed:443@attacker/` through as an allowed host.
+- A static-file mount no longer decodes `%2F` into a path separator, which
+  reached files below a more specific mount.
+- HTTP/3 consumes received stream bytes in amortized constant time (a peer
+  could make it copy quadratically), and a malformed message, a malformed
+  trailer or a request stream that ends before its HEADERS resets only that
+  stream instead of closing the connection.
+- QUIC bounds out-of-order receive fragments across a connection's streams,
+  not only per stream (a peer could hold about a million one-byte holes), and
+  no longer re-advertises every finished stream's window on each ACK.
+- The streaming HTTP/1 decoders bound the chunk-size line, and the server
+  bounds chunk extensions by the data received (the class of Node's
+  CVE-2024-22019). Bodyless responses never carry chunked framing, and an
+  HTTP/1.0 client gets `Content-Length` instead of chunked.
+- The buffered `Multipart` extractor no longer rescans the rest of the body
+  for each part; the `Router::layer` compressor leaves BREACH-sensitive and
+  `206` responses uncompressed; the debug server refuses other web origins.
+- An ATP-over-RaptorQ receiver bounds the sender's symbol geometry before it
+  sizes receive state: an unauthenticated Hello with one-byte symbols and an
+  unbounded block size used to make it allocate per-symbol tables for a whole
+  4 GiB entry and abort. Deciding whether to seed a block no longer runs a
+  full rank analysis for every repair packet.
+- An HTTP/1 handler response whose declared `Content-Length` does not match
+  its body gets `500` and a closed connection instead of desynchronizing the
+  client.
+- A bonded ATP donor serves at most what a receiver can keep for each block:
+  one plaintext NeedMore frame naming a window of four billion repair
+  symbols used to make it reserve and fill about 17 GiB.
+- `DecodingPipeline` refuses a symbol whose ESI cannot belong to its block
+  when it arrives; once kept, such a symbol failed every later decode of the
+  block, so a block that needed repair never decoded.
+- HTTP/2: a field block refused with a stream error is still decoded, so the
+  following requests on the connection no longer read the wrong header
+  values, and a block past the fragment caps ends the connection.
+
+Lost data and hangs:
+
+- JetStream acks reach the server (they were sent to a subject the server
+  does not listen on), the process-wide pull estimate no longer grows until
+  every pull is refused, named consumers are durable, and a pull ends on the
+  server's status reply.
+- NATS: a timed-out supervised call no longer stalls the connection, `ping()`
+  after a denied publish waits for its PONG, and a JetStream pull's inbox
+  holds its whole batch.
+- Kafka: a send whose delivery report arrived reports it even if the caller
+  was cancelled, and a poll returns the record its broker poll fetched.
+- Redis: a `Pipeline` refuses reply-changing commands instead of mispairing
+  replies, and a Pub/Sub subscribe the server refuses keeps the connection.
+- Streams: the concurrent `for_each` terminals see a member's failure and the
+  caller's cancellation while waiting for the source, and `buffered`,
+  `buffer_unordered` and `try_buffered` no longer lose a wakeup with more
+  than 1024 futures in flight.
+- `Scope::timeout` keeps the caller's cancellation reason instead of
+  reporting a timeout; the circuit breaker no longer re-opens on its
+  recovering probe.
+- PBFT: a repeated or cancelled proposal no longer stops the message pump or
+  wedges the primary; SWIM gives a suspicion at a newer incarnation its own
+  window; a lease reactor that lags behind membership compaction still revokes
+  departed nodes.
+- Trace and ATP journals recover from a damaged stripe and from a device
+  number that changed across a reboot.
+- `read_line` and `LineReader` skip the rest of a line with invalid UTF-8
+  instead of returning its tail as the next line, and `LineReader` reports
+  EOF after a stream that ended inside a code point.
+- QUIC: STREAM_DATA_BLOCKED and MAX_STREAM_DATA open a peer's stream (a lost
+  first packet used to fail the connection), and `QuicStreamIo` writes what
+  the flow-control windows allow instead of waiting for credit for the whole
+  buffer.
+- HTTP/2 client: a response whose closing HEADERS frame continues in
+  CONTINUATION frames is taken instead of failing as `STREAM_CLOSED`.
+- `BytesMut` grows instead of moving its whole live region on every small
+  advance-then-append cycle.
+
 ### UDP launch-time sends and the socket error queue (Linux, GH #73)
 
 - `UdpSocket::set_txtime` turns on `SO_TXTIME` (`UdpTxTimeConfig`: clock,
