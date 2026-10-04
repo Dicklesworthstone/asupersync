@@ -20,6 +20,10 @@
 //!   protocol (cancel remaining children, run finalizers) and resolves only
 //!   when the region reaches `Closed` — no live children, finalizers done.
 //!   Dropping the handle requests the same close best-effort.
+//! - **Bounded close:** [`ChildRegion::close_within`] begins the same close
+//!   but waits at most a bound on the runtime's clock. On timeout it reports
+//!   the tasks still running instead of waiting forever for one that never
+//!   observes cancellation. Those tasks stay owned by the closing region.
 //! - **No ambient authority:** everything flows through the caller's `Cx`
 //!   capability wiring. A detached Cx without a runtime gateway fails closed
 //!   with [`ChildRegionError::NoRuntimeGateway`].
@@ -34,15 +38,18 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use parking_lot::Mutex;
 
 use crate::record::region::RegionCloseState;
 use crate::runtime::region_table::RegionCreateError;
 use crate::runtime::resource_monitor::RegionPriority;
-use crate::runtime::spawn_mailbox::{AdmittedRegionSlot, RegionCommand, SpawnGateway};
+use crate::runtime::spawn_mailbox::{
+    AdmittedRegionSlot, RegionCommand, RegionLiveTasksQuery, SpawnGateway,
+};
 use crate::types::{
-    Budget, CancelReason, CapabilityBudget, CapabilityBudgetRequirements, RegionId,
+    Budget, CancelReason, CapabilityBudget, CapabilityBudgetRequirements, RegionId, TaskId,
 };
 
 /// Admission envelope for [`Cx::open_child_region`](crate::cx::Cx::open_child_region).
@@ -124,6 +131,35 @@ impl std::error::Error for ChildRegionError {
             _ => None,
         }
     }
+}
+
+/// How a [`ChildRegion::close_within`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ChildRegionCloseOutcome {
+    /// The region reached `Closed` within the bound: its tasks and child
+    /// regions finished and its finalizers ran.
+    Quiescent,
+    /// The bound elapsed first. The region keeps closing. Its unfinished
+    /// tasks stay owned by it, and an ancestor's close or the root drain
+    /// finishes them. Nothing is force-dropped.
+    TimedOut,
+}
+
+/// What a [`ChildRegion::close_within`] observed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ChildRegionCloseReport {
+    /// Whether the region closed within the bound.
+    pub outcome: ChildRegionCloseOutcome,
+    /// Time from the close request until the region closed or the bound
+    /// elapsed, on the runtime's clock (virtual time under the lab runtime).
+    pub elapsed: Duration,
+    /// Tasks of the region and its descendant regions that had not finished
+    /// when the bound elapsed, in depth-first region order. Empty when
+    /// quiescent. A straggler that finishes between the timeout and this
+    /// snapshot is not listed.
+    pub stragglers: Vec<TaskId>,
 }
 
 impl From<RegionCreateError> for ChildRegionError {
@@ -398,6 +434,67 @@ impl<Caps> ChildRegion<Caps> {
         };
         waiter.await;
         Ok(())
+    }
+
+    /// Begins the close protocol like [`ChildRegion::close`], but waits at
+    /// most `bound` on the runtime's clock (virtual time under the lab
+    /// runtime) for the region to reach `Closed`.
+    ///
+    /// Cancellation is cooperative, so `close` waits forever for a task that
+    /// never reaches a checkpoint or a cancel-aware await. `close_within`
+    /// instead reports [`ChildRegionCloseOutcome::TimedOut`] together with
+    /// the tasks still running in the region and its descendants. Those
+    /// stragglers are not dropped or detached: the region keeps closing and
+    /// still owns them, so an ancestor's close or the root drain finishes
+    /// them (br-asupersync-issue65-criticisms-kpmoy5.2.4).
+    ///
+    /// # Errors
+    ///
+    /// Fails closed like [`ChildRegion::close`] when no runtime gateway is
+    /// wired or the owning runtime is gone before a command could be
+    /// enqueued or answered.
+    pub async fn close_within(
+        mut self,
+        bound: Duration,
+    ) -> Result<ChildRegionCloseReport, ChildRegionError>
+    where
+        Caps: crate::cx::cap::HasTime,
+    {
+        // As in close(): this is the close the Drop backstop exists for.
+        self.closed = true;
+        let started = self.cx.now();
+        self.enqueue(RegionCommand::Close {
+            region_id: self.region_id,
+        })?;
+        let waiter = RegionQuiescence {
+            state: Arc::clone(&self.close_notify),
+        };
+        let quiescent = crate::time::timeout(started, bound, waiter).await.is_ok();
+        let elapsed = Duration::from_nanos(self.cx.now().duration_since(started));
+        let (outcome, stragglers) = if quiescent {
+            (ChildRegionCloseOutcome::Quiescent, Vec::new())
+        } else {
+            (ChildRegionCloseOutcome::TimedOut, self.live_tasks().await?)
+        };
+        Ok(ChildRegionCloseReport {
+            outcome,
+            elapsed,
+            stragglers,
+        })
+    }
+
+    /// The live tasks of this region and its descendants, as the runtime
+    /// sees them now.
+    async fn live_tasks(&self) -> Result<Vec<TaskId>, ChildRegionError> {
+        let (reply, mut replied) = crate::channel::oneshot::channel();
+        self.enqueue(RegionCommand::LiveTasks(RegionLiveTasksQuery::new(
+            self.region_id,
+            reply,
+        )))?;
+        replied
+            .recv_uninterruptible()
+            .await
+            .map_err(|_| ChildRegionError::RuntimeUnavailable)
     }
 }
 
@@ -891,6 +988,104 @@ mod tests {
             assert_eq!(body.join(child.cx()).await.expect("body joins"), 3);
             child.close().await.expect("lab quiescence reached");
         });
+    }
+
+    /// Parks until released and ignores cancellation: a task that never
+    /// reaches a checkpoint or a cancel-aware await.
+    struct Released(
+        Arc<(
+            std::sync::atomic::AtomicBool,
+            Mutex<Option<std::task::Waker>>,
+        )>,
+    );
+
+    impl Future for Released {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            let (released, waker) = &*self.0;
+            *waker.lock() = Some(cx.waker().clone());
+            if released.load(std::sync::atomic::Ordering::SeqCst) {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        }
+    }
+
+    #[test]
+    fn close_within_times_out_on_lab_time_and_names_the_straggler() {
+        use crate::lab::{LabConfig, LabRuntime};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        let bound = Duration::from_millis(50);
+        let mut observed = Vec::new();
+        for seed in [0x34_C400_u64, 0x34_C401, 0x34_C402] {
+            let mut lab = LabRuntime::new(LabConfig::new(seed).max_steps(100_000));
+            let root = lab.state.create_root_region(Budget::INFINITE);
+            let result = Arc::new(Mutex::new(None));
+            let result_slot = Arc::clone(&result);
+            let (owner, _join) = lab
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    let cx = Cx::current().expect("lab task cx");
+                    let child = cx
+                        .open_child_region(ChildRegionSpec::inherit())
+                        .await
+                        .expect("child region");
+                    let gate = Arc::new((AtomicBool::new(false), Mutex::new(None)));
+                    let gate_for_task = Arc::clone(&gate);
+                    let started = Arc::new(AtomicBool::new(false));
+                    let started_flag = Arc::clone(&started);
+                    let straggler_id = Arc::new(Mutex::new(None));
+                    let id_slot = Arc::clone(&straggler_id);
+                    let mut straggler = child
+                        .cx()
+                        .spawn(move |task_cx| async move {
+                            *id_slot.lock() = Some(task_cx.task_id());
+                            started_flag.store(true, Ordering::SeqCst);
+                            Released(gate_for_task).await;
+                        })
+                        .expect("spawn straggler");
+                    while !started.load(Ordering::SeqCst) {
+                        crate::runtime::yield_now().await;
+                    }
+                    let report = child.close_within(bound).await.expect("close report");
+                    let named = report.stragglers == vec![(*straggler_id.lock()).expect("ran")];
+                    // Still owned by the closing region: releasing it lets
+                    // the region close normally.
+                    gate.0.store(true, Ordering::SeqCst);
+                    if let Some(waker) = gate.1.lock().take() {
+                        waker.wake();
+                    }
+                    // It ignored the cancellation, so it joins as Cancelled.
+                    let _ = straggler.join(&cx).await;
+                    *result_slot.lock() = Some((report.outcome, report.elapsed, named));
+                })
+                .expect("create owner");
+            lab.scheduler.lock().schedule(owner, 0);
+            let run = lab.run_with_auto_advance();
+            let (outcome, elapsed, named) = result
+                .lock()
+                .take()
+                .unwrap_or_else(|| panic!("seed {seed:#x}: the owner did not finish ({run:?})"));
+            assert_eq!(outcome, ChildRegionCloseOutcome::TimedOut, "seed {seed:#x}");
+            assert!(
+                named,
+                "seed {seed:#x}: the report names exactly the straggler"
+            );
+            assert!(
+                elapsed >= bound,
+                "seed {seed:#x}: elapsed {elapsed:?} < {bound:?}"
+            );
+            assert_eq!(lab.state.live_task_count(), 0, "seed {seed:#x}");
+            observed.push(elapsed);
+        }
+        assert!(
+            observed.windows(2).all(|pair| pair[0] == pair[1]),
+            "virtual-time elapsed differs across seeds: {observed:?}"
+        );
     }
 
     /// The runtime owns this future, including its retirement. Counting actual

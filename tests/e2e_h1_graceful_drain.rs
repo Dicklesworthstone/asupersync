@@ -1117,3 +1117,199 @@ fn lb_compat_keeps_socket_until_drain_completes() {
         );
     });
 }
+
+/// Parks until released and ignores cancellation: a handler that never
+/// reaches a cancel-aware await.
+type Gate = Arc<(
+    std::sync::atomic::AtomicBool,
+    std::sync::Mutex<Option<std::task::Waker>>,
+)>;
+
+struct Parked(Gate);
+
+impl std::future::Future for Parked {
+    type Output = ();
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        let (released, waker) = &*self.0;
+        *waker.lock().expect("gate lock") = Some(cx.waker().clone());
+        if released.load(Ordering::SeqCst) {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    }
+}
+
+/// Under `Http1Listener::run_in` each connection task belongs to the region of
+/// the context it is given (br-asupersync-issue65-criticisms-kpmoy5.4.5). A
+/// request whose handler ignores cancellation keeps its connection task
+/// alive for the server's request drain grace, so a bounded close of the
+/// listener's region that ends first names that task as a straggler next to
+/// the accept loop, which is still draining. A connection spawned into the
+/// root region would not be listed.
+#[test]
+fn region_owned_listener_reports_a_stuck_connection_as_its_straggler() {
+    use asupersync::cx::{ChildRegionCloseOutcome, ChildRegionSpec, Cx};
+    use std::sync::atomic::AtomicBool;
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let gate: Gate = Arc::new((AtomicBool::new(false), std::sync::Mutex::new(None)));
+    let gate_for_handler = Arc::clone(&gate);
+    runtime.block_on(async move {
+        let cx = Cx::current().expect("root cx");
+        let child = cx
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .expect("child region");
+        let parked = Arc::new(AtomicBool::new(false));
+        let parked_flag = Arc::clone(&parked);
+        let listener = Http1Listener::bind_with_config(
+            "127.0.0.1:0",
+            move |_req| {
+                let gate = Arc::clone(&gate_for_handler);
+                let parked = Arc::clone(&parked_flag);
+                async move {
+                    parked.store(true, Ordering::SeqCst);
+                    Parked(gate).await;
+                    Response::new(200, "OK", b"released".to_vec())
+                }
+            },
+            // The default 500 ms drain grace would race the 500 ms close
+            // bound below: once it ends the server drops the handler and
+            // the connection task finishes.
+            localhost_config(Duration::from_secs(5), Duration::from_secs(10)).http_config(
+                Http1Config {
+                    allowed_hosts: HostPolicy::allow_list(vec!["localhost".to_owned()]),
+                    request_drain_grace: Duration::from_secs(30),
+                    ..Http1Config::default()
+                },
+            ),
+        )
+        .await
+        .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let accept_loop = Arc::new(std::sync::Mutex::new(None));
+        let accept_slot = Arc::clone(&accept_loop);
+        let _serving = child
+            .cx()
+            .spawn(move |listener_cx| async move {
+                *accept_slot.lock().expect("accept slot") = Some(listener_cx.task_id());
+                listener.run_in(&listener_cx).await
+            })
+            .expect("spawn the accept loop in the child region");
+
+        let client = blocking_client(addr);
+        let mut yields = 0_u32;
+        while !parked.load(Ordering::SeqCst) {
+            yields += 1;
+            assert!(yields < 1_000_000, "the request never reached its handler");
+            asupersync::runtime::yield_now().await;
+        }
+
+        let report = child
+            .close_within(Duration::from_millis(500))
+            .await
+            .expect("close report");
+        assert_eq!(
+            report.outcome,
+            ChildRegionCloseOutcome::TimedOut,
+            "{report:?}"
+        );
+        let accept_loop = (*accept_loop.lock().expect("accept slot")).expect("accept loop ran");
+        assert!(
+            report.stragglers.contains(&accept_loop),
+            "the accept loop is still draining: {report:?}"
+        );
+        assert_eq!(
+            report.stragglers.len(),
+            2,
+            "the stuck connection task belongs to the listener's region: {report:?}"
+        );
+
+        let (released, waker) = &*gate;
+        released.store(true, Ordering::SeqCst);
+        if let Some(waker) = waker.lock().expect("gate lock").take() {
+            waker.wake();
+        }
+        let _ = client.join();
+    });
+    assert_eq!(
+        runtime.drain_root_region(Duration::from_secs(15)),
+        asupersync::runtime::RootDrainOutcome::Quiescent
+    );
+}
+
+/// Closing the region that runs `Http1Listener::run_in` ends the accept loop
+/// and drains an idle keep-alive connection, so the region closes quiescent
+/// within its bound and no connection outlives it.
+#[test]
+fn region_owned_listener_drains_when_the_region_closes() {
+    use asupersync::cx::{ChildRegionCloseOutcome, ChildRegionSpec, Cx};
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    runtime.block_on(async move {
+        let cx = Cx::current().expect("root cx");
+        let child = cx
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .expect("child region");
+        let listener = Http1Listener::bind_with_config(
+            "127.0.0.1:0",
+            |_req| async { Response::new(200, "OK", b"owned".to_vec()) },
+            localhost_config(Duration::from_secs(5), Duration::from_secs(10)),
+        )
+        .await
+        .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let manager = listener.connection_manager().clone();
+        let _serving = child
+            .cx()
+            .spawn(move |listener_cx| async move { listener.run_in(&listener_cx).await })
+            .expect("spawn the accept loop in the child region");
+
+        let mut keep_alive = std::net::TcpStream::connect(addr).expect("client connect");
+        keep_alive
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("set read timeout");
+        keep_alive
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .expect("client write");
+        let mut head = [0_u8; 512];
+        let read = keep_alive.read(&mut head).expect("response");
+        let response = String::from_utf8_lossy(&head[..read]).into_owned();
+        assert!(response.starts_with("HTTP/1.1 200"), "{response:?}");
+        assert_eq!(
+            manager.active_count(),
+            1,
+            "the keep-alive connection is open"
+        );
+
+        // Closing the region cancels the accept loop and the idle connection.
+        let report = child
+            .close_within(Duration::from_secs(5))
+            .await
+            .expect("close report");
+        assert_eq!(
+            report.outcome,
+            ChildRegionCloseOutcome::Quiescent,
+            "region close ends the accept loop and drains the connection: {report:?}"
+        );
+        let mut rest = Vec::new();
+        let _ = keep_alive.read_to_end(&mut rest);
+        assert_eq!(
+            manager.active_count(),
+            0,
+            "no connection outlives the region"
+        );
+    });
+}

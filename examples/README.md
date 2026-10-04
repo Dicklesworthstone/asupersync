@@ -15,7 +15,10 @@ this index.
 - [`onramp_level3.rs`](onramp_level3.rs) — commit a two-phase channel send and
   make the deterministic lab catch an obligation leak.
 - [`production_service.rs`](production_service.rs) — run a production-style
-  HTTP service with a SQLite-backed handler and request-aware graceful drain.
+  HTTP service with a SQLite-backed handler. The service region owns the
+  listener and every connection (`Http1Listener::run_in`), so shutdown is a
+  request-aware drain followed by a bounded region close
+  (`ChildRegion::close_within`), with no `RuntimeHandle`.
 
 ## Runtime, API, and structured-concurrency examples
 

@@ -696,6 +696,38 @@ where
         self.run_with(runtime, spawn_connection::<F, Fut, R>).await
     }
 
+    /// Like [`Self::run`], but each connection task is spawned with `cx`, so
+    /// it belongs to `cx`'s region instead of the runtime's root region.
+    ///
+    /// Run it inside a region that owns the service (for example a
+    /// [`ChildRegion`](crate::cx::ChildRegion)). Cancelling or closing that
+    /// region then cancels the accept loop and drains every connection with
+    /// it: shutdown follows from region close, with no `RuntimeHandle` and no
+    /// separate drain bookkeeping. A graceful drain through the connection
+    /// manager behaves exactly as with [`Self::run`]
+    /// (br-asupersync-issue65-criticisms-kpmoy5.4.5).
+    pub async fn run_in(self, cx: &Cx) -> io::Result<ShutdownStats> {
+        let spawner = cx.clone();
+        self.run_with_spawner(
+            Some(cx.clone()),
+            move |stream, guard, handler, config, shutdown_signal, in_flight_requests| {
+                spawner
+                    .spawn(move |_connection_cx| {
+                        serve_connection::<F, Fut, R>(
+                            stream,
+                            guard,
+                            handler,
+                            config,
+                            shutdown_signal,
+                            in_flight_requests,
+                        )
+                    })
+                    .map(ConnectionTask::Owned)
+            },
+        )
+        .await
+    }
+
     /// Run the accept loop over TLS until shutdown.
     ///
     /// This is the HTTPS/1.1 counterpart to [`Self::run`]. The supplied
@@ -776,12 +808,55 @@ impl<F> Http1Listener<F> {
             ) -> Result<JoinHandle<()>, SpawnError>
             + Send,
     {
-        let mut tasks = ConnectionTasks::default();
+        self.run_with_spawner(
+            None,
+            move |stream, guard, handler, config, shutdown_signal, in_flight_requests| {
+                spawn_connection(
+                    stream,
+                    guard,
+                    handler,
+                    config,
+                    shutdown_signal,
+                    in_flight_requests,
+                    runtime,
+                )
+                .map(ConnectionTask::Root)
+            },
+        )
+        .await
+    }
+
+    /// The accept loop and drain behind every `run*` method. `owner` is the
+    /// context whose region owns the connection tasks, when the spawner puts
+    /// them there; the drain joins them through it.
+    async fn run_with_spawner<Spawn>(
+        self,
+        owner: Option<Cx>,
+        spawn_connection: Spawn,
+    ) -> io::Result<ShutdownStats>
+    where
+        F: Send + Sync,
+        Spawn: Fn(
+                crate::net::tcp::stream::TcpStream,
+                ConnectionGuard,
+                Arc<F>,
+                Http1Config,
+                ShutdownSignal,
+                Arc<AtomicUsize>,
+            ) -> Result<ConnectionTask, SpawnError>
+            + Send,
+    {
+        // run_in's owner: its cancellation (for example its region closing)
+        // ends accepting and starts the drain, like a shutdown signal.
+        let owner_cancel = owner.clone();
+        let mut tasks = ConnectionTasks::new(owner);
         let mut shutdown_rx = self.shutdown_signal.subscribe();
         let mut transient_accept_streak: u32 = 0;
         // Accept loop: keep accepting until shutdown
         loop {
-            if self.shutdown_signal.is_shutting_down() {
+            if self.shutdown_signal.is_shutting_down()
+                || owner_cancel.as_ref().is_some_and(Cx::is_cancel_requested)
+            {
                 break;
             }
 
@@ -795,7 +870,9 @@ impl<F> Http1Listener<F> {
 
                 std::future::poll_fn(|cx| {
                     // Check shutdown synchronously first
-                    if self.shutdown_signal.is_shutting_down() {
+                    if self.shutdown_signal.is_shutting_down()
+                        || owner_cancel.as_ref().is_some_and(Cx::is_cancel_requested)
+                    {
                         return Poll::Ready(AcceptOrShutdown::Shutdown);
                     }
 
@@ -856,7 +933,6 @@ impl<F> Http1Listener<F> {
                 http_config,
                 shutdown_signal,
                 in_flight_requests,
-                runtime,
             ) {
                 Ok(handle) => handle,
                 Err(err) => {
@@ -1027,27 +1103,48 @@ where
     Fut: Future<Output = R> + Send + 'static,
     R: IntoHttp1Response + Send + 'static,
 {
-    let handle = runtime.try_spawn(async move {
-        let _guard = guard;
-        let server = Http1Server::with_config_upgradeable(move |req| handler(req), config)
-            .with_shutdown_signal(shutdown_signal.clone())
-            .with_in_flight_requests(in_flight_requests);
-        let peer_addr = stream.peer_addr().ok();
-        if let Ok(Http1ServeOutcome::Upgraded {
-            io,
-            read_ahead,
-            upgrade,
-            ..
-        }) = server
-            .serve_upgradeable_with_peer_addr(stream, peer_addr)
-            .await
-            && let Some(session_cx) = Cx::current()
-        {
-            let session = upgrade.run(session_cx.clone(), io, read_ahead);
-            run_upgrade_session(&shutdown_signal, session_cx, session).await;
-        }
-    })?;
-    Ok(handle)
+    runtime.try_spawn(serve_connection(
+        stream,
+        guard,
+        handler,
+        config,
+        shutdown_signal,
+        in_flight_requests,
+    ))
+}
+
+/// One HTTP/1.1 connection, from first byte to close or upgrade session end.
+/// The connection guard is held for the whole future.
+async fn serve_connection<F, Fut, R>(
+    stream: crate::net::tcp::stream::TcpStream,
+    guard: ConnectionGuard,
+    handler: Arc<F>,
+    config: Http1Config,
+    shutdown_signal: ShutdownSignal,
+    in_flight_requests: Arc<AtomicUsize>,
+) where
+    F: Fn(Request) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = R> + Send + 'static,
+    R: IntoHttp1Response + Send + 'static,
+{
+    let _guard = guard;
+    let server = Http1Server::with_config_upgradeable(move |req| handler(req), config)
+        .with_shutdown_signal(shutdown_signal.clone())
+        .with_in_flight_requests(in_flight_requests);
+    let peer_addr = stream.peer_addr().ok();
+    if let Ok(Http1ServeOutcome::Upgraded {
+        io,
+        read_ahead,
+        upgrade,
+        ..
+    }) = server
+        .serve_upgradeable_with_peer_addr(stream, peer_addr)
+        .await
+        && let Some(session_cx) = Cx::current()
+    {
+        let session = upgrade.run(session_cx.clone(), io, read_ahead);
+        run_upgrade_session(&shutdown_signal, session_cx, session).await;
+    }
 }
 
 /// Spawn one HTTPS/1.1 connection as a runtime task.
@@ -1270,14 +1367,39 @@ where
     .await;
 }
 
+/// A spawned connection: a root-region task ([`Http1Listener::run`]) or a
+/// task owned by the region of the context given to [`Http1Listener::run_in`].
+enum ConnectionTask {
+    Root(JoinHandle<()>),
+    Owned(crate::runtime::TaskHandle<()>),
+}
+
+impl ConnectionTask {
+    fn is_finished(&self) -> bool {
+        match self {
+            Self::Root(handle) => handle.is_finished(),
+            Self::Owned(handle) => handle.is_finished(),
+        }
+    }
+}
+
 #[derive(Default)]
 struct ConnectionTasks {
-    handles: Vec<JoinHandle<()>>,
+    handles: Vec<ConnectionTask>,
     push_count: u64,
+    /// Joins [`ConnectionTask::Owned`] handles.
+    owner: Option<Cx>,
 }
 
 impl ConnectionTasks {
-    fn push(&mut self, handle: JoinHandle<()>) {
+    fn new(owner: Option<Cx>) -> Self {
+        Self {
+            owner,
+            ..Self::default()
+        }
+    }
+
+    fn push(&mut self, handle: ConnectionTask) {
         self.handles.push(handle);
         self.push_count = self.push_count.wrapping_add(1);
         // Clean up finished tasks periodically to prevent unbounded memory growth
@@ -1289,14 +1411,30 @@ impl ConnectionTasks {
     }
 
     async fn join_all(&mut self) {
-        for handle in self.handles.drain(..) {
-            let result = CatchUnwind { inner: handle }.await;
-            if let Err(payload) = result {
-                let _ = &payload;
-                error!(
-                    message = %crate::cx::scope::payload_to_string(&payload),
-                    "connection task panicked"
-                );
+        for task in self.handles.drain(..) {
+            match task {
+                ConnectionTask::Root(handle) => {
+                    let result = CatchUnwind { inner: handle }.await;
+                    if let Err(payload) = result {
+                        let _ = &payload;
+                        error!(
+                            message = %crate::cx::scope::payload_to_string(&payload),
+                            "connection task panicked"
+                        );
+                    }
+                }
+                ConnectionTask::Owned(mut handle) => {
+                    let owner = self
+                        .owner
+                        .as_ref()
+                        .expect("an owned connection task has an owner context");
+                    if let Err(crate::runtime::JoinError::Panicked(payload)) =
+                        handle.join(owner).await
+                    {
+                        let _ = &payload;
+                        error!(message = %payload, "connection task panicked");
+                    }
+                }
             }
         }
     }
