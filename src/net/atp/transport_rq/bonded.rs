@@ -36,6 +36,22 @@ use crate::net::atp::sdk::{BondedTransferProgress, TransferPhase};
 
 const BONDING_AUTH_REJECTION_TRACE_EVENT: &str = "atp.bonding.auth_rejection";
 
+/// The most repair symbols a donor emits for one `BondedNeedMore`, whatever
+/// windows it names (the QUIC sender's per-round bound). The receiver asks
+/// again for any deficit left unserved.
+const BONDED_MAX_REPAIR_SYMBOLS_PER_NEED_MORE: usize = 1 << 20;
+
+/// The most repair symbols a donor emits for one block of `k` source symbols
+/// in one `BondedNeedMore`: twice K plus 64, the per-block headroom a bonded
+/// receiver keeps ([`bonded_retention_policy`]). A receiver-named window can
+/// span 2^32 ESIs; this keeps it from sizing the donor's work.
+fn bonded_need_more_block_repair_cap(k: u32) -> usize {
+    usize::try_from(k)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(2)
+        .saturating_add(64)
+}
+
 /// Bonded control-plane protocol version carried in the donor hello.
 ///
 /// Version 3 binds the protocol-v4 metadata commitment and RaptorQ geometry
@@ -2100,6 +2116,7 @@ async fn bonded_donor_execute_need_more(
     let mut dropper = 0u32;
     let mut udp_send_acceleration = UdpSendAccelerationReport::default();
     let tag = transfer_tag(&descriptor.transfer_id);
+    let mut repair_budget = BONDED_MAX_REPAIR_SYMBOLS_PER_NEED_MORE;
 
     for block in &need.blocks {
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
@@ -2147,12 +2164,28 @@ async fn bonded_donor_execute_need_more(
                 stagger_delay_slots: assignment.donor_index,
             });
         }
+        let mut block_repair_budget = bonded_need_more_block_repair_cap(k).min(repair_budget);
         for window in &block.repair_windows {
             if window.end_exclusive <= window.start_inclusive {
                 continue;
             }
-            let requested = usize::try_from(window.end_exclusive - window.start_inclusive)
+            let span = usize::try_from(window.end_exclusive - window.start_inclusive)
                 .unwrap_or(usize::MAX);
+            let requested = span.min(block_repair_budget);
+            if requested < span {
+                bondtrace!(
+                    "donor: need_more_window_capped donor_index={} entry={} sbn={} window={:?} served={requested}",
+                    assignment.donor_index,
+                    block.entry_index,
+                    block.source_block_number,
+                    window
+                );
+            }
+            if requested == 0 {
+                continue;
+            }
+            block_repair_budget -= requested;
+            repair_budget -= requested;
             let mut windowed = assignment.clone();
             windowed.esi_windows = vec![*window];
             let schedule = schedule_bonded_repair_continuation(
@@ -3858,6 +3891,77 @@ mod tests {
                 ),
             "survivor must contribute accepted symbols: {:?}",
             report.donor_ingress
+        );
+    }
+
+    /// A NeedMore names repair ESI windows of any size (up to 2^32 ESIs) over
+    /// the plaintext control channel. The donor serves at most the per-block
+    /// headroom a bonded receiver keeps (2K + 64) instead of allocating and
+    /// encoding the whole window.
+    #[test]
+    fn donor_serves_a_need_more_window_only_up_to_the_block_cap() {
+        let config = bonded_lab_config();
+        let root = bonded_e2e_tmp("need_more_cap");
+        let src_dir = root.join("src");
+        std::fs::create_dir_all(&src_dir).expect("create src dir");
+        let payload = bonded_e2e_payload(4096);
+        std::fs::write(src_dir.join("payload.bin"), &payload).expect("write payload");
+        let descriptor =
+            bonded_e2e_descriptor(&src_dir, &["payload.bin"], "payload.bin", false, &config);
+        let geometry = descriptor
+            .entry_block_geometry(0, 0)
+            .expect("block 0 geometry");
+        let k = u32::from(geometry.source_symbols);
+        let cap = bonded_need_more_block_repair_cap(k);
+        // Fifty times the cap: before the fix the donor served all of it,
+        // which stays cheap at this size.
+        let span = u32::try_from(cap * 50).expect("span fits u32");
+        let receiver = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind receiver udp");
+        let assignment = DonorAssignment::new_static(
+            0,
+            1,
+            vec![receiver.local_addr().expect("receiver udp addr")],
+            None,
+        );
+        let need = BondedNeedMore {
+            round: 1,
+            blocks: vec![BondedBlockNeed {
+                entry_index: 0,
+                source_block_number: 0,
+                source_esis: Vec::new(),
+                repair_windows: vec![EsiWindow {
+                    start_inclusive: k,
+                    end_exclusive: k + span,
+                }],
+            }],
+        };
+
+        let runtime = RuntimeBuilder::multi_thread()
+            .worker_threads(2)
+            .enable_platform_reactor(true)
+            .build()
+            .expect("bonded donor runtime");
+        let sent = runtime
+            .block_on(runtime.handle().spawn(async move {
+                let cx = Cx::current().expect("bonded donor cx");
+                bonded_donor_execute_need_more(
+                    &cx,
+                    &descriptor,
+                    &assignment,
+                    &src_dir,
+                    &config,
+                    None,
+                    &need,
+                )
+                .await
+            }))
+            .expect("donor serves the NeedMore");
+        drop(receiver);
+
+        assert_eq!(
+            sent,
+            u64::try_from(cap).expect("cap fits u64"),
+            "a {span}-ESI window for a K={k} block is served up to the block cap"
         );
     }
 }
