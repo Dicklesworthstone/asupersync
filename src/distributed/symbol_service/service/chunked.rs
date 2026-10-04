@@ -195,7 +195,14 @@ impl ChunkedSymbolService {
                 let end = offset.checked_add(bytes.len()).ok_or(SymbolStoreError::Overflow)?;
                 if end > upload.total { return Err(SymbolStoreError::Limit("declared upload bytes")); }
                 if offset == stage.bytes.len() {
-                    stage.bytes.try_reserve_exact(bytes.len()).map_err(|_| SymbolStoreError::Allocation)?;
+                    // Allocate the whole declared upload once (BEGIN already charged it to the
+                    // staging quota). Growing by each chunk let small chunks copy everything
+                    // staged so far under the shared lock, and left unzeroed copies behind.
+                    let missing = upload.total - stage.bytes.len();
+                    if stage.bytes.capacity() < upload.total {
+                        let reserved = stage.bytes.try_reserve_exact(missing);
+                        reserved.map_err(|_| SymbolStoreError::Allocation)?;
+                    }
                     stage.bytes.extend_from_slice(bytes);
                 } else if stage.bytes.get(offset..end) != Some(bytes) {
                     return Err(SymbolStoreError::Conflict);
@@ -483,6 +490,35 @@ mod tests {
         assert_eq!(read_progress(&begin, repeated).unwrap().0, upload.total);
         command(&service, &peer, 7, COMMIT, repeated).unwrap();
         command(&service, &peer, 8, ABORT, repeated).unwrap();
+        assert_eq!(service.store.stats().batches, 1);
+    }
+
+    #[test]
+    fn staged_upload_is_allocated_once_whatever_the_chunk_size() {
+        let batch = fixture(42);
+        let upload = make_upload(&batch, 1);
+        let service = make_service(1, batch.as_ref().len(), 1);
+        let peer = NodeId::new("origin");
+        command(&service, &peer, 0, BEGIN, upload).unwrap();
+        let mut staged_at = None;
+        for (offset, byte) in batch.as_ref().iter().enumerate() {
+            let chunk = std::slice::from_ref(byte);
+            piece(&service, &peer, 1, upload, offset, chunk).unwrap();
+            let state = service.staging.lock();
+            let staged = &state.entries[&(peer.clone(), upload.attempt)].bytes;
+            let capacity = staged.capacity();
+            assert!(
+                capacity >= upload.total,
+                "chunk at {offset}: capacity {capacity}"
+            );
+            let at = staged.as_ptr();
+            assert_eq!(
+                *staged_at.get_or_insert(at),
+                at,
+                "chunk at {offset} moved the staged bytes"
+            );
+        }
+        command(&service, &peer, 2, COMMIT, upload).unwrap();
         assert_eq!(service.store.stats().batches, 1);
     }
 
