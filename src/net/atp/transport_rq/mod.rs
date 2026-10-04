@@ -8086,10 +8086,12 @@ fn source_streaming_block_ready_to_seed(dec: &EntryDecoder, sbn: usize) -> bool 
     let Ok(block_sbn) = u8::try_from(sbn) else {
         return false;
     };
-    let Some(status) = dec
+    // Runs for every accepted repair symbol, so only the count: block_status
+    // would also run a full rank analysis of the block each time.
+    let Some(symbols_received) = dec
         .pipeline
         .as_ref()
-        .and_then(|pipeline| pipeline.block_status(block_sbn))
+        .and_then(|pipeline| pipeline.block_symbols_received(block_sbn))
     else {
         return false;
     };
@@ -8100,7 +8102,7 @@ fn source_streaming_block_ready_to_seed(dec: &EntryDecoder, sbn: usize) -> bool 
         .filter(|(received, seeded)| **received && !**seeded)
         .count();
 
-    status.symbols_received.saturating_add(unseeded_sources) >= block.k
+    symbols_received.saturating_add(unseeded_sources) >= block.k
 }
 
 fn source_seed_symbol_plan(

@@ -940,6 +940,19 @@ impl DecodingPipeline {
         }
     }
 
+    /// Returns how many symbols a block has received, if it is known.
+    ///
+    /// The count [`Self::block_status`] reports, without the rank analysis
+    /// that call also runs (a dense constraint-matrix build and elimination,
+    /// O(L^2) work for a block of L intermediate symbols). Use this on
+    /// per-symbol paths.
+    #[must_use]
+    pub fn block_symbols_received(&self, sbn: u8) -> Option<usize> {
+        self.symbols
+            .block_progress(sbn)
+            .map(|progress| progress.total())
+    }
+
     /// Returns per-block status if known.
     #[must_use]
     pub fn block_status(&self, sbn: u8) -> Option<BlockStatus> {
@@ -3068,6 +3081,16 @@ mod tests {
             expected_received,
             received
         );
+        // The cheap count used on per-symbol paths agrees with the status.
+        let cheap = decoder.block_symbols_received(0);
+        crate::assert_with_log!(
+            cheap == Some(received),
+            "block_symbols_received matches block_status",
+            Some(received),
+            cheap
+        );
+        let unknown = decoder.block_symbols_received(99);
+        crate::assert_with_log!(unknown.is_none(), "unknown block", None::<usize>, unknown);
         let rank_is_available = status.rank.is_some();
         crate::assert_with_log!(rank_is_available, "rank available", true, rank_is_available);
         let rank_deficit_positive = status.rank_deficit.is_some_and(|deficit| deficit > 0);
