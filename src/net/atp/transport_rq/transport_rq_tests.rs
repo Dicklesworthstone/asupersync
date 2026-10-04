@@ -3979,6 +3979,11 @@ fn source_streaming_test_decoder(
     size: u64,
     symbol_size: u16,
 ) -> EntryDecoder {
+    // One block, or blocks of RaptorQ's K'max symbols for a larger entry, as
+    // the sender's encoder plans them.
+    let max_block_size =
+        usize::try_from(size.min(RQ_MAX_SOURCE_SYMBOLS_PER_BLOCK * u64::from(symbol_size)))
+            .expect("test block size fits usize");
     EntryDecoder {
         index: 0,
         object_id,
@@ -3995,14 +4000,10 @@ fn source_streaming_test_decoder(
         staging_unflushed_bytes: 0,
         cache_staging_file: false,
         bytes_written: 0,
-        max_block_size: usize::try_from(size).expect("test size fits usize"),
+        max_block_size,
         source_streaming: true,
-        source_blocks: source_block_progress_for(
-            size,
-            usize::try_from(size).expect("test size fits usize"),
-            symbol_size,
-        )
-        .expect("test source blocks"),
+        source_blocks: source_block_progress_for(size, max_block_size, symbol_size)
+            .expect("test source blocks"),
         pending_decodes: Vec::new(),
         inc: None,
         inc_digest: None,
@@ -10536,4 +10537,157 @@ fn verify_and_commit_rejects_packed_object_with_wrong_member_sha() {
     // Nothing written into place.
     assert!(!dest.path().join("payload/a.txt").exists());
     assert!(!dest.path().join("payload/b.txt").exists());
+}
+
+#[test]
+fn peer_geometry_is_checked_before_it_sizes_receive_state() {
+    // Zero sizes can never be received.
+    assert!(rq_peer_geometry_error(0, 8 << 20).is_some());
+    assert!(rq_peer_geometry_error(1400, 0).is_some());
+    assert!(
+        rq_peer_geometry_error(1, u64::MAX).is_none(),
+        "checked per entry"
+    );
+
+    // One 4 GiB block of one-byte symbols: K = 2^32.
+    let huge = rq_entry_geometry_error(4 << 30, 1, u64::MAX).expect("refused");
+    assert!(huge.contains("source symbols in a block"), "{huge}");
+    // Blocks of at most K'max symbols, but far more blocks than an SBN names.
+    let many =
+        rq_entry_geometry_error(4 << 30, 1, RQ_MAX_SOURCE_SYMBOLS_PER_BLOCK).expect("refused");
+    assert!(many.contains("source blocks"), "{many}");
+    // The limits themselves are fine, and so are ordinary geometries,
+    // including small symbols with the default block ceiling on a small entry.
+    let full_block = RQ_MAX_SOURCE_SYMBOLS_PER_BLOCK * 64;
+    assert!(rq_entry_geometry_error(full_block, 64, full_block).is_none());
+    assert!(rq_entry_geometry_error(full_block + 64, 64, full_block + 64).is_some());
+    // The largest object the sender's large-file split makes with the default
+    // block size: 256 blocks of 8 MiB.
+    let largest_object = MAX_SOURCE_BLOCKS as u64 * DEFAULT_MAX_BLOCK_SIZE as u64;
+    assert!(rq_entry_geometry_error(largest_object, 1400, DEFAULT_MAX_BLOCK_SIZE as u64).is_none());
+    assert!(rq_entry_geometry_error(4096, 4, DEFAULT_MAX_BLOCK_SIZE as u64).is_none());
+    assert!(rq_entry_geometry_error(0, 1, 1).is_none());
+
+    let config = RqConfig::default();
+    assert_eq!(
+        rq_receive_source_symbol_budget(&config),
+        RQ_RECEIVE_SOURCE_SYMBOL_BUDGET_FLOOR
+    );
+    let larger = RqConfig {
+        max_transfer_bytes: 64 << 30,
+        ..RqConfig::default()
+    };
+    assert_eq!(rq_receive_source_symbol_budget(&larger), (64 << 30) / 1024);
+}
+
+#[test]
+fn source_block_progress_refuses_a_block_beyond_k_max_before_allocating() {
+    let limit = RQ_MAX_SOURCE_SYMBOLS_PER_BLOCK;
+    assert!(source_block_progress_for(limit, usize::MAX, 1).is_some());
+    assert!(
+        source_block_progress_for(limit + 1, usize::MAX, 1).is_none(),
+        "a block RaptorQ cannot decode must not get per-symbol tables"
+    );
+}
+
+/// Runs one RQ receiver over loopback and feeds it raw control frames, as a
+/// peer that is not an asupersync sender can. Returns the receiver's error.
+fn receive_raw_control_frames(frames: Vec<Frame>) -> RqError {
+    use std::io::Write as _;
+
+    let dest = canon_tempdir();
+    let dest_path = dest.path().to_path_buf();
+    let (addr_tx, addr_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let runtime = crate::runtime::RuntimeBuilder::multi_thread()
+            .worker_threads(2)
+            .enable_platform_reactor(true)
+            .build()
+            .expect("receiver runtime");
+        let result = runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("receiver cx");
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            addr_tx.send(listener.local_addr()?).expect("send addr");
+            let config = RqConfig::default().allow_unauthenticated_for_trusted_transport();
+            receive_once(&cx, &listener, "127.0.0.1", &dest_path, config, "receiver").await
+        }));
+        let _ = done_tx.send(result);
+    });
+    let addr = addr_rx.recv().expect("receiver bound");
+    let mut client = std::net::TcpStream::connect(addr).expect("connect");
+    for frame in frames {
+        client
+            .write_all(&frame.to_wire_bytes().expect("encode frame"))
+            .expect("send frame");
+    }
+    let result = done_rx
+        .recv_timeout(Duration::from_secs(20))
+        .expect("the receiver must answer a hostile peer in bounded time");
+    drop(dest);
+    result.expect_err("the receiver must refuse")
+}
+
+fn raw_hello(symbol_size: u16, max_block_size: u64) -> Frame {
+    json_frame(
+        FrameType::Handshake,
+        &Hello {
+            protocol: ATP_RQ_PROTOCOL,
+            role: "sender".to_string(),
+            peer_id: "raw-peer".to_string(),
+            symbol_size,
+            max_block_size,
+            symbol_auth: false,
+            total_bytes: 0,
+            prefer_control_source_stream: false,
+            delta_transfer_nonce: None,
+            delta_client_auth_tag: None,
+        },
+    )
+    .expect("hello frame")
+}
+
+/// A Hello's symbol geometry is adopted as is; a zero symbol size used to be
+/// accepted and divided by later.
+#[test]
+fn receiver_refuses_a_zero_symbol_geometry_at_the_handshake() {
+    let err = receive_raw_control_frames(vec![raw_hello(0, 8 << 20)]);
+    assert!(
+        matches!(&err, RqError::HandshakeRejected(reason) if reason.contains("invalid symbol geometry")),
+        "{err:?}"
+    );
+}
+
+/// One-byte symbols in one unbounded block made the receiver allocate
+/// per-symbol tables for the whole entry (about 35 bytes per byte of the
+/// entry; 4 GiB entries aborted the process) before any symbol arrived, and
+/// with no authentication on the control channel.
+#[test]
+fn receiver_refuses_entry_geometry_before_allocating_receive_state() {
+    let size = 1 << 20;
+    let manifest = TransferManifest {
+        transfer_id: "rawpeer1".to_string(),
+        root_name: "payload.bin".to_string(),
+        is_directory: false,
+        total_bytes: size,
+        merkle_root_hex: "ab".repeat(32),
+        metadata: Some(bare_metadata_manifest(["payload.bin"])),
+        delta_manifest: None,
+        entries: vec![ManifestEntry {
+            index: 0,
+            rel_path: "payload.bin".to_string(),
+            size,
+            sha256_hex: "cd".repeat(32),
+            members: Vec::new(),
+            fragment: None,
+        }],
+    };
+    let err = receive_raw_control_frames(vec![
+        raw_hello(1, u64::MAX),
+        json_frame(FrameType::ObjectManifest, &manifest).expect("manifest frame"),
+    ]);
+    assert!(
+        matches!(&err, RqError::Frame(reason) if reason.contains("source symbols in a block")),
+        "{err:?}"
+    );
 }
