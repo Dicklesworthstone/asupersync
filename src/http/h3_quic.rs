@@ -47,6 +47,9 @@ pub const H3_REQUEST_REJECTED: u64 = 0x010b;
 /// RFC 9114 application error code `H3_MESSAGE_ERROR`.
 const H3_MESSAGE_ERROR: u64 = 0x010e;
 
+/// RFC 9114 application error code `H3_REQUEST_INCOMPLETE`.
+const H3_REQUEST_INCOMPLETE: u64 = 0x010d;
+
 const H3_CONTROL_STREAM_TYPE: u64 = 0x00;
 const FRAME_HEADER_MAX_BYTES: usize = 16;
 const MAX_OPEN_STREAM_RUNS: usize = 4096;
@@ -635,9 +638,10 @@ pub struct NativeH3Session {
     closing: bool,
     next_local_request_stream_id: u64,
     streaming_receive: Option<StreamingReceive>,
-    /// Malformed requests already reported, whose RESET_STREAM and
-    /// STOP_SENDING are still to be queued on the connection.
-    rejected_requests: Vec<StreamId>,
+    /// Malformed or incomplete requests already reported, whose RESET_STREAM
+    /// and STOP_SENDING (with the error code) are still to be queued on the
+    /// connection.
+    rejected_requests: Vec<(StreamId, u64)>,
 }
 
 impl NativeH3Session {
@@ -1250,6 +1254,7 @@ impl NativeH3Session {
             // is truncation. FIN is never inferred from Content-Length or an
             // empty read and never overtakes a preceding application event.
             self.finish_stream(stream_id)?;
+            self.reset_rejected_requests(cx, connection)?;
             return Ok(true);
         }
         let has_lookahead = !self
@@ -1359,6 +1364,7 @@ impl NativeH3Session {
 
         if readiness.fin_received && connection.is_stream_eof(stream_id)? {
             self.finish_stream(stream_id)?;
+            self.reset_rejected_requests(cx, connection)?;
         }
         Ok(())
     }
@@ -1368,23 +1374,36 @@ impl NativeH3Session {
     /// `H3_MESSAGE_ERROR`. The stream is reported as
     /// a [`NativeH3Event::StreamReset`] so owners release its per-stream
     /// state, and its later bytes are discarded.
-    fn reject_malformed_request(&mut self, stream_id: StreamId) -> Result<(), NativeH3SessionError> {
+    fn reject_malformed_request(
+        &mut self,
+        stream_id: StreamId,
+    ) -> Result<(), NativeH3SessionError> {
+        self.reject_request_stream(stream_id, H3_MESSAGE_ERROR)
+    }
+
+    /// End only this request stream with `error_code`, reported as a
+    /// [`NativeH3Event::StreamReset`]; the connection carries on.
+    fn reject_request_stream(
+        &mut self,
+        stream_id: StreamId,
+        error_code: u64,
+    ) -> Result<(), NativeH3SessionError> {
         self.state.abort_request_stream(stream_id.0)?;
         self.incoming.remove(&stream_id);
         self.forget_streaming_readiness(stream_id);
         self.terminal_streams.insert(stream_id)?;
-        self.rejected_requests.push(stream_id);
+        self.rejected_requests.push((stream_id, error_code));
         self.events.push_back(NativeH3Event::StreamReset {
             stream_id,
-            error_code: H3_MESSAGE_ERROR,
+            error_code,
             final_size: 0,
         });
         Ok(())
     }
 
     /// Queue RESET_STREAM and STOP_SENDING for every request rejected as
-    /// malformed. Returns true when any was rejected, so the caller stops
-    /// processing a stream it may no longer own.
+    /// malformed or incomplete. Returns true when any was rejected, so the
+    /// caller stops processing a stream it may no longer own.
     fn reset_rejected_requests(
         &mut self,
         cx: &Cx,
@@ -1393,9 +1412,9 @@ impl NativeH3Session {
         if self.rejected_requests.is_empty() {
             return Ok(false);
         }
-        for stream_id in std::mem::take(&mut self.rejected_requests) {
-            connection.reset_stream(cx, stream_id, H3_MESSAGE_ERROR)?;
-            connection.stop_stream_receiving(cx, stream_id, H3_MESSAGE_ERROR)?;
+        for (stream_id, error_code) in std::mem::take(&mut self.rejected_requests) {
+            connection.reset_stream(cx, stream_id, error_code)?;
+            connection.stop_stream_receiving(cx, stream_id, error_code)?;
         }
         Ok(true)
     }
@@ -1826,6 +1845,18 @@ impl NativeH3Session {
                 });
             }
             IncomingStreamKind::RequestResponse => {
+                if self.state.request_stream_lacks_initial_headers(stream_id.0) {
+                    // RFC 9114 section 4.1: a request stream that ends before
+                    // its HEADERS is incomplete, and a response that ends
+                    // before its final HEADERS is malformed. Either ends only
+                    // this stream, not the connection.
+                    let error_code = if self.role == H3EndpointRole::Server {
+                        H3_REQUEST_INCOMPLETE
+                    } else {
+                        H3_MESSAGE_ERROR
+                    };
+                    return self.reject_request_stream(stream_id, error_code);
+                }
                 self.state.finish_request_stream(stream_id.0)?;
                 self.events.push_back(NativeH3Event::Finished { stream_id });
             }

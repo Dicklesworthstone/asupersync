@@ -4134,6 +4134,18 @@ impl H3ConnectionState {
         self.finished_request_streams.contains(&stream_id)
     }
 
+    /// Whether an unfinished request stream has yet to receive its initial
+    /// HEADERS (on a client, its final response HEADERS), so that ending it
+    /// now would leave the message incomplete.
+    #[cfg(feature = "http3")]
+    pub(crate) fn request_stream_lacks_initial_headers(&self, stream_id: u64) -> bool {
+        !self.is_request_stream_finished(stream_id)
+            && self
+                .request_streams
+                .get(&stream_id)
+                .is_none_or(|state| state.header_blocks_seen == 0)
+    }
+
     /// Process a control-stream frame.
     pub fn on_control_frame(&mut self, frame: &H3Frame) -> Result<(), H3NativeError> {
         self.control.on_remote_control_frame(frame)?;
