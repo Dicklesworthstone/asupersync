@@ -2573,11 +2573,17 @@ impl NativeQuicConnection {
                 stream_id,
                 maximum_stream_data,
             } => {
+                let id = StreamId(stream_id.value());
+                // RFC 9000 3.2: credit for the sending part of a peer's
+                // bidirectional stream also opens it. It can overtake the
+                // peer's first STREAM frame when that packet is lost.
+                if id.direction() == StreamDirection::Bidirectional
+                    && self.streams.stream(id).is_err()
+                {
+                    self.accept_remote_stream(cx, id)?;
+                }
                 self.streams
-                    .increase_stream_send_limit(
-                        StreamId(stream_id.value()),
-                        maximum_stream_data.value(),
-                    )
+                    .increase_stream_send_limit(id, maximum_stream_data.value())
                     .map_err(map_stream_table_error)?;
                 Ok(())
             }
@@ -2668,6 +2674,11 @@ impl NativeQuicConnection {
                 // hysteresis, one full window consumed since the last growth)
                 // and returns the advertisement to put on the wire.
                 let id = StreamId(stream_id.value());
+                // RFC 9000 3.2: STREAM_DATA_BLOCKED opens a peer's stream,
+                // as STREAM and RESET_STREAM do.
+                if self.streams.stream(id).is_err() {
+                    self.accept_remote_stream(cx, id)?;
+                }
                 if let Some(limit) = self
                     .streams
                     .note_peer_stream_data_blocked(id, maximum_stream_data.value())
@@ -4427,6 +4438,64 @@ mod tests {
             QuicFrame::MaxStreamData { stream_id, maximum_stream_data }
                 if stream_id.value() == stream.0 && maximum_stream_data.value() > 100
         )));
+    }
+
+    /// A packet with STREAM_DATA_BLOCKED or MAX_STREAM_DATA can arrive before
+    /// the lost packet that carried the stream's first STREAM frame. Both open
+    /// the peer's stream (RFC 9000 3.2); they used to fail the packet with an
+    /// unknown-stream error, which the endpoint dropped unacknowledged on
+    /// every retransmission.
+    #[test]
+    fn blocked_and_credit_frames_open_a_peer_stream() {
+        let cx = test_cx();
+        let mut conn = established_server_conn();
+        let blocked = StreamId(0);
+        let credited = StreamId(4);
+        let frames = [
+            QuicFrame::StreamDataBlocked {
+                stream_id: VarInt(blocked.0),
+                maximum_stream_data: VarInt(100),
+            },
+            QuicFrame::MaxStreamData {
+                stream_id: VarInt(credited.0),
+                maximum_stream_data: VarInt(1 << 20),
+            },
+        ];
+        conn.process_packet_frames(&cx, PacketNumberSpace::ApplicationData, 3, &frames, 100)
+            .expect("both frames open their streams");
+        assert!(conn.streams.stream(blocked).is_ok());
+        assert!(conn.streams.stream(credited).is_ok());
+
+        let late = [QuicFrame::Stream {
+            stream_id: VarInt(blocked.0),
+            offset: Some(VarInt(0)),
+            data: Bytes::from_static(b"late"),
+            fin: false,
+        }];
+        conn.process_packet_frames(&cx, PacketNumberSpace::ApplicationData, 4, &late, 200)
+            .expect("the retransmitted first STREAM frame lands on the open stream");
+        assert_eq!(
+            conn.read_stream_bytes(&cx, blocked, 16).expect("read"),
+            Bytes::from_static(b"late")
+        );
+
+        // A peer's unidirectional stream only receives; credit for sending on
+        // it does not open it.
+        let receive_only = [QuicFrame::MaxStreamData {
+            stream_id: VarInt(2),
+            maximum_stream_data: VarInt(1 << 20),
+        }];
+        assert!(
+            conn.process_packet_frames(
+                &cx,
+                PacketNumberSpace::ApplicationData,
+                5,
+                &receive_only,
+                300
+            )
+            .is_err()
+        );
+        assert!(conn.streams.stream(StreamId(2)).is_err());
     }
 
     /// The per-stream bound alone let a peer keep that many one-byte holes on
