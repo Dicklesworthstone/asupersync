@@ -1146,7 +1146,12 @@ where
                 self.config.request_timeout_header_cap,
             );
 
-            let upgrade_request = req.clone();
+            // Only an upgrade-aware listener checks a handoff against its
+            // request, and a request with a body or trailers can never hand
+            // off. Keep a copy just for that case: copying every request
+            // cost a copy of its whole body, up to max_body_size.
+            let upgrade_request = (admit_upgrade && req.body.is_empty() && req.trailers.is_empty())
+                .then(|| req.clone());
             let mut forced_close = false;
             let output = match ServerRequestRegion::mint("h1", request_budget, request_now) {
                 Some(region) => {
@@ -1242,7 +1247,18 @@ where
                             "HTTP/1 upgrade refused after listener drain began",
                         ));
                     }
-                    validate_upgrade_handoff(&upgrade_request, &resp, &upgrade)?;
+                    let Some(upgrade_request) = upgrade_request.as_ref() else {
+                        // Same refusals, in the same order, as the check below.
+                        if request_version != Version::Http11 || request_method != Method::Get {
+                            return Err(invalid_upgrade_error(
+                                "WebSocket handoff requires an HTTP/1.1 GET request",
+                            ));
+                        }
+                        return Err(invalid_upgrade_error(
+                            "WebSocket handoff request must not carry a body or trailers",
+                        ));
+                    };
+                    validate_upgrade_handoff(upgrade_request, &resp, &upgrade)?;
                     Some(upgrade)
                 }
                 None => None,
@@ -7841,6 +7857,56 @@ mod tests {
             matches!(error, HttpError::Io(ref error) if error.kind() == io::ErrorKind::InvalidData)
         );
         assert!(written.lock().unwrap().is_empty());
+    }
+
+    /// The upgrade check no longer copies a request that carries a body; it
+    /// must still refuse such a handoff with the same errors, in the same
+    /// order.
+    #[test]
+    fn upgradeable_server_refuses_a_handoff_for_a_request_with_a_body() {
+        for (method, expected) in [
+            ("POST", "WebSocket handoff requires an HTTP/1.1 GET request"),
+            (
+                "GET",
+                "WebSocket handoff request must not carry a body or trailers",
+            ),
+        ] {
+            let written = Arc::new(Mutex::new(Vec::new()));
+            let io = TestIo::new(
+                format!(
+                    "{method} /ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n\
+                     Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+                     Sec-WebSocket-Version: 13\r\nContent-Length: 4\r\n\r\nbody"
+                )
+                .into_bytes(),
+                Arc::clone(&written),
+            );
+            let server = Http1Server::with_config_upgradeable(
+                |_request| async move {
+                    let response = Response::new(101, "Switching Protocols", Vec::new())
+                        .with_header("connection", "Upgrade")
+                        .with_header("upgrade", "websocket")
+                        .with_header("sec-websocket-accept", "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+                    Http1Response::new(response)
+                        .with_upgrade(Http1Upgrade::new(|_cx, _io, _read_ahead| async {}))
+                },
+                localhost_server_config(),
+            );
+            let runtime = RuntimeBuilder::current_thread()
+                .build()
+                .expect("build current-thread runtime");
+            let error = match runtime
+                .block_on(async { server.serve_upgradeable_with_peer_addr(io, None).await })
+            {
+                Err(error) => error,
+                Ok(_) => panic!("{method} with a body must refuse handoff"),
+            };
+            assert!(
+                matches!(&error, HttpError::Io(error) if error.to_string().contains(expected)),
+                "{method}: {error:?}"
+            );
+            assert!(written.lock().unwrap().is_empty());
+        }
     }
 
     fn deflate_handoff(offer: Option<&str>) -> Result<Http1ServeOutcome<TestIo>, HttpError> {
