@@ -1246,6 +1246,118 @@ fn region_owned_listener_reports_a_stuck_connection_as_its_straggler() {
     );
 }
 
+/// Under `Http1Listener::run_in` a request's context derives from its
+/// connection's (br-asupersync-vqppo5): it belongs to the listener's region,
+/// and a task the handler spawns through it is that region's work, so a
+/// bounded close of the region names it as a straggler. A request context
+/// minted from the root region put such work in the root instead, where the
+/// listener's region never saw it.
+#[test]
+fn region_owned_listener_owns_the_work_a_handler_spawns() {
+    use asupersync::cx::{ChildRegionCloseOutcome, ChildRegionSpec, Cx};
+    use asupersync::types::{RegionId, TaskId};
+    use std::sync::atomic::AtomicBool;
+
+    type Seen = Option<(RegionId, Result<(), String>)>;
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let gate: Gate = Arc::new((AtomicBool::new(false), std::sync::Mutex::new(None)));
+    let gate_for_handler = Arc::clone(&gate);
+    runtime.block_on(async move {
+        let cx = Cx::current().expect("root cx");
+        let child = cx
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .expect("child region");
+        let listener_region = child.region_id();
+        let seen: Arc<std::sync::Mutex<Seen>> = Arc::new(std::sync::Mutex::new(None));
+        let spawned: Arc<std::sync::Mutex<Option<TaskId>>> = Arc::new(std::sync::Mutex::new(None));
+        let seen_by_handler = Arc::clone(&seen);
+        let spawned_by_handler = Arc::clone(&spawned);
+        let listener = Http1Listener::bind_with_config(
+            "127.0.0.1:0",
+            move |_req| {
+                let gate = Arc::clone(&gate_for_handler);
+                let seen = Arc::clone(&seen_by_handler);
+                let spawned = Arc::clone(&spawned_by_handler);
+                async move {
+                    let request_cx = Cx::current().expect("request context");
+                    // The spawned task ignores cancellation until released.
+                    let spawn = request_cx
+                        .spawn(move |task_cx| async move {
+                            *spawned.lock().expect("spawned slot") = Some(task_cx.task_id());
+                            Parked(gate).await;
+                        })
+                        .map(drop)
+                        .map_err(|error| error.to_string());
+                    *seen.lock().expect("seen slot") = Some((request_cx.region_id(), spawn));
+                    Response::new(200, "OK", b"spawned".to_vec())
+                }
+            },
+            localhost_config(Duration::from_secs(5), Duration::from_secs(10)),
+        )
+        .await
+        .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let _serving = child
+            .cx()
+            .spawn(move |listener_cx| async move { listener.run_in(&listener_cx).await })
+            .expect("spawn the accept loop in the child region");
+
+        let client = blocking_client(addr);
+        let mut yields = 0_u32;
+        let (request_region, spawn) = loop {
+            if let Some(found) = seen.lock().expect("seen slot").clone() {
+                break found;
+            }
+            yields += 1;
+            assert!(yields < 1_000_000, "the request never reached its handler");
+            asupersync::runtime::yield_now().await;
+        };
+        assert_eq!(
+            request_region, listener_region,
+            "the request context belongs to the listener's region, not the root"
+        );
+        spawn.expect("a handler spawns through its request context");
+        let spawned_task = loop {
+            if let Some(task) = *spawned.lock().expect("spawned slot") {
+                break task;
+            }
+            yields += 1;
+            assert!(yields < 1_000_000, "the spawned task never ran");
+            asupersync::runtime::yield_now().await;
+        };
+
+        let report = child
+            .close_within(Duration::from_millis(500))
+            .await
+            .expect("close report");
+        assert_eq!(
+            report.outcome,
+            ChildRegionCloseOutcome::TimedOut,
+            "{report:?}"
+        );
+        assert!(
+            report.stragglers.contains(&spawned_task),
+            "the handler's spawned task is the listener region's work: {report:?}"
+        );
+
+        let (released, waker) = &*gate;
+        released.store(true, Ordering::SeqCst);
+        if let Some(waker) = waker.lock().expect("gate lock").take() {
+            waker.wake();
+        }
+        let _ = client.join();
+    });
+    assert_eq!(
+        runtime.drain_root_region(Duration::from_secs(15)),
+        asupersync::runtime::RootDrainOutcome::Quiescent
+    );
+}
+
 /// Closing the region that runs `Http1Listener::run_in` ends the accept loop
 /// and drains an idle keep-alive connection, so the region closes quiescent
 /// within its bound and no connection outlives it.

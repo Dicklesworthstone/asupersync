@@ -1153,7 +1153,21 @@ where
             let upgrade_request = (admit_upgrade && req.body.is_empty() && req.trailers.is_empty())
                 .then(|| req.clone());
             let mut forced_close = false;
-            let output = match ServerRequestRegion::mint("h1", request_budget, request_now) {
+            // The request context derives from the connection's own context
+            // when there is one, so work a handler spawns belongs to the
+            // connection's region instead of the root
+            // (br-asupersync-vqppo5). Callers outside any task keep the
+            // runtime mint.
+            let region = match conn_cx.as_ref() {
+                Some(connection_cx) => Some(ServerRequestRegion::mint_from_connection(
+                    "h1",
+                    request_budget,
+                    request_now,
+                    connection_cx,
+                )),
+                None => ServerRequestRegion::mint("h1", request_budget, request_now),
+            };
+            let output = match region {
                 Some(region) => {
                     // Race the whole hop against ForceClosing so slow
                     // handlers don't block shutdown (drop is the backstop).
