@@ -6,9 +6,9 @@ use crate::bytes::{Buf, BytesCursor, BytesMut};
 use crate::codec::Encoder;
 use crate::http::body::{Body, Frame, HeaderMap, HeaderName, HeaderValue, SizeHint};
 use crate::http::h1::codec::{
-    ChunkedBodyDecoder, HttpError, append_chunk_size_line, append_decimal, is_forbidden_trailer,
-    parse_chunk_size_line, parse_header_line, require_transfer_encoding_chunked, trim_ows,
-    unique_header_value, validate_header_field,
+    ChunkedBodyDecoder, HttpError, append_chunk_size_line, append_decimal,
+    find_chunk_size_line_end, is_forbidden_trailer, parse_chunk_size_line, parse_header_line,
+    require_transfer_encoding_chunked, trim_ows, unique_header_value, validate_header_field,
 };
 use crate::http::h1::types::{Method, Request, Response, Version};
 use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
@@ -1196,8 +1196,7 @@ impl<T> ClientIncomingBody<T> {
         loop {
             match *state {
                 ChunkedReadState::SizeLine => {
-                    let line_end = self.buffer.as_ref().windows(2).position(|w| w == b"\r\n");
-                    let Some(line_end) = line_end else {
+                    let Some(line_end) = find_chunk_size_line_end(self.buffer.as_ref())? else {
                         return Ok(None);
                     };
 
@@ -2611,6 +2610,36 @@ mod tests {
         let mut buf = BytesMut::from(&raw[..]);
         let resp = codec.decode(&mut buf).unwrap().unwrap();
         assert_eq!(resp.trailers[0].1, "\u{a0}one\u{a0}");
+    }
+
+    /// A response chunk-size line longer than the buffered codec's limit used
+    /// to be buffered and rescanned on every read; it is now a framing error.
+    #[test]
+    fn streaming_chunk_size_line_is_bounded() {
+        let mut response_bytes = Vec::new();
+        response_bytes.extend_from_slice(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+        response_bytes.extend_from_slice(b"1;");
+        response_bytes.extend_from_slice(&[b'a'; 2048]);
+        response_bytes.extend_from_slice(b"\r\nX\r\n0\r\n\r\n");
+
+        let io = TestIo::new(&response_bytes);
+        let req = Request {
+            method: Method::Get,
+            uri: "/".to_string(),
+            version: Version::Http11,
+            headers: vec![("Host".to_string(), "example.com".to_string())],
+            body: Vec::new(),
+            trailers: Vec::new(),
+            peer_addr: None,
+        };
+
+        let mut resp = block_on(Http1Client::request_streaming(io, req)).expect("streaming resp");
+        assert_eq!(resp.head.status, 200);
+        let frame = poll_body(&mut resp.body).expect("a terminal frame");
+        assert!(
+            matches!(frame, Err(HttpError::BadChunkedEncoding)),
+            "{frame:?}"
+        );
     }
 
     #[test]

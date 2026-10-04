@@ -1227,6 +1227,19 @@ fn split_line_crlf(src: &mut BytesMut, max_len: usize) -> Result<Option<BytesMut
     Ok(Some(line))
 }
 
+/// Finds the CRLF ending the chunk-size line at the start of `buf`, for the
+/// streaming decoders. A line is at most `MAX_CHUNK_LINE_LEN` bytes, as in
+/// the buffered codec, so only that much is searched: a longer line is an
+/// error, not a reason to keep buffering and rescanning (CVE-2024-22019).
+pub(super) fn find_chunk_size_line_end(buf: &[u8]) -> Result<Option<usize>, HttpError> {
+    let window = &buf[..buf.len().min(MAX_CHUNK_LINE_LEN + 2)];
+    match window.windows(2).position(|pair| pair == b"\r\n") {
+        Some(line_end) => Ok(Some(line_end)),
+        None if buf.len() >= MAX_CHUNK_LINE_LEN + 2 => Err(HttpError::BadChunkedEncoding),
+        None => Ok(None),
+    }
+}
+
 pub(super) fn parse_chunk_size_line(line: &[u8]) -> Result<usize, HttpError> {
     let line = std::str::from_utf8(line).map_err(|_| HttpError::BadChunkedEncoding)?;
     // RFC 9112 §7.1.1: chunk-ext is tokens and quoted strings, so it holds no
@@ -1919,6 +1932,33 @@ mod tests {
                      5;ext=1\r\nhello\r\n0\r\n\r\n";
         let req = decode_one(&mut codec, raw).unwrap().unwrap();
         assert_eq!(req.body, b"hello");
+    }
+
+    #[test]
+    fn chunk_size_line_search_is_bounded_like_the_buffered_codec() {
+        let mut line = b"1;".to_vec();
+        line.resize(MAX_CHUNK_LINE_LEN, b'a');
+        line.extend_from_slice(b"\r\nX");
+        assert_eq!(
+            find_chunk_size_line_end(&line).unwrap(),
+            Some(MAX_CHUNK_LINE_LEN)
+        );
+
+        let mut long = b"1;".to_vec();
+        long.resize(MAX_CHUNK_LINE_LEN + 1, b'a');
+        long.extend_from_slice(b"\r\nX");
+        assert!(matches!(
+            find_chunk_size_line_end(&long),
+            Err(HttpError::BadChunkedEncoding)
+        ));
+        assert!(matches!(
+            find_chunk_size_line_end(&long[..MAX_CHUNK_LINE_LEN + 2]),
+            Err(HttpError::BadChunkedEncoding)
+        ));
+        assert_eq!(
+            find_chunk_size_line_end(&long[..MAX_CHUNK_LINE_LEN + 1]).unwrap(),
+            None
+        );
     }
 
     #[test]

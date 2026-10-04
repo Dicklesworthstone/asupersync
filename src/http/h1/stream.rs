@@ -29,11 +29,13 @@ use crate::channel::mpsc::{RecvError, SendError};
 use crate::cx::{CancelWakerToken, Cx};
 use crate::http::body::{Body, Frame, HeaderMap, HeaderName, HeaderValue, SizeHint};
 use crate::http::h1::codec::{
-    HttpError, is_forbidden_trailer, parse_chunk_size_line, parse_header_line,
-    require_transfer_encoding_chunked, trim_ows, validate_header_field,
+    HttpError, find_chunk_size_line_end, is_forbidden_trailer, parse_chunk_size_line,
+    parse_header_line, require_transfer_encoding_chunked, trim_ows, validate_header_field,
 };
 use crate::types::CancelKind;
 
+/// Chunk-extension bytes a request body may carry beyond its data bytes.
+const CHUNK_EXTENSION_ALLOWANCE_BYTES: u64 = 16 * 1024;
 const DEFAULT_MAX_BODY_SIZE: u64 = 16 * 1024 * 1024;
 const DEFAULT_MAX_TRAILERS_SIZE: usize = 16 * 1024;
 const DEFAULT_MAX_BUFFERED_BYTES: usize = 256 * 1024;
@@ -1620,6 +1622,9 @@ pub struct IncomingRequestBodyWriter {
     max_trailers_size: usize,
     max_buffered_bytes: usize,
     total_bytes: u64,
+    /// Chunk-extension bytes received so far, bounded by `total_bytes` plus
+    /// `CHUNK_EXTENSION_ALLOWANCE_BYTES`.
+    chunk_extension_bytes: u64,
     discarded_frames: u64,
     discarded_bytes: u64,
 }
@@ -1665,6 +1670,7 @@ impl IncomingRequestBodyWriter {
             max_trailers_size: DEFAULT_MAX_TRAILERS_SIZE,
             max_buffered_bytes: DEFAULT_MAX_BUFFERED_BYTES,
             total_bytes: 0,
+            chunk_extension_bytes: 0,
             discarded_frames: 0,
             discarded_bytes: 0,
         };
@@ -2068,8 +2074,7 @@ impl IncomingRequestBodyWriter {
         loop {
             match self.chunked_state {
                 ChunkedReadState::SizeLine => {
-                    let line_end = self.buffer.as_ref().windows(2).position(|w| w == b"\r\n");
-                    let Some(line_end) = line_end else {
+                    let Some(line_end) = find_chunk_size_line_end(self.buffer.as_ref())? else {
                         return Ok(None);
                     };
 
@@ -2081,6 +2086,24 @@ impl IncomingRequestBodyWriter {
                     // intermediary (nginx/envoy) frames the same body differently
                     // (br-asupersync-usvn1p / -8dl9j7).
                     let chunk_size = parse_chunk_size_line(line)?;
+                    // Extensions carry no body bytes, so the body limit never
+                    // sees them. Bound them by the data received so far plus a
+                    // fixed allowance, or each body byte could cost a client's
+                    // peer a whole line of extensions (CVE-2024-22019).
+                    let extension = line
+                        .iter()
+                        .position(|&byte| byte == b';')
+                        .map_or(0, |start| line_end - start);
+                    self.chunk_extension_bytes = self
+                        .chunk_extension_bytes
+                        .saturating_add(u64::try_from(extension).unwrap_or(u64::MAX));
+                    if self.chunk_extension_bytes
+                        > self
+                            .total_bytes
+                            .saturating_add(CHUNK_EXTENSION_ALLOWANCE_BYTES)
+                    {
+                        return Err(HttpError::BadChunkedEncoding);
+                    }
 
                     let _ = self.buffer.split_to(line_end + 2);
 
@@ -4139,6 +4162,59 @@ mod tests {
             Err(IncomingBodyError::BadChunkedEncoding)
         ));
         assert!(body.is_end_stream());
+    }
+
+    /// A chunk-size line longer than the buffered codec's limit used to be
+    /// buffered (up to 256 KiB) and rescanned from its start on every read.
+    #[test]
+    fn incoming_chunk_size_line_is_bounded() {
+        let cx: Cx = Cx::for_testing();
+        let (mut writer, _body) = IncomingRequestBody::channel(&cx, BodyKind::Chunked);
+        writer.buffer.extend_from_slice(b"1;");
+        writer.buffer.extend_from_slice(&[b'a'; 2048]);
+        assert!(matches!(
+            writer.try_decode_frame(),
+            Err(HttpError::BadChunkedEncoding)
+        ));
+    }
+
+    /// Extensions are not body bytes, so the body limit never charged them:
+    /// a client could send a kilobyte of extension per byte of body without
+    /// end. They are bounded by the data received plus 16 KiB.
+    #[test]
+    fn incoming_chunk_extensions_are_bounded_by_the_data_received() {
+        let cx: Cx = Cx::for_testing();
+        let (mut writer, _body) = IncomingRequestBody::channel(&cx, BodyKind::Chunked);
+        let mut line = b"1;e=".to_vec();
+        line.resize(1000, b'a');
+        line.extend_from_slice(b"\r\nX\r\n");
+        let mut frames = 0usize;
+        let error = loop {
+            writer.buffer.extend_from_slice(&line);
+            match writer.try_decode_frame() {
+                Ok(Some(_)) => frames += 1,
+                Ok(None) => panic!("a whole chunk was buffered"),
+                Err(error) => break error,
+            }
+            assert!(frames < 64, "extensions were never bounded");
+        };
+        assert!(matches!(error, HttpError::BadChunkedEncoding));
+        assert_eq!(frames, 16, "16 KiB of allowance, then one byte per line");
+
+        // Ordinary per-chunk extensions, such as signatures on each chunk of
+        // a signed upload, stay within the budget.
+        let (mut writer, _body) = IncomingRequestBody::channel(&cx, BodyKind::Chunked);
+        let mut chunk = format!("400;chunk-signature={}\r\n", "f".repeat(64)).into_bytes();
+        chunk.extend_from_slice(&[b'd'; 0x400]);
+        chunk.extend_from_slice(b"\r\n");
+        for _ in 0..64 {
+            writer.buffer.extend_from_slice(&chunk);
+            let frame = writer
+                .try_decode_frame()
+                .expect("a signed chunk is accepted")
+                .expect("a whole chunk decodes");
+            assert_eq!(frame.into_data().expect("data").remaining(), 0x400);
+        }
     }
 
     #[test]
