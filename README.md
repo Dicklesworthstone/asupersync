@@ -632,10 +632,11 @@ buffered request dispatch.
 
 The live multi-peer, stalled-response, and receive-credit regressions are in
 `tests/quic_h3_live_udp.rs`; the streaming request journeys are in
-`tests/quic_h3_listener_streaming.rs`. The earlier buffered listener passed its
-focused production-library/integration compile check. The new streaming path
-has source/API review and authored native regression journeys; its full native
-compilation and runtime execution remain unverified.
+`tests/quic_h3_listener_streaming.rs`. Both compile and pass natively with
+`--features http3,tls` (2026-10-04, `2780d3454`): 21 of 21 streaming journeys,
+and 16 live-UDP tests with 3 ignored. Two of the ignored tests are subprocess
+roles that their parent tests launch. The third, kernel `EAGAIN`
+backpressure, needs isolated Linux network namespaces and did not run.
 
 `Router::into_http1_streaming_handler` bridges validated H1 heads
 and a bounded live `StreamingRawBody`; buffered JSON/form collectors can consume
@@ -706,11 +707,10 @@ and request cleanup on current-thread and multithread runtimes. Run it with:
 cargo test -p asupersync --features http2-streaming --test http2_listener_streaming
 ```
 
-The implementation and its native tests have source review and formatting
-checks. Full compiler analysis and native execution remain unverified: the
-available build environment exhausted its memory allowance before analysis
-completed. The feature is excluded from the default build pending that
-validation; the existing buffered and produced-response APIs remain available.
+It compiles and passes natively: 17 of 17 tests (2026-10-04, `2780d3454`).
+Sixteen of them run on both a current-thread runtime and a two-worker
+multi-thread runtime with sharded state. The feature stays opt-in and outside
+the default build. The buffered and produced-response APIs are unchanged.
 
 Filesystem status is deliberately conservative. `src/fs/` currently exposes
 `File`, buffered readers/writers, metadata, directory/path helpers,
@@ -2598,7 +2598,7 @@ GA.
 | I/O reactor (Linux epoll + optional io_uring primary path; BSD/Windows reactors have narrower interest support) | ✅ Implemented |
 | TCP, HTTP/1.1, HTTP/2, TLS | ✅ Implemented |
 | WebSocket | ⚠️ Runtime surface shipped; live RFC6455 conformance coverage now wires extension negotiation plus broader framing/control/close/masking/fragmentation harnesses, with runtime e2e coverage still lane-specific |
-| HTTP/3 (default static-only QPACK; opt-in dynamic QPACK field-section and instruction-stream state machine) | ⚠️ Partial implementation: an established-connection adapter drives control and request/response lifecycle over native QUIC stream bytes, including static-QPACK headers/trailers, informational responses, GOAWAY, cancellation, resets, and reliable STREAM/control-frame recovery. A caller-driven `NativeH3Router` bridge assembles bounded requests through FIN, detaches bounded caller-scoped Router dispatches, and emits validated final responses on the originating stream while isolating per-stream refusal/reset. The feature-gated `NativeH3Listener` adds autonomous multi-peer TLS admission, runtime-owned request tasks, buffered and produced responses, deadlines, and graceful shutdown over native UDP. Opt-in streaming request ingress admits handlers at HEADERS, applies static body policy before admission, and uses bounded request-task-owned DATA queues with per-stream backpressure and FIN validation. The earlier buffered listener compiled; the new request-streaming implementation and native regressions have source review, with full native compilation/execution still unverified. The live request path also carries a bounded final trailer section through the body queue and requires actual FIN before EOF. The native opt-in state machine separately supports dynamic QPACK field sections/tables, Huffman strings, encoder/decoder instruction-stream processing, and bounded blocked-stream scheduling. Deployment readiness, CONNECT, migration, 0-RTT, and external interop evidence remain open, so this is not a claim of h3/quinn drop-in parity or full QUIC deployment parity. |
+| HTTP/3 (default static-only QPACK; opt-in dynamic QPACK field-section and instruction-stream state machine) | ⚠️ Partial implementation: an established-connection adapter drives control and request/response lifecycle over native QUIC stream bytes, including static-QPACK headers/trailers, informational responses, GOAWAY, cancellation, resets, and reliable STREAM/control-frame recovery. A caller-driven `NativeH3Router` bridge assembles bounded requests through FIN, detaches bounded caller-scoped Router dispatches, and emits validated final responses on the originating stream while isolating per-stream refusal/reset. The feature-gated `NativeH3Listener` adds autonomous multi-peer TLS admission, runtime-owned request tasks, buffered and produced responses, deadlines, and graceful shutdown over native UDP. Opt-in streaming request ingress admits handlers at HEADERS, applies static body policy before admission, and uses bounded request-task-owned DATA queues with per-stream backpressure and FIN validation. The streaming listener's native suites pass (2026-10-04: 21/21 streaming journeys; 16 live-UDP tests plus 3 ignored, one of which needs isolated network namespaces). The live request path also carries a bounded final trailer section through the body queue and requires actual FIN before EOF. The native opt-in state machine separately supports dynamic QPACK field sections/tables, Huffman strings, encoder/decoder instruction-stream processing, and bounded blocked-stream scheduling. Deployment readiness, CONNECT, migration, 0-RTT, and external interop evidence remain open, so this is not a claim of h3/quinn drop-in parity or full QUIC deployment parity. |
 | Database clients (SQLite, PostgreSQL, MySQL) | ✅ Implemented |
 | Actor supervision (GenServer, links, monitors) | ✅ GenServers, actors and supervisors. `cx.spawn_gen_server(server, capacity)`, `cx.spawn_actor(actor, capacity)` and `cx.spawn_supervised_actor(factory, strategy, capacity)` run them as tasks in the caller's region, on the native runtime and in the lab. Monitors and links fire when the watched task ends. `cx.monitor(&handle)` delivers one DOWN with the exit reason; `cx.link(peer)` cancels the other side of an abnormal exit (`CancelKind::LinkedExit`); `cx.link_trapping(peer)` delivers the peer's exit instead. A GenServer gets the same through `GenServerHandle::monitor` / `link` / `link_trapping`, as `SystemMsg::Down` / `SystemMsg::Exit` in `handle_info`. |
 | DPOR-style race-guided seed exploration | ⚠️ Implemented as trace analysis, seed derivation, and equivalence-class telemetry; no exact-prefix backtracking or completeness claim |
