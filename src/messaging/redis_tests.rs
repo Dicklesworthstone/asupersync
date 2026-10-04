@@ -4674,6 +4674,95 @@ mod tests {
         server.join().expect("server join");
     }
 
+    /// Redis checks ACL permissions before subscribing to anything, so a
+    /// `-NOPERM` reply means the whole command was refused and nothing
+    /// changed. It used to fail as a protocol error that invalidated the
+    /// connection and discarded the messages already buffered.
+    #[test]
+    fn pubsub_refused_subscribe_keeps_the_connection_and_buffered_messages() {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+            write_hello3_ok(&mut stream);
+            assert_resp_command(read_resp_frame(&mut stream), &[b"SUBSCRIBE", b"chan"]);
+            stream
+                .write_all(&pubsub_subscription_frame(b"subscribe", b"chan", 1).encode())
+                .expect("acknowledge chan");
+            assert_resp_command(read_resp_frame(&mut stream), &[b"SUBSCRIBE", b"secret"]);
+            let mut outbound = Vec::new();
+            RespValue::Push(vec![
+                RespValue::BulkString(Some(b"message".to_vec())),
+                RespValue::BulkString(Some(b"chan".to_vec())),
+                RespValue::BulkString(Some(b"early".to_vec())),
+            ])
+            .encode_into(&mut outbound);
+            RespValue::Error(
+                "NOPERM User default has no permissions to access the 'secret' channel".to_string(),
+            )
+            .encode_into(&mut outbound);
+            stream
+                .write_all(&outbound)
+                .expect("write a message, then refuse the subscribe");
+            assert_resp_command(read_resp_frame(&mut stream), &[b"SUBSCRIBE", b"other"]);
+            stream
+                .write_all(&pubsub_subscription_frame(b"subscribe", b"other", 2).encode())
+                .expect("acknowledge other");
+            stream.flush().expect("flush replies");
+        });
+
+        run_test_with_cx(|cx| async move {
+            let config = RedisConfig {
+                host: addr.ip().to_string(),
+                port: addr.port(),
+                ..Default::default()
+            };
+            let mut pubsub = RedisPubSub::connect(&cx, config)
+                .await
+                .expect("connect pubsub client");
+            pubsub
+                .subscribe(&cx, &["chan"])
+                .await
+                .expect("subscribe chan");
+            let err = assert_completes_within(
+                Duration::from_secs(2),
+                "redis pubsub returns a refused subscribe",
+                || Box::pin(pubsub.subscribe(&cx, &["secret"])),
+            )
+            .await
+            .expect_err("the server refused the subscribe");
+            assert!(
+                matches!(&err, RedisError::Redis(message) if message.starts_with("NOPERM")),
+                "{err:?}"
+            );
+            assert!(!pubsub.poisoned);
+            assert_eq!(pubsub.channels(), ["chan".to_string()]);
+
+            pubsub
+                .subscribe(&cx, &["other"])
+                .await
+                .expect("the connection still serves control commands");
+            assert_eq!(pubsub.channels(), ["chan".to_string(), "other".to_string()]);
+            let event = pubsub
+                .next_event(&cx)
+                .await
+                .expect("the buffered message survives the refusal");
+            assert!(
+                matches!(
+                    &event,
+                    PubSubEvent::Message(message)
+                        if message.channel == "chan" && message.payload == b"early"
+                ),
+                "{event:?}"
+            );
+        });
+
+        server.join().expect("server join");
+    }
+
     #[test]
     fn pubsub_control_counts_span_channels_patterns_and_reconnect() {
         let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");

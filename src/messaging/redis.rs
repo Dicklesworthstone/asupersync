@@ -4483,6 +4483,8 @@ struct PubSubControlGuard<'a> {
     snapshot_channels: Vec<String>,
     snapshot_patterns: Vec<String>,
     active: bool,
+    /// Whether this command has received any subscription acknowledgement.
+    acknowledged: bool,
 }
 
 impl<'a> PubSubControlGuard<'a> {
@@ -4493,6 +4495,7 @@ impl<'a> PubSubControlGuard<'a> {
             snapshot_patterns: pubsub.patterns.clone(),
             pubsub,
             active: true,
+            acknowledged: false,
         })
     }
 
@@ -4504,8 +4507,21 @@ impl<'a> PubSubControlGuard<'a> {
         self.pubsub.conn.write_command(cx, args).await
     }
 
-    async fn read_next_event(&mut self, cx: &Cx) -> Result<PubSubEvent, RedisError> {
-        self.pubsub.read_next_event(cx).await
+    /// Reads the next reply to this control command. An error reply before
+    /// any acknowledgement means the server refused the whole command (Redis
+    /// checks ACL permissions and arguments before subscribing to anything),
+    /// so nothing changed: the guard is released without invalidating the
+    /// connection or its buffered messages, and the server's error returned.
+    /// An error after an acknowledgement still fails closed.
+    async fn read_control_event(&mut self, cx: &Cx) -> Result<PubSubEvent, RedisError> {
+        let response = self.pubsub.conn.read_pubsub_response(cx).await?;
+        if let RespValue::Error(message) = &response
+            && !self.acknowledged
+        {
+            self.active = false;
+            return Err(RedisError::from_redis_error_message(message));
+        }
+        RedisPubSub::parse_event(response)
     }
 
     async fn read_ping_event(
@@ -4582,6 +4598,7 @@ impl<'a> PubSubControlGuard<'a> {
                 channel,
                 remaining,
             } => {
+                self.acknowledged = true;
                 let expected_kind = action.expected_kind();
                 if kind != expected_kind {
                     return Err(RedisError::Protocol(format!(
@@ -4970,6 +4987,10 @@ impl RedisPubSub {
     }
 
     /// Subscribe to one or more channels.
+    ///
+    /// A command the server refuses outright, such as an ACL `-NOPERM`,
+    /// returns the server's error and leaves the existing subscriptions and
+    /// buffered messages usable.
     pub async fn subscribe(&mut self, cx: &Cx, channels: &[&str]) -> Result<(), RedisError> {
         if channels.is_empty() {
             return Err(RedisError::Protocol(
@@ -4990,7 +5011,7 @@ impl RedisPubSub {
             .map(|channel| (*channel).to_string())
             .collect();
         while !expected_acks.is_empty() {
-            let event = guard.read_next_event(cx).await?;
+            let event = guard.read_control_event(cx).await?;
             guard.handle_control_event(
                 PubSubControlAction::SubscribeChannel,
                 &mut expected_acks,
@@ -5003,6 +5024,8 @@ impl RedisPubSub {
     }
 
     /// Subscribe to one or more glob-style patterns.
+    ///
+    /// A refused command is handled as for [`subscribe`](Self::subscribe).
     pub async fn psubscribe(&mut self, cx: &Cx, patterns: &[&str]) -> Result<(), RedisError> {
         if patterns.is_empty() {
             return Err(RedisError::Protocol(
@@ -5023,7 +5046,7 @@ impl RedisPubSub {
             .map(|pattern| (*pattern).to_string())
             .collect();
         while !expected_acks.is_empty() {
-            let event = guard.read_next_event(cx).await?;
+            let event = guard.read_control_event(cx).await?;
             guard.handle_control_event(
                 PubSubControlAction::SubscribePattern,
                 &mut expected_acks,
@@ -5061,7 +5084,7 @@ impl RedisPubSub {
                 .collect()
         };
         while !expected_acks.is_empty() {
-            let event = guard.read_next_event(cx).await?;
+            let event = guard.read_control_event(cx).await?;
             guard.handle_control_event(
                 PubSubControlAction::UnsubscribeChannel,
                 &mut expected_acks,
@@ -5098,7 +5121,7 @@ impl RedisPubSub {
                 .collect()
         };
         while !expected_acks.is_empty() {
-            let event = guard.read_next_event(cx).await?;
+            let event = guard.read_control_event(cx).await?;
             guard.handle_control_event(
                 PubSubControlAction::UnsubscribePattern,
                 &mut expected_acks,
