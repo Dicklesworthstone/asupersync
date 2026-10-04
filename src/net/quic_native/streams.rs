@@ -2723,11 +2723,22 @@ impl AsyncWrite for QuicStreamIo<'_> {
             return Poll::Ready(Ok(0));
         }
         let this = self.get_mut();
+        // Accept what the stream and connection windows allow now, as an
+        // AsyncWrite may. Waiting for credit for the whole buffer never ends
+        // when the peer grants more only after it receives these bytes.
+        let capacity = match this.table.poll_stream_send_capacity(this.id, 1, cx) {
+            Poll::Ready(Ok(capacity)) => capacity,
+            Poll::Ready(Err(err)) => return Poll::Ready(Err(Self::io_error(err))),
+            Poll::Pending => return Poll::Pending,
+        };
+        let len = buf
+            .len()
+            .min(usize::try_from(capacity).unwrap_or(usize::MAX));
         match this
             .table
-            .write_stream_bytes(this.id, Bytes::copy_from_slice(buf), false)
+            .write_stream_bytes(this.id, Bytes::copy_from_slice(&buf[..len]), false)
         {
-            Ok(()) => Poll::Ready(Ok(buf.len())),
+            Ok(()) => Poll::Ready(Ok(len)),
             Err(StreamTableError::Stream(QuicStreamError::Flow(_))) => {
                 this.table.register_write_waker(this.id, cx.waker());
                 Poll::Pending
@@ -3298,6 +3309,37 @@ mod tests {
         let counter = std::sync::Arc::new(CountingWake::default());
         let waker = std::task::Waker::from(counter.clone());
         (counter, waker)
+    }
+
+    /// A write larger than the remaining credit used to wait for credit for
+    /// all of it, forever if the peer grants more only after receiving data.
+    #[test]
+    fn stream_io_write_accepts_what_the_window_allows() {
+        let mut table = StreamTable::new(StreamRole::Client, 4, 4, 16, 1 << 20);
+        let id = table.open_local_bidi().expect("open");
+        let (wakes, waker) = counting_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let written = {
+            let mut io = table.stream_io(id).expect("io");
+            Pin::new(&mut io).poll_write(&mut cx, &[7u8; 32])
+        };
+        assert!(matches!(written, Poll::Ready(Ok(16))), "{written:?}");
+        let blocked = {
+            let mut io = table.stream_io(id).expect("io");
+            Pin::new(&mut io).poll_write(&mut cx, &[7u8; 8])
+        };
+        assert!(blocked.is_pending());
+
+        table
+            .increase_stream_send_limit(id, 24)
+            .expect("the peer grants more credit");
+        assert_eq!(wakes.count(), 1, "the blocked writer is woken");
+        let resumed = {
+            let mut io = table.stream_io(id).expect("io");
+            Pin::new(&mut io).poll_write(&mut cx, &[7u8; 16])
+        };
+        assert!(matches!(resumed, Poll::Ready(Ok(8))), "{resumed:?}");
     }
 
     #[test]
@@ -4959,20 +5001,23 @@ mod tests {
         let waker = std::task::Waker::noop().clone();
         let mut cx = Context::from_waker(&waker);
 
+        // A write larger than the window takes what the window allows.
         {
             let mut io = table.stream_io(stream).expect("io");
             let poll = AsyncWrite::poll_write(Pin::new(&mut io), &mut cx, b"abcde");
-            assert!(matches!(poll, Poll::Pending));
-        }
-        assert_eq!(table.connection_send_remaining(), 4);
-        assert_eq!(table.stream(stream).expect("stream").send_offset, 0);
-
-        {
-            let mut io = table.stream_io(stream).expect("io");
-            let poll = AsyncWrite::poll_write(Pin::new(&mut io), &mut cx, b"abcd");
-            assert!(matches!(poll, Poll::Ready(Ok(4))));
+            assert!(matches!(poll, Poll::Ready(Ok(4))), "{poll:?}");
         }
         assert_eq!(table.connection_send_remaining(), 0);
+        assert_eq!(table.stream(stream).expect("stream").send_offset, 4);
+
+        // With no credit left a write is pending and consumes nothing.
+        {
+            let mut io = table.stream_io(stream).expect("io");
+            let poll = AsyncWrite::poll_write(Pin::new(&mut io), &mut cx, b"e");
+            assert!(matches!(poll, Poll::Pending));
+        }
+        assert_eq!(table.connection_send_remaining(), 0);
+        assert_eq!(table.stream(stream).expect("stream").send_offset, 4);
         let frame = table.pop_next_stream_frame(16).expect("stream frame");
         assert_eq!(frame.data.as_ref(), b"abcd");
         assert!(!frame.fin);
@@ -5094,13 +5139,19 @@ mod tests {
 
         let (counter, waker) = counting_waker();
         let mut cx = Context::from_waker(&waker);
+        // The first write fills the stream window; the next one waits.
         {
             let mut io = table.stream_io(stream).expect("io");
             let poll = AsyncWrite::poll_write(Pin::new(&mut io), &mut cx, b"abcde");
+            assert!(matches!(poll, Poll::Ready(Ok(4))), "{poll:?}");
+        }
+        {
+            let mut io = table.stream_io(stream).expect("io");
+            let poll = AsyncWrite::poll_write(Pin::new(&mut io), &mut cx, b"e");
             assert!(matches!(poll, Poll::Pending));
         }
         assert_eq!(counter.count(), 0, "pending write must not self-wake");
-        assert_eq!(table.stream(stream).expect("stream").send_offset, 0);
+        assert_eq!(table.stream(stream).expect("stream").send_offset, 4);
 
         table
             .increase_stream_send_limit(stream, 8)
@@ -5109,11 +5160,14 @@ mod tests {
 
         {
             let mut io = table.stream_io(stream).expect("io");
-            let poll = AsyncWrite::poll_write(Pin::new(&mut io), &mut cx, b"abcde");
-            assert!(matches!(poll, Poll::Ready(Ok(5))));
+            let poll = AsyncWrite::poll_write(Pin::new(&mut io), &mut cx, b"e");
+            assert!(matches!(poll, Poll::Ready(Ok(1))), "{poll:?}");
         }
-        let frame = table.pop_next_stream_frame(16).expect("stream frame");
-        assert_eq!(frame.data.as_ref(), b"abcde");
+        let mut sent = Vec::new();
+        while let Some(frame) = table.pop_next_stream_frame(16) {
+            sent.extend_from_slice(frame.data.as_ref());
+        }
+        assert_eq!(sent, b"abcde");
     }
 
     #[test]
