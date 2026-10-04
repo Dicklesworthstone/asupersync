@@ -23,7 +23,7 @@
 
 use super::swim::{MembershipEvent, MembershipKind};
 use crate::remote::NodeId;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// An aggregated, observable view of cluster membership.
 #[derive(Debug, Clone, Default)]
@@ -39,6 +39,9 @@ pub struct MembershipView {
     /// compaction this stays `0` and the view behaves as a plain append-only
     /// log.
     base: usize,
+    /// Nodes ever observed `Dead` or `Left`. Unlike the log, compaction never
+    /// drops these, so a lagging observer can still see a departure.
+    departed: BTreeSet<NodeId>,
 }
 
 impl MembershipView {
@@ -51,6 +54,9 @@ impl MembershipView {
     /// Applies one membership event: updates the node's latest state and appends
     /// it to the watchable event log.
     pub fn apply(&mut self, event: MembershipEvent) {
+        if matches!(event.kind, MembershipKind::Dead | MembershipKind::Left) {
+            self.departed.insert(event.node.clone());
+        }
         self.states.insert(event.node.clone(), event.kind);
         self.log.push(event);
     }
@@ -66,6 +72,19 @@ impl MembershipView {
     #[must_use]
     pub fn kind_of(&self, node: &NodeId) -> Option<MembershipKind> {
         self.states.get(node).copied()
+    }
+
+    /// Every observed node with its latest kind, in id order.
+    pub fn members(&self) -> impl Iterator<Item = (&NodeId, MembershipKind)> {
+        self.states.iter().map(|(id, kind)| (id, *kind))
+    }
+
+    /// Whether `node` was ever observed `Dead` or `Left`, including in events
+    /// that [`compact`](Self::compact) has since dropped. Its latest kind can
+    /// be `Alive` again if it rejoined under the same id.
+    #[must_use]
+    pub fn has_departed(&self, node: &NodeId) -> bool {
+        self.departed.contains(node)
     }
 
     /// The peer process-group: nodes currently believed `Alive`, in id order.
@@ -88,7 +107,8 @@ impl MembershipView {
     /// The absolute cursor below which events have been dropped by
     /// [`compact`](Self::compact). An observer whose cursor is `< compact_base`
     /// has missed events and should reconcile against the current
-    /// [`alive_peers`](Self::alive_peers) snapshot.
+    /// [`members`](Self::members) snapshot and
+    /// [`has_departed`](Self::has_departed).
     #[must_use]
     pub fn compact_base(&self) -> usize {
         self.base
@@ -105,7 +125,8 @@ impl MembershipView {
     /// the full retained suffix as a *resync point*. Such an observer must adopt
     /// [`event_count`](Self::event_count) as its new cursor — NOT
     /// `cursor + len`, which would loop on the suffix — and reconcile current
-    /// membership from [`alive_peers`](Self::alive_peers). Callers that only ever
+    /// membership from [`members`](Self::members) and
+    /// [`has_departed`](Self::has_departed). Callers that only ever
     /// `compact` up to the minimum live-observer cursor never create this case.
     #[must_use]
     pub fn events_since(&self, cursor: usize) -> &[MembershipEvent] {
@@ -120,7 +141,8 @@ impl MembershipView {
     /// watermark. Observers whose cursor falls below the new
     /// [`compact_base`](Self::compact_base) will receive the full retained
     /// suffix from [`events_since`](Self::events_since) and should reconcile
-    /// against [`alive_peers`](Self::alive_peers) (aasraf).
+    /// against [`members`](Self::members) and
+    /// [`has_departed`](Self::has_departed) (aasraf).
     pub fn compact(&mut self, low_watermark: usize) {
         let drop = low_watermark.saturating_sub(self.base).min(self.log.len());
         if drop > 0 {
@@ -224,5 +246,29 @@ mod tests {
         // The membership snapshot is untouched by log compaction.
         assert_eq!(view.kind_of(&node("a")), Some(MembershipKind::Dead));
         assert_eq!(view.kind_of(&node("b")), Some(MembershipKind::Alive));
+    }
+
+    #[test]
+    fn departures_survive_compaction() {
+        let mut view = MembershipView::new();
+        view.apply(event("a", MembershipKind::Dead, 0));
+        view.apply(event("a", MembershipKind::Alive, 1));
+        view.apply(event("b", MembershipKind::Left, 0));
+        view.apply(event("c", MembershipKind::Suspect, 0));
+        view.compact(view.event_count());
+        assert!(view.events_since(0).is_empty());
+
+        assert!(view.has_departed(&node("a")), "rejoined under the same id");
+        assert!(view.has_departed(&node("b")));
+        assert!(!view.has_departed(&node("c")));
+        let members: Vec<_> = view.members().collect();
+        assert_eq!(
+            members,
+            vec![
+                (&node("a"), MembershipKind::Alive),
+                (&node("b"), MembershipKind::Left),
+                (&node("c"), MembershipKind::Suspect),
+            ]
+        );
     }
 }
