@@ -8,7 +8,8 @@
 
 use crate::error::{Error, ErrorKind};
 use crate::raptorq::decoder::{
-    DecodeError as RaptorDecodeError, InactivationDecoder, RankStatus, ReceivedSymbol,
+    DecodeError as RaptorDecodeError, InactivationDecoder, MAX_ALLOWED_ESI, RankStatus,
+    ReceivedSymbol,
 };
 use crate::raptorq::systematic::{SystematicError, SystematicParams};
 use crate::security::{AuthenticatedSymbol, SecurityContext};
@@ -804,6 +805,16 @@ impl DecodingPipeline {
                 SymbolAcceptResult::Rejected(RejectReason::BlockAlreadyDecoded),
             ));
         }
+        // A symbol no decode of its block can use is refused here, before it
+        // is retained: once retained it fails every decode of the block and is
+        // restored afterwards, so the block never decodes.
+        if let Some(plan) = self.block_plan(sbn)
+            && !esi_fits_block(kind, symbol.esi(), plan.k)
+        {
+            return Ok(DeferredSymbolAcceptResult::Immediate(
+                SymbolAcceptResult::Rejected(RejectReason::InvalidMetadata),
+            ));
+        }
         if self.inflight_decode_symbols.contains(&symbol_id) {
             return Ok(DeferredSymbolAcceptResult::Immediate(
                 SymbolAcceptResult::Duplicate,
@@ -1553,6 +1564,17 @@ fn sum_required_symbols(plans: &[BlockPlan], overhead: f64, min_overhead: usize)
     })
 }
 
+/// Whether a symbol's ESI can take part in decoding a block of `k` source
+/// symbols: a source ESI names one of the K source symbols, and a repair ESI
+/// starts at K and stays within the range the decoder admits.
+fn esi_fits_block(kind: SymbolKind, esi: u32, k: usize) -> bool {
+    let esi_index = esi as usize;
+    match kind {
+        SymbolKind::Source => esi_index < k,
+        SymbolKind::Repair => esi_index >= k && esi <= MAX_ALLOWED_ESI,
+    }
+}
+
 fn received_symbols_for_block(
     plan: &BlockPlan,
     symbols: &[Symbol],
@@ -2217,6 +2239,109 @@ mod tests {
         );
 
         crate::test_complete!("reject_invalid_metadata_repair_esi_overflow_without_panicking");
+    }
+
+    #[test]
+    fn out_of_range_esis_do_not_stop_a_block_recovering_from_repair() {
+        init_test("out_of_range_esis_do_not_stop_a_block_recovering_from_repair");
+        // One block of K = 2 four-byte symbols. Source symbol 1 is lost, so
+        // the block can only decode with a repair symbol.
+        let config = crate::config::EncodingConfig {
+            symbol_size: 4,
+            max_block_size: 8,
+            repair_overhead: 1.0,
+            encoding_parallelism: 1,
+            decoding_parallelism: 1,
+        };
+        // The geometry, data and seed of deferred_streaming_feed_finishes_via_decode_job,
+        // which decodes from source symbol 0 and the first repair symbol.
+        let object_id = ObjectId::new_for_test(113);
+        let data = b"ABCDEFGH".to_vec();
+        let encoder_pool = SymbolPool::new(PoolConfig {
+            symbol_size: config.symbol_size,
+            initial_size: 16,
+            max_size: 16,
+            allow_growth: false,
+            growth_increment: 0,
+        });
+        let mut encoder = EncodingPipeline::new(config.clone(), encoder_pool);
+        let mut source_zero = None;
+        let mut repair = None;
+        for encoded in encoder.encode_single_block_with_repair(object_id, 0, &data, 2) {
+            let symbol = encoded.expect("encode").into_symbol();
+            match symbol.kind() {
+                SymbolKind::Source if symbol.esi() == 0 => source_zero = Some(symbol),
+                SymbolKind::Repair if repair.is_none() => repair = Some(symbol),
+                _ => {}
+            }
+        }
+
+        let mut decoder = DecodingPipeline::new(DecodingConfig {
+            symbol_size: config.symbol_size,
+            max_block_size: config.max_block_size,
+            repair_overhead: 1.0,
+            min_overhead: 0,
+            max_buffered_symbols: 8192,
+            block_timeout: Duration::from_secs(30),
+            verify_auth: false,
+        });
+        decoder
+            .set_object_params(ObjectParams::new(
+                object_id,
+                data.len() as u64,
+                config.symbol_size,
+                1,
+                2,
+            ))
+            .expect("set params");
+        let mut feed = |symbol: Symbol| {
+            decoder
+                .feed(AuthenticatedSymbol::new_unauthenticated(symbol))
+                .expect("feed")
+        };
+
+        // A source ESI beyond K, a repair ESI below K and a repair ESI past
+        // the decoder's ceiling: no decode of this block can use them.
+        let out_of_range: Vec<SymbolAcceptResult> = [
+            (5, SymbolKind::Source),
+            (1, SymbolKind::Repair),
+            (MAX_ALLOWED_ESI + 1, SymbolKind::Repair),
+        ]
+        .into_iter()
+        .map(|(esi, kind)| {
+            feed(Symbol::new(
+                SymbolId::new(object_id, 0, esi),
+                vec![0xEE; 4],
+                kind,
+            ))
+        })
+        .collect();
+
+        let first = feed(source_zero.expect("source zero"));
+        let first_ok = matches!(first, SymbolAcceptResult::Accepted { .. });
+        crate::assert_with_log!(first_ok, "source symbol 0 accepted", true, first);
+        let recovered = feed(repair.expect("repair symbol"));
+        let expected = SymbolAcceptResult::BlockComplete {
+            block_sbn: 0,
+            data: data.clone(),
+        };
+        crate::assert_with_log!(
+            recovered == expected,
+            "the block recovers its lost source symbol from the repair symbol",
+            expected,
+            recovered
+        );
+
+        let refused = SymbolAcceptResult::Rejected(RejectReason::InvalidMetadata);
+        let all_refused = out_of_range.iter().all(|result| *result == refused);
+        crate::assert_with_log!(
+            all_refused,
+            "out-of-range ESIs are refused when they arrive",
+            refused,
+            out_of_range
+        );
+
+        crate::test_complete!("out_of_range_esis_do_not_stop_a_block_recovering_from_repair");
     }
 
     #[test]

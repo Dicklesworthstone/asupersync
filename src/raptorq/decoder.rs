@@ -50,7 +50,7 @@ enum ColumnState {
 
 /// Maximum ESI value allowed to prevent amplification attacks.
 /// ESI values near u32::MAX can cause expensive operations.
-const MAX_ALLOWED_ESI: u32 = 1_000_000;
+pub(crate) const MAX_ALLOWED_ESI: u32 = 1_000_000;
 
 /// Maximum columns generated per ESI to prevent matrix blow-up.
 const MAX_COLUMNS_PER_ESI: usize = 1000;
