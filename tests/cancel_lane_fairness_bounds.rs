@@ -110,14 +110,20 @@ fn verify_bound_for_limit(cancel_streak_limit: usize) {
         worker.run_loop();
     });
 
-    std::thread::sleep(Duration::from_millis(300));
+    // Wait for the ready task itself, not a fixed 300 ms: on a loaded host the
+    // worker can need longer to reach it. The bound checked below is about
+    // dispatch order, which the wait does not change.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while ready_pos.load(Ordering::SeqCst) == usize::MAX && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
     scheduler.shutdown();
     handle.join().unwrap();
 
     let pos = ready_pos.load(Ordering::SeqCst);
     assert!(
         pos != usize::MAX,
-        "ready task never executed (limit={cancel_streak_limit})"
+        "ready task never executed within 10 s (limit={cancel_streak_limit})"
     );
     let bound = cancel_streak_limit + 1;
     assert!(
