@@ -276,6 +276,33 @@ async fn parked_loser(cx: Cx, started: Arc<AtomicBool>, done: Arc<AtomicBool>) -
     0
 }
 
+/// Parks like `parked_loser`, counting the branches that started and the
+/// ones that stopped after a cancellation, for combinators with several.
+async fn parked_branch(cx: Cx, started: Arc<AtomicUsize>, stopped: Arc<AtomicUsize>) -> u32 {
+    let (_hold, mut never) = mpsc::channel::<u32>(1);
+    started.fetch_add(1, Ordering::SeqCst);
+    let _ = never.recv(&cx).await;
+    yield_now().await;
+    stopped.fetch_add(1, Ordering::SeqCst);
+    0
+}
+
+/// Waits a bounded time (virtual time on the lab) for `count` to reach
+/// `target`, and returns where it got.
+async fn settle(cx: &Cx, count: &AtomicUsize, target: usize) -> usize {
+    for _ in 0..200 {
+        if count.load(Ordering::SeqCst) >= target {
+            break;
+        }
+        sleep(cx.now(), Duration::from_millis(5)).await;
+    }
+    count.load(Ordering::SeqCst)
+}
+
+fn counters() -> (Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)))
+}
+
 fn flags() -> (Arc<AtomicBool>, Arc<AtomicBool>) {
     (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)))
 }
@@ -439,6 +466,80 @@ fn race_all_panicking_winner_still_drains_losers(cx: Cx) -> ScenarioFuture {
                     done[1].load(Ordering::SeqCst)
                 ),
             ),
+        ])
+    })
+}
+
+/// A `Scope::timeout` future dropped before it returns (an outer timeout
+/// fired, as when it loses a `select!`) must ask its operation to stop; the
+/// deadline lived in the dropped future.
+fn dropped_scope_timeout_stops_its_operation(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let (started, stopped) = counters();
+        let (s, d) = (Arc::clone(&started), Arc::clone(&stopped));
+        let scope = cx.scope();
+        let inner = scope.timeout(&cx, Duration::from_secs(30), move |task_cx| async move {
+            Ok::<u32, String>(parked_branch(task_cx, s, d).await)
+        });
+        let dropped = timeout(cx.now(), Duration::from_millis(20), inner)
+            .await
+            .is_err();
+        let began = started.load(Ordering::SeqCst);
+        let ended = settle(&cx, &stopped, began).await;
+        observe([
+            ("dropped", dropped.to_string()),
+            ("every_started_branch_stopped", (ended == began).to_string()),
+            ("started", began.to_string()),
+        ])
+    })
+}
+
+/// A `quorum` future dropped while its branches run must ask them to stop.
+fn dropped_quorum_stops_its_branches(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let (started, stopped) = counters();
+        let branches: Vec<_> = (0..3)
+            .map(|_| {
+                let (s, d) = (Arc::clone(&started), Arc::clone(&stopped));
+                move |cx: Cx| async move { Ok::<u32, String>(parked_branch(cx, s, d).await) }
+            })
+            .collect();
+        let scope = cx.scope();
+        let inner = scope.quorum(&cx, 2, branches);
+        let dropped = timeout(cx.now(), Duration::from_millis(20), inner)
+            .await
+            .is_err();
+        let began = started.load(Ordering::SeqCst);
+        let ended = settle(&cx, &stopped, began).await;
+        observe([
+            ("dropped", dropped.to_string()),
+            ("every_started_branch_stopped", (ended == began).to_string()),
+            ("started", began.to_string()),
+        ])
+    })
+}
+
+/// A `first_ok` future dropped while an attempt runs must ask it to stop.
+fn dropped_first_ok_stops_its_attempt(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let (started, stopped) = counters();
+        let attempts: Vec<_> = (0..2)
+            .map(|_| {
+                let (s, d) = (Arc::clone(&started), Arc::clone(&stopped));
+                move |cx: Cx| async move { Ok::<u32, String>(parked_branch(cx, s, d).await) }
+            })
+            .collect();
+        let scope = cx.scope();
+        let inner = scope.first_ok(&cx, attempts);
+        let dropped = timeout(cx.now(), Duration::from_millis(20), inner)
+            .await
+            .is_err();
+        let began = started.load(Ordering::SeqCst);
+        let ended = settle(&cx, &stopped, began).await;
+        observe([
+            ("dropped", dropped.to_string()),
+            ("every_started_branch_stopped", (ended == began).to_string()),
+            ("started", began.to_string()),
         ])
     })
 }
@@ -2510,7 +2611,26 @@ fn panicking_winners_drain_their_losers_on_the_block_on_root() {
     }
 }
 differential!(differential_quorum, quorum_two_of_three_drains_the_straggler, []);
-differential!(differential_hedge, hedge_backup_wins_and_drains_the_primary, []);
+differential!(
+    differential_dropped_scope_timeout,
+    dropped_scope_timeout_stops_its_operation,
+    ["started"]
+);
+differential!(
+    differential_dropped_quorum,
+    dropped_quorum_stops_its_branches,
+    ["started"]
+);
+differential!(
+    differential_dropped_first_ok,
+    dropped_first_ok_stops_its_attempt,
+    ["started"]
+);
+differential!(
+    differential_hedge,
+    hedge_backup_wins_and_drains_the_primary,
+    []
+);
 differential!(
     differential_hedge_panicking_backup,
     hedge_panicking_backup_still_drains_the_primary,
