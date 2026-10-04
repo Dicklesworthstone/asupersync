@@ -1222,6 +1222,9 @@ where
 
             if request_method == Method::Head {
                 suppress_response_body_for_head(&mut resp);
+            } else if declared_length_mismatches_body(&resp) {
+                resp = hop_error_response(request_version, 500, "Internal Server Error");
+                forced_close = true;
             }
 
             // br-asupersync-server-stack-hardening-eeexl1.2 (D2.2b): once the
@@ -1643,6 +1646,9 @@ where
             }
             if request_method == Method::Head {
                 suppress_response_body_for_head(&mut response);
+            } else if declared_length_mismatches_body(&response) {
+                response = hop_error_response(request_version, 500, "Internal Server Error");
+                forced_close = true;
             }
             let draining = self
                 .shutdown_signal
@@ -3741,6 +3747,25 @@ fn remove_header(resp: &mut Response, header_name: &str) -> bool {
     resp.headers
         .retain(|(name, _)| !name.eq_ignore_ascii_case(header_name));
     resp.headers.len() != before
+}
+
+/// Whether a handler's response to a non-HEAD request declares a
+/// Content-Length its body does not carry. Written as is, a keep-alive client
+/// would take the difference from the next response (or wait for bytes that
+/// never come), so the server answers 500 and closes instead. Bodyless
+/// statuses carry no body whatever they declare (RFC 9112 6.3).
+fn declared_length_mismatches_body(resp: &Response) -> bool {
+    if (100..=199).contains(&resp.status) || resp.status == 204 || resp.status == 304 {
+        return false;
+    }
+    resp.headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .any(|(_, value)| {
+            let digits = value.trim();
+            !digits.bytes().all(|byte| byte.is_ascii_digit())
+                || digits.parse::<usize>().ok() != Some(resp.body.len())
+        })
 }
 
 fn suppress_response_body_for_head(resp: &mut Response) {
@@ -7138,6 +7163,66 @@ mod tests {
         assert!(written.contains("Connection: close\r\n"));
         assert!(written.ends_with("\r\n\r\n"));
         assert!(!written.ends_with("\r\n\r\nhello"));
+    }
+
+    /// A handler that declares a Content-Length its body does not carry used
+    /// to have it written as is: the client then read the next response's
+    /// bytes as this body. HEAD keeps the declared length.
+    #[test]
+    fn serve_refuses_a_declared_length_the_body_does_not_match() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"GET /short HTTP/1.1\r\nHost: localhost\r\n\r\nGET /next HTTP/1.1\r\nHost: localhost\r\n\r\n"
+                .to_vec(),
+            Arc::clone(&written),
+        );
+        let server = Http1Server::with_config(
+            |_req| async move {
+                Response::new(200, "OK", Vec::new()).with_header("Content-Length", "10")
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+        let state = runtime
+            .block_on(async { server.serve(io).await })
+            .expect("serve");
+
+        assert_eq!(
+            state.requests_served, 1,
+            "the connection closes after the 500"
+        );
+        let written = String::from_utf8(written.lock().unwrap().clone())
+            .expect("response should be valid utf8");
+        assert!(written.starts_with("HTTP/1.1 500 "), "{written:?}");
+        assert!(
+            written
+                .to_ascii_lowercase()
+                .contains("\r\nconnection: close\r\n"),
+            "{written:?}"
+        );
+        assert!(!written.contains("Content-Length: 10"), "{written:?}");
+        assert_eq!(written.matches("HTTP/1.1 ").count(), 1, "{written:?}");
+
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"HEAD /short HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let server = Http1Server::with_config(
+            |_req| async move {
+                Response::new(200, "OK", Vec::new()).with_header("Content-Length", "10")
+            },
+            localhost_server_config(),
+        );
+        runtime
+            .block_on(async { server.serve(io).await })
+            .expect("serve head");
+        let written = String::from_utf8(written.lock().unwrap().clone())
+            .expect("response should be valid utf8");
+        assert!(written.starts_with("HTTP/1.1 200 OK\r\n"), "{written:?}");
+        assert!(written.contains("Content-Length: 10\r\n"), "{written:?}");
     }
 
     #[test]
