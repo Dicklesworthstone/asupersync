@@ -2358,8 +2358,12 @@ impl Connection {
 
     fn prune_closed_streams_without_pending_frames(&mut self) {
         let pending_ops = &self.pending_ops;
+        // A closed stream whose field block is still arriving keeps its
+        // record until the block's last CONTINUATION frame.
+        let continuation_stream_id = self.continuation_stream_id;
         self.streams.prune_closed_except(|stream_id| {
-            pending_ops.iter().any(|op| op.references_stream(stream_id))
+            continuation_stream_id == Some(stream_id)
+                || pending_ops.iter().any(|op| op.references_stream(stream_id))
         });
     }
 
@@ -3434,6 +3438,112 @@ mod tests {
             };
             assert_eq!(decoded, headers);
         }
+    }
+
+    #[test]
+    fn client_takes_a_closing_response_whose_field_block_continues() {
+        // A bodyless request leaves the stream half-closed (local). The
+        // response HEADERS carries END_STREAM, which closes the stream, and
+        // its field block ends in a CONTINUATION frame (RFC 9113 §6.2).
+        let mut conn = Connection::client(Settings::client());
+        conn.state = ConnectionState::Open;
+        let stream_id = conn
+            .open_stream(test_request_header_vec("/no-body"), true)
+            .unwrap();
+        while conn.next_frame().is_some() {}
+        let block = encode_test_headers(&[(":status", "204"), ("x-split", "across-frames")]);
+        let split = block.len() / 2;
+        assert!(
+            conn.process_frame(Frame::Headers(HeadersFrame::new(
+                stream_id,
+                block.slice(..split),
+                true,
+                false,
+            )))
+            .expect("HEADERS with END_STREAM starts the field block")
+            .is_none()
+        );
+        let received = conn
+            .process_frame(Frame::Continuation(ContinuationFrame {
+                stream_id,
+                header_block: block.slice(split..),
+                end_headers: true,
+            }))
+            .expect("CONTINUATION finishes the response's field block");
+        let Some(ReceivedFrame::Headers {
+            stream_id: received_stream_id,
+            headers,
+            end_stream,
+        }) = received
+        else {
+            panic!("the response headers must be delivered, got {received:?}")
+        };
+        assert_eq!(received_stream_id, stream_id);
+        assert!(end_stream, "the response ends the stream");
+        assert_eq!(
+            headers,
+            vec![
+                Header::new(":status", "204"),
+                Header::new("x-split", "across-frames"),
+            ]
+        );
+    }
+
+    #[test]
+    fn pruning_keeps_a_closed_stream_whose_field_block_is_still_arriving() {
+        // Closed streams are pruned once the map holds more than twice the
+        // local max_concurrent_streams; a client's own requests do not count
+        // against that setting, so its third request crosses the threshold.
+        let mut settings = Settings::client();
+        settings.max_concurrent_streams = 1;
+        let mut conn = Connection::client(settings);
+        conn.state = ConnectionState::Open;
+        for path in ["/first", "/second"] {
+            let stream_id = conn
+                .open_stream(test_request_header_vec(path), true)
+                .unwrap();
+            while conn.next_frame().is_some() {}
+            conn.process_frame(Frame::Headers(HeadersFrame::new(
+                stream_id,
+                test_response_headers("204"),
+                true,
+                true,
+            )))
+            .expect("complete response");
+        }
+        let stream_id = conn
+            .open_stream(test_request_header_vec("/third"), true)
+            .unwrap();
+        while conn.next_frame().is_some() {}
+        let block = encode_test_headers(&[(":status", "204"), ("x-split", "across-frames")]);
+        let split = block.len() / 2;
+        assert!(
+            conn.process_frame(Frame::Headers(HeadersFrame::new(
+                stream_id,
+                block.slice(..split),
+                true,
+                false,
+            )))
+            .expect("HEADERS with END_STREAM starts the field block")
+            .is_none()
+        );
+        let received = conn
+            .process_frame(Frame::Continuation(ContinuationFrame {
+                stream_id,
+                header_block: block.slice(split..),
+                end_headers: true,
+            }))
+            .expect("the block's CONTINUATION still finds its stream");
+        assert!(
+            matches!(
+                received,
+                Some(ReceivedFrame::Headers {
+                    end_stream: true,
+                    ..
+                })
+            ),
+            "the response headers must be delivered, got {received:?}"
+        );
     }
 
     #[test]
