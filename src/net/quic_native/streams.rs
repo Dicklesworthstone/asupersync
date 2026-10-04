@@ -1794,12 +1794,19 @@ impl StreamTable {
     ///
     /// Re-attached to outgoing ACKs so a lost MAX_STREAM_DATA frame cannot
     /// wedge a credit-blocked sender: advertisements are idempotent monotonic
-    /// maxima, so repeating the current limit is always safe.
+    /// maxima, so repeating the current limit is always safe. A stream whose
+    /// final size is known, or whose receive side was reset or stopped, needs
+    /// no more credit (RFC 9000 3.2) and is left out.
     #[must_use]
     pub fn bounded_recv_window_advertisements(&self) -> Vec<(StreamId, u64)> {
         self.streams
             .iter()
-            .filter(|(_, stream)| stream.recv_window_bytes.is_some())
+            .filter(|(_, stream)| {
+                stream.recv_window_bytes.is_some()
+                    && stream.final_size.is_none()
+                    && stream.recv_reset.is_none()
+                    && stream.receive_stopped_error_code.is_none()
+            })
             .map(|(id, stream)| (*id, stream.recv_limit_advertised))
             .collect()
     }

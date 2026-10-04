@@ -3501,8 +3501,33 @@ impl NativeQuicConnection {
             // advance only on application reads — consumption-clocked, SETTLED
             // after four attempts; see the MATRIX-227 history on
             // advance_bounded_recv_windows before re-trying receipt-clocking.)
-            for (stream, limit) in self.streams.bounded_recv_window_advertisements() {
-                self.queue_max_stream_data_frame(stream, limit);
+            // One pass over the queue for all of them: replacing each stream's
+            // frame separately rescanned the queue once per stream, S^2 work
+            // on every packet with S bounded-window streams.
+            let advertisements = self.streams.bounded_recv_window_advertisements();
+            if !advertisements.is_empty() {
+                let limits: BTreeMap<u64, u64> = advertisements
+                    .iter()
+                    .map(|&(stream, limit)| (stream.0, limit))
+                    .collect();
+                self.pending_control_frames.retain(|frame| {
+                    !matches!(
+                        frame,
+                        QuicFrame::MaxStreamData {
+                            stream_id,
+                            maximum_stream_data,
+                        } if limits
+                            .get(&stream_id.value())
+                            .is_some_and(|&limit| maximum_stream_data.value() <= limit)
+                    )
+                });
+                for (stream, limit) in advertisements {
+                    self.pending_control_frames
+                        .push_back(QuicFrame::MaxStreamData {
+                            stream_id: VarInt(stream.0),
+                            maximum_stream_data: VarInt(limit),
+                        });
+                }
             }
         }
     }
@@ -4310,6 +4335,43 @@ mod tests {
             stream_id: VarInt(stream.0),
             maximum_stream_data: VarInt(140),
         }));
+    }
+
+    /// A stream whose sender has finished, or that was reset, needs no more
+    /// credit (RFC 9000 3.2), yet every ACK re-advertised its window, and the
+    /// re-attach rescanned the control queue once per stream.
+    #[test]
+    fn acks_reattach_windows_only_for_streams_still_receiving() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        let live = conn.open_local_bidi(&cx).expect("open");
+        let finished = conn.open_local_bidi(&cx).expect("open");
+        let reset = conn.open_local_bidi(&cx).expect("open");
+        for stream in [live, finished, reset] {
+            conn.configure_stream_recv_window(&cx, stream, 100)
+                .expect("configure window");
+        }
+        let _ = conn
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 1024)
+            .expect("initial advertisements");
+        conn.receive_stream_bytes(&cx, finished, 0, Bytes::from_static(b"done"), true)
+            .expect("the sender finishes");
+        conn.reset_stream_receive(&cx, reset, 0, 0)
+            .expect("the sender resets");
+
+        conn.acknowledge_received_packet(PacketNumberSpace::ApplicationData, 9);
+        let frames = conn
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 1024)
+            .expect("ack with advertisements");
+        assert!(frames.iter().any(|f| matches!(f, QuicFrame::Ack { .. })));
+        let advertised: Vec<u64> = frames
+            .iter()
+            .filter_map(|frame| match frame {
+                QuicFrame::MaxStreamData { stream_id, .. } => Some(stream_id.value()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(advertised, vec![live.0]);
     }
 
     #[test]
