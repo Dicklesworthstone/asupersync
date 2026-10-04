@@ -386,12 +386,16 @@ impl RecvPacketRuns {
     }
 
     fn exceeds(&self, limit: usize) -> bool {
+        self.runs.len() > limit || self.out_of_order() > limit.saturating_sub(1)
+    }
+
+    /// Runs other than a readable one at the read offset.
+    fn out_of_order(&self) -> usize {
         let head = self
             .runs
             .first()
             .is_some_and(|&(start, _)| start == self.read_offset);
-        self.runs.len() > limit
-            || self.runs.len().saturating_sub(usize::from(head)) > limit.saturating_sub(1)
+        self.runs.len().saturating_sub(usize::from(head))
     }
 }
 
@@ -1150,6 +1154,11 @@ impl QuicStream {
         let merged = self.recv_chunks.range(start..=end).count();
         Ok(self.recv_chunks.len() - merged + 1)
     }
+
+    /// Buffered receive runs other than a readable one at the read offset.
+    fn out_of_order_recv_runs(&self) -> usize {
+        self.recv_chunks.len() - usize::from(self.recv_chunks.contains_key(&self.read_offset))
+    }
 }
 
 /// Stream table errors.
@@ -1906,10 +1915,23 @@ impl StreamTable {
         Ok(())
     }
 
+    /// Out-of-order receive runs buffered across every stream. A readable run
+    /// at a stream's read offset does not count, so a frame that closes a
+    /// head-of-line gap stays admissible however full the budget is.
+    fn out_of_order_recv_runs(&self) -> usize {
+        self.streams
+            .values()
+            .map(QuicStream::out_of_order_recv_runs)
+            .sum()
+    }
+
     /// Check whether accepting a STREAM payload would exceed a fragment cap.
     ///
     /// This is a read-only preflight so callers can reject hostile
     /// fragmentation before flow-control or reassembly state is mutated.
+    /// The connection screens with
+    /// [`Self::stream_reassembly_limits_would_be_exceeded`].
+    #[cfg(test)]
     pub(crate) fn stream_reassembly_fragment_limit_would_be_exceeded(
         &self,
         id: StreamId,
@@ -1917,6 +1939,22 @@ impl StreamTable {
         len: u64,
         is_fin: bool,
         limit: usize,
+    ) -> Result<bool, StreamTableError> {
+        self.stream_reassembly_limits_would_be_exceeded(id, offset, len, is_fin, limit, usize::MAX)
+    }
+
+    /// As [`Self::stream_reassembly_fragment_limit_would_be_exceeded`], and
+    /// also refuse a payload that would take the out-of-order runs buffered
+    /// across every stream above `connection_limit`. The per-stream cap alone
+    /// lets a peer hold that many tiny holes on each of its streams at once.
+    pub(crate) fn stream_reassembly_limits_would_be_exceeded(
+        &self,
+        id: StreamId,
+        offset: u64,
+        len: u64,
+        is_fin: bool,
+        limit: usize,
+        connection_limit: usize,
     ) -> Result<bool, StreamTableError> {
         if id.direction() == StreamDirection::Unidirectional && id.is_local_for(self.role) {
             return Err(StreamTableError::StreamNotReadable(id));
@@ -1950,18 +1988,46 @@ impl StreamTable {
             readable_head_present || incoming_makes_head_readable,
         ));
         let max_out_of_order = limit.saturating_sub(1);
-
-        Ok(projected > limit || projected_out_of_order > max_out_of_order)
+        if projected > limit || projected_out_of_order > max_out_of_order {
+            return Ok(true);
+        }
+        if connection_limit == usize::MAX {
+            return Ok(false);
+        }
+        let elsewhere = self.out_of_order_recv_runs() - stream.out_of_order_recv_runs();
+        Ok(elsewhere.saturating_add(projected_out_of_order) > connection_limit)
     }
 
     /// Screen the entire packet's reassembly budget before any frame effects.
     /// Protocol validation still belongs to the ordinary frame-processing path.
     /// No payloads, send queues, wakers, or other streams are cloned here.
+    /// The connection screens with
+    /// [`Self::packet_reassembly_limits_would_be_exceeded`].
+    #[cfg(test)]
     pub(crate) fn packet_reassembly_fragment_limit_would_be_exceeded(
         &self,
         frames: &[QuicFrame],
         limit: usize,
     ) -> bool {
+        self.packet_reassembly_limits_would_be_exceeded(frames, limit, usize::MAX)
+    }
+
+    /// As [`Self::packet_reassembly_fragment_limit_would_be_exceeded`], and
+    /// also bound the out-of-order runs buffered across every stream by
+    /// `connection_limit` (see [`Self::stream_reassembly_limits_would_be_exceeded`]).
+    pub(crate) fn packet_reassembly_limits_would_be_exceeded(
+        &self,
+        frames: &[QuicFrame],
+        limit: usize,
+        connection_limit: usize,
+    ) -> bool {
+        let stream_frames = frames
+            .iter()
+            .filter(|frame| matches!(frame, QuicFrame::Stream { .. }))
+            .count();
+        if stream_frames == 0 {
+            return false;
+        }
         // An interval adds at most one run. Most packets therefore need only
         // this allocation-free upper bound, even when carrying several streams.
         let could_reach_limit = frames.iter().any(|frame| {
@@ -1974,7 +2040,13 @@ impl StreamTable {
                 .saturating_add(frames.len())
                 > limit.saturating_sub(1)
         });
-        if !could_reach_limit {
+        // Tracked only under a connection limit: the sum visits every stream.
+        let mut out_of_order =
+            (connection_limit != usize::MAX).then(|| self.out_of_order_recv_runs());
+        if !could_reach_limit
+            && out_of_order
+                .is_none_or(|total| total.saturating_add(stream_frames) <= connection_limit)
+        {
             return false;
         }
 
@@ -2014,12 +2086,23 @@ impl StreamTable {
                         // it cannot reach a subsequent reassembly admission.
                         break;
                     };
+                    let before = projection.out_of_order();
                     projection.insert(offset, end);
-                    if projection.exceeds(limit) {
+                    // The total includes this stream's runs, so it is at
+                    // least `before`.
+                    if let Some(total) = out_of_order.as_mut() {
+                        *total = *total - before + projection.out_of_order();
+                    }
+                    if projection.exceeds(limit)
+                        || out_of_order.is_some_and(|total| total > connection_limit)
+                    {
                         return true;
                     }
                 }
                 QuicFrame::ResetStream { .. } => {
+                    if let Some(total) = out_of_order.as_mut() {
+                        *total -= projection.out_of_order();
+                    }
                     projection.runs.clear();
                     projection.reset = true;
                 }
@@ -2816,6 +2899,72 @@ mod tests {
             );
             assert!(stream.recv_chunks.is_empty());
         }
+    }
+
+    #[test]
+    fn recv_reassembly_connection_budget_spans_streams_and_packets() {
+        use crate::net::atp::protocol::varint::VarInt;
+        let mut table = StreamTable::new(StreamRole::Server, 0, 0, 1 << 20, 1 << 20);
+        let (a, b, c) = (StreamId(0), StreamId(4), StreamId(8));
+        for id in [a, b, c] {
+            table.accept_remote_stream(id).expect("stream");
+        }
+        for (id, offset) in [(a, 1), (a, 3), (b, 1)] {
+            table
+                .receive_stream_bytes(id, offset, Bytes::from_static(b"x"), false)
+                .expect("hole");
+        }
+        let frame = |id: StreamId, offset: u64| QuicFrame::Stream {
+            stream_id: VarInt(id.0),
+            offset: Some(VarInt(offset)),
+            data: Bytes::from_static(b"x"),
+            fin: false,
+        };
+        let before = table.clone();
+
+        // Three holes are held; a connection limit of four admits one more
+        // anywhere, though every stream is far under its own limit of eight.
+        assert!(
+            !table
+                .stream_reassembly_limits_would_be_exceeded(c, 1, 1, false, 8, 4)
+                .expect("preflight")
+        );
+        assert!(
+            table
+                .stream_reassembly_limits_would_be_exceeded(c, 1, 1, false, 8, 3)
+                .expect("preflight")
+        );
+        assert!(!table.packet_reassembly_limits_would_be_exceeded(&[frame(c, 1)], 8, 4));
+        assert!(table.packet_reassembly_limits_would_be_exceeded(
+            &[frame(c, 1), frame(b, 3)],
+            8,
+            4
+        ));
+        // A reset earlier in the packet releases its stream's two holes.
+        let reset = QuicFrame::ResetStream {
+            stream_id: VarInt(a.0),
+            error_code: VarInt(0),
+            final_size: VarInt(4),
+        };
+        assert!(!table.packet_reassembly_limits_would_be_exceeded(
+            &[reset, frame(c, 1), frame(b, 3)],
+            8,
+            4
+        ));
+        // A frame that makes a head readable is not out of order, and joining
+        // b's hole into its head frees a slot for another hole in the packet.
+        assert!(!table.packet_reassembly_limits_would_be_exceeded(
+            &[frame(b, 0), frame(c, 1), frame(c, 3)],
+            8,
+            4
+        ));
+        // Without a connection limit the per-stream screen is unchanged.
+        assert!(!table.packet_reassembly_fragment_limit_would_be_exceeded(
+            &[frame(c, 1), frame(b, 3), frame(c, 5)],
+            8
+        ));
+        assert_eq!(table.stream(a).unwrap(), before.stream(a).unwrap());
+        assert_eq!(table.stream(c).unwrap(), before.stream(c).unwrap());
     }
 
     #[test]

@@ -437,6 +437,13 @@ const MAX_TRACKED_ACK_RANGES: usize = MAX_ACK_FRAME_RANGES * 4;
 /// authenticated peer can fill the receive window with tiny disjoint ranges
 /// and amplify each byte into a tree node plus reassembly work.
 pub(crate) const MAX_BUFFERED_STREAM_REASSEMBLY_FRAGMENTS: usize = 4096;
+
+/// Maximum number of out-of-order receive fragments buffered across all of a
+/// connection's streams. The per-stream bound alone admits that many on every
+/// stream the peer may open (128 + 128 by default): about 1M one-byte holes,
+/// hundreds of MB of tree and buffer metadata for a few MB of credit.
+pub(crate) const MAX_BUFFERED_CONNECTION_REASSEMBLY_FRAGMENTS: usize =
+    4 * MAX_BUFFERED_STREAM_REASSEMBLY_FRAGMENTS;
 const STREAM_REASSEMBLY_LIMIT_ERROR: &str = "stream receive reassembly fragment limit exceeded";
 
 /// Maximum number of outbound DATAGRAM payloads queued before `send_datagram`
@@ -1347,12 +1354,13 @@ impl NativeQuicConnection {
         self.ensure_stream_active_state()?;
         if self
             .streams
-            .stream_reassembly_fragment_limit_would_be_exceeded(
+            .stream_reassembly_limits_would_be_exceeded(
                 id,
                 offset,
                 data.len() as u64,
                 is_fin,
                 MAX_BUFFERED_STREAM_REASSEMBLY_FRAGMENTS,
+                MAX_BUFFERED_CONNECTION_REASSEMBLY_FRAGMENTS,
             )
             .map_err(map_stream_table_error)?
         {
@@ -2413,13 +2421,11 @@ impl NativeQuicConnection {
         ) {
             return Ok(());
         }
-        if self
-            .streams
-            .packet_reassembly_fragment_limit_would_be_exceeded(
-                frames,
-                MAX_BUFFERED_STREAM_REASSEMBLY_FRAGMENTS,
-            )
-        {
+        if self.streams.packet_reassembly_limits_would_be_exceeded(
+            frames,
+            MAX_BUFFERED_STREAM_REASSEMBLY_FRAGMENTS,
+            MAX_BUFFERED_CONNECTION_REASSEMBLY_FRAGMENTS,
+        ) {
             return Err(NativeQuicConnectionError::InvalidState(
                 STREAM_REASSEMBLY_LIMIT_ERROR,
             ));
@@ -4421,6 +4427,62 @@ mod tests {
             QuicFrame::MaxStreamData { stream_id, maximum_stream_data }
                 if stream_id.value() == stream.0 && maximum_stream_data.value() > 100
         )));
+    }
+
+    /// The per-stream bound alone let a peer keep that many one-byte holes on
+    /// every stream it could open, about 1M for the default stream limits.
+    #[test]
+    fn stream_receive_reassembly_fragments_are_bounded_across_streams() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        let per_stream = MAX_BUFFERED_STREAM_REASSEMBLY_FRAGMENTS - 1;
+        let full_streams = MAX_BUFFERED_CONNECTION_REASSEMBLY_FRAGMENTS / per_stream;
+        let mut holes = 0usize;
+        for _ in 0..full_streams {
+            let stream = conn.open_local_bidi(&cx).expect("open");
+            for fragment in 0..per_stream {
+                let offset = 1 + (fragment as u64 * 2);
+                conn.receive_stream_bytes(&cx, stream, offset, Bytes::from_static(b"x"), false)
+                    .expect("fragment within both limits");
+                holes += 1;
+            }
+        }
+        let last = conn.open_local_bidi(&cx).expect("open");
+        let mut fragment = 0u64;
+        while holes < MAX_BUFFERED_CONNECTION_REASSEMBLY_FRAGMENTS {
+            conn.receive_stream_bytes(&cx, last, 1 + fragment * 2, Bytes::from_static(b"x"), false)
+                .expect("fragment within the connection limit");
+            fragment += 1;
+            holes += 1;
+        }
+
+        let err = conn
+            .receive_stream_bytes(&cx, last, 1 + fragment * 2, Bytes::from_static(b"x"), false)
+            .expect_err("a hole beyond the connection limit must fail closed");
+        assert!(err.is_stream_reassembly_backpressure(), "{err:?}");
+        let frames = [QuicFrame::Stream {
+            stream_id: VarInt(last.0),
+            offset: Some(VarInt(1 + fragment * 2)),
+            data: Bytes::from_static(b"x"),
+            fin: false,
+        }];
+        let err = conn
+            .process_packet_frames(&cx, PacketNumberSpace::ApplicationData, 9, &frames, 300)
+            .expect_err("a packet adding a hole beyond the connection limit is refused");
+        assert!(err.is_stream_reassembly_backpressure(), "{err:?}");
+
+        // A frame that makes a stream's head readable is not out of order, so
+        // it stays admissible at the limit. Here it also joins the first hole
+        // into the readable head, which frees one slot.
+        conn.receive_stream_bytes(&cx, last, 0, Bytes::from_static(b"h"), false)
+            .expect("head-of-line fragment remains admissible");
+        assert_eq!(
+            conn.read_stream_bytes(&cx, last, 2)
+                .expect("read the head and its joined successor"),
+            Bytes::from_static(b"hx")
+        );
+        conn.receive_stream_bytes(&cx, last, 1 + fragment * 2, Bytes::from_static(b"x"), false)
+            .expect("the freed slot admits one more hole");
     }
 
     #[test]
