@@ -4136,16 +4136,11 @@ impl Runtime {
     ///   checked holder authority.
     pub fn block_on<F: Future>(&self, future: F) -> F::Output {
         let _guard = ScopedRuntimeHandle::new(self.handle());
-        // #41: install an ambient Cx backed by this runtime's drivers
-        // (IO + timer + blocking pool + observability). Without it,
-        // `Cx::current()` returns None inside the polled future, so
-        // public async networking APIs (e.g. `TcpListener::accept`)
-        // fall back to a tight `accept4` / `WouldBlock` poll instead
-        // of waiting through the configured reactor. Wrap the existing
-        // execution path in `_cx_guard` so the Cx is installed for the
-        // duration of the future poll and uninstalled on return —
-        // mirrors `block_on_with_cx` but builds the Cx for callers
-        // who don't have a request-scoped one to thread in.
+        // #41: install an ambient Cx backed by this runtime's drivers (IO, timer, blocking pool,
+        // observability). Without it `Cx::current()` is None inside the polled future, and public
+        // async networking (e.g. `TcpListener::accept`) spins on `WouldBlock` instead of waiting
+        // through the reactor. `_cx_guard` installs it for the poll and removes it on return, as
+        // `block_on_with_cx` does for a caller that has a request-scoped Cx.
         let request_cx = self.request_cx_with_budget(Budget::INFINITE);
         let _cx_guard = crate::cx::Cx::set_current(Some(request_cx.clone()));
         // GH#58 / br-asupersync-94jh37: on a `RuntimeBuilder::current_thread()`
@@ -4172,6 +4167,11 @@ impl Runtime {
         let _caller_cx_guard = registration
             .as_ref()
             .map(|registration| crate::cx::Cx::set_current(Some(registration.cx.clone())));
+        // Workers drive the tasks this root spawns, so the root may wait for them as a worker
+        // would: a race whose winner panics joins its losers instead of polling them once.
+        let _driven = (self.inner.current_thread_driver.get().is_none()
+            && self.inner.config.worker_threads > 0)
+            .then(crate::runtime::scheduler::three_lane::ScopedSchedulerDriven::enter);
         run_future_with_budget(
             future,
             self.inner.config.poll_budget,

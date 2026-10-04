@@ -136,6 +136,41 @@ fn run_native(workers: Option<usize>, scenario: &Scenario) -> Observation {
     }
 }
 
+/// Runs the scenario as the root future of a multi-thread runtime's
+/// `block_on`, the way `#[asupersync::main]` runs `main`: the root is polled
+/// on the calling thread, not on a worker, while workers run what it spawns.
+fn run_native_root(workers: usize, scenario: &Scenario) -> Observation {
+    let (name, run) = (scenario.name, scenario.run);
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let runtime = RuntimeBuilder::multi_thread()
+            .worker_threads(workers)
+            .build()
+            .expect("build native runtime");
+        let observation = runtime.block_on(async move {
+            let cx = Cx::current().expect("block_on root installs Cx");
+            run(cx).await
+        });
+        let quiescent = runtime.shutdown_timeout(Duration::from_secs(10));
+        let _ = done_tx.send((observation, quiescent));
+    });
+    match done_rx.recv_timeout(NATIVE_HANG_LIMIT) {
+        Ok((observation, quiescent)) => {
+            assert!(
+                quiescent,
+                "{name}: native runtime must reach quiescence and shut down"
+            );
+            observation
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("{name}: block_on root ({workers} workers) hung for {NATIVE_HANG_LIMIT:?}")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("{name}: block_on root ({workers} workers) panicked; see its message above")
+        }
+    }
+}
+
 /// Run `scenario` everywhere and require one observation, modulo the
 /// scenario's schedule-dependent fields.
 fn check(scenario: &Scenario) {
@@ -334,6 +369,54 @@ fn race_all_drains_every_loser(cx: Cx) -> ScenarioFuture {
                 for gate in &gates {
                     wait_for(gate).await;
                 }
+                1u32
+            })
+            .expect("spawn winner");
+        let mut handles = vec![winner];
+        for index in 0..2 {
+            let (s, d) = (Arc::clone(&started[index]), Arc::clone(&done[index]));
+            handles.push(
+                cx.spawn(move |cx| parked_loser(cx, s, d))
+                    .expect("spawn loser"),
+            );
+        }
+        let result = cx.scope().race_all(&cx, handles).await;
+        observe([
+            ("race_all", outcome(&result)),
+            (
+                "losers_drained_before_return",
+                format!(
+                    "{},{}",
+                    done[0].load(Ordering::SeqCst),
+                    done[1].load(Ordering::SeqCst)
+                ),
+            ),
+        ])
+    })
+}
+
+/// A panicking `race_all` winner must still drain every loser.
+fn race_all_panicking_winner_still_drains_losers(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let started = [
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        ];
+        let done = [
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        ];
+        let gates = started.clone();
+        let winner = cx
+            .spawn(move |_cx| async move {
+                for gate in &gates {
+                    wait_for(gate).await;
+                }
+                // Panics on purpose: every gate is set here.
+                assert!(
+                    !gates[0].load(Ordering::SeqCst),
+                    "differential: race_all winner panics"
+                );
                 1u32
             })
             .expect("spawn winner");
@@ -2382,6 +2465,50 @@ differential!(
     []
 );
 differential!(differential_race_all, race_all_drains_every_loser, []);
+differential!(
+    differential_race_all_panicking_winner,
+    race_all_panicking_winner_still_drains_losers,
+    []
+);
+
+/// The multi-thread `block_on` root (`#[asupersync::main]`'s `main`) is not
+/// polled by a worker, but workers run the tasks it spawns, so a race whose
+/// winner panics must drain its losers there too. It used to poll them once
+/// with a no-op waker and return while they were still running.
+#[test]
+fn panicking_winners_drain_their_losers_on_the_block_on_root() {
+    let cases: [(Scenario, &str, &str); 2] = [
+        (
+            Scenario {
+                name: "race_panicking_winner_still_drains_loser",
+                run: race_panicking_winner_still_drains_loser,
+                schedule_dependent: &[],
+            },
+            "loser_drained_before_return",
+            "true",
+        ),
+        (
+            Scenario {
+                name: "race_all_panicking_winner_still_drains_losers",
+                run: race_all_panicking_winner_still_drains_losers,
+                schedule_dependent: &[],
+            },
+            "losers_drained_before_return",
+            "true,true",
+        ),
+    ];
+    for (scenario, field, drained) in &cases {
+        for repeat in 0..NATIVE_REPEATS {
+            let observation = run_native_root(NATIVE_WORKERS, scenario);
+            assert_eq!(
+                observation.get(field).map(String::as_str),
+                Some(*drained),
+                "{} on the block_on root #{repeat}: {observation:?}",
+                scenario.name
+            );
+        }
+    }
+}
 differential!(differential_quorum, quorum_two_of_three_drains_the_straggler, []);
 differential!(differential_hedge, hedge_backup_wins_and_drains_the_primary, []);
 differential!(
