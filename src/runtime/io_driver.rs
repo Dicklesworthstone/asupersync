@@ -375,12 +375,10 @@ impl IoDriver {
         self.waker_buf.clear();
         let mut seen_tokens = std::collections::HashSet::<Token>::new();
 
-        // Dispatch wakers for ready events
+        // Collect the wakers for ready events before any callback runs.
         for event in &self.events {
-            let interest = self.interests.get(&event.token).copied();
             // The event disarmed the one-shot registration.
             self.undispatched.remove(&event.token);
-            on_event(event, interest);
             if !seen_tokens.insert(event.token) {
                 continue;
             }
@@ -393,7 +391,15 @@ impl IoDriver {
             }
         }
 
-        wake_each(self.waker_buf.drain(..));
+        let (events, interests) = (&self.events, &self.interests);
+        run_callbacks_then_wake(
+            || {
+                for event in events {
+                    on_event(event, interests.get(&event.token).copied());
+                }
+            },
+            self.waker_buf.drain(..),
+        );
 
         Ok(n)
     }
@@ -784,11 +790,14 @@ impl IoDriverHandle {
 
             drop(guard);
 
-            for (event, interest) in event_data {
-                on_event(&event, interest);
-            }
-
-            wake_each(wakers);
+            run_callbacks_then_wake(
+                || {
+                    for (event, interest) in event_data {
+                        on_event(&event, interest);
+                    }
+                },
+                wakers,
+            );
 
             poll_result.map(Some)
         } else {
@@ -1091,6 +1100,21 @@ fn wake_each(wakers: impl IntoIterator<Item = Waker>) {
     }
     if let Some(payload) = first_panic {
         std::panic::resume_unwind(payload);
+    }
+}
+
+/// Runs a batch's per-event callbacks, then wakes its wakers. A panicking
+/// callback is re-raised only after every waker was woken: the batch's
+/// one-shot registrations have already fired, so wakers dropped by the
+/// unwind would never be woken again (br-asupersync-n89rul L4, the same class
+/// as dofi11). When both panic, the callback's panic is the one re-raised.
+fn run_callbacks_then_wake(callbacks: impl FnOnce(), wakers: impl IntoIterator<Item = Waker>) {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(callbacks)) {
+        Ok(()) => wake_each(wakers),
+        Err(payload) => {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| wake_each(wakers)));
+            std::panic::resume_unwind(payload);
+        }
     }
 }
 
@@ -3376,6 +3400,78 @@ mod tests {
             assert!(state.flag.load(Ordering::SeqCst), "every other waker fired");
         }
         crate::test_complete!("a_panicking_waker_does_not_strand_the_rest_of_a_handle_turn");
+    }
+
+    /// Registers two well-behaved wakers, both ready in one batch.
+    fn ready_batch_of_two(
+        reactor: &LabReactor,
+        register_waker: &mut dyn FnMut(Waker) -> Token,
+    ) -> [Arc<FlagWaker>; 2] {
+        let (first, first_state) = create_test_waker();
+        let (second, second_state) = create_test_waker();
+        for waker in [first, second] {
+            let token = register_waker(waker);
+            reactor
+                .register(&TestFdSource, token, Interest::READABLE)
+                .expect("register");
+            reactor.inject_event(token, Event::readable(token), Duration::ZERO);
+        }
+        [first_state, second_state]
+    }
+
+    /// br-asupersync-n89rul L4: an event callback that panics on the batch's
+    /// first event still lets every waker of the batch fire, and the panic
+    /// still reaches the caller.
+    #[test]
+    fn a_panicking_event_callback_does_not_strand_its_batch() {
+        init_test("a_panicking_event_callback_does_not_strand_its_batch");
+        let reactor = Arc::new(LabReactor::new());
+        let mut driver = IoDriver::new(reactor.clone());
+        let states = ready_batch_of_two(&reactor, &mut |waker| driver.register_waker(waker));
+
+        let turn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            driver.turn_with(Some(Duration::from_millis(10)), |_, _| {
+                panic!("this callback panics on purpose");
+            })
+        }));
+        assert!(
+            turn.is_err(),
+            "the callback's panic still reaches the caller"
+        );
+        for state in &states {
+            assert!(
+                state.flag.load(Ordering::SeqCst),
+                "every waker of the batch fired"
+            );
+        }
+        crate::test_complete!("a_panicking_event_callback_does_not_strand_its_batch");
+    }
+
+    /// The same through `IoDriverHandle::turn_with`, which the runtime's
+    /// workers drive.
+    #[test]
+    fn a_panicking_event_callback_does_not_strand_a_handle_turn() {
+        init_test("a_panicking_event_callback_does_not_strand_a_handle_turn");
+        let reactor = Arc::new(LabReactor::new());
+        let driver = IoDriverHandle::new(reactor.clone());
+        let states = ready_batch_of_two(&reactor, &mut |waker| driver.lock().register_waker(waker));
+
+        let turn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            driver.turn_with(Some(Duration::from_millis(10)), |_, _| {
+                panic!("this callback panics on purpose");
+            })
+        }));
+        assert!(
+            turn.is_err(),
+            "the callback's panic still reaches the caller"
+        );
+        for state in &states {
+            assert!(
+                state.flag.load(Ordering::SeqCst),
+                "every waker of the batch fired"
+            );
+        }
+        crate::test_complete!("a_panicking_event_callback_does_not_strand_a_handle_turn");
     }
 }
 
