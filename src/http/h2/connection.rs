@@ -2127,6 +2127,11 @@ impl Connection {
         let mut skipped_ops = std::collections::VecDeque::new();
         let mut newly_queued_ops = std::collections::VecDeque::new();
         let mut returned_frame = None;
+        // Streams whose DATA was set aside for lack of send credit. Their later
+        // HEADERS (trailers), DATA and PUSH_PROMISE stay queued behind it: a
+        // trailer or an empty final DATA sent first would carry END_STREAM
+        // ahead of the body (br-asupersync-dx72q4).
+        let mut held_streams: Vec<u32> = Vec::new();
 
         for _ in 0..pending_len {
             let op = self.pending_ops.pop_front()?;
@@ -2162,6 +2167,14 @@ impl Connection {
                     end_stream,
                 } => {
                     if !self.stream_can_emit_queued_frames(stream_id) {
+                        continue;
+                    }
+                    if held_streams.contains(&stream_id) {
+                        skipped_ops.push_back(PendingOp::Headers {
+                            stream_id,
+                            headers,
+                            end_stream,
+                        });
                         continue;
                     }
                     if end_stream {
@@ -2220,6 +2233,14 @@ impl Connection {
                     if !self.stream_can_emit_queued_frames(stream_id)
                         || !self.stream_can_emit_queued_frames(promised_stream_id)
                     {
+                        continue;
+                    }
+                    if held_streams.contains(&stream_id) {
+                        skipped_ops.push_back(PendingOp::PushPromise {
+                            stream_id,
+                            promised_stream_id,
+                            headers,
+                        });
                         continue;
                     }
 
@@ -2294,6 +2315,14 @@ impl Connection {
                         }
                         _ => continue,
                     };
+                    if held_streams.contains(&stream_id) {
+                        skipped_ops.push_back(PendingOp::Data {
+                            stream_id,
+                            data,
+                            end_stream,
+                        });
+                        continue;
+                    }
 
                     // Determine the maximum sendable bytes from flow control windows and max_frame_size.
                     let conn_avail = self.send_window.max(0).cast_unsigned();
@@ -2307,6 +2336,7 @@ impl Connection {
                             data,
                             end_stream,
                         });
+                        held_streams.push(stream_id);
                         blocked_data = true;
                         continue;
                     }
@@ -3334,6 +3364,73 @@ mod tests {
         assert_eq!(last.data.as_ref(), b"ef");
         assert!(last.end_stream);
         assert_eq!(conn.active_stream_count(), 0);
+    }
+
+    #[test]
+    fn trailers_and_a_final_empty_data_wait_behind_flow_blocked_data() {
+        // br-asupersync-dx72q4: DATA held back for lack of send credit was set
+        // aside while the queue scan went on, so the trailers (or an empty
+        // final DATA) went out first with END_STREAM and the rest of the body
+        // followed on a closed stream.
+        for trailers in [true, false] {
+            let mut conn = Connection::server(Settings::default());
+            conn.state = ConnectionState::Open;
+            conn.process_frame(Frame::Settings(SettingsFrame::new(vec![
+                Setting::InitialWindowSize(3),
+            ])))
+            .unwrap();
+            conn.process_frame(Frame::Headers(HeadersFrame::new(
+                1,
+                test_request_headers("/trailers"),
+                true,
+                true,
+            )))
+            .unwrap();
+            conn.send_headers(1, vec![Header::new(":status", "200")], false)
+                .unwrap();
+            conn.send_data(1, Bytes::from_static(b"abcdef"), false)
+                .unwrap();
+            if trailers {
+                conn.send_headers(1, vec![Header::new("grpc-status", "0")], true)
+                    .unwrap();
+            } else {
+                conn.send_data(1, Bytes::new(), true).unwrap();
+            }
+
+            fn drain(conn: &mut Connection, body: &mut Vec<u8>, ended: &mut bool) {
+                while let Some(frame) = conn.next_frame() {
+                    let end_stream = match frame {
+                        Frame::Data(frame) if frame.stream_id == 1 => {
+                            assert!(!*ended, "DATA after END_STREAM");
+                            body.extend_from_slice(&frame.data);
+                            frame.end_stream
+                        }
+                        Frame::Headers(frame) if frame.stream_id == 1 => frame.end_stream,
+                        _ => false,
+                    };
+                    if end_stream {
+                        assert_eq!(body, b"abcdef", "END_STREAM before the whole body");
+                        *ended = true;
+                    }
+                }
+            }
+            let mut body = Vec::new();
+            let mut ended = false;
+            drain(&mut conn, &mut body, &mut ended);
+            assert_eq!(body, b"abc");
+            assert!(
+                !ended,
+                "the stream must stay open while its body is blocked"
+            );
+
+            conn.process_frame(Frame::WindowUpdate(WindowUpdateFrame::new(1, 3)))
+                .unwrap();
+            drain(&mut conn, &mut body, &mut ended);
+            assert!(
+                ended,
+                "the body and then END_STREAM go out once credit returns"
+            );
+        }
     }
 
     #[test]
