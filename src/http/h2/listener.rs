@@ -4695,6 +4695,46 @@ where
         )
         .await
     }
+
+    /// Like [`Self::run`], but each connection task is spawned with `cx`, so
+    /// it (and every request task it starts) belongs to `cx`'s region instead
+    /// of the runtime's root region.
+    ///
+    /// Run it inside a region that owns the service (for example a
+    /// [`ChildRegion`]). Cancelling or closing that region ends the accept
+    /// loop and drains every connection with it, with no `RuntimeHandle`. A
+    /// graceful drain through the connection manager behaves exactly as with
+    /// [`Self::run`] (br-asupersync-aoqf9j, the HTTP/2 counterpart of
+    /// `Http1Listener::run_in`).
+    ///
+    /// # Errors
+    ///
+    /// Besides the accept errors of [`Self::run`], fails when no runtime is
+    /// installed on the calling thread.
+    pub async fn run_in(self, cx: &Cx) -> io::Result<ShutdownStats> {
+        let Some(runtime) = crate::runtime::Runtime::current_handle() else {
+            return Err(io::Error::other(
+                "Http2Listener::run_in must run inside a runtime task",
+            ));
+        };
+        let spawner = cx.clone();
+        self.run_mapped_with(
+            Some(cx.clone()),
+            runtime,
+            move |connection| {
+                spawner
+                    .spawn(move |_connection_cx| connection)
+                    .map(H2ConnectionTask::Owned)
+            },
+            true,
+            #[cfg(feature = "http2-streaming")]
+            None,
+            |handler, request| async move {
+                H2DispatchResponse::Buffered(handler(request).await.into_h2_response())
+            },
+        )
+        .await
+    }
 }
 
 impl<F> Http2Listener<F> {
@@ -5041,7 +5081,6 @@ impl<F> Http2Listener<F> {
         .await
     }
 
-    #[allow(clippy::too_many_lines)]
     async fn run_mapped<M, MFut>(
         self,
         runtime: &RuntimeHandle,
@@ -5054,6 +5093,41 @@ impl<F> Http2Listener<F> {
         M: Fn(Arc<F>, Request) -> MFut + Clone + Send + Sync + 'static,
         MFut: Future<Output = H2DispatchResponse> + Send + 'static,
     {
+        self.run_mapped_with(
+            None,
+            runtime.clone(),
+            move |connection| runtime.try_spawn(connection).map(H2ConnectionTask::Root),
+            owned_request,
+            #[cfg(feature = "http2-streaming")]
+            streaming,
+            map_response,
+        )
+        .await
+    }
+
+    /// The accept loop and drain behind every `run*` method. `owner` is the
+    /// context whose region owns the connection tasks when `spawn_connection`
+    /// puts them there; the drain joins them through it, and its cancellation
+    /// (for example its region closing) ends accepting like a shutdown signal.
+    /// `runtime` reaches each connection for the streaming ingress.
+    #[allow(clippy::too_many_lines)]
+    async fn run_mapped_with<S, M, MFut>(
+        self,
+        owner: Option<Cx>,
+        runtime: RuntimeHandle,
+        spawn_connection: S,
+        owned_request: bool,
+        #[cfg(feature = "http2-streaming")] streaming: Option<StreamingDispatch>,
+        map_response: M,
+    ) -> io::Result<ShutdownStats>
+    where
+        F: Send + Sync + 'static,
+        S: Fn(Pin<Box<dyn Future<Output = ()> + Send>>) -> Result<H2ConnectionTask, SpawnError>
+            + Send,
+        M: Fn(Arc<F>, Request) -> MFut + Clone + Send + Sync + 'static,
+        MFut: Future<Output = H2DispatchResponse> + Send + 'static,
+    {
+        let owner_cancel = owner.clone();
         // An acceptor that cannot negotiate h2 would complete a full handshake
         // with every client and then reject it: refuse it at startup instead.
         #[cfg(feature = "tls")]
@@ -5069,7 +5143,7 @@ impl<F> Http2Listener<F> {
                 "Http2Listener::with_tls needs an acceptor that advertises the h2 ALPN protocol",
             ));
         }
-        let mut tasks: Vec<JoinHandle<()>> = Vec::new();
+        let mut tasks: Vec<H2ConnectionTask> = Vec::new();
         // Independent push counter so finished connection tasks are reaped
         // periodically instead of accumulating for the listener's lifetime
         // (h1 parity — prevents unbounded memory growth under churn).
@@ -5084,7 +5158,9 @@ impl<F> Http2Listener<F> {
         }
 
         loop {
-            if self.shutdown_signal.is_shutting_down() {
+            if self.shutdown_signal.is_shutting_down()
+                || owner_cancel.as_ref().is_some_and(Cx::is_cancel_requested)
+            {
                 break;
             }
 
@@ -5094,7 +5170,9 @@ impl<F> Http2Listener<F> {
                 let mut accept_fut = core::pin::pin!(accept_fut);
                 let mut shutdown_fut = core::pin::pin!(shutdown_fut);
                 std::future::poll_fn(|cx| {
-                    if self.shutdown_signal.is_shutting_down() {
+                    if self.shutdown_signal.is_shutting_down()
+                        || owner_cancel.as_ref().is_some_and(Cx::is_cancel_requested)
+                    {
                         return Poll::Ready(AcceptOrShutdown::Shutdown);
                     }
                     if shutdown_fut.as_mut().poll(cx).is_ready() {
@@ -5199,7 +5277,7 @@ impl<F> Http2Listener<F> {
                 }
                 drop(guard);
             });
-            let spawn_result = runtime.try_spawn(connection);
+            let spawn_result = spawn_connection(connection);
             match spawn_result {
                 Ok(handle) => {
                     tasks.push(handle);
@@ -5312,14 +5390,27 @@ impl<F> Http2Listener<F> {
         let is_force_closing = self.shutdown_signal.phase() == ShutdownPhase::ForceClosing;
 
         for task in tasks {
-            if let Err(payload) = (CatchUnwind { inner: task }).await {
-                // Bind unconditionally: tracing_compat::error! compiles to
-                // nothing without the tracing feature.
-                let _ = &payload;
-                error!(
-                    message = %crate::cx::scope::payload_to_string(&payload),
-                    "h2 connection task panicked"
-                );
+            match task {
+                H2ConnectionTask::Root(handle) => {
+                    if let Err(payload) = (CatchUnwind { inner: handle }).await {
+                        // Bind unconditionally: tracing_compat::error! compiles
+                        // to nothing without the tracing feature.
+                        let _ = &payload;
+                        error!(
+                            message = %crate::cx::scope::payload_to_string(&payload),
+                            "h2 connection task panicked"
+                        );
+                    }
+                }
+                H2ConnectionTask::Owned(mut handle) => {
+                    let owner = owner
+                        .as_ref()
+                        .expect("an owned h2 connection task has an owner context");
+                    if let Err(JoinError::Panicked(payload)) = handle.join(owner).await {
+                        let _ = &payload;
+                        error!(message = %payload, "h2 connection task panicked");
+                    }
+                }
             }
         }
 
@@ -5342,6 +5433,23 @@ impl<F> Http2Listener<F> {
 /// Panic isolation for connection-task joins (HTTP/1.1 listener parity):
 /// a panicked or force-cancelled task must not take down the listener's
 /// drain/stats path.
+/// A spawned connection task: a root-region task from [`Http2Listener::run`]
+/// and its variants, or a task of the owner's region from
+/// [`Http2Listener::run_in`].
+enum H2ConnectionTask {
+    Root(JoinHandle<()>),
+    Owned(TaskHandle<()>),
+}
+
+impl H2ConnectionTask {
+    fn is_finished(&self) -> bool {
+        match self {
+            Self::Root(handle) => handle.is_finished(),
+            Self::Owned(handle) => handle.is_finished(),
+        }
+    }
+}
+
 #[pin_project::pin_project]
 struct CatchUnwind<F> {
     #[pin]

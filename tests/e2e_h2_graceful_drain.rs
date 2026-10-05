@@ -217,6 +217,199 @@ fn h2_serves_request_response_round_trip() {
     });
 }
 
+type Gate = Arc<(
+    std::sync::atomic::AtomicBool,
+    std::sync::Mutex<Option<std::task::Waker>>,
+)>;
+
+/// Pending until its gate opens, whatever cancellation says.
+struct Parked(Gate);
+
+impl Future for Parked {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+        let (released, waker) = &*self.0;
+        *waker.lock().expect("gate lock") = Some(cx.waker().clone());
+        if released.load(Ordering::SeqCst) {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    }
+}
+
+fn release(gate: &Gate) {
+    let (released, waker) = &**gate;
+    released.store(true, Ordering::SeqCst);
+    if let Some(waker) = waker.lock().expect("gate lock").take() {
+        waker.wake();
+    }
+}
+
+/// Under `Http2Listener::run_in` the connection task, and the request task it
+/// starts, belong to the region of the context it is given
+/// (br-asupersync-aoqf9j). A request whose handler ignores cancellation keeps
+/// running for the request drain grace (30 s here), so a bounded close of the
+/// listener's region that ends first names the handler's own task as a
+/// straggler, next to the accept loop, which is still draining. With
+/// connections spawned into the root region neither would be listed.
+#[test]
+fn region_owned_h2_listener_reports_a_stuck_request_as_its_straggler() {
+    use asupersync::cx::{ChildRegionCloseOutcome, ChildRegionSpec};
+    use asupersync::types::TaskId;
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let gate: Gate = Arc::new((
+        std::sync::atomic::AtomicBool::new(false),
+        std::sync::Mutex::new(None),
+    ));
+    let gate_for_handler = Arc::clone(&gate);
+    runtime.block_on(async move {
+        let cx = Cx::current().expect("root cx");
+        let child = cx
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .expect("child region");
+        let handler_task: Arc<std::sync::Mutex<Option<TaskId>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let handler_slot = Arc::clone(&handler_task);
+        let listener = Http2Listener::bind_with_config(
+            "127.0.0.1:0",
+            move |_req| {
+                let gate = Arc::clone(&gate_for_handler);
+                let slot = Arc::clone(&handler_slot);
+                async move {
+                    let task = Cx::current().expect("request context").task_id();
+                    *slot.lock().expect("handler slot") = Some(task);
+                    Parked(gate).await;
+                    Response::new(200, "OK", b"released".to_vec())
+                }
+            },
+            drain_config(Duration::from_secs(5), Duration::from_secs(10))
+                .request_drain_grace(Duration::from_secs(30)),
+        )
+        .await
+        .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let accept_loop: Arc<std::sync::Mutex<Option<TaskId>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let accept_slot = Arc::clone(&accept_loop);
+        let _serving = child
+            .cx()
+            .spawn(move |listener_cx| {
+                boxed_listener_run(async move {
+                    *accept_slot.lock().expect("accept slot") = Some(listener_cx.task_id());
+                    listener.run_in(&listener_cx).await
+                })
+            })
+            .expect("spawn the accept loop in the child region");
+
+        let client = h2_blocking_client(addr, "/stuck", true);
+        let mut yields = 0_u32;
+        let handler_task = loop {
+            if let Some(task) = *handler_task.lock().expect("handler slot") {
+                break task;
+            }
+            yields += 1;
+            assert!(yields < 1_000_000, "the request never reached its handler");
+            asupersync::runtime::yield_now().await;
+        };
+
+        let report = child
+            .close_within(Duration::from_millis(500))
+            .await
+            .expect("close report");
+        assert_eq!(
+            report.outcome,
+            ChildRegionCloseOutcome::TimedOut,
+            "{report:?}"
+        );
+        let accept_loop = (*accept_loop.lock().expect("accept slot")).expect("accept loop ran");
+        assert!(
+            report.stragglers.contains(&accept_loop),
+            "the accept loop is still draining: {report:?}"
+        );
+        assert!(
+            report.stragglers.contains(&handler_task),
+            "the stuck request task belongs to the listener's region: {report:?}"
+        );
+
+        release(&gate);
+        let _ = client.join();
+    });
+    assert_eq!(
+        runtime.drain_root_region(Duration::from_secs(15)),
+        asupersync::runtime::RootDrainOutcome::Quiescent
+    );
+}
+
+/// Closing the region that runs `Http2Listener::run_in` ends the accept loop
+/// and drains an idle keep-alive connection, so the region closes quiescent
+/// with no connection left (br-asupersync-aoqf9j).
+#[test]
+fn region_owned_h2_listener_drains_when_the_region_closes() {
+    use asupersync::cx::{ChildRegionCloseOutcome, ChildRegionSpec};
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    runtime.block_on(async move {
+        let cx = Cx::current().expect("root cx");
+        let child = cx
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .expect("child region");
+        let listener = Http2Listener::bind_with_config(
+            "127.0.0.1:0",
+            move |_req| async move { Response::new(200, "OK", b"served".to_vec()) },
+            drain_config(Duration::from_secs(5), Duration::from_secs(10)),
+        )
+        .await
+        .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let manager = listener.connection_manager().clone();
+        let _serving = child
+            .cx()
+            .spawn(move |listener_cx| {
+                boxed_listener_run(async move { listener.run_in(&listener_cx).await })
+            })
+            .expect("spawn the accept loop in the child region");
+
+        let client = h2_blocking_client(addr, "/idle", true);
+        let mut yields = 0_u32;
+        while manager.active_count() == 0 {
+            yields += 1;
+            assert!(yields < 1_000_000, "the connection was never registered");
+            asupersync::runtime::yield_now().await;
+        }
+
+        let report = child
+            .close_within(Duration::from_secs(5))
+            .await
+            .expect("close report");
+        assert_eq!(
+            report.outcome,
+            ChildRegionCloseOutcome::Quiescent,
+            "{report:?}"
+        );
+        assert_eq!(
+            manager.active_count(),
+            0,
+            "no connection outlives the region"
+        );
+        let _ = client.join();
+    });
+    assert_eq!(
+        runtime.drain_root_region(Duration::from_secs(15)),
+        asupersync::runtime::RootDrainOutcome::Quiescent
+    );
+}
+
 /// The production Router adapter composes with the native H2 listener over
 /// real frames, inherits its bounded request-region Cx, and preserves 404
 /// routing.
