@@ -105,6 +105,8 @@ pub enum ActorState {
 #[derive(Debug)]
 struct ActorStateCell {
     state: AtomicU8,
+    /// The task waiting out a supervised restart backoff, woken by a stop.
+    stop_waker: parking_lot::Mutex<Option<std::task::Waker>>,
 }
 
 impl ActorStateCell {
@@ -112,6 +114,27 @@ impl ActorStateCell {
     fn new(state: ActorState) -> Self {
         Self {
             state: AtomicU8::new(Self::encode(state)),
+            stop_waker: parking_lot::Mutex::new(None),
+        }
+    }
+
+    /// Stores `Stopping` and wakes a supervised restart backoff waiting on it.
+    fn request_stop(&self) {
+        self.store(ActorState::Stopping);
+        let waiter = self.stop_waker.lock().take();
+        if let Some(waker) = waiter {
+            waker.wake();
+        }
+    }
+
+    /// Registers the task that a later [`Self::request_stop`] must wake.
+    fn register_stop_waker(&self, waker: &std::task::Waker) {
+        let mut slot = self.stop_waker.lock();
+        if !slot
+            .as_ref()
+            .is_some_and(|current| current.will_wake(waker))
+        {
+            *slot = Some(waker.clone());
         }
     }
 
@@ -293,7 +316,7 @@ impl<A: Actor> ActorHandle<A> {
     /// cancellation, allowing the actor to drain pending work. The mailbox is
     /// sealed immediately so new sends fail fast instead of extending shutdown.
     pub fn stop(&self) {
-        self.state.store(ActorState::Stopping);
+        self.state.request_stop();
         self.sender.close_receiver();
     }
 
@@ -337,7 +360,7 @@ impl<A: Actor> ActorHandle<A> {
     /// to exit at the next cancellation check point. The actor will call
     /// `on_stop` before returning.
     pub fn abort(&self) {
-        self.state.store(ActorState::Stopping);
+        self.state.request_stop();
         self.sender.close_receiver();
         if let Some(inner) = self.inner.upgrade() {
             let cancel_wakers = {
@@ -383,7 +406,7 @@ impl<A: Actor> ActorJoinFuture<'_, A> {
     }
 
     fn abort(&self) {
-        self.state.store(ActorState::Stopping);
+        self.state.request_stop();
         self.sender.close_receiver();
         if let Some(inner) = self.cx_inner.upgrade() {
             let cancel_wakers = {
@@ -1075,7 +1098,14 @@ fn try_commit_supervised_restart(state: &ActorStateCell) -> bool {
     state.compare_and_swap(ActorState::Running, ActorState::Created)
 }
 
-async fn wait_supervised_restart_delay(cx: &Cx, delay: Duration) -> Outcome<(), JoinError> {
+/// Waits out a supervised restart backoff. Cancellation fails the wait; a
+/// stop requested meanwhile ends it early (`Ok`), and the caller's restart
+/// commit then sees `Stopping` and suppresses the restart.
+async fn wait_supervised_restart_delay(
+    cx: &Cx,
+    state: &ActorStateCell,
+    delay: Duration,
+) -> Outcome<(), JoinError> {
     if cx.checkpoint().is_err() {
         return Outcome::err(actor_cancel_join_error(cx));
     }
@@ -1094,6 +1124,11 @@ async fn wait_supervised_restart_delay(cx: &Cx, delay: Duration) -> Outcome<(), 
     std::future::poll_fn(|task_cx| {
         if cx.checkpoint().is_err() {
             return std::task::Poll::Ready(Outcome::err(actor_cancel_join_error(cx)));
+        }
+        // Register before checking, so a stop that lands in between wakes us.
+        state.register_stop_waker(task_cx.waker());
+        if state.load() == ActorState::Stopping {
+            return std::task::Poll::Ready(Outcome::ok(()));
         }
         Pin::new(&mut sleeper)
             .poll(task_cx)
@@ -1605,7 +1640,7 @@ where
 
                         // Apply backoff delay if the supervisor computed one.
                         if let Some(backoff) = delay {
-                            match wait_supervised_restart_delay(&cx, backoff).await {
+                            match wait_supervised_restart_delay(&cx, &cell.state, backoff).await {
                                 Outcome::Ok(()) => {}
                                 Outcome::Err(err) => return Err(err),
                                 Outcome::Cancelled(_) => return Err(actor_cancel_join_error(&cx)),
@@ -2812,7 +2847,12 @@ mod tests {
             Some(timer.clone()),
             None,
         );
-        let mut wait = Box::pin(wait_supervised_restart_delay(&cx, Duration::from_millis(5)));
+        let state = ActorStateCell::new(ActorState::Running);
+        let mut wait = Box::pin(wait_supervised_restart_delay(
+            &cx,
+            &state,
+            Duration::from_millis(5),
+        ));
         let mut task_cx = Context::from_waker(Waker::noop());
 
         assert!(matches!(
@@ -3020,6 +3060,87 @@ mod tests {
         }
 
         crate::test_complete!("supervised_actor_stop_during_restart_backoff_prevents_new_instance");
+    }
+
+    /// A stop during a supervised restart backoff ends the backoff at once:
+    /// the actor finishes without waiting for the backoff timer.
+    #[test]
+    fn supervised_actor_stop_ends_the_restart_backoff_without_waiting_for_it() {
+        use std::sync::atomic::AtomicU32;
+
+        #[derive(Debug)]
+        struct CrashingActor;
+
+        impl Actor for CrashingActor {
+            type Message = ();
+
+            fn handle(
+                &mut self,
+                _cx: &Cx,
+                _msg: (),
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                panic!("panic before delayed restart");
+            }
+        }
+
+        init_test("supervised_actor_stop_ends_the_restart_backoff_without_waiting_for_it");
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let cx: Cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
+        let factory_count = Arc::new(AtomicU32::new(0));
+        let fc = Arc::clone(&factory_count);
+        let strategy = crate::supervision::SupervisionStrategy::Restart(
+            crate::supervision::RestartConfig::new(3, Duration::from_secs(60)).with_backoff(
+                crate::supervision::BackoffStrategy::Fixed(Duration::from_secs(3600)),
+            ),
+        );
+        let (mut handle, stored) = scope
+            .spawn_supervised_actor(
+                &mut runtime.state,
+                &cx,
+                move || {
+                    fc.fetch_add(1, Ordering::Relaxed);
+                    CrashingActor
+                },
+                strategy,
+                8,
+            )
+            .expect("spawn supervised actor");
+        let task_id = handle.task_id();
+        runtime.state.store_spawned_task(task_id, stored);
+        handle.try_send(()).expect("queue panic message");
+        runtime.scheduler.lock().schedule(task_id, 0);
+        runtime.run_until_idle();
+        assert!(
+            !handle.is_finished(),
+            "the actor waits out its restart backoff"
+        );
+
+        // No virtual time passes: only the stop can end the hour-long backoff.
+        handle.stop();
+        runtime.run_until_idle();
+        assert!(
+            handle.is_finished(),
+            "the stop ends the backoff instead of waiting for its timer"
+        );
+        assert_eq!(
+            factory_count.load(Ordering::SeqCst),
+            1,
+            "the stop suppresses the restart"
+        );
+        match futures_lite::future::block_on(handle.join(&cx)) {
+            Err(JoinError::Panicked(payload)) => assert_eq!(
+                payload.message(),
+                "panic before delayed restart",
+                "the original panic surfaces when the stop suppresses the restart"
+            ),
+            other => panic!("expected the original panic, got {other:?}"),
+        }
+
+        crate::test_complete!(
+            "supervised_actor_stop_ends_the_restart_backoff_without_waiting_for_it"
+        );
     }
 
     #[test]
@@ -3243,8 +3364,10 @@ mod tests {
         let cx = Cx::for_testing();
         cx.cancel_fast(crate::types::CancelKind::User);
 
+        let state = ActorStateCell::new(ActorState::Running);
         let mut delay = std::pin::pin!(wait_supervised_restart_delay(
             &cx,
+            &state,
             std::time::Duration::from_secs(60),
         ));
         let first_poll =
