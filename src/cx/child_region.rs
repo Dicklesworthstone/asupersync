@@ -46,7 +46,7 @@ use crate::record::region::RegionCloseState;
 use crate::runtime::region_table::RegionCreateError;
 use crate::runtime::resource_monitor::RegionPriority;
 use crate::runtime::spawn_mailbox::{
-    AdmittedRegionSlot, RegionCommand, RegionLiveTasksQuery, SpawnGateway,
+    AdmittedRegionSlot, RegionCommand, RegionLiveTasksQuery, SpawnGateway, TeardownWake,
 };
 use crate::types::{
     Budget, CancelReason, CapabilityBudget, CapabilityBudgetRequirements, RegionId, TaskId,
@@ -248,12 +248,15 @@ impl<Caps> Future for ChildRegionOpening<Caps> {
             });
         }
         // Fail closed when the runtime vanished before publication; a live
-        // runtime keeps the registration until the worker publishes.
+        // runtime keeps the registration until the worker publishes. The
+        // waker is registered first: teardown drops the liveness token and
+        // only then wakes registered waiters, so a teardown racing this poll
+        // is either seen here or wakes this registration.
+        slot.register(cx.waker().clone());
         if liveness.upgrade().is_none() {
             this.pending = None;
             return Poll::Ready(Err(ChildRegionError::RuntimeUnavailable));
         }
-        slot.register(cx.waker().clone());
         Poll::Pending
     }
 }
@@ -402,10 +405,7 @@ impl<Caps> ChildRegion<Caps> {
         self.enqueue(RegionCommand::Close {
             region_id: self.region_id,
         })?;
-        RegionQuiescence {
-            state: Arc::clone(&self.close_notify),
-        }
-        .await;
+        self.quiescence().await?;
         self.close_receipt
             .lock()
             .clone()
@@ -429,11 +429,7 @@ impl<Caps> ChildRegion<Caps> {
         self.enqueue(RegionCommand::Close {
             region_id: self.region_id,
         })?;
-        let waiter = RegionQuiescence {
-            state: Arc::clone(&self.close_notify),
-        };
-        waiter.await;
-        Ok(())
+        self.quiescence().await
     }
 
     /// Begins the close protocol like [`ChildRegion::close`], but waits at
@@ -466,10 +462,16 @@ impl<Caps> ChildRegion<Caps> {
         self.enqueue(RegionCommand::Close {
             region_id: self.region_id,
         })?;
-        let waiter = RegionQuiescence {
-            state: Arc::clone(&self.close_notify),
+        let quiescent = match crate::time::timeout(started, bound, self.quiescence()).await {
+            Ok(closed) => {
+                closed?;
+                true
+            }
+            // The timeout checks its deadline before polling the region, so
+            // a region that reached Closed in time, but was polled late,
+            // would still read as timed out.
+            Err(_elapsed) => self.close_notify.lock().closed,
         };
-        let quiescent = crate::time::timeout(started, bound, waiter).await.is_ok();
         let elapsed = Duration::from_nanos(self.cx.now().duration_since(started));
         let (outcome, stragglers) = if quiescent {
             (ChildRegionCloseOutcome::Quiescent, Vec::new())
@@ -481,6 +483,20 @@ impl<Caps> ChildRegion<Caps> {
             elapsed,
             stragglers,
         })
+    }
+
+    /// Waits for this region to reach `Closed`. Runtime teardown wakes the
+    /// wait, which then fails closed instead of pending forever when it is
+    /// awaited outside the runtime (the werypv shape for monitors).
+    fn quiescence(&self) -> RegionQuiescence {
+        if let Some(gateway) = &self.gateway {
+            let watch = Arc::downgrade(&self.close_notify);
+            gateway.mailbox().register_teardown_wake(watch);
+        }
+        RegionQuiescence {
+            state: Arc::clone(&self.close_notify),
+            gateway: self.gateway.clone(),
+        }
     }
 
     /// The live tasks of this region and its descendants, as the runtime
@@ -511,18 +527,20 @@ impl<Caps> Drop for ChildRegion<Caps> {
     }
 }
 
-/// Resolves once the observed region reaches terminal `Closed`.
+/// Resolves once the observed region reaches terminal `Closed`, or fails
+/// closed once the runtime that owns it is gone.
 struct RegionQuiescence {
     state: Arc<Mutex<RegionCloseState>>,
+    gateway: Option<Arc<SpawnGateway>>,
 }
 
 impl Future for RegionQuiescence {
-    type Output = ();
+    type Output = Result<(), ChildRegionError>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut state = self.state.lock();
         if state.closed {
-            return Poll::Ready(());
+            return Poll::Ready(Ok(()));
         }
         if !state
             .waiters
@@ -531,7 +549,27 @@ impl Future for RegionQuiescence {
         {
             state.waiters.push(cx.waker().clone());
         }
+        drop(state);
+        // Checked after registering: teardown drops the liveness token and
+        // then wakes this state's waiters, so a teardown racing this poll is
+        // either seen here or wakes the registration above.
+        if self
+            .gateway
+            .as_ref()
+            .is_some_and(|gateway| gateway.liveness_guard().is_none())
+        {
+            return Poll::Ready(Err(ChildRegionError::RuntimeUnavailable));
+        }
         Poll::Pending
+    }
+}
+
+impl TeardownWake for Mutex<RegionCloseState> {
+    fn wake_for_teardown(&self) {
+        let waiters = std::mem::take(&mut self.lock().waiters);
+        for waker in waiters {
+            waker.wake();
+        }
     }
 }
 #[cfg(test)]
@@ -1086,6 +1124,111 @@ mod tests {
             observed.windows(2).all(|pair| pair[0] == pair[1]),
             "virtual-time elapsed differs across seeds: {observed:?}"
         );
+    }
+
+    struct CountWakes(std::sync::atomic::AtomicUsize);
+
+    impl std::task::Wake for CountWakes {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// A close awaited outside the runtime is woken by the runtime's teardown
+    /// and fails closed, instead of pending forever on a region that can no
+    /// longer finish closing (the monitor-watch teardown shape, werypv).
+    #[test]
+    fn teardown_wakes_a_close_awaited_outside_the_runtime() {
+        use crate::lab::{LabConfig, LabRuntime};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let mut lab = LabRuntime::new(LabConfig::new(0x0C1_05E0).max_steps(4096));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let slot = Arc::new(Mutex::new(None));
+        let slot_for_owner = Arc::clone(&slot);
+        let (owner, _join) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("lab task cx");
+                let child = cx
+                    .open_child_region(ChildRegionSpec::inherit())
+                    .await
+                    .expect("child region");
+                // Never finishes, so the region cannot reach Closed.
+                let _parked = child
+                    .cx()
+                    .spawn(|_task_cx| std::future::pending::<()>())
+                    .expect("spawn parked task");
+                *slot_for_owner.lock() = Some(child);
+            })
+            .expect("create owner");
+        lab.scheduler.lock().schedule(owner, 0);
+        lab.run_until_idle();
+        let child = slot
+            .lock()
+            .take()
+            .expect("the owner opened the child region");
+
+        let wakes = Arc::new(CountWakes(AtomicUsize::new(0)));
+        let waker = std::task::Waker::from(Arc::clone(&wakes));
+        let mut context = Context::from_waker(&waker);
+        let mut closing = Box::pin(child.close());
+        assert!(closing.as_mut().poll(&mut context).is_pending());
+        lab.run_until_idle();
+        assert!(
+            closing.as_mut().poll(&mut context).is_pending(),
+            "the parked task keeps the region closing"
+        );
+        let before = wakes.0.load(Ordering::SeqCst);
+
+        drop(lab);
+        assert!(
+            wakes.0.load(Ordering::SeqCst) > before,
+            "teardown wakes the waiting close"
+        );
+        assert!(matches!(
+            closing.as_mut().poll(&mut context),
+            Poll::Ready(Err(ChildRegionError::RuntimeUnavailable))
+        ));
+    }
+
+    /// `close_within` reports a region that reached `Closed` before its bound
+    /// as quiescent, even when it is first polled after the deadline: the
+    /// timeout checks the deadline before it polls the region.
+    #[test]
+    fn close_within_reports_an_already_closed_region_as_quiescent() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build runtime");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("root cx");
+            let child = cx
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .expect("child region");
+            // An empty region closes as soon as the cancel is applied.
+            child
+                .cancel(CancelReason::user("closed before the bounded close"))
+                .expect("cancel");
+            let close_state = Arc::clone(&child.close_notify);
+            let mut turns = 0_u32;
+            while !close_state.lock().closed {
+                turns += 1;
+                assert!(turns < 100_000, "the cancelled region never closed");
+                crate::runtime::yield_now().await;
+            }
+
+            let report = child
+                .close_within(Duration::ZERO)
+                .await
+                .expect("close report");
+            assert_eq!(
+                report.outcome,
+                ChildRegionCloseOutcome::Quiescent,
+                "{report:?}"
+            );
+            assert!(report.stragglers.is_empty(), "{report:?}");
+        });
     }
 
     /// The runtime owns this future, including its retirement. Counting actual
