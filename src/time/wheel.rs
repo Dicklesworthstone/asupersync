@@ -41,6 +41,10 @@ use std::time::Duration;
 pub type WakerBatch = SmallVec<[Waker; 4]>;
 
 const LEVEL_COUNT: usize = 4;
+
+/// Cancelled entries tolerated beyond twice the live timers before
+/// `TimerWheel::cancel` compacts stored entries.
+const COMPACTION_SLACK: usize = 1024;
 const SLOTS_PER_LEVEL: usize = 256;
 const LEVEL0_RESOLUTION_NS: u64 = 1_000_000; // 1ms
 
@@ -381,6 +385,11 @@ pub struct TimerWheel {
     coalescing: CoalescingConfig,
     max_wheel_duration_ns: u64,
     max_timer_duration_ns: u64,
+    /// Cancellations since stored entries were last compacted. A cancelled
+    /// entry stays in its slot until the slot is visited, which for a
+    /// higher-level or overflow timer can be minutes or days; this bounds how
+    /// many accumulate (br-asupersync-m85zfi).
+    cancelled_since_compaction: usize,
 }
 
 impl TimerWheel {
@@ -424,6 +433,7 @@ impl TimerWheel {
             coalescing,
             max_wheel_duration_ns,
             max_timer_duration_ns,
+            cancelled_since_compaction: 0,
         }
     }
 
@@ -462,6 +472,7 @@ impl TimerWheel {
             }
             level.occupied = [0u64; BITMAP_WORDS];
         }
+        self.cancelled_since_compaction = 0;
     }
 
     /// Returns the current time aligned to the wheel resolution.
@@ -560,6 +571,11 @@ impl TimerWheel {
             self.active.remove(id_usize);
             if self.active.is_empty() {
                 self.purge_inactive_storage();
+            } else {
+                self.cancelled_since_compaction += 1;
+                if self.cancelled_since_compaction > self.active.len() * 2 + COMPACTION_SLACK {
+                    self.compact_inactive_storage();
+                }
             }
             true
         } else {
@@ -597,29 +613,36 @@ impl TimerWheel {
         }
 
         // Take the minimum across ALL levels. Early-returning after the first
-        // level (or first occupied slot) that yields a candidate is unsound:
-        // levels are not deadline-ordered near cursor-wrap boundaries. A
-        // level-1 slot that has not cascaded yet can hold an entry whose
-        // deadline is EARLIER than a wrapped-around level-0 entry (e.g. at
-        // tick 200: level 1 slot 1 holds deadline-tick 300 awaiting the
-        // tick-256 cascade, while level 0 holds a wrapped entry at tick 400).
-        // Reporting the level-0 minimum would make the driver oversleep and
-        // fire the level-1 timer late. The occupied bitmap keeps this scan
-        // cheap: only set bits are visited.
+        // level that yields a candidate is unsound: levels are not
+        // deadline-ordered near cursor-wrap boundaries. A level-1 slot that
+        // has not cascaded yet can hold an entry whose deadline is EARLIER
+        // than a wrapped-around level-0 entry (e.g. at tick 200: level 1 slot
+        // 1 holds deadline-tick 300 awaiting the tick-256 cascade, while level
+        // 0 holds a wrapped entry at tick 400). Reporting the level-0 minimum
+        // would make the driver oversleep and fire the level-1 timer late.
+        //
+        // Within one level the slots ARE ordered: an entry stored at level k
+        // has its level-k tick within one revolution ahead of the level's
+        // cursor (cascades keep every cursor at the current tick), so the
+        // slots from `cursor + 1` around to `cursor` itself hold strictly
+        // increasing ticks. The first slot there holding a live entry holds
+        // the level's earliest deadline; later slots need not be scanned, and
+        // slots holding only cancelled entries are skipped
+        // (br-asupersync-m85zfi).
         for level in &self.levels {
-            for (word_idx, &word) in level.occupied.iter().enumerate() {
-                let mut word = word;
-                while word != 0 {
-                    let bit = word.trailing_zeros() as usize;
-                    word &= word - 1;
-                    let slot = word_idx * 64 + bit;
-                    for entry in &level.slots[slot] {
-                        if !self.is_live(entry) {
-                            continue;
-                        }
-                        min_deadline =
-                            Some(min_deadline.map_or(entry.deadline, |c| c.min(entry.deadline)));
-                    }
+            for offset in 1..=SLOTS_PER_LEVEL {
+                let slot = (level.cursor + offset) % SLOTS_PER_LEVEL;
+                if !level.is_occupied(slot) {
+                    continue;
+                }
+                let earliest = level.slots[slot]
+                    .iter()
+                    .filter(|entry| self.is_live(entry))
+                    .map(|entry| entry.deadline)
+                    .min();
+                if let Some(deadline) = earliest {
+                    min_deadline = Some(min_deadline.map_or(deadline, |c| c.min(deadline)));
+                    break;
                 }
             }
         }
@@ -1105,6 +1128,37 @@ impl TimerWheel {
             }
             level.occupied = [0u64; BITMAP_WORDS];
         }
+        self.cancelled_since_compaction = 0;
+    }
+
+    /// Drops every stored entry whose timer was cancelled, keeping live ones
+    /// where they are. Called from `cancel` once the cancellations since the
+    /// last compaction exceed twice the live timers plus a constant, so the
+    /// cost is amortized O(1) per cancel.
+    fn compact_inactive_storage(&mut self) {
+        let active = &self.active;
+        let live = |entry: &TimerEntry| {
+            active
+                .get(entry.id as usize)
+                .is_some_and(|generation| *generation == entry.generation)
+        };
+        self.ready.retain(|entry| live(entry));
+        let overflow = std::mem::take(&mut self.overflow).into_vec();
+        self.overflow = overflow
+            .into_iter()
+            .filter(|entry| live(&entry.entry))
+            .collect();
+        for level in &mut self.levels {
+            for slot in 0..SLOTS_PER_LEVEL {
+                if level.is_occupied(slot) {
+                    level.slots[slot].retain(|entry| live(entry));
+                    if level.slots[slot].is_empty() {
+                        level.clear_occupied(slot);
+                    }
+                }
+            }
+        }
+        self.cancelled_since_compaction = 0;
     }
 }
 
@@ -1481,6 +1535,130 @@ mod tests {
         let wakers = wheel.collect_expired(Time::from_millis(300));
         crate::assert_with_log!(wakers.len() == 1, "A fires at 300ms", 1, wakers.len());
         crate::test_complete!("next_deadline_sees_earlier_uncascaded_higher_level_entry");
+    }
+
+    /// Every stored entry, live or cancelled.
+    fn stored_entries(wheel: &TimerWheel) -> usize {
+        wheel.ready.len()
+            + wheel.overflow.len()
+            + wheel
+                .levels
+                .iter()
+                .map(|level| level.slots.iter().map(Vec::len).sum::<usize>())
+                .sum::<usize>()
+    }
+
+    /// The earliest deadline by scanning every live entry, as next_deadline
+    /// did before it stopped at each level's first live slot.
+    fn next_deadline_by_full_scan(wheel: &TimerWheel) -> Option<Time> {
+        let current = wheel.current_time();
+        let ready: Vec<Time> = wheel
+            .ready
+            .iter()
+            .filter(|entry| wheel.is_live(entry))
+            .map(|entry| entry.deadline)
+            .collect();
+        if !ready.is_empty() {
+            return ready.iter().min().map(|&earliest| {
+                if earliest <= current {
+                    current
+                } else {
+                    earliest
+                }
+            });
+        }
+        wheel
+            .levels
+            .iter()
+            .flat_map(|level| level.slots.iter().flatten())
+            .chain(wheel.overflow.iter().map(|entry| &entry.entry))
+            .filter(|entry| wheel.is_live(entry))
+            .map(|entry| entry.deadline)
+            .min()
+    }
+
+    #[test]
+    fn next_deadline_matches_a_full_scan_under_random_churn() {
+        // br-asupersync-m85zfi: next_deadline stops at each level's first slot
+        // holding a live entry instead of scanning every entry under the
+        // driver lock. Random registrations across every level and the
+        // overflow, cancellations and advances must give the same answer as
+        // a full scan at every step.
+        init_test("next_deadline_matches_a_full_scan_under_random_churn");
+        let mut wheel = TimerWheel::new();
+        let mut handles = Vec::new();
+        let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut now = Time::ZERO;
+        for step in 0..6_000 {
+            match next() % 10 {
+                0..=4 => {
+                    // Offsets from sub-tick to beyond the 4-level wheel.
+                    let offset_ms = match next() % 5 {
+                        0 => next() % 300,
+                        1 => next() % 70_000,
+                        2 => next() % 20_000_000,
+                        3 => next() % 5_000_000_000,
+                        _ => next() % 10,
+                    };
+                    let deadline =
+                        now.saturating_add_nanos(offset_ms * 1_000_000 + next() % 1_000_000);
+                    handles
+                        .push(wheel.register(deadline, counter_waker(Arc::new(AtomicU64::new(0)))));
+                }
+                5..=7 if !handles.is_empty() => {
+                    let index = (next() as usize) % handles.len();
+                    let handle = handles.swap_remove(index);
+                    let _ = wheel.cancel(&handle);
+                }
+                _ => {
+                    let step_ms = match next() % 3 {
+                        0 => next() % 5,
+                        1 => next() % 1_000,
+                        _ => next() % 600_000,
+                    };
+                    now = now.saturating_add_nanos(step_ms * 1_000_000);
+                    let _ = wheel.collect_expired(now);
+                }
+            }
+            let expected = next_deadline_by_full_scan(&wheel);
+            assert_eq!(wheel.next_deadline(), expected, "step {step}");
+        }
+        crate::test_complete!("next_deadline_matches_a_full_scan_under_random_churn");
+    }
+
+    #[test]
+    fn cancelled_timers_do_not_accumulate_in_the_wheel() {
+        // br-asupersync-m85zfi: a cancelled timer stayed in its slot until the
+        // slot was visited, minutes away for a higher-level timer, so a server
+        // that cancels most of its timeouts kept millions of dead entries.
+        init_test("cancelled_timers_do_not_accumulate_in_the_wheel");
+        let mut wheel = TimerWheel::new();
+        let keep = wheel.register(
+            Time::from_secs(3_600),
+            counter_waker(Arc::new(AtomicU64::new(0))),
+        );
+        for index in 0..5_000_u64 {
+            let handle = wheel.register(
+                Time::from_secs(3_600) + Duration::from_millis(index),
+                counter_waker(Arc::new(AtomicU64::new(0))),
+            );
+            assert!(wheel.cancel(&handle));
+        }
+        assert_eq!(wheel.len(), 1);
+        assert!(
+            stored_entries(&wheel) <= 2 * wheel.len() + COMPACTION_SLACK + 1,
+            "cancelled entries are compacted, stored {}",
+            stored_entries(&wheel)
+        );
+        assert_eq!(wheel.next_deadline(), Some(Time::from_secs(3_600)));
+        assert!(wheel.cancel(&keep));
+        crate::test_complete!("cancelled_timers_do_not_accumulate_in_the_wheel");
     }
 
     #[test]
