@@ -1127,6 +1127,15 @@ impl WorkerCoordinator {
         self.notify_wake();
     }
 
+    /// Wakes the I/O driver, so a worker blocked in the reactor as its idle
+    /// leader returns and re-checks its queues.
+    #[inline]
+    pub(crate) fn wake_io_driver(&self) {
+        if let Some(io) = &self.io_driver {
+            let _ = io.wake();
+        }
+    }
+
     /// Publishes one concrete Parker permit without calling the reactor.
     ///
     /// RuntimeState uses this beneath its outer lock after enqueueing deferred
@@ -1354,6 +1363,20 @@ impl Drop for ScopedLocalReady {
             *cell.borrow_mut() = self.prev.take();
         });
     }
+}
+
+/// Whether this thread is running the dispatch loop of the worker that owns
+/// `queue`. That loop checks `local_ready` before it waits again, so a wake
+/// raised here needs no reactor wake (br-asupersync-kopidb H1).
+#[inline]
+fn thread_drives_local_ready(queue: &Arc<LocalReadyQueue>) -> bool {
+    CURRENT_LOCAL_READY
+        .try_with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, queue))
+        })
+        .unwrap_or(false)
 }
 
 /// Schedules a local (`!Send`) task on the current thread's non-stealable queue.
@@ -9266,6 +9289,14 @@ impl ThreeLaneLocalWaker {
                     .record_task_enqueue(self.task_id, crate::time::wall_now().as_nanos());
             }
             self.parker.unpark();
+            // The owning worker may be the idle reactor leader, blocked in the
+            // I/O driver where its parker cannot reach it; it would see this
+            // task only at the next reactor timeout (up to the next timer).
+            // A wake raised on the thread running that worker's loop needs no
+            // reactor wake (br-asupersync-kopidb H1).
+            if !thread_drives_local_ready(&self.local_ready) {
+                self.coordinator.wake_io_driver();
+            }
             self.coordinator.notify_wake();
         }
     }
@@ -9393,6 +9424,11 @@ impl ThreeLaneLocalCancelWaker {
                 .record_task_enqueue(self.task_id, crate::time::wall_now().as_nanos());
         }
         self.parker.unpark();
+        // As in ThreeLaneLocalWaker::schedule: reach an owner blocked in the
+        // reactor unless this thread runs its loop (br-asupersync-kopidb H1).
+        if !thread_drives_local_ready(&self.local_ready) {
+            self.coordinator.wake_io_driver();
+        }
         self.coordinator.notify_wake();
     }
 }
@@ -9570,6 +9606,67 @@ mod lifo_slot_tests {
         assert!(
             ran.is_ok(),
             "a task outside the waking chain never ran: the LIFO slot starved it"
+        );
+    }
+}
+
+#[cfg(test)]
+mod local_wake_reactor_tests {
+    use super::*;
+    use crate::channel::{mpsc, oneshot};
+    use crate::runtime::RuntimeBuilder;
+
+    /// br-asupersync-kopidb H1: a `!Send` local task woken from a plain thread
+    /// runs promptly while its worker idles in the reactor with a far timer
+    /// armed. Before the fix the wake only unparked the worker, which was
+    /// blocked in the reactor, so the task waited for the 30 s timer.
+    #[test]
+    fn a_local_task_woken_from_another_thread_does_not_wait_for_the_reactor_timeout() {
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<Duration>();
+        std::thread::spawn(move || {
+            let rt = RuntimeBuilder::current_thread()
+                .build()
+                .expect("current-thread runtime");
+            let elapsed = rt.block_on(rt.handle().spawn(async move {
+                let cx = crate::Cx::current().expect("a spawned task has a Cx");
+                // A 30 s timer, so an idle reactor turn waits up to 30 s. The
+                // task waits in a cancel-aware recv, so the abort below ends it.
+                let (_keep, mut never) = mpsc::channel::<u8>(1);
+                let mut sleeper = cx
+                    .spawn(move |cx| async move {
+                        let _ = crate::time::timeout(
+                            cx.now(),
+                            Duration::from_secs(30),
+                            never.recv(&cx),
+                        )
+                        .await;
+                    })
+                    .expect("spawn the timer task");
+                let (tx, mut rx) = oneshot::channel::<u32>();
+                let mut local = cx
+                    .spawn_local(move |cx| async move { rx.recv(&cx).await.ok() })
+                    .expect("spawn the local task");
+                let sender = std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(50));
+                    let _ = tx.send_blocking(7);
+                });
+                let start = std::time::Instant::now();
+                let value = local.join(&cx).await.expect("the local task");
+                let elapsed = start.elapsed();
+                assert_eq!(value, Some(7), "the local task received the value");
+                sender.join().expect("the sender thread");
+                sleeper.abort();
+                let _ = sleeper.join(&cx).await;
+                elapsed
+            }));
+            let _ = done_tx.send(elapsed);
+        });
+        let elapsed = done_rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the runtime thread finished");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the local task waited {elapsed:?}: its wake did not reach the worker blocked in the reactor"
         );
     }
 }
