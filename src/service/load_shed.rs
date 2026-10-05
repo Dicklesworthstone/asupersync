@@ -40,17 +40,43 @@ fn tracked_probe_waker(delegate: &Waker) -> (Waker, Arc<AtomicBool>) {
     (waker, woke)
 }
 
+/// The probe waker a [`LoadShed`] polls its inner service with, kept across
+/// `poll_ready` calls while the task's waker stays the same. A fresh probe per
+/// poll would look like a new task to an inner service that de-duplicates
+/// wakers with `will_wake` (`Buffer`), which then queues one more waker for
+/// every shed request.
+#[derive(Debug)]
+struct ReadinessProbe {
+    waker: Waker,
+    woke: Arc<AtomicBool>,
+    delegate: Waker,
+}
+
 fn poll_ready_preserving_self_wake<S, Request>(
     service: &mut S,
+    probe: &mut Option<ReadinessProbe>,
     cx: &mut Context<'_>,
 ) -> Poll<Result<(), S::Error>>
 where
     S: Service<Request>,
 {
-    let (probe_waker, woke_during_poll) = tracked_probe_waker(cx.waker());
-    let mut probe_cx = Context::from_waker(&probe_waker);
+    if !probe
+        .as_ref()
+        .is_some_and(|probe| probe.delegate.will_wake(cx.waker()))
+    {
+        let (waker, woke) = tracked_probe_waker(cx.waker());
+        *probe = Some(ReadinessProbe {
+            waker,
+            woke,
+            delegate: cx.waker().clone(),
+        });
+    }
+    let probe = probe.as_ref().expect("probe installed above");
+    // Only a wake during this poll counts as a self-wake.
+    probe.woke.store(false, Ordering::SeqCst);
+    let mut probe_cx = Context::from_waker(&probe.waker);
     let mut readiness = service.poll_ready(&mut probe_cx);
-    if matches!(readiness, Poll::Pending) && woke_during_poll.load(Ordering::SeqCst) {
+    if matches!(readiness, Poll::Pending) && probe.woke.load(Ordering::SeqCst) {
         readiness = service.poll_ready(cx);
     }
     readiness
@@ -106,6 +132,7 @@ pub struct LoadShed<S> {
     inner: S,
     overloaded: bool,
     ready_observed: bool,
+    probe: Option<ReadinessProbe>,
 }
 
 impl<S: Clone> Clone for LoadShed<S> {
@@ -115,6 +142,7 @@ impl<S: Clone> Clone for LoadShed<S> {
             overloaded: self.overloaded,
             // Readiness is handle-local and must not be duplicated across clones.
             ready_observed: false,
+            probe: None,
         }
     }
 }
@@ -127,6 +155,7 @@ impl<S> LoadShed<S> {
             inner,
             overloaded: false,
             ready_observed: false,
+            probe: None,
         }
     }
 
@@ -219,7 +248,7 @@ where
 
     #[inline]
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        match poll_ready_preserving_self_wake::<S, Request>(&mut self.inner, cx) {
+        match poll_ready_preserving_self_wake::<S, Request>(&mut self.inner, &mut self.probe, cx) {
             Poll::Ready(Ok(())) => {
                 self.overloaded = false;
                 self.ready_observed = true;
@@ -738,6 +767,48 @@ mod tests {
             calls.load(Ordering::SeqCst)
         );
         crate::test_complete!("load_shed_clone_does_not_inherit_ready_window");
+    }
+
+    #[test]
+    fn load_shed_reuses_its_probe_waker_while_shedding_over_a_full_buffer() {
+        init_test("load_shed_reuses_its_probe_waker_while_shedding_over_a_full_buffer");
+        struct CountWakes(Arc<AtomicUsize>);
+        impl std::task::Wake for CountWakes {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let buffer = crate::service::Buffer::new(ReadyService, 1);
+        let mut holder = buffer.clone();
+        let noop = noop_waker();
+        let held = Service::<i32>::poll_ready(&mut holder, &mut Context::from_waker(&noop));
+        assert!(
+            matches!(held, Poll::Ready(Ok(()))),
+            "the holder reserves the only slot"
+        );
+
+        let mut shed = LoadShed::new(buffer);
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(CountWakes(Arc::clone(&wakes))));
+        let mut cx = Context::from_waker(&waker);
+        for _ in 0..100 {
+            let ready = Service::<i32>::poll_ready(&mut shed, &mut cx);
+            assert!(
+                matches!(ready, Poll::Ready(Ok(()))),
+                "the shedder stays ready"
+            );
+            assert!(shed.is_overloaded(), "a full buffer is shed");
+        }
+
+        // Releasing the slot wakes each distinct waker the buffer queued.
+        drop(holder);
+        crate::assert_with_log!(
+            wakes.load(Ordering::SeqCst) == 1,
+            "one task polling 100 times is queued, and woken, once",
+            1,
+            wakes.load(Ordering::SeqCst)
+        );
+        crate::test_complete!("load_shed_reuses_its_probe_waker_while_shedding_over_a_full_buffer");
     }
 
     #[test]
