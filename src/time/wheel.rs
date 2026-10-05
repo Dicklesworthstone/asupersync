@@ -18,8 +18,8 @@
 //!
 //! When enabled, nearby timers can be grouped together to reduce the number of wakeups.
 //! Timers within the configured coalesce window fire together when the window boundary
-//! is reached. This is useful for reducing CPU overhead when many timers have similar
-//! deadlines.
+//! is reached, never before their own deadlines. This is useful for reducing CPU
+//! overhead when many timers have similar deadlines.
 //!
 //! # Performance Characteristics
 //!
@@ -58,6 +58,17 @@ const LEVEL_RESOLUTIONS_NS: [u64; LEVEL_COUNT] = [
 #[inline]
 fn duration_to_u64_nanos(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
+/// The end of the coalescing window that holds `time`: the first multiple of
+/// `window` at or after it. Windows are `(end - window, end]`. `None` when
+/// that end is past `Time::MAX`; such a timer is not coalesced.
+#[inline]
+fn window_end(time: Time, window: u64) -> Option<Time> {
+    time.as_nanos()
+        .div_ceil(window)
+        .checked_mul(window)
+        .map(Time::from_nanos)
 }
 
 // =============================================================================
@@ -119,7 +130,9 @@ impl TimerWheelConfig {
 ///
 /// Coalescing groups nearby timers together to reduce the number of wakeups.
 /// When multiple timers fall within the same coalesce window, they all fire
-/// at the window boundary rather than at their individual deadlines.
+/// at the window boundary rather than at their individual deadlines. The
+/// boundary is the end of the window, so a coalesced timer never fires
+/// before its deadline; it can fire up to one window later.
 #[derive(Debug, Clone)]
 pub struct CoalescingConfig {
     /// Timers within this window fire together.
@@ -127,7 +140,7 @@ pub struct CoalescingConfig {
     /// Default: 1ms
     pub coalesce_window: Duration,
 
-    /// Minimum number of timers in a slot before coalescing takes effect.
+    /// Minimum number of timers in a window before coalescing takes effect.
     ///
     /// Set to 1 to always coalesce, or higher to only coalesce when there
     /// are many timers (reducing overhead for sparse timers).
@@ -583,19 +596,43 @@ impl TimerWheel {
         }
     }
 
-    /// Returns the earliest pending deadline, if any.
+    /// Returns the earliest time at which a pending timer fires, if any.
+    ///
+    /// With coalescing, a timer whose window holds a group fires at the end
+    /// of that window, which is at or after its own deadline, so that end is
+    /// reported for it.
     #[must_use]
     pub fn next_deadline(&mut self) -> Option<Time> {
+        let raw = self.raw_next_deadline()?;
+        let Some(window) = self.coalescing_window_ns() else {
+            return Some(raw);
+        };
         let current = self.current_time();
-
-        // With coalescing enabled, collect_expired(now) can legally fire a
-        // whole in-window group immediately, before the group's raw earliest
-        // deadline. next_deadline() must report that immediate readiness or
-        // callers can oversleep past the actual coalesced wake point.
-        if self.coalescing.enabled && self.coalescing_group_size(current) > 0 {
-            return Some(current);
+        if raw <= current {
+            // Something is due. It waits only when every due timer sits in
+            // the current window and that window holds a group.
+            let Some(end) = window_end(current, window) else {
+                return Some(current);
+            };
+            let all_due_wait = end > current
+                && self.window_holds_group(end, window)
+                && self
+                    .ready
+                    .iter()
+                    .filter(|entry| self.is_live(entry) && entry.deadline <= current)
+                    .all(|entry| window_end(entry.deadline, window) == Some(end));
+            return Some(if all_due_wait { end } else { current });
         }
+        match window_end(raw, window) {
+            Some(end) if end > raw && self.window_holds_group(end, window) => Some(end),
+            _ => Some(raw),
+        }
+    }
 
+    /// The earliest live deadline, clamped to the current time when a timer
+    /// is already due; ignores coalescing.
+    fn raw_next_deadline(&mut self) -> Option<Time> {
+        let current = self.current_time();
         let mut min_deadline: Option<Time> = None;
 
         for entry in &self.ready {
@@ -879,105 +916,25 @@ impl TimerWheel {
         }
     }
 
-    fn promote_coalescing_window_entries(&mut self, boundary: Time, ready: &mut Vec<TimerEntry>) {
-        let boundary_ns = boundary.as_nanos();
-        for level in &mut self.levels {
-            let now_nanos = self.current_tick.saturating_mul(LEVEL0_RESOLUTION_NS);
-            let level_tick_current = now_nanos / level.resolution_ns;
-            let level_tick_boundary = boundary_ns / level.resolution_ns;
-
-            if level_tick_boundary < level_tick_current {
-                continue;
-            }
-
-            let current_slot = (level_tick_current % (SLOTS_PER_LEVEL as u64)) as usize;
-            // Compare in u64 before narrowing to usize: on 32-bit targets, a
-            // direct `as usize` cast of a wide difference would silently
-            // truncate the high bits and could bypass the SLOTS_PER_LEVEL
-            // clamp, causing us to miss timer slots that are far in the
-            // future.
-            let diff_u64 = level_tick_boundary - level_tick_current;
-            let diff = if diff_u64 >= SLOTS_PER_LEVEL as u64 {
-                SLOTS_PER_LEVEL - 1
-            } else {
-                diff_u64 as usize
-            };
-
-            for i in 0..=diff {
-                let slot_idx = (current_slot + i) % SLOTS_PER_LEVEL;
-                if !level.is_occupied(slot_idx) {
-                    continue;
-                }
-
-                let slot_empty = {
-                    let slot = &mut level.slots[slot_idx];
-                    let mut j = 0;
-                    while j < slot.len() {
-                        if slot[j].deadline <= boundary {
-                            ready.push(slot.swap_remove(j));
-                        } else {
-                            j += 1;
-                        }
-                    }
-                    slot.is_empty()
-                };
-                if slot_empty {
-                    level.clear_occupied(slot_idx);
-                }
-            }
-        }
-
-        while self.overflow.peek().is_some_and(|e| e.deadline <= boundary) {
-            let entry = self.overflow.pop().expect("peeked entry missing");
-            ready.push(entry.entry);
-        }
-    }
-
     fn drain_ready(&mut self, now: Time) -> WakerBatch {
-        if self.ready.is_empty() && !self.coalescing.enabled {
+        if self.ready.is_empty() {
             return WakerBatch::new();
         }
+
+        // With coalescing, a due timer in the current window waits for that
+        // window's end when the window holds a group: a coalesced timer fires
+        // at the first window boundary at or after its deadline, never before
+        // it (br-asupersync-m85zfi LOW 3).
+        let held_window = self.coalescing_window_ns().and_then(|window| {
+            let end = window_end(now, window)?;
+            (end > now && self.window_holds_group(end, window)).then_some((end, window))
+        });
 
         let mut wakers = WakerBatch::new();
 
         // Take the ready vec out so we can mutate it in-place while also
-        // accessing self.active / self.coalescing through &mut self.
+        // accessing self.active through &mut self.
         let mut ready = std::mem::take(&mut self.ready);
-
-        // Calculate the coalesced time boundary if coalescing is enabled.
-        // Coalescing only applies when there are enough timers in-window.
-        let coalesced_time = if self.coalescing.enabled {
-            let window_ns = self
-                .coalescing
-                .coalesce_window
-                .as_nanos()
-                .min(u128::from(u64::MAX)) as u64;
-            if window_ns == 0 {
-                None
-            } else {
-                let now_ns = now.as_nanos();
-                // Compute the next coalescing window boundary with saturation.
-                // At very large logical times, `((now/window)+1)*window` can overflow.
-                now_ns.checked_div(window_ns).map(|quotient| {
-                    let window_end_ns = quotient.saturating_add(1).saturating_mul(window_ns);
-                    Time::from_nanos(window_end_ns)
-                })
-            }
-        } else {
-            None
-        };
-        if let Some(boundary) = coalesced_time {
-            self.promote_coalescing_window_entries(boundary, &mut ready);
-        }
-
-        let coalescing_enabled = coalesced_time.is_some_and(|boundary| {
-            let min_group_size = self.coalescing.min_group_size.max(1);
-            ready
-                .iter()
-                .filter(|entry| self.is_live(entry) && entry.deadline <= boundary)
-                .count()
-                >= min_group_size
-        });
 
         // Process in-place efficiently using drain — no separate `remaining` allocation.
         #[allow(clippy::iter_with_drain)]
@@ -986,18 +943,15 @@ impl TimerWheel {
                 continue;
             }
 
-            let should_fire = if coalescing_enabled {
-                let coalesced = coalesced_time.unwrap_or(now);
-                entry.deadline <= coalesced
+            if entry.deadline > now {
+                self.insert_entry(entry);
+            } else if held_window
+                .is_some_and(|(end, window)| window_end(entry.deadline, window) == Some(end))
+            {
+                self.ready.push(entry);
             } else {
-                entry.deadline <= now
-            };
-
-            if should_fire {
                 self.active.remove(entry.id as usize);
                 wakers.push(entry.waker);
-            } else {
-                self.insert_entry(entry);
             }
         }
 
@@ -1011,55 +965,82 @@ impl TimerWheel {
         wakers
     }
 
-    /// Returns coalescing statistics: number of timers that would fire together.
+    /// Returns coalescing statistics: how many timers fire together.
     ///
-    /// This is useful for monitoring coalescing effectiveness.
+    /// With coalescing on, this is the group of the window that contains
+    /// `now` when that window holds at least `min_group_size` timers;
+    /// otherwise it is the number of timers already due at `now`. This is
+    /// useful for monitoring coalescing effectiveness.
     #[must_use]
     pub fn coalescing_group_size(&self, now: Time) -> usize {
-        let expired_count = self
+        let due = self
             .ready
             .iter()
             .filter(|e| self.is_live(e) && e.deadline <= now)
             .count();
-        if !self.coalescing.enabled {
-            return expired_count;
+        let Some(window) = self.coalescing_window_ns() else {
+            return due;
+        };
+        let Some(end) = window_end(now, window) else {
+            return due;
+        };
+        let group = self.window_group_count(end, window);
+        if group >= self.coalescing.min_group_size.max(1) {
+            group
+        } else {
+            due
         }
+    }
 
-        let window_ns = self
+    /// The coalescing window in nanoseconds, when coalescing is on.
+    fn coalescing_window_ns(&self) -> Option<u64> {
+        if !self.coalescing.enabled {
+            return None;
+        }
+        let window = self
             .coalescing
             .coalesce_window
             .as_nanos()
             .min(u128::from(u64::MAX)) as u64;
-        if window_ns == 0 {
-            return expired_count;
-        }
+        (window > 0).then_some(window)
+    }
 
-        let now_ns = now.as_nanos();
-        let window_end_ns = (now_ns / window_ns)
-            .saturating_add(1)
-            .saturating_mul(window_ns);
-        let coalesced_time = Time::from_nanos(window_end_ns);
+    /// Whether the window ending at `end` holds at least `min_group_size`
+    /// live timers.
+    fn window_holds_group(&self, end: Time, window: u64) -> bool {
+        self.window_group_count(end, window) >= self.coalescing.min_group_size.max(1)
+    }
 
-        let mut coalesced_count = self
+    /// The live timers whose deadline falls in the window `(end - window, end]`.
+    fn window_group_count(&self, end: Time, window: u64) -> usize {
+        let end_ns = end.as_nanos();
+        let start_ns = end_ns.saturating_sub(window);
+        let in_window = |deadline: Time| {
+            let ns = deadline.as_nanos();
+            ns > start_ns && ns <= end_ns
+        };
+        let mut count = self
             .ready
             .iter()
-            .filter(|e| self.is_live(e) && e.deadline <= coalesced_time)
+            .filter(|e| self.is_live(e) && in_window(e.deadline))
             .count();
 
+        // Timers not yet due sit in the slots from the current tick up to the
+        // window end.
         for level in &self.levels {
             let now_nanos = self.current_tick.saturating_mul(LEVEL0_RESOLUTION_NS);
             let level_tick_current = now_nanos / level.resolution_ns;
-            let level_tick_boundary = window_end_ns / level.resolution_ns;
+            let level_tick_end = end_ns / level.resolution_ns;
 
-            if level_tick_boundary < level_tick_current {
+            if level_tick_end < level_tick_current {
                 continue;
             }
 
             let current_slot = (level_tick_current % (SLOTS_PER_LEVEL as u64)) as usize;
             // Clamp in u64 before narrowing to usize: a direct cast on 32-bit
             // targets would silently truncate the high bits and could bypass
-            // the SLOTS_PER_LEVEL clamp. See `promote_coalescing_window_entries`.
-            let diff_u64 = level_tick_boundary - level_tick_current;
+            // the SLOTS_PER_LEVEL clamp.
+            let diff_u64 = level_tick_end - level_tick_current;
             let diff = if diff_u64 >= SLOTS_PER_LEVEL as u64 {
                 SLOTS_PER_LEVEL - 1
             } else {
@@ -1069,25 +1050,20 @@ impl TimerWheel {
             for i in 0..=diff {
                 let slot_idx = (current_slot + i) % SLOTS_PER_LEVEL;
                 if level.is_occupied(slot_idx) {
-                    coalesced_count += level.slots[slot_idx]
+                    count += level.slots[slot_idx]
                         .iter()
-                        .filter(|e| self.is_live(e) && e.deadline <= coalesced_time)
+                        .filter(|e| self.is_live(e) && in_window(e.deadline))
                         .count();
                 }
             }
         }
 
-        coalesced_count += self
-            .overflow
-            .iter()
-            .filter(|e| self.is_live(&e.entry) && e.deadline <= coalesced_time)
-            .count();
-
-        if coalesced_count >= self.coalescing.min_group_size.max(1) {
-            coalesced_count
-        } else {
-            expired_count
-        }
+        count
+            + self
+                .overflow
+                .iter()
+                .filter(|e| self.is_live(&e.entry) && in_window(e.deadline))
+                .count()
     }
 
     fn is_live(&self, entry: &TimerEntry) -> bool {
@@ -1662,8 +1638,11 @@ mod tests {
     }
 
     #[test]
-    fn next_deadline_returns_current_when_coalescing_can_fire_window_now() {
-        init_test("next_deadline_returns_current_when_coalescing_can_fire_window_now");
+    fn next_deadline_reports_the_window_end_for_a_grouped_window() {
+        // br-asupersync-m85zfi LOW 3: a coalesced group fires at the end of
+        // its window, never before a member's deadline. This test used to
+        // assert the opposite (the whole group due at 1 ms).
+        init_test("next_deadline_reports_the_window_end_for_a_grouped_window");
 
         let coalescing = CoalescingConfig::new()
             .coalesce_window(Duration::from_millis(5))
@@ -1685,21 +1664,43 @@ mod tests {
 
         let next = wheel.next_deadline();
         crate::assert_with_log!(
-            next == Some(Time::from_millis(1)),
-            "coalescing-ready window is immediately due",
-            Some(Time::from_millis(1)),
+            next == Some(Time::from_millis(5)),
+            "the grouped window fires at its end",
+            Some(Time::from_millis(5)),
             next
         );
 
-        let wakers = wheel.collect_expired(Time::from_millis(1));
+        let early = wheel.collect_expired(Time::from_millis(1));
+        crate::assert_with_log!(
+            early.is_empty(),
+            "nothing fires before its deadline",
+            0usize,
+            early.len()
+        );
+        let due_but_waiting = wheel.collect_expired(Time::from_millis(4));
+        crate::assert_with_log!(
+            due_but_waiting.is_empty(),
+            "due members wait for the window end",
+            0usize,
+            due_but_waiting.len()
+        );
+        let next = wheel.next_deadline();
+        crate::assert_with_log!(
+            next == Some(Time::from_millis(5)),
+            "waiting members report the window end",
+            Some(Time::from_millis(5)),
+            next
+        );
+
+        let wakers = wheel.collect_expired(Time::from_millis(5));
         crate::assert_with_log!(
             wakers.len() == 2,
-            "same query time really fires the whole coalesced group",
+            "the whole group fires at the window end",
             2usize,
             wakers.len()
         );
 
-        crate::test_complete!("next_deadline_returns_current_when_coalescing_can_fire_window_now");
+        crate::test_complete!("next_deadline_reports_the_window_end_for_a_grouped_window");
     }
 
     struct CounterWaker {
@@ -2003,21 +2004,35 @@ mod tests {
             wheel.len()
         );
 
-        // Check coalescing group size
+        // Windows are (end - 1ms, end]. The timer due at 0 ends its own
+        // window at 0; the 99 others share the window that ends at 1ms.
         let group_size = wheel.coalescing_group_size(Time::from_nanos(500_000));
         crate::assert_with_log!(
-            group_size >= 100,
-            "all timers in coalescing group",
-            100,
+            group_size == 99,
+            "the 1ms window holds the 99 later timers",
+            99,
             group_size
         );
 
-        // Advance to 0.5ms - all should fire together
+        // At 0.5ms only the timer whose window already ended fires; a
+        // coalesced timer never fires before its window end (m85zfi LOW 3).
         let wakers = wheel.collect_expired(Time::from_nanos(500_000));
         crate::assert_with_log!(
-            wakers.len() == 100,
-            "all 100 timers fire together",
-            100,
+            wakers.len() == 1,
+            "only the timer due at the 0 boundary fires",
+            1,
+            wakers.len()
+        );
+        for waker in wakers {
+            waker.wake();
+        }
+
+        // At the window end the other 99 fire together.
+        let wakers = wheel.collect_expired(Time::from_millis(1));
+        crate::assert_with_log!(
+            wakers.len() == 99,
+            "the 99 grouped timers fire together at 1ms",
+            99,
             wakers.len()
         );
 
@@ -2114,7 +2129,16 @@ mod tests {
             wheel.register(deadline, counter_waker(counter.clone()));
         }
 
+        // The group meets the threshold, so all three fire together at the
+        // window end (5ms), and none before (m85zfi LOW 3).
         let wakers = wheel.collect_expired(Time::from_millis(1));
+        crate::assert_with_log!(
+            wakers.is_empty(),
+            "the grouped window waits for its end",
+            0,
+            wakers.len()
+        );
+        let wakers = wheel.collect_expired(Time::from_millis(5));
         crate::assert_with_log!(
             wakers.len() == 3,
             "coalescing enabled when threshold met",
@@ -2339,36 +2363,111 @@ mod tests {
 
         let counter = Arc::new(AtomicU64::new(0));
 
-        // Register timers at 3ms, 5ms, 15ms
-        // With coalescing window of 10ms, at t=9ms:
-        //   - coalesced boundary = ((9_000_000 / 10_000_000) + 1) * 10_000_000 = 10_000_000 (10ms)
-        //   - Both 3ms and 5ms are in ready (past their tick) and <= 10ms boundary
+        // Register timers at 3ms, 5ms, 15ms. With a 10ms window the windows
+        // are (0, 10ms] and (10ms, 20ms]: 3ms and 5ms fire together at 10ms,
+        // and 15ms fires at 20ms. A coalesced timer fires at its window end,
+        // never before its deadline (m85zfi LOW 3).
         wheel.register(Time::from_millis(3), counter_waker(counter.clone()));
         wheel.register(Time::from_millis(5), counter_waker(counter.clone()));
         wheel.register(Time::from_millis(15), counter_waker(counter.clone()));
 
-        // At t=9ms, both 3ms and 5ms timers should have been moved to ready
-        // and both should fire (deadlines 3ms and 5ms both <= coalesced boundary 10ms)
+        // At t=9ms both are due but their window has not ended.
         let wakers = wheel.collect_expired(Time::from_millis(9));
+        crate::assert_with_log!(
+            wakers.is_empty(),
+            "due timers wait for the window end",
+            0usize,
+            wakers.len()
+        );
+
+        // At t=10ms the first window ends: 3ms and 5ms fire together.
+        let wakers = wheel.collect_expired(Time::from_millis(10));
         for w in &wakers {
             w.wake_by_ref();
         }
         let count = counter.load(Ordering::SeqCst);
         crate::assert_with_log!(
             count == 2,
-            "both timers fired within coalescing window",
+            "both timers fired at the window end",
             2u64,
             count
         );
 
-        // At t=16ms, the 15ms timer should fire
+        // At t=16ms the 15ms timer is due but its window ends at 20ms.
         let wakers = wheel.collect_expired(Time::from_millis(16));
+        crate::assert_with_log!(
+            wakers.is_empty(),
+            "the 15ms timer waits for 20ms",
+            0usize,
+            wakers.len()
+        );
+        let wakers = wheel.collect_expired(Time::from_millis(20));
         for w in &wakers {
             w.wake_by_ref();
         }
         let count = counter.load(Ordering::SeqCst);
         crate::assert_with_log!(count == 3, "all three fired", 3u64, count);
         crate::test_complete!("coalescing_fires_timers_within_window");
+    }
+
+    /// br-asupersync-m85zfi LOW 3: whatever the window and group threshold,
+    /// a coalesced timer never fires before its deadline, and every timer
+    /// still fires.
+    #[test]
+    fn coalesced_timers_never_fire_before_their_deadline() {
+        init_test("coalesced_timers_never_fire_before_their_deadline");
+        for (window_ms, min_group) in [(1_u64, 1_usize), (5, 1), (5, 3), (10, 2)] {
+            let coalescing = CoalescingConfig::new()
+                .coalesce_window(Duration::from_millis(window_ms))
+                .min_group_size(min_group)
+                .enable();
+            let mut wheel =
+                TimerWheel::with_config(Time::ZERO, TimerWheelConfig::default(), coalescing);
+            let mut seed = 0x9E37_79B9_7F4A_7C15_u64 ^ window_ms;
+            let mut next = || {
+                seed = seed
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                seed >> 33
+            };
+            let deadlines: Vec<Time> = (0..200)
+                .map(|_| Time::from_nanos(next() % 50_000_000))
+                .collect();
+            let counters: Vec<Arc<AtomicU64>> = deadlines
+                .iter()
+                .map(|deadline| {
+                    let counter = Arc::new(AtomicU64::new(0));
+                    wheel.register(*deadline, counter_waker(Arc::clone(&counter)));
+                    counter
+                })
+                .collect();
+
+            let mut fired = vec![false; deadlines.len()];
+            let mut now = 0_u64;
+            while now <= 70_000_000 {
+                now += next() % 700_000 + 1;
+                let at = Time::from_nanos(now);
+                for waker in wheel.collect_expired(at) {
+                    waker.wake();
+                }
+                for (index, counter) in counters.iter().enumerate() {
+                    if !fired[index] && counter.load(Ordering::SeqCst) > 0 {
+                        fired[index] = true;
+                        assert!(
+                            deadlines[index] <= at,
+                            "window {window_ms}ms, min group {min_group}: timer {index} \
+                             due {:?} fired early at {at:?}",
+                            deadlines[index]
+                        );
+                    }
+                }
+            }
+            assert!(
+                fired.iter().all(|fired| *fired),
+                "window {window_ms}ms, min group {min_group}: every timer fires"
+            );
+        }
+        crate::test_complete!("coalesced_timers_never_fire_before_their_deadline");
     }
 
     #[test]
