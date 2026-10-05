@@ -4,6 +4,7 @@
 //! [`Buffered`](super::Buffered): it runs up to `limit` futures concurrently,
 //! yields their outputs in source order, and stops at the first `Err`.
 
+use super::buffered::EntryWakes;
 use super::{Stream, StreamTelemetrySnapshot};
 use std::collections::VecDeque;
 use std::fmt;
@@ -23,29 +24,48 @@ const TRY_BUFFERED_ADMISSION_BUDGET: usize = 1024;
 /// when every future is ready or repeatedly returns `Poll::Pending`.
 ///
 /// A partial scan is only allowed to return a bare `Poll::Pending` once every
-/// in-flight future has been polled at least once with the current task's waker
-/// (tracked via a waker epoch). Until then the combinator self-wakes so unpolled
-/// futures cannot be stranded — but it must NOT self-wake merely because the
-/// buffer is larger than the budget, or an all-pending buffer turns into a
-/// permanent busy-poll loop.
+/// in-flight future has been polled at least once (with its own child waker,
+/// see `EntryWakes` in `buffered.rs`). Until then the combinator self-wakes so
+/// unpolled futures cannot be stranded — but it must NOT self-wake merely
+/// because the buffer is larger than the budget, or an all-pending buffer
+/// turns into a permanent busy-poll loop. A future woken outside the scan
+/// window is found by its child waker's id and polled on the next poll.
 const TRY_BUFFERED_POLL_BUDGET: usize = 1024;
 
 struct TryBufferedEntry<Fut: Future> {
     fut: Fut,
     output: Option<Fut::Output>,
-    /// Waker epoch this entry was last polled under. Entries whose epoch lags
-    /// the combinator's current epoch have not registered the current task
-    /// waker and keep the self-wake loop alive until scanned.
-    seen_epoch: u64,
+    /// Admission id; consecutive across the queue, which only pops its front.
+    id: u64,
+    /// This entry's child waker.
+    waker: Waker,
+    /// Polled at least once, so its child waker is registered wherever the
+    /// future waits. Unpolled entries keep the self-wake loop alive.
+    polled: bool,
 }
 
 impl<Fut: Future> TryBufferedEntry<Fut> {
     #[inline]
-    fn new(fut: Fut, stale_epoch: u64) -> Self {
+    fn new(fut: Fut, id: u64, waker: Waker) -> Self {
         Self {
             fut,
             output: None,
-            seen_epoch: stale_epoch,
+            id,
+            waker,
+            polled: false,
+        }
+    }
+
+    /// Polls the future with its own child waker, keeping a ready output.
+    #[inline]
+    fn poll_entry(&mut self)
+    where
+        Fut: Unpin,
+    {
+        self.polled = true;
+        let mut cx = Context::from_waker(&self.waker);
+        if let Poll::Ready(output) = Pin::new(&mut self.fut).poll(&mut cx) {
+            self.output = Some(output);
         }
     }
 }
@@ -93,6 +113,8 @@ where
     poll_epoch: u64,
     /// Waker the current `poll_epoch` corresponds to.
     epoch_waker: Option<Waker>,
+    /// Per-entry wake routing.
+    wakes: EntryWakes,
 }
 
 impl<S> TryBuffered<S>
@@ -106,13 +128,16 @@ where
         assert!(limit > 0, "try_buffered limit must be non-zero");
         Self {
             stream,
-            in_flight: VecDeque::with_capacity(limit),
+            // `limit` may be a huge "unbounded" value: reserving it up front
+            // overflowed the capacity (usize::MAX) or aborted the allocation.
+            in_flight: VecDeque::with_capacity(limit.min(TRY_BUFFERED_ADMISSION_BUDGET)),
             limit,
             done: false,
             failed: false,
             next_poll_index: 0,
             poll_epoch: 0,
             epoch_waker: None,
+            wakes: EntryWakes::new(),
         }
     }
 
@@ -218,21 +243,30 @@ where
         }
 
         self.refresh_epoch(cx);
-        let epoch = self.poll_epoch;
-        // Fresh entries are stamped one epoch behind so they read as "not yet
-        // polled under the current waker" until the scan reaches them.
-        let stale = epoch.wrapping_sub(1);
+        self.wakes.set_parent(cx.waker());
         let mut budget_exhausted = false;
 
+        // An `Err` already waiting at the front ends the stream on this poll:
+        // admitting first would take more items from the source only to drop
+        // them unpolled.
+        let front_failed = matches!(
+            self.in_flight.front(),
+            Some(TryBufferedEntry {
+                output: Some(Err(_)),
+                ..
+            })
+        );
         let mut admitted_this_poll = 0usize;
-        while !self.done && self.in_flight.len() < self.limit {
+        while !front_failed && !self.done && self.in_flight.len() < self.limit {
             if admitted_this_poll >= TRY_BUFFERED_ADMISSION_BUDGET {
                 budget_exhausted = true;
                 break;
             }
             match Pin::new(&mut self.stream).poll_next(cx) {
                 Poll::Ready(Some(fut)) => {
-                    self.in_flight.push_back(TryBufferedEntry::new(fut, stale));
+                    let (id, waker) = self.wakes.child();
+                    self.in_flight
+                        .push_back(TryBufferedEntry::new(fut, id, waker));
                     admitted_this_poll += 1;
                 }
                 Poll::Ready(None) => {
@@ -248,17 +282,37 @@ where
         }
 
         let len = self.in_flight.len();
+        let woken = self.wakes.take_woken();
+        if len > TRY_BUFFERED_POLL_BUDGET {
+            // The window below reaches only part of the buffer, so first poll
+            // the entries whose own wakers fired, wherever they sit. Ids are
+            // consecutive from the front; an id below it already finished.
+            let front_id = self.in_flight.front().map_or(0, |front| front.id);
+            for (polled, id) in woken.iter().enumerate() {
+                if polled >= TRY_BUFFERED_POLL_BUDGET {
+                    self.wakes.requeue(&woken[polled..]);
+                    budget_exhausted = true;
+                    break;
+                }
+                let index = id
+                    .checked_sub(front_id)
+                    .and_then(|offset| usize::try_from(offset).ok());
+                if let Some(entry) = index.and_then(|index| self.in_flight.get_mut(index))
+                    && entry.id == *id
+                    && entry.output.is_none()
+                {
+                    entry.poll_entry();
+                }
+            }
+        }
         if len > 0 {
             let mut index = self.next_poll_index.min(len.saturating_sub(1));
             let scan_budget = len.min(TRY_BUFFERED_POLL_BUDGET);
             for _ in 0..scan_budget {
-                if let Some(entry) = self.in_flight.get_mut(index) {
-                    if entry.output.is_none() {
-                        if let Poll::Ready(output) = Pin::new(&mut entry.fut).poll(cx) {
-                            entry.output = Some(output);
-                        }
-                        entry.seen_epoch = epoch;
-                    }
+                if let Some(entry) = self.in_flight.get_mut(index)
+                    && entry.output.is_none()
+                {
+                    entry.poll_entry();
                 }
                 index += 1;
                 if index >= len {
@@ -269,7 +323,7 @@ where
             if self
                 .in_flight
                 .iter()
-                .any(|e| e.output.is_none() && e.seen_epoch != epoch)
+                .any(|e| e.output.is_none() && !e.polled)
             {
                 budget_exhausted = true;
             }
@@ -639,6 +693,39 @@ mod tests {
     }
 
     #[test]
+    fn try_buffered_stops_taking_items_once_an_err_waits_at_the_front() {
+        init_test("try_buffered_stops_taking_items_once_an_err_waits_at_the_front");
+        // After Ok(1) is yielded, the Err is already ready at the front. The
+        // next poll used to admit Ok(4) from the source first, then drop it.
+        let futures = vec![
+            DelayedResult::new(0, Ok(1)),
+            DelayedResult::new(0, Err("boom")),
+            DelayedResult::new(0, Ok(3)),
+            DelayedResult::new(0, Ok(4)),
+        ];
+        let mut stream = TryBuffered::new(iter(futures), 3);
+        assert_eq!(next_item(&mut stream), Some(Ok(1)));
+        assert_eq!(next_item(&mut stream), Some(Err("boom")));
+        assert_eq!(
+            stream.get_ref().size_hint(),
+            (1, Some(1)),
+            "Ok(4) must still be in the source"
+        );
+        crate::test_complete!("try_buffered_stops_taking_items_once_an_err_waits_at_the_front");
+    }
+
+    #[test]
+    fn try_buffered_accepts_an_unbounded_limit() {
+        init_test("try_buffered_accepts_an_unbounded_limit");
+        let futures = vec![DelayedResult::new(1, Ok(1)), DelayedResult::new(0, Ok(2))];
+        let mut stream = TryBuffered::new(iter(futures), usize::MAX);
+        assert_eq!(next_item(&mut stream), Some(Ok(1)));
+        assert_eq!(next_item(&mut stream), Some(Ok(2)));
+        assert_eq!(next_item(&mut stream), None);
+        crate::test_complete!("try_buffered_accepts_an_unbounded_limit");
+    }
+
+    #[test]
     fn try_buffered_empty_source_completes_immediately() {
         init_test("try_buffered_empty_source_completes_immediately");
         let futures: Vec<DelayedResult> = Vec::new();
@@ -720,6 +807,104 @@ mod tests {
                 "try_buffered_conformance::all_pending_buffer_does_not_busy_poll"
             );
         }
+    }
+
+    /// A future that stays pending until its gate opens, keeping the waker of
+    /// the poll that found it closed.
+    #[derive(Clone, Default)]
+    struct Gate(Arc<std::sync::Mutex<(bool, Option<Waker>)>>);
+
+    impl Gate {
+        fn open(&self) {
+            let waker = {
+                let mut state = self.0.lock().unwrap();
+                state.0 = true;
+                state.1.take()
+            };
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+        }
+    }
+
+    struct GateFuture {
+        gate: Gate,
+        value: usize,
+    }
+
+    impl Future for GateFuture {
+        type Output = Result<usize, &'static str>;
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            let mut state = self.gate.0.lock().unwrap();
+            if state.0 {
+                Poll::Ready(Ok(self.value))
+            } else {
+                state.1 = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        }
+    }
+
+    struct CountWake(AtomicUsize);
+
+    impl Wake for CountWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Polls the way an executor does: again only after a wake. Returns the
+    /// first `Ready`, or `Pending` once the stream parks without a wake.
+    fn run_until_parked<S: Stream + Unpin>(
+        stream: &mut S,
+        wakes: &Arc<CountWake>,
+    ) -> Poll<Option<S::Item>> {
+        let waker = Waker::from(Arc::clone(wakes));
+        let mut cx = Context::from_waker(&waker);
+        for _ in 0..64 {
+            let before = wakes.0.load(Ordering::SeqCst);
+            if let Poll::Ready(item) = Pin::new(&mut *stream).poll_next(&mut cx) {
+                return Poll::Ready(item);
+            }
+            if wakes.0.load(Ordering::SeqCst) == before {
+                return Poll::Pending;
+            }
+        }
+        panic!("the stream kept waking itself");
+    }
+
+    /// With more futures in flight than one poll scans, a future woken while
+    /// outside the scan window was passed over; its wake had consumed its
+    /// registration, so nothing woke the stream again and it parked forever.
+    #[test]
+    fn try_buffered_polls_a_woken_future_outside_the_scan_window() {
+        init_test("try_buffered_polls_a_woken_future_outside_the_scan_window");
+        let count = 2 * TRY_BUFFERED_POLL_BUDGET;
+        let gates: Vec<Gate> = (0..count).map(|_| Gate::default()).collect();
+        let futures: Vec<GateFuture> = gates
+            .iter()
+            .enumerate()
+            .map(|(value, gate)| GateFuture {
+                gate: gate.clone(),
+                value,
+            })
+            .collect();
+        let mut stream = TryBuffered::new(iter(futures), count);
+        let wakes = Arc::new(CountWake(AtomicUsize::new(0)));
+        assert_eq!(run_until_parked(&mut stream, &wakes), Poll::Pending);
+        gates[1500].open();
+        assert_eq!(run_until_parked(&mut stream, &wakes), Poll::Pending);
+        gates[0].open();
+        assert_eq!(
+            run_until_parked(&mut stream, &wakes),
+            Poll::Ready(Some(Ok(0)))
+        );
+        crate::test_complete!("try_buffered_polls_a_woken_future_outside_the_scan_window");
     }
 
     /// AC5 lifecycle proof for `TryBuffered`: the snapshot exposes head-of-line

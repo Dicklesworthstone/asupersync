@@ -242,9 +242,13 @@ fn panic_payload(payload: Box<dyn Any + Send>) -> PanicPayload {
     } else {
         "non-string bracket panic".to_owned()
     };
-    // An arbitrary payload destructor can panic again. Do not let it prevent
-    // resource return, subtree drain, or release of a successfully acquired R.
-    std::mem::forget(payload);
+    // An arbitrary payload destructor can panic again. Contain that panic so
+    // it cannot prevent resource return, subtree drain, or release of a
+    // successfully acquired R; leak only the payload of a destructor that did
+    // panic, not every payload (with whatever it owns).
+    if let Err(nested) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(payload))) {
+        std::mem::forget(nested);
+    }
     PanicPayload::new(message)
 }
 

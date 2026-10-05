@@ -179,7 +179,7 @@ request extraction and body decoding semantics across all built-in extractors.
 |--------------|-----------|----------|--------|--------|
 | `Service<Request>` trait | `Service<Request>` + `AsupersyncService` | `service/service.rs` | Complete | — |
 | `Layer` trait | `Layer` trait | `service/layer.rs` | Complete | — |
-| `ServiceBuilder` | `ServiceBuilder` | `service/builder.rs` | Complete | — |
+| `ServiceBuilder` | `ServiceBuilder` (layer order is reversed: the last-added layer is outermost) | `service/builder.rs` | Complete | — |
 | `ServiceExt` (ready, oneshot) | `ServiceExt` | `service/service.rs` | Complete | — |
 | Tower adapter (bidirectional) | `TowerAdapter` / `AsupersyncAdapter` | `service/service.rs` | Complete | — |
 

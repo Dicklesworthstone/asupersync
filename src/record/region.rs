@@ -317,12 +317,169 @@ impl AtomicRegionState {
     }
 }
 
+/// Regions at or below this many member slots keep a plain vector: a short
+/// linear scan beats hashing and needs no index allocation.
+const TASK_MEMBERSHIP_INDEX_THRESHOLD: usize = 16;
+
+/// A region's member tasks: insertion-ordered, duplicate-free, with O(1)
+/// insert, remove, and membership test once the region grows past
+/// [`TASK_MEMBERSHIP_INDEX_THRESHOLD`] (br-asupersync-issue65-criticisms-kpmoy5.1.4).
+///
+/// Iteration order is insertion order of the live members, exactly what the
+/// previous `Vec<TaskId>` + `contains` + `retain` representation produced.
+/// Cancel propagation iterates this order, so traces and lab replay stay
+/// byte-identical. Small regions keep a dense vector (removal shifts at most
+/// [`TASK_MEMBERSHIP_INDEX_THRESHOLD`] entries). Large regions switch to
+/// tombstoned slots plus a position index and compact, order-preserving, when
+/// tombstones dominate, so a server keeping thousands of connection tasks in
+/// one region pays O(1) per spawn and per exit instead of O(N).
+#[derive(Default)]
+struct TaskMembership {
+    /// Members in insertion order; `None` marks a removed member and only
+    /// appears while `index` is built.
+    slots: Vec<Option<TaskId>>,
+    /// Slot position of every live member, present once the region grew past
+    /// the threshold.
+    index: Option<crate::util::DetHashMap<TaskId, usize>>,
+    /// Number of live members.
+    live: usize,
+}
+
+impl TaskMembership {
+    #[inline]
+    fn len(&self) -> usize {
+        self.live
+    }
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.live == 0
+    }
+
+    #[inline]
+    fn position(&self, task: TaskId) -> Option<usize> {
+        match &self.index {
+            Some(index) => index.get(&task).copied(),
+            None => self.slots.iter().position(|slot| *slot == Some(task)),
+        }
+    }
+
+    #[inline]
+    fn contains(&self, task: TaskId) -> bool {
+        self.position(task).is_some()
+    }
+
+    /// Appends `task` unless it is already a member. Returns whether it was added.
+    fn insert(&mut self, task: TaskId) -> bool {
+        if self.contains(task) {
+            return false;
+        }
+        self.push_absent(task);
+        true
+    }
+
+    /// Appends `task`, which the caller has just checked is not a member.
+    fn push_absent(&mut self, task: TaskId) {
+        debug_assert!(
+            !self.contains(task),
+            "task {task:?} is already a region member"
+        );
+        let position = self.slots.len();
+        self.slots.push(Some(task));
+        self.live += 1;
+        match &mut self.index {
+            Some(index) => {
+                index.insert(task, position);
+            }
+            None if self.slots.len() > TASK_MEMBERSHIP_INDEX_THRESHOLD => self.rebuild_index(),
+            None => {}
+        }
+    }
+
+    /// Removes `task` if it is a member. Returns whether it was removed.
+    fn remove(&mut self, task: TaskId) -> bool {
+        let Some(index) = self.index.as_mut() else {
+            // Dense mode: preserve order by shifting the (short) tail.
+            let Some(position) = self.slots.iter().position(|slot| *slot == Some(task)) else {
+                return false;
+            };
+            self.slots.remove(position);
+            self.live -= 1;
+            return true;
+        };
+        let Some(position) = index.remove(&task) else {
+            return false;
+        };
+        self.slots[position] = None;
+        self.live -= 1;
+        if self.live == 0 {
+            self.slots.clear();
+            self.index = None;
+            return true;
+        }
+        while matches!(self.slots.last(), Some(None)) {
+            self.slots.pop();
+        }
+        // Compact when tombstones dominate (amortized O(1) per removal), and
+        // return to dense mode once the region is small again so a region
+        // that briefly grew does not keep its index forever. The second arm
+        // costs at most one pass over 2 * threshold slots.
+        if self.slots.len() > 2 * self.live + TASK_MEMBERSHIP_INDEX_THRESHOLD
+            || self.live <= TASK_MEMBERSHIP_INDEX_THRESHOLD / 2
+        {
+            self.compact();
+        }
+        true
+    }
+
+    /// Drops tombstones, keeping insertion order, and rebuilds the index (or
+    /// returns to dense mode when the region shrank back below the threshold).
+    fn compact(&mut self) {
+        self.slots.retain(Option::is_some);
+        if self.slots.len() > TASK_MEMBERSHIP_INDEX_THRESHOLD {
+            self.rebuild_index();
+        } else {
+            self.index = None;
+        }
+    }
+
+    fn rebuild_index(&mut self) {
+        let mut index = crate::util::DetHashMap::default();
+        index.reserve(self.live);
+        for (position, slot) in self.slots.iter().enumerate() {
+            if let Some(task) = *slot {
+                index.insert(task, position);
+            }
+        }
+        self.index = Some(index);
+    }
+
+    /// Live members in insertion order.
+    #[inline]
+    fn iter(&self) -> impl Iterator<Item = TaskId> + '_ {
+        self.slots.iter().filter_map(|slot| *slot)
+    }
+
+    fn to_vec(&self) -> Vec<TaskId> {
+        let mut out = Vec::with_capacity(self.live);
+        out.extend(self.iter());
+        out
+    }
+}
+
+impl std::fmt::Debug for TaskMembership {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Same rendering as the `Vec<TaskId>` this replaced.
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
 #[derive(Debug)]
 struct RegionInner {
     budget: Budget,
     capability_budget: CapabilityBudget,
     children: Vec<RegionId>,
-    tasks: Vec<TaskId>,
+    tasks: TaskMembership,
     cancel_reason: Option<CancelReason>,
     close_outcome: Option<TaskOutcome>,
     /// Finalizer terminals only; ordinary cancelled children must not masquerade
@@ -794,7 +951,7 @@ impl RegionRecord {
                 budget,
                 capability_budget,
                 children: Vec::new(),
-                tasks: Vec::new(),
+                tasks: TaskMembership::default(),
                 cancel_reason: None,
                 close_outcome: None,
                 cleanup_outcome: None,
@@ -1006,14 +1163,14 @@ impl RegionRecord {
     /// Returns a snapshot of task IDs.
     #[must_use]
     pub fn task_ids(&self) -> Vec<TaskId> {
-        self.inner.read().tasks.clone()
+        self.inner.read().tasks.to_vec()
     }
 
     /// Copies task IDs into the provided buffer (avoids fresh allocation).
     #[inline]
     pub fn copy_task_ids_into(&self, buf: &mut Vec<TaskId>) {
         let inner = self.inner.read();
-        buf.extend_from_slice(&inner.tasks);
+        buf.extend(inner.tasks.iter());
     }
 
     /// Returns task IDs as a SmallVec, avoiding heap allocation for typical regions.
@@ -1021,7 +1178,7 @@ impl RegionRecord {
     #[must_use]
     pub fn task_ids_small(&self) -> smallvec::SmallVec<[TaskId; 8]> {
         let inner = self.inner.read();
-        smallvec::SmallVec::from_slice(&inner.tasks)
+        inner.tasks.iter().collect()
     }
 
     /// Returns true if the region has any live children, tasks, pending
@@ -1148,7 +1305,7 @@ impl RegionRecord {
             return Err(AdmissionError::Closed);
         }
 
-        if inner.tasks.contains(&task) {
+        if inner.tasks.contains(task) {
             return Ok(());
         }
 
@@ -1165,7 +1322,7 @@ impl RegionRecord {
             }
         }
 
-        inner.tasks.push(task);
+        inner.tasks.push_absent(task);
         drop(inner);
         Ok(())
     }
@@ -1189,7 +1346,7 @@ impl RegionRecord {
     /// Removes a task from this region.
     pub fn remove_task(&self, task: TaskId) {
         let mut inner = self.inner.write();
-        inner.tasks.retain(|&t| t != task);
+        inner.tasks.remove(task);
     }
 
     /// Reserves an obligation slot for this region.
@@ -1786,7 +1943,7 @@ impl RegionRecord {
     #[must_use]
     pub fn tasks_completed(&self, completed: &dyn Fn(TaskId) -> bool) -> bool {
         let inner = self.inner.read();
-        inner.tasks.iter().all(|task| completed(*task))
+        inner.tasks.iter().all(completed)
     }
 
     /// Returns true if all obligations are resolved.
@@ -1806,7 +1963,7 @@ impl RegionRecord {
         // all closed" as sufficient, they must supply that logic externally.
         let inner = self.inner.read();
         inner.children.is_empty()
-            && inner.tasks.iter().all(|task| completed(*task))
+            && inner.tasks.iter().all(completed)
             && inner.pending_obligations == 0
             && inner.unapplied_obligations == 0
     }
@@ -1878,9 +2035,7 @@ impl RegionRecord {
             }
         }
         for task_id in tasks {
-            if !inner.tasks.contains(&task_id) {
-                inner.tasks.push(task_id);
-            }
+            inner.tasks.insert(task_id);
         }
         inner.cancel_reason = cancel_reason;
         // Publish state change while still holding the write lock — readers
@@ -4041,5 +4196,119 @@ mod tests {
         }
         assert_eq!(region.pending_spawn_count(), 0);
         assert_eq!(region.pending_spawn_handle().underflow_count(), 0);
+    }
+
+    fn membership_tid(n: u32) -> TaskId {
+        TaskId::from_arena(ArenaIndex::new(n, n % 3))
+    }
+
+    /// The indexed membership must be observationally identical to the
+    /// `Vec` + `contains` + `retain` representation it replaced: same
+    /// iteration order, same length, same membership answers, same
+    /// idempotent-insert result, across dense mode, the index switch, heavy
+    /// tombstoning, compaction, and draining back to empty.
+    #[test]
+    fn task_membership_matches_vec_model_across_modes() {
+        let mut membership = TaskMembership::default();
+        let mut model: Vec<TaskId> = Vec::new();
+        // Deterministic LCG: no RNG dependency, reproducible failures.
+        let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = move |bound: u64| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % bound
+        };
+        for step in 0..20_000u32 {
+            // Phases: grow past the threshold, churn, drain, regrow.
+            let insert_bias = match step / 2_500 {
+                0 | 4 => 85,
+                1 | 5 => 50,
+                2 | 6 => 15,
+                _ => 60,
+            };
+            let task = membership_tid(next(400) as u32);
+            if next(100) < insert_bias {
+                let expected_added = !model.contains(&task);
+                if expected_added {
+                    model.push(task);
+                }
+                assert_eq!(membership.insert(task), expected_added, "insert {step}");
+            } else {
+                let expected_removed = model.contains(&task);
+                model.retain(|&t| t != task);
+                assert_eq!(membership.remove(task), expected_removed, "remove {step}");
+            }
+            assert_eq!(membership.len(), model.len(), "len {step}");
+            assert_eq!(membership.is_empty(), model.is_empty(), "is_empty {step}");
+            if step % 97 == 0 {
+                assert_eq!(membership.to_vec(), model, "order {step}");
+                for probe in 0..400 {
+                    let probe = membership_tid(probe);
+                    assert_eq!(membership.contains(probe), model.contains(&probe));
+                }
+            }
+        }
+        assert_eq!(membership.to_vec(), model);
+    }
+
+    #[test]
+    fn task_membership_fifo_drain_stays_bounded_and_ordered() {
+        let mut membership = TaskMembership::default();
+        for n in 0..10_000 {
+            assert!(membership.insert(membership_tid(n)));
+        }
+        assert!(membership.index.is_some(), "large regions are indexed");
+        // Completing the oldest tasks first leaves leading tombstones; the
+        // slot vector must compact rather than grow without bound.
+        for n in 0..9_992 {
+            assert!(membership.remove(membership_tid(n)));
+            assert!(
+                membership.slots.len() <= 2 * membership.len() + TASK_MEMBERSHIP_INDEX_THRESHOLD
+            );
+        }
+        // Eight members left: at or below half the threshold, so dense again.
+        let expected: Vec<TaskId> = (9_992..10_000).map(membership_tid).collect();
+        assert_eq!(membership.to_vec(), expected);
+        assert!(
+            membership.index.is_none(),
+            "a region that shrank back below half the threshold is dense again"
+        );
+        assert_eq!(membership.slots.len(), 8, "dense mode holds no tombstones");
+        for n in 9_992..10_000 {
+            assert!(membership.remove(membership_tid(n)));
+        }
+        assert!(membership.is_empty());
+        assert!(membership.slots.is_empty());
+    }
+
+    #[test]
+    fn region_task_admission_is_idempotent_and_limit_counts_live_members() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::INFINITE);
+        region.set_limits(RegionLimits {
+            max_tasks: Some(40),
+            ..RegionLimits::UNLIMITED
+        });
+        for n in 0..40 {
+            region.add_task(membership_tid(n)).expect("under limit");
+        }
+        // Re-adding a member is a no-op, not a limit failure.
+        region.add_task(membership_tid(7)).expect("idempotent add");
+        assert!(
+            region.add_task(membership_tid(40)).is_err(),
+            "limit reached"
+        );
+        region.remove_task(membership_tid(3));
+        region
+            .add_task(membership_tid(40))
+            .expect("slot freed by removal");
+        let mut expected: Vec<TaskId> = (0..40).filter(|&n| n != 3).map(membership_tid).collect();
+        expected.push(membership_tid(40));
+        assert_eq!(region.task_ids(), expected);
+        assert_eq!(region.task_count(), 40);
+        assert_eq!(region.task_ids_small().to_vec(), expected);
+        let mut buf = Vec::new();
+        region.copy_task_ids_into(&mut buf);
+        assert_eq!(buf, expected);
     }
 }

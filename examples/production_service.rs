@@ -18,8 +18,15 @@
 //!   * The default request-trace middleware, which the listener applies
 //!     automatically — every request emits a structured start/finish log that
 //!     the e2e scenarios assert against (the logging is the test interface).
-//!   * Graceful drain: the service boots, serves a self-probe end to end, then
-//!     drains to quiescence and exits cleanly.
+//!   * Structured shutdown: the service lives in its own region. The accept
+//!     loop runs in that region through `Http1Listener::run_in`, so every
+//!     connection task belongs to it too. Shutdown is a request-aware graceful
+//!     drain followed by closing the region with a bound
+//!     (`ChildRegion::close_within`): neither the accept loop nor a connection
+//!     can outlive it, and a task that ignores cancellation is named instead of
+//!     hanging the exit. The entry point is `#[asupersync::main]`, which also
+//!     gives `/users` its blocking pool. No `RuntimeHandle`, no detached task,
+//!     no hand-kept handles.
 //!
 //! Deferred to follow-up slices of eeexl1.8 (tracked on the bead): an outbound
 //! downstream call via `http::Client`, a supervised background worker, explicit
@@ -34,11 +41,10 @@
 use std::io::{Read, Write};
 use std::time::Duration;
 
-use asupersync::cx::Cx;
+use asupersync::cx::{ChildRegionCloseOutcome, ChildRegionSpec, Cx};
 use asupersync::database::SqliteConnection;
 use asupersync::http::h1::listener::{Http1Listener, Http1ListenerConfig};
 use asupersync::http::h1::server::{HostPolicy, Http1Config};
-use asupersync::runtime::RuntimeBuilder;
 use asupersync::types::Outcome;
 use asupersync::web::{AsyncCxFnHandler, FnHandler, Response, Router, StatusCode, get};
 
@@ -130,53 +136,71 @@ fn self_probe(addr: std::net::SocketAddr, path: &str) -> std::io::Result<(String
     ))
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = RuntimeBuilder::new().worker_threads(2).build()?;
-    let handle = runtime.handle();
-
-    runtime.block_on(async move {
-        let listener = Http1Listener::bind_with_config(
-            "127.0.0.1:0",
-            service_router().into_http_handler(),
-            service_config(),
-        )
+#[asupersync::main(workers = 2)]
+async fn main(cx: &Cx) {
+    // The service region owns everything the service starts.
+    let service = cx
+        .open_child_region(ChildRegionSpec::inherit())
         .await
-        .expect("bind production service");
+        .expect("open the service region");
 
-        let addr = listener.local_addr().expect("local addr");
-        let manager = listener.connection_manager().clone();
-        println!("production_service listening on http://{addr}");
+    let listener = Http1Listener::bind_with_config(
+        "127.0.0.1:0",
+        service_router().into_http_handler(),
+        service_config(),
+    )
+    .await
+    .expect("bind production service");
 
-        // Drive the accept loop on the runtime; it runs until graceful drain.
-        let run_handle = handle
-            .clone()
-            .try_spawn(async move { listener.run(&handle).await })
-            .expect("spawn listener run");
+    let addr = listener.local_addr().expect("local addr");
+    let manager = listener.connection_manager().clone();
+    println!("production_service listening on http://{addr}");
 
-        // Prove the composed stack serves real traffic: a self-probe on a std
-        // thread hits /health and /users through the full server path.
-        for (path, expected_status, expected_body) in [
-            ("/health", "HTTP/1.1 200 OK", "ok\n"),
-            ("/users", "HTTP/1.1 200 OK", "1\tAlice\n2\tBob\n"),
-            ("/missing", "HTTP/1.1 404 Not Found", "not found\n"),
-        ] {
-            let probe_addr = addr;
-            let probe_path = path.to_owned();
-            let (status, body) = std::thread::spawn(move || self_probe(probe_addr, &probe_path))
-                .join()
-                .expect("probe thread")
-                .expect("self-probe response");
-            assert_eq!(status, expected_status, "status for {path}");
-            assert_eq!(body, expected_body, "body for {path}");
-            println!("self-probe GET {path} -> {status}");
-        }
+    // The accept loop is a task of the service region, and `run_in` puts
+    // each connection task in the same region.
+    let _accept_loop = service
+        .cx()
+        .spawn(move |listener_cx| async move { listener.run_in(&listener_cx).await })
+        .expect("spawn the accept loop");
 
-        // Graceful, request-aware shutdown: in-flight requests get the soft
-        // budget to finish before the hard deadline.
-        assert!(manager.begin_drain(Duration::from_secs(5)));
-        let _ = run_handle.await.expect("listener run result");
-        println!("production_service drained cleanly");
-    });
+    // Prove the composed stack serves real traffic: a self-probe on a std
+    // thread hits /health and /users through the full server path.
+    for (path, expected_status, expected_body) in [
+        ("/health", "HTTP/1.1 200 OK", "ok\n"),
+        ("/users", "HTTP/1.1 200 OK", "1\tAlice\n2\tBob\n"),
+        ("/missing", "HTTP/1.1 404 Not Found", "not found\n"),
+    ] {
+        let probe_addr = addr;
+        let probe_path = path.to_owned();
+        let (status, body) = std::thread::spawn(move || self_probe(probe_addr, &probe_path))
+            .join()
+            .expect("probe thread")
+            .expect("self-probe response");
+        assert_eq!(status, expected_status, "status for {path}");
+        assert_eq!(body, expected_body, "body for {path}");
+        println!("self-probe GET {path} -> {status}");
+    }
 
-    Ok(())
+    // Shutdown (a real service would start it from a signal, e.g.
+    // `asupersync::signal::ctrl_c()`). First a graceful, request-aware
+    // drain: in-flight requests get the soft budget to finish before the
+    // hard deadline. Then the service region closes: everything it started
+    // has finished or is cancelled and drained. The bound turns a task that
+    // ignores cancellation into a report instead of a hang.
+    assert!(manager.begin_drain(Duration::from_secs(5)));
+    let report = service
+        .close_within(Duration::from_secs(30))
+        .await
+        .expect("close the service region");
+    assert_eq!(
+        report.outcome,
+        ChildRegionCloseOutcome::Quiescent,
+        "the service region closes with nothing left running: {report:?}"
+    );
+    assert_eq!(
+        manager.active_count(),
+        0,
+        "no connection outlives the service"
+    );
+    println!("production_service drained cleanly in {:?}", report.elapsed);
 }

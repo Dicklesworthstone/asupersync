@@ -501,6 +501,14 @@ fn dispatcher_for(kind: SignalKind) -> Result<&'static SignalDispatcher, SignalE
     }
 }
 
+/// Whether the dispatcher runs and has a slot for `kind`, without
+/// registering an OS handler for it. A registered handler stays for the
+/// life of the process, so an availability probe must not install one.
+#[cfg(any(unix, windows))]
+pub(super) fn dispatcher_has_slot(kind: SignalKind) -> bool {
+    dispatcher_for(kind).is_ok_and(|dispatcher| dispatcher.slot(kind).is_some())
+}
+
 /// An async stream that receives signals of a particular kind.
 ///
 /// # Example
@@ -626,7 +634,9 @@ impl Signal {
 ///
 /// # Errors
 ///
-/// Returns an error if signal handling is not available.
+/// Returns an error if signal handling is not available. Refuses with
+/// [`IoCapabilityDenied`](crate::cx::IoCapabilityDenied) when the calling
+/// task's `Cx` lacks the IO capability.
 ///
 /// # Example
 ///
@@ -637,6 +647,7 @@ impl Signal {
 /// sigterm.recv().await;
 /// ```
 pub fn signal(kind: SignalKind) -> io::Result<Signal> {
+    crate::cx::io_gate::require_ambient_io("signal::signal")?;
     Signal::new(kind).map_err(Into::into)
 }
 

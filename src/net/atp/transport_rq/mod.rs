@@ -150,6 +150,21 @@ pub const DEFAULT_SYMBOL_SIZE: u16 = 1400;
 /// `split_large_entries` so each object's K stays bounded (E-12).
 pub const DEFAULT_MAX_BLOCK_SIZE: usize = 8 * 1024 * 1024;
 
+/// Most source symbols one RaptorQ block can hold (RFC 6330 K'max). A peer
+/// geometry whose blocks would exceed it can never decode.
+const RQ_MAX_SOURCE_SYMBOLS_PER_BLOCK: u64 = 56_403;
+
+/// Floor of the source-symbol budget a receiver commits to one transfer.
+/// Every source symbol costs receive bookkeeping before any data arrives, so
+/// the peer's geometry must not choose that cost freely: one-byte symbols
+/// over a 4 GiB transfer would ask for billions of entries.
+const RQ_RECEIVE_SOURCE_SYMBOL_BUDGET_FLOOR: u64 = 1 << 24;
+
+/// The budget also grows with `max_transfer_bytes` at this many bytes per
+/// symbol, so a receiver configured for larger transfers keeps admitting
+/// ordinary symbol sizes.
+const RQ_RECEIVE_BUDGET_BYTES_PER_SYMBOL: u64 = 1024;
+
 /// Target source-symbol count for the effective transfer block size.
 ///
 /// RaptorQ's matrix work grows sharply with K. A K~512 block is small enough to
@@ -160,8 +175,8 @@ const TARGET_SOURCE_SYMBOLS_PER_BLOCK: usize = 512;
 const TARGET_STREAMING_BLOCK_BYTES: usize = 4 * 1024 * 1024;
 /// Maximum encoded ATP-RQ symbols sent in one connected UDP batch.
 ///
-/// Match the UDP GSO segment budget so fixed-size RQ symbols fill one
-/// super-packet before the sender flushes. Fanout must not multiply this
+/// Match the UDP GSO segment budget: one flush is one sendmmsg call carrying
+/// GSO super-packets of fixed-size RQ symbols. Fanout must not multiply this
 /// aggregate burst, or a clean round-0 ramp can overrun the receiver despite
 /// aggregate pacing.
 const RQ_SEND_BATCH_PER_SOCKET: usize = UDP_MAX_GSO_SEGMENTS;
@@ -8071,10 +8086,12 @@ fn source_streaming_block_ready_to_seed(dec: &EntryDecoder, sbn: usize) -> bool 
     let Ok(block_sbn) = u8::try_from(sbn) else {
         return false;
     };
-    let Some(status) = dec
+    // Runs for every accepted repair symbol, so only the count: block_status
+    // would also run a full rank analysis of the block each time.
+    let Some(symbols_received) = dec
         .pipeline
         .as_ref()
-        .and_then(|pipeline| pipeline.block_status(block_sbn))
+        .and_then(|pipeline| pipeline.block_symbols_received(block_sbn))
     else {
         return false;
     };
@@ -8085,7 +8102,7 @@ fn source_streaming_block_ready_to_seed(dec: &EntryDecoder, sbn: usize) -> bool 
         .filter(|(received, seeded)| **received && !**seeded)
         .count();
 
-    status.symbols_received.saturating_add(unseeded_sources) >= block.k
+    symbols_received.saturating_add(unseeded_sources) >= block.k
 }
 
 fn source_seed_symbol_plan(
@@ -8870,7 +8887,20 @@ pub async fn send_path(
             )?)
             .await?;
         rqtrace!("sender: sent ObjectComplete, awaiting reply");
-        let reply = control.recv().await?;
+        // The receiver answers each ObjectComplete exactly once, and also echoes
+        // the liveness probes sent while spraying. An echo that arrives after
+        // the round is not that answer: re-sending ObjectComplete for it would
+        // leave the sender acting on every later verdict one round late, and
+        // the receiver could commit while the sender was still spraying
+        // (asupersync-fjg6ng).
+        let reply = loop {
+            let reply = control.recv().await?;
+            if reply.frame_type() != FrameType::KeepAlive {
+                break reply;
+            }
+            adaptive.mark_control_peer_activity();
+            rqtrace!("sender: KeepAlive while awaiting the round verdict");
+        };
         let control_wait = control_wait_started.elapsed();
         let window_probe = RqSenderWindowProbe::new(
             pacer.pacing(),
@@ -8882,7 +8912,6 @@ pub async fn send_path(
         let window_probe_phase = match reply.frame_type() {
             FrameType::Proof => "proof",
             FrameType::ObjectRequest => "need_more",
-            FrameType::KeepAlive => "keep_alive",
             _ => "other",
         };
         peak_sender_window_bytes = peak_sender_window_bytes.max(window_probe.peak_window_bytes());
@@ -8942,9 +8971,6 @@ pub async fn send_path(
                     udp_send_acceleration,
                     peer,
                 });
-            }
-            FrameType::KeepAlive => {
-                adaptive.mark_control_peer_activity();
             }
             FrameType::ObjectRequest => {
                 let need: NeedMore = parse_json(&reply)?;
@@ -11091,10 +11117,12 @@ pub async fn receive_connection_with_options(
     let strict_delta_context = rq_delta_control_auth_context(&config);
     let authenticated_delta_nonce = validate_rq_delta_hello(strict_delta_context, &hello)?;
     let delta_offered = authenticated_delta_nonce.is_some();
+    let geometry_error = rq_peer_geometry_error(hello.symbol_size, hello.max_block_size);
     let accepted = hello.protocol == ATP_RQ_PROTOCOL
         && hello.role == "sender"
         && hello.symbol_auth == symbol_auth_enabled
         && hello.total_bytes <= config.max_transfer_bytes
+        && geometry_error.is_none()
         && (!delta_offered || config.udp_fanout.max(1) <= RQ_DELTA_MAX_ADVERTISED_UDP_PORTS);
     let control_source_stream = accepted
         && hello.prefer_control_source_stream
@@ -11137,6 +11165,8 @@ pub async fn receive_connection_with_options(
             "transfer size {} exceeds receiver maximum {}",
             hello.total_bytes, config.max_transfer_bytes
         ))
+    } else if let Some(reason) = geometry_error {
+        Some(reason)
     } else if delta_offered && config.udp_fanout.max(1) > RQ_DELTA_MAX_ADVERTISED_UDP_PORTS {
         Some(format!(
             "RQ delta receiver fanout {} exceeds protocol maximum {RQ_DELTA_MAX_ADVERTISED_UDP_PORTS}",
@@ -11393,6 +11423,27 @@ pub async fn receive_connection_with_options(
             hello.max_block_size
         ))
     })?;
+    // The peer's geometry decides how much receive state each entry costs
+    // before any data arrives (per-block plans, per-symbol flags and tags for
+    // source streaming), so bound it before any decoder or staging exists.
+    if let Some(reason) = manifest
+        .entries
+        .iter()
+        .find_map(|entry| rq_entry_geometry_error(entry.size, symbol_size, hello.max_block_size))
+    {
+        return Err(RqError::Frame(reason));
+    }
+    let source_symbols = manifest.entries.iter().try_fold(0u64, |total, entry| {
+        total.checked_add(entry.size.div_ceil(u64::from(symbol_size.max(1))))
+    });
+    let symbol_budget = rq_receive_source_symbol_budget(&config);
+    if source_symbols.is_none_or(|symbols| symbols > symbol_budget) {
+        return Err(RqError::Frame(format!(
+            "transfer of {} bytes in {symbol_size}-byte symbols exceeds the receiver's budget of \
+             {symbol_budget} source symbols",
+            manifest.total_bytes
+        )));
+    }
     let mut staging_guard = create_receive_staging_guard(dest_dir, &manifest.transfer_id).await?;
     let staging_dir = staging_guard.dir().to_path_buf();
     let single_file_fragment_staging = single_file_fragment_staging_path(&manifest, &staging_dir);
@@ -12099,6 +12150,14 @@ fn source_block_progress_for(
     let mut start = 0u64;
     let block_size = u64::try_from(max_block_size.max(1)).unwrap_or(u64::MAX);
     let symbol_size = u64::from(symbol_size.max(1));
+    // Refuse before allocating: the per-symbol tables below are sized by K,
+    // and an entry needing more blocks than an SBN can name would otherwise
+    // allocate every block's tables first.
+    if size.div_ceil(block_size) > u64::try_from(MAX_SOURCE_BLOCKS).unwrap_or(u64::MAX)
+        || block_size.min(size).div_ceil(symbol_size) > RQ_MAX_SOURCE_SYMBOLS_PER_BLOCK
+    {
+        return None;
+    }
     while start < size {
         if blocks.len() >= MAX_SOURCE_BLOCKS {
             return None;
@@ -12120,6 +12179,52 @@ fn source_block_progress_for(
         start = start.checked_add(len_u64)?;
     }
     Some(blocks)
+}
+
+/// Why a sender's symbol geometry cannot be received, if it cannot. The
+/// receiver must decode with the sender's symbol size and block size, so it
+/// adopts them; they are checked first because they size the receive state.
+fn rq_peer_geometry_error(symbol_size: u16, max_block_size: u64) -> Option<String> {
+    (symbol_size == 0 || max_block_size == 0).then(|| {
+        format!(
+            "invalid symbol geometry: symbol_size {symbol_size}, max_block_size {max_block_size}"
+        )
+    })
+}
+
+/// Why one manifest entry cannot be received with the sender's geometry, if
+/// it cannot: more blocks than a source block number can name, or a block
+/// with more source symbols than RaptorQ allows. The sender's encoder refuses
+/// both, so only a hostile peer declares them, to size receive state that
+/// would otherwise be allocated (or iterated) per block and per symbol.
+fn rq_entry_geometry_error(size: u64, symbol_size: u16, max_block_size: u64) -> Option<String> {
+    if size == 0 {
+        return None;
+    }
+    let max_block_size = max_block_size.max(1);
+    let blocks = size.div_ceil(max_block_size);
+    let block_symbols = size
+        .min(max_block_size)
+        .div_ceil(u64::from(symbol_size.max(1)));
+    if blocks > u64::try_from(MAX_SOURCE_BLOCKS).unwrap_or(u64::MAX) {
+        Some(format!(
+            "entry of {size} bytes needs {blocks} source blocks of at most {max_block_size} \
+             bytes; at most {MAX_SOURCE_BLOCKS} are allowed"
+        ))
+    } else if block_symbols > RQ_MAX_SOURCE_SYMBOLS_PER_BLOCK {
+        Some(format!(
+            "entry of {size} bytes puts {block_symbols} source symbols in a block; RaptorQ \
+             allows {RQ_MAX_SOURCE_SYMBOLS_PER_BLOCK}"
+        ))
+    } else {
+        None
+    }
+}
+
+/// Source symbols one received transfer may need, summed over its entries.
+fn rq_receive_source_symbol_budget(config: &RqConfig) -> u64 {
+    RQ_RECEIVE_SOURCE_SYMBOL_BUDGET_FLOOR
+        .max(config.max_transfer_bytes / RQ_RECEIVE_BUDGET_BYTES_PER_SYMBOL)
 }
 
 fn collect_source_requests(decoders: &[EntryDecoder], limit: usize) -> Vec<SourceSymbolRequest> {
@@ -16754,7 +16859,14 @@ where
         if cx.is_cancel_requested() {
             return Ok(());
         }
-        let (stream, peer) = control_listener.accept().await?;
+        let (stream, peer) = match control_listener.accept().await {
+            Ok(accepted) => accepted,
+            // Cancellation interrupts the pending accept. That is the documented
+            // stop, not a failure, whichever side of the check above it lands
+            // on (br-asupersync-ks43rc).
+            Err(_) if cx.is_cancel_requested() => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
         let result = receive_connection_with_options(
             cx,
             stream,

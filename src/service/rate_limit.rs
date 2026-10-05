@@ -595,10 +595,14 @@ impl<S> RateLimit<S> {
                     self.sleep = Some(crate::time::Sleep::new(next_deadline));
                 }
 
+                // `poll_deadline`, not the cancel-aware `poll`: in a cancelled
+                // task `poll` is Ready at once, and every poll_ready then
+                // dropped the Sleep, woke itself and built a new one, a busy
+                // loop until the refill. The refill timer is a deadline.
                 let timer_ready = self
                     .sleep
                     .as_mut()
-                    .is_some_and(|sleep| std::pin::Pin::new(sleep).poll(cx).is_ready());
+                    .is_some_and(|sleep| std::pin::Pin::new(sleep).poll_deadline(cx).is_ready());
                 if timer_ready {
                     // `take` clears the field before arbitrary Waker
                     // destruction, avoiding a second drop during unwinding.
@@ -1259,6 +1263,40 @@ mod tests {
         let pending = result.is_pending();
         crate::assert_with_log!(pending, "pending", true, pending);
         crate::test_complete!("pending_when_no_tokens");
+    }
+
+    #[test]
+    fn exhausted_bucket_does_not_spin_in_a_cancelled_task() {
+        init_test("exhausted_bucket_does_not_spin_in_a_cancelled_task");
+        struct CountWakes(AtomicUsize);
+        impl Wake for CountWakes {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let current = crate::cx::Cx::for_testing();
+        let _current = crate::cx::Cx::set_current(Some(current.clone()));
+        current.cancel_with(crate::types::CancelKind::User, Some("caller gave up"));
+
+        let mut svc = RateLimit::new(EchoService, 1, Duration::from_secs(3600));
+        let wakes = Arc::new(CountWakes(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(svc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        let mut future = svc.call(42);
+        let _ = Pin::new(&mut future).poll(&mut cx);
+
+        // The refill is an hour away. The cancel-aware Sleep completed at once
+        // in this cancelled task, so each poll woke the task again: a spin.
+        for _ in 0..3 {
+            assert!(svc.poll_ready(&mut cx).is_pending());
+        }
+        assert_eq!(
+            wakes.0.load(Ordering::SeqCst),
+            0,
+            "an exhausted bucket must not wake its task before the refill"
+        );
+        crate::test_complete!("exhausted_bucket_does_not_spin_in_a_cancelled_task");
     }
 
     #[test]

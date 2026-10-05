@@ -1895,3 +1895,56 @@ fn metrics_counter_gauge_and_histogram_updates_do_not_allocate() {
     let expected: u64 = 1 + 10_000 + (0..10_000_u64).map(|i| i & 7).sum::<u64>();
     assert_eq!(counter.get(), expected, "every counter update was applied");
 }
+
+/// Heap allocations per `Cx::spawn` + `join` of a trivial task
+/// (br-asupersync-issue65-criticisms-kpmoy5.1.9).
+///
+/// A current-thread runtime runs the parent, the children and admission on
+/// the test thread, so the thread-local counter sees every allocation of the
+/// cycle. The ceiling is the value measured when this test was added, in
+/// this crate's test build (which also enables the conformance
+/// dev-dependency's features). Cutting it is the bead's goal; raising it needs
+/// a reason recorded on the bead.
+#[test]
+fn spawn_join_allocations_per_task_stay_within_budget() {
+    const TASKS: u64 = 1_000;
+    const BUDGET_PER_TASK: f64 = SPAWN_JOIN_ALLOCATION_BUDGET;
+    init_test("spawn_join_allocations_per_task_stay_within_budget");
+    let _guard = ALLOC_TEST_GUARD.lock();
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("current-thread runtime");
+    let (allocs, bytes) = runtime.block_on(async {
+        let cx = Cx::current().expect("block_on installs a Cx");
+        // Warm-up: one-time growth of tables, queues and lazy statics.
+        for _ in 0..64 {
+            let mut handle = cx.spawn(|_| async {}).expect("spawn");
+            handle.join(&cx).await.expect("join");
+        }
+        let before = AllocSnapshot::take();
+        for _ in 0..TASKS {
+            let mut handle = cx.spawn(|_| async {}).expect("spawn");
+            handle.join(&cx).await.expect("join");
+        }
+        let after = AllocSnapshot::take();
+        (after.allocs_since(&before), after.bytes_since(&before))
+    });
+    let per_task = u64_to_f64(allocs) / u64_to_f64(TASKS);
+    let bytes_per_task = u64_to_f64(bytes) / u64_to_f64(TASKS);
+    eprintln!(
+        "ALLOC_BUDGET spawn_join allocations_per_task={per_task:.2} bytes_per_task={bytes_per_task:.0}"
+    );
+    assert!(
+        per_task <= BUDGET_PER_TASK,
+        "spawn + join allocates {per_task:.2} times per task (budget {BUDGET_PER_TASK}); \
+         {bytes_per_task:.0} bytes per task"
+    );
+}
+
+/// Ceiling for [`spawn_join_allocations_per_task_stay_within_budget`].
+///
+/// Measured 30.07 allocations (5,626 bytes) per task on 2026-10-03, in the
+/// `postgres,test-internals` test build. The ceiling leaves 20% for builds
+/// with more instrumentation features, and still catches a regression of six
+/// or more allocations per task.
+const SPAWN_JOIN_ALLOCATION_BUDGET: f64 = 36.0;

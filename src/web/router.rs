@@ -225,6 +225,18 @@ impl MethodRouter {
         self.on(METHOD_OPTIONS, handler)
     }
 
+    /// Add `other`'s methods to this route; `other` wins for a method both
+    /// register, as a later `.get(..)` on one method router does. A body
+    /// policy is kept from this router, or taken from `other` if this one
+    /// has none.
+    fn merge(&mut self, other: Self) {
+        self.handlers.extend(other.handlers);
+        if self.body_policy.is_none() {
+            self.body_policy = other.body_policy;
+        }
+        self.method_not_allowed = Box::new(MethodNotAllowedHandler::new(self.allow_header()));
+    }
+
     /// Apply a monotonic request-body policy to every method on this route.
     ///
     /// The policy is met with the enclosing server and router policies during
@@ -301,10 +313,17 @@ impl MethodRouter {
         }
         // Slow path: case-insensitive fallback (allocates only if needed).
         let upper = req.method.to_uppercase();
-        match self.handlers.get(&upper) {
-            Some(handler) => handler.call(cx, req).await,
-            None => self.method_not_allowed.call(cx, req).await,
+        if let Some(handler) = self.handlers.get(&upper) {
+            return handler.call(cx, req).await;
         }
+        // A server answers HEAD as it would GET (RFC 9110 §9.1, §9.3.2); the
+        // HTTP transports send the response without its content.
+        if upper == METHOD_HEAD
+            && let Some(handler) = self.handlers.get(METHOD_GET)
+        {
+            return handler.call(cx, req).await;
+        }
+        self.method_not_allowed.call(cx, req).await
     }
 }
 
@@ -414,7 +433,7 @@ struct RouteSpecificity {
     total_segments: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Segment {
     Literal(String),
     Param(String),
@@ -2926,8 +2945,20 @@ impl Router {
     /// Register a route with the given pattern and method router.
     #[must_use]
     pub fn route(mut self, pattern: &str, method_router: MethodRouter) -> Self {
-        self.routes
-            .push((RoutePattern::parse(pattern), method_router));
+        let pattern = RoutePattern::parse(pattern);
+        // The same pattern registered again (`.route("/a", get(..))` then
+        // `.route("/a", post(..))`) adds its methods to the existing route.
+        // Kept separate, the first registration always matched and answered
+        // the second one's methods with 405.
+        if let Some((_, existing)) = self
+            .routes
+            .iter_mut()
+            .find(|(registered, _)| registered.segments == pattern.segments)
+        {
+            existing.merge(method_router);
+            return self;
+        }
+        self.routes.push((pattern, method_router));
         self
     }
 
@@ -5938,6 +5969,57 @@ mod tests {
         let resp = router.handle(Request::new("POST", "/"));
         assert_eq!(resp.status, StatusCode::METHOD_NOT_ALLOWED);
         assert_eq!(resp.header_value("allow"), Some("GET"));
+    }
+
+    #[test]
+    fn head_is_answered_by_the_get_handler_when_none_is_registered() {
+        // RFC 9110 §9.1: all general-purpose servers MUST support GET and
+        // HEAD. A GET-only route answered HEAD with 405.
+        let router = Router::new()
+            .route("/", get(FnHandler::new(ok_handler)))
+            .route("/post-only", post(FnHandler::new(created_handler)))
+            .route(
+                "/both",
+                get(FnHandler::new(ok_handler)).head(FnHandler::new(created_handler)),
+            );
+        assert_eq!(
+            router.handle(Request::new("HEAD", "/")).status,
+            StatusCode::OK
+        );
+        assert_eq!(
+            router.handle(Request::new("head", "/")).status,
+            StatusCode::OK
+        );
+        // An explicit HEAD handler still wins, and a route without GET still
+        // refuses HEAD.
+        assert_eq!(
+            router.handle(Request::new("HEAD", "/both")).status,
+            StatusCode::CREATED
+        );
+        let resp = router.handle(Request::new("HEAD", "/post-only"));
+        assert_eq!(resp.status, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(resp.header_value("allow"), Some("POST"));
+    }
+
+    #[test]
+    fn routing_the_same_pattern_twice_merges_the_methods() {
+        // Kept as two routes, the first always matched: POST /a got a 405
+        // naming only GET although POST /a was registered.
+        let router = Router::new()
+            .route("/a", get(FnHandler::new(ok_handler)))
+            .route("/a", post(FnHandler::new(created_handler)));
+
+        assert_eq!(
+            router.handle(Request::new("GET", "/a")).status,
+            StatusCode::OK
+        );
+        assert_eq!(
+            router.handle(Request::new("POST", "/a")).status,
+            StatusCode::CREATED
+        );
+        let resp = router.handle(Request::new("DELETE", "/a"));
+        assert_eq!(resp.status, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(resp.header_value("allow"), Some("GET, POST"));
     }
 
     #[test]

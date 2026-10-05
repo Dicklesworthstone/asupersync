@@ -580,7 +580,7 @@ impl<'a, T, Caps> Future for LockFuture<'a, '_, T, Caps> {
                 }
             }
 
-            if !state.locked && state.granted_waiter.is_none() && self.waiter_id.is_none() {
+            if !state.locked && state.granted_waiter.is_none() && self.unqueued(&state.waiters) {
                 // Check lock ordering before acquisition (debug builds only)
                 if let Some(rank) = self.mutex.rank {
                     lock_ordering::check_acquire(self.mutex.name, rank);
@@ -1050,6 +1050,20 @@ impl<T, U: ?Sized> OwnedMappedMutexGuard<T, U> {
         } else {
             Err(self)
         }
+    }
+}
+
+impl<T, Caps> LockFuture<'_, '_, T, Caps> {
+    /// Whether this future has no place in the wait queue, so it may take a
+    /// free, ungranted mutex at once. A waiter whose grant was revoked because
+    /// waking it panicked (`Mutex::wake_granted`) keeps an id that is in no
+    /// queue; it used to queue itself again on the unlocked mutex and wait for
+    /// a wake nobody would send, while `try_lock` reported it locked.
+    fn unqueued(&mut self, waiters: &WaiterChain) -> bool {
+        if self.waiter_id.is_some_and(|id| !waiters.contains(id)) {
+            self.waiter_id = None;
+        }
+        self.waiter_id.is_none()
     }
 }
 

@@ -10224,12 +10224,14 @@ fn lab_run(args: &LabRunArgs, output: &mut Output) -> Result<(), CliError> {
             .map_err(scenario_runner_error)?;
 
     let passed = result.passed();
+    let bindings =
+        asupersync::lab::scenario_runner::ScenarioRunner::participant_bindings(&scenario);
 
     if args.json {
-        let json = JsonOutputValue::new(result.to_json());
+        let json = JsonOutputValue::new(result.to_json_with_bindings(&bindings));
         output.write(&json).map_err(output_cli_error)?;
     } else {
-        let report = LabRunOutput::from_result(&result);
+        let report = LabRunOutput::from_result(&result, &bindings);
         output.write(&report).map_err(output_cli_error)?;
     }
 
@@ -12997,10 +12999,17 @@ struct LabRunOutput {
     invariant_violations: Vec<String>,
     event_hash: u64,
     schedule_hash: u64,
+    /// Which declared participants ran as lab tasks (br-asupersync-39okzv);
+    /// absent when the scenario declares no participants.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    participant_bindings: Option<asupersync::lab::scenario_runner::ParticipantBindings>,
 }
 
 impl LabRunOutput {
-    fn from_result(result: &asupersync::lab::scenario_runner::ScenarioRunResult) -> Self {
+    fn from_result(
+        result: &asupersync::lab::scenario_runner::ScenarioRunResult,
+        bindings: &asupersync::lab::scenario_runner::ParticipantBindings,
+    ) -> Self {
         Self {
             scenario_id: result.scenario_id.clone(),
             seed: result.seed,
@@ -13014,6 +13023,7 @@ impl LabRunOutput {
             invariant_violations: result.lab_report.invariant_violations.clone(),
             event_hash: result.certificate.event_hash,
             schedule_hash: result.certificate.schedule_hash,
+            participant_bindings: (!bindings.is_empty()).then(|| bindings.clone()),
         }
     }
 }
@@ -13021,16 +13031,27 @@ impl LabRunOutput {
 impl Outputtable for LabRunOutput {
     fn human_format(&self) -> String {
         let status = if self.passed { "PASS" } else { "FAIL" };
+        // A zero-step run executed nothing, so its oracles observed nothing.
+        let empty_run = if self.steps == 0 {
+            " (no workload ran)"
+        } else {
+            ""
+        };
         let mut lines = vec![
             format!("Scenario: {} [{}]", self.scenario_id, status),
             format!("Seed: {}", self.seed),
-            format!("Steps: {}", self.steps),
-            format!("Faults injected: {}", self.faults_injected),
-            format!(
-                "Oracles: {}/{} passed ({} not fed by the lab runtime)",
-                self.oracles_passed, self.oracles_checked, self.oracles_unfed
-            ),
+            format!("Steps: {}{empty_run}", self.steps),
         ];
+        lines.extend(
+            self.participant_bindings
+                .as_ref()
+                .and_then(asupersync::lab::scenario_runner::ParticipantBindings::summary_line),
+        );
+        lines.push(format!("Faults injected: {}", self.faults_injected));
+        lines.push(format!(
+            "Oracles: {}/{} passed ({} not fed by the lab runtime)",
+            self.oracles_passed, self.oracles_checked, self.oracles_unfed
+        ));
         if !self.invariant_violations.is_empty() {
             lines.push(format!(
                 "Invariant violations: {}",
@@ -14833,6 +14854,69 @@ lab:
         assert_eq!(err.exit_code, ExitCode::USER_ERROR);
         assert!(written.contains("\"valid\": false"));
         assert!(written.contains("\"errors\""));
+    }
+
+    #[test]
+    fn lab_run_output_flags_empty_runs_and_reports_participant_bindings() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let empty = temp.path().join("empty.yaml");
+        fs::write(&empty, "id: empty-run\n").expect("write empty scenario");
+        let bound = temp.path().join("bound.yaml");
+        fs::write(
+            &bound,
+            "id: bound-run\nparticipants:\n  - name: alice\n    role: sender\n  - name: bob\n    role: receiver\n  - name: carol\n    role: coordinator\n",
+        )
+        .expect("write bound scenario");
+
+        let run_with = |path: &Path, format: OutputFormat, json: bool| {
+            let capture = SharedWrite::default();
+            let mut output = Output::with_writer(format, capture.clone());
+            let args = LabRunArgs {
+                scenario: path.to_path_buf(),
+                seed: None,
+                json,
+            };
+            let passed = lab_run(&args, &mut output).is_ok();
+            (passed, capture.contents())
+        };
+        let run = |path: &Path, format: OutputFormat| run_with(path, format, false);
+
+        let (passed, human) = run(&empty, OutputFormat::Human);
+        assert!(passed, "{human}");
+        let lines: Vec<&str> = human.lines().collect();
+        assert_eq!(lines[2], "Steps: 0 (no workload ran)", "{human}");
+        assert_eq!(lines[3], "Faults injected: 0", "{human}");
+        assert!(!human.contains("Participants:"), "{human}");
+        let (_, json) = run(&empty, OutputFormat::Json);
+        assert!(!json.contains("participant_bindings"), "{json}");
+        // `--json` writes the full result, plus whether anything ran.
+        let (_, full) = run_with(&empty, OutputFormat::Json, true);
+        let value: serde_json::Value = serde_json::from_str(full.trim()).expect("lab run --json");
+        assert_eq!(value["workload_ran"], false, "{full}");
+        assert!(value.get("participant_bindings").is_none(), "{full}");
+        let (_, full) = run_with(&bound, OutputFormat::Json, true);
+        let value: serde_json::Value = serde_json::from_str(full.trim()).expect("lab run --json");
+        assert_eq!(value["workload_ran"], true, "{full}");
+        assert_eq!(value["participant_bindings"]["bound"][0]["name"], "alice");
+
+        let (passed, human) = run(&bound, OutputFormat::Human);
+        assert!(passed, "{human}");
+        let lines: Vec<&str> = human.lines().collect();
+        assert!(lines[2].starts_with("Steps: "), "{human}");
+        assert!(!lines[2].ends_with("(no workload ran)"), "{human}");
+        assert_eq!(
+            lines[3], "Participants: 2 bound (sender, receiver), 1 unbound (coordinator)",
+            "{human}"
+        );
+        assert_eq!(lines[4], "Faults injected: 0", "{human}");
+        let (_, json) = run(&bound, OutputFormat::Json);
+        let value: serde_json::Value = serde_json::from_str(json.trim()).expect("lab run JSON");
+        assert_eq!(value["participant_bindings"]["bound"][0]["name"], "alice");
+        assert_eq!(
+            value["participant_bindings"]["unbound"][0]["role"],
+            "coordinator"
+        );
+        assert_eq!(value["participant_bindings"]["implicit_sink"], false);
     }
 
     #[test]

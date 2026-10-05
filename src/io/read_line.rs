@@ -71,6 +71,7 @@ where
         buf,
         bytes_read: 0,
         pending: Vec::new(),
+        discarding: None,
         completed: false,
     }
 }
@@ -83,6 +84,9 @@ pub struct ReadLine<'a, R: ?Sized> {
     /// Holds incomplete UTF-8 bytes that were consumed from the reader
     /// but not yet appended to `buf`.
     pending: Vec<u8>,
+    /// Set after invalid UTF-8 in a line whose `\n` has not been read yet:
+    /// the rest of the line is skipped before the error is reported.
+    discarding: Option<std::str::Utf8Error>,
     completed: bool,
 }
 
@@ -99,10 +103,40 @@ enum ChunkAction {
     Consume,
     Finish(io::Result<usize>),
     ConsumeAndFinish(io::Result<usize>),
+    /// Invalid UTF-8 before this line's `\n`: consume the window and skip
+    /// the rest of the line, then report the error.
+    ConsumeAndDiscardLine(std::str::Utf8Error),
 }
 
 fn invalid_data_result(err: std::str::Utf8Error) -> io::Result<usize> {
     Err(io::Error::new(io::ErrorKind::InvalidData, err))
+}
+
+/// An invalid line ends at its `\n` (or at EOF): skip what remains of it, as
+/// std and tokio do, so its tail never comes back as the next line. Returns
+/// the error once the line is gone, or `None` while more of it may follow.
+fn discard_line<R: AsyncBufRead + Unpin + ?Sized>(
+    reader: &mut R,
+    available_len: usize,
+    newline: Option<usize>,
+    discarding: &mut Option<std::str::Utf8Error>,
+) -> Option<io::Result<usize>> {
+    let error = (*discarding)?;
+    match newline {
+        Some(pos) => {
+            Pin::new(reader).consume(pos + 1);
+            *discarding = None;
+            Some(invalid_data_result(error))
+        }
+        None if available_len == 0 => {
+            *discarding = None;
+            Some(invalid_data_result(error))
+        }
+        None => {
+            Pin::new(reader).consume(available_len);
+            None
+        }
+    }
 }
 
 fn append_utf8(buf: &mut String, bytes_read: &mut usize, bytes: &[u8]) -> io::Result<()> {
@@ -144,14 +178,18 @@ fn process_fresh_chunk(
                 if let Err(err) = append_utf8(buf, bytes_read, &chunk[..valid_len]) {
                     return ChunkAction::Finish(Err(err));
                 }
-                if found_newline || e.error_len().is_some() {
+                if found_newline {
                     ChunkAction::ConsumeAndFinish(invalid_data_result(e))
+                } else if e.error_len().is_some() {
+                    ChunkAction::ConsumeAndDiscardLine(e)
                 } else {
                     pending.extend_from_slice(&chunk[valid_len..]);
                     ChunkAction::Consume
                 }
-            } else if e.error_len().is_some() || found_newline {
+            } else if found_newline {
                 ChunkAction::ConsumeAndFinish(invalid_data_result(e))
+            } else if e.error_len().is_some() {
+                ChunkAction::ConsumeAndDiscardLine(e)
             } else {
                 pending.extend_from_slice(chunk);
                 ChunkAction::Consume
@@ -187,15 +225,21 @@ fn process_pending_chunk(
                     return ChunkAction::Finish(Err(err));
                 }
                 pending.drain(..valid_len);
-                if found_newline || e.error_len().is_some() {
+                if found_newline {
                     pending.clear();
                     ChunkAction::ConsumeAndFinish(invalid_data_result(e))
+                } else if e.error_len().is_some() {
+                    pending.clear();
+                    ChunkAction::ConsumeAndDiscardLine(e)
                 } else {
                     ChunkAction::Consume
                 }
-            } else if e.error_len().is_some() || found_newline {
+            } else if found_newline {
                 pending.clear();
                 ChunkAction::ConsumeAndFinish(invalid_data_result(e))
+            } else if e.error_len().is_some() {
+                pending.clear();
+                ChunkAction::ConsumeAndDiscardLine(e)
             } else {
                 ChunkAction::Consume
             }
@@ -234,8 +278,24 @@ where
                 Poll::Ready(Ok(buf)) => buf,
             };
 
+            if this.discarding.is_some() {
+                let newline = available.iter().position(|&b| b == b'\n');
+                let available_len = available.len();
+                if let Some(result) = discard_line(
+                    &mut *this.reader,
+                    available_len,
+                    newline,
+                    &mut this.discarding,
+                ) {
+                    this.completed = true;
+                    return Poll::Ready(result);
+                }
+                continue;
+            }
+
             if available.is_empty() {
                 if let Err(err) = append_utf8(this.buf, &mut this.bytes_read, &this.pending) {
+                    this.pending.clear();
                     this.completed = true;
                     return Poll::Ready(Err(err));
                 }
@@ -280,6 +340,10 @@ where
                     this.completed = true;
                     return Poll::Ready(result);
                 }
+                ChunkAction::ConsumeAndDiscardLine(error) => {
+                    Pin::new(&mut *this.reader).consume(consume_len);
+                    this.discarding = Some(error);
+                }
             }
         }
     }
@@ -298,8 +362,9 @@ where
 // struct that owns the underlying reader. Each `LineReader::read_line` call
 // borrows the wrapper's `pending` field, so cancelling the future leaves
 // the partial prefix in the wrapper for the next call. The user holds a
-// `LineReader` across multiple read_line invocations and gets bit-exact
-// resumption on cancel.
+// `LineReader` and the same `String` across read_line invocations and gets
+// bit-exact resumption on cancel: complete codepoints are already in the
+// String, only the partial one waits in the wrapper.
 // ============================================================================
 
 /// Cancel-safe wrapper that holds the partial UTF-8 prefix for a sequence of
@@ -315,19 +380,24 @@ where
 /// use asupersync::io::{BufReader, LineReader};
 ///
 /// let mut reader = LineReader::new(BufReader::new(socket));
+/// // Keep the String across calls. A read cancelled mid-line leaves the
+/// // complete part of the line here and the partial codepoint in `reader`;
+/// // a fresh String per call would drop the start of the line.
+/// let mut line = String::new();
 /// loop {
-///     let mut line = String::new();
-///     // Even if this future is cancelled mid-codepoint, the prefix
-///     // is preserved in `reader` for the next iteration.
 ///     let n = reader.read_line(&mut line).await?;
 ///     if n == 0 { break; }
 ///     handle_line(&line);
+///     line.clear();
 /// }
 /// ```
 #[derive(Debug)]
 pub struct LineReader<R> {
     inner: R,
     pending: Vec<u8>,
+    /// Kept here, like `pending`, so a cancelled call still skips the rest
+    /// of an invalid line before the next call reads a new one.
+    discarding: Option<std::str::Utf8Error>,
 }
 
 impl<R> LineReader<R> {
@@ -336,6 +406,7 @@ impl<R> LineReader<R> {
         Self {
             inner,
             pending: Vec::new(),
+            discarding: None,
         }
     }
 
@@ -369,6 +440,7 @@ where
             buf,
             bytes_read: 0,
             pending: &mut self.pending,
+            discarding: &mut self.discarding,
             completed: false,
         }
     }
@@ -382,6 +454,7 @@ pub struct ReadLineCancelSafe<'a, R: ?Sized> {
     buf: &'a mut String,
     bytes_read: usize,
     pending: &'a mut Vec<u8>,
+    discarding: &'a mut Option<std::str::Utf8Error>,
     completed: bool,
 }
 
@@ -416,8 +489,24 @@ where
                 Poll::Ready(Ok(buf)) => buf,
             };
 
+            if this.discarding.is_some() {
+                let newline = available.iter().position(|&b| b == b'\n');
+                let available_len = available.len();
+                if let Some(result) =
+                    discard_line(&mut *this.reader, available_len, newline, this.discarding)
+                {
+                    this.completed = true;
+                    return Poll::Ready(result);
+                }
+                continue;
+            }
+
             if available.is_empty() {
                 if let Err(err) = append_utf8(this.buf, &mut this.bytes_read, this.pending) {
+                    // An incomplete code point at EOF is reported once; the
+                    // next call then sees a plain EOF instead of this error
+                    // again forever.
+                    this.pending.clear();
                     this.completed = true;
                     return Poll::Ready(Err(err));
                 }
@@ -461,6 +550,10 @@ where
                     Pin::new(&mut *this.reader).consume(consume_len);
                     this.completed = true;
                     return Poll::Ready(result);
+                }
+                ChunkAction::ConsumeAndDiscardLine(error) => {
+                    Pin::new(&mut *this.reader).consume(consume_len);
+                    *this.discarding = Some(error);
                 }
             }
         }
@@ -799,54 +892,97 @@ mod tests {
 
     #[test]
     fn ghv5u1_line_reader_resumes_partial_utf8_after_cancel() {
-        // Stream: a 4-byte emoji split across two read_line invocations.
-        // After the first read_line (which we drive to its first poll
-        // and then drop), the LineReader's pending field must hold the
-        // partial prefix. The second read_line (with the remaining
-        // bytes appended) must successfully decode the emoji.
-        use crate::io::BufReader;
-
-        // Two-stage source: first stage returns partial bytes; second
-        // stage returns the rest plus newline. We simulate this with
-        // two BufReader instances around two byte slices, threaded
-        // through a LineReader that owns the pending prefix.
-        let emoji = "\u{1F600}\n"; // U+1F600 = F0 9F 98 80, 4 bytes + newline
+        // A 4-byte emoji split across two reads, with the reader pending in
+        // between. The first read_line takes the partial prefix and parks;
+        // it is dropped there. The prefix lives on the LineReader, so the
+        // next read_line decodes the emoji. (This test used to complete its
+        // first call through EOF, and passed only because an incomplete
+        // code point at EOF stayed in `pending` forever.)
+        let emoji = "\u{1F600}\n"; // U+1F600 = F0 9F 98 80, then a newline
         let bytes = emoji.as_bytes();
-        // Split: first 2 bytes (start of emoji), then the rest.
-        let first_chunk: &[u8] = &bytes[..2];
-
-        // Stage 1: BufReader sees first_chunk only. Drive read_line to
-        // completion against this exhausted buffer (returns 0 bytes
-        // appended because it never finds a newline, exits via EOF).
-        let mut reader = LineReader::new(BufReader::new(first_chunk));
+        let mut reader = LineReader::new(PendingBetweenChunksReader {
+            chunks: vec![bytes[..2].to_vec(), bytes[2..].to_vec()],
+            pending_once: false,
+        });
         let mut buf = String::new();
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
         {
             let mut fut = reader.read_line(&mut buf);
-            let mut pinned = std::pin::Pin::new(&mut fut);
-            // Run until the underlying source is exhausted (it'll either
-            // return Pending awaiting more bytes or Ready(Ok(2)) for the
-            // 2 partial bytes treated as EOF). Either way, the future ends
-            // this scope before completion.
-            let _ = pinned.as_mut().poll(&mut cx);
+            let poll = Pin::new(&mut fut).poll(&mut cx);
+            assert!(poll.is_pending(), "the first call parks between chunks");
         }
+        assert!(buf.is_empty());
 
-        // The LineReader pending should now hold the 2 partial bytes.
-        // Drop the reader to inspect via into_parts.
-        let (inner, pending) = reader.into_parts();
-        let _ = inner; // exhausted
+        let mut fut = reader.read_line(&mut buf);
+        let mut fut = Pin::new(&mut fut);
+        let n = poll_ready(&mut fut)
+            .expect("the resumed call completes")
+            .expect("the emoji decodes");
+        assert_eq!(n, bytes.len());
+        assert_eq!(buf, emoji);
+    }
 
-        // Either the partial bytes survived in pending (the bug-fixed
-        // path) OR were appended to buf as best-effort EOF (also OK
-        // — the bytes are not lost). Assert at least that the bytes
-        // are accounted for somewhere.
-        let total_partial =
-            pending.len() + buf.bytes().filter(|b| *b == 0xF0 || *b == 0x9F).count();
-        assert!(
-            total_partial >= 1,
-            "LineReader must preserve partial UTF-8 bytes; pending={pending:?} buf={buf:?}"
-        );
+    /// Invalid UTF-8 before a line's `\n`, with the newline in a later
+    /// buffer: the error used to consume only the current buffer, so the
+    /// rest of the bad line came back as the next "line".
+    #[test]
+    fn read_line_skips_the_rest_of_an_invalid_line() {
+        init_test("read_line_skips_the_rest_of_an_invalid_line");
+        let chunks = || vec![b"ab\xFFcd".to_vec(), b"ef\nnext\n".to_vec()];
+
+        let mut reader = SplitReader { chunks: chunks() };
+        let mut line = String::new();
+        let err = {
+            let mut fut = read_line(&mut reader, &mut line);
+            let mut fut = Pin::new(&mut fut);
+            poll_ready(&mut fut)
+                .expect("resolves")
+                .expect_err("invalid line")
+        };
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        line.clear();
+        let n = {
+            let mut fut = read_line(&mut reader, &mut line);
+            let mut fut = Pin::new(&mut fut);
+            poll_ready(&mut fut).expect("resolves").expect("next line")
+        };
+        assert_eq!((n, line.as_str()), (5, "next\n"));
+
+        let mut reader = LineReader::new(SplitReader { chunks: chunks() });
+        let mut line = String::new();
+        let err = {
+            let mut fut = reader.read_line(&mut line);
+            let mut fut = Pin::new(&mut fut);
+            poll_ready(&mut fut)
+                .expect("resolves")
+                .expect_err("invalid line")
+        };
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        line.clear();
+        let n = {
+            let mut fut = reader.read_line(&mut line);
+            let mut fut = Pin::new(&mut fut);
+            poll_ready(&mut fut).expect("resolves").expect("next line")
+        };
+        assert_eq!((n, line.as_str()), (5, "next\n"));
+    }
+
+    /// A stream that ends inside a code point is an error once; the call
+    /// after it used to fail the same way forever instead of seeing EOF.
+    #[test]
+    fn line_reader_reports_eof_after_an_incomplete_code_point() {
+        init_test("line_reader_reports_eof_after_an_incomplete_code_point");
+        let mut reader = LineReader::new(BufReader::new(&b"ok\n\xF0\x9F"[..]));
+        let mut results = Vec::new();
+        for _ in 0..3 {
+            let mut line = String::new();
+            let mut fut = reader.read_line(&mut line);
+            let mut fut = Pin::new(&mut fut);
+            let result = poll_ready(&mut fut).expect("resolves");
+            results.push(result.map_err(|err| err.kind()));
+        }
+        assert_eq!(results, vec![Ok(3), Err(io::ErrorKind::InvalidData), Ok(0)]);
     }
 
     #[test]

@@ -202,6 +202,7 @@ where
 
     #[inline]
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        let mut restarted_acquisition = false;
         loop {
             match &mut self.state {
                 State::Idle => {
@@ -229,9 +230,22 @@ where
                     Poll::Ready(Ok(permit)) => {
                         self.state = State::Ready(permit);
                     }
-                    Poll::Ready(Err(_)) => {
+                    Poll::Ready(Err(err)) => {
                         // Reset state and return error (e.g. closed/cancelled)
                         self.state = State::Idle;
+                        // The acquisition carries the Cx of the task that
+                        // started it. Shared through Buffer, Steer or a load
+                        // balancer, the limiter is polled by other tasks too:
+                        // when that first task was cancelled but this poller
+                        // was not, start over under this poller's Cx (once
+                        // per call) instead of failing an unrelated request.
+                        if err == crate::sync::AcquireError::Cancelled
+                            && !restarted_acquisition
+                            && !Cx::current().is_some_and(|current| current.is_cancel_requested())
+                        {
+                            restarted_acquisition = true;
+                            continue;
+                        }
                         return Poll::Ready(Err(ConcurrencyLimitError::LimitExceeded));
                     }
                     Poll::Pending => return Poll::Pending,
@@ -904,6 +918,35 @@ mod tests {
         let ready_ok = matches!(ready, Poll::Ready(Ok(())));
         crate::assert_with_log!(ready_ok, "waiter ready", true, ready_ok);
         crate::test_complete!("pending_without_current_cx_registers_waiter_and_wakes_on_release");
+    }
+
+    #[test]
+    fn a_cancelled_first_poller_does_not_fail_the_next_poller() {
+        init_test("a_cancelled_first_poller_does_not_fail_the_next_poller");
+        let layer = ConcurrencyLimitLayer::new(1);
+        let mut holder = layer.layer(NeverCompleteService);
+        let mut shared = layer.layer(EchoService);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(holder.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        let held = holder.call(());
+
+        // Task A starts the queued acquisition, then is cancelled.
+        let task_a = Cx::for_testing();
+        let guard_a = Cx::set_current(Some(task_a.clone()));
+        assert!(shared.poll_ready(&mut cx).is_pending());
+        drop(guard_a);
+        task_a.cancel_with(crate::types::CancelKind::User, Some("task A gave up"));
+
+        // Task B polls the same limiter (as through Buffer or Steer). It used
+        // to inherit A's cancellation as LimitExceeded.
+        let task_b = Cx::for_testing();
+        let _guard_b = Cx::set_current(Some(task_b));
+        let polled = shared.poll_ready(&mut cx);
+        assert!(polled.is_pending(), "task B keeps waiting: {polled:?}");
+        drop(held);
+        assert!(matches!(shared.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        crate::test_complete!("a_cancelled_first_poller_does_not_fail_the_next_poller");
     }
 
     #[test]

@@ -200,7 +200,7 @@ fn decode_binary(value: &str) -> Result<Bytes, Status> {
         .map_err(|_| Status::internal("invalid base64 in gRPC response metadata"))
 }
 
-fn http_fallback(status: u16) -> Status {
+pub fn http_fallback(status: u16) -> Status {
     let code = match status {
         400 => Code::Internal,
         401 => Code::Unauthenticated,

@@ -15,13 +15,18 @@ this index.
 - [`onramp_level3.rs`](onramp_level3.rs) — commit a two-phase channel send and
   make the deterministic lab catch an obligation leak.
 - [`production_service.rs`](production_service.rs) — run a production-style
-  HTTP service with a SQLite-backed handler and request-aware graceful drain.
+  HTTP service with a SQLite-backed handler. The service region owns the
+  listener and every connection (`Http1Listener::run_in`), so shutdown is a
+  request-aware drain followed by a bounded region close
+  (`ChildRegion::close_within`), with no `RuntimeHandle`.
 
 ## Runtime, API, and structured-concurrency examples
 
 - [`hello.rs`](hello.rs) — minimal async entry point with a `Cx` checkpoint.
 - [`spawn_fanout.rs`](spawn_fanout.rs) — small `JoinSet` fan-out with joined
   child outcomes.
+- [`fibers_borrowing.rs`](fibers_borrowing.rs) — `fiber::scope` fan-out over
+  borrowed data inside one task, with no `'static` bound.
 - [`external_consumer.rs`](external_consumer.rs) — public-API smoke program for
   runtime and lab entry points.
 - [`appspec_reference_journey.rs`](appspec_reference_journey.rs) — production
@@ -77,10 +82,23 @@ this index.
 These 13 YAML files are typed `Scenario` fixtures. Their filenames, comments,
 and descriptions are authoring narratives, not evidence that the runner simulates
 every declared network, cancellation, or fault effect or schedules the named
-workload. In particular, include paths are validated but not merged, and
-the schema itself schedules no application tasks. See the
-[FrankenLab author guide](../docs/adoption/getting_started.md) for the current
-input, output, diagnostics, and field-consumption boundaries.
+workload. Include paths are validated but not merged. Only participants whose
+role is exactly `sender`, `receiver`, `swarm`, `supervisor`, `worker`,
+`saga-coordinator`, `saga-participant`, `primary`, `replica`,
+`lease-grantor`, `lease-holder`, `hub` or `peer` run: senders and receivers
+as lab tasks on bounded two-phase `mpsc` channels, a swarm as many short lab
+tasks, supervisors as managed supervisors that restart failing workers, saga
+coordinators as `remote::Saga` runs that compensate in reverse when a
+participant refuses or a message is lost, primaries as log shippers that
+catch lagging replicas up, lease holders that acquire, renew and release
+their grantor's lease while the run checks that no two hold it at once, and
+hubs that ping their peers and time the echoes. The `network` preset and
+per-link latency and loss delay or drop saga, replication, lease and hub
+messages; `partition` and `heal` faults between two
+participants cut and restore their links, and `clock_skew` and `clock_reset`
+move a lease role's clock. No other fault changes the workload. Other roles
+run nothing (`Steps: 0 (no workload ran)`). See the
+[author guide](../docs/adoption/getting_started.md) for the field boundaries.
 
 - [`scenarios/smoke_happy_path.yaml`](scenarios/smoke_happy_path.yaml) — small
   typed smoke fixture.
@@ -88,28 +106,35 @@ input, output, diagnostics, and field-consumption boundaries.
   — fixture declaring cancellation settings, which are currently
   validation-only.
 - [`scenarios/chaos_sendpermit_ack.yaml`](scenarios/chaos_sendpermit_ack.yaml) —
-  typed chaos and oracle configuration fixture.
+  chaos fixture; its `sender` and `receiver` run as a real channel workload.
 - [`scenarios/clock_skew_lease.yaml`](scenarios/clock_skew_lease.yaml) —
-  clock-skew declaration fixture; the action is recorded rather than simulated.
+  lease fixture; `node-a` holds `node-b`'s lease through four renewals while
+  `node-b`'s clock runs 1 ms ahead, then releases it.
 - [`scenarios/composable_base.yaml`](scenarios/composable_base.yaml) — reusable
   base-shaped fixture; current loaders do not merge it into another document.
 - [`scenarios/composed_partition_test.yaml`](scenarios/composed_partition_test.yaml)
-  — include and partition declaration fixture; include resolution is not wired.
+  — replication fixture; `node-b` misses `node-a`'s batches while their link
+  is cut and catches up after the heal. Its include is not merged.
 - [`scenarios/custom_latency_model.yaml`](scenarios/custom_latency_model.yaml) —
-  network-validation fixture; the runner does not consume network settings.
+  network-latency fixture; hub `a` pings peers `b`, `c` and `d`, whose round
+  trips follow their fixed, uniform and normal link latencies.
 - [`scenarios/host_crash_restart.yaml`](scenarios/host_crash_restart.yaml) —
-  crash/restart declaration fixture; those actions are trace records today.
-- [`scenarios/partition_heal.yaml`](scenarios/partition_heal.yaml) — network
-  partition/heal declaration fixture; those actions are trace records today.
+  supervision fixture; its `supervisor` restarts each `worker` after one
+  failure, while the crash and restart actions stay trace records.
+- [`scenarios/partition_heal.yaml`](scenarios/partition_heal.yaml) — saga
+  partition/heal fixture; its coordinator runs a saga over two participants
+  while the declared partition cuts one of their links.
 - [`scenarios/stress_10k_tasks.yaml`](scenarios/stress_10k_tasks.yaml) —
-  large-scale authoring narrative; the YAML does not schedule that workload.
+  stress fixture; one `swarm` participant runs 10,000 short lab tasks under
+  chaos.
 
 The standalone FrankenLab CLI also ships three typed scenario fixtures, all
 covered by [`metadata.json`](metadata.json):
 
 - [`01_race_condition.yaml`](../frankenlab/examples/scenarios/01_race_condition.yaml)
-  — typed fixture describing a race-condition narrative.
+  — race-condition fixture; two `sender` tasks race on one implicit-sink channel.
 - [`02_obligation_leak.yaml`](../frankenlab/examples/scenarios/02_obligation_leak.yaml)
-  — typed fixture describing an obligation-leak narrative.
+  — obligation fixture; one `sender` and four `receiver` tasks under light chaos.
 - [`03_saga_partition.yaml`](../frankenlab/examples/scenarios/03_saga_partition.yaml)
-  — typed fixture describing a partitioned-saga narrative.
+  — ten-participant saga under heavy chaos; without chaos, the partition of
+  participants 7-9 makes the coordinator time out and compensate its steps.

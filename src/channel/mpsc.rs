@@ -671,9 +671,18 @@ impl<T> Sender<T> {
     /// on the returned permit (`let permit = tx.reserve(cx).await?;
     /// permit.send(value)?;`). That keeps `value` in the caller's hands until the
     /// slot is secured, so a cancellation between the two steps cannot drop it.
+    ///
+    /// **Obligations:** the internal permit is committed in the same poll that
+    /// reserves it, so it is never held across an await and cannot leak. It is
+    /// therefore not registered as a runtime obligation; permits returned by
+    /// [`reserve`](Self::reserve) and [`reserve_checked`](Self::reserve_checked)
+    /// still are (br-asupersync-issue65-criticisms-kpmoy5.1.16).
     #[inline]
     pub async fn send(&self, cx: &Cx, value: T) -> Result<(), SendError<T>> {
-        let result = self.reserve(cx).await;
+        let result = TransientReserve {
+            inner: self.reserve(cx),
+        }
+        .await;
         match result {
             Ok(permit) => permit.try_send(value),
             Err(SendError::<()>::Disconnected(())) => Err(SendError::Disconnected(value)),
@@ -1097,6 +1106,24 @@ impl<'a, T> Future for Reserve<'a, T> {
         self.poll_with_registration(ctx, |cx| {
             Ok(cx.try_register_obligation(crate::record::ObligationKind::SendPermit, cx.task_id()))
         })
+    }
+}
+
+/// The reserve inside [`Sender::send`]: identical channel semantics, but the
+/// permit is not registered as a runtime obligation because `send` commits it
+/// before returning control to the scheduler. Registering it cost two
+/// obligation-mailbox posts, each applied by a worker under the runtime state
+/// lock, for every message (br-asupersync-issue65-criticisms-kpmoy5.1.16).
+struct TransientReserve<'a, T> {
+    inner: Reserve<'a, T>,
+}
+
+impl<'a, T> Future for TransientReserve<'a, T> {
+    type Output = Result<SendPermit<'a, T>, SendError<()>>;
+
+    fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
+        // `Reserve` is `Unpin` (it holds references, an option and a bool).
+        Pin::new(&mut self.get_mut().inner).poll_with_registration(ctx, |_| Ok(None))
     }
 }
 

@@ -7,9 +7,21 @@ use crate::record::task::{TaskPhase, TaskRecord};
 use crate::runtime::stored_task::StoredTask;
 use crate::types::TaskId;
 use crate::util::{Arena, ArenaIndex, RecyclingPool};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Number of task phases that are considered "live" (not Completed).
 const LIVE_PHASE_COUNT: usize = 5;
+
+/// Debug builds compare the live count with an arena scan on every read of a
+/// table this small...
+#[cfg(debug_assertions)]
+const LIVE_COUNT_CHECK_ALWAYS_UP_TO: usize = 64;
+
+/// ...and on every this-many reads of a larger one, so that the check does
+/// not make a run quadratic in its task count again.
+#[cfg(debug_assertions)]
+const LIVE_COUNT_CHECK_INTERVAL: usize = 4096;
 
 /// Telemetry for the `TaskRecord` recycling pool.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -64,9 +76,17 @@ pub struct TaskTable {
     /// Incremental total of all non-terminal task phases.
     ///
     /// Kept as a mutation-side cache for future fully-encapsulated task phase
-    /// updates. Read-side access currently scans the arena so direct legacy
-    /// `TaskRecord` phase mutations cannot panic or leak stale health metrics.
+    /// updates. Read-side access uses `live_records` instead, which direct
+    /// legacy `TaskRecord` phase mutations cannot drift.
     live_task_count: usize,
+    /// Records in the arena whose phase is not terminal. Each record's
+    /// `TaskPhaseCell` holds this counter while the record is in the table and
+    /// adjusts it on every phase store, so `live_task_count` is O(1) and exact
+    /// on every mutation path (br-asupersync-bzict6).
+    live_records: Arc<AtomicUsize>,
+    /// Reads of `live_task_count`, for the sampled debug cross-check.
+    #[cfg(debug_assertions)]
+    live_count_reads: AtomicUsize,
     /// Sum of all deadlines (in nanoseconds) for live tasks that have a
     /// non-infinite deadline. Combined with virtual-time `now`, allows O(1)
     /// estimation of deadline pressure.
@@ -104,6 +124,9 @@ impl TaskTable {
             task_record_pool_stats: TaskRecordPoolStats::default(),
             phase_counts: [0; LIVE_PHASE_COUNT],
             live_task_count: 0,
+            live_records: Arc::new(AtomicUsize::new(0)),
+            #[cfg(debug_assertions)]
+            live_count_reads: AtomicUsize::new(0),
             deadline_sum_ns: 0,
             tasks_with_deadline: 0,
         }
@@ -136,6 +159,9 @@ impl TaskTable {
             task_record_pool_stats: TaskRecordPoolStats::default(),
             phase_counts: [0; LIVE_PHASE_COUNT],
             live_task_count: 0,
+            live_records: Arc::new(AtomicUsize::new(0)),
+            #[cfg(debug_assertions)]
+            live_count_reads: AtomicUsize::new(0),
             deadline_sum_ns: 0,
             tasks_with_deadline: 0,
         }
@@ -335,13 +361,25 @@ impl TaskTable {
             record
         });
         self.note_task_added(phase, deadline);
+        self.count_live(idx);
         idx
+    }
+
+    /// Makes the record at `idx` count toward `live_task_count` while it
+    /// stays in the table.
+    #[inline]
+    fn count_live(&mut self, idx: ArenaIndex) {
+        let live_records = Arc::clone(&self.live_records);
+        if let Some(record) = self.tasks.get_mut(idx) {
+            record.phase.attach_live_count(live_records);
+        }
     }
 
     /// Removes a task record by arena index.
     #[inline]
     pub fn remove(&mut self, index: ArenaIndex) -> Option<TaskRecord> {
-        let record = self.tasks.remove(index)?;
+        let mut record = self.tasks.remove(index)?;
+        record.phase.detach_live_count();
         if let Some(cx) = &record.cx {
             cx.revoke_obligation_admission();
         }
@@ -474,6 +512,7 @@ impl TaskTable {
             let phase = record.phase.load();
             self.note_task_added(phase, record.deadline);
         }
+        self.count_live(idx);
         idx
     }
 
@@ -512,6 +551,7 @@ impl TaskTable {
             let phase = record.phase.load();
             self.note_task_added(phase, record.deadline);
         }
+        self.count_live(idx);
         idx
     }
 
@@ -613,13 +653,35 @@ impl TaskTable {
     }
 
     /// Returns the number of live tasks (non-terminal).
+    ///
+    /// O(1). A scan of the arena made this O(tasks) and every lab step with
+    /// it, because `RuntimeState::is_quiescent` reads it (br-asupersync-bzict6).
     #[must_use]
     #[inline]
     pub fn live_task_count(&self) -> usize {
-        self.tasks
-            .iter()
-            .filter(|(_, record)| (record.phase.load() as usize) < LIVE_PHASE_COUNT)
-            .count()
+        let count = self.live_records.load(Ordering::Acquire);
+        #[cfg(debug_assertions)]
+        self.debug_check_live_count(count);
+        count
+    }
+
+    /// Debug builds: the counted live tasks must equal an arena scan.
+    #[cfg(debug_assertions)]
+    fn debug_check_live_count(&self, count: usize) {
+        let reads = self.live_count_reads.fetch_add(1, Ordering::Relaxed);
+        if self.tasks.len() <= LIVE_COUNT_CHECK_ALWAYS_UP_TO
+            || reads.is_multiple_of(LIVE_COUNT_CHECK_INTERVAL)
+        {
+            let scanned = self
+                .tasks
+                .iter()
+                .filter(|(_, record)| (record.phase.load() as usize) < LIVE_PHASE_COUNT)
+                .count();
+            debug_assert_eq!(
+                count, scanned,
+                "live task count drifted from the task records"
+            );
+        }
     }
 
     /// Returns the number of stored futures.
@@ -882,6 +944,55 @@ mod tests {
         assert_eq!(table.live_task_count(), 0);
         assert_eq!(table.count_in_phase(TaskPhase::Created), 0);
         assert_eq!(table.count_in_phase(TaskPhase::Running), 0);
+    }
+
+    /// The live count is a counter rather than a scan (br-asupersync-bzict6).
+    /// It must still agree with the records on every path that changes them:
+    /// each insert path, direct record mutation, `update_task`, removal,
+    /// recycling, and reuse of a recycled record.
+    #[test]
+    fn live_task_count_agrees_with_the_records_on_every_path() {
+        fn scanned(table: &TaskTable) -> usize {
+            table
+                .iter()
+                .filter(|(_, record)| !record.phase.load().is_terminal())
+                .count()
+        }
+        fn check(table: &TaskTable, expected: usize, step: &str) {
+            assert_eq!(table.live_task_count(), expected, "{step}");
+            assert_eq!(scanned(table), expected, "{step}: scan");
+        }
+        let mut table = TaskTable::with_capacity_and_pool_limit(8, 8);
+        let owner = RegionId::from_arena(ArenaIndex::new(1, 0));
+
+        let a = TaskId::from_arena(table.insert_task(make_task_record(owner)));
+        let b = TaskId::from_arena(table.insert_task_with(|_| make_task_record(owner)));
+        let c = TaskId::from_arena(table.insert_pooled_task_with(|_, record| record.owner = owner));
+        check(&table, 3, "three insert paths");
+
+        let record = table.task_mut(a).expect("a");
+        record.start_running();
+        check(&table, 3, "running is live");
+        table.task_mut(a).expect("a").complete(Outcome::Ok(()));
+        check(&table, 2, "direct completion");
+        table.update_task(b, |record| {
+            record.start_running();
+            record.complete(Outcome::Ok(()));
+        });
+        check(&table, 1, "completion through update_task");
+
+        table.remove_and_recycle_task(c);
+        check(&table, 0, "live record removed and recycled");
+        let d = TaskId::from_arena(table.insert_pooled_task_with(|_, record| record.owner = owner));
+        check(&table, 1, "recycled record reused");
+        table.remove_task(a);
+        check(&table, 1, "terminal record removed");
+
+        let mut removed = table.remove_task(d).expect("d");
+        check(&table, 0, "live record removed");
+        removed.start_running();
+        drop(removed);
+        check(&table, 0, "a removed record no longer counts");
     }
 
     #[test]

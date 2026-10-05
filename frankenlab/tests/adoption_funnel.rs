@@ -34,6 +34,18 @@ fn assert_scenario_run_passes(name: &str, require_faults: bool) {
         "Scenario failed: violations={:?}",
         result.lab_report.invariant_violations
     );
+    // Every shipped fixture binds participants, so a run of zero steps
+    // means its workload was lost.
+    assert!(
+        !ScenarioRunner::participant_bindings(&scenario)
+            .bound
+            .is_empty(),
+        "{name} binds no participants"
+    );
+    assert!(
+        result.lab_report.steps_total > 0,
+        "{name} ran no workload steps"
+    );
     if require_faults {
         assert!(
             result.faults_injected > 0,

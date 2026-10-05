@@ -6714,4 +6714,59 @@ mod tests {
 
         crate::test_complete!("audit_sender_send_sync_trait_bounds_compliance");
     }
+
+    /// `reserve` marked the sender consumed and a permit outstanding before
+    /// the permit existed. When registering its obligation panicked, nothing
+    /// was left to close the channel, so the parked receiver was never woken.
+    #[test]
+    fn reserve_obligation_panic_still_closes_the_channel_for_the_receiver() {
+        use crate::runtime::obligation_mailbox::ObligationGateway;
+        let mut lab =
+            crate::lab::LabRuntime::new(crate::lab::LabConfig::new(0x28_c004).max_steps(128));
+        let root = lab.state.create_root_region(crate::types::Budget::INFINITE);
+        let (task, _handle) = lab
+            .state
+            .create_task(root, crate::types::Budget::INFINITE, async {})
+            .unwrap();
+        let cx = lab.state.task(task).unwrap().cx.clone().unwrap();
+        let notifications = Arc::new(AtomicUsize::new(0));
+        let observed = notifications.clone();
+        let liveness = Arc::new(());
+        let gateway = Arc::new(ObligationGateway::new(
+            Arc::clone(lab.state.obligation_gateway().unwrap().mailbox()),
+            Arc::new(move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+                panic!("planted oneshot reserve notification panic");
+            }),
+            Arc::downgrade(&liveness),
+        ));
+        let cx = cx.with_obligation_gateway(Some(gateway), None);
+        let (tx, mut rx) = channel::<u32>();
+        let inner = rx.inner.clone();
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let waker = counting_waker(wakes.clone());
+        let mut ctx = Context::from_waker(&waker);
+        let mut receiver = Box::pin(rx.recv(&cx));
+        assert!(receiver.as_mut().poll(&mut ctx).is_pending());
+
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(tx.reserve(&cx));
+        }))
+        .expect_err("the planted notification must panic");
+        assert_eq!(
+            failure.downcast_ref::<&str>(),
+            Some(&"planted oneshot reserve notification panic")
+        );
+        assert_eq!(notifications.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            wakes.load(Ordering::SeqCst),
+            1,
+            "the parked receiver was never woken"
+        );
+        assert!(!inner.lock().permit_outstanding);
+        assert_eq!(
+            receiver.as_mut().poll(&mut ctx),
+            Poll::Ready(Err(RecvError::Closed))
+        );
+    }
 }

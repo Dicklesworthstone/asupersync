@@ -7,11 +7,13 @@
 //!
 //! ```
 //! use asupersync::web::static_files::StaticFiles;
-//! use asupersync::web::{Router, get};
+//! use asupersync::web::Router;
 //!
+//! // The handler resolves the request path against the root, so mount it
+//! // where the router strips the prefix: `GET /static/app.js` serves
+//! // `./public/app.js`.
 //! let statics = StaticFiles::new("./public");
-//! let app = Router::new()
-//!     .route("/static/*path", get(statics.handler()));
+//! let app = Router::new().nest("/static", Router::new().fallback(statics.handler()));
 //! ```
 //!
 //! # Security
@@ -78,7 +80,11 @@ fn is_denied_hidden_component(component: &str) -> bool {
 /// how many duplicate/overlapping specs the client sends.
 fn parse_ranges(range_header: &str, file_size: u64) -> Result<Vec<ByteRange>, RangeError> {
     let range_header = range_header.trim();
-    let Some(ranges_str) = range_header.strip_prefix("bytes=") else {
+    // Range units are case-insensitive (RFC 9110 section 14.1).
+    let Some(ranges_str) = range_header
+        .split_once('=')
+        .and_then(|(unit, ranges)| unit.eq_ignore_ascii_case("bytes").then_some(ranges))
+    else {
         return Err(RangeError::InvalidSyntax);
     };
 
@@ -267,9 +273,24 @@ impl StaticFiles {
 
     /// Resolve a request path to a file, applying security checks.
     fn resolve_path(&self, request_path: &str) -> Option<PathBuf> {
-        // Strip leading slash and URL decode.
+        // Strip leading slash and URL decode each segment on its own, after
+        // splitting on the literal `/` (RFC 3986 §2.4). The router keeps a
+        // `%2F` inside one segment, so `/files/admin%2Fsecret` never reaches a
+        // mount at `/files/admin`; decoding the whole path here would then
+        // serve `admin/secret` from an outer mount's root, past whatever
+        // guards the inner mount.
         let cleaned = request_path.trim_start_matches('/');
-        let decoded = percent_decode(cleaned);
+        let mut decoded = String::with_capacity(cleaned.len());
+        for (index, segment) in cleaned.split('/').enumerate() {
+            let segment = percent_decode(segment);
+            if segment.contains('/') {
+                return None;
+            }
+            if index > 0 {
+                decoded.push('/');
+            }
+            decoded.push_str(&segment);
+        }
 
         // Reject traversal, ambiguous Windows separators, and hidden files.
         // Repeat the same policy after bounded additional decoding so a proxy
@@ -387,6 +408,7 @@ impl StaticFiles {
         path: &Path,
         range_header: &str,
         if_none_match: Option<&str>,
+        if_range: Option<&str>,
     ) -> Response {
         let Some(path) = self.validated_current_path(path) else {
             return Response::empty(StatusCode::NOT_FOUND);
@@ -434,6 +456,16 @@ impl StaticFiles {
                         .header("accept-ranges", "bytes"),
                 );
             }
+        }
+
+        // RFC 9110 §13.1.5: with If-Range, the range applies only while the
+        // representation still matches the validator, compared strongly;
+        // otherwise the whole current representation is sent with 200, so a
+        // resumed download cannot splice bytes of a changed file onto the
+        // part it already has. A date validator never matches here (no
+        // Last-Modified is sent), so it also gets the full body.
+        if if_range.is_some_and(|validator| validator.trim() != etag) {
+            return self.serve_file(&path, None);
         }
 
         // Parse Range header (after preconditions per RFC 9110 §13.2.2).
@@ -561,14 +593,25 @@ impl Handler for StaticFilesHandler {
         Box::pin(async move {
             let head_only = req.method.eq_ignore_ascii_case("HEAD");
             let if_none_match = req.header("if-none-match").map(str::to_owned);
-            let range_header = req.header("range");
+            let if_range = req.header("if-range");
+            // RFC 9110 §14.2: a Range in a unit other than bytes is ignored.
+            let range_header = req.header("range").filter(|range| {
+                range
+                    .trim()
+                    .split_once('=')
+                    .is_some_and(|(unit, _)| unit.eq_ignore_ascii_case("bytes"))
+            });
             let request_path = &req.path;
 
             let mut response = match self.config.resolve_path(request_path) {
                 Some(file_path) => {
                     if let Some(range_str) = range_header {
-                        self.config
-                            .serve_range(&file_path, range_str, if_none_match.as_deref())
+                        self.config.serve_range(
+                            &file_path,
+                            range_str,
+                            if_none_match.as_deref(),
+                            if_range,
+                        )
                     } else {
                         let mut resp = self.config.serve_file(&file_path, if_none_match.as_deref());
                         // Add Accept-Ranges header to advertise range support
@@ -967,6 +1010,33 @@ mod tests {
             sf.resolve_path("/index.html").is_some(),
             "normal files still served"
         );
+    }
+
+    #[test]
+    fn resolve_path_keeps_an_encoded_slash_inside_its_segment() {
+        let dir = setup_dir();
+        let sf = StaticFiles::new(dir.path());
+        assert!(sf.resolve_path("/sub/page.html").is_some());
+        assert!(sf.resolve_path("/sub%2Fpage.html").is_none());
+        assert!(sf.resolve_path("/sub%2fpage.html").is_none());
+    }
+
+    #[test]
+    fn an_encoded_slash_cannot_reach_files_below_a_more_specific_mount() {
+        // `/files/sub%2Fpage.html` is one segment to the router, so it misses
+        // a mount at `/files/sub` (which may carry auth) and lands on the
+        // outer `/files` mount, which must not serve `sub/page.html` for it.
+        let dir = setup_dir();
+        let app = crate::web::Router::new().nest(
+            "/files",
+            crate::web::Router::new().fallback(StaticFiles::new(dir.path()).handler()),
+        );
+        let get = |path: &str| {
+            app.handle(super::super::extract::Request::new("GET", path))
+                .status
+        };
+        assert_eq!(get("/files/sub/page.html"), StatusCode::OK);
+        assert_eq!(get("/files/sub%2Fpage.html"), StatusCode::NOT_FOUND);
     }
 
     #[test]
@@ -1413,7 +1483,7 @@ mod tests {
         // requested range starts well past EOF. parse_ranges returns
         // NotSatisfiable, which the pre-fix path short-circuited to
         // 416 before checking If-None-Match.
-        let resp = sf.serve_range(&path, "bytes=99999-100000", Some(&etag));
+        let resp = sf.serve_range(&path, "bytes=99999-100000", Some(&etag), None);
 
         assert_eq!(
             resp.status,
@@ -1451,7 +1521,7 @@ mod tests {
             .expect("etag must be present")
             .clone();
 
-        let resp = sf.serve_range(&path, "bytes=abc-def", Some(&etag));
+        let resp = sf.serve_range(&path, "bytes=abc-def", Some(&etag), None);
 
         assert_eq!(
             resp.status,
@@ -1471,7 +1541,7 @@ mod tests {
         let sf = StaticFiles::new(dir.path());
         let path = sf.resolve_path("/hello.txt").unwrap();
 
-        let resp = sf.serve_range(&path, "bytes=99999-100000", Some("\"not-the-etag\""));
+        let resp = sf.serve_range(&path, "bytes=99999-100000", Some("\"not-the-etag\""), None);
 
         assert_eq!(
             resp.status,
@@ -1558,6 +1628,45 @@ mod tests {
             head_resp.headers.get("x-content-type-options"),
             get_resp.headers.get("x-content-type-options")
         );
+    }
+
+    #[test]
+    fn handler_honours_if_range_and_range_units() {
+        use super::super::extract::Request;
+        let dir = setup_dir();
+        let sf = StaticFiles::new(dir.path());
+        let handler = sf.handler();
+        let etag = handler
+            .call_sync(Request::new("GET", "/hello.txt"))
+            .headers
+            .get("etag")
+            .cloned()
+            .expect("etag");
+        let ranged = |if_range: Option<&str>, range: &str| {
+            let mut req = Request::new("GET", "/hello.txt").with_header("Range", range);
+            if let Some(if_range) = if_range {
+                req = req.with_header("If-Range", if_range);
+            }
+            handler.call_sync(req)
+        };
+
+        // The validator still matches: the range applies.
+        let resp = ranged(Some(&etag), "bytes=0-4");
+        assert_eq!(resp.status, StatusCode::PARTIAL_CONTENT);
+        assert_eq!(resp.body.as_ref(), b"Hello");
+        // A stale validator, or a date (no Last-Modified is sent): the whole
+        // current file with 200, never a 206 of a different representation.
+        for stale in ["\"an-old-etag\"", "Sat, 01 Jan 2000 00:00:00 GMT"] {
+            let resp = ranged(Some(stale), "bytes=0-4");
+            assert_eq!(resp.status, StatusCode::OK, "If-Range {stale}");
+            assert_eq!(resp.body.as_ref(), b"Hello, world!");
+        }
+        // Range units are case-insensitive; an unknown unit is ignored.
+        let resp = ranged(None, "BYTES=0-4");
+        assert_eq!(resp.status, StatusCode::PARTIAL_CONTENT);
+        let resp = ranged(None, "items=0-4");
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(resp.body.as_ref(), b"Hello, world!");
     }
 
     #[test]

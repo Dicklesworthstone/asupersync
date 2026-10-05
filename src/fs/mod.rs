@@ -117,5 +117,5 @@ pub use vfs::{UnixVfs, UnixVfsFile, Vfs, VfsFile};
 /// to `false`. Behavior mirrors Tokio's `fs::try_exists`.
 pub async fn try_exists(path: impl AsRef<std::path::Path>) -> std::io::Result<bool> {
     let path = path.as_ref().to_owned();
-    crate::runtime::spawn_blocking_io(move || path.try_exists()).await
+    crate::cx::io_gate::spawn_blocking_io(move || path.try_exists()).await
 }

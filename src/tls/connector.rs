@@ -998,10 +998,10 @@ impl TlsConnectorBuilder {
     ///   a fresh `TlsConnector`. Long-lived processes connecting to
     ///   slowly-rotating PKIs should periodically rebuild the
     ///   connector with a current CRL.
-    /// * **Coverage**: a CRL covers only the certs issued by the
-    ///   matching CA. Mixing CRLs from multiple CAs is supported;
-    ///   each CRL applies to its issuer. CRLs for CAs that do not
-    ///   appear in the configured roots are silently inert.
+    /// * **Coverage**: a CRL covers only the certs its CA issued, and a
+    ///   cert whose issuer has no configured CRL is still accepted. CRLs
+    ///   from several CAs can be mixed. CRLs for CAs that do not appear
+    ///   in the configured roots are silently inert.
     /// * **OCSP**: rustls 0.23 does not surface OCSP-stapling
     ///   *enforcement*, only OCSP-response *acceptance* during the
     ///   handshake. CRL is the more reliable revocation primitive
@@ -1074,15 +1074,14 @@ impl TlsConnectorBuilder {
         // Create the config builder with the crypto provider and protocol versions.
         let builder = ClientConfig::builder_with_provider(Arc::new(default_provider()));
         let builder = if self.min_protocol.is_some() || self.max_protocol.is_some() {
-            // Convert protocol versions to ordinals for comparison.
-            // TLS 1.2 = 0x0303, TLS 1.3 = 0x0304
+            // Compare protocol versions by their wire value (TLS 1.0 = 0x0301
+            // ... TLS 1.3 = 0x0304), which orders every TLS version. A bound
+            // below TLS 1.2 is then honoured: a TLS 1.1 ceiling leaves no
+            // version (a build error) and a TLS 1.0 floor admits 1.2 and 1.3.
+            // Mapping them to 0xFFFF made the ceiling a no-op and the floor an
+            // error. DTLS values (0xFEFF and below) sort above every TLS one.
             fn version_ordinal(v: rustls::ProtocolVersion) -> u16 {
-                match v {
-                    rustls::ProtocolVersion::TLSv1_2 => 0x0303,
-                    rustls::ProtocolVersion::TLSv1_3 => 0x0304,
-                    // For unknown versions, use a high value so they're excluded by default
-                    _ => 0xFFFF,
-                }
+                u16::from(v)
             }
 
             let min = self.min_protocol.map(version_ordinal);
@@ -1153,8 +1152,13 @@ impl TlsConnectorBuilder {
                         .into(),
                 ));
             }
+            // rustls defaults to refusing any certificate whose issuer has
+            // no configured CRL (UnknownRevocationStatus). A CRL covers only
+            // its issuer, as documented on `with_crl_pem`, so a chain from a
+            // CA without one is accepted and a listed serial is still refused.
             let verifier = rustls::client::WebPkiServerVerifier::builder(Arc::new(roots))
                 .with_crls(crl_ders)
+                .allow_unknown_revocation_status()
                 .build()
                 .map_err(|e| TlsError::Configuration(format!("CRL verifier build: {e}")))?;
             // The dangerous() name reflects that callers can plug in

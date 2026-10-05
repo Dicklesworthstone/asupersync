@@ -724,6 +724,9 @@ pub struct TaskCompletionObserver {
     panic_count: Option<Arc<AtomicU64>>,
     retired_cancel_wakers: TaskCompletionRetirements,
     epoch_telemetry: Option<super::epoch_tracker::EpochTelemetryDispatch>,
+    /// Monitor and link effects of this task's exit
+    /// (br-asupersync-issue65-criticisms-kpmoy5.6.1).
+    watch_effects: Option<crate::monitor::WatchEffects>,
 }
 
 enum TaskCompletionObserverPayload {
@@ -765,6 +768,7 @@ impl TaskCompletionObserver {
             panic_count: Some(Arc::clone(panic_count)),
             retired_cancel_wakers: TaskCompletionRetirements::empty(),
             epoch_telemetry: None,
+            watch_effects: None,
         }
     }
 
@@ -774,6 +778,7 @@ impl TaskCompletionObserver {
             panic_count: Some(Arc::clone(panic_count)),
             retired_cancel_wakers: TaskCompletionRetirements::empty(),
             epoch_telemetry: None,
+            watch_effects: None,
         }
     }
 
@@ -781,6 +786,13 @@ impl TaskCompletionObserver {
         if !telemetry.is_empty() {
             debug_assert!(self.epoch_telemetry.is_none());
             self.epoch_telemetry = Some(telemetry);
+        }
+    }
+
+    fn attach_watch_effects(&mut self, effects: Option<crate::monitor::WatchEffects>) {
+        if effects.is_some() {
+            debug_assert!(self.watch_effects.is_none());
+            self.watch_effects = effects;
         }
     }
 
@@ -792,6 +804,12 @@ impl TaskCompletionObserver {
     /// caught panic increments this runtime's callback-free atomic failure
     /// counter once for this dispatch without invoking another observer.
     pub fn dispatch(mut self) {
+        // Monitors and links first: the caller released the runtime-state
+        // lock, and DOWN delivery, exit signals and linked cancellation
+        // requests contain their own waker panics.
+        if let Some(effects) = self.watch_effects.take() {
+            effects.dispatch();
+        }
         let Some(panic_count) = self.panic_count.take() else {
             return;
         };
@@ -876,6 +894,12 @@ impl TaskCompletionObserver {
 
 impl Drop for TaskCompletionObserver {
     fn drop(&mut self) {
+        // Undelivered watch effects hold slot Arcs whose stored Wakers may run
+        // arbitrary destructors; an abandoned token may sit under the
+        // runtime-state lock, so leak them like the payload.
+        if let Some(effects) = self.watch_effects.take() {
+            std::mem::forget(effects);
+        }
         let Some(payload) = self.payload.take() else {
             return;
         };
@@ -1872,6 +1896,16 @@ pub struct RuntimeState {
     /// remain outside this notification boundary.
     pending_cancel_dispatch_coordinator:
         Option<std::sync::Weak<crate::runtime::scheduler::three_lane::WorkerCoordinator>>,
+    /// Live runtime monitors and links, fired when a watched task finishes
+    /// (br-asupersync-issue65-criticisms-kpmoy5.6.1). Empty unless a task
+    /// called `Cx::monitor`, `Cx::link` or `Cx::link_trapping`.
+    task_watches: crate::monitor::TaskWatches,
+    /// `(watcher, monitored, completion time)` per delivered DOWN, oldest
+    /// first, for post-run oracle hydration (the lab's `down_order`).
+    /// Bounded by [`RuntimeState::bound_oracle_histories`] on native
+    /// runtimes; empty unless monitors fire.
+    down_history: VecDeque<(TaskId, TaskId, Time)>,
+    down_history_limit: Option<usize>,
     /// Shard-table handle bundle for `with_sharded_state` builds
     /// (E2 S4c-2c-iv, br-asupersync-m9wsza).
     ///
@@ -1899,6 +1933,9 @@ pub struct RuntimeState {
     /// Opt-in anytime-valid leak monitor, fed one age per resolved
     /// obligation (br-asupersync-bi2462.150.2). `None` by default.
     obligation_leak_monitor: Option<parking_lot::Mutex<crate::obligation::eprocess::LeakMonitor>>,
+    /// Leaks that the `Recover` policy is aborting while a monitor is
+    /// enabled: their abort effect must not feed the monitor an on-time age.
+    leak_recovered_obligations: HashSet<ObligationId>,
     /// Optional cached draining-region count for governor/diagnostic snapshots.
     read_biased_draining_region_snapshot: ReadBiasedDrainingRegionSnapshot,
     /// Leak-handling recursion depth for diagnostics.
@@ -2136,6 +2173,9 @@ impl RuntimeState {
             pending_cancel_dispatches: Vec::new(),
             pending_cancel_dispatch_ready: Arc::new(AtomicBool::new(false)),
             pending_cancel_dispatch_coordinator: None,
+            task_watches: crate::monitor::TaskWatches::default(),
+            down_history: VecDeque::new(),
+            down_history_limit: None,
             shard_tables: None,
             // br-asupersync-qp2tfx: internal constructors Panic on obligation
             // leak so the lab/test paths surface bugs the same way the
@@ -2144,6 +2184,7 @@ impl RuntimeState {
             leak_escalation: None,
             leak_count: 0,
             obligation_leak_monitor: None,
+            leak_recovered_obligations: HashSet::new(),
             read_biased_draining_region_snapshot: ReadBiasedDrainingRegionSnapshot::default(),
             handling_leaks: 0,
             in_flight_leak_ids: HashSet::new(),
@@ -2168,8 +2209,16 @@ impl RuntimeState {
             state_verifier: Arc::new(super::state_verifier::StateTransitionVerifier::new(
                 super::state_verifier::StateVerifierConfig::default(),
             )),
+            // Protocol validation feeds violation diagnostics only. It tracks
+            // every task in this crate's tests and debug builds; release builds
+            // keep an untracked validator so spawn and completion skip its map
+            // work (br-asupersync-issue65-criticisms-kpmoy5.1.8).
             cancel_protocol_validator: Arc::new(parking_lot::Mutex::new(
-                CancelProtocolValidator::new(CancelValidationLevel::Basic),
+                if cfg!(any(test, debug_assertions)) {
+                    CancelProtocolValidator::new(CancelValidationLevel::Basic)
+                } else {
+                    CancelProtocolValidator::untracked()
+                },
             )),
             debt_monitor: Arc::new(crate::observability::CancellationDebtMonitor::default()),
             resource_monitor,
@@ -2816,27 +2865,30 @@ impl RuntimeState {
     }
 
     /// Enables an obligation leak monitor, a
-    /// [`LeakMonitor::change_detector`](crate::obligation::eprocess::LeakMonitor::change_detector):
-    /// its expected number of observations before a false alarm is at least
-    /// `1/alpha`, and its alarm latches.
+    /// [`LeakMonitor::change_detector`](crate::obligation::eprocess::LeakMonitor::change_detector)
+    /// over `horizon` resolutions: the probability of a false alarm within
+    /// them is at most `alpha`, and its alarm latches. Choose `horizon` to
+    /// cover the monitored period.
     ///
     /// From this call on, every obligation this state commits or aborts feeds
     /// the monitor its age at resolution, exactly once, and every leaked
     /// obligation (still reserved when its holder completes) raises the alarm
-    /// through `observe_leak`. The first alarm is reported as a warning event.
-    /// Obligations resolved earlier are not observed, and a second call
-    /// replaces the monitor and its evidence. Live obligations are never
-    /// rescanned, so one held indefinitely is not observed; bound that with a
-    /// budget deadline.
+    /// through `observe_leak`, including one the `Recover` policy aborts. The
+    /// first alarm is reported as a warning event. Obligations resolved
+    /// earlier are not observed, and a second call replaces the monitor and
+    /// its evidence. Live obligations are never rescanned, so one held
+    /// indefinitely is not observed; bound that with a budget deadline.
     ///
     /// # Panics
-    /// If `config` is invalid (see [`LeakMonitor::new`](crate::obligation::eprocess::LeakMonitor::new)).
+    /// If `config` or `horizon` is invalid (see
+    /// [`LeakMonitor::change_detector`](crate::obligation::eprocess::LeakMonitor::change_detector)).
     pub fn enable_obligation_leak_monitor(
         &mut self,
         config: crate::obligation::eprocess::MonitorConfig,
+        horizon: u64,
     ) {
         self.obligation_leak_monitor = Some(parking_lot::Mutex::new(
-            crate::obligation::eprocess::LeakMonitor::change_detector(config),
+            crate::obligation::eprocess::LeakMonitor::change_detector(config, horizon),
         ));
     }
 
@@ -3873,6 +3925,22 @@ impl RuntimeState {
         )
     }
 
+    /// Shared value for [`Self::create_task_infrastructure_in`]'s caller
+    /// argument, which admission never reads. Runtime spawn paths pass this
+    /// instead of minting a throwaway system `Cx` (several allocations and a
+    /// global id draw) on every spawn
+    /// (br-asupersync-issue65-criticisms-kpmoy5.1.9).
+    pub(crate) fn unread_caller_cx() -> &'static crate::cx::Cx {
+        static CALLER: std::sync::OnceLock<crate::cx::Cx> = std::sync::OnceLock::new();
+        CALLER.get_or_init(|| {
+            crate::cx::Cx::new(
+                next_bootstrap_region_id(),
+                next_bootstrap_task_id(),
+                Budget::INFINITE,
+            )
+        })
+    }
+
     /// Creates the infrastructure for a task (record, context, channel) without storing the future.
     ///
     /// This helper allows `create_task` and `spawn_local` to share the same setup logic
@@ -4219,9 +4287,9 @@ impl RuntimeState {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        let system_cx = self.create_system_cx();
+        let system_cx = Self::unread_caller_cx();
         let (task_id, handle, cx, result_tx, spawn_effects) =
-            self.create_task_infrastructure_in(&system_cx, region, budget, false, tasks, regions)?;
+            self.create_task_infrastructure_in(system_cx, region, budget, false, tasks, regions)?;
         let wrapped_future = run_state_task_to_terminal(future, cx, result_tx);
 
         tasks
@@ -4536,6 +4604,46 @@ impl RuntimeState {
 
     /// Scheduler routing includes its external-only task table, which need
     /// not install a complete ShardedState bundle.
+    /// Applies a monitor or link command (kpmoy5.6.1). A target is live while
+    /// its record exists and is not terminal; it is looked up in the table
+    /// that owns task records for this runtime shape (shard A, the worker's
+    /// external dispatch table, or the embedded table), locked after this
+    /// state in canonical B -> A order. The caller wakes a returned waker,
+    /// and enqueues a returned retry again, after releasing the state lock.
+    pub(crate) fn apply_watch_command(
+        &mut self,
+        command: crate::monitor::WatchCommand,
+        task_table: Option<&Arc<crate::sync::ContendedMutex<TaskTable>>>,
+    ) -> crate::monitor::WatchApply {
+        fn live_owner(table: &TaskTable, task: TaskId) -> Option<RegionId> {
+            table
+                .task(task)
+                .filter(|record| !record.state.is_terminal())
+                .map(|record| record.owner)
+        }
+        let shards = self.shard_tables.clone();
+        let external = match (shards.as_ref(), task_table) {
+            (Some(shards), _) => Some(
+                shards
+                    .tasks
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ),
+            (None, Some(table)) => Some(
+                table
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ),
+            (None, None) => None,
+        };
+        let embedded = &self.tasks;
+        self.task_watches
+            .apply(command, |task| match external.as_deref() {
+                Some(table) => live_owner(table, task),
+                None => live_owner(embedded, task),
+            })
+    }
+
     pub(crate) fn close_region_command_in_task_table(
         &mut self,
         region_id: RegionId,
@@ -4928,7 +5036,6 @@ impl RuntimeState {
     }
 
     pub(crate) fn notify_runtime_epoch_advance(&mut self, module: super::epoch_tracker::ModuleId) {
-        let now = self.current_runtime_time();
         let cursor = match module {
             super::epoch_tracker::ModuleId::RegionTable => &mut self.region_table_epoch,
             super::epoch_tracker::ModuleId::TaskTable => &mut self.task_table_epoch,
@@ -4938,8 +5045,13 @@ impl RuntimeState {
         let from_epoch = *cursor;
         let to_epoch = from_epoch.next();
         *cursor = to_epoch;
-        self.epoch_tracker
-            .notify_epoch_transition(module, from_epoch, to_epoch, now);
+        // The counters always advance; only the tracker's bookkeeping (and
+        // the clock read it needs) is skipped when the tracker is disabled.
+        if self.epoch_tracker.is_enabled() {
+            let now = self.current_runtime_time();
+            self.epoch_tracker
+                .notify_epoch_transition(module, from_epoch, to_epoch, now);
+        }
     }
 
     /// Creates one bounded epoch telemetry delivery token for use after
@@ -5303,9 +5415,16 @@ impl RuntimeState {
                 }
             }
             ObligationLeakResponse::Recover => {
+                let monitored = self.obligation_leak_monitor.is_some();
                 for &id in &leak_ids {
+                    // A recovered leak is still a leak to the monitor, not an
+                    // abort on time: its abort effect, dispatched now or later,
+                    // skips the age it would otherwise report.
+                    if monitored {
+                        self.leak_recovered_obligations.insert(id);
+                    }
                     // Abort instead of marking leaked — performs resource cleanup.
-                    let _ = self.abort_obligation_in(
+                    let aborted = self.abort_obligation_in(
                         regions,
                         tasks,
                         obligations,
@@ -5313,6 +5432,13 @@ impl RuntimeState {
                         id,
                         ObligationAbortReason::Error,
                     );
+                    if monitored {
+                        if aborted.is_ok() {
+                            self.observe_obligation_leak();
+                        } else {
+                            self.leak_recovered_obligations.remove(&id);
+                        }
+                    }
                 }
                 crate::tracing_compat::warn!(
                     task_id = ?error.task_id,
@@ -6221,7 +6347,9 @@ impl RuntimeState {
             )
         });
         self.metrics.obligation_discharged(info.region);
-        self.observe_obligation_age(info.duration);
+        if !self.leak_recovered_obligations.remove(&info.id) {
+            self.observe_obligation_age(info.duration);
+        }
 
         // Track obligation settlement work in debt monitor
         let cancel_reason = CancelReason::new(CancelKind::User);
@@ -6729,8 +6857,8 @@ impl RuntimeState {
 
     /// Returns the number of non-terminal tasks.
     ///
-    /// O(1) — delegates to [`TaskTable::live_task_count`] which keeps
-    /// an incremental sum across `phase_counts` (br-asupersync-afv6z4).
+    /// O(1) — delegates to [`TaskTable::live_task_count`], a counter each
+    /// record's phase cell keeps exact (br-asupersync-afv6z4, bzict6).
     /// Pre-fix this method scanned the arena via `tasks_iter()` and
     /// filtered by `state.is_terminal()` on every call, costing O(N)
     /// in the arena's high-water-mark size — silently O(N²) when a
@@ -7460,10 +7588,10 @@ impl RuntimeState {
         // in an external TaskTable and remove the id from the region only at
         // the cross-cutting completion boundary.
         let tasks = tasks.resolve_ref(&self.tasks);
+        // Iterate in place: cloning the member list on every completion of a
+        // closing region made draining N tasks O(N^2) in allocation and copy.
         let all_tasks_done = region
-            .task_ids()
-            .iter()
-            .all(|&task_id| tasks.task(task_id).is_some_and(|t| t.state.is_terminal()));
+            .tasks_completed(&|task_id| tasks.task(task_id).is_some_and(|t| t.state.is_terminal()));
 
         // Check all child regions are closed
         let all_children_closed = region.child_ids().iter().all(|&child_id| {
@@ -7712,6 +7840,32 @@ impl RuntimeState {
         // was either detached from shard A before entry (external arm) or
         // still lives embedded (unified arm) — identical logical-time
         // observations either way.
+        //
+        // Monitors and links (kpmoy5.6.1) are resolved first, while the
+        // outcome is still borrowed: the effects ride the completion observer
+        // and are delivered after the lock is released. No watch means one
+        // emptiness check.
+        let watch_effects = if self.task_watches.is_empty() {
+            None
+        } else {
+            let now = self
+                .timer_driver
+                .as_ref()
+                .map_or(self.now, TimerDriverHandle::now);
+            let gateway = self.spawn_gateway.clone();
+            let effects =
+                self.task_watches
+                    .on_task_completed(task_id, close_outcome.as_ref(), now, gateway);
+            if let Some(effects) = effects.as_ref() {
+                self.down_history.extend(effects.down_deliveries());
+                if let Some(limit) = self.down_history_limit {
+                    while self.down_history.len() > limit {
+                        self.down_history.pop_front();
+                    }
+                }
+            }
+            effects
+        };
         match self.shard_tables.clone() {
             Some(shards) => {
                 let mut deferred = Vec::new();
@@ -7791,6 +7945,7 @@ impl RuntimeState {
 
         let mut observer = observer;
         observer.attach_epoch_telemetry(self.take_epoch_telemetry());
+        observer.attach_watch_effects(watch_effects);
         TaskCompletionEffects {
             waiters,
             observer,
@@ -8711,6 +8866,16 @@ impl RuntimeState {
     pub(crate) fn bound_oracle_histories(&mut self, limit: usize) {
         self.closed_region_history_limit = Some(limit);
         self.loser_drain_history.retain_completed_races(limit);
+        self.down_history_limit = Some(limit);
+        while self.down_history.len() > limit {
+            self.down_history.pop_front();
+        }
+    }
+
+    /// `(watcher, monitored, completion time)` per delivered DOWN, oldest
+    /// first (kpmoy5.6.1).
+    pub(crate) fn down_history(&self) -> impl Iterator<Item = (TaskId, TaskId, Time)> + '_ {
+        self.down_history.iter().copied()
     }
 
     fn pop_tracked_finalizer(

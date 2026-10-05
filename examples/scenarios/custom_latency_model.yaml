@@ -50,15 +50,16 @@ network:
       packet_duplicate: 0.005
       packet_reorder: 0.01
 
+# The hub pings each peer every round; the links above set each round trip.
 participants:
   - name: a
     role: hub
   - name: b
-    role: local-peer
+    role: peer # local
   - name: c
-    role: wan-peer
+    role: peer # WAN
   - name: d
-    role: satellite-peer
+    role: peer # satellite
 
 oracles:
   - all

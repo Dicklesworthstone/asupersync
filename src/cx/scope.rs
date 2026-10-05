@@ -1707,6 +1707,39 @@ fn branch_join_to_outcome<T, E>(joined: Result<Result<T, E>, JoinError>) -> Outc
     }
 }
 
+/// Branch handles a combinator is still waiting on. A combinator future
+/// dropped before it cancels and joins its branches itself (it lost a
+/// `select!`, an outer timeout fired) would leave them running with no
+/// request to stop, since a dropped `TaskHandle` detaches, and the deadline of
+/// `Scope::timeout` would be gone with it. Dropping this requests cancellation
+/// of every branch that has not published its result, as dropping a race's
+/// join futures does; the region still owns the branches and drains them.
+struct AbortUnfinishedOnDrop<T>(Vec<TaskHandle<T>>);
+
+impl<T> std::ops::Deref for AbortUnfinishedOnDrop<T> {
+    type Target = Vec<TaskHandle<T>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T> std::ops::DerefMut for AbortUnfinishedOnDrop<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl<T> Drop for AbortUnfinishedOnDrop<T> {
+    fn drop(&mut self) {
+        for handle in &self.0 {
+            if !handle.terminal_published() {
+                handle.abort();
+            }
+        }
+    }
+}
+
 impl<P: Policy> Scope<'_, P> {
     /// Runs `branches` concurrently in this scope's region and resolves once
     /// `needed` of them have returned `Ok` — M-of-N completion.
@@ -1797,7 +1830,7 @@ impl<P: Policy> Scope<'_, P> {
             });
         }
 
-        let mut handles = self.spawn_quorum_branches(cx, branches).await?;
+        let mut handles = AbortUnfinishedOnDrop(self.spawn_quorum_branches(cx, branches).await?);
         // Quorum branches can still be awaiting mailbox admission. Completion
         // history must use the same identities as this start record.
         let participants: Vec<TaskId> = handles.iter().map(TaskHandle::task_id).collect();
@@ -1994,8 +2027,8 @@ impl<P: Policy> Scope<'_, P> {
                 return first_ok_to_result(FirstOkResult::failure(failures, total));
             }
 
-            let mut handle = match cx.spawn_in_cancellation_dominant(self, factory) {
-                Ok(handle) => handle,
+            let mut attempt = match cx.spawn_in_cancellation_dominant(self, factory) {
+                Ok(handle) => AbortUnfinishedOnDrop(vec![handle]),
                 Err(_spawn_err) => {
                     failures.push((
                         index,
@@ -2008,6 +2041,7 @@ impl<P: Policy> Scope<'_, P> {
             // Await the attempt to termination. If the caller is cancelled
             // while it is in flight, forward the cancellation to the attempt
             // once and keep joining: the attempt is drained, not abandoned.
+            let handle = &mut attempt[0];
             let mut abort_requested = false;
             let joined = std::future::poll_fn(|poll_cx| {
                 if !abort_requested && cx.checkpoint().is_err() {
@@ -2082,7 +2116,8 @@ impl<P: Policy> Scope<'_, P> {
 
         let mut sleep = std::pin::pin!(crate::time::sleep(cx.now(), duration));
         let deadline = sleep.deadline();
-        let mut handle = cx.spawn_in(self, operation)?;
+        let mut operation_handle = AbortUnfinishedOnDrop(vec![cx.spawn_in(self, operation)?]);
+        let handle = &mut operation_handle[0];
         let task = handle.task_id();
         let race_id = self.record_loser_drain_start(cx, vec![task]);
 
@@ -2092,11 +2127,16 @@ impl<P: Policy> Scope<'_, P> {
             if let Poll::Ready(joined) = handle.poll_join(poll_cx) {
                 return Poll::Ready(Some(branch_join_to_outcome(joined)));
             }
-            if sleep.as_mut().poll(poll_cx).is_ready() {
-                return Poll::Ready(None);
-            }
+            // The caller's cancellation is checked before the timer, and the
+            // timer is polled for its deadline only. The cancel-aware poll
+            // also completed on the caller's cancellation, so that was
+            // reported as a timeout and the operation aborted with Timeout
+            // instead of the caller's reason.
             if cx.checkpoint().is_err() {
                 caller_cancelled = true;
+                return Poll::Ready(None);
+            }
+            if sleep.as_mut().poll_deadline(poll_cx).is_ready() {
                 return Poll::Ready(None);
             }
             Poll::Pending

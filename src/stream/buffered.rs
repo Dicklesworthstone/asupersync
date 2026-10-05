@@ -4,11 +4,12 @@
 //! as soon as futures complete.
 
 use super::{Stream, StreamTelemetrySnapshot};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::task::{Context, Poll, Waker};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::task::{Context, Poll, Wake, Waker};
 
 /// Cooperative budget for admitting new futures from the source stream.
 ///
@@ -22,30 +23,142 @@ const BUFFERED_ADMISSION_BUDGET: usize = 1024;
 /// when every future is ready or repeatedly returns `Poll::Pending`.
 ///
 /// A partial scan is only allowed to return a bare `Poll::Pending` once every
-/// in-flight future has been polled at least once with the current task's
-/// waker (tracked via a waker epoch). Until then the combinator self-wakes so
-/// unpolled futures cannot be stranded — but it must NOT self-wake merely
-/// because the buffer is larger than the budget, or an all-pending buffer
-/// turns into a permanent busy-poll loop.
+/// in-flight future has been polled at least once (with its own child waker,
+/// see [`EntryWakes`]). Until then the combinator self-wakes so unpolled
+/// futures cannot be stranded — but it must NOT self-wake merely because the
+/// buffer is larger than the budget, or an all-pending buffer turns into a
+/// permanent busy-poll loop. A future woken outside the scan window is found
+/// by its child waker's id and polled on the next poll.
 const BUFFERED_POLL_BUDGET: usize = 1024;
+
+/// Per-entry wake routing for the buffering combinators.
+///
+/// Every buffered future is polled with its own child waker, which records the
+/// entry's id and then wakes the task. A buffer larger than the per-poll scan
+/// budget polls only a window of its entries each time, and a future's wake
+/// consumes its registration: woken while outside the window, it used to sit
+/// unpolled with nothing left to wake the task, so the stream parked forever.
+/// The woken ids say which entries to poll regardless of the window.
+pub(super) struct EntryWakes {
+    shared: Arc<WakeShared>,
+    next_id: u64,
+}
+
+struct WakeShared {
+    /// The polling task's current waker; a child wake is forwarded to it.
+    parent: Mutex<Option<Waker>>,
+    /// Ids of the entries woken since the last poll took them.
+    woken: Mutex<Vec<u64>>,
+}
+
+struct EntryWake {
+    id: u64,
+    shared: Arc<WakeShared>,
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl Wake for EntryWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        lock(&self.shared.woken).push(self.id);
+        let parent = lock(&self.shared.parent).clone();
+        if let Some(parent) = parent {
+            parent.wake();
+        }
+    }
+}
+
+impl EntryWakes {
+    pub(super) fn new() -> Self {
+        Self {
+            shared: Arc::new(WakeShared {
+                parent: Mutex::new(None),
+                woken: Mutex::new(Vec::new()),
+            }),
+            next_id: 0,
+        }
+    }
+
+    /// Makes `waker` (the polling task's) the target of every child wake.
+    pub(super) fn set_parent(&self, waker: &Waker) {
+        let mut parent = lock(&self.shared.parent);
+        if !parent
+            .as_ref()
+            .is_some_and(|current| current.will_wake(waker))
+        {
+            *parent = Some(waker.clone());
+        }
+    }
+
+    /// A fresh id and child waker for a newly admitted entry. Ids increase in
+    /// admission order.
+    pub(super) fn child(&mut self) -> (u64, Waker) {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        let waker = Waker::from(Arc::new(EntryWake {
+            id,
+            shared: Arc::clone(&self.shared),
+        }));
+        (id, waker)
+    }
+
+    /// The ids woken since the last call, ascending and without duplicates.
+    pub(super) fn take_woken(&self) -> Vec<u64> {
+        let mut ids = std::mem::take(&mut *lock(&self.shared.woken));
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    /// Returns ids this poll did not get to, for the next poll.
+    pub(super) fn requeue(&self, ids: &[u64]) {
+        lock(&self.shared.woken).extend_from_slice(ids);
+    }
+}
 
 struct BufferedEntry<Fut: Future> {
     fut: Fut,
     output: Option<Fut::Output>,
-    /// Waker epoch this entry was last polled under. Entries whose epoch
-    /// lags the combinator's current epoch have not registered the current
-    /// task waker and keep the self-wake loop alive until scanned.
-    seen_epoch: u64,
+    /// Admission id; consecutive across the queue, which only pops its front.
+    id: u64,
+    /// This entry's child waker (see [`EntryWakes`]).
+    waker: Waker,
+    /// Polled at least once, so its child waker is registered wherever the
+    /// future waits. Unpolled entries keep the self-wake loop alive.
+    polled: bool,
 }
 
 impl<Fut: Future> BufferedEntry<Fut> {
     #[inline]
-    fn new(fut: Fut, stale_epoch: u64) -> Self {
+    fn new(fut: Fut, id: u64, waker: Waker) -> Self {
         Self {
             fut,
             output: None,
-            seen_epoch: stale_epoch,
+            id,
+            waker,
+            polled: false,
         }
+    }
+
+    /// Polls the future with its own child waker, keeping a ready output.
+    #[inline]
+    fn poll_entry(&mut self) -> bool
+    where
+        Fut: Unpin,
+    {
+        self.polled = true;
+        let mut cx = Context::from_waker(&self.waker);
+        if let Poll::Ready(output) = Pin::new(&mut self.fut).poll(&mut cx) {
+            self.output = Some(output);
+            return true;
+        }
+        false
     }
 }
 
@@ -68,6 +181,8 @@ where
     poll_epoch: u64,
     /// Waker the current `poll_epoch` corresponds to.
     epoch_waker: Option<Waker>,
+    /// Per-entry wake routing.
+    wakes: EntryWakes,
 }
 
 impl<S> Buffered<S>
@@ -81,12 +196,15 @@ where
         assert!(limit > 0, "buffered limit must be non-zero");
         Self {
             stream,
-            in_flight: VecDeque::with_capacity(limit),
+            // `limit` may be a huge "unbounded" value: reserving it up front
+            // overflowed the capacity (usize::MAX) or aborted the allocation.
+            in_flight: VecDeque::with_capacity(limit.min(BUFFERED_ADMISSION_BUDGET)),
             limit,
             done: false,
             next_poll_index: 0,
             poll_epoch: 0,
             epoch_waker: None,
+            wakes: EntryWakes::new(),
         }
     }
 
@@ -167,10 +285,7 @@ where
     #[inline]
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.refresh_epoch(cx);
-        let epoch = self.poll_epoch;
-        // Fresh entries are stamped one epoch behind so they read as
-        // "not yet polled under the current waker" until the scan reaches them.
-        let stale = epoch.wrapping_sub(1);
+        self.wakes.set_parent(cx.waker());
         let mut budget_exhausted = false;
         let mut admitted_this_poll = 0usize;
         while !self.done && self.in_flight.len() < self.limit {
@@ -180,7 +295,8 @@ where
             }
             match Pin::new(&mut self.stream).poll_next(cx) {
                 Poll::Ready(Some(fut)) => {
-                    self.in_flight.push_back(BufferedEntry::new(fut, stale));
+                    let (id, waker) = self.wakes.child();
+                    self.in_flight.push_back(BufferedEntry::new(fut, id, waker));
                     admitted_this_poll += 1;
                 }
                 Poll::Ready(None) => {
@@ -203,20 +319,37 @@ where
         }
 
         let len = self.in_flight.len();
+        let woken = self.wakes.take_woken();
+        if len > BUFFERED_POLL_BUDGET {
+            // The window below reaches only part of the buffer, so first poll
+            // the entries whose own wakers fired, wherever they sit. Ids are
+            // consecutive from the front; an id below it already finished.
+            let front_id = self.in_flight.front().map_or(0, |front| front.id);
+            for (polled, id) in woken.iter().enumerate() {
+                if polled >= BUFFERED_POLL_BUDGET {
+                    self.wakes.requeue(&woken[polled..]);
+                    budget_exhausted = true;
+                    break;
+                }
+                let index = id
+                    .checked_sub(front_id)
+                    .and_then(|offset| usize::try_from(offset).ok());
+                if let Some(entry) = index.and_then(|index| self.in_flight.get_mut(index))
+                    && entry.id == *id
+                    && entry.output.is_none()
+                {
+                    entry.poll_entry();
+                }
+            }
+        }
         if len > 0 {
             let mut index = self.next_poll_index.min(len.saturating_sub(1));
             let scan_budget = len.min(BUFFERED_POLL_BUDGET);
             for _ in 0..scan_budget {
-                if let Some(entry) = self.in_flight.get_mut(index) {
-                    if entry.output.is_none() {
-                        if let Poll::Ready(output) = Pin::new(&mut entry.fut).poll(cx) {
-                            entry.output = Some(output);
-                        }
-                        // Mark as polled under the current waker whether it
-                        // completed or returned Pending: either way this
-                        // future has registered our waker.
-                        entry.seen_epoch = epoch;
-                    }
+                if let Some(entry) = self.in_flight.get_mut(index)
+                    && entry.output.is_none()
+                {
+                    entry.poll_entry();
                 }
                 index += 1;
                 if index >= len {
@@ -224,16 +357,16 @@ where
                 }
             }
             self.next_poll_index = index;
-            // Self-wake ONLY while unscanned pending entries remain (buffer
-            // larger than the per-poll scan budget). Once every pending future
-            // has been polled under the current waker, a bare Pending is safe:
-            // each future will wake us on its own progress. A blanket
-            // `len > BUFFERED_POLL_BUDGET` self-wake would busy-loop forever on
-            // an all-pending oversized buffer (br fresh-eyes: buffered-busy-poll).
+            // Self-wake ONLY while never-polled entries remain (buffer larger
+            // than the per-poll scan budget). Once every pending future has
+            // been polled, a bare Pending is safe: each one wakes its own child
+            // waker on progress. A blanket `len > BUFFERED_POLL_BUDGET`
+            // self-wake would busy-loop forever on an all-pending oversized
+            // buffer (br fresh-eyes: buffered-busy-poll).
             if self
                 .in_flight
                 .iter()
-                .any(|e| e.output.is_none() && e.seen_epoch != epoch)
+                .any(|e| e.output.is_none() && !e.polled)
             {
                 budget_exhausted = true;
             }
@@ -289,15 +422,31 @@ where
     poll_epoch: u64,
     /// Waker the current `poll_epoch` corresponds to.
     epoch_waker: Option<Waker>,
+    /// Per-entry wake routing.
+    wakes: EntryWakes,
 }
 
-/// A pending future plus the waker epoch it was last polled under, so an
-/// oversized `BufferUnordered` (limit > `BUFFERED_POLL_BUDGET`) can distinguish
-/// "not yet polled under the current waker" from "already registered" and
-/// avoid a permanent self-wake busy loop on an all-pending buffer.
+/// A pending future with its child waker, so an oversized `BufferUnordered`
+/// (limit > `BUFFERED_POLL_BUDGET`) can tell a never-polled entry from one
+/// whose waker is registered, and find the entry a wake names.
 struct UnorderedEntry<Fut> {
     fut: Fut,
-    seen_epoch: u64,
+    /// Admission id, to find the entry a child wake names.
+    id: u64,
+    /// This entry's child waker (see [`EntryWakes`]).
+    waker: Waker,
+    /// Polled at least once (see [`BufferedEntry::polled`]).
+    polled: bool,
+}
+
+impl<Fut: Future + Unpin> UnorderedEntry<Fut> {
+    /// Polls the future with its own child waker.
+    #[inline]
+    fn poll_entry(&mut self) -> Poll<Fut::Output> {
+        self.polled = true;
+        let mut cx = Context::from_waker(&self.waker);
+        Pin::new(&mut self.fut).poll(&mut cx)
+    }
 }
 
 impl<S> fmt::Debug for Buffered<S>
@@ -339,11 +488,12 @@ where
         assert!(limit > 0, "buffer_unordered limit must be non-zero");
         Self {
             stream,
-            in_flight: VecDeque::with_capacity(limit),
+            in_flight: VecDeque::with_capacity(limit.min(BUFFERED_ADMISSION_BUDGET)),
             limit,
             done: false,
             poll_epoch: 0,
             epoch_waker: None,
+            wakes: EntryWakes::new(),
         }
     }
 
@@ -417,8 +567,7 @@ where
     #[inline]
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.refresh_epoch(cx);
-        let epoch = self.poll_epoch;
-        let stale = epoch.wrapping_sub(1);
+        self.wakes.set_parent(cx.waker());
         let mut budget_exhausted = false;
         let mut admitted_this_poll = 0usize;
         while !self.done && self.in_flight.len() < self.limit {
@@ -428,9 +577,12 @@ where
             }
             match Pin::new(&mut self.stream).poll_next(cx) {
                 Poll::Ready(Some(fut)) => {
+                    let (id, waker) = self.wakes.child();
                     self.in_flight.push_back(UnorderedEntry {
                         fut,
-                        seen_epoch: stale,
+                        id,
+                        waker,
+                        polled: false,
                     });
                     admitted_this_poll += 1;
                 }
@@ -443,24 +595,54 @@ where
         }
 
         let len = self.in_flight.len();
+        let woken = self.wakes.take_woken();
+        if len > BUFFERED_POLL_BUDGET && !woken.is_empty() {
+            // The rotation below reaches only part of the buffer, so first
+            // poll the entries whose own wakers fired, wherever they sit.
+            let mut pending: HashSet<u64> = woken.into_iter().collect();
+            let mut polled = 0usize;
+            let mut index = 0usize;
+            while index < self.in_flight.len() && !pending.is_empty() {
+                if polled >= BUFFERED_POLL_BUDGET {
+                    budget_exhausted = true;
+                    break;
+                }
+                let entry = &mut self.in_flight[index];
+                if pending.remove(&entry.id) {
+                    polled += 1;
+                    if let Poll::Ready(output) = entry.poll_entry() {
+                        self.in_flight.remove(index);
+                        let rest: Vec<u64> = pending.into_iter().collect();
+                        self.wakes.requeue(&rest);
+                        return Poll::Ready(Some(output));
+                    }
+                }
+                index += 1;
+            }
+            // Ids not found finished earlier; ids not reached wait for the
+            // next poll.
+            if budget_exhausted {
+                let rest: Vec<u64> = pending.into_iter().collect();
+                self.wakes.requeue(&rest);
+            }
+        }
         let poll_budget = len.min(BUFFERED_POLL_BUDGET);
         for _ in 0..poll_budget {
             let mut entry = self.in_flight.pop_front().expect("length checked");
-            match Pin::new(&mut entry.fut).poll(cx) {
+            match entry.poll_entry() {
                 Poll::Ready(output) => return Poll::Ready(Some(output)),
                 Poll::Pending => {
-                    // Registered our waker; stamp and rotate to the back.
-                    entry.seen_epoch = epoch;
+                    // Its child waker is registered; rotate to the back.
                     self.in_flight.push_back(entry);
                 }
             }
         }
-        // Self-wake only while unscanned entries remain (buffer larger than the
-        // per-poll budget). Once every future has been polled under the current
-        // waker, a bare Pending is safe — the futures themselves will wake us.
-        // A blanket `len > BUFFERED_POLL_BUDGET` self-wake busy-loops forever on
+        // Self-wake only while never-polled entries remain (buffer larger
+        // than the per-poll budget). Once every future has been polled, a bare
+        // Pending is safe: each one wakes its own child waker on progress. A
+        // blanket `len > BUFFERED_POLL_BUDGET` self-wake busy-loops forever on
         // an all-pending oversized buffer (br fresh-eyes: buffered-busy-poll).
-        if self.in_flight.iter().any(|e| e.seen_epoch != epoch) {
+        if self.in_flight.iter().any(|e| !e.polled) {
             budget_exhausted = true;
         }
 
@@ -766,6 +948,137 @@ mod tests {
         let is_none = matches!(poll, Poll::Ready(None));
         crate::assert_with_log!(is_none, "empty stream yields None", true, is_none);
         crate::test_complete!("buffered_empty_stream_terminates");
+    }
+
+    /// An "unbounded" limit used to be reserved up front and overflowed.
+    #[test]
+    fn buffered_and_buffer_unordered_accept_an_unbounded_limit() {
+        init_test("buffered_and_buffer_unordered_accept_an_unbounded_limit");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut ordered = Buffered::new(iter(vec![std::future::ready(7)]), usize::MAX);
+        let poll = Pin::new(&mut ordered).poll_next(&mut cx);
+        assert!(matches!(poll, Poll::Ready(Some(7))), "{poll:?}");
+        let mut unordered = BufferUnordered::new(iter(vec![std::future::ready(8)]), usize::MAX);
+        let poll = Pin::new(&mut unordered).poll_next(&mut cx);
+        assert!(matches!(poll, Poll::Ready(Some(8))), "{poll:?}");
+        crate::test_complete!("buffered_and_buffer_unordered_accept_an_unbounded_limit");
+    }
+
+    /// A future that stays pending until its gate opens, keeping the waker of
+    /// the poll that found it closed.
+    #[derive(Clone, Default)]
+    struct Gate(Arc<std::sync::Mutex<(bool, Option<Waker>)>>);
+
+    impl Gate {
+        fn open(&self) {
+            let waker = {
+                let mut state = self.0.lock().unwrap();
+                state.0 = true;
+                state.1.take()
+            };
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+        }
+    }
+
+    struct GateFuture {
+        gate: Gate,
+        value: usize,
+    }
+
+    impl Future for GateFuture {
+        type Output = usize;
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<usize> {
+            let mut state = self.gate.0.lock().unwrap();
+            if state.0 {
+                Poll::Ready(self.value)
+            } else {
+                state.1 = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        }
+    }
+
+    struct CountWake(AtomicUsize);
+
+    impl Wake for CountWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Polls the way an executor does: again only after a wake. Returns the
+    /// first `Ready`, or `Pending` once the stream parks without a wake.
+    fn run_until_parked<S: Stream + Unpin>(
+        stream: &mut S,
+        wakes: &Arc<CountWake>,
+    ) -> Poll<Option<S::Item>> {
+        let waker = Waker::from(Arc::clone(wakes));
+        let mut cx = Context::from_waker(&waker);
+        for _ in 0..64 {
+            let before = wakes.0.load(Ordering::SeqCst);
+            if let Poll::Ready(item) = Pin::new(&mut *stream).poll_next(&mut cx) {
+                return Poll::Ready(item);
+            }
+            if wakes.0.load(Ordering::SeqCst) == before {
+                return Poll::Pending;
+            }
+        }
+        panic!("the stream kept waking itself");
+    }
+
+    fn gated(count: usize) -> (Vec<Gate>, Vec<GateFuture>) {
+        let gates: Vec<Gate> = (0..count).map(|_| Gate::default()).collect();
+        let futures = gates
+            .iter()
+            .enumerate()
+            .map(|(value, gate)| GateFuture {
+                gate: gate.clone(),
+                value,
+            })
+            .collect();
+        (gates, futures)
+    }
+
+    /// With more futures in flight than one poll scans, a future woken while
+    /// outside the scan window was passed over; its wake had consumed its
+    /// registration, so nothing woke the stream again and it parked forever.
+    #[test]
+    fn buffered_polls_a_woken_future_outside_the_scan_window() {
+        init_test("buffered_polls_a_woken_future_outside_the_scan_window");
+        let count = 2 * BUFFERED_POLL_BUDGET;
+        let (gates, futures) = gated(count);
+        let mut stream = Buffered::new(iter(futures), count);
+        let wakes = Arc::new(CountWake(AtomicUsize::new(0)));
+        assert_eq!(run_until_parked(&mut stream, &wakes), Poll::Pending);
+        gates[1500].open();
+        assert_eq!(run_until_parked(&mut stream, &wakes), Poll::Pending);
+        gates[0].open();
+        assert_eq!(run_until_parked(&mut stream, &wakes), Poll::Ready(Some(0)));
+        crate::test_complete!("buffered_polls_a_woken_future_outside_the_scan_window");
+    }
+
+    #[test]
+    fn buffer_unordered_polls_a_woken_future_outside_the_scan_window() {
+        init_test("buffer_unordered_polls_a_woken_future_outside_the_scan_window");
+        let count = 2 * BUFFERED_POLL_BUDGET;
+        let (gates, futures) = gated(count);
+        let mut stream = BufferUnordered::new(iter(futures), count);
+        let wakes = Arc::new(CountWake(AtomicUsize::new(0)));
+        assert_eq!(run_until_parked(&mut stream, &wakes), Poll::Pending);
+        gates[1500].open();
+        assert_eq!(
+            run_until_parked(&mut stream, &wakes),
+            Poll::Ready(Some(1500))
+        );
+        crate::test_complete!("buffer_unordered_polls_a_woken_future_outside_the_scan_window");
     }
 
     /// Invariant: `BufferUnordered` on an empty stream yields `None` immediately.

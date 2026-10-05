@@ -198,11 +198,17 @@ impl Storage {
             max_data_bytes: number(24),
         };
         limits.validate()?;
+        // Reopen compares the recorded inode numbers but not the device
+        // numbers: a device number is assigned at mount time and can differ
+        // after a reboot (btrfs subvolumes, dynamically numbered partitions),
+        // which refused exactly the crash recovery this journal exists for.
+        // The same-boot identity checks still compare devices, and restore
+        // re-hashes and byte-compares the data itself.
         if &header[..8] != MAGIC
             || header[12..16] != [0; 4]
             || header[64..] != hash(&[], &header[..64])
-            || (number(32), number(40)) != (metadata.dev(), metadata.ino())
-            || (number(48), number(56)) != (parent.dev(), parent.ino())
+            || number(40) != metadata.ino()
+            || number(56) != parent.ino()
             || metadata.len() > limits.max_data_bytes
         {
             return Err(invalid());
@@ -330,14 +336,18 @@ impl Storage {
         self.data.sync_all()?;
         self.data_directory.sync_all()?;
         if !duplicate {
-            let mut record = Zeroizing::new(vec![0; 16 + payload.len()]);
+            // One buffer, so the record and its checksum go out in one write:
+            // a kill between two writes left a checksum-less frame that every
+            // later reopen refuses.
+            let end = 16 + payload.len();
+            let mut record = Zeroizing::new(vec![0; end + 32]);
             record[..8].copy_from_slice(&u64::from(state.records).to_be_bytes());
             record[8..12].copy_from_slice(&(payload.len() as u32).to_be_bytes());
-            record[16..].copy_from_slice(&payload);
-            let checksum = hash(&state.previous, &record);
+            record[16..end].copy_from_slice(&payload);
+            let checksum = hash(&state.previous, &record[..end]);
+            record[end..].copy_from_slice(&checksum);
             state.file.seek(SeekFrom::End(0))?;
             state.file.write_all(&record)?;
-            state.file.write_all(&checksum)?;
             state.file.sync_all()?;
             self.journal_directory.sync_all()?;
             state.records += 1;
@@ -923,6 +933,35 @@ mod tests {
         );
         assert_eq!(std::fs::read(&journal).unwrap(), bytes);
         assert_eq!(std::fs::metadata(&data).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn a_device_number_changed_by_a_reboot_does_not_refuse_recovery() {
+        let (journal, data) = files();
+        let (start, _, _) = checkpoints();
+        let store = ReceiverJournalFile::create_new(&journal, &data, limits()).unwrap();
+        store.storage.append(start).unwrap();
+        drop(store);
+        // Change both recorded device numbers, then reseal the header and the
+        // record chain the way a writer before the reboot would have sealed
+        // them.
+        let mut bytes = std::fs::read(&journal).unwrap();
+        bytes[39] ^= 1;
+        bytes[55] ^= 1;
+        let mut previous = hash(&[], &bytes[..64]);
+        bytes[64..HEADER].copy_from_slice(&previous);
+        let mut at = HEADER;
+        while at < bytes.len() {
+            let size = u32::from_be_bytes(bytes[at + 8..at + 12].try_into().unwrap()) as usize;
+            let end = at + 16 + size;
+            previous = hash(&previous, &bytes[at..end]);
+            bytes[end..end + 32].copy_from_slice(&previous);
+            at = end + 32;
+        }
+        std::fs::write(&journal, &bytes).unwrap();
+        let reopened = ReceiverJournalFile::open_existing(&journal, &data)
+            .expect("the recorded inodes still match");
+        assert_eq!(reopened.checkpoint().unwrap().prefix().bytes, 0);
     }
 
     #[test]

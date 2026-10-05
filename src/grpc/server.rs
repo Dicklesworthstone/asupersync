@@ -484,7 +484,8 @@ pub struct ServerConfig {
     /// default. Callers that want a tighter ceiling on the default should set
     /// `default_timeout` itself.
     pub max_request_deadline: Option<Duration>,
-    /// Compression used for outbound response messages.
+    /// Compression used for outbound response messages, for clients whose
+    /// `grpc-accept-encoding` lists it.
     pub send_compression: Option<CompressionEncoding>,
     /// Compression encodings accepted by this server.
     pub accept_compression: Vec<CompressionEncoding>,
@@ -549,6 +550,13 @@ fn grpc_request_header_is_allowed(key: &str) -> bool {
         || key.eq_ignore_ascii_case("grpc-encoding")
         || key.eq_ignore_ascii_case("grpc-accept-encoding")
         || key.eq_ignore_ascii_case("grpc-message-type")
+        // Sent by grpc-go and grpc-java on retry and hedging attempts
+        // (gRFC A6); refusing it failed every retried call with a
+        // non-retryable INVALID_ARGUMENT.
+        || key.eq_ignore_ascii_case("grpc-previous-rpc-attempts")
+        // OpenCensus tracing and tag propagation.
+        || key.eq_ignore_ascii_case("grpc-trace-bin")
+        || key.eq_ignore_ascii_case("grpc-tags-bin")
 }
 
 fn matches_media_type_prefix(value: &str, prefix: &str) -> bool {
@@ -1077,6 +1085,10 @@ impl ServerBuilder {
     }
 
     /// Set the outbound compression encoding for responses.
+    ///
+    /// A response is compressed only when the request's
+    /// `grpc-accept-encoding` lists this encoding; otherwise it is sent
+    /// uncompressed.
     #[must_use]
     pub fn send_compression(mut self, encoding: CompressionEncoding) -> Self {
         self.config.send_compression = Some(encoding);
@@ -1468,6 +1480,7 @@ impl Server {
             Ok(decoded) => decoded,
             Err(status) => return Self::http2_status_response(&status),
         };
+        let compression = self.response_compression(request.metadata());
         let result = self
             .dispatch_unary(request, move |request| {
                 handler(GrpcTransportRequest {
@@ -1478,7 +1491,7 @@ impl Server {
             })
             .await;
         match result {
-            Ok(response) => match self.encode_http2_unary_response(&response) {
+            Ok(response) => match self.encode_http2_unary_response(&response, compression) {
                 Ok(response) => response,
                 Err(status) => Self::http2_status_response(&status),
             },
@@ -1497,11 +1510,12 @@ impl Server {
                 "registered gRPC HTTP/2 dispatch requires a runtime Cx",
             ));
         };
+        let compression = self.response_compression(request.metadata());
         let result = self
             .dispatch_registered_unary_with_trailers(&cx, &path, request, trailing_metadata)
             .await;
         match result {
-            Ok(response) => match self.encode_http2_unary_response(&response) {
+            Ok(response) => match self.encode_http2_unary_response(&response, compression) {
                 Ok(response) => response,
                 Err(status) => Self::http2_status_response(&status),
             },
@@ -1610,14 +1624,38 @@ impl Server {
         ))
     }
 
+    /// The response encoding for a request: `send_compression` when the
+    /// client listed it in `grpc-accept-encoding`, otherwise none. A client
+    /// that did not list it may have no decompressor (a default `Channel`
+    /// accepts identity only), and compressing anyway failed every call.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn response_compression(&self, request_metadata: &Metadata) -> Option<CompressionEncoding> {
+        let encoding = self.config.send_compression?;
+        let name = match encoding {
+            CompressionEncoding::Identity => return None,
+            CompressionEncoding::Gzip => "gzip",
+        };
+        request_metadata
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case("grpc-accept-encoding"))
+            .any(|(_, value)| match value {
+                super::streaming::MetadataValue::Ascii(list) => list
+                    .split(',')
+                    .any(|token| token.trim().eq_ignore_ascii_case(name)),
+                super::streaming::MetadataValue::Binary(_) => false,
+            })
+            .then_some(encoding)
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     fn encode_http2_unary_response(
         &self,
         response: &Response<Bytes>,
+        encoding: Option<CompressionEncoding>,
     ) -> Result<HttpResponse, Status> {
         let mut codec = self.framed_codec(super::codec::IdentityCodec);
         let mut grpc_encoding = None;
-        if let Some(encoding) = self.config.send_compression {
+        if let Some(encoding) = encoding {
             if encoding != CompressionEncoding::Identity {
                 let compressor = encoding.frame_compressor().ok_or_else(|| {
                     Status::unimplemented("configured response compression is not compiled in")

@@ -10,9 +10,52 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 
 // ─── Steer ────────────────────────────────────────────────────────────────
+
+/// Wakers of the steer futures waiting for one backend's `poll_ready`.
+///
+/// Most services keep only the latest waker passed to `poll_ready`
+/// (`RateLimit`, the semaphore behind `ConcurrencyLimit`), so with two
+/// futures waiting on one backend only the later one would be woken. A
+/// future that stops waiting (dispatched, failed or dropped) therefore wakes
+/// the others, which re-poll and register their own wakers again.
+#[derive(Default)]
+struct ReadinessWaiters {
+    next_id: u64,
+    wakers: Vec<(u64, Waker)>,
+}
+
+impl ReadinessWaiters {
+    fn register(waiters: &Mutex<Self>, id: &mut Option<u64>, waker: &Waker) {
+        let mut guard = waiters.lock();
+        let key = *id.get_or_insert_with(|| {
+            guard.next_id = guard.next_id.wrapping_add(1);
+            guard.next_id
+        });
+        match guard.wakers.iter_mut().find(|(entry, _)| *entry == key) {
+            Some((_, stored)) if stored.will_wake(waker) => {}
+            Some((_, stored)) => stored.clone_from(waker),
+            None => guard.wakers.push((key, waker.clone())),
+        }
+    }
+
+    fn release(waiters: &Mutex<Self>, id: Option<u64>) {
+        let others: Vec<Waker> = {
+            let mut guard = waiters.lock();
+            guard
+                .wakers
+                .drain(..)
+                .filter(|(entry, _)| Some(*entry) != id)
+                .map(|(_, waker)| waker)
+                .collect()
+        };
+        for waker in others {
+            waker.wake();
+        }
+    }
+}
 
 /// A service that routes requests to one of several inner services.
 ///
@@ -21,6 +64,8 @@ use std::task::{Context, Poll};
 /// indexes fail closed instead of being silently wrapped.
 pub struct Steer<S, F> {
     services: Vec<Arc<Mutex<S>>>,
+    /// Per backend, shared by clones like the backend itself.
+    waiters: Vec<Arc<Mutex<ReadinessWaiters>>>,
     picker: F,
 }
 
@@ -37,11 +82,13 @@ impl<S, F> Steer<S, F> {
     #[must_use]
     pub fn new(services: Vec<S>, picker: F) -> Self {
         assert!(!services.is_empty(), "steer requires at least one service");
+        let waiters = services.iter().map(|_| Arc::default()).collect();
         Self {
             services: services
                 .into_iter()
                 .map(|service| Arc::new(Mutex::new(service)))
                 .collect(),
+            waiters,
             picker,
         }
     }
@@ -84,6 +131,7 @@ impl<S, F: Clone> Clone for Steer<S, F> {
     fn clone(&self) -> Self {
         Self {
             services: self.services.clone(),
+            waiters: self.waiters.clone(),
             picker: self.picker.clone(),
         }
     }
@@ -120,6 +168,9 @@ where
     },
     PollReady {
         service: Arc<Mutex<S>>,
+        waiters: Arc<Mutex<ReadinessWaiters>>,
+        /// This future's entry in `waiters`, once it has waited.
+        waiter: Option<u64>,
         request: Option<Request>,
     },
     Calling {
@@ -141,12 +192,35 @@ where
         }
     }
 
-    fn new(service: Arc<Mutex<S>>, request: Request) -> Self {
+    fn new(
+        service: Arc<Mutex<S>>,
+        waiters: Arc<Mutex<ReadinessWaiters>>,
+        request: Request,
+    ) -> Self {
         Self {
             state: SteerState::PollReady {
                 service,
+                waiters,
+                waiter: None,
                 request: Some(request),
             },
+        }
+    }
+}
+
+impl<S, Request> Drop for SteerFuture<S, Request>
+where
+    S: Service<Request>,
+{
+    fn drop(&mut self) {
+        // The backend may hold this future's waker as its only one.
+        if let SteerState::PollReady {
+            waiters,
+            waiter: Some(id),
+            ..
+        } = &self.state
+        {
+            ReadinessWaiters::release(waiters, Some(*id));
         }
     }
 }
@@ -185,25 +259,37 @@ where
                 }
                 SteerState::PollReady {
                     service,
+                    waiters,
+                    mut waiter,
                     mut request,
                 } => {
                     let mut inner = service.lock();
                     match inner.poll_ready(cx) {
                         Poll::Pending => {
                             drop(inner);
-                            this.state = SteerState::PollReady { service, request };
+                            ReadinessWaiters::register(&waiters, &mut waiter, cx.waker());
+                            this.state = SteerState::PollReady {
+                                service,
+                                waiters,
+                                waiter,
+                                request,
+                            };
                             return Poll::Pending;
                         }
                         Poll::Ready(Err(err)) => {
+                            drop(inner);
+                            ReadinessWaiters::release(&waiters, waiter);
                             return Poll::Ready(Err(SteerError::Inner(err)));
                         }
                         Poll::Ready(Ok(())) => {
                             let Some(req) = request.take() else {
                                 drop(inner);
+                                ReadinessWaiters::release(&waiters, waiter);
                                 return Poll::Ready(Err(SteerError::PolledAfterCompletion));
                             };
                             let future = inner.call(req);
                             drop(inner);
+                            ReadinessWaiters::release(&waiters, waiter);
                             this.state = SteerState::Calling { future };
                         }
                     }
@@ -250,7 +336,11 @@ where
         if idx >= self.services.len() {
             return SteerFuture::invalid_route(idx, self.services.len());
         }
-        SteerFuture::new(Arc::clone(&self.services[idx]), req)
+        SteerFuture::new(
+            Arc::clone(&self.services[idx]),
+            Arc::clone(&self.waiters[idx]),
+            req,
+        )
     }
 }
 
@@ -737,6 +827,8 @@ mod tests {
         let mut future = SteerFuture {
             state: SteerState::PollReady {
                 service: Arc::new(Mutex::new(IdService { id: 7 })),
+                waiters: Arc::default(),
+                waiter: None,
                 request: None,
             },
         };
@@ -778,5 +870,98 @@ mod tests {
             Poll::Ready(Err(SteerError::PolledAfterCompletion))
         ));
         crate::test_complete!("steer_future_inner_panic_fails_closed");
+    }
+
+    /// A backend that, like RateLimit or the ConcurrencyLimit semaphore,
+    /// keeps only the latest waker passed to `poll_ready`.
+    struct LatestWakerGate {
+        open: Arc<std::sync::atomic::AtomicBool>,
+        waker: Arc<Mutex<Option<Waker>>>,
+    }
+
+    impl Service<usize> for LatestWakerGate {
+        type Response = usize;
+        type Error = std::convert::Infallible;
+        type Future = Ready<Result<usize, std::convert::Infallible>>;
+
+        fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            if self.open.load(Ordering::SeqCst) {
+                return Poll::Ready(Ok(()));
+            }
+            *self.waker.lock() = Some(cx.waker().clone());
+            Poll::Pending
+        }
+
+        fn call(&mut self, req: usize) -> Self::Future {
+            ready(Ok(req))
+        }
+    }
+
+    struct CountingWaker(AtomicUsize);
+
+    impl std::task::Wake for CountingWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn assert_other_waiter_woken(drop_instead_of_dispatch: bool) {
+        let open = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let gate_waker = Arc::new(Mutex::new(None));
+        let mut steer = Steer::new(
+            vec![LatestWakerGate {
+                open: Arc::clone(&open),
+                waker: Arc::clone(&gate_waker),
+            }],
+            |_: &usize| 0,
+        );
+        let mut first = steer.call(1);
+        let mut second = steer.call(2);
+        let first_wakes = Arc::new(CountingWaker(AtomicUsize::new(0)));
+        let second_wakes = Arc::new(CountingWaker(AtomicUsize::new(0)));
+        let first_waker = Waker::from(Arc::clone(&first_wakes));
+        let second_waker = Waker::from(Arc::clone(&second_wakes));
+        assert!(
+            Pin::new(&mut first)
+                .poll(&mut Context::from_waker(&first_waker))
+                .is_pending()
+        );
+        // The gate now holds only the second future's waker.
+        assert!(
+            Pin::new(&mut second)
+                .poll(&mut Context::from_waker(&second_waker))
+                .is_pending()
+        );
+
+        open.store(true, Ordering::SeqCst);
+        gate_waker.lock().take().expect("gate waker").wake();
+        assert_eq!(second_wakes.0.load(Ordering::SeqCst), 1);
+        if drop_instead_of_dispatch {
+            drop(second);
+        } else {
+            let done = Pin::new(&mut second).poll(&mut Context::from_waker(&second_waker));
+            assert!(matches!(done, Poll::Ready(Ok(2))));
+        }
+        assert_eq!(
+            first_wakes.0.load(Ordering::SeqCst),
+            1,
+            "the first future must be woken to re-poll the backend"
+        );
+        let done = Pin::new(&mut first).poll(&mut Context::from_waker(&first_waker));
+        assert!(matches!(done, Poll::Ready(Ok(1))));
+    }
+
+    #[test]
+    fn a_waiter_is_woken_when_another_dispatches_to_its_backend() {
+        init_test("a_waiter_is_woken_when_another_dispatches_to_its_backend");
+        assert_other_waiter_woken(false);
+        crate::test_complete!("a_waiter_is_woken_when_another_dispatches_to_its_backend");
+    }
+
+    #[test]
+    fn a_waiter_is_woken_when_another_waiting_future_is_dropped() {
+        init_test("a_waiter_is_woken_when_another_waiting_future_is_dropped");
+        assert_other_waiter_woken(true);
+        crate::test_complete!("a_waiter_is_woken_when_another_waiting_future_is_dropped");
     }
 }

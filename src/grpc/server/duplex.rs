@@ -321,7 +321,8 @@ impl Server {
     {
         config.response.validate()?;
         self.validate_http2_transport_config()?;
-        self.streaming_output_codec().map_err(io::Error::other)?;
+        self.streaming_output_codec(self.config.send_compression)
+            .map_err(io::Error::other)?;
         if self.services.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -406,7 +407,13 @@ impl Server {
         let mut encoding = CompressionEncoding::Identity;
         let mut names = BTreeSet::new();
         for (name, value) in &request.head.headers {
-            if !names.insert(name.to_ascii_lowercase()) {
+            // Repeated metadata (grpc-go's metadata.Pairs, split cookies) is
+            // legal, and the unary lane accepts it. Only fields that must have
+            // a single value are refused when repeated.
+            let single_valued = ["content-type", "grpc-encoding", "grpc-timeout", "te"]
+                .iter()
+                .any(|key| name.eq_ignore_ascii_case(key));
+            if single_valued && !names.insert(name.to_ascii_lowercase()) {
                 return Err(Status::invalid_argument(
                     "duplicate gRPC initial metadata key",
                 ));
@@ -488,7 +495,8 @@ impl Server {
             let mut inner = cx.inner.write();
             inner.budget = deadline.budget(inner.budget);
         }
-        let (codec, encoding) = match self.streaming_output_codec() {
+        let compression = self.response_compression(request.metadata());
+        let (codec, encoding) = match self.streaming_output_codec(compression) {
             Ok(codec) => codec,
             Err(status) => {
                 return Http2ProducedResponse::buffered(Self::http2_status_response(&status));

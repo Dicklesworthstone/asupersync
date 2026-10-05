@@ -78,33 +78,58 @@ impl MembershipLeaseReactor {
 
     /// Consumes membership events appended since the last poll and returns the
     /// `(node, action)` pairs the lease manager should enact, in stream order.
+    ///
+    /// If the view compacted events this reactor had not seen yet, they are
+    /// gone: the reactor then reconciles from the current snapshot instead, in
+    /// node id order. A node ever seen `Dead` or `Left` is revoked even if it
+    /// has since rejoined under the same id, as it would have been had the
+    /// reactor seen the events.
     pub fn poll(&mut self, view: &MembershipView) -> Vec<(NodeId, LeaseAction)> {
         let mut actions = Vec::new();
-        for event in view.events_since(self.cursor) {
-            let node = &event.node;
-            if self.revoked.contains(node) {
-                continue; // terminal: ignore anything after revocation
+        if self.cursor < view.compact_base() {
+            for (node, kind) in view.members() {
+                let action = if view.has_departed(node) {
+                    LeaseAction::Revoke
+                } else {
+                    lease_action_for(kind)
+                };
+                self.enact(node, action, &mut actions);
             }
-            match lease_action_for(event.kind) {
-                LeaseAction::Revoke => {
-                    self.revoked.insert(node.clone());
-                    self.paused.remove(node);
-                    actions.push((node.clone(), LeaseAction::Revoke));
-                }
-                LeaseAction::PauseGrants => {
-                    if self.paused.insert(node.clone()) {
-                        actions.push((node.clone(), LeaseAction::PauseGrants));
-                    }
-                }
-                LeaseAction::Resume => {
-                    if self.paused.remove(node) {
-                        actions.push((node.clone(), LeaseAction::Resume));
-                    }
-                }
+        } else {
+            for event in view.events_since(self.cursor) {
+                self.enact(&event.node, lease_action_for(event.kind), &mut actions);
             }
         }
         self.cursor = view.event_count();
         actions
+    }
+
+    fn enact(
+        &mut self,
+        node: &NodeId,
+        action: LeaseAction,
+        actions: &mut Vec<(NodeId, LeaseAction)>,
+    ) {
+        if self.revoked.contains(node) {
+            return; // terminal: ignore anything after revocation
+        }
+        match action {
+            LeaseAction::Revoke => {
+                self.revoked.insert(node.clone());
+                self.paused.remove(node);
+                actions.push((node.clone(), LeaseAction::Revoke));
+            }
+            LeaseAction::PauseGrants => {
+                if self.paused.insert(node.clone()) {
+                    actions.push((node.clone(), LeaseAction::PauseGrants));
+                }
+            }
+            LeaseAction::Resume => {
+                if self.paused.remove(node) {
+                    actions.push((node.clone(), LeaseAction::Resume));
+                }
+            }
+        }
     }
 
     /// Whether new grants to `node` are currently paused (suspected).
@@ -202,6 +227,41 @@ mod tests {
         );
         // Same suspicion observed again -> no duplicate action.
         view.apply(event("a", MembershipKind::Suspect));
+        assert!(reactor.poll(&view).is_empty());
+    }
+
+    /// A view that compacts past the reactor's cursor (the SWIM driver's
+    /// observation keeps a bounded suffix) used to drop those events
+    /// silently, so a node that died while the reactor lagged kept its leases.
+    #[test]
+    fn a_lagging_reactor_reconciles_from_the_snapshot() {
+        let mut view = MembershipView::new();
+        let mut reactor = MembershipLeaseReactor::new();
+        view.apply(event("a", MembershipKind::Suspect));
+        view.apply(event("d", MembershipKind::Suspect));
+        assert_eq!(reactor.poll(&view).len(), 2);
+
+        view.apply(event("a", MembershipKind::Alive));
+        view.apply(event("b", MembershipKind::Dead));
+        view.apply(event("c", MembershipKind::Suspect));
+        view.apply(event("e", MembershipKind::Left));
+        view.apply(event("e", MembershipKind::Alive));
+        view.compact(view.event_count());
+        assert_eq!(
+            reactor.poll(&view),
+            vec![
+                (node("a"), LeaseAction::Resume),
+                (node("b"), LeaseAction::Revoke),
+                (node("c"), LeaseAction::PauseGrants),
+                (node("e"), LeaseAction::Revoke),
+            ]
+        );
+        assert!(reactor.is_paused(&node("d")), "d is still suspect");
+        assert!(reactor.is_revoked(&node("e")), "e left, then rejoined");
+
+        // Back in step: later events are consumed from the log again.
+        view.apply(event("c", MembershipKind::Dead));
+        assert_eq!(reactor.poll(&view), vec![(node("c"), LeaseAction::Revoke)]);
         assert!(reactor.poll(&view).is_empty());
     }
 }

@@ -1678,12 +1678,32 @@ impl Drop for NatsCancelWakerGuard {
 /// driving it. No ambient context is replaced: capability restrictions and
 /// supervisor shutdown remain effective while caller cancellation can wake a
 /// silent read, blocked write, connection attempt, or TLS handshake.
+///
+/// A budget deadline on either context is a cancellation source too, but
+/// `Cx::checkpoint` only notices an expired deadline when something polls.
+/// A timer for each deadline re-polls work parked on a silent server, so it
+/// fails with `Cancelled` at the deadline, as `redis_io` does.
 async fn nats_io<T, E>(cx: &Cx, future: impl Future<Output = Result<T, E>>) -> Result<T, NatsError>
 where
     NatsError: From<E>,
 {
     let mut owner_cancel = NatsCancelWakerGuard::new(cx);
     let mut driver_cancel = Cx::current().as_ref().map(NatsCancelWakerGuard::new);
+    let mut deadlines: Vec<_> = [
+        cx.budget().deadline,
+        driver_cancel
+            .as_ref()
+            .and_then(|driver| driver.cx.budget().deadline),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    deadlines.sort_unstable();
+    // Latest first, so `pop` yields the next deadline to arm.
+    deadlines.reverse();
+    let mut deadline_timer = deadlines
+        .pop()
+        .map(|at| Box::pin(crate::time::sleep_until(at)));
     let mut future = std::pin::pin!(future);
     std::future::poll_fn(|task_cx| {
         // Registration precedes the checkpoint: cancellation published while
@@ -1692,6 +1712,17 @@ where
         owner_cancel.refresh(task_cx.waker());
         if let Some(driver) = driver_cancel.as_mut() {
             driver.refresh(task_cx.waker());
+        }
+        // Arm (or re-arm) the deadline wakeup. A fired timer is replaced by
+        // the next deadline: the earlier one may not end the call (for
+        // example, the driving task is inside a masked section).
+        while deadline_timer
+            .as_mut()
+            .is_some_and(|timer| timer.as_mut().poll(task_cx).is_ready())
+        {
+            deadline_timer = deadlines
+                .pop()
+                .map(|at| Box::pin(crate::time::sleep_until(at)));
         }
         if cx.checkpoint().is_err()
             || driver_cancel
@@ -2507,65 +2538,7 @@ impl NatsConnection {
     }
 
     fn reply_status_error(message: &Message) -> Option<NatsError> {
-        if !message.payload.is_empty() {
-            return None;
-        }
-
-        let headers = message.headers.as_deref()?;
-        let header_text = std::str::from_utf8(headers).ok()?;
-        let mut lines = header_text.split("\r\n");
-        let first_line = lines.next()?;
-        if first_line != "NATS/1.0" && !first_line.starts_with("NATS/1.0 ") {
-            return None;
-        }
-
-        let (mut status, mut description) =
-            if let Some(status_line) = first_line.strip_prefix("NATS/1.0 ") {
-                let status_line = status_line.trim();
-                let mut parts = status_line.splitn(2, char::is_whitespace);
-                (
-                    parts.next().and_then(|value| value.parse::<u16>().ok()),
-                    parts
-                        .next()
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .map(ToOwned::to_owned),
-                )
-            } else {
-                (None, None)
-            };
-
-        for line in lines {
-            if line.is_empty() {
-                break;
-            }
-            let Some((name, value)) = line.split_once(':') else {
-                continue;
-            };
-            let value = value.trim();
-            if name.eq_ignore_ascii_case("Status") {
-                status = value.parse::<u16>().ok();
-            } else if name.eq_ignore_ascii_case("Description") {
-                description = Some(value.to_string());
-            }
-        }
-
-        let status = status?;
-        if status < 300 {
-            return None;
-        }
-
-        // nats-server answers a request with no subscribers with a bare
-        // `NATS/1.0 503` header and no Description line (real-server suite,
-        // nats:2.10). Supply the protocol's well-known wording for that code
-        // so callers can recognise the condition the way other clients
-        // (`ErrNoResponders`) surface it; unknown bare codes keep the numeric
-        // fallback.
-        let detail = description.unwrap_or_else(|| match status {
-            503 => "No Responders".to_string(),
-            _ => format!("status {status}"),
-        });
-        Some(NatsError::Server(format!("status {status}: {detail}")))
+        status_reply(message).map(|(_, error)| error)
     }
 
     /// Publish a message to a subject.
@@ -2968,6 +2941,17 @@ impl NatsConnection {
     ///
     /// Returns a `Subscription` that can be used to receive messages.
     pub async fn subscribe(&mut self, cx: &Cx, subject: &str) -> Result<Subscription, NatsError> {
+        self.subscribe_with_capacity(cx, subject, DEFAULT_SUBSCRIPTION_CAPACITY)
+            .await
+    }
+
+    /// Subscribe to a subject, buffering up to `capacity` messages (at least 1).
+    pub async fn subscribe_with_capacity(
+        &mut self,
+        cx: &Cx,
+        subject: &str,
+        capacity: usize,
+    ) -> Result<Subscription, NatsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
         if !self.connected {
@@ -2976,7 +2960,8 @@ impl NatsConnection {
         validate_nats_subscription_pattern(subject, "subject")?;
 
         let sid = self.next_sid.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = mpsc::channel(256); // Bounded for backpressure
+        // Bounded: a message that arrives while the buffer is full is dropped.
+        let (tx, rx) = mpsc::channel(capacity.max(1));
 
         // Register subscription
         {
@@ -3036,7 +3021,7 @@ impl NatsConnection {
         validate_nats_token(queue_group, "queue group")?;
 
         let sid = self.next_sid.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = mpsc::channel(256);
+        let (tx, rx) = mpsc::channel(DEFAULT_SUBSCRIPTION_CAPACITY);
 
         {
             let mut subs = self.state.subscriptions.lock();
@@ -3122,6 +3107,15 @@ impl NatsConnection {
                     NatsMessage::Pong => {
                         self.connected = true;
                         return Ok(());
+                    }
+                    // The server keeps the connection after a permissions
+                    // violation and sends the PONG next. Failing here broke
+                    // the publish-then-ping flush idiom and reconnected,
+                    // dropping in-flight messages.
+                    NatsMessage::Err(e) if server_error_keeps_connection(&e) => {
+                        cx.trace(&format!(
+                            "nats: server reported {e:?} before PONG; the connection stays open"
+                        ));
                     }
                     NatsMessage::Err(e) => return Err(NatsError::Server(e)),
                     NatsMessage::Ping => {
@@ -3255,6 +3249,10 @@ impl Drop for NatsConnection {
 
 const NATS_SUPERVISOR_COMMAND_CAPACITY: usize = 64;
 
+/// Messages a subscription buffers before further ones are dropped; see
+/// [`NatsClient::subscribe_with_capacity`].
+const DEFAULT_SUBSCRIPTION_CAPACITY: usize = 256;
+
 /// NATS client with Cx integration.
 ///
 /// When the supplied [`Cx`] is backed by an asupersync runtime, the client
@@ -3318,6 +3316,7 @@ enum NatsSupervisorCommand {
         cx: Cx,
         subject: String,
         queue_group: Option<String>,
+        capacity: usize,
         reply: oneshot::Sender<Result<Subscription, NatsError>>,
     },
     Unsubscribe {
@@ -3330,7 +3329,6 @@ enum NatsSupervisorCommand {
         reply: oneshot::Sender<Result<(), NatsError>>,
     },
     Process {
-        cx: Cx,
         after_epoch: u64,
         reply: oneshot::Sender<Result<(), NatsError>>,
     },
@@ -3592,9 +3590,33 @@ impl NatsClient {
     }
 
     /// Subscribe to a subject.
+    ///
+    /// The subscription buffers up to 256 messages; one that arrives while the
+    /// buffer is full is dropped with a warning. Use
+    /// [`Self::subscribe_with_capacity`] for a larger buffer.
     pub async fn subscribe(&mut self, cx: &Cx, subject: &str) -> Result<Subscription, NatsError> {
+        self.subscribe_with_capacity(cx, subject, DEFAULT_SUBSCRIPTION_CAPACITY)
+            .await
+    }
+
+    /// Subscribe to a subject, buffering up to `capacity` messages (at least
+    /// 1) until they are received.
+    ///
+    /// A message that arrives while the buffer is full is dropped with a
+    /// warning, so size the buffer to the largest burst the subscriber must
+    /// absorb between receives, such as a request expecting that many replies.
+    pub async fn subscribe_with_capacity(
+        &mut self,
+        cx: &Cx,
+        subject: &str,
+        capacity: usize,
+    ) -> Result<Subscription, NatsError> {
         match &mut self.mode {
-            NatsClientMode::Direct(connection) => connection.subscribe(cx, subject).await,
+            NatsClientMode::Direct(connection) => {
+                connection
+                    .subscribe_with_capacity(cx, subject, capacity)
+                    .await
+            }
             NatsClientMode::Supervised(supervisor) => {
                 let subject = subject.to_string();
                 supervisor
@@ -3602,6 +3624,7 @@ impl NatsClient {
                         cx,
                         subject,
                         queue_group: None,
+                        capacity,
                         reply,
                     })
                     .await
@@ -3628,6 +3651,7 @@ impl NatsClient {
                         cx,
                         subject,
                         queue_group,
+                        capacity: DEFAULT_SUBSCRIPTION_CAPACITY,
                         reply,
                     })
                     .await
@@ -3675,8 +3699,7 @@ impl NatsClient {
             NatsClientMode::Supervised(supervisor) => {
                 let after_epoch = self.state.processed_epoch.load(Ordering::Acquire);
                 supervisor
-                    .request(cx, move |cx, reply| NatsSupervisorCommand::Process {
-                        cx,
+                    .request(cx, move |_, reply| NatsSupervisorCommand::Process {
                         after_epoch,
                         reply,
                     })
@@ -3737,6 +3760,7 @@ async fn run_nats_supervisor(
     mut commands: mpsc::Receiver<NatsSupervisorCommand>,
 ) {
     let mut streak = ReconnectStreak::default();
+    let mut process_waiters = Vec::new();
     connection.state.supervised.store(true, Ordering::Release);
     loop {
         let pumped = match connection.flush_dropped_subscriptions(supervisor_cx).await {
@@ -3746,14 +3770,17 @@ async fn run_nats_supervisor(
         match pumped {
             Ok(processed) => {
                 if processed > 0 {
-                    connection
+                    let epoch = connection
                         .state
                         .processed_epoch
-                        .fetch_add(processed, Ordering::AcqRel);
+                        .fetch_add(processed, Ordering::AcqRel)
+                        .saturating_add(processed);
+                    answer_process_waiters(&mut process_waiters, epoch);
                     continue;
                 }
             }
             Err(error) => {
+                fail_process_waiters(&mut process_waiters);
                 if !recover_supervisor_connection(
                     supervisor_cx,
                     &mut connection,
@@ -3781,6 +3808,7 @@ async fn run_nats_supervisor(
         match selected {
             Ok(Either::Left(Ok(()))) => {}
             Ok(Either::Left(Err(error))) => {
+                fail_process_waiters(&mut process_waiters);
                 if !recover_supervisor_connection(
                     supervisor_cx,
                     &mut connection,
@@ -3795,34 +3823,39 @@ async fn run_nats_supervisor(
             Ok(Either::Right(Ok(command))) => {
                 // A subscription dropped while the supervisor waited is
                 // unsubscribed before the command writes anything.
-                if let Err(error) = connection.flush_dropped_subscriptions(supervisor_cx).await
-                    && !recover_supervisor_connection(
+                if let Err(error) = connection.flush_dropped_subscriptions(supervisor_cx).await {
+                    fail_process_waiters(&mut process_waiters);
+                    if !recover_supervisor_connection(
                         supervisor_cx,
                         &mut connection,
                         &mut streak,
                         error,
                     )
                     .await
-                {
-                    break;
+                    {
+                        break;
+                    }
                 }
-                if !handle_supervisor_command(&mut connection, command).await {
+                if !handle_supervisor_command(&mut connection, command, &mut process_waiters).await
+                {
                     break;
                 }
                 // A command cut off mid-exchange (a cancelled or failed write,
                 // or a PING whose PONG never came) leaves the connection marked
                 // unusable. The stream may end in a partial frame that the next
                 // PONG would complete, so replace it instead of reading on.
-                if !connection.connected
-                    && !recover_supervisor_connection(
+                if !connection.connected {
+                    fail_process_waiters(&mut process_waiters);
+                    if !recover_supervisor_connection(
                         supervisor_cx,
                         &mut connection,
                         &mut streak,
                         NatsError::NotConnected,
                     )
                     .await
-                {
-                    break;
+                    {
+                        break;
+                    }
                 }
             }
             Ok(Either::Right(Err(_))) | Err(_) => break,
@@ -3896,9 +3929,35 @@ async fn recover_supervisor_connection(
     reconnected
 }
 
+/// A parked supervised `process()` call: the epoch it saw, and its reply.
+type ProcessWaiter = (u64, oneshot::Sender<Result<(), NatsError>>);
+
+/// Answers each parked `process()` call once the supervisor has handled a
+/// frame after the epoch the call saw, and forgets callers that stopped
+/// waiting.
+fn answer_process_waiters(waiters: &mut Vec<ProcessWaiter>, epoch: u64) {
+    let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(waiters)
+        .into_iter()
+        .filter(|(_, reply)| !reply.is_closed())
+        .partition(|(after_epoch, _)| epoch > *after_epoch);
+    *waiters = waiting;
+    for (_, reply) in ready {
+        let _ = reply.send_blocking(Ok(()));
+    }
+}
+
+/// Fails every parked `process()` call when the connection breaks, as the
+/// read it used to make would have.
+fn fail_process_waiters(waiters: &mut Vec<ProcessWaiter>) {
+    for (_, reply) in waiters.drain(..) {
+        let _ = reply.send_blocking(Err(NatsError::NotConnected));
+    }
+}
+
 async fn handle_supervisor_command(
     connection: &mut NatsConnection,
     command: NatsSupervisorCommand,
+    process_waiters: &mut Vec<ProcessWaiter>,
 ) -> bool {
     if command.caller_gave_up() {
         return true;
@@ -3972,6 +4031,7 @@ async fn handle_supervisor_command(
             cx,
             subject,
             queue_group,
+            capacity,
             reply,
         } => {
             let result = if let Some(queue_group) = queue_group {
@@ -3979,7 +4039,9 @@ async fn handle_supervisor_command(
                     .queue_subscribe(&cx, &subject, &queue_group)
                     .await
             } else {
-                connection.subscribe(&cx, &subject).await
+                connection
+                    .subscribe_with_capacity(&cx, &subject, capacity)
+                    .await
             };
             let _ = reply.send_blocking(result);
         }
@@ -3989,25 +4051,20 @@ async fn handle_supervisor_command(
         NatsSupervisorCommand::Ping { cx, reply } => {
             let _ = reply.send_blocking(connection.ping(&cx).await);
         }
-        NatsSupervisorCommand::Process {
-            cx,
-            after_epoch,
-            reply,
-        } => {
-            let already_processed =
-                connection.state.processed_epoch.load(Ordering::Acquire) > after_epoch;
-            let result = if already_processed {
-                Ok(())
+        NatsSupervisorCommand::Process { after_epoch, reply } => {
+            // The supervisor's own frame loop answers it. Reading the socket
+            // here held the supervisor until the next inbound frame even when
+            // the caller had stopped waiting (a timeout drops the future and
+            // does not cancel its Cx): for a JetStream pull, until the
+            // server's next PING, minutes later, with every command queued.
+            if !connection.connected {
+                let _ = reply.send_blocking(Err(NatsError::NotConnected));
+            } else if connection.state.processed_epoch.load(Ordering::Acquire) > after_epoch {
+                let _ = reply.send_blocking(Ok(()));
             } else {
-                connection.process(&cx).await
-            };
-            if result.is_ok() && !already_processed {
-                connection
-                    .state
-                    .processed_epoch
-                    .fetch_add(1, Ordering::AcqRel);
+                process_waiters.retain(|(_, waiting)| !waiting.is_closed());
+                process_waiters.push((after_epoch, reply));
             }
-            let _ = reply.send_blocking(result);
         }
         NatsSupervisorCommand::Close { cx, reply } => {
             let result = connection.close(&cx).await;
@@ -4020,6 +4077,74 @@ async fn handle_supervisor_command(
         .connected
         .store(connection.connected, Ordering::Release);
     true
+}
+
+/// The server status carried by a message that is only a `NATS/1.0` header
+/// block (`NATS/1.0 503`, `NATS/1.0 409 Consumer Deleted`): its code and the
+/// error it means. `None` for an ordinary message or a status below 300.
+pub(crate) fn status_reply(message: &Message) -> Option<(u16, NatsError)> {
+    if !message.payload.is_empty() {
+        return None;
+    }
+
+    let headers = message.headers.as_deref()?;
+    let header_text = std::str::from_utf8(headers).ok()?;
+    let mut lines = header_text.split("\r\n");
+    let first_line = lines.next()?;
+    if first_line != "NATS/1.0" && !first_line.starts_with("NATS/1.0 ") {
+        return None;
+    }
+
+    let (mut status, mut description) =
+        if let Some(status_line) = first_line.strip_prefix("NATS/1.0 ") {
+            let status_line = status_line.trim();
+            let mut parts = status_line.splitn(2, char::is_whitespace);
+            (
+                parts.next().and_then(|value| value.parse::<u16>().ok()),
+                parts
+                    .next()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned),
+            )
+        } else {
+            (None, None)
+        };
+
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        if name.eq_ignore_ascii_case("Status") {
+            status = value.parse::<u16>().ok();
+        } else if name.eq_ignore_ascii_case("Description") {
+            description = Some(value.to_string());
+        }
+    }
+
+    let status = status?;
+    if status < 300 {
+        return None;
+    }
+
+    // nats-server answers a request with no subscribers with a bare
+    // `NATS/1.0 503` header and no Description line (real-server suite,
+    // nats:2.10). Supply the protocol's well-known wording for that code
+    // so callers can recognise the condition the way other clients
+    // (`ErrNoResponders`) surface it; unknown bare codes keep the numeric
+    // fallback.
+    let detail = description.unwrap_or_else(|| match status {
+        503 => "No Responders".to_string(),
+        _ => format!("status {status}"),
+    });
+    Some((
+        status,
+        NatsError::Server(format!("status {status}: {detail}")),
+    ))
 }
 
 fn parse_hmsg_frame(
@@ -4410,6 +4535,79 @@ mod tests {
         assert!(driver.inner.read().cancel_waker_registrations.is_empty());
     }
 
+    /// A budget deadline must wake work parked on a silent server; a
+    /// checkpoint alone notices an expired deadline only when something
+    /// polls. With two deadlines, an earlier one that does not end the call
+    /// (here the driving task's checkpoints are masked) must not leave the
+    /// later one unarmed.
+    #[test]
+    fn nats_io_wakes_a_parked_call_at_each_budget_deadline() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, RegionId, TaskId, Time};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountWakes(AtomicUsize);
+        impl std::task::Wake for CountWakes {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+        let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+        let cx_with_deadline = |task: u32, deadline_ms: u64| {
+            Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(task, 0),
+                Budget::new().with_deadline(Time::from_millis(deadline_ms)),
+                None,
+                None,
+                None,
+                Some(timer.clone()),
+                None,
+            )
+        };
+        let owner = cx_with_deadline(1, 300);
+        let driver = cx_with_deadline(2, 100);
+        let _current = Cx::set_current(Some(driver.clone()));
+        let silent_server = std::future::pending::<Result<(), NatsError>>();
+        let mut call = std::pin::pin!(crate::combinator::bracket::commit_section(
+            &driver,
+            u32::MAX,
+            nats_io(&owner, silent_server),
+        ));
+        let wakes = Arc::new(CountWakes(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut task_cx = std::task::Context::from_waker(&waker);
+        assert!(call.as_mut().poll(&mut task_cx).is_pending());
+
+        // The driver's deadline wakes the call, which stays pending because
+        // the driver's checkpoints are masked.
+        clock.advance(150_000_000);
+        let _fired = timer.process_timers();
+        assert!(
+            wakes.0.load(Ordering::SeqCst) > 0,
+            "the driver's deadline must wake the parked call"
+        );
+        assert!(
+            call.as_mut().poll(&mut task_cx).is_pending(),
+            "the masked driver does not end the call"
+        );
+
+        // Only a timer for the owner's later deadline can wake it now.
+        let before = wakes.0.load(Ordering::SeqCst);
+        clock.advance(200_000_000);
+        let _fired = timer.process_timers();
+        assert!(
+            wakes.0.load(Ordering::SeqCst) > before,
+            "the owner's deadline must wake the parked call"
+        );
+        assert!(matches!(
+            call.as_mut().poll(&mut task_cx),
+            Poll::Ready(Err(NatsError::Cancelled))
+        ));
+    }
+
     #[test]
     fn nats_io_drop_retires_both_owners_without_stale_wakes() {
         struct WakeCount(AtomicU64);
@@ -4555,6 +4753,74 @@ mod tests {
             connect_line
         });
         (addr, server)
+    }
+
+    /// Messages the burst server sends ahead of its PONG.
+    const BURST: usize = 300;
+
+    /// Answers the client's first PING with `BURST` messages for the client's
+    /// subscription, then the PONG, so every message is dispatched before
+    /// `ping` returns and none is received in between.
+    fn spawn_burst_server() -> (SocketAddr, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind burst listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept burst client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            stream
+                .write_all(b"INFO {\"server_id\":\"burst\",\"max_payload\":1048576}\r\n")
+                .expect("write INFO line");
+            let mut reader = BufReader::new(stream);
+            assert!(read_protocol_line(&mut reader).starts_with("CONNECT "));
+            let subscribe = read_protocol_line(&mut reader);
+            let sid = subscribe
+                .split_whitespace()
+                .nth(2)
+                .expect("SUB sid")
+                .to_string();
+            assert_eq!(trim_protocol_line(read_protocol_line(&mut reader)), "PING");
+            let mut burst = String::new();
+            for index in 0..BURST {
+                burst.push_str(&format!("MSG burst {sid} 4\r\n{index:04}\r\n"));
+            }
+            burst.push_str("PONG\r\n");
+            let stream = reader.get_mut();
+            stream.write_all(burst.as_bytes()).expect("write burst");
+            stream.flush().expect("flush burst");
+        });
+        (addr, server)
+    }
+
+    #[test]
+    fn a_subscription_sized_for_a_burst_keeps_every_message() {
+        // Frames that arrive while the subscriber is not receiving (here, all
+        // of them before the PONG) are dispatched into its buffer, and the
+        // buffer used to hold 256 whatever the burst.
+        let (addr, server) = spawn_burst_server();
+        run_test_with_cx(|cx| async move {
+            let config = NatsConfig {
+                host: addr.ip().to_string(),
+                port: addr.port(),
+                ..Default::default()
+            };
+            let mut client = NatsClient::connect_with_config(&cx, config)
+                .await
+                .expect("connect burst server");
+            let mut sub = client
+                .subscribe_with_capacity(&cx, "burst", BURST)
+                .await
+                .expect("subscribe");
+            client.ping(&cx).await.expect("ping");
+            let mut received = Vec::new();
+            while let Some(msg) = sub.try_next() {
+                received.push(msg.payload);
+            }
+            assert_eq!(received.len(), BURST, "every burst message is kept");
+            assert_eq!(received[BURST - 1], b"0299".to_vec());
+        });
+        server.join().expect("join burst server");
     }
 
     fn deterministic_user_seed(byte: u8) -> String {

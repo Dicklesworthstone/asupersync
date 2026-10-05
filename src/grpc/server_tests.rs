@@ -182,6 +182,52 @@ mod tests {
         assert!(body.is_empty());
     }
 
+    /// A server built with send_compression(Gzip) compressed every response,
+    /// also for a client that listed only identity in grpc-accept-encoding
+    /// or sent none (a default Channel), which then failed the call.
+    #[cfg(feature = "compression")]
+    #[test]
+    fn http2_unary_response_is_compressed_only_for_a_client_that_accepts_it() {
+        let server = Arc::new(
+            Server::builder()
+                .send_compression(CompressionEncoding::Gzip)
+                .build(),
+        );
+        let respond = |accept: Option<&str>| {
+            let mut request =
+                unary_http2_request(&server, "/test.Echo/Unary", Bytes::from_static(b"ping"));
+            if let Some(accept) = accept {
+                request
+                    .headers
+                    .push(("grpc-accept-encoding".to_owned(), accept.to_owned()));
+            }
+            futures_lite::future::block_on(server.dispatch_http2_unary(
+                request,
+                Arc::new(|_transport: GrpcTransportRequest| async move {
+                    Ok(Response::new(Bytes::from_static(b"pong")))
+                }),
+            ))
+        };
+        let grpc_encoding = |response: &HttpResponse| {
+            response
+                .headers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case("grpc-encoding"))
+                .map(|(_, value)| value.clone())
+        };
+
+        for accept in [None, Some("identity")] {
+            let response = respond(accept);
+            assert_eq!(grpc_status_trailer(&response), Some("0"), "{accept:?}");
+            assert_eq!(grpc_encoding(&response), None, "{accept:?}");
+            assert_eq!(response.body[0], 0, "uncompressed frame for {accept:?}");
+        }
+        let response = respond(Some("identity, gzip"));
+        assert_eq!(grpc_status_trailer(&response), Some("0"));
+        assert_eq!(grpc_encoding(&response).as_deref(), Some("gzip"));
+        assert_eq!(response.body[0], 1, "compressed frame");
+    }
+
     #[test]
     fn http2_status_response_preserves_percent_encoded_message_and_details() {
         let status = Status::with_details(
@@ -1207,6 +1253,22 @@ mod tests {
             "error message must mention reserved grpc-* prefix, got: {msg}"
         );
         crate::test_complete!("enforce_metadata_size_limit_rejects_reserved_grpc_header");
+    }
+
+    /// grpc-go and grpc-java send grpc-previous-rpc-attempts on retries and
+    /// hedged attempts, and OpenCensus sends grpc-trace-bin/grpc-tags-bin.
+    /// All were refused as reserved, failing retried and traced calls.
+    #[test]
+    fn enforce_metadata_size_limit_accepts_request_side_grpc_headers() {
+        init_test("enforce_metadata_size_limit_accepts_request_side_grpc_headers");
+        let mut metadata = super::super::streaming::Metadata::new();
+        metadata.insert("grpc-previous-rpc-attempts", "1");
+        metadata.insert_bin("grpc-trace-bin", Bytes::from_static(&[0, 1, 2]));
+        metadata.insert_bin("grpc-tags-bin", Bytes::from_static(&[3]));
+
+        enforce_metadata_size_limit(&metadata, 8 * 1024)
+            .expect("request-side grpc-* headers are accepted");
+        crate::test_complete!("enforce_metadata_size_limit_accepts_request_side_grpc_headers");
     }
 
     #[test]

@@ -516,12 +516,17 @@ impl<T> Sender<T> {
             inner.permit_outstanding = true;
         }
 
-        Ok(SendPermit {
+        // The permit exists before the obligation is registered: if the
+        // registration's notifier panics, dropping the permit still closes
+        // the channel and wakes the receiver.
+        let mut permit = SendPermit {
             inner: Arc::clone(&self.inner),
             sent: false,
-            obligation: cx
-                .try_register_obligation(crate::record::ObligationKind::SendPermit, cx.task_id()),
-        })
+            obligation: None,
+        };
+        permit.obligation =
+            cx.try_register_obligation(crate::record::ObligationKind::SendPermit, cx.task_id());
+        Ok(permit)
     }
 
     /// Convenience method: reserves and sends in one step.

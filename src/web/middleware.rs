@@ -100,6 +100,9 @@ pub use crate::service::Layer;
 use crate::tracing_compat::{debug, error, warn};
 use crate::types::Time;
 
+use super::compress::{
+    RequestCompressionSensitivity, compression_oracle_sensitive, is_partial_content,
+};
 use super::extract::Request;
 use super::handler::Handler;
 use super::response::{IntoResponse, Redirect, Response, StatusCode};
@@ -346,8 +349,15 @@ impl<H: Handler> Handler for CorsMiddleware<H> {
     ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
         let cx = cx.clone();
         Box::pin(async move {
+            // A response without CORS headers still depends on the request's
+            // Origin: a shared cache must not serve it to an allowed origin,
+            // which would then be blocked. Mark it `Vary: Origin` as well.
+            let without_cors = |mut resp: Response| {
+                append_vary_header(&mut resp, "origin");
+                resp
+            };
             let Some(origin) = header_value(&req, "origin") else {
-                return self.inner.call(&cx, req).await;
+                return without_cors(self.inner.call(&cx, req).await);
             };
 
             if Self::is_malformed_origin_value(&origin) {
@@ -355,12 +365,12 @@ impl<H: Handler> Handler for CorsMiddleware<H> {
                     origin = %origin,
                     "CorsMiddleware: dropping malformed multi-origin request header"
                 );
-                return self.inner.call(&cx, req).await;
+                return without_cors(self.inner.call(&cx, req).await);
             }
 
             let Some(allow_origin) = self.allowed_origin_value(&origin) else {
                 // Origin not allowed: pass through without CORS headers.
-                return self.inner.call(&cx, req).await;
+                return without_cors(self.inner.call(&cx, req).await);
             };
 
             if Self::is_preflight(&req) {
@@ -611,10 +621,10 @@ impl<H: Handler> Handler for CircuitBreakerMiddleware<H> {
     ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
         let cx = cx.clone();
         Box::pin(async move {
-            let now = (self.time_getter)();
-
-            // Get permit from circuit breaker
-            let permit = match self.breaker.should_allow(now) {
+            // The guard frees a half-open probe slot if this future is dropped
+            // (client gone, timeout) or the handler panics; a bare permit kept
+            // the slot taken for good, so every later request got 503.
+            let permit = match self.breaker.acquire_guarded((self.time_getter)()) {
                 Ok(permit) => permit,
                 Err(crate::combinator::circuit_breaker::CircuitBreakerError::Open {
                     remaining,
@@ -639,10 +649,14 @@ impl<H: Handler> Handler for CircuitBreakerMiddleware<H> {
 
             // Call the handler
             let resp = self.inner.call(&cx, req).await;
+            // The outcome is stamped when the call ends: with the start time, a
+            // failure that took longer than open_duration opened the breaker
+            // already that long ago, so the open phase was skipped.
+            let now = (self.time_getter)();
             if resp.status.is_server_error() {
-                self.breaker.record_failure(permit, "server_error", now);
+                permit.record_failure("server_error", now);
             } else {
-                self.breaker.record_success(permit, now);
+                permit.record_success(now);
             }
             resp
         })
@@ -951,16 +965,36 @@ impl Default for CompressionConfig {
 /// Uses [`negotiate_encoding`] to select the best encoding from the
 /// client's Accept-Encoding header against the server's supported set.
 /// Only compresses when the response body exceeds `min_body_size`.
+///
+/// Like [`crate::web::compress`], it leaves uncompressed a response that a
+/// BREACH-style length oracle could probe: one to a request carrying Cookie,
+/// Authorization, X-CSRF-Token or X-XSRF-Token, or one that sets a cookie or
+/// is marked `Cache-Control: private`/`no-store`/`no-cache`. It never
+/// compresses a 206 (its Content-Range describes the uncompressed bytes).
 pub struct CompressionMiddleware<H> {
     inner: H,
     config: CompressionConfig,
+    compress_sensitive: bool,
 }
 
 impl<H: Handler> CompressionMiddleware<H> {
     /// Wrap a handler with response compression.
     #[must_use]
     pub fn new(inner: H, config: CompressionConfig) -> Self {
-        Self { inner, config }
+        Self {
+            inner,
+            config,
+            compress_sensitive: false,
+        }
+    }
+
+    /// Also compress the responses the BREACH guard leaves uncompressed.
+    /// Enable this only when such responses never mix secrets with
+    /// attacker-influenced content.
+    #[must_use]
+    pub fn compress_sensitive_responses(mut self, enabled: bool) -> Self {
+        self.compress_sensitive = enabled;
+        self
     }
 }
 
@@ -973,6 +1007,7 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
         let cx = cx.clone();
         Box::pin(async move {
             let accept_encoding = header_value(&req, "accept-encoding");
+            let sensitivity = RequestCompressionSensitivity::from_request(&req);
             let mut resp = self.inner.call(&cx, req).await;
 
             if resp.status == StatusCode::NO_CONTENT || resp.status == StatusCode::NOT_MODIFIED {
@@ -981,6 +1016,10 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
 
             if let Some(existing_encoding) = resp.remove_header("content-encoding") {
                 resp.set_header("content-encoding", existing_encoding);
+                return resp;
+            }
+
+            if is_partial_content(&resp) {
                 return resp;
             }
 
@@ -995,6 +1034,18 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
             let identity_acceptable =
                 negotiate_encoding(accept_encoding.as_deref(), &[ContentEncoding::Identity])
                     == Some(ContentEncoding::Identity);
+
+            if !self.compress_sensitive && compression_oracle_sensitive(sensitivity, &resp) {
+                if !identity_acceptable {
+                    return Response::new(
+                        StatusCode::from_u16(406),
+                        b"No acceptable response encoding".to_vec(),
+                    );
+                }
+                append_vary_header(&mut resp, "accept-encoding");
+                sensitivity.append_vary_tokens(&mut resp);
+                return resp;
+            }
 
             let body_below_minimum = resp.body.len() < self.config.min_body_size;
             if body_below_minimum && identity_acceptable {
@@ -1142,6 +1193,12 @@ impl<H: Handler> Handler for RequestBodyLimitMiddleware<H> {
                     .into_bytes(),
                 );
             }
+            // A streaming body (StreamingRawBody) is not in `req.body`, and a
+            // chunked upload declares no Content-Length: neither check above
+            // sees it. Cap the stream itself, as the router's body policy
+            // does, so reading past the limit fails with BodyTooLarge.
+            #[cfg(not(target_arch = "wasm32"))]
+            super::extract::tighten_streaming_raw_body(&req, self.max_bytes);
             self.inner.call(&cx, req).await
         })
     }
@@ -1949,6 +2006,15 @@ fn normalization_redirect_response(path: &str) -> Response {
     }
 }
 
+/// Keeps the request's query on a normalized redirect target, so
+/// `GET /search/?q=x` redirects to `/search?q=x` rather than `/search`.
+fn with_request_query(path: String, query: Option<&str>) -> String {
+    match query {
+        Some(query) if !query.is_empty() => format!("{path}?{query}"),
+        _ => path,
+    }
+}
+
 fn invalid_normalized_redirect_response(path: &str, err: impl std::fmt::Display) -> Response {
     let _ = (&path, &err);
     warn!(
@@ -2001,14 +2067,15 @@ impl<H: Handler> Handler for NormalizePathMiddleware<H> {
                         if trimmed.is_empty() {
                             trimmed = "/".to_string();
                         }
-                        return normalization_redirect_response(&trimmed);
+                        let target = with_request_query(trimmed, req.query.as_deref());
+                        return normalization_redirect_response(&target);
                     }
                     self.inner.call(&cx, req).await
                 }
                 TrailingSlash::RedirectAlways => {
                     if !path.ends_with('/') && !path.contains('.') {
-                        let with_slash = format!("{path}/");
-                        return normalization_redirect_response(&with_slash);
+                        let target = with_request_query(format!("{path}/"), req.query.as_deref());
+                        return normalization_redirect_response(&target);
                     }
                     self.inner.call(&cx, req).await
                 }
@@ -2598,13 +2665,24 @@ impl<H: Handler> Layer<H> for RetryLayer {
 #[derive(Debug, Clone)]
 pub struct CompressionLayer {
     config: CompressionConfig,
+    compress_sensitive: bool,
 }
 
 impl CompressionLayer {
     /// Create a compression layer from the given config.
     #[must_use]
     pub fn new(config: CompressionConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            compress_sensitive: false,
+        }
+    }
+
+    /// See [`CompressionMiddleware::compress_sensitive_responses`].
+    #[must_use]
+    pub fn compress_sensitive_responses(mut self, enabled: bool) -> Self {
+        self.compress_sensitive = enabled;
+        self
     }
 }
 
@@ -2619,6 +2697,7 @@ impl<H: Handler> Layer<H> for CompressionLayer {
 
     fn layer(&self, inner: H) -> Self::Service {
         CompressionMiddleware::new(inner, self.config.clone())
+            .compress_sensitive_responses(self.compress_sensitive)
     }
 }
 
@@ -3280,6 +3359,128 @@ mod tests {
         set_circuit_test_time(11_000);
         let recovered = ok_mw.call(make_request());
         assert_eq!(recovered.status, StatusCode::OK);
+    }
+
+    /// A half-open probe whose request was abandoned (client gone, timeout)
+    /// kept its probe slot, so every later request got 503 HalfOpenFull.
+    #[test]
+    fn abandoned_request_releases_the_half_open_probe() {
+        struct NeverHandler;
+        impl Handler for NeverHandler {
+            fn call(
+                &self,
+                _cx: &crate::Cx,
+                _req: Request,
+            ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+                Box::pin(std::future::pending())
+            }
+        }
+
+        let policy = CircuitBreakerPolicy {
+            failure_threshold: 1,
+            success_threshold: 1,
+            open_duration: Duration::ZERO,
+            ..Default::default()
+        };
+        let breaker = Arc::new(CircuitBreaker::new(policy));
+        let fail_mw = CircuitBreakerMiddleware::shared_with_time_getter(
+            FnHandler::new(error_handler),
+            Arc::clone(&breaker),
+            circuit_test_time,
+        );
+        let never_mw = CircuitBreakerMiddleware::shared_with_time_getter(
+            NeverHandler,
+            Arc::clone(&breaker),
+            circuit_test_time,
+        );
+        let ok_mw = CircuitBreakerMiddleware::shared_with_time_getter(
+            FnHandler::new(ok_handler),
+            Arc::clone(&breaker),
+            circuit_test_time,
+        );
+
+        set_circuit_test_time(1_000);
+        assert_eq!(
+            fail_mw.call(make_request()).status,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+
+        let cx = crate::Cx::for_testing();
+        let mut probe = Handler::call(&never_mw, &cx, make_request());
+        let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(probe.as_mut().poll(&mut task_cx).is_pending());
+        assert!(
+            matches!(
+                breaker.state(),
+                crate::combinator::circuit_breaker::State::HalfOpen {
+                    probes_active: 1,
+                    ..
+                }
+            ),
+            "the abandoned request must hold the probe: {:?}",
+            breaker.state()
+        );
+        drop(probe);
+
+        let next = ok_mw.call(make_request());
+        assert_eq!(next.status, StatusCode::OK, "the probe slot was leaked");
+        assert!(matches!(
+            breaker.state(),
+            crate::combinator::circuit_breaker::State::Closed { .. }
+        ));
+    }
+
+    /// The outcome was stamped with the request's start time, so a failure
+    /// that took longer than open_duration opened the breaker in the past and
+    /// the next request went straight to half-open.
+    #[test]
+    fn a_slow_failure_opens_the_breaker_when_it_ends() {
+        struct SlowFailureHandler;
+        impl Handler for SlowFailureHandler {
+            fn call(
+                &self,
+                _cx: &crate::Cx,
+                _req: Request,
+            ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+                Box::pin(async {
+                    set_circuit_test_time(21_000);
+                    Response::new(StatusCode::INTERNAL_SERVER_ERROR, b"late".to_vec())
+                })
+            }
+        }
+
+        let policy = CircuitBreakerPolicy {
+            failure_threshold: 1,
+            success_threshold: 1,
+            open_duration: Duration::from_secs(10),
+            ..Default::default()
+        };
+        let breaker = Arc::new(CircuitBreaker::new(policy));
+        let slow_mw = CircuitBreakerMiddleware::shared_with_time_getter(
+            SlowFailureHandler,
+            Arc::clone(&breaker),
+            circuit_test_time,
+        );
+        let ok_mw = CircuitBreakerMiddleware::shared_with_time_getter(
+            FnHandler::new(ok_handler),
+            Arc::clone(&breaker),
+            circuit_test_time,
+        );
+
+        set_circuit_test_time(1_000);
+        assert_eq!(
+            slow_mw.call(make_request()).status,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            breaker.state(),
+            crate::combinator::circuit_breaker::State::Open {
+                since_millis: 21_000
+            }
+        );
+
+        let rejected = ok_mw.call(make_request());
+        assert_eq!(rejected.status, StatusCode::SERVICE_UNAVAILABLE);
     }
 
     // --- RateLimitMiddleware ---
@@ -4015,6 +4216,26 @@ mod tests {
     }
 
     #[test]
+    fn cors_varies_on_origin_even_when_it_adds_no_cors_headers() {
+        // A shared cache that stored the no-Origin or blocked-Origin variant
+        // without `Vary: Origin` would serve it to allowed origins, whose
+        // browsers would then block the response.
+        let policy = CorsPolicy::with_exact_origins(vec!["https://allowed.example".to_string()]);
+        let mw = CorsMiddleware::new(FnHandler::new(ok_handler), policy);
+        let requests = [
+            Request::new("GET", "/cors"),
+            Request::new("GET", "/cors").with_header("Origin", "https://blocked.example"),
+            Request::new("GET", "/cors")
+                .with_header("Origin", "https://allowed.example, https://other.example"),
+        ];
+        for request in requests {
+            let resp = mw.call(request);
+            assert!(!resp.headers.contains_key("access-control-allow-origin"));
+            assert_eq!(resp.headers.get("vary"), Some(&"origin".to_string()));
+        }
+    }
+
+    #[test]
     fn cors_credentials_with_allowlisted_origin_echoes_exact_origin() {
         // br-asupersync-d4f31s: when credentials are enabled, the only
         // legal way to allow cross-origin reads is an explicit
@@ -4650,6 +4871,51 @@ mod tests {
 
     #[cfg(feature = "compression")]
     #[test]
+    fn compression_leaves_breach_sensitive_and_partial_responses_alone() {
+        fn large_handler() -> Response {
+            Response::new(StatusCode::OK, vec![b'x'; 1024])
+        }
+        fn partial_handler() -> Response {
+            Response::new(StatusCode::PARTIAL_CONTENT, vec![b'x'; 1024])
+                .header("content-range", "bytes 0-1023/4096")
+        }
+        let gzip = || make_request().with_header("Accept-Encoding", "gzip");
+        let encoding = |resp: &Response| resp.headers.get("content-encoding").cloned();
+        let mw =
+            CompressionMiddleware::new(FnHandler::new(large_handler), CompressionConfig::default());
+
+        assert_eq!(encoding(&mw.call(gzip())), Some("gzip".to_string()));
+        // A secret in the response would leak through the compressed length.
+        let sensitive = mw.call(gzip().with_header("Cookie", "session=s3cret"));
+        assert_eq!(encoding(&sensitive), None);
+        assert_eq!(
+            sensitive.headers.get("vary"),
+            Some(&"accept-encoding, cookie".to_string())
+        );
+        assert_eq!(
+            encoding(&mw.call(gzip().with_header("Authorization", "Bearer t"))),
+            None
+        );
+
+        let opted_in =
+            CompressionMiddleware::new(FnHandler::new(large_handler), CompressionConfig::default())
+                .compress_sensitive_responses(true);
+        assert_eq!(
+            encoding(&opted_in.call(gzip().with_header("Cookie", "session=s3cret"))),
+            Some("gzip".to_string())
+        );
+
+        let partial = CompressionMiddleware::new(
+            FnHandler::new(partial_handler),
+            CompressionConfig::default(),
+        );
+        let resp = partial.call(gzip());
+        assert_eq!(encoding(&resp), None, "a 206 is never compressed");
+        assert_eq!(resp.body.len(), 1024);
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
     fn compression_removes_stale_content_length_after_body_rewrite() {
         fn large_handler() -> Response {
             Response::new(StatusCode::OK, vec![b'a'; 4096]).header("content-length", "4096")
@@ -4835,6 +5101,65 @@ mod tests {
         req.body = vec![0u8; 100].into();
         let resp = mw.call(req);
         assert_eq!(resp.status, StatusCode::OK);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn body_limit_caps_a_streaming_chunked_body() {
+        use crate::http::h1::stream::{BodyKind, IncomingBodyError, IncomingRequestBody};
+        use crate::web::extract::{
+            FromRequest, StreamingRawBody, StreamingRawBodyCollectError, insert_streaming_raw_body,
+        };
+
+        // Collects the streaming body and answers with what it saw.
+        struct CollectStreaming;
+        impl Handler for CollectStreaming {
+            fn call(
+                &self,
+                cx: &Cx,
+                req: Request,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>>
+            {
+                let cx = cx.clone();
+                Box::pin(async move {
+                    let body = StreamingRawBody::from_request(req).expect("streaming body");
+                    match body.collect_bounded_with_cx(&cx, 1024).await {
+                        Ok(collected) => Response::new(
+                            StatusCode::OK,
+                            collected.data().len().to_string().into_bytes(),
+                        ),
+                        Err(StreamingRawBodyCollectError::Body(
+                            IncomingBodyError::BodyTooLarge { .. },
+                        )) => Response::empty(StatusCode::PAYLOAD_TOO_LARGE),
+                        Err(other) => Response::new(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("{other:?}").into_bytes(),
+                        ),
+                    }
+                })
+            }
+        }
+
+        // A chunked upload carries no Content-Length and leaves req.body
+        // empty, so the 6-byte limit used to let all 8 bytes through.
+        let cx = Cx::for_testing();
+        let (mut writer, incoming) = IncomingRequestBody::channel(&cx, BodyKind::Chunked);
+        let mut req = Request::new("POST", "/upload");
+        let control = insert_streaming_raw_body(&mut req, incoming).expect("install body");
+        futures_lite::future::block_on(
+            writer.push_bytes(&cx, b"4\r\nABCD\r\n4\r\nEFGH\r\n0\r\n\r\n"),
+        )
+        .expect("publish chunked body");
+
+        let mw = RequestBodyLimitMiddleware::new(CollectStreaming, 6);
+        let resp = mw.call(req);
+        assert_eq!(
+            resp.status,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "{}",
+            String::from_utf8_lossy(&resp.body)
+        );
+        drop(control);
     }
 
     #[test]
@@ -5284,6 +5609,26 @@ mod tests {
         assert_eq!(
             resp.headers.get("location"),
             Some(&"/api/users".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_path_redirects_keep_the_query_string() {
+        let mw =
+            NormalizePathMiddleware::new(FnHandler::new(ok_handler), TrailingSlash::RedirectTrim);
+        let resp = mw.call(Request::new("GET", "/search/").with_query("q=x&page=2"));
+        assert_eq!(resp.status, StatusCode::MOVED_PERMANENTLY);
+        assert_eq!(
+            resp.headers.get("location"),
+            Some(&"/search?q=x&page=2".to_string())
+        );
+
+        let mw =
+            NormalizePathMiddleware::new(FnHandler::new(ok_handler), TrailingSlash::RedirectAlways);
+        let resp = mw.call(Request::new("GET", "/search").with_query("q=x"));
+        assert_eq!(
+            resp.headers.get("location"),
+            Some(&"/search/?q=x".to_string())
         );
     }
 

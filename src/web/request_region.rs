@@ -906,7 +906,8 @@ impl ServerRequestRegion {
     /// instead of relying on ambient task-local state. The child inherits the
     /// connection's drivers and runtime capability mask, receives independent
     /// cancellation state, and installs the tightened request budget without
-    /// any capability escalation.
+    /// any capability escalation. It also inherits the connection's spawn
+    /// route, so tasks it spawns belong to the connection's region.
     #[must_use]
     pub fn mint_from_connection(
         protocol: &'static str,
@@ -963,9 +964,24 @@ impl ServerRequestRegion {
             connection_cx.timer_driver(),
             Some(connection_cx.child_entropy(task)),
         )
-        .with_blocking_pool_handle(connection_cx.blocking_pool_handle());
+        .with_blocking_pool_handle(connection_cx.blocking_pool_handle())
+        .with_logical_clock(connection_cx.logical_clock_handle());
+        // A runtime-owned connection lends its spawn route: work the handler
+        // spawns is admitted into the connection's region, under that
+        // region's pending-spawn accounting. Without it `cx.spawn` from a
+        // request context failed with RuntimeUnavailable
+        // (br-asupersync-vqppo5). A detached connection context, which has
+        // no gateway, stays as it was.
+        if let Some(gateway) = connection_cx.spawn_gateway_handle() {
+            cx = cx
+                .with_spawn_gateway(Some(gateway))
+                .with_pending_spawn_counter(connection_cx.pending_spawn_counter_handle());
+        }
         if let Some(trace) = connection_cx.trace_buffer() {
             cx.set_trace_buffer(trace);
+        }
+        if let Some(history) = connection_cx.loser_drain_history_handle() {
+            cx.set_loser_drain_history_handle(history);
         }
         cx.runtime_mask = connection_cx.runtime_mask;
         cx

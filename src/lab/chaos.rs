@@ -452,6 +452,14 @@ impl ChaosConfig {
 // Chaos RNG
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// The splitmix64 finalizer: spreads every bit of `seed` over the whole word.
+const fn scramble_seed(seed: u64) -> u64 {
+    let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
 /// Deterministic RNG for chaos injection decisions.
 ///
 /// Uses the existing [`DetRng`] internally but provides chaos-specific methods.
@@ -462,10 +470,16 @@ pub struct ChaosRng {
 
 impl ChaosRng {
     /// Creates a new ChaosRng with the given seed.
+    ///
+    /// The seed is scrambled before it becomes the generator's state, so the
+    /// same seed still gives the same sequence. xorshift64 started from a
+    /// seed below about 2^32 returns first values near zero, which made a
+    /// run's first chaos decision fire whatever its probability
+    /// (br-asupersync-6g0qlk).
     #[must_use]
     pub fn new(seed: u64) -> Self {
         Self {
-            inner: DetRng::new(seed),
+            inner: DetRng::new(scramble_seed(seed)),
         }
     }
 
@@ -989,6 +1003,31 @@ mod tests {
                 rng1.should_inject_cancel(&config),
                 rng2.should_inject_cancel(&config)
             );
+        }
+    }
+
+    /// Small seeds used to start xorshift64 near zero, so every run's first
+    /// chaos decision fired (br-asupersync-6g0qlk). The first draws of seeds
+    /// 0..256 must now spread over [0, 1).
+    #[test]
+    fn small_seeds_do_not_bias_the_first_draws() {
+        for draw in 0..3 {
+            let firsts: Vec<f64> = (0..256_u64)
+                .map(|seed| {
+                    let mut rng = ChaosRng::new(seed);
+                    for _ in 0..draw {
+                        let _ = rng.next_f64();
+                    }
+                    rng.next_f64()
+                })
+                .collect();
+            let below_tenth = firsts.iter().filter(|value| **value < 0.1).count();
+            let mean = firsts.iter().sum::<f64>() / 256.0;
+            assert!(
+                (8..=48).contains(&below_tenth),
+                "draw {draw}: {below_tenth} of 256 seeds below 0.1"
+            );
+            assert!((0.4..0.6).contains(&mean), "draw {draw}: mean {mean}");
         }
     }
 

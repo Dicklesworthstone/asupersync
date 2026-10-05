@@ -563,57 +563,50 @@ impl Semaphore {
             });
         }
 
+        let mut rollback = AcquisitionRollbackGuard::new(self, count);
+        rollback.notify_on_rollback = true;
         let mut state = self.state.lock();
-        let result = if state.closed {
-            Err(TryAcquireError)
-        } else if state.waiter_head.is_some() {
-            // Strict FIFO
-            Err(TryAcquireError)
-        } else if state.permits >= count {
-            // Enforce lock ordering only on the success path, under the state
-            // guard and immediately before the transition, mirroring the async
-            // acquisition path. A failed try_acquire (closed, FIFO-blocked, or
-            // insufficient permits) must return Err rather than panic ASUP-E205
-            // or record a phantom acquisition edge (br-asupersync-btp04i).
-            if let Some(rank) = self.rank {
-                lock_ordering::check_acquire(self.name, rank);
-            }
+        // Closed, FIFO-blocked (a waiter is queued) or short of permits.
+        if state.closed || state.waiter_head.is_some() || state.permits < count {
+            return Err(TryAcquireError);
+        }
+        // Enforce lock ordering only on the success path, under the state
+        // guard and immediately before the transition, mirroring the async
+        // acquisition path. A failed try_acquire (closed, FIFO-blocked, or
+        // insufficient permits) must return Err rather than panic ASUP-E205
+        // or record a phantom acquisition edge (br-asupersync-btp04i).
+        if let Some(rank) = self.rank {
+            lock_ordering::check_acquire(self.name, rank);
+        }
 
-            state.permits -= count;
-            // Relaxed: permits_shadow is an advisory fast-path hint. A stale
-            // read in available_permits() just skips the fast path or causes a
-            // benign try_acquire miss — the real count is protected by the lock.
-            // On ARM this avoids a store-release barrier per acquisition.
-            self.permits_shadow.store(state.permits, Ordering::Relaxed);
-
-            // Record lock acquisition for ordering tracking
-            let lock_order = lock_ordering::record_guard_acquire(self.name, self.rank);
-
-            // One task-local lookup for both obligations: this is the
-            // synchronization-critical path.
-            let current_cx = crate::cx::Cx::current();
-            Ok(SemaphorePermit {
-                // br-asupersync-13jmt3: static description avoids the
-                // per-acquire String allocation. The permit count is
-                // already exposed via SemaphorePermit.count for any
-                // observer that needs the numeric identity; duplicating
-                // it here in heap-allocated form was wasted work on the
-                // synchronization-critical path.
-                obligation: current_cx
-                    .as_ref()
-                    .and_then(|cx| reserve_permit_obligation(cx.region_id())),
-                runtime_obligation: current_cx
-                    .as_ref()
-                    .and_then(reserve_runtime_permit_obligation),
-                semaphore: self,
-                count,
-                lock_order,
-            })
-        } else {
-            Err(TryAcquireError)
-        };
+        state.permits -= count;
+        // Relaxed: permits_shadow is an advisory fast-path hint. A stale
+        // read in available_permits() just skips the fast path or causes a
+        // benign try_acquire miss — the real count is protected by the lock.
+        // On ARM this avoids a store-release barrier per acquisition.
+        self.permits_shadow.store(state.permits, Ordering::Relaxed);
+        rollback.arm();
+        rollback.record_lock_acquire();
         drop(state);
-        result
+
+        // Register the obligations only after the lock is released, with the
+        // rollback armed, as try_acquire_checked does. Registering wakes a
+        // runtime worker and runs the gateway notifier: under the lock, a
+        // notifier that touched this semaphore deadlocked, and one that
+        // panicked lost the permits for good.
+        //
+        // One task-local lookup for both obligations: this is the
+        // synchronization-critical path.
+        let current_cx = crate::cx::Cx::current();
+        rollback.runtime_obligation = current_cx
+            .as_ref()
+            .and_then(reserve_runtime_permit_obligation);
+        // br-asupersync-13jmt3: the obligation's static description avoids a
+        // per-acquire String allocation; the count is on the permit.
+        rollback.obligation = current_cx
+            .as_ref()
+            .and_then(|cx| reserve_permit_obligation(cx.region_id()));
+        Ok(rollback.into_borrowed_permit())
     }
 
     /// Tries to acquire `count` permits without waiting.
@@ -822,9 +815,7 @@ impl<'a, Caps> Future for AcquireFuture<'a, '_, Caps> {
 
     #[inline]
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        self.poll_with_registration(context, false, |cx| {
-            Ok(reserve_runtime_permit_obligation(cx))
-        })
+        self.poll_with_registration(context, |cx| Ok(reserve_runtime_permit_obligation(cx)))
     }
 }
 
@@ -832,7 +823,6 @@ impl<'a, Caps> AcquireFuture<'a, '_, Caps> {
     fn poll_with_registration<E: From<AcquireError>>(
         &mut self,
         context: &mut Context<'_>,
-        checked: bool,
         register: impl FnOnce(
             &Cx<Caps>,
         )
@@ -884,7 +874,11 @@ impl<'a, Caps> AcquireFuture<'a, '_, Caps> {
             // This must be declared before `state`: unwind drops locals in
             // reverse order, releasing the mutex before rollback re-locks it.
             let mut rollback = AcquisitionRollbackGuard::new(self.semaphore, self.count);
-            rollback.notify_on_rollback = checked;
+            // A rollback wakes the waiter its restored permits make runnable,
+            // for the unchecked path too. Without the wake, an unwind after
+            // the permits were taken (a stored Waker whose Drop panics) left
+            // the next waiter parked with capacity available.
+            rollback.notify_on_rollback = true;
             let mut state = self.semaphore.state.lock();
 
             if state.closed {
@@ -1007,7 +1001,7 @@ impl<'a, Caps> Future for CheckedAcquireFuture<'a, '_, Caps> {
     type Output = Result<SemaphorePermit<'a>, CheckedAcquireError>;
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        self.inner.poll_with_registration(context, true, |cx| {
+        self.inner.poll_with_registration(context, |cx| {
             cx.try_register_obligation_checked(
                 crate::record::ObligationKind::SemaphorePermit,
                 cx.task_id(),
@@ -1860,6 +1854,49 @@ mod tests {
             drop(successor);
             finish_checked_admission_fixture(lab, &cx, handle, 2);
         }
+    }
+
+    /// try_acquire registered its runtime obligation while holding the
+    /// semaphore lock, so the gateway notifier ran under the lock. A notifier
+    /// that panicked there lost the permits for good: no permit existed yet
+    /// to give them back.
+    #[test]
+    fn try_acquire_notifier_runs_outside_the_lock_and_its_panic_restores_the_permit() {
+        use crate::runtime::obligation_mailbox::ObligationGateway;
+        let (lab, cx, _handle) = checked_admission_fixture(4);
+        let semaphore = Arc::new(Semaphore::with_name("tasks", 1));
+        let observed = semaphore.clone();
+        let lock_was_free = Arc::new(AtomicBool::new(false));
+        let seen = lock_was_free.clone();
+        let liveness = Arc::new(());
+        let gateway = Arc::new(ObligationGateway::new(
+            Arc::clone(lab.state.obligation_gateway().unwrap().mailbox()),
+            Arc::new(move || {
+                seen.store(observed.state.try_lock().is_some(), Ordering::SeqCst);
+                panic!("planted try_acquire notifier panic");
+            }),
+            Arc::downgrade(&liveness),
+        ));
+        let cx = cx.with_obligation_gateway(Some(gateway), None);
+        let _current = Cx::set_current(Some(cx));
+
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(semaphore.try_acquire(1));
+        }))
+        .expect_err("the planted notifier must run");
+        assert_eq!(
+            failure.downcast_ref::<&str>(),
+            Some(&"planted try_acquire notifier panic")
+        );
+        assert!(
+            lock_was_free.load(Ordering::SeqCst),
+            "the notifier ran under the semaphore lock"
+        );
+        assert_eq!(
+            semaphore.available_permits(),
+            1,
+            "the panic must give the permit back"
+        );
     }
 
     thread_local! {
@@ -3480,6 +3517,69 @@ mod tests {
         #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_ordering::clear_held_locks();
         crate::test_complete!("borrowed_acquire_rolls_back_when_cascade_wake_panics");
+    }
+
+    /// A Waker whose payload panics when its last reference is dropped.
+    struct DropPanicsWaker;
+
+    #[allow(clippy::manual_noop_waker)]
+    impl std::task::Wake for DropPanicsWaker {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for DropPanicsWaker {
+        fn drop(&mut self) {
+            panic!("semaphore waiter waker panics when dropped");
+        }
+    }
+
+    /// c11v6v item 9: the unchecked acquire's rollback did not wake a
+    /// successor. A takes the only permit, and dropping its own stored Waker
+    /// unwinds; the rollback restores the permit, which makes B runnable, but
+    /// B's waker was discarded and B stayed parked with capacity available.
+    #[test]
+    fn unchecked_acquire_rollback_wakes_the_waiter_it_makes_runnable() {
+        init_test("unchecked_acquire_rollback_wakes_the_waiter_it_makes_runnable");
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+        lock_ordering::clear_held_locks();
+
+        let semaphore = Semaphore::new(0);
+        let cx_a = test_cx();
+        let cx_b = test_cx();
+        let mut future_a = semaphore.acquire(&cx_a, 1);
+        let mut future_b = semaphore.acquire(&cx_b, 1);
+        let dropping = Waker::from(Arc::new(DropPanicsWaker));
+        assert!(poll_once_with_waker(&mut future_a, &dropping).is_none());
+        // The semaphore now holds the last reference to A's waker.
+        drop(dropping);
+        let counter_b = CountingWaker::new();
+        let waker_b = Waker::from(Arc::clone(&counter_b));
+        assert!(poll_once_with_waker(&mut future_b, &waker_b).is_none());
+
+        semaphore.add_permits(1);
+        let unwound =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| poll_once(&mut future_a)));
+        assert!(unwound.is_err(), "dropping A's stored waker must unwind");
+        assert_eq!(
+            semaphore.available_permits(),
+            1,
+            "A's interrupted acquisition restores its permit"
+        );
+        assert_eq!(
+            counter_b.count(),
+            1,
+            "the rollback must wake B, which the restored permit made runnable"
+        );
+
+        drop(future_a);
+        let permit_b = poll_once_with_waker(&mut future_b, &waker_b)
+            .expect("B is runnable")
+            .expect("B acquires the restored permit");
+        drop(permit_b);
+        assert_eq!(semaphore.available_permits(), 1);
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+        lock_ordering::clear_held_locks();
+        crate::test_complete!("unchecked_acquire_rollback_wakes_the_waiter_it_makes_runnable");
     }
 
     #[test]

@@ -26,9 +26,9 @@ use std::time::Instant;
 pub const ATP_UDP_DEFAULT_MAX_PACKET_SIZE: usize = 1500;
 /// Default ATP UDP batch bound.
 ///
-/// One default batch fills a Linux UDP GSO super-packet when packet payloads are
-/// fixed-size, while variable-sized packets still fall back to one sendmmsg
-/// batch through the portable UDP planner.
+/// One default batch of fixed-size packets goes out as Linux UDP GSO
+/// super-packets in one sendmmsg call, each under the 64 KiB datagram limit;
+/// variable-sized packets fall back to one plain sendmmsg batch.
 pub const ATP_UDP_DEFAULT_BATCH_SIZE: usize = UDP_MAX_GSO_SEGMENTS;
 
 /// ATP UDP socket configuration.
@@ -1096,6 +1096,42 @@ mod tests {
             assert_eq!(socket.profile().source, "native-udp");
             assert!(socket.doctor_json().get("local_addr").is_some());
             assert!(socket.doctor_human().contains("udp local="));
+        });
+    }
+
+    // capabilities() reported every IPv6 socket's dual-stack support as
+    // Unknown, so a bind that required it always failed, even on a [::]
+    // socket with IPV6_V6ONLY off (the Linux default) that does carry IPv4.
+    #[test]
+    fn bind_requiring_dual_stack_receives_ipv4_on_an_ipv6_socket() {
+        if std::net::UdpSocket::bind("[::]:0").is_err() {
+            eprintln!("skipped: this host has no IPv6");
+            return;
+        }
+        run_test_with_cx(|cx| async move {
+            let mut socket = AtpUdpSocket::bind(
+                &cx,
+                "[::]:0",
+                AtpUdpSocketConfig {
+                    require_dual_stack: true,
+                    ..AtpUdpSocketConfig::default()
+                },
+            )
+            .await
+            .expect("a [::] socket with IPV6_V6ONLY off is dual-stack");
+            assert_eq!(
+                socket.profile().capabilities.dual_stack,
+                UdpCapability::Supported
+            );
+
+            let port = socket.profile().local_addr.port();
+            let sender = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind IPv4 sender");
+            sender
+                .send_to(b"over ipv4", ("127.0.0.1", port))
+                .expect("send to the dual-stack socket");
+            let batch = socket.recv_packets(&cx).await.expect("receive");
+            assert_eq!(batch.packets.len(), 1);
+            assert_eq!(batch.packets[0].payload, b"over ipv4");
         });
     }
 

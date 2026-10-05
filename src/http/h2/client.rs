@@ -283,8 +283,9 @@ pub struct Http2RequestBuilder {
 
 impl Http2RequestBuilder {
     /// Append a regular field. Names are normalized to lowercase; pseudo-fields,
-    /// connection-specific fields, conflicting Host, and invalid bytes fail
-    /// before opening a socket. Repeated ordinary fields are preserved.
+    /// connection-specific fields, conflicting Host, invalid bytes, and values
+    /// with leading or trailing whitespace fail before opening a socket.
+    /// Repeated ordinary fields are preserved.
     #[must_use]
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers
@@ -431,6 +432,13 @@ impl Http2RequestBuilder {
         for header in &self.headers {
             validate_header_field(&header.name, &header.value)
                 .map_err(|error| invalid(error.to_string()))?;
+            // RFC 9113 §8.2.1: such a field is malformed, and strict peers
+            // reset the stream after I/O. Refuse it before a socket opens.
+            if header.value.starts_with([' ', '\t']) || header.value.ends_with([' ', '\t']) {
+                return Err(invalid(
+                    "field value has leading or trailing whitespace (RFC 9113 8.2.1)",
+                ));
+            }
             match header.name.as_str() {
                 "connection" | "keep-alive" | "proxy-connection" | "transfer-encoding"
                 | "upgrade" => {
@@ -823,7 +831,15 @@ where
                 }
                 Poll::Pending => {}
             }
-            if stream_id.is_none() && connection.state() == ConnectionState::Open {
+            // RFC 9113 §6.5.2: a peer may set SETTINGS_MAX_CONCURRENT_STREAMS
+            // to zero, and is expected to raise it again shortly. This
+            // connection carries one request, so it waits, within the
+            // request's deadline, for a SETTINGS that admits a stream instead
+            // of reporting a legal setting as a protocol error.
+            if stream_id.is_none()
+                && connection.state() == ConnectionState::Open
+                && connection.remote_settings().max_concurrent_streams != 0
+            {
                 let request_headers = headers
                     .take()
                     .ok_or_else(|| protocol("request headers already consumed"))?;
@@ -1016,6 +1032,11 @@ mod tests {
                 .header("content-length", "0")
                 .header("content-length", "0"),
             client.get("http://localhost/a\rb"),
+            // asupersync-e427ys: RFC 9113 §8.2.1 malformed field values.
+            client.get("http://localhost/").header("x-pad", " leading"),
+            client
+                .get("http://localhost/")
+                .header("x-pad", "trailing\t"),
             client.request(Method::Extension("G ET".into()), "http://localhost/"),
             client.request(Method::Connect, "http://localhost/"),
         ] {

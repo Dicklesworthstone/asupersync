@@ -189,12 +189,28 @@ impl Drop for Delivery<'_> {
 impl OtlpHttpExporter {
     pub(super) fn enqueue_metrics(&self, metrics: &MetricsSnapshot) -> Result<(), ExportError> {
         let bytes = metrics_bytes(metrics)?;
+        // Refuse here what delivery could never encode: more than 1000 points
+        // for one metric, more fields than the wire limits allow, or a body
+        // over the request limit. Admitted, such a batch failed at delivery
+        // without any I/O, taking the whole snapshot with it and stopping
+        // run_queued. The timestamp is a fixed-width field, so encoding with a
+        // placeholder predicts the delivered size exactly.
+        let encoded = encode_metrics(metrics, 1, &self.snapshot_config())?;
+        if encoded.len() > OWNED_OTLP_DEFAULT_REQUEST_BYTES {
+            return Err(ExportError::new("otlp.queue.encoded_batch_too_large"));
+        }
         self.export_queue
             .admit(self, bytes, || Payload::Metrics(metrics.clone()))
     }
 
     pub(super) fn enqueue_logs(&self, logs: &LogsSnapshot) -> Result<(), ExportError> {
         let bytes = logs_bytes(logs)?;
+        // The queue admits up to OTLP_EXPORT_QUEUE_MAX_BYTES, but one request
+        // body may not exceed the request limit; refuse that here, not at
+        // delivery.
+        if logs.to_otlp_protobuf().len() > OWNED_OTLP_DEFAULT_REQUEST_BYTES {
+            return Err(ExportError::new("otlp.queue.encoded_batch_too_large"));
+        }
         self.export_queue
             .admit(self, bytes, || Payload::Logs(logs.clone()))
     }
@@ -522,9 +538,7 @@ fn encode_metrics(
         ..ExportMetricsServiceRequest::default()
     };
     request
-        .encode_to_bytes(ProtobufWireLimits::for_message_size(
-            OWNED_OTLP_DEFAULT_REQUEST_BYTES,
-        ))
+        .encode_to_bytes(otlp_request_limits(OWNED_OTLP_DEFAULT_REQUEST_BYTES))
         .map(|bytes| bytes.to_vec())
         .map_err(|_| ExportError::new("otlp.queue.encoded_batch_too_large"))
 }
@@ -586,6 +600,36 @@ mod tests {
         metrics.add_gauge("requests", Vec::new(), 2);
         assert!(exporter.export(&metrics).is_err());
         assert_eq!(exporter.queue_stats().retained_batches, 0);
+    }
+
+    /// Admission checked only the total point count and the queue byte
+    /// budget, so it accepted snapshots delivery could never encode: 1001
+    /// points for one metric name, or a logs body over the 4 MiB request
+    /// limit. Delivery then failed without any I/O, lost the whole snapshot
+    /// and stopped run_queued.
+    #[test]
+    fn a_snapshot_delivery_could_never_send_is_refused_at_admission() {
+        let exporter = OtlpHttpExporter::new("http://127.0.0.1:4318/v1/metrics");
+        let mut metrics = MetricsSnapshot::new();
+        for route in 0..=OWNED_OTLP_MAX_POINTS_PER_METRIC {
+            metrics.add_counter(
+                "requests",
+                vec![("route".to_string(), route.to_string())],
+                1,
+            );
+        }
+        assert!(exporter.export(&metrics).is_err());
+        assert_eq!(exporter.queue_stats().retained_batches, 0);
+
+        let exporter = OtlpLogsHttpExporter::new("http://127.0.0.1:4318/v1/logs");
+        let mut logs = LogsSnapshot::new("queue-test");
+        logs.add_record(OtlpLogRecord::new(
+            LogLevel::Info,
+            "x".repeat(OWNED_OTLP_DEFAULT_REQUEST_BYTES + 1),
+            1,
+        ));
+        assert!(exporter.export(&logs).is_err());
+        assert_eq!(exporter.queue_stats(), OtlpExportQueueStats::default());
     }
 
     #[test]

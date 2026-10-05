@@ -808,8 +808,13 @@ impl Stream {
         header_block: Bytes,
         end_headers: bool,
     ) -> Result<(), H2Error> {
-        // Reject CONTINUATION on closed streams as defense-in-depth.
-        if self.state.is_closed() {
+        // Reject CONTINUATION on closed streams as defense-in-depth. A
+        // HEADERS frame with END_STREAM but not END_HEADERS closes a
+        // half-closed (local) stream while its field block is still
+        // arriving; the CONTINUATION frames that finish the block are part
+        // of that HEADERS frame (RFC 9113 §6.2), so they are taken. A reset
+        // stream still refuses them.
+        if self.state.is_closed() && (self.headers_complete || self.error_code.is_some()) {
             return Err(H2Error::stream(
                 self.id,
                 ErrorCode::StreamClosed,

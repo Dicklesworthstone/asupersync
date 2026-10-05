@@ -379,3 +379,74 @@ fn runtime_drop_retires_tasks_before_joining_blocking_work_they_release() {
         }
     });
 }
+
+/// A closure that polls its own Cx sees a Shutdown cancellation when the
+/// runtime is dropped, so the pool does not wait it out. The handle stays
+/// alive, so only the teardown can cancel. Runtime teardown cancels the task's
+/// Cx before it drops the operation's wait (asupersync-67tsr5 suspected
+/// otherwise; this pins the behavior).
+#[test]
+fn hard_teardown_cancels_a_running_drained_closure_through_its_cx() {
+    bounded(|| {
+        for workers in [1, 2] {
+            let runtime = runtime(workers);
+            let (started, mut start) = oneshot::channel();
+            let (observed, ended) = mpsc::channel();
+            let task = runtime
+                .spawn_blocking_drained(move |cx| {
+                    started.send_blocking(()).unwrap();
+                    let begun = Instant::now();
+                    while cx.checkpoint().is_ok() && begun.elapsed() < Duration::from_secs(20) {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    let _ = observed.send(cx.cancel_reason().map(|reason| reason.kind));
+                })
+                .unwrap();
+            runtime.block_on(async {
+                let cx = Cx::current().unwrap();
+                start.recv(&cx).await.unwrap();
+            });
+            let dropped = Instant::now();
+            drop(runtime);
+            let kind = ended
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the closure ended");
+            let elapsed = dropped.elapsed();
+            drop(task);
+            assert_eq!(kind, Some(CancelKind::Shutdown), "workers={workers}");
+            assert!(
+                elapsed < Duration::from_secs(4),
+                "workers={workers}: the closure saw the teardown only after {elapsed:?}"
+            );
+            println!(
+                "drained_blocking workers={workers} phase=hard_teardown elapsed_ms={}",
+                elapsed.as_millis()
+            );
+        }
+    });
+}
+
+/// Dropping a handle whose closure already finished cancels nothing: a Cx
+/// clone the closure returned stays uncancelled (asupersync-67tsr5).
+#[test]
+fn dropping_a_finished_handle_does_not_cancel_a_returned_cx() {
+    bounded(|| {
+        for workers in [1, 2] {
+            let runtime = runtime(workers);
+            let mut task = runtime.spawn_blocking_drained(|cx| cx).unwrap();
+            let returned = runtime
+                .block_on(async move {
+                    let joined = task.join().await;
+                    drop(task);
+                    joined
+                })
+                .expect("the closure's Cx");
+            assert!(
+                !returned.is_cancel_requested(),
+                "workers={workers}: {:?}",
+                returned.cancel_reason()
+            );
+            drained(&runtime);
+        }
+    });
+}

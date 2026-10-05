@@ -1010,8 +1010,17 @@ impl Connection {
             if stream.reset_sent() {
                 return;
             }
+            // A field block still arriving keeps its fragments: they reach
+            // the HPACK decoder when the block ends (RFC 9113 §4.3).
+            let arriving_block = (self.continuation_stream_id == Some(stream_id))
+                .then(|| stream.take_header_fragments());
             stream.reset(error_code);
             stream.mark_reset_sent();
+            for fragment in arriving_block.into_iter().flatten() {
+                // These fragments already passed the caps they are checked
+                // against again here.
+                let _ = stream.add_header_fragment(fragment);
+            }
         }
         self.pending_ops.push_back(PendingOp::RstStream {
             stream_id,
@@ -1396,9 +1405,19 @@ impl Connection {
         // If get_or_create fails (e.g., invalid stream parity or monotonicity
         // violation), we must not pollute last_stream_id — GOAWAY must only
         // report the highest actually-processed stream (RFC 7540 §6.8).
-        {
-            let stream = self.streams.get_or_create_for_headers(frame.stream_id)?;
-            refused |= stream.headers_refused();
+        let created = self
+            .streams
+            .get_or_create_for_headers(frame.stream_id)
+            .map(|stream| stream.headers_refused());
+        match created {
+            Ok(headers_refused) => refused |= headers_refused,
+            Err(error) => {
+                return Err(self.decode_unkept_field_block(
+                    frame.header_block,
+                    frame.end_headers,
+                    error,
+                ));
+            }
         }
 
         if !refused {
@@ -1414,13 +1433,26 @@ impl Connection {
         })?;
         // br-asupersync-pyhaov: thread direction so Stream can apply
         // the server-side trailers-MUST-have-END_STREAM rule.
-        stream.recv_headers(frame.end_stream, frame.end_headers, self.is_client)?;
+        if let Err(error) = stream.recv_headers(frame.end_stream, frame.end_headers, self.is_client)
+        {
+            if error.stream_id.is_none() {
+                return Err(error);
+            }
+            // RFC 9113 §4.3: the refused block's dynamic-table updates still
+            // apply. It takes the path of a block for a reset stream; the
+            // caller resets the stream on this error, so the block's
+            // CONTINUATION frames take that path too.
+            self.discard_header_fragment(frame.stream_id, frame.header_block, frame.end_headers)?;
+            return Err(error);
+        }
 
         if let Some(priority) = frame.priority {
             stream.set_priority(priority);
         }
 
-        stream.add_header_fragment(frame.header_block)?;
+        stream
+            .add_header_fragment(frame.header_block)
+            .map_err(Self::unkept_field_block_error)?;
 
         if frame.end_headers {
             self.continuation_stream_id = None;
@@ -1494,7 +1526,9 @@ impl Connection {
             .get_mut(frame.stream_id)
             .ok_or_else(|| H2Error::protocol("CONTINUATION for unknown stream"))?;
 
-        stream.recv_continuation(frame.header_block, frame.end_headers)?;
+        stream
+            .recv_continuation(frame.header_block, frame.end_headers)
+            .map_err(Self::unkept_field_block_error)?;
 
         if frame.end_headers {
             self.continuation_stream_id = None;
@@ -1526,6 +1560,44 @@ impl Connection {
             }
         } else {
             Ok(None)
+        }
+    }
+
+    /// A field block the stream's record cannot hold (past the fragment
+    /// count or size cap) cannot be decoded, and a stream error would leave
+    /// the HPACK tables behind the peer's (RFC 9113 §4.3), so it ends the
+    /// connection.
+    fn unkept_field_block_error(error: H2Error) -> H2Error {
+        if error.stream_id.is_some() {
+            H2Error::connection(error.code, "field block too large to keep for decoding")
+        } else {
+            error
+        }
+    }
+
+    /// A HEADERS frame refused before any stream record exists (a stream id
+    /// past the implementation's gap ceiling) still carries dynamic-table
+    /// updates (RFC 9113 §4.3). A complete block is decoded and dropped
+    /// before the stream error; a block that continues in CONTINUATION
+    /// frames has no record to collect it, so the connection ends.
+    fn decode_unkept_field_block(
+        &mut self,
+        mut fragment: Bytes,
+        end_headers: bool,
+        error: H2Error,
+    ) -> H2Error {
+        if error.stream_id.is_none() {
+            return error;
+        }
+        if !end_headers {
+            return H2Error::connection(
+                ErrorCode::EnhanceYourCalm,
+                "refused stream's field block continues in CONTINUATION frames",
+            );
+        }
+        match self.hpack_decoder.decode(&mut fragment) {
+            Ok(_) => error,
+            Err(decode_error) => decode_error,
         }
     }
 
@@ -1613,11 +1685,12 @@ impl Connection {
         let max_fragment_size =
             Stream::max_header_fragment_size_for(self.local_settings.max_header_list_size);
         if total_len > max_fragment_size {
-            return Err(H2Error::stream(
+            // Not decoded, so not a stream error (RFC 9113 §4.3).
+            return Err(Self::unkept_field_block_error(H2Error::stream(
                 stream_id,
                 ErrorCode::EnhanceYourCalm,
                 "accumulated header fragments too large",
-            ));
+            )));
         }
         let mut combined = BytesMut::with_capacity(total_len);
         for fragment in fragments {
@@ -2358,8 +2431,12 @@ impl Connection {
 
     fn prune_closed_streams_without_pending_frames(&mut self) {
         let pending_ops = &self.pending_ops;
+        // A closed stream whose field block is still arriving keeps its
+        // record until the block's last CONTINUATION frame.
+        let continuation_stream_id = self.continuation_stream_id;
         self.streams.prune_closed_except(|stream_id| {
-            pending_ops.iter().any(|op| op.references_stream(stream_id))
+            continuation_stream_id == Some(stream_id)
+                || pending_ops.iter().any(|op| op.references_stream(stream_id))
         });
     }
 
@@ -3434,6 +3511,268 @@ mod tests {
             };
             assert_eq!(decoded, headers);
         }
+    }
+
+    #[test]
+    fn client_takes_a_closing_response_whose_field_block_continues() {
+        // A bodyless request leaves the stream half-closed (local). The
+        // response HEADERS carries END_STREAM, which closes the stream, and
+        // its field block ends in a CONTINUATION frame (RFC 9113 §6.2).
+        let mut conn = Connection::client(Settings::client());
+        conn.state = ConnectionState::Open;
+        let stream_id = conn
+            .open_stream(test_request_header_vec("/no-body"), true)
+            .unwrap();
+        while conn.next_frame().is_some() {}
+        let block = encode_test_headers(&[(":status", "204"), ("x-split", "across-frames")]);
+        let split = block.len() / 2;
+        assert!(
+            conn.process_frame(Frame::Headers(HeadersFrame::new(
+                stream_id,
+                block.slice(..split),
+                true,
+                false,
+            )))
+            .expect("HEADERS with END_STREAM starts the field block")
+            .is_none()
+        );
+        let received = conn
+            .process_frame(Frame::Continuation(ContinuationFrame {
+                stream_id,
+                header_block: block.slice(split..),
+                end_headers: true,
+            }))
+            .expect("CONTINUATION finishes the response's field block");
+        let Some(ReceivedFrame::Headers {
+            stream_id: received_stream_id,
+            headers,
+            end_stream,
+        }) = received
+        else {
+            panic!("the response headers must be delivered, got {received:?}")
+        };
+        assert_eq!(received_stream_id, stream_id);
+        assert!(end_stream, "the response ends the stream");
+        assert_eq!(
+            headers,
+            vec![
+                Header::new(":status", "204"),
+                Header::new("x-split", "across-frames"),
+            ]
+        );
+    }
+
+    #[test]
+    fn pruning_keeps_a_closed_stream_whose_field_block_is_still_arriving() {
+        // Closed streams are pruned once the map holds more than twice the
+        // local max_concurrent_streams; a client's own requests do not count
+        // against that setting, so its third request crosses the threshold.
+        let mut settings = Settings::client();
+        settings.max_concurrent_streams = 1;
+        let mut conn = Connection::client(settings);
+        conn.state = ConnectionState::Open;
+        for path in ["/first", "/second"] {
+            let stream_id = conn
+                .open_stream(test_request_header_vec(path), true)
+                .unwrap();
+            while conn.next_frame().is_some() {}
+            conn.process_frame(Frame::Headers(HeadersFrame::new(
+                stream_id,
+                test_response_headers("204"),
+                true,
+                true,
+            )))
+            .expect("complete response");
+        }
+        let stream_id = conn
+            .open_stream(test_request_header_vec("/third"), true)
+            .unwrap();
+        while conn.next_frame().is_some() {}
+        let block = encode_test_headers(&[(":status", "204"), ("x-split", "across-frames")]);
+        let split = block.len() / 2;
+        assert!(
+            conn.process_frame(Frame::Headers(HeadersFrame::new(
+                stream_id,
+                block.slice(..split),
+                true,
+                false,
+            )))
+            .expect("HEADERS with END_STREAM starts the field block")
+            .is_none()
+        );
+        let received = conn
+            .process_frame(Frame::Continuation(ContinuationFrame {
+                stream_id,
+                header_block: block.slice(split..),
+                end_headers: true,
+            }))
+            .expect("the block's CONTINUATION still finds its stream");
+        assert!(
+            matches!(
+                received,
+                Some(ReceivedFrame::Headers {
+                    end_stream: true,
+                    ..
+                })
+            ),
+            "the response headers must be delivered, got {received:?}"
+        );
+    }
+
+    /// The request that follows a refused field block, encoded by the same
+    /// encoder, so it references the dynamic-table entries that block added.
+    fn decode_after_refused_block(
+        conn: &mut Connection,
+        encoder: &mut hpack::Encoder,
+        headers: &[Header],
+        refused_len: usize,
+        stream_id: u32,
+    ) {
+        let mut indexed = BytesMut::new();
+        encoder.encode(headers, &mut indexed);
+        assert!(
+            indexed.len() < refused_len,
+            "the next block must reference the refused block's table entries"
+        );
+        let received = conn
+            .process_frame(Frame::Headers(HeadersFrame::new(
+                stream_id,
+                indexed.freeze(),
+                true,
+                true,
+            )))
+            .expect("the next request decodes");
+        let Some(ReceivedFrame::Headers {
+            headers: decoded, ..
+        }) = received
+        else {
+            panic!("the next request must be delivered, got {received:?}")
+        };
+        assert_eq!(decoded, headers);
+    }
+
+    fn refusal_test_headers(path: &str) -> Vec<Header> {
+        let mut headers = test_request_header_vec(path);
+        headers.push(Header::new("x-dynamic", "kept-in-step"));
+        headers
+    }
+
+    #[test]
+    fn a_stream_error_before_decoding_keeps_the_hpack_decoder_in_step() {
+        for fragmented in [false, true] {
+            let mut conn = Connection::server(Settings::default());
+            conn.state = ConnectionState::Open;
+            // Stream 1's request is complete, so it is half-closed (remote) and
+            // another HEADERS frame on it is a stream error.
+            conn.process_frame(Frame::Headers(HeadersFrame::new(
+                1,
+                test_request_headers("/first"),
+                true,
+                true,
+            )))
+            .unwrap();
+            let headers = refusal_test_headers("/after-refusal");
+            let mut encoder = hpack::Encoder::new();
+            let mut refused = BytesMut::new();
+            encoder.encode(&headers, &mut refused);
+            let refused = refused.freeze();
+            let split = if fragmented {
+                refused.len() / 2
+            } else {
+                refused.len()
+            };
+            let error = conn
+                .process_frame(Frame::Headers(HeadersFrame::new(
+                    1,
+                    refused.slice(..split),
+                    true,
+                    !fragmented,
+                )))
+                .expect_err("HEADERS on a half-closed (remote) stream");
+            assert_eq!(error.stream_id, Some(1), "a stream error: {error:?}");
+            // As the listener does on a stream error.
+            conn.reset_stream(1, error.code);
+            if fragmented {
+                assert!(
+                    conn.process_frame(Frame::Continuation(ContinuationFrame {
+                        stream_id: 1,
+                        header_block: refused.slice(split..),
+                        end_headers: true,
+                    }))
+                    .expect("the refused block's CONTINUATION is decoded")
+                    .is_none()
+                );
+            }
+            while conn.next_frame().is_some() {}
+            decode_after_refused_block(&mut conn, &mut encoder, &headers, refused.len(), 3);
+        }
+    }
+
+    #[test]
+    fn a_refused_stream_id_gap_still_decodes_its_field_block() {
+        // Far past any stream-id gap the stream table accepts.
+        let far_stream_id = (1 << 30) + 1;
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+        let headers = refusal_test_headers("/after-gap");
+        let mut encoder = hpack::Encoder::new();
+        let mut refused = BytesMut::new();
+        encoder.encode(&headers, &mut refused);
+        let refused = refused.freeze();
+        let error = conn
+            .process_frame(Frame::Headers(HeadersFrame::new(
+                far_stream_id,
+                refused.clone(),
+                true,
+                true,
+            )))
+            .expect_err("a stream id past the gap ceiling is refused");
+        assert_eq!(error.stream_id, Some(far_stream_id), "{error:?}");
+        assert_eq!(error.code, ErrorCode::RefusedStream);
+        conn.reset_stream(far_stream_id, error.code);
+        while conn.next_frame().is_some() {}
+        decode_after_refused_block(&mut conn, &mut encoder, &headers, refused.len(), 1);
+
+        // A refused block that continues has no record to collect it.
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+        let error = conn
+            .process_frame(Frame::Headers(HeadersFrame::new(
+                far_stream_id,
+                refused.slice(..refused.len() / 2),
+                true,
+                false,
+            )))
+            .expect_err("a continuing block for a refused stream id");
+        assert!(error.stream_id.is_none(), "a connection error: {error:?}");
+    }
+
+    #[test]
+    fn a_field_block_past_the_fragment_cap_ends_the_connection() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+        conn.process_frame(Frame::Headers(HeadersFrame::new(
+            1,
+            Bytes::new(),
+            false,
+            false,
+        )))
+        .unwrap();
+        let error = (0..2048)
+            .find_map(|_| {
+                conn.process_frame(Frame::Continuation(ContinuationFrame {
+                    stream_id: 1,
+                    header_block: Bytes::new(),
+                    end_headers: false,
+                }))
+                .err()
+            })
+            .expect("the fragment cap refuses the block");
+        assert_eq!(error.code, ErrorCode::EnhanceYourCalm);
+        assert!(
+            error.stream_id.is_none(),
+            "a block that cannot be decoded ends the connection: {error:?}"
+        );
     }
 
     #[test]

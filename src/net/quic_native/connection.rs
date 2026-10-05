@@ -437,6 +437,13 @@ const MAX_TRACKED_ACK_RANGES: usize = MAX_ACK_FRAME_RANGES * 4;
 /// authenticated peer can fill the receive window with tiny disjoint ranges
 /// and amplify each byte into a tree node plus reassembly work.
 pub(crate) const MAX_BUFFERED_STREAM_REASSEMBLY_FRAGMENTS: usize = 4096;
+
+/// Maximum number of out-of-order receive fragments buffered across all of a
+/// connection's streams. The per-stream bound alone admits that many on every
+/// stream the peer may open (128 + 128 by default): about 1M one-byte holes,
+/// hundreds of MB of tree and buffer metadata for a few MB of credit.
+pub(crate) const MAX_BUFFERED_CONNECTION_REASSEMBLY_FRAGMENTS: usize =
+    4 * MAX_BUFFERED_STREAM_REASSEMBLY_FRAGMENTS;
 const STREAM_REASSEMBLY_LIMIT_ERROR: &str = "stream receive reassembly fragment limit exceeded";
 
 /// Maximum number of outbound DATAGRAM payloads queued before `send_datagram`
@@ -1347,12 +1354,13 @@ impl NativeQuicConnection {
         self.ensure_stream_active_state()?;
         if self
             .streams
-            .stream_reassembly_fragment_limit_would_be_exceeded(
+            .stream_reassembly_limits_would_be_exceeded(
                 id,
                 offset,
                 data.len() as u64,
                 is_fin,
                 MAX_BUFFERED_STREAM_REASSEMBLY_FRAGMENTS,
+                MAX_BUFFERED_CONNECTION_REASSEMBLY_FRAGMENTS,
             )
             .map_err(map_stream_table_error)?
         {
@@ -2413,13 +2421,11 @@ impl NativeQuicConnection {
         ) {
             return Ok(());
         }
-        if self
-            .streams
-            .packet_reassembly_fragment_limit_would_be_exceeded(
-                frames,
-                MAX_BUFFERED_STREAM_REASSEMBLY_FRAGMENTS,
-            )
-        {
+        if self.streams.packet_reassembly_limits_would_be_exceeded(
+            frames,
+            MAX_BUFFERED_STREAM_REASSEMBLY_FRAGMENTS,
+            MAX_BUFFERED_CONNECTION_REASSEMBLY_FRAGMENTS,
+        ) {
             return Err(NativeQuicConnectionError::InvalidState(
                 STREAM_REASSEMBLY_LIMIT_ERROR,
             ));
@@ -2567,11 +2573,17 @@ impl NativeQuicConnection {
                 stream_id,
                 maximum_stream_data,
             } => {
+                let id = StreamId(stream_id.value());
+                // RFC 9000 3.2: credit for the sending part of a peer's
+                // bidirectional stream also opens it. It can overtake the
+                // peer's first STREAM frame when that packet is lost.
+                if id.direction() == StreamDirection::Bidirectional
+                    && self.streams.stream(id).is_err()
+                {
+                    self.accept_remote_stream(cx, id)?;
+                }
                 self.streams
-                    .increase_stream_send_limit(
-                        StreamId(stream_id.value()),
-                        maximum_stream_data.value(),
-                    )
+                    .increase_stream_send_limit(id, maximum_stream_data.value())
                     .map_err(map_stream_table_error)?;
                 Ok(())
             }
@@ -2662,6 +2674,11 @@ impl NativeQuicConnection {
                 // hysteresis, one full window consumed since the last growth)
                 // and returns the advertisement to put on the wire.
                 let id = StreamId(stream_id.value());
+                // RFC 9000 3.2: STREAM_DATA_BLOCKED opens a peer's stream,
+                // as STREAM and RESET_STREAM do.
+                if self.streams.stream(id).is_err() {
+                    self.accept_remote_stream(cx, id)?;
+                }
                 if let Some(limit) = self
                     .streams
                     .note_peer_stream_data_blocked(id, maximum_stream_data.value())
@@ -3484,8 +3501,33 @@ impl NativeQuicConnection {
             // advance only on application reads — consumption-clocked, SETTLED
             // after four attempts; see the MATRIX-227 history on
             // advance_bounded_recv_windows before re-trying receipt-clocking.)
-            for (stream, limit) in self.streams.bounded_recv_window_advertisements() {
-                self.queue_max_stream_data_frame(stream, limit);
+            // One pass over the queue for all of them: replacing each stream's
+            // frame separately rescanned the queue once per stream, S^2 work
+            // on every packet with S bounded-window streams.
+            let advertisements = self.streams.bounded_recv_window_advertisements();
+            if !advertisements.is_empty() {
+                let limits: BTreeMap<u64, u64> = advertisements
+                    .iter()
+                    .map(|&(stream, limit)| (stream.0, limit))
+                    .collect();
+                self.pending_control_frames.retain(|frame| {
+                    !matches!(
+                        frame,
+                        QuicFrame::MaxStreamData {
+                            stream_id,
+                            maximum_stream_data,
+                        } if limits
+                            .get(&stream_id.value())
+                            .is_some_and(|&limit| maximum_stream_data.value() <= limit)
+                    )
+                });
+                for (stream, limit) in advertisements {
+                    self.pending_control_frames
+                        .push_back(QuicFrame::MaxStreamData {
+                            stream_id: VarInt(stream.0),
+                            maximum_stream_data: VarInt(limit),
+                        });
+                }
             }
         }
     }
@@ -4295,6 +4337,43 @@ mod tests {
         }));
     }
 
+    /// A stream whose sender has finished, or that was reset, needs no more
+    /// credit (RFC 9000 3.2), yet every ACK re-advertised its window, and the
+    /// re-attach rescanned the control queue once per stream.
+    #[test]
+    fn acks_reattach_windows_only_for_streams_still_receiving() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        let live = conn.open_local_bidi(&cx).expect("open");
+        let finished = conn.open_local_bidi(&cx).expect("open");
+        let reset = conn.open_local_bidi(&cx).expect("open");
+        for stream in [live, finished, reset] {
+            conn.configure_stream_recv_window(&cx, stream, 100)
+                .expect("configure window");
+        }
+        let _ = conn
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 1024)
+            .expect("initial advertisements");
+        conn.receive_stream_bytes(&cx, finished, 0, Bytes::from_static(b"done"), true)
+            .expect("the sender finishes");
+        conn.reset_stream_receive(&cx, reset, 0, 0)
+            .expect("the sender resets");
+
+        conn.acknowledge_received_packet(PacketNumberSpace::ApplicationData, 9);
+        let frames = conn
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 1024)
+            .expect("ack with advertisements");
+        assert!(frames.iter().any(|f| matches!(f, QuicFrame::Ack { .. })));
+        let advertised: Vec<u64> = frames
+            .iter()
+            .filter_map(|frame| match frame {
+                QuicFrame::MaxStreamData { stream_id, .. } => Some(stream_id.value()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(advertised, vec![live.0]);
+    }
+
     #[test]
     fn peer_stream_data_blocked_grows_an_allowed_bounded_window_and_advertises_it() {
         let cx = test_cx();
@@ -4421,6 +4500,120 @@ mod tests {
             QuicFrame::MaxStreamData { stream_id, maximum_stream_data }
                 if stream_id.value() == stream.0 && maximum_stream_data.value() > 100
         )));
+    }
+
+    /// A packet with STREAM_DATA_BLOCKED or MAX_STREAM_DATA can arrive before
+    /// the lost packet that carried the stream's first STREAM frame. Both open
+    /// the peer's stream (RFC 9000 3.2); they used to fail the packet with an
+    /// unknown-stream error, which the endpoint dropped unacknowledged on
+    /// every retransmission.
+    #[test]
+    fn blocked_and_credit_frames_open_a_peer_stream() {
+        let cx = test_cx();
+        let mut conn = established_server_conn();
+        let blocked = StreamId(0);
+        let credited = StreamId(4);
+        let frames = [
+            QuicFrame::StreamDataBlocked {
+                stream_id: VarInt(blocked.0),
+                maximum_stream_data: VarInt(100),
+            },
+            QuicFrame::MaxStreamData {
+                stream_id: VarInt(credited.0),
+                maximum_stream_data: VarInt(1 << 20),
+            },
+        ];
+        conn.process_packet_frames(&cx, PacketNumberSpace::ApplicationData, 3, &frames, 100)
+            .expect("both frames open their streams");
+        assert!(conn.streams.stream(blocked).is_ok());
+        assert!(conn.streams.stream(credited).is_ok());
+
+        let late = [QuicFrame::Stream {
+            stream_id: VarInt(blocked.0),
+            offset: Some(VarInt(0)),
+            data: Bytes::from_static(b"late"),
+            fin: false,
+        }];
+        conn.process_packet_frames(&cx, PacketNumberSpace::ApplicationData, 4, &late, 200)
+            .expect("the retransmitted first STREAM frame lands on the open stream");
+        assert_eq!(
+            conn.read_stream_bytes(&cx, blocked, 16).expect("read"),
+            Bytes::from_static(b"late")
+        );
+
+        // A peer's unidirectional stream only receives; credit for sending on
+        // it does not open it.
+        let receive_only = [QuicFrame::MaxStreamData {
+            stream_id: VarInt(2),
+            maximum_stream_data: VarInt(1 << 20),
+        }];
+        assert!(
+            conn.process_packet_frames(
+                &cx,
+                PacketNumberSpace::ApplicationData,
+                5,
+                &receive_only,
+                300
+            )
+            .is_err()
+        );
+        assert!(conn.streams.stream(StreamId(2)).is_err());
+    }
+
+    /// The per-stream bound alone let a peer keep that many one-byte holes on
+    /// every stream it could open, about 1M for the default stream limits.
+    #[test]
+    fn stream_receive_reassembly_fragments_are_bounded_across_streams() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        let per_stream = MAX_BUFFERED_STREAM_REASSEMBLY_FRAGMENTS - 1;
+        let full_streams = MAX_BUFFERED_CONNECTION_REASSEMBLY_FRAGMENTS / per_stream;
+        let mut holes = 0usize;
+        for _ in 0..full_streams {
+            let stream = conn.open_local_bidi(&cx).expect("open");
+            for fragment in 0..per_stream {
+                let offset = 1 + (fragment as u64 * 2);
+                conn.receive_stream_bytes(&cx, stream, offset, Bytes::from_static(b"x"), false)
+                    .expect("fragment within both limits");
+                holes += 1;
+            }
+        }
+        let last = conn.open_local_bidi(&cx).expect("open");
+        let mut fragment = 0u64;
+        while holes < MAX_BUFFERED_CONNECTION_REASSEMBLY_FRAGMENTS {
+            conn.receive_stream_bytes(&cx, last, 1 + fragment * 2, Bytes::from_static(b"x"), false)
+                .expect("fragment within the connection limit");
+            fragment += 1;
+            holes += 1;
+        }
+
+        let err = conn
+            .receive_stream_bytes(&cx, last, 1 + fragment * 2, Bytes::from_static(b"x"), false)
+            .expect_err("a hole beyond the connection limit must fail closed");
+        assert!(err.is_stream_reassembly_backpressure(), "{err:?}");
+        let frames = [QuicFrame::Stream {
+            stream_id: VarInt(last.0),
+            offset: Some(VarInt(1 + fragment * 2)),
+            data: Bytes::from_static(b"x"),
+            fin: false,
+        }];
+        let err = conn
+            .process_packet_frames(&cx, PacketNumberSpace::ApplicationData, 9, &frames, 300)
+            .expect_err("a packet adding a hole beyond the connection limit is refused");
+        assert!(err.is_stream_reassembly_backpressure(), "{err:?}");
+
+        // A frame that makes a stream's head readable is not out of order, so
+        // it stays admissible at the limit. Here it also joins the first hole
+        // into the readable head, which frees one slot.
+        conn.receive_stream_bytes(&cx, last, 0, Bytes::from_static(b"h"), false)
+            .expect("head-of-line fragment remains admissible");
+        assert_eq!(
+            conn.read_stream_bytes(&cx, last, 2)
+                .expect("read the head and its joined successor"),
+            Bytes::from_static(b"hx")
+        );
+        conn.receive_stream_bytes(&cx, last, 1 + fragment * 2, Bytes::from_static(b"x"), false)
+            .expect("the freed slot admits one more hole");
     }
 
     #[test]

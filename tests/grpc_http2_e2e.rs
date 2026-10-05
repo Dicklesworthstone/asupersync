@@ -1452,6 +1452,7 @@ fn public_owned_server_streaming_round_trip(workers: usize, tls: bool) {
                 )
                 .await
                 .expect("public client owns a real server stream");
+            assert!(stream.headers().await.is_ok());
             assert!(stream.initial_metadata().is_some());
             assert!(
                 stream

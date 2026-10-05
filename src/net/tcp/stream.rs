@@ -392,8 +392,8 @@ impl TcpStream {
     /// Connects using an existing configured socket.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) async fn connect_from_socket(socket: Socket, addr: SocketAddr) -> io::Result<Self> {
+        crate::cx::io_gate::require_ambient_io("net::TcpStream::connect")?;
         socket.set_nonblocking(true)?;
-
         // 2. Attempt connect (non-blocking)
         let sock_addr = SockAddr::from(addr);
         let registration = match socket.connect(&sock_addr) {
@@ -2106,7 +2106,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_rearm_replaces_stale_writable_interest() {
+    fn stream_rearm_keeps_a_waiting_write_armed_until_an_event_then_drops_it() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
         let addr = listener.local_addr().expect("local addr");
         let client = net::TcpStream::connect(addr).expect("connect");
@@ -2120,7 +2120,7 @@ mod tests {
             TaskId::new_for_test(0, 0),
             Budget::INFINITE,
             None,
-            Some(driver),
+            Some(driver.clone()),
             None,
         );
         let _guard = Cx::set_current(Some(cx));
@@ -2142,13 +2142,33 @@ mod tests {
             "initial wait should arm writability only"
         );
 
+        // A read wait in the same poll must not disarm the write wait: the
+        // stream has one waiter, and nothing else would wake the parked write.
         stream
             .register_interest(&task_cx, Interest::READABLE)
             .expect("rearm readable");
         assert_eq!(
             reactor.last_interest(),
+            Interest::READABLE | Interest::WRITABLE,
+            "a read wait keeps the undispatched write wait armed"
+        );
+
+        // An event disarms the one-shot registration. A read-only wait after it
+        // must drop the write bit, or a writable socket would wake every poll.
+        let token = stream.registration.as_ref().expect("registration").token();
+        reactor
+            .inner
+            .set_ready(token, crate::runtime::reactor::Event::readable(token));
+        driver
+            .turn_with(Some(Duration::ZERO), |_, _| {})
+            .expect("dispatch the event");
+        stream
+            .register_interest(&task_cx, Interest::READABLE)
+            .expect("rearm readable after the event");
+        assert_eq!(
+            reactor.last_interest(),
             Interest::READABLE,
-            "subsequent read wait must drop the stale writable bit"
+            "a read wait after an event must drop the stale writable bit"
         );
         assert_eq!(
             stream

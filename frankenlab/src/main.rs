@@ -18,7 +18,8 @@ use asupersync::lab::ldfi_trace::{
 };
 use asupersync::lab::scenario::Scenario;
 use asupersync::lab::scenario_runner::{
-    ScenarioExplorationResult, ScenarioRunResult, ScenarioRunner, ScenarioRunnerError,
+    ParticipantBindings, ScenarioExplorationResult, ScenarioRunResult, ScenarioRunner,
+    ScenarioRunnerError,
 };
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::trace::minimizer::LogicalMinimizerClock;
@@ -279,23 +280,31 @@ fn apply_per_replay_step_cap(scenario: &mut Scenario, per_replay_step_cap: Optio
 // Run
 // ---------------------------------------------------------------------------
 
-fn format_run_result(result: &ScenarioRunResult, json: bool) -> String {
+fn format_run_result(
+    result: &ScenarioRunResult,
+    bindings: &ParticipantBindings,
+    json: bool,
+) -> String {
     if json {
-        pretty_json_or(&result.to_json(), "{}")
+        pretty_json_or(&result.to_json_with_bindings(bindings), "{}")
     } else {
         let status = if result.passed() { "PASS" } else { "FAIL" };
+        let steps = result.lab_report.steps_total;
+        // A zero-step run executed nothing, so its oracles observed nothing.
+        let empty_run = if steps == 0 { " (no workload ran)" } else { "" };
         let mut lines = vec![
             format!("Scenario: {} [{}]", result.scenario_id, status),
             format!("Seed: {}", result.seed),
-            format!("Steps: {}", result.lab_report.steps_total),
-            format!("Faults injected: {}", result.faults_injected),
-            format!(
-                "Oracles: {}/{} passed ({} not fed by the lab runtime)",
-                result.oracle_report.passed_count,
-                result.oracle_report.checked.len(),
-                result.oracle_report.unfed_count()
-            ),
+            format!("Steps: {steps}{empty_run}"),
         ];
+        lines.extend(bindings.summary_line());
+        lines.push(format!("Faults injected: {}", result.faults_injected));
+        lines.push(format!(
+            "Oracles: {}/{} passed ({} not fed by the lab runtime)",
+            result.oracle_report.passed_count,
+            result.oracle_report.checked.len(),
+            result.oracle_report.unfed_count()
+        ));
         if !result.lab_report.invariant_violations.is_empty() {
             lines.push(format!(
                 "Invariant violations: {}",
@@ -315,8 +324,9 @@ fn cmd_run(args: RunArgs, json: bool) -> Result<(), String> {
     let scenario = load_scenario(&args.scenario)?;
     let result =
         ScenarioRunner::run_with_seed(&scenario, args.seed).map_err(runner_error_message)?;
+    let bindings = ScenarioRunner::participant_bindings(&scenario);
 
-    let output = format_run_result(&result, json);
+    let output = format_run_result(&result, &bindings, json);
     println!("{output}");
 
     if result.passed() {
@@ -1321,6 +1331,51 @@ mod tests {
         });
 
         assert!(message.starts_with("[ASUP-E401] Replay divergence at seed 17:"));
+    }
+
+    #[test]
+    fn format_run_result_flags_empty_runs_and_reports_participant_bindings() {
+        let path = Path::new("inline.yaml");
+        let empty = parse_scenario(path, "id: empty-run\n").expect("parse empty scenario");
+        let result = ScenarioRunner::run(&empty).expect("run empty scenario");
+        let bindings = ScenarioRunner::participant_bindings(&empty);
+        let text = format_run_result(&result, &bindings, false);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[2], "Steps: 0 (no workload ran)", "{text}");
+        assert_eq!(lines[3], "Faults injected: 0", "{text}");
+        assert!(!text.contains("Participants:"), "{text}");
+
+        let bound = parse_scenario(
+            path,
+            "id: bound-run\nparticipants:\n  - name: alice\n    role: sender\n  - name: bob\n    role: receiver\n  - name: carol\n    role: coordinator\n",
+        )
+        .expect("parse bound scenario");
+        let result = ScenarioRunner::run(&bound).expect("run bound scenario");
+        let bindings = ScenarioRunner::participant_bindings(&bound);
+        let text = format_run_result(&result, &bindings, false);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines[2],
+            format!("Steps: {}", result.lab_report.steps_total),
+            "{text}"
+        );
+        assert!(result.lab_report.steps_total > 0, "{text}");
+        assert_eq!(
+            lines[3], "Participants: 2 bound (sender, receiver), 1 unbound (coordinator)",
+            "{text}"
+        );
+        assert_eq!(lines[4], "Faults injected: 0", "{text}");
+
+        // The JSON form is the run result plus whether anything ran and what
+        // was bound.
+        assert_eq!(
+            format_run_result(&result, &bindings, true),
+            pretty_json_or(&result.to_json_with_bindings(&bindings), "{}")
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(&format_run_result(&result, &bindings, true)).expect("JSON");
+        assert_eq!(json["workload_ran"], true);
+        assert_eq!(json["participant_bindings"]["unbound"][0]["name"], "carol");
     }
 
     #[test]

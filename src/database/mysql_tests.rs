@@ -1583,6 +1583,117 @@ mod tests {
         assert_eq!(start_sql, "START TRANSACTION READ ONLY");
     }
 
+    /// with_mysql_transaction rolled back with the body's Cx. Once the body
+    /// had cancelled it, rollback() stopped at its first checkpoint and sent
+    /// nothing, so the transaction and its locks stayed open.
+    #[test]
+    fn transaction_helper_rolls_back_after_its_body_cancelled_the_cx() {
+        const SERVER_STATUS_IN_TRANS: u16 = 0x0001;
+
+        init_test("mysql_transaction_helper_rolls_back_after_its_body_cancelled_the_cx");
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let cx = Cx::for_testing();
+
+        let server = std::thread::spawn(move || {
+            peer.set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+            assert_eq!(
+                command_sql(&read_client_command(&mut peer)),
+                "START TRANSACTION"
+            );
+            write_response_packet(&mut peer, 1, ok_packet_payload(0, SERVER_STATUS_IN_TRANS));
+            assert_eq!(command_sql(&read_client_command(&mut peer)), "ROLLBACK");
+            write_response_packet(&mut peer, 1, ok_packet_payload(0, 0));
+        });
+
+        let outcome = run(crate::database::transaction::with_mysql_transaction(
+            &mut conn,
+            &cx,
+            |_tx: &mut MySqlTransaction<'_>, cx: &Cx| {
+                cx.cancel_fast(CancelKind::User);
+                async { Outcome::<(), MySqlError>::Err(MySqlError::Protocol("body failed".into())) }
+            },
+        ));
+        match outcome {
+            Outcome::Err(MySqlError::Protocol(message)) => assert_eq!(message, "body failed"),
+            other => panic!("the body's error is returned, got {other:?}"),
+        }
+        server.join().expect("the ROLLBACK reached the server");
+    }
+
+    /// MariaDB before 11.1 and MySQL before 5.7.20 have no
+    /// transaction_isolation variable. Both reads in begin_with_isolation
+    /// queried it, so the call always failed there with ERR 1193.
+    #[test]
+    fn begin_with_isolation_falls_back_to_tx_isolation_on_older_servers() {
+        const SERVER_STATUS_IN_TRANS: u16 = 0x0001;
+        const NEW_NAME: &str = "SELECT @@SESSION.transaction_isolation AS isolation";
+        const OLD_NAME: &str = "SELECT @@SESSION.tx_isolation AS isolation";
+
+        init_test("begin_with_isolation_falls_back_to_tx_isolation_on_older_servers");
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let cx = Cx::for_testing();
+
+        let server = std::thread::spawn(move || {
+            peer.set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+            let read = |peer: &mut std::net::TcpStream| command_sql(&read_client_command(peer));
+            let unknown_variable = |peer: &mut std::net::TcpStream| {
+                let message = "Unknown system variable 'transaction_isolation'";
+                write_response_packet(peer, 1, error_packet_payload(1193, "HY000", message));
+            };
+            let isolation = |peer: &mut std::net::TcpStream, value: &str, status: u16| {
+                write_response_packet(peer, 1, vec![0x01]);
+                write_response_packet(peer, 2, column_definition_payload("isolation"));
+                write_response_packet(peer, 3, eof_packet_payload(status));
+                let mut row = vec![u8::try_from(value.len()).expect("short value")];
+                row.extend_from_slice(value.as_bytes());
+                write_response_packet(peer, 4, row);
+                write_response_packet(peer, 5, eof_packet_payload(status));
+            };
+
+            assert_eq!(read(&mut peer), NEW_NAME);
+            unknown_variable(&mut peer);
+            assert_eq!(read(&mut peer), OLD_NAME);
+            isolation(&mut peer, "REPEATABLE-READ", 0);
+            assert_eq!(
+                read(&mut peer),
+                "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE"
+            );
+            write_response_packet(&mut peer, 1, ok_packet_payload(0, 0));
+            assert_eq!(read(&mut peer), "START TRANSACTION READ WRITE");
+            write_response_packet(&mut peer, 1, ok_packet_payload(0, SERVER_STATUS_IN_TRANS));
+            assert_eq!(read(&mut peer), NEW_NAME);
+            unknown_variable(&mut peer);
+            assert_eq!(read(&mut peer), OLD_NAME);
+            isolation(&mut peer, "SERIALIZABLE", SERVER_STATUS_IN_TRANS);
+            assert_eq!(read(&mut peer), "COMMIT");
+            write_response_packet(&mut peer, 1, ok_packet_payload(0, 0));
+            assert_eq!(
+                read(&mut peer),
+                "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ"
+            );
+            write_response_packet(&mut peer, 1, ok_packet_payload(0, 0));
+        });
+
+        run(async {
+            let tx = match conn
+                .begin_with_isolation(&cx, IsolationLevel::Serializable, false)
+                .await
+            {
+                Outcome::Ok(tx) => tx,
+                Outcome::Err(err) => panic!("begin_with_isolation failed: {err}"),
+                _ => panic!("begin_with_isolation did not complete"),
+            };
+            match tx.commit(&cx).await {
+                Outcome::Ok(()) => {}
+                Outcome::Err(err) => panic!("commit failed: {err}"),
+                _ => panic!("commit did not complete"),
+            }
+        });
+        server.join().expect("mysql server thread");
+    }
+
     /// br-asupersync-dvgvcu — IsolationLevel::from_server_string
     /// must parse every value MySQL returns from
     /// `@@SESSION.transaction_isolation` (hyphenated form), tolerate
@@ -2134,6 +2245,41 @@ mod tests {
         let values = MySqlConnection::parse_binary_row(&row, &columns).expect("parse binary row");
 
         assert_eq!(values, vec![MySqlValue::Text("hello".to_string())]);
+    }
+
+    /// The server sends a DATETIME or TIMESTAMP at midnight as 4 bytes, with
+    /// no time part. It was read as a bare date, unlike the text protocol.
+    #[test]
+    fn binary_row_parser_keeps_the_time_of_a_midnight_datetime() {
+        let columns = vec![
+            MySqlColumn {
+                column_type: column_type::MYSQL_TYPE_DATETIME,
+                ..test_var_string_column("at")
+            },
+            MySqlColumn {
+                column_type: column_type::MYSQL_TYPE_TIMESTAMP,
+                ..test_var_string_column("ts")
+            },
+            MySqlColumn {
+                column_type: column_type::MYSQL_TYPE_DATE,
+                ..test_var_string_column("day")
+            },
+        ];
+        let mut row = vec![0x00, 0x00];
+        for _ in 0..3 {
+            row.extend_from_slice(&[4, 0xE8, 0x07, 1, 15]);
+        }
+
+        let values = MySqlConnection::parse_binary_row(&row, &columns).expect("parse binary row");
+
+        assert_eq!(
+            values,
+            vec![
+                MySqlValue::Text("2024-01-15 00:00:00".to_string()),
+                MySqlValue::Text("2024-01-15 00:00:00".to_string()),
+                MySqlValue::Text("2024-01-15".to_string()),
+            ]
+        );
     }
 
     #[test]

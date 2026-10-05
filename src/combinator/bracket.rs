@@ -286,7 +286,11 @@ where
         // the use phase are released before the cleanup phase attempts to run.
         let release_fut: Option<Pin<Box<RF>>> =
             match std::mem::replace(&mut self.state.phase, BracketPhase::Done) {
-                BracketPhase::Acquiring(_) | BracketPhase::Using(_) => {
+                unfinished @ (BracketPhase::Acquiring(_) | BracketPhase::Using(_)) => {
+                    // A `_` pattern left the future in the match temporary,
+                    // alive until this statement ended, so release_fn ran
+                    // while the use future still held what it had taken.
+                    drop(unfinished);
                     // Cancel before release starts: construct the release future
                     // from the saved resource clone if one exists.
                     if let (Some(release_fn), Some(resource)) = (
@@ -1214,6 +1218,71 @@ mod tests {
         assert!(
             released.load(Ordering::SeqCst),
             "release must complete even when bracket is dropped during Releasing phase"
+        );
+    }
+
+    /// Clears its flag when dropped: stands for whatever the use future holds.
+    struct HeldWhileAlive(Arc<AtomicBool>);
+
+    impl Drop for HeldWhileAlive {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// Dropped during use, the bracket called release_fn while the use future
+    /// was still alive, so a release that takes a lock the use future holds
+    /// deadlocked.
+    #[test]
+    fn bracket_drop_during_use_drops_the_use_future_before_release_starts() {
+        const NOT_CALLED: usize = 0;
+        const USE_ALIVE: usize = 1;
+        const USE_DROPPED: usize = 2;
+
+        let held = Arc::new(AtomicBool::new(false));
+        let use_held = held.clone();
+        let release_held = held.clone();
+        let release_saw = Arc::new(AtomicUsize::new(NOT_CALLED));
+        let saw = release_saw.clone();
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut fut = Box::pin(bracket(
+            async { Ok::<_, ()>(1_i32) },
+            move |_| {
+                use_held.store(true, Ordering::SeqCst);
+                let guard = HeldWhileAlive(use_held);
+                async move {
+                    let _guard = guard;
+                    std::future::pending::<()>().await;
+                    Ok::<_, ()>(())
+                }
+            },
+            move |_| {
+                let seen = if release_held.load(Ordering::SeqCst) {
+                    USE_ALIVE
+                } else {
+                    USE_DROPPED
+                };
+                saw.store(seen, Ordering::SeqCst);
+                async {}
+            },
+        ));
+
+        assert!(fut.as_mut().poll(&mut cx).is_pending());
+        assert!(
+            held.load(Ordering::SeqCst),
+            "the use future must be running"
+        );
+
+        drop(fut);
+
+        assert!(!held.load(Ordering::SeqCst));
+        assert_eq!(
+            release_saw.load(Ordering::SeqCst),
+            USE_DROPPED,
+            "release_fn must run after the use future is dropped (1 = it was still alive)"
         );
     }
 

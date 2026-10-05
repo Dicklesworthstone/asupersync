@@ -1738,9 +1738,7 @@ impl OwnedOtlpMetrics {
                 ..ExportMetricsServiceRequest::default()
             };
             let bytes = request
-                .encode_to_bytes(ProtobufWireLimits::for_message_size(
-                    self.config.max_request_bytes,
-                ))
+                .encode_to_bytes(otlp_request_limits(self.config.max_request_bytes))
                 .map_err(|_| OwnedOtlpMetricsError::WireEnvelopeExceeded)?;
             encoded.push(bytes.to_vec());
         }
@@ -2955,9 +2953,7 @@ impl OwnedOtlpTraces {
                 ..Default::default()
             };
             let bytes = request
-                .encode_to_bytes(ProtobufWireLimits::for_message_size(
-                    self.config.max_request_bytes,
-                ))
+                .encode_to_bytes(otlp_request_limits(self.config.max_request_bytes))
                 .map_err(|error| match error {
                     crate::grpc::protobuf::ProtobufWireError::SchemaInvariant {
                         invariant: "trace state must use the W3C tracestate format",
@@ -3203,6 +3199,34 @@ fn compare_owned_otlp_attributes(
         }))
 }
 
+/// Wire limits for one encoded OTLP export request of at most
+/// `max_request_bytes`. Every protobuf record takes at least one byte, so a
+/// record cap equal to the byte cap never binds first. The default fixed cap
+/// of 65,536 records failed requests far below the byte limit, for example one
+/// span with 128 events of 128 attributes (about 170 KB).
+#[cfg(not(target_arch = "wasm32"))]
+fn otlp_request_limits(max_request_bytes: usize) -> ProtobufWireLimits {
+    ProtobufWireLimits::for_message_size(max_request_bytes).with_max_fields(max_request_bytes)
+}
+
+/// The tracestate list without its empty members. W3C Trace Context allows
+/// empty and whitespace-only list members (`list-member = (key "=" value) /
+/// OWS`), which HTTP stacks produce when they join several tracestate
+/// headers. The OTLP encoder accepts only non-empty members, so one stray
+/// comma failed the whole trace collection. Other members are kept verbatim.
+#[cfg(not(target_arch = "wasm32"))]
+fn canonical_trace_state(trace_state: &str) -> String {
+    let is_empty = |member: &str| member.trim_matches([' ', '\t']).is_empty();
+    if !trace_state.split(',').any(is_empty) {
+        return trace_state.to_owned();
+    }
+    trace_state
+        .split(',')
+        .filter(|member| !is_empty(member))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn owned_otlp_trace_span(
     span: &OtlpTraceSpanInput<'_>,
@@ -3244,7 +3268,7 @@ fn owned_otlp_trace_span(
             Ok(SpanLink {
                 trace_id: link.trace_id.to_vec(),
                 span_id: link.span_id.to_vec(),
-                trace_state: link.trace_state.to_owned(),
+                trace_state: canonical_trace_state(link.trace_state),
                 attributes: owned_otlp_attributes(link.attributes)
                     .map_err(|_| OwnedOtlpTraceError::InvalidAttributes)?,
                 dropped_attributes_count: link.dropped_attributes_count,
@@ -3275,7 +3299,7 @@ fn owned_otlp_trace_span(
         trace_id: span.trace_id.to_vec(),
         span_id: span.span_id.to_vec(),
         parent_span_id: span.parent_span_id.map_or_else(Vec::new, |id| id.to_vec()),
-        trace_state: span.trace_state.to_owned(),
+        trace_state: canonical_trace_state(span.trace_state),
         name: span.name.to_owned(),
         kind: span.kind.as_raw(),
         start_time_unix_nano: span.start_time_unix_nano,
@@ -3582,6 +3606,67 @@ mod owned_otlp_trace_tests {
             mapper().collect(&[malformed], &[]).unwrap_err(),
             OwnedOtlpTraceError::InvalidTraceState
         );
+    }
+
+    /// W3C Trace Context allows empty tracestate list members, such as a
+    /// trailing comma or ",," left where HTTP stacks join several headers.
+    /// One of them failed the whole collection with InvalidTraceState.
+    #[test]
+    fn empty_trace_state_members_are_dropped_instead_of_failing_the_collection() {
+        for (trace_state, expected) in [
+            ("rojo=00f067aa0ba902b7,", "rojo=00f067aa0ba902b7"),
+            ("a=1,,b=2", "a=1,b=2"),
+            ("a=1, \t,b=2", "a=1,b=2"),
+            ("vendor=value", "vendor=value"),
+        ] {
+            assert_eq!(canonical_trace_state(trace_state), expected);
+            let span = basic_span(ROOT_ID, "root").with_trace_state(trace_state);
+            let collection = mapper()
+                .collect(&[span], &[])
+                .unwrap_or_else(|error| panic!("{trace_state:?}: {error:?}"));
+            assert_eq!(collection.sampled_spans(), 1, "{trace_state:?}");
+        }
+
+        // A malformed non-empty member is still refused.
+        let malformed = basic_span(ROOT_ID, "root").with_trace_state("a=1,,Vendor=value");
+        assert_eq!(
+            mapper().collect(&[malformed], &[]).unwrap_err(),
+            OwnedOtlpTraceError::InvalidTraceState
+        );
+    }
+
+    /// The encoder used the wire limits' fixed 65,536-record cap. A request
+    /// inside every configured and semantic limit can need far more records:
+    /// 200 spans of 128 events and 128 links each is about 51,000 repeated
+    /// items and about 1.3 MB, but about 155,000 field records, so it failed
+    /// with WireEnvelopeExceeded under a 4 MiB request limit and the whole
+    /// collection was lost.
+    #[test]
+    fn a_span_within_the_configured_limits_encodes_within_the_byte_cap() {
+        let events: Vec<OtlpTraceEventInput<'_>> = (0..OWNED_OTLP_MAX_EVENTS_PER_SPAN)
+            .map(|index| {
+                OtlpTraceEventInput::new(200 + u64::try_from(index).expect("small index"), "event")
+            })
+            .collect();
+        let links: Vec<OtlpTraceLinkInput<'_>> = (1..=OWNED_OTLP_MAX_LINKS_PER_SPAN)
+            .map(|index| {
+                let span_id = u64::try_from(index).expect("small index").to_be_bytes();
+                OtlpTraceLinkInput::new([0x33; 16], span_id)
+            })
+            .collect();
+        let spans: Vec<OtlpTraceSpanInput<'_>> = (1..=200_u64)
+            .map(|index| {
+                let mut trace_id = TRACE_ID;
+                trace_id[..8].copy_from_slice(&index.to_be_bytes());
+                OtlpTraceSpanInput::new(trace_id, index.to_be_bytes(), "span", 100, 500)
+                    .with_events(&events)
+                    .with_links(&links)
+            })
+            .collect();
+        let collection = mapper()
+            .collect(&spans, &[])
+            .expect("a request within the configured limits encodes");
+        assert_eq!(collection.requests().len(), 1);
     }
 
     #[test]
@@ -4247,9 +4332,7 @@ impl OwnedOtlpLogs {
                 ..ExportLogsServiceRequest::default()
             };
             let bytes = request
-                .encode_to_bytes(ProtobufWireLimits::for_message_size(
-                    self.config.max_request_bytes,
-                ))
+                .encode_to_bytes(otlp_request_limits(self.config.max_request_bytes))
                 .map_err(|_| OwnedOtlpLogError::WireEnvelopeExceeded)?;
             requests.push(bytes.to_vec());
         }
@@ -5257,7 +5340,13 @@ impl LoadSheddingLogsExporter {
     pub fn process_queue(&self) -> Result<usize, ExportError> {
         let mut processed = 0;
         while let Some(batch) = self.export_queue.dequeue() {
-            self.inner.export(&batch)?;
+            if let Err(error) = self.inner.export(&batch) {
+                // The batch is already off the queue: returning with `?`
+                // dropped it uncounted, so each attempt during an outage lost
+                // one more. Keep it for the next attempt instead.
+                self.export_queue.requeue_front(batch);
+                return Err(error);
+            }
             processed += 1;
         }
         Ok(processed)
@@ -5696,6 +5785,22 @@ impl<T> BoundedExportQueue<T> {
         self.queue.lock().pop_front()
     }
 
+    /// Put back, at the front, a batch whose export failed. It is the oldest
+    /// batch, so when the queue has filled up meanwhile it is the one shed:
+    /// counted as dropped, and `false` is returned. A batch the receiver keeps
+    /// refusing is therefore evicted by later traffic rather than blocking
+    /// the queue for good.
+    pub(crate) fn requeue_front(&self, batch: T) -> bool {
+        let mut queue = self.queue.lock();
+        if queue.len() >= self.capacity {
+            self.dropped_batches
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return false;
+        }
+        queue.push_front(batch);
+        true
+    }
+
     /// Get the current queue depth.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -5771,7 +5876,13 @@ impl LoadSheddingExporter {
         let mut processed = 0;
 
         while let Some(batch) = self.export_queue.dequeue() {
-            self.inner.export(&batch)?;
+            if let Err(error) = self.inner.export(&batch) {
+                // The batch is already off the queue: returning with `?`
+                // dropped it uncounted, so each attempt during an outage lost
+                // one more. Keep it for the next attempt instead.
+                self.export_queue.requeue_front(batch);
+                return Err(error);
+            }
             processed += 1;
         }
 
@@ -10677,6 +10788,70 @@ mod exporter_tests {
 
         exporter.clear();
         assert_eq!(exporter.total_records(), 0);
+    }
+
+    /// process_queue dequeued a batch and exported it with `?`, so a batch
+    /// whose export failed was dropped uncounted: each flush during an outage
+    /// lost one more.
+    #[test]
+    fn load_shedding_logs_exporter_keeps_a_batch_whose_export_failed() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct FlakyLogsExporter {
+            fail: Arc<AtomicBool>,
+            inner: Arc<InMemoryLogsExporter>,
+        }
+        impl LogsExporter for FlakyLogsExporter {
+            fn export(&self, logs: &LogsSnapshot) -> Result<(), ExportError> {
+                if self.fail.load(Ordering::SeqCst) {
+                    return Err(ExportError::new("collector unavailable"));
+                }
+                self.inner.export(logs)
+            }
+
+            fn flush(&self) -> Result<(), ExportError> {
+                Ok(())
+            }
+        }
+
+        let fail = Arc::new(AtomicBool::new(true));
+        let memory = Arc::new(InMemoryLogsExporter::new());
+        let exporter = LoadSheddingLogsExporter::new(
+            Box::new(FlakyLogsExporter {
+                fail: Arc::clone(&fail),
+                inner: Arc::clone(&memory),
+            }),
+            10,
+        );
+        for timestamp in 1..=3 {
+            let snapshot = LogsSnapshot::new("checkout").with_record(OtlpLogRecord::new(
+                LogLevel::Info,
+                "event",
+                timestamp,
+            ));
+            exporter.export(&snapshot).expect("queued");
+        }
+        for _ in 0..3 {
+            assert!(exporter.flush().is_err(), "the collector is down");
+        }
+        let stats = exporter.load_shedding_stats();
+        assert_eq!((stats.queue_depth, stats.dropped_batches), (3, 0));
+
+        fail.store(false, Ordering::SeqCst);
+        exporter.flush().expect("the collector is back");
+        assert_eq!(memory.total_records(), 3);
+        assert_eq!(exporter.load_shedding_stats().queue_depth, 0);
+
+        // A failed batch put back into a queue that filled up meanwhile is the
+        // oldest, so it is the one shed, and it is counted.
+        let queue = BoundedExportQueue::new(2);
+        queue.enqueue(1);
+        queue.enqueue(2);
+        let failed = queue.dequeue().expect("oldest batch");
+        queue.enqueue(3);
+        assert!(!queue.requeue_front(failed));
+        assert_eq!(queue.dropped_count(), 1);
+        assert_eq!(queue.dequeue(), Some(2));
     }
 
     #[test]

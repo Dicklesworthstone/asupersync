@@ -144,6 +144,14 @@ impl<E: fmt::Display> fmt::Display for QuorumError<E> {
             }
             Self::Cancelled(r) => write!(f, "quorum cancelled: {r}"),
             Self::Panicked(p) => write!(f, "quorum panicked: {p}"),
+            // Scope::quorum also refuses needed == 0, which does not exceed
+            // anything.
+            Self::InvalidQuorum { required: 0, total } => {
+                write!(
+                    f,
+                    "invalid quorum: required 0 of {total}, at least 1 success must be required"
+                )
+            }
             Self::InvalidQuorum { required, total } => {
                 write!(
                     f,
@@ -811,6 +819,15 @@ mod tests {
             total: 3,
         };
         assert!(err.to_string().contains("invalid quorum"));
+
+        // needed == 0 (refused by Scope::quorum) said "required 0 exceeds total 3".
+        let err: QuorumError<&str> = QuorumError::InvalidQuorum {
+            required: 0,
+            total: 3,
+        };
+        let text = err.to_string();
+        assert!(text.contains("invalid quorum"), "{text}");
+        assert!(!text.contains("exceeds"), "{text}");
     }
 
     #[test]

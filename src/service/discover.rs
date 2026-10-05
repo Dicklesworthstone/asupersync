@@ -855,6 +855,29 @@ impl DnsServiceDiscovery {
     }
 }
 
+/// Armed around the resolver call and forgotten when it returns; dropped
+/// only while a resolver panic unwinds.
+struct ReleaseInFlightOnUnwind<'a> {
+    discovery: &'a DnsServiceDiscovery,
+    generation: u64,
+}
+
+impl Drop for ReleaseInFlightOnUnwind<'_> {
+    fn drop(&mut self) {
+        let mut state = self.discovery.state.lock();
+        if state.in_flight_generation == Some(self.generation) {
+            state.in_flight_generation = None;
+        }
+        state.error_count += 1;
+        state.last_resolution_error = Some(StoredDnsError::from_error(
+            self.generation,
+            &std::io::Error::other("dns discovery resolver panicked"),
+        ));
+        drop(state);
+        self.discovery.resolve_done.notify_all();
+    }
+}
+
 impl Discover for DnsServiceDiscovery {
     type Key = SocketAddr;
     type Error = DnsDiscoveryError;
@@ -897,7 +920,15 @@ impl Discover for DnsServiceDiscovery {
             state.resolve_generation
         };
 
+        // If the resolver panics, the in-flight slot must still be released:
+        // otherwise every waiting follower, and every later poll, would wait
+        // on `resolve_done` for a resolution that never finishes.
+        let unwind = ReleaseInFlightOnUnwind {
+            discovery: self,
+            generation: resolve_generation,
+        };
         let resolution = self.resolve();
+        std::mem::forget(unwind);
         let mut state = self.state.lock();
         state.in_flight_generation = None;
         let result = match resolution {
@@ -1395,6 +1426,42 @@ mod tests {
         );
         assert_eq!(discovery.resolve_count(), 1);
         crate::test_complete!("dns_discovery_custom_resolver_can_reenter_without_deadlock");
+    }
+
+    #[test]
+    fn dns_discovery_recovers_after_a_resolver_panic() {
+        init_test("dns_discovery_recovers_after_a_resolver_panic");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_resolver = Arc::clone(&calls);
+        let discovery = Arc::new(DnsServiceDiscovery::new(
+            DnsDiscoveryConfig::new("service.test", 80)
+                .poll_interval(Duration::ZERO)
+                .with_resolver(move |_, _| {
+                    if calls_for_resolver.fetch_add(1, Ordering::SeqCst) == 0 {
+                        panic!("resolver bug");
+                    }
+                    Ok(socket_set(&["127.0.0.1:80"]))
+                }),
+        ));
+
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = discovery.poll_discover();
+        }));
+        assert!(panicked.is_err(), "the resolver panic propagates");
+
+        // The in-flight slot was left set, so the next poll waited forever
+        // for a resolution that would never finish.
+        let (tx, rx) = mpsc::channel();
+        let next = Arc::clone(&discovery);
+        thread::spawn(move || {
+            let _ = tx.send(next.poll_discover());
+        });
+        let result = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the next poll must not block after a resolver panic");
+        let changes = result.expect("the next resolution succeeds");
+        assert_eq!(changes.len(), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]

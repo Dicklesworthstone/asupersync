@@ -48,7 +48,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use std::collections::HashSet;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 
@@ -66,12 +65,6 @@ const MAX_CONSUMER_NAME_CHARS: usize = 128;
 /// JetStream stream subjects are regular NATS subscription patterns and share
 /// the same practical size ceiling as the underlying NATS parser.
 const MAX_STREAM_SUBJECT_BYTES: usize = 4 * 1024;
-
-/// Anti-replay token timeout in seconds - ack tokens expire after this duration
-const ACK_TOKEN_TIMEOUT_SECS: u64 = 300; // 5 minutes
-
-/// Maximum number of recent ack tokens to track for replay prevention
-const MAX_ACK_TOKEN_HISTORY: usize = 10000;
 
 /// Pull rate limiting: minimum interval between consecutive pull requests per consumer (ms)
 const MIN_PULL_INTERVAL_MS: u64 = 50; // 20 requests/second max per consumer
@@ -102,12 +95,14 @@ const GLOBAL_PULL_RATE_LIMIT: u64 = 1000;
 /// recommendation.
 const MAX_PULL_BATCH: usize = 1024;
 
-/// Anti-replay tracker for JetStream acknowledgment tokens.
-/// Maintains a set of recently used ack tokens to prevent replay attacks.
-#[derive(Debug)]
-struct AckTokenTracker {
-    /// Set of recently used ack tokens with their expiry timestamps
-    used_tokens: Mutex<HashSet<(String, u64)>>, // (token_hash, expires_at)
+/// Inbox room for a pull's status replies (404/408/409...) beyond its batch.
+const PULL_INBOX_STATUS_SLACK: usize = 8;
+
+/// Messages a pull's inbox buffers: the whole batch plus its status replies,
+/// since a supervised client dispatches what the server sends before the pull
+/// drains the inbox, and a full inbox drops messages.
+fn pull_inbox_capacity(batch: usize) -> usize {
+    batch.saturating_add(PULL_INBOX_STATUS_SLACK)
 }
 
 /// Pull request rate limiter to prevent DoS via rapid pull requests.
@@ -138,66 +133,6 @@ struct GlobalPullRateTracker {
 /// Global pull rate tracker for system-wide DoS protection
 static GLOBAL_PULL_RATE_TRACKER: std::sync::LazyLock<Mutex<GlobalPullRateTracker>> =
     std::sync::LazyLock::new(|| Mutex::new(GlobalPullRateTracker::new()));
-
-/// Global token tracker for anti-replay protection
-#[allow(dead_code)]
-static GLOBAL_ACK_TOKEN_TRACKER: std::sync::LazyLock<AckTokenTracker> =
-    std::sync::LazyLock::new(AckTokenTracker::new);
-
-impl AckTokenTracker {
-    fn new() -> Self {
-        Self {
-            used_tokens: Mutex::new(HashSet::new()),
-        }
-    }
-
-    /// Check if a token has been used and mark it as used if not.
-    /// Returns true if the token is valid (not replayed), false if it's a replay.
-    fn validate_and_mark_token(&self, token: &str, timestamp: u64) -> bool {
-        let now = wall_now().as_nanos() / 1_000_000_000; // Current time in seconds
-        let token_hash = self.hash_token(token);
-
-        // Clean expired tokens first
-        self.cleanup_expired_tokens(now);
-
-        let mut tokens = self.used_tokens.lock().unwrap();
-
-        // Check if token is already used (replay attempt)
-        if tokens.iter().any(|(hash, _)| hash == &token_hash) {
-            return false; // Replay detected
-        }
-
-        // Check if token is expired
-        if now > timestamp + ACK_TOKEN_TIMEOUT_SECS {
-            return false; // Expired token
-        }
-
-        // Mark token as used
-        if tokens.len() >= MAX_ACK_TOKEN_HISTORY {
-            // Remove oldest entries to prevent unbounded growth
-            let min_timestamp = tokens.iter().map(|(_, ts)| *ts).min().unwrap_or(0);
-            tokens.retain(|(_, ts)| *ts > min_timestamp);
-        }
-
-        tokens.insert((token_hash, timestamp + ACK_TOKEN_TIMEOUT_SECS));
-        true
-    }
-
-    fn cleanup_expired_tokens(&self, now: u64) {
-        let mut tokens = self.used_tokens.lock().unwrap();
-        tokens.retain(|(_, expires_at)| *expires_at > now);
-    }
-
-    fn hash_token(&self, token: &str) -> String {
-        // Simple hash for token deduplication
-        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-        for byte in token.as_bytes() {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        format!("{hash:016x}")
-    }
-}
 
 impl PullRateLimiter {
     fn new() -> Self {
@@ -314,22 +249,41 @@ impl GlobalPullRateTracker {
         self.buffer_position = (self.buffer_position + 1) % self.recent_pulls.len();
         self.estimated_memory_usage = new_memory_usage;
 
-        // Cleanup old memory usage estimates (rough approximation)
-        if self.buffer_position % 100 == 0 {
-            self.estimated_memory_usage = self
-                .estimated_memory_usage
-                .saturating_sub(estimated_batch_memory * 50);
-        }
-
         Ok(())
+    }
+
+    /// Give back a finished pull's estimate. The estimate used to be trimmed
+    /// by only half a pull's worth per pull, so it grew without bound and,
+    /// after a few thousand pulls, refused every pull in the process.
+    fn release(&mut self, estimated_batch_memory: u64) {
+        self.estimated_memory_usage = self
+            .estimated_memory_usage
+            .saturating_sub(estimated_batch_memory);
     }
 }
 
-/// Global ack token tracker to prevent replay attacks across all consumers
-static ACK_TOKEN_TRACKER: std::sync::OnceLock<AckTokenTracker> = std::sync::OnceLock::new();
+/// The local flow-control bound for a consumer's `max_ack_pending`.
+/// JetStream uses -1 for "unlimited" (and 0 for "server default"); clamping
+/// those to 1 made each pull keep its first message and drop the rest
+/// without a NAK.
+fn local_max_ack_pending(server_value: i64) -> usize {
+    usize::try_from(server_value)
+        .ok()
+        .filter(|&limit| limit > 0)
+        .unwrap_or(usize::MAX)
+}
 
-fn get_ack_token_tracker() -> &'static AckTokenTracker {
-    ACK_TOKEN_TRACKER.get_or_init(AckTokenTracker::new)
+/// A pull's share of the global memory estimate, released when the pull
+/// completes, fails or is dropped.
+struct GlobalPullReservation(u64);
+
+impl Drop for GlobalPullReservation {
+    fn drop(&mut self) {
+        GLOBAL_PULL_RATE_TRACKER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .release(self.0);
+    }
 }
 
 fn redacted_name_fingerprint(value: &str) -> String {
@@ -1058,7 +1012,11 @@ impl ConsumerConfig {
         if let Some(ref name) = self.name {
             parts.push(format!("\"name\":\"{}\"", json_escape(name)));
         }
-        if let Some(ref durable) = self.durable_name {
+        // The server makes a consumer durable only when durable_name is set;
+        // with name alone it is a named ephemeral consumer, deleted after its
+        // inactivity threshold (5 s by default). A named consumer here is
+        // documented as durable, so it carries durable_name too.
+        if let Some(durable) = self.durable_name.as_ref().or(self.name.as_ref()) {
             parts.push(format!("\"durable_name\":\"{}\"", json_escape(durable)));
         }
         if let Some(ref deliver_subject) = self.deliver_subject {
@@ -1523,7 +1481,7 @@ impl JetStreamContext {
             name,
             prefix: self.prefix.clone(),
             pending_acks: Arc::new(AtomicUsize::new(0)),
-            max_ack_pending: config.max_ack_pending.max(1) as usize,
+            max_ack_pending: local_max_ack_pending(config.max_ack_pending),
             pull_rate_limiter: PullRateLimiter::new(),
         })
     }
@@ -1546,9 +1504,9 @@ impl JetStreamContext {
         }
 
         // Extract max_ack_pending from consumer info response, fallback to default
-        let max_ack_pending = extract_json_i64_simple(&response_str, "max_ack_pending")
-            .unwrap_or(1000)
-            .max(1) as usize;
+        let max_ack_pending = local_max_ack_pending(
+            extract_json_i64_simple(&response_str, "max_ack_pending").unwrap_or(1000),
+        );
 
         Ok(Consumer {
             stream: stream.to_string(),
@@ -1848,6 +1806,7 @@ impl Consumer {
                 )));
             }
         }
+        let _reservation = GlobalPullReservation(estimated_batch_memory);
 
         let subject = format!(
             "{}.CONSUMER.MSG.NEXT.{}.{}",
@@ -1863,9 +1822,14 @@ impl Consumer {
         };
         let request = build_pull_request_json(effective_batch, expires, None);
 
-        // Subscribe to get batch responses
+        // Subscribe to get batch responses. A message dropped by a full inbox
+        // is redelivered only after ack_wait, or lost with AckNone.
         let mut sub = client
-            .subscribe(cx, &format!("_INBOX.{}", random_id(cx)))
+            .subscribe_with_capacity(
+                cx,
+                &format!("_INBOX.{}", random_id(cx)),
+                pull_inbox_capacity(effective_batch),
+            )
             .await?;
         let sid = sub.sid();
         if let Err(err) = client
@@ -1899,6 +1863,24 @@ impl Consumer {
                 let Some(msg) = sub.try_next() else {
                     break;
                 };
+                // Status replies carry no reply subject, so they were taken
+                // for foreign messages and the pull waited out its timeout,
+                // returning no error even for a deleted consumer.
+                match super::nats::status_reply(&msg) {
+                    // No messages (404), or the request expired on the server
+                    // (408): the pull is over and returns what it has.
+                    Some((404 | 408, _)) => {
+                        pull_state.observe_request_end();
+                        continue;
+                    }
+                    // 409 (consumer deleted, a pull limit exceeded), 503 (no
+                    // JetStream responders) and the rest fail the pull.
+                    Some((_, error)) => {
+                        pull_state.observe_error(JsError::Nats(error));
+                        continue;
+                    }
+                    None => {}
+                }
                 if let Some(js_msg) = Self::parse_js_message(msg, Some(self.pending_acks.clone())) {
                     // Flow control: check if we can accept this message
                     if self.increment_pending() {
@@ -1976,10 +1958,21 @@ impl Consumer {
             return None;
         }
 
-        // Parse from the tail: pending(-1), timestamp(-2), consumer_seq(-3),
-        // stream_seq(-4), delivered(-5).
-        let delivered: u32 = parts[parts.len() - 5].parse().ok()?;
-        let sequence: u64 = parts[parts.len() - 4].parse().ok()?;
+        // The v2 form, $JS.ACK.<domain>.<account hash>.<stream>.<consumer>.
+        // <delivered>.<stream_seq>.<consumer_seq>.<timestamp>.<pending>.<token>,
+        // has at least 12 tokens and ends in a random token. Read from the tail,
+        // it put the stream sequence in `delivered` (dropping the message once
+        // it no longer fit a u32) and the consumer sequence in `sequence`. As
+        // nats.go does, 12 or more tokens are read by position. Shorter
+        // subjects are read from the tail: pending(-1), timestamp(-2),
+        // consumer_seq(-3), stream_seq(-4), delivered(-5).
+        let (delivered, sequence) = if parts.len() >= 12 {
+            (parts[6], parts[7])
+        } else {
+            (parts[parts.len() - 5], parts[parts.len() - 4])
+        };
+        let delivered: u32 = delivered.parse().ok()?;
+        let sequence: u64 = sequence.parse().ok()?;
 
         Some(JsMessage {
             subject: msg.subject,
@@ -2054,6 +2047,13 @@ impl PullSubscriberState {
     }
 
     fn observe_ignored_message(&mut self) {}
+
+    /// The server ended the pull request (no messages, or it expired).
+    fn observe_request_end(&mut self) {
+        if self.is_active() {
+            self.termination = PullSubscriberTermination::Completed;
+        }
+    }
 
     fn observe_process_ready(&mut self) {}
 
@@ -2920,20 +2920,21 @@ impl JsMessage {
             }
         }
 
-        // Generate anti-replay protected ack token
-        let (protected_reply_subject, ack_token) = self.generate_protected_ack_token();
+        // If this future is dropped mid-publish (a timeout, a cancelled
+        // select), the reservation is rolled back: left in flight, every later
+        // ack returned AlreadyAcknowledged and the pending credit was never
+        // released.
+        let _reservation = InFlightAck {
+            state: &self.ack_state,
+            in_flight,
+        };
 
-        // Validate the ack token to prevent replay attacks
-        let now = wall_now().as_nanos() / 1_000_000_000;
-        let tracker = get_ack_token_tracker();
-        if !tracker.validate_and_mark_token(&ack_token, now) {
-            return Err(JsError::InvalidConfig(
-                "Acknowledgment token replay detected or expired".to_string(),
-            ));
-        }
-
+        // The server takes acks only on the reply subject exactly as delivered:
+        // it subscribes `$JS.ACK.<stream>.<consumer>` plus five tokens. A
+        // subject with anything appended matched no subscription, so every
+        // ack, nak and term was dropped while this call returned Ok.
         match client
-            .publish(cx, &protected_reply_subject, payload.as_ref())
+            .publish(cx, &self.reply_subject, payload.as_ref())
             .await
         {
             Ok(()) => {
@@ -2950,91 +2951,25 @@ impl JsMessage {
             }
         }
     }
+}
 
-    /// Generate a cryptographically protected ack token to prevent replay attacks.
-    /// Returns (protected_reply_subject, ack_token).
-    fn generate_protected_ack_token(&self) -> (String, String) {
-        let now = wall_now().as_nanos() / 1_000_000_000; // Current time in seconds
+/// Returns a terminal-ack reservation to pending when it is dropped still in
+/// flight, that is, when the publishing future was dropped before the publish
+/// finished. A finished publish has already stored the outcome, so the guard
+/// then does nothing.
+struct InFlightAck<'a> {
+    state: &'a AtomicU8,
+    in_flight: u8,
+}
 
-        // Generate a secure random nonce using the system entropy
-        let nonce = self.generate_secure_nonce();
-
-        // Create ack token with timestamp, sequence, delivery count, and nonce
-        let ack_token = format!(
-            "{}.{}.{}.{}.{}",
-            now,
-            self.sequence,
-            self.delivered,
-            nonce,
-            self.hash_reply_subject_components()
+impl Drop for InFlightAck<'_> {
+    fn drop(&mut self) {
+        let _ = self.state.compare_exchange(
+            self.in_flight,
+            ACK_STATE_PENDING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
         );
-
-        // Create HMAC-protected reply subject
-        let hmac = self.generate_ack_token_hmac(&ack_token);
-        let protected_reply_subject = format!("{}.{}", self.reply_subject, hmac);
-
-        (protected_reply_subject, ack_token)
-    }
-
-    /// Generate a secure random nonce for anti-replay protection.
-    fn generate_secure_nonce(&self) -> u64 {
-        // Use sequence and delivered count as seed with current time for deterministic but unique nonce
-        let mut hasher = 0xcbf2_9ce4_8422_2325_u64;
-        let now = wall_now().as_nanos();
-
-        // Mix in sequence, delivered count, and current time
-        hasher ^= self.sequence;
-        hasher = hasher.wrapping_mul(0x0000_0100_0000_01b3);
-        hasher ^= u64::from(self.delivered);
-        hasher = hasher.wrapping_mul(0x0000_0100_0000_01b3);
-        hasher ^= now;
-        hasher = hasher.wrapping_mul(0x0000_0100_0000_01b3);
-
-        // Mix in reply subject for additional entropy
-        for byte in self.reply_subject.as_bytes() {
-            hasher ^= u64::from(*byte);
-            hasher = hasher.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-
-        hasher
-    }
-
-    /// Generate HMAC for ack token integrity protection.
-    fn generate_ack_token_hmac(&self, token: &str) -> String {
-        // Simple HMAC-like construction using the reply subject as key
-        let mut hasher = 0xa5a5_a5a5_a5a5_a5a5_u64;
-
-        // Mix in the reply subject as secret key material
-        for byte in self.reply_subject.as_bytes() {
-            hasher ^= u64::from(*byte);
-            hasher = hasher.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-
-        // Mix in the token data
-        for byte in token.as_bytes() {
-            hasher ^= u64::from(*byte);
-            hasher = hasher.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-
-        format!("{hasher:016x}")
-    }
-
-    /// Hash reply subject components for additional verification.
-    fn hash_reply_subject_components(&self) -> u64 {
-        let mut hasher = 0xfeed_face_cafe_babe_u64;
-
-        // Hash subject and reply_subject together
-        for byte in self.subject.as_bytes() {
-            hasher ^= u64::from(*byte);
-            hasher = hasher.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-
-        for byte in self.reply_subject.as_bytes() {
-            hasher ^= u64::from(*byte);
-            hasher = hasher.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-
-        hasher
     }
 }
 
@@ -3497,7 +3432,19 @@ mod tests {
         assert_eq!(cfg.name.as_deref(), Some("worker_1"));
         assert!(cfg.durable_name.is_none());
         assert!(cfg.to_json().contains("\"name\":\"worker_1\""));
-        assert!(!cfg.to_json().contains("durable_name"));
+        // Without durable_name the server creates a named ephemeral consumer
+        // and deletes it after 5 s of inactivity.
+        assert_eq!(
+            cfg.to_json()
+                .matches("\"durable_name\":\"worker_1\"")
+                .count(),
+            1
+        );
+        assert!(
+            !ConsumerConfig::ephemeral()
+                .to_json()
+                .contains("durable_name")
+        );
     }
 
     #[test]
@@ -4629,6 +4576,36 @@ mod tests {
         assert_eq!(js_msg.sequence, 42);
     }
 
+    /// The pull inbox used the subscription default of 256 messages, so a
+    /// supervised client that dispatched a larger batch before the pull drained
+    /// the inbox dropped the rest.
+    #[test]
+    fn a_pull_inbox_holds_a_whole_batch_and_its_status_replies() {
+        for batch in [1, 256, 257, MAX_PULL_BATCH] {
+            assert!(pull_inbox_capacity(batch) > batch, "batch {batch}");
+        }
+    }
+
+    /// The v2 ack subject carries a domain and an account hash in front and a
+    /// random token at the end. Read from the tail, its stream sequence became
+    /// `delivered` and its consumer sequence became `sequence`.
+    #[test]
+    fn parse_js_message_v2_ack_subject() {
+        let reply =
+            "$JS.ACK.hub.ACC9H4SH.orders.processor.3.4294967396.14.1713790000000001234.2.rTk9";
+        let msg = Message {
+            subject: "orders.created".to_string(),
+            sid: 1,
+            headers: None,
+            payload: b"order".to_vec(),
+            reply_to: Some(reply.to_string()),
+        };
+        let js_msg = Consumer::parse_js_message(msg, None).expect("a v2 ack subject parses");
+        assert_eq!(js_msg.delivered, 3);
+        assert_eq!(js_msg.sequence, 4_294_967_396);
+        assert_eq!(js_msg.reply_subject, reply);
+    }
+
     #[test]
     fn parse_js_message_simple_names() {
         // Baseline: standard 9-segment ACK subject still works
@@ -4781,6 +4758,8 @@ mod tests {
             reply_subject: String,
             payload: Vec<u8>,
         },
+        /// A header-only status reply such as `NATS/1.0 409 Consumer Deleted`.
+        Status(&'static str),
     }
 
     fn read_crlf_line(stream: &mut std::net::TcpStream) -> Vec<u8> {
@@ -5017,6 +4996,17 @@ mod tests {
                         .expect("write pull response terminator");
                     stream.flush().expect("flush pull response");
                 }
+                DeterministicServerReply::Status(status_line) => {
+                    let headers = format!("{status_line}\r\n\r\n");
+                    let frame = format!(
+                        "HMSG {inbox} {sid} {len} {len}\r\n{headers}\r\n",
+                        len = headers.len()
+                    );
+                    stream
+                        .write_all(frame.as_bytes())
+                        .expect("write status reply");
+                    stream.flush().expect("flush status reply");
+                }
             }
 
             let unsubscribe = String::from_utf8(read_crlf_line(&mut stream)).expect("UNSUB utf8");
@@ -5087,6 +5077,222 @@ mod tests {
             transcript.publishes.is_empty(),
             "emergency pressure refusal must happen before any PUB frame"
         );
+    }
+
+    /// The server subscribes `$JS.ACK.<stream>.<consumer>` plus exactly five
+    /// tokens. Acks went to the reply subject with an extra token appended,
+    /// which matched nothing, so every ack, nak and term was dropped.
+    #[test]
+    fn acks_are_published_to_the_reply_subject_as_delivered() {
+        const REPLY: &str = "$JS.ACK.ORDERS.processor.1.42.7.1713790000000000000.0";
+        let transcript = capture_publish_transcript(3, |cx, addr| async move {
+            let mut client = NatsClient::connect_with_config(
+                &cx,
+                NatsConfig {
+                    host: addr.ip().to_string(),
+                    port: addr.port(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("connect ack protocol server");
+            let message = || JsMessage {
+                subject: "orders.created".to_string(),
+                payload: b"order".to_vec(),
+                sequence: 42,
+                delivered: 1,
+                reply_subject: REPLY.to_string(),
+                ack_state: AtomicU8::new(ACK_STATE_PENDING),
+                pending_acks: None,
+            };
+            message().ack(&mut client, &cx).await.expect("ack");
+            message().nack(&mut client, &cx).await.expect("nak");
+            message().term(&mut client, &cx).await.expect("term");
+        });
+
+        let sent: Vec<_> = transcript
+            .publishes
+            .iter()
+            .map(|publish| (publish.subject.as_str(), publish.payload.as_slice()))
+            .collect();
+        assert_eq!(
+            sent,
+            vec![
+                (REPLY, b"+ACK".as_slice()),
+                (REPLY, b"-NAK".as_slice()),
+                (REPLY, b"+TERM".as_slice()),
+            ]
+        );
+    }
+
+    /// A pull answered with a status reply waited out its whole timeout and
+    /// returned Ok with no messages, even for a deleted consumer: status
+    /// replies carry no reply subject and were skipped as foreign messages.
+    #[test]
+    fn pull_ends_on_a_jetstream_status_reply() {
+        let pull = |status: &'static str| {
+            let outcome = Arc::new(parking_lot::Mutex::new(None));
+            let seen = Arc::clone(&outcome);
+            capture_wire_transcript(
+                DeterministicServerReply::Status(status),
+                move |cx, addr| async move {
+                    let mut client = NatsClient::connect_with_config(
+                        &cx,
+                        NatsConfig {
+                            host: addr.ip().to_string(),
+                            port: addr.port(),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .expect("connect status server");
+                    let consumer = Consumer {
+                        stream: "ORDERS".to_string(),
+                        name: "processor".to_string(),
+                        prefix: "$JS.API".to_string(),
+                        pending_acks: Arc::new(AtomicUsize::new(0)),
+                        max_ack_pending: 1000,
+                        pull_rate_limiter: PullRateLimiter::new(),
+                    };
+                    let started = Instant::now();
+                    let result = consumer
+                        .pull_with_timeout(&mut client, &cx, 1, Duration::from_secs(4))
+                        .await
+                        .map(|messages| messages.len());
+                    *seen.lock() = Some((result, started.elapsed()));
+                },
+            );
+            outcome.lock().take().expect("pull finished")
+        };
+
+        let (deleted, _) = pull("NATS/1.0 409 Consumer Deleted");
+        match deleted {
+            Err(JsError::Nats(NatsError::Server(text))) => {
+                assert!(text.contains("409"), "{text}");
+            }
+            other => panic!("a deleted consumer must fail the pull, got {other:?}"),
+        }
+
+        let (expired, waited) = pull("NATS/1.0 408 Request Timeout");
+        assert_eq!(expired.expect("an expired request ends the pull"), 0);
+        assert!(
+            waited < Duration::from_secs(2),
+            "the pull waited {waited:?} after the server ended the request"
+        );
+    }
+
+    /// A dropped ack() (a timeout, a lost select) left the message in
+    /// flight: every later ack returned AlreadyAcknowledged and the pending
+    /// credit was never released.
+    #[test]
+    fn a_dropped_ack_can_be_sent_again() {
+        use std::io::{BufRead, Write};
+        const REPLY: &str = "$JS.ACK.ORDERS.processor.1.42.7.1713790000000000000.0";
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ack listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept ack client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(15)))
+                .expect("set read timeout");
+            stream
+                .write_all(
+                    b"INFO {\"server_id\":\"test\",\"version\":\"2.9.0\",\"proto\":1,\"max_payload\":1048576}\r\n",
+                )
+                .expect("write INFO");
+            stream.flush().expect("flush INFO");
+            let mut reader = std::io::BufReader::new(stream);
+            let mut lines = Vec::new();
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break lines,
+                    Ok(_) => lines.push(line.trim_end().to_string()),
+                }
+            }
+        });
+
+        let runtime = crate::runtime::RuntimeBuilder::new()
+            .worker_threads(1)
+            .build()
+            .expect("build runtime");
+        let pending = Arc::new(AtomicUsize::new(1));
+        let task_pending = Arc::clone(&pending);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let task = runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("runtime task context");
+            let mut client = NatsClient::connect_with_config(
+                &cx,
+                NatsConfig {
+                    host: addr.ip().to_string(),
+                    port: addr.port(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("connect supervised client");
+            let message = JsMessage {
+                subject: "orders.created".to_string(),
+                payload: b"order".to_vec(),
+                sequence: 42,
+                delivered: 1,
+                reply_subject: REPLY.to_string(),
+                ack_state: AtomicU8::new(ACK_STATE_PENDING),
+                pending_acks: Some(task_pending),
+            };
+            {
+                let mut ack = std::pin::pin!(message.ack(&mut client, &cx));
+                let mut poll_cx = std::task::Context::from_waker(std::task::Waker::noop());
+                assert!(
+                    std::future::Future::poll(ack.as_mut(), &mut poll_cx).is_pending(),
+                    "the ack waits for the supervisor"
+                );
+            }
+            let acked_after_drop = message.is_acked();
+            let again = message.ack(&mut client, &cx).await;
+            client.close(&cx).await.expect("close supervised client");
+            let _ = done_tx.send((acked_after_drop, again.is_ok()));
+        });
+
+        let outcome = done_rx.recv_timeout(Duration::from_secs(10));
+        let lines = server.join().expect("ack server joined");
+        drop(task);
+        let drained = runtime.shutdown_timeout(Duration::from_secs(3));
+        assert_eq!(
+            outcome,
+            Ok((false, true)),
+            "(acked after the dropped ack, the second ack succeeded)"
+        );
+        assert_eq!(
+            pending.load(Ordering::SeqCst),
+            0,
+            "the pending credit is released once"
+        );
+        let publishes = lines
+            .iter()
+            .filter(|line| line.starts_with(&format!("PUB {REPLY} ")))
+            .count();
+        assert_eq!(publishes, 1, "{lines:?}");
+        assert!(drained, "ack runtime did not drain");
+    }
+
+    /// JetStream reports an unlimited max_ack_pending as -1. It was clamped
+    /// to 1, so each pull kept its first message and dropped the rest.
+    #[test]
+    fn unlimited_max_ack_pending_does_not_drop_pulled_messages() {
+        assert_eq!(local_max_ack_pending(-1), usize::MAX);
+        assert_eq!(local_max_ack_pending(0), usize::MAX);
+        assert_eq!(local_max_ack_pending(5), 5);
+        let consumer = Consumer {
+            stream: "ORDERS".to_string(),
+            name: "processor".to_string(),
+            prefix: "$JS.API".to_string(),
+            pending_acks: Arc::new(AtomicUsize::new(0)),
+            max_ack_pending: local_max_ack_pending(-1),
+            pull_rate_limiter: PullRateLimiter::new(),
+        };
+        assert!(consumer.increment_pending());
+        assert!(consumer.increment_pending());
     }
 
     #[test]
@@ -6247,6 +6453,22 @@ mod tests {
                 successful_requests <= GLOBAL_PULL_RATE_LIMIT as usize,
                 "Should not exceed global rate limit"
             );
+        }
+
+        #[test]
+        fn global_tracker_estimate_returns_to_zero_as_pulls_finish() {
+            // Each pull's estimate used to be trimmed by only half its size,
+            // so the estimate grew until every pull in the process was refused
+            // (after about 5,000 pulls of 100 messages).
+            let mut tracker = GlobalPullRateTracker::new();
+            let batch_memory = 100 * 2048;
+            for i in 0..10_000_u64 {
+                tracker
+                    .check_global_pull_request(i * 1_000_000_000, batch_memory)
+                    .expect("a finished pull frees its estimate");
+                tracker.release(batch_memory);
+            }
+            assert_eq!(tracker.estimated_memory_usage, 0);
         }
 
         #[test]

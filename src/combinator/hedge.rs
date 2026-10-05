@@ -600,30 +600,38 @@ pub struct HedgeFuture<Prim, Back, F> {
     backup_factory: Option<F>,
     backup: Option<Back>,
     timer: Option<Sleep>,
+    timer_armed: bool,
     config: HedgeConfig,
     completed: bool,
 }
 
 impl<Prim, Back, F> HedgeFuture<Prim, Back, F> {
     fn new(config: HedgeConfig, primary: Prim, backup_factory: F) -> Self {
-        // Start timer immediately
-        let timer = {
-            let now = Cx::current().map_or_else(crate::time::wall_now, |current| {
-                current
-                    .timer_driver()
-                    .map_or_else(crate::time::wall_now, |driver| driver.now())
-            });
-            Sleep::after(now, config.hedge_delay)
-        };
-
         Self {
             primary: Some(primary),
             backup_factory: Some(backup_factory),
             backup: None,
-            timer: Some(timer),
+            timer: None,
+            timer_armed: false,
             config,
             completed: false,
         }
+    }
+
+    /// Starts the hedge delay. It runs from the first poll, when the primary
+    /// starts: armed at construction, a future first polled after its delay
+    /// launched the backup together with the primary.
+    fn arm_timer(&mut self) {
+        if self.timer_armed {
+            return;
+        }
+        self.timer_armed = true;
+        let now = Cx::current().map_or_else(crate::time::wall_now, |current| {
+            current
+                .timer_driver()
+                .map_or_else(crate::time::wall_now, |driver| driver.now())
+        });
+        self.timer = Some(Sleep::after(now, self.config.hedge_delay));
     }
 
     fn finish_cancelled<T, E>(&mut self, reason: CancelReason) -> HedgeResult<T, E> {
@@ -686,6 +694,8 @@ where
         if let Some(reason) = ambient_cancel_reason() {
             return Poll::Ready(this.finish_cancelled(reason));
         }
+
+        this.arm_timer();
 
         // Poll primary if present
         if let Some(primary) = &mut this.primary {
@@ -1413,6 +1423,54 @@ mod tests {
         if let Outcome::Ok(v) = result.winner_outcome() {
             assert_eq!(*v, 2);
         }
+    }
+
+    /// The hedge delay ran from construction: a hedge built 150 ms before its
+    /// first poll, with a 100 ms delay, started the backup on that first poll.
+    #[test]
+    fn hedge_delay_runs_from_the_first_poll() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, RegionId, TaskId};
+
+        let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(TimerDriverHandle::with_virtual_clock(Arc::clone(&clock))),
+            None,
+        );
+        let _current = Cx::set_current(Some(cx));
+
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&factory_calls);
+        let mut future = hedge(
+            HedgeConfig::from_millis(100),
+            std::future::pending::<Outcome<i32, ()>>(),
+            move || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                std::future::pending::<Outcome<i32, ()>>()
+            },
+        );
+
+        clock.advance(150_000_000);
+        assert!(poll_once(&mut future).is_pending());
+        assert_eq!(
+            factory_calls.load(Ordering::Relaxed),
+            0,
+            "the backup started before the delay had passed since the first poll"
+        );
+
+        clock.advance(99_000_000);
+        assert!(poll_once(&mut future).is_pending());
+        assert_eq!(factory_calls.load(Ordering::Relaxed), 0);
+
+        clock.advance(1_000_000);
+        assert!(poll_once(&mut future).is_pending());
+        assert_eq!(factory_calls.load(Ordering::Relaxed), 1);
     }
 
     #[test]

@@ -26,9 +26,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Poll;
 use std::time::Duration;
 
+use asupersync::CancelReason;
 use asupersync::combinator::timeout::{TimedError, TimedResult};
 use asupersync::cx::Cx;
-use asupersync::runtime::RuntimeBuilder;
+use asupersync::runtime::{RuntimeBuilder, yield_now};
 
 /// Parks (self-waking) until the task's own context has been cancelled.
 async fn park_until_cancelled(task_cx: &Cx) {
@@ -117,6 +118,49 @@ fn overrunning_operation_is_cancelled_and_drained_before_return() {
     assert_eq!(
         cleanup_seen_at_return, 1,
         "the drained task's cleanup must have run before Scope::timeout returned"
+    );
+}
+
+/// When the caller is cancelled, the operation must see the caller's reason.
+/// The timer's cancel-aware poll completed on the caller's cancellation
+/// before the caller's checkpoint was checked, so it was treated as the
+/// deadline and the operation was aborted with `Timeout`.
+#[test]
+fn caller_cancellation_reaches_the_operation_as_the_callers_reason() {
+    let seen = Arc::new(std::sync::Mutex::new(None::<String>));
+    let seen_by_operation = Arc::clone(&seen);
+    let started = Arc::new(AtomicUsize::new(0));
+    let started_by_operation = Arc::clone(&started);
+    run_on_production(move |cx| async move {
+        let mut owner = cx
+            .spawn(move |owner_cx| async move {
+                let _ = owner_cx
+                    .scope()
+                    .timeout::<u32, String, _, _>(
+                        &owner_cx,
+                        Duration::from_secs(30),
+                        move |task_cx| async move {
+                            started_by_operation.store(1, Ordering::SeqCst);
+                            park_until_cancelled(&task_cx).await;
+                            *seen_by_operation.lock().expect("record reason") = task_cx
+                                .cancel_reason()
+                                .map(|reason| format!("{:?}", reason.kind));
+                            Err("cancelled".to_string())
+                        },
+                    )
+                    .await;
+            })
+            .expect("spawn owner");
+        while started.load(Ordering::SeqCst) == 0 {
+            yield_now().await;
+        }
+        owner.abort_with_reason(CancelReason::user("caller gave up"));
+        let _ = owner.join(&cx).await;
+    });
+    assert_eq!(
+        seen.lock().expect("read reason").as_deref(),
+        Some("User"),
+        "the operation must be cancelled with the caller's reason, not Timeout"
     );
 }
 

@@ -31,11 +31,10 @@ use super::h3_native::{
     H3ConnectionConfig, H3ConnectionState, H3ControlState, H3EndpointRole, H3Frame, H3NativeError,
     H3QpackMode, H3RequestHead, H3ResponseHead, H3Settings, H3UniStreamType,
     QpackDecoderInstruction, QpackEncoderInstruction, header_fields_to_request_head,
-    qpack_decode_decoder_instruction, qpack_decode_encoder_instruction,
-    qpack_decode_field_section_with_context, qpack_plan_to_header_fields,
-    qpack_decode_response_field_section, qpack_decode_trailer_field_section,
+    header_fields_to_response_head, qpack_decode_decoder_instruction,
+    qpack_decode_encoder_instruction, qpack_decode_field_section_with_context,
     qpack_encode_request_field_section, qpack_encode_response_field_section,
-    qpack_encode_trailer_field_section,
+    qpack_encode_trailer_field_section, qpack_plan_to_header_fields, validate_trailer_fields,
 };
 
 /// RFC 9114 application error code `H3_REQUEST_CANCELLED`.
@@ -47,6 +46,9 @@ pub const H3_REQUEST_REJECTED: u64 = 0x010b;
 
 /// RFC 9114 application error code `H3_MESSAGE_ERROR`.
 const H3_MESSAGE_ERROR: u64 = 0x010e;
+
+/// RFC 9114 application error code `H3_REQUEST_INCOMPLETE`.
+const H3_REQUEST_INCOMPLETE: u64 = 0x010d;
 
 const H3_CONTROL_STREAM_TYPE: u64 = 0x00;
 const FRAME_HEADER_MAX_BYTES: usize = 16;
@@ -199,10 +201,69 @@ enum IncomingStreamKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IncomingStream {
     kind: IncomingStreamKind,
-    bytes: Vec<u8>,
+    bytes: RecvBuf,
     header_blocks_seen: u8,
     final_response_headers_seen: bool,
     data_frame: Option<DataFrameCursor>,
+}
+
+/// Received stream bytes, consumed from the front. Decoding removes items one
+/// at a time; `Vec::drain(..n)` shifted the rest of the buffer on every
+/// removal, so a peer sending a large run of one-byte instructions or tiny
+/// frames cost quadratic copying and stalled every connection on the
+/// listener's loop. Consumption moves a start offset instead, and the buffer
+/// is compacted only once the consumed prefix is at least half of it.
+#[derive(Debug, Clone, Default)]
+struct RecvBuf {
+    data: Vec<u8>,
+    start: usize,
+}
+
+impl PartialEq for RecvBuf {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl Eq for RecvBuf {}
+
+impl RecvBuf {
+    fn extend_from_slice(&mut self, bytes: &[u8]) {
+        self.data.extend_from_slice(bytes);
+    }
+
+    /// Drops the first `n` unconsumed bytes.
+    fn consume(&mut self, n: usize) {
+        self.start += n;
+        debug_assert!(self.start <= self.data.len());
+        if self.start >= self.data.len() {
+            self.data.clear();
+            self.start = 0;
+        } else if self.start >= self.data.len() / 2 {
+            self.data.drain(..self.start);
+            self.start = 0;
+        }
+    }
+
+    /// Removes and returns the first `n` unconsumed bytes.
+    fn take_front(&mut self, n: usize) -> Vec<u8> {
+        let taken = self[..n].to_vec();
+        self.consume(n);
+        taken
+    }
+
+    fn clear(&mut self) {
+        self.data.clear();
+        self.start = 0;
+    }
+}
+
+impl std::ops::Deref for RecvBuf {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.data[self.start..]
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -313,7 +374,7 @@ impl IncomingStream {
         };
         Self {
             kind,
-            bytes: Vec::new(),
+            bytes: RecvBuf::default(),
             header_blocks_seen: 0,
             final_response_headers_seen: false,
             data_frame: None,
@@ -548,6 +609,20 @@ fn encode_frame(frame: H3Frame) -> Result<Bytes, NativeH3SessionError> {
     Ok(Bytes::from(wire))
 }
 
+/// Append `body` as DATA frames of at most `max_payload` bytes each. A peer
+/// with the same frame limit, such as this crate's sessions, refuses a larger
+/// DATA frame as a connection error.
+fn encode_body_frames(
+    body: &[u8],
+    max_payload: usize,
+    wire: &mut Vec<u8>,
+) -> Result<(), NativeH3SessionError> {
+    for chunk in body.chunks(max_payload.max(1)) {
+        H3Frame::Data(chunk.to_vec()).encode(wire)?;
+    }
+    Ok(())
+}
+
 /// Static-QPACK HTTP/3 mapping over one established native QUIC connection.
 #[derive(Debug, Clone)]
 pub struct NativeH3Session {
@@ -563,9 +638,10 @@ pub struct NativeH3Session {
     closing: bool,
     next_local_request_stream_id: u64,
     streaming_receive: Option<StreamingReceive>,
-    /// Malformed requests already reported, whose RESET_STREAM and
-    /// STOP_SENDING are still to be queued on the connection.
-    rejected_requests: Vec<StreamId>,
+    /// Malformed or incomplete requests already reported, whose RESET_STREAM
+    /// and STOP_SENDING (with the error code) are still to be queued on the
+    /// connection.
+    rejected_requests: Vec<(StreamId, u64)>,
 }
 
 impl NativeH3Session {
@@ -591,10 +667,14 @@ impl NativeH3Session {
     /// opt-in dynamic state machine.
     #[must_use]
     pub fn with_config(config: H3ConnectionConfig) -> Self {
+        let mut state = H3ConnectionState::with_config(config);
+        // This adapter never sends MAX_PUSH_ID and refuses push streams, so a
+        // push ID in a server's CANCEL_PUSH or PUSH_PROMISE is out of range.
+        state.refuse_server_push();
         Self {
             role: config.endpoint_role,
             config,
-            state: H3ConnectionState::with_config(config),
+            state,
             local_control: H3ControlState::new(),
             local_control_stream: None,
             incoming: BTreeMap::new(),
@@ -766,9 +846,7 @@ impl NativeH3Session {
         self.next_local_request_stream_id = self.next_local_request_stream_id.saturating_add(4);
         let mut wire = Vec::new();
         H3Frame::Headers(qpack_encode_request_field_section(head)?).encode(&mut wire)?;
-        if !body.is_empty() {
-            H3Frame::Data(body.to_vec()).encode(&mut wire)?;
-        }
+        encode_body_frames(&body, self.config.max_frame_payload_size, &mut wire)?;
         connection.write_stream(cx, stream_id, Bytes::from(wire), true)?;
         Ok(stream_id)
     }
@@ -890,9 +968,7 @@ impl NativeH3Session {
 
         let mut wire = Vec::new();
         H3Frame::Headers(qpack_encode_response_field_section(head)?).encode(&mut wire)?;
-        if !body.is_empty() {
-            H3Frame::Data(body.to_vec()).encode(&mut wire)?;
-        }
+        encode_body_frames(&body, self.config.max_frame_payload_size, &mut wire)?;
         connection.write_stream(cx, stream_id, Bytes::from(wire), true)?;
         Ok(())
     }
@@ -1178,6 +1254,7 @@ impl NativeH3Session {
             // is truncation. FIN is never inferred from Content-Length or an
             // empty read and never overtakes a preceding application event.
             self.finish_stream(stream_id)?;
+            self.reset_rejected_requests(cx, connection)?;
             return Ok(true);
         }
         let has_lookahead = !self
@@ -1287,31 +1364,46 @@ impl NativeH3Session {
 
         if readiness.fin_received && connection.is_stream_eof(stream_id)? {
             self.finish_stream(stream_id)?;
+            self.reset_rejected_requests(cx, connection)?;
         }
         Ok(())
     }
 
-    /// Reject a request whose field section decoded but is malformed: it ends
-    /// only its own stream, with `H3_MESSAGE_ERROR`. The stream is reported as
+    /// Reject a request (or, on a client, a response) whose field section
+    /// decoded but is malformed: it ends only its own stream, with
+    /// `H3_MESSAGE_ERROR`. The stream is reported as
     /// a [`NativeH3Event::StreamReset`] so owners release its per-stream
     /// state, and its later bytes are discarded.
-    fn reject_malformed_request(&mut self, stream_id: StreamId) -> Result<(), NativeH3SessionError> {
+    fn reject_malformed_request(
+        &mut self,
+        stream_id: StreamId,
+    ) -> Result<(), NativeH3SessionError> {
+        self.reject_request_stream(stream_id, H3_MESSAGE_ERROR)
+    }
+
+    /// End only this request stream with `error_code`, reported as a
+    /// [`NativeH3Event::StreamReset`]; the connection carries on.
+    fn reject_request_stream(
+        &mut self,
+        stream_id: StreamId,
+        error_code: u64,
+    ) -> Result<(), NativeH3SessionError> {
         self.state.abort_request_stream(stream_id.0)?;
         self.incoming.remove(&stream_id);
         self.forget_streaming_readiness(stream_id);
         self.terminal_streams.insert(stream_id)?;
-        self.rejected_requests.push(stream_id);
+        self.rejected_requests.push((stream_id, error_code));
         self.events.push_back(NativeH3Event::StreamReset {
             stream_id,
-            error_code: H3_MESSAGE_ERROR,
+            error_code,
             final_size: 0,
         });
         Ok(())
     }
 
     /// Queue RESET_STREAM and STOP_SENDING for every request rejected as
-    /// malformed. Returns true when any was rejected, so the caller stops
-    /// processing a stream it may no longer own.
+    /// malformed or incomplete. Returns true when any was rejected, so the
+    /// caller stops processing a stream it may no longer own.
     fn reset_rejected_requests(
         &mut self,
         cx: &Cx,
@@ -1320,9 +1412,9 @@ impl NativeH3Session {
         if self.rejected_requests.is_empty() {
             return Ok(false);
         }
-        for stream_id in std::mem::take(&mut self.rejected_requests) {
-            connection.reset_stream(cx, stream_id, H3_MESSAGE_ERROR)?;
-            connection.stop_stream_receiving(cx, stream_id, H3_MESSAGE_ERROR)?;
+        for (stream_id, error_code) in std::mem::take(&mut self.rejected_requests) {
+            connection.reset_stream(cx, stream_id, error_code)?;
+            connection.stop_stream_receiving(cx, stream_id, error_code)?;
         }
         Ok(true)
     }
@@ -1347,7 +1439,7 @@ impl NativeH3Session {
         let mut prefix = self
             .incoming
             .get(&stream_id)
-            .map_or_else(Vec::new, |incoming| incoming.bytes.clone());
+            .map_or_else(Vec::new, |incoming| incoming.bytes.to_vec());
         prefix.extend_from_slice(&connection.reset_stream_buffered_prefix(stream_id)?);
         let Some((stream_type, _)) = decode_prefix(&prefix)? else {
             return Ok(Some(IncomingStreamKind::AwaitingUniType));
@@ -1397,7 +1489,7 @@ impl NativeH3Session {
                     .incoming
                     .get_mut(&stream_id)
                     .expect("stream checked above");
-                stream.bytes.drain(..consumed);
+                stream.bytes.consume(consumed);
                 stream.kind = match decoded {
                     H3UniStreamType::Control => IncomingStreamKind::Control,
                     H3UniStreamType::QpackEncoder => IncomingStreamKind::QpackEncoder,
@@ -1429,7 +1521,7 @@ impl NativeH3Session {
                             QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 0 },
                             n,
                         )) => {
-                            stream.bytes.drain(..n);
+                            stream.bytes.consume(n);
                         }
                         Ok(_) => {
                             return Err(NativeH3SessionError::Protocol(
@@ -1457,7 +1549,7 @@ impl NativeH3Session {
                 while !stream.bytes.is_empty() {
                     match qpack_decode_decoder_instruction(&stream.bytes) {
                         Ok((QpackDecoderInstruction::StreamCancellation { .. }, n)) => {
-                            stream.bytes.drain(..n);
+                            stream.bytes.consume(n);
                         }
                         Ok(_) => {
                             return Err(NativeH3SessionError::Protocol(
@@ -1499,7 +1591,7 @@ impl NativeH3Session {
                     if len == 0 && !cursor.is_complete() {
                         return Ok(());
                     }
-                    let bytes = Bytes::from(stream.bytes.drain(..len).collect::<Vec<_>>());
+                    let bytes = Bytes::from(stream.bytes.take_front(len));
                     if cursor.is_complete() {
                         stream.data_frame = None;
                     }
@@ -1520,7 +1612,7 @@ impl NativeH3Session {
                         .incoming
                         .get_mut(&stream_id)
                         .expect("stream checked above");
-                    stream.bytes.drain(..header.header_len);
+                    stream.bytes.consume(header.header_len);
                     stream.data_frame = Some(DataFrameCursor::new(header.payload_len));
                     continue;
                 }
@@ -1544,7 +1636,7 @@ impl NativeH3Session {
                     .expect("stream checked above");
                 let (frame, consumed) = H3Frame::decode(&stream.bytes[..frame_len], &self.config)?;
                 debug_assert_eq!(consumed, frame_len);
-                stream.bytes.drain(..consumed);
+                stream.bytes.consume(consumed);
                 frame
             };
             self.on_frame(stream_id, kind, frame)?;
@@ -1609,11 +1701,19 @@ impl NativeH3Session {
                             .push_back(NativeH3Event::RequestHeaders { stream_id, head });
                         return Ok(());
                     }
-                    let fields = qpack_decode_trailer_field_section(
+                    // Likewise for trailers: one that decodes but HTTP/3
+                    // forbids (an uppercase or connection-specific name, a
+                    // control character, a pseudo-header) makes only this
+                    // request malformed. It used to end the whole connection.
+                    let plan = qpack_decode_field_section_with_context(
                         &field_section,
                         H3QpackMode::StaticOnly,
                         None,
                     )?;
+                    let fields = qpack_plan_to_header_fields(&plan, None)?;
+                    if validate_trailer_fields(&fields).is_err() {
+                        return self.reject_malformed_request(stream_id);
+                    }
                     self.state
                         .on_request_stream_frame(stream_id.0, &H3Frame::Headers(field_section))?;
                     self.incoming
@@ -1629,12 +1729,20 @@ impl NativeH3Session {
                         .get(&stream_id)
                         .expect("request stream exists while decoding")
                         .final_response_headers_seen;
+                    // A response or trailer section that QPACK decodes but
+                    // HTTP/3 forbids makes only this response malformed, a
+                    // stream error (RFC 9114 section 4.1.2). It used to close
+                    // the connection and every other request on it.
+                    let plan = qpack_decode_field_section_with_context(
+                        &field_section,
+                        H3QpackMode::StaticOnly,
+                        None,
+                    )?;
+                    let fields = qpack_plan_to_header_fields(&plan, None)?;
                     if final_response_headers_seen {
-                        let fields = qpack_decode_trailer_field_section(
-                            &field_section,
-                            H3QpackMode::StaticOnly,
-                            None,
-                        )?;
+                        if validate_trailer_fields(&fields).is_err() {
+                            return self.reject_malformed_request(stream_id);
+                        }
                         self.state.on_request_stream_frame(
                             stream_id.0,
                             &H3Frame::Headers(field_section),
@@ -1648,11 +1756,9 @@ impl NativeH3Session {
                             .push_back(NativeH3Event::Trailers { stream_id, fields });
                         return Ok(());
                     }
-                    let head = qpack_decode_response_field_section(
-                        &field_section,
-                        H3QpackMode::StaticOnly,
-                        None,
-                    )?;
+                    let Ok(head) = header_fields_to_response_head(&fields) else {
+                        return self.reject_malformed_request(stream_id);
+                    };
                     let informational = (100..200).contains(&head.status);
                     if informational {
                         self.state.on_informational_response_headers(stream_id.0)?;
@@ -1739,6 +1845,18 @@ impl NativeH3Session {
                 });
             }
             IncomingStreamKind::RequestResponse => {
+                if self.state.request_stream_lacks_initial_headers(stream_id.0) {
+                    // RFC 9114 section 4.1: a request stream that ends before
+                    // its HEADERS is incomplete, and a response that ends
+                    // before its final HEADERS is malformed. Either ends only
+                    // this stream, not the connection.
+                    let error_code = if self.role == H3EndpointRole::Server {
+                        H3_REQUEST_INCOMPLETE
+                    } else {
+                        H3_MESSAGE_ERROR
+                    };
+                    return self.reject_request_stream(stream_id, error_code);
+                }
                 self.state.finish_request_stream(stream_id.0)?;
                 self.events.push_back(NativeH3Event::Finished { stream_id });
             }
@@ -2100,5 +2218,47 @@ mod tests {
             H3NativeError::ControlProtocol("terminal stream tracking window exceeded")
         );
         assert_eq!(tracker.ensure_healthy(), Err(error));
+    }
+
+    /// Decoding removed each item from the front of a Vec, which shifted the
+    /// rest of the buffer every time. A peer's run of one-byte QPACK decoder
+    /// instructions (or of tiny frames) cost quadratic copying and blocked the
+    /// listener loop that serves every connection.
+    #[test]
+    fn decoding_a_long_run_of_one_byte_instructions_is_linear() {
+        let cx = Cx::for_testing();
+        let (mut session, _connection) = server_with_request_limit(&cx, 1);
+        let stream_id = StreamId(11);
+        let mut incoming = IncomingStream::new(stream_id);
+        incoming.kind = IncomingStreamKind::QpackDecoder;
+        // 0x40 is a Stream Cancellation for stream 0, one byte long.
+        incoming.bytes.extend_from_slice(&vec![0x40; 1 << 20]);
+        session.incoming.insert(stream_id, incoming);
+
+        let started = std::time::Instant::now();
+        session
+            .decode_stream(stream_id)
+            .expect("each instruction is legal");
+        let elapsed = started.elapsed();
+        assert!(session.incoming[&stream_id].bytes.is_empty());
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "1 MiB of one-byte instructions took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn recv_buf_consumes_from_the_front_and_compacts() {
+        let mut buf = RecvBuf::default();
+        buf.extend_from_slice(b"abcdef");
+        buf.consume(1);
+        assert_eq!(&*buf, b"bcdef");
+        assert_eq!(buf.take_front(2), b"bc".to_vec());
+        assert_eq!(&*buf, b"def");
+        assert_eq!(buf.start, 0, "consuming half the buffer compacts it");
+        buf.extend_from_slice(b"gh");
+        buf.consume(5);
+        assert!(buf.is_empty());
+        assert_eq!((buf.start, buf.data.len()), (0, 0));
     }
 }

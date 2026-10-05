@@ -10,6 +10,7 @@ pub mod socket;
 pub mod split;
 pub mod stream;
 pub mod traits;
+mod user_timeout;
 pub mod virtual_tcp;
 
 #[cfg(target_arch = "wasm32")]

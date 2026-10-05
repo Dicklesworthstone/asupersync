@@ -99,6 +99,11 @@ pub struct IoDriver {
     wakers: TokenSlab,
     /// Interest sets for registered tokens.
     interests: HashMap<Token, Interest>,
+    /// Interest armed for each token since its last dispatched event. A
+    /// one-shot registration stays armed for all of it until an event fires,
+    /// so a single-waiter socket whose read and write both wait in one poll
+    /// keeps both armed (see `IoRegistration::rearm_accumulating`).
+    undispatched: HashMap<Token, Interest>,
     /// Pre-allocated events buffer to avoid allocation per turn.
     events: Events,
     /// Reusable waker buffer to avoid allocation per turn.
@@ -154,6 +159,7 @@ impl IoDriver {
             reactor,
             wakers: TokenSlab::new(),
             interests: HashMap::with_capacity(interest_map_capacity(DEFAULT_EVENTS_CAPACITY)),
+            undispatched: HashMap::new(),
             events: Events::with_capacity(DEFAULT_EVENTS_CAPACITY),
             waker_buf: Vec::with_capacity(64),
             stats: IoStats::default(),
@@ -170,6 +176,7 @@ impl IoDriver {
             reactor,
             wakers: TokenSlab::new(),
             interests: HashMap::with_capacity(interest_map_capacity(events_capacity)),
+            undispatched: HashMap::new(),
             events: Events::with_capacity(events_capacity),
             waker_buf: Vec::with_capacity(events_capacity.min(256)),
             stats: IoStats::default(),
@@ -216,6 +223,7 @@ impl IoDriver {
         match self.reactor.register(source, io_token, interest) {
             Ok(()) => {
                 self.interests.insert(io_token, interest);
+                self.undispatched.insert(io_token, interest);
                 self.stats.registrations += 1;
                 Ok(io_token)
             }
@@ -264,6 +272,24 @@ impl IoDriver {
         Ok(())
     }
 
+    /// Re-arms `token` for `interest` plus every interest armed for it since
+    /// its last dispatched event, and returns the armed union.
+    fn modify_interest_accumulating(
+        &mut self,
+        token: Token,
+        interest: Interest,
+    ) -> io::Result<Interest> {
+        let armed = self
+            .undispatched
+            .get(&token)
+            .copied()
+            .unwrap_or(Interest::empty())
+            | interest;
+        self.modify_interest(token, armed)?;
+        self.undispatched.insert(token, armed);
+        Ok(armed)
+    }
+
     /// Deregisters an I/O source.
     ///
     /// Removes the source from the reactor and frees the waker slot.
@@ -285,6 +311,7 @@ impl IoDriver {
             self.stats.deregistrations += 1;
         }
         self.interests.remove(&token);
+        self.undispatched.remove(&token);
 
         match result {
             Ok(()) => Ok(()),
@@ -351,6 +378,8 @@ impl IoDriver {
         // Dispatch wakers for ready events
         for event in &self.events {
             let interest = self.interests.get(&event.token).copied();
+            // The event disarmed the one-shot registration.
+            self.undispatched.remove(&event.token);
             on_event(event, interest);
             if !seen_tokens.insert(event.token) {
                 continue;
@@ -433,6 +462,8 @@ impl IoDriver {
 
         for event in events_ref {
             let interest = restorer.driver.interests.get(&event.token).copied();
+            // The event disarmed the one-shot registration.
+            restorer.driver.undispatched.remove(&event.token);
             // Store event data for later callback invocation
             event_data.push((*event, interest));
 
@@ -882,6 +913,30 @@ impl IoRegistration {
     /// Returns `Ok(true)` if the registration remains valid, `Ok(false)`
     /// if the slab slot was removed (caller should clear the registration).
     pub fn rearm(&mut self, interest: Interest, waker: &Waker) -> io::Result<bool> {
+        self.rearm_with(interest, waker, false)
+    }
+
+    /// Like [`Self::rearm`], for a single-waiter source whose read and write
+    /// can both wait in one poll. It keeps every interest requested since the
+    /// token's last dispatched event armed, so a read wait does not disarm a
+    /// write wait that is still pending, or the reverse. An event resets the
+    /// union, so a direction the caller stopped waiting on drops out at the
+    /// next re-arm instead of waking it again and again.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn rearm_accumulating(
+        &mut self,
+        interest: Interest,
+        waker: &Waker,
+    ) -> io::Result<bool> {
+        self.rearm_with(interest, waker, true)
+    }
+
+    fn rearm_with(
+        &mut self,
+        interest: Interest,
+        waker: &Waker,
+        accumulate: bool,
+    ) -> io::Result<bool> {
         self.wake_polling_reactor();
         let Some(driver) = self.driver.upgrade() else {
             return Err(io::Error::new(
@@ -892,8 +947,12 @@ impl IoRegistration {
         let mut guard = driver.lock();
 
         // Re-arm reactor (oneshot semantics require this on every poll).
-        guard.modify_interest(self.token, interest)?;
-        self.interest = interest;
+        self.interest = if accumulate {
+            guard.modify_interest_accumulating(self.token, interest)?
+        } else {
+            guard.modify_interest(self.token, interest)?;
+            interest
+        };
 
         // Skip the waker clone when the task's waker hasn't changed.
         if self

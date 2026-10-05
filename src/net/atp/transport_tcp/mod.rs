@@ -2346,6 +2346,32 @@ async fn append_receiver_delta_chunks(
     Ok(())
 }
 
+/// Polls of a receipt send that keep the receive's cancellation masked.
+///
+/// A receipt is one Proof frame of at most [`MAX_FRAME_SIZE`] bytes plus an
+/// empty Close frame, so a healthy send needs a handful of polls. Each frame's
+/// send is also bounded in time by `idle_timeout`.
+const RECEIPT_MASKED_POLLS: u32 = 1024;
+
+/// How long a receipt send may continue once the receive has been asked to
+/// stop. A peer that is reading gets its receipt within milliseconds. One that
+/// is not must not hold the stop, and with it a server's drain (30 s by default
+/// in atpd), for an `idle_timeout` per frame.
+const RECEIPT_STOP_GRACE: Duration = Duration::from_secs(2);
+
+/// Sends the receipt of a finished receive, then its Close frame.
+///
+/// By the time the receipt is sent, the receive has committed its files into
+/// the destination (or found a verification failure and committed nothing). A
+/// stop that arrives during the commit or the send must not make both peers
+/// report a failed transfer whose files are already in place, so the send runs
+/// with the receive's cancellation masked, for at most
+/// [`RECEIPT_MASKED_POLLS`] polls and at most [`RECEIPT_STOP_GRACE`] after the
+/// stop. A cancellation that arrived meanwhile is acknowledged once the receipt
+/// is out. The receive has then finished its protocol, and a receive task
+/// joined after [`TaskHandle::abort`](crate::runtime::TaskHandle::abort)
+/// reports this outcome instead of a task-level cancellation. If the grace
+/// runs out first, the receive ends with [`TransportError::Cancelled`].
 async fn send_receipt_and_close<S>(
     cx: &Cx,
     transport: &mut FrameTransport<S>,
@@ -2356,22 +2382,51 @@ where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
 {
     let proof = json_frame(FrameType::Proof, receipt)?;
-    with_transport_timeout(
+    let mut send = std::pin::pin!(crate::combinator::try_commit_section(
         cx,
-        config.idle_timeout,
-        "send proof",
-        transport.send(&proof),
-    )
-    .await?;
-    let close = Frame::empty(FrameType::Close).map_err(|e| TransportError::Frame(e.to_string()))?;
-    let _ = with_transport_timeout(
-        cx,
-        config.idle_timeout,
-        "send close",
-        transport.send(&close),
-    )
+        RECEIPT_MASKED_POLLS,
+        async {
+            with_transport_timeout(
+                cx,
+                config.idle_timeout,
+                "send proof",
+                transport.send(&proof),
+            )
+            .await?;
+            let close =
+                Frame::empty(FrameType::Close).map_err(|e| TransportError::Frame(e.to_string()))?;
+            let _ = with_transport_timeout(
+                cx,
+                config.idle_timeout,
+                "send close",
+                transport.send(&close),
+            )
+            .await;
+            Ok::<(), TransportError>(())
+        }
+    ));
+    // A mask-agnostic observer: the stop wakes it even while the masked write
+    // is parked, and the first poll that sees the stop arms the grace.
+    let mut stop = std::pin::pin!(cx.cancelled());
+    let mut grace: Option<std::pin::Pin<Box<crate::time::Sleep>>> = None;
+    let sent = std::future::poll_fn(|task| {
+        if grace.is_none() && stop.as_mut().poll(task).is_ready() {
+            grace = Some(Box::pin(crate::time::sleep(cx.now(), RECEIPT_STOP_GRACE)));
+        }
+        if let Some(timer) = grace.as_mut()
+            && timer.as_mut().poll(task).is_ready()
+        {
+            return std::task::Poll::Ready(Err(TransportError::Cancelled));
+        }
+        send.as_mut().poll(task)
+    })
     .await;
-    Ok(())
+    if sent.is_ok() && cx.is_cancel_requested() {
+        // The checkpoint's error is the acknowledgement itself: nothing is
+        // left to stop.
+        let _ = cx.checkpoint();
+    }
+    sent
 }
 
 async fn create_directory_metadata_paths(
@@ -3633,8 +3688,28 @@ pub async fn receive_connection(
     config: TransferConfig,
     peer_id: &str,
 ) -> Result<ReceiveReport, TransportError> {
-    let mut transport = FrameTransport::new(stream);
+    receive_on_transport(
+        cx,
+        FrameTransport::new(stream),
+        peer,
+        dest_dir,
+        config,
+        peer_id,
+    )
+    .await
+}
 
+async fn receive_on_transport<S>(
+    cx: &Cx,
+    mut transport: FrameTransport<S>,
+    peer: SocketAddr,
+    dest_dir: &Path,
+    config: TransferConfig,
+    peer_id: &str,
+) -> Result<ReceiveReport, TransportError>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
     // Handshake.
     let hello_frame = with_transport_timeout(
         cx,
@@ -4118,22 +4193,7 @@ pub async fn receive_connection(
             .map(|p| p.display().to_string())
             .collect(),
     };
-    let proof = json_frame(FrameType::Proof, &receipt)?;
-    with_transport_timeout(
-        cx,
-        config.idle_timeout,
-        "send proof",
-        transport.send(&proof),
-    )
-    .await?;
-    let close = Frame::empty(FrameType::Close).map_err(|e| TransportError::Frame(e.to_string()))?;
-    let _ = with_transport_timeout(
-        cx,
-        config.idle_timeout,
-        "send close",
-        transport.send(&close),
-    )
-    .await;
+    send_receipt_and_close(cx, &mut transport, &config, &receipt).await?;
 
     if !committed {
         return Err(TransportError::Integrity(
@@ -4806,6 +4866,251 @@ mod tests {
             crate::types::CancelReason::parent_cancelled(),
         ));
         assert!(matches!(err, TransportError::Cancelled));
+    }
+
+    /// Passes a receive's reads and writes through to its TCP stream. Once
+    /// `committed` exists in the destination, the receiver's next write is its
+    /// receipt. Before passing that write through, the stream aborts the
+    /// receive task the way `serve`'s stop path does. With `park_receipt`, the
+    /// receipt write then never completes and registers no wakeup, like a
+    /// socket whose peer has stopped reading.
+    struct AbortAtReceipt {
+        stream: TcpStream,
+        committed: PathBuf,
+        receive: std::sync::Arc<parking_lot::Mutex<Option<ReceiveTaskHandle>>>,
+        receive_cx: Cx,
+        aborted_before_receipt: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        park_receipt: bool,
+    }
+
+    impl crate::io::AsyncRead for AbortAtReceipt {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            task: &mut std::task::Context<'_>,
+            buf: &mut crate::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.get_mut().stream).poll_read(task, buf)
+        }
+    }
+
+    impl crate::io::AsyncWrite for AbortAtReceipt {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            task: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            let this = self.get_mut();
+            if !this.aborted_before_receipt.load(Ordering::Acquire) && this.committed.exists() {
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                loop {
+                    if let Some(receive) = this.receive.lock().as_ref() {
+                        receive.abort_with_reason(crate::types::CancelReason::parent_cancelled());
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the test never published the receive task's handle"
+                    );
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                this.aborted_before_receipt
+                    .store(this.receive_cx.is_cancel_requested(), Ordering::Release);
+            }
+            if this.park_receipt && this.aborted_before_receipt.load(Ordering::Acquire) {
+                return std::task::Poll::Pending;
+            }
+            std::pin::Pin::new(&mut this.stream).poll_write(task, buf)
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            task: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.get_mut().stream).poll_flush(task)
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            task: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.get_mut().stream).poll_shutdown(task)
+        }
+    }
+
+    /// What [`stop_at_receipt`] observed.
+    struct StoppedAtReceipt {
+        joined: Result<Result<ReceiveReport, TransportError>, crate::runtime::JoinError>,
+        aborted_before_receipt: bool,
+        receive_time: Duration,
+        sent: Result<SendReport, TransportError>,
+        committed: PathBuf,
+        payload: Vec<u8>,
+    }
+
+    /// A real sender (`send_path`) transfers one file over loopback TCP to a
+    /// receive task whose stream is an [`AbortAtReceipt`], which aborts the task
+    /// at its receipt (and, with `park_receipt`, never delivers it).
+    fn stop_at_receipt(label: &str, park_receipt: bool) -> StoppedAtReceipt {
+        const DEADLINE: Duration = Duration::from_secs(30);
+        let root = canonical_test_root(label);
+        let source = root.join("payload.bin");
+        let payload: Vec<u8> = (0..70_001u32)
+            .map(|index| u8::try_from(index % 251).expect("below 251"))
+            .collect();
+        std::fs::write(&source, &payload).expect("write the source file");
+        let dest = root.join("inbox");
+        std::fs::create_dir_all(&dest).expect("create the destination");
+        let committed = dest.join("payload.bin");
+
+        let (addr_tx, addr_rx) = std::sync::mpsc::channel::<SocketAddr>();
+        let sender = std::thread::spawn(move || {
+            let addr = addr_rx.recv_timeout(DEADLINE).expect("receiver address");
+            let runtime = crate::runtime::RuntimeBuilder::multi_thread()
+                .build()
+                .expect("sender runtime");
+            // A sender whose receipt never comes gives up after its idle
+            // timeout, so keep that short of the test's deadline.
+            let config = TransferConfig {
+                idle_timeout: Duration::from_secs(10),
+                ..TransferConfig::default()
+            };
+            runtime.block_on(runtime.handle().spawn(async move {
+                let cx = Cx::current().expect("sender cx");
+                send_path(&cx, addr, &source, config, "sender").await
+            }))
+        });
+
+        let runtime = crate::runtime::RuntimeBuilder::multi_thread()
+            .build()
+            .expect("receiver runtime");
+        let committed_path = committed.clone();
+        let (joined, aborted_before_receipt, receive_time) =
+            runtime.block_on(runtime.handle().spawn(async move {
+                let cx = Cx::current().expect("receiver cx");
+                let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+                addr_tx
+                    .send(listener.local_addr().expect("listener address"))
+                    .expect("publish the listener address");
+                let (stream, peer) =
+                    with_transport_timeout(&cx, DEADLINE, "accept", listener.accept())
+                        .await
+                        .expect("accept the sender");
+                let receive = std::sync::Arc::new(parking_lot::Mutex::new(None));
+                let aborted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let receive_slot = std::sync::Arc::clone(&receive);
+                let aborted_witness = std::sync::Arc::clone(&aborted);
+                let handle = cx
+                    .spawn(move |child| async move {
+                        let stream = AbortAtReceipt {
+                            stream,
+                            committed: committed_path,
+                            receive: receive_slot,
+                            receive_cx: child.clone(),
+                            aborted_before_receipt: aborted_witness,
+                            park_receipt,
+                        };
+                        receive_on_transport(
+                            &child,
+                            FrameTransport::new(stream),
+                            peer,
+                            &dest,
+                            TransferConfig::default(),
+                            "receiver",
+                        )
+                        .await
+                    })
+                    .expect("spawn the receive task");
+                let started = std::time::Instant::now();
+                *receive.lock() = Some(handle);
+                let deadline = started + DEADLINE;
+                while !receive
+                    .lock()
+                    .as_ref()
+                    .is_some_and(crate::runtime::TaskHandle::is_finished)
+                {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the receive task did not finish within {DEADLINE:?}"
+                    );
+                    crate::time::sleep(cx.now(), Duration::from_millis(5)).await;
+                }
+                let receive_time = started.elapsed();
+                let mut handle = receive.lock().take().expect("the receive task's handle");
+                (
+                    handle.join(&cx).await,
+                    aborted.load(Ordering::Acquire),
+                    receive_time,
+                )
+            }));
+        let sent = sender.join().expect("sender thread");
+        StoppedAtReceipt {
+            joined,
+            aborted_before_receipt,
+            receive_time,
+            sent,
+            committed,
+            payload,
+        }
+    }
+
+    /// A stop (the receive task's abort, as `serve` issues it) that lands after
+    /// the files are committed must not turn the transfer into a failure on
+    /// both sides: the receipt still reaches the sender, and joining the
+    /// receive task yields the committed report.
+    #[test]
+    fn a_stop_after_the_commit_still_sends_the_receipt_and_reports_the_transfer() {
+        let run = stop_at_receipt("atp-tcp-stop-at-receipt", false);
+        assert!(
+            run.aborted_before_receipt,
+            "the receive task must be aborted after its commit and before its receipt"
+        );
+        let report = match run.joined {
+            Ok(Ok(report)) => report,
+            other => panic!("the receive committed its files, so it must report them: {other:?}"),
+        };
+        assert!(report.committed);
+        assert_eq!(report.committed_paths, vec![run.committed.clone()]);
+        let sent = run.sent.expect("the sender holds the receiver's receipt");
+        assert!(sent.receipt.committed);
+        assert_eq!(
+            std::fs::read(&run.committed).expect("read the committed file"),
+            run.payload
+        );
+    }
+
+    /// The receipt is sent with the stop held off, but a peer that has stopped
+    /// reading must not hold the stop for an idle_timeout (60 s by default) per
+    /// frame. The receive ends RECEIPT_STOP_GRACE after the stop, as cancelled;
+    /// its files stay committed.
+    #[test]
+    fn a_stop_ends_a_receipt_the_peer_does_not_read_after_the_grace() {
+        let run = stop_at_receipt("atp-tcp-stop-at-unread-receipt", true);
+        assert!(
+            run.aborted_before_receipt,
+            "the receive task must be aborted after its commit and before its receipt"
+        );
+        assert!(
+            run.receive_time < RECEIPT_STOP_GRACE + Duration::from_secs(8),
+            "a stop waited {:?} for an unread receipt",
+            run.receive_time
+        );
+        assert!(
+            matches!(
+                run.joined,
+                Ok(Err(TransportError::Cancelled)) | Err(crate::runtime::JoinError::Cancelled(_))
+            ),
+            "an undelivered receipt must end the receive as cancelled: {:?}",
+            run.joined
+        );
+        assert!(
+            run.sent.is_err(),
+            "the sender never received the receipt: {:?}",
+            run.sent
+        );
+        assert_eq!(
+            std::fs::read(&run.committed).expect("read the committed file"),
+            run.payload
+        );
     }
 
     #[test]

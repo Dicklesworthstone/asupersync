@@ -136,6 +136,41 @@ fn run_native(workers: Option<usize>, scenario: &Scenario) -> Observation {
     }
 }
 
+/// Runs the scenario as the root future of a multi-thread runtime's
+/// `block_on`, the way `#[asupersync::main]` runs `main`: the root is polled
+/// on the calling thread, not on a worker, while workers run what it spawns.
+fn run_native_root(workers: usize, scenario: &Scenario) -> Observation {
+    let (name, run) = (scenario.name, scenario.run);
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let runtime = RuntimeBuilder::multi_thread()
+            .worker_threads(workers)
+            .build()
+            .expect("build native runtime");
+        let observation = runtime.block_on(async move {
+            let cx = Cx::current().expect("block_on root installs Cx");
+            run(cx).await
+        });
+        let quiescent = runtime.shutdown_timeout(Duration::from_secs(10));
+        let _ = done_tx.send((observation, quiescent));
+    });
+    match done_rx.recv_timeout(NATIVE_HANG_LIMIT) {
+        Ok((observation, quiescent)) => {
+            assert!(
+                quiescent,
+                "{name}: native runtime must reach quiescence and shut down"
+            );
+            observation
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("{name}: block_on root ({workers} workers) hung for {NATIVE_HANG_LIMIT:?}")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("{name}: block_on root ({workers} workers) panicked; see its message above")
+        }
+    }
+}
+
 /// Run `scenario` everywhere and require one observation, modulo the
 /// scenario's schedule-dependent fields.
 fn check(scenario: &Scenario) {
@@ -239,6 +274,33 @@ async fn parked_loser(cx: Cx, started: Arc<AtomicBool>, done: Arc<AtomicBool>) -
     yield_now().await;
     done.store(true, Ordering::SeqCst);
     0
+}
+
+/// Parks like `parked_loser`, counting the branches that started and the
+/// ones that stopped after a cancellation, for combinators with several.
+async fn parked_branch(cx: Cx, started: Arc<AtomicUsize>, stopped: Arc<AtomicUsize>) -> u32 {
+    let (_hold, mut never) = mpsc::channel::<u32>(1);
+    started.fetch_add(1, Ordering::SeqCst);
+    let _ = never.recv(&cx).await;
+    yield_now().await;
+    stopped.fetch_add(1, Ordering::SeqCst);
+    0
+}
+
+/// Waits a bounded time (virtual time on the lab) for `count` to reach
+/// `target`, and returns where it got.
+async fn settle(cx: &Cx, count: &AtomicUsize, target: usize) -> usize {
+    for _ in 0..200 {
+        if count.load(Ordering::SeqCst) >= target {
+            break;
+        }
+        sleep(cx.now(), Duration::from_millis(5)).await;
+    }
+    count.load(Ordering::SeqCst)
+}
+
+fn counters() -> (Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)))
 }
 
 fn flags() -> (Arc<AtomicBool>, Arc<AtomicBool>) {
@@ -356,6 +418,128 @@ fn race_all_drains_every_loser(cx: Cx) -> ScenarioFuture {
                     done[1].load(Ordering::SeqCst)
                 ),
             ),
+        ])
+    })
+}
+
+/// A panicking `race_all` winner must still drain every loser.
+fn race_all_panicking_winner_still_drains_losers(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let started = [
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        ];
+        let done = [
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        ];
+        let gates = started.clone();
+        let winner = cx
+            .spawn(move |_cx| async move {
+                for gate in &gates {
+                    wait_for(gate).await;
+                }
+                // Panics on purpose: every gate is set here.
+                assert!(
+                    !gates[0].load(Ordering::SeqCst),
+                    "differential: race_all winner panics"
+                );
+                1u32
+            })
+            .expect("spawn winner");
+        let mut handles = vec![winner];
+        for index in 0..2 {
+            let (s, d) = (Arc::clone(&started[index]), Arc::clone(&done[index]));
+            handles.push(
+                cx.spawn(move |cx| parked_loser(cx, s, d))
+                    .expect("spawn loser"),
+            );
+        }
+        let result = cx.scope().race_all(&cx, handles).await;
+        observe([
+            ("race_all", outcome(&result)),
+            (
+                "losers_drained_before_return",
+                format!(
+                    "{},{}",
+                    done[0].load(Ordering::SeqCst),
+                    done[1].load(Ordering::SeqCst)
+                ),
+            ),
+        ])
+    })
+}
+
+/// A `Scope::timeout` future dropped before it returns (an outer timeout
+/// fired, as when it loses a `select!`) must ask its operation to stop; the
+/// deadline lived in the dropped future.
+fn dropped_scope_timeout_stops_its_operation(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let (started, stopped) = counters();
+        let (s, d) = (Arc::clone(&started), Arc::clone(&stopped));
+        let scope = cx.scope();
+        let inner = scope.timeout(&cx, Duration::from_secs(30), move |task_cx| async move {
+            Ok::<u32, String>(parked_branch(task_cx, s, d).await)
+        });
+        let dropped = timeout(cx.now(), Duration::from_millis(20), inner)
+            .await
+            .is_err();
+        let began = started.load(Ordering::SeqCst);
+        let ended = settle(&cx, &stopped, began).await;
+        observe([
+            ("dropped", dropped.to_string()),
+            ("every_started_branch_stopped", (ended == began).to_string()),
+            ("started", began.to_string()),
+        ])
+    })
+}
+
+/// A `quorum` future dropped while its branches run must ask them to stop.
+fn dropped_quorum_stops_its_branches(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let (started, stopped) = counters();
+        let branches: Vec<_> = (0..3)
+            .map(|_| {
+                let (s, d) = (Arc::clone(&started), Arc::clone(&stopped));
+                move |cx: Cx| async move { Ok::<u32, String>(parked_branch(cx, s, d).await) }
+            })
+            .collect();
+        let scope = cx.scope();
+        let inner = scope.quorum(&cx, 2, branches);
+        let dropped = timeout(cx.now(), Duration::from_millis(20), inner)
+            .await
+            .is_err();
+        let began = started.load(Ordering::SeqCst);
+        let ended = settle(&cx, &stopped, began).await;
+        observe([
+            ("dropped", dropped.to_string()),
+            ("every_started_branch_stopped", (ended == began).to_string()),
+            ("started", began.to_string()),
+        ])
+    })
+}
+
+/// A `first_ok` future dropped while an attempt runs must ask it to stop.
+fn dropped_first_ok_stops_its_attempt(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let (started, stopped) = counters();
+        let attempts: Vec<_> = (0..2)
+            .map(|_| {
+                let (s, d) = (Arc::clone(&started), Arc::clone(&stopped));
+                move |cx: Cx| async move { Ok::<u32, String>(parked_branch(cx, s, d).await) }
+            })
+            .collect();
+        let scope = cx.scope();
+        let inner = scope.first_ok(&cx, attempts);
+        let dropped = timeout(cx.now(), Duration::from_millis(20), inner)
+            .await
+            .is_err();
+        let began = started.load(Ordering::SeqCst);
+        let ended = settle(&cx, &stopped, began).await;
+        observe([
+            ("dropped", dropped.to_string()),
+            ("every_started_branch_stopped", (ended == began).to_string()),
+            ("started", began.to_string()),
         ])
     })
 }
@@ -1300,6 +1484,101 @@ fn region_poll_quota_stops_a_busy_task(cx: Cx) -> ScenarioFuture {
     })
 }
 
+/// The same quota stops a task that never calls `checkpoint()` and only reads
+/// its cancellation flag between yields. Nothing in the task notices the spent
+/// quota, so the scheduler itself must request cancellation: polls 1 to 3
+/// spend a quota of 3, and the request lands before poll 4
+/// (br-asupersync-0fvvq9).
+fn region_poll_quota_cancels_a_task_that_never_checkpoints(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let mut spec = ChildRegionSpec::inherit();
+        spec.budget = Some(Budget::new().with_poll_quota(3));
+        let child = cx
+            .open_child_region(spec)
+            .await
+            .expect("open child region with a poll quota");
+        let mut handle = child
+            .cx()
+            .spawn(|task_cx| async move {
+                for round in 0..1_000u32 {
+                    if task_cx.is_cancel_requested() {
+                        let reason = task_cx
+                            .cancel_reason()
+                            .map(|reason| format!("{:?}", reason.kind));
+                        return (Some(round), reason);
+                    }
+                    yield_now().await;
+                }
+                (None, None)
+            })
+            .expect("spawn inside the child region");
+        let joined = handle.join(&cx).await;
+        let closed = child.close().await;
+        let joined = outcome(&joined);
+        assert_ne!(
+            joined, "ok:(None, None)",
+            "the spent quota must request cancellation"
+        );
+        observe([("join", joined), ("close", format!("{closed:?}"))])
+    })
+}
+
+/// A task cancelled through its handle acknowledges and enters cleanup, where
+/// its live budget becomes the User cleanup budget of 1000 polls. It then
+/// spawns a helper that yields 1100 times. The cleanup quota bounds only the
+/// cancelled task's own drain, so the helper must finish every round instead
+/// of being cancelled with `PollQuota` (br-asupersync-0fvvq9).
+fn cleanup_spawned_helper_is_not_bound_by_the_cleanup_quota(cx: Cx) -> ScenarioFuture {
+    Box::pin(async move {
+        let (started, _) = flags();
+        let s = Arc::clone(&started);
+        let (result_tx, mut result_rx) = oneshot::channel::<Result<u32, (u32, Option<String>)>>();
+        let mut handle = cx
+            .spawn(move |task_cx| async move {
+                s.store(true, Ordering::SeqCst);
+                while task_cx.checkpoint().is_ok() {
+                    yield_now().await;
+                }
+                // Acknowledged. One more poll lets the runtime install the
+                // cleanup budget before the helper is spawned.
+                yield_now().await;
+                // The lab also charges cleanup polls; production does not.
+                let cleanup_quota = task_cx.budget().poll_quota;
+                let in_cleanup = cleanup_quota > 900 && cleanup_quota <= 1_000;
+                let spawned = task_cx.spawn(move |helper_cx| async move {
+                    let mut result = Ok(1_100);
+                    for round in 0..1_100u32 {
+                        if helper_cx.checkpoint().is_err() {
+                            let reason = helper_cx
+                                .cancel_reason()
+                                .map(|reason| format!("{:?}", reason.kind));
+                            result = Err((round, reason));
+                            break;
+                        }
+                        yield_now().await;
+                    }
+                    let _ = result_tx.send_blocking(result);
+                });
+                (in_cleanup, spawned.is_ok())
+            })
+            .expect("spawn");
+        wait_for(&started).await;
+        yield_now().await;
+        handle.abort_with_reason(CancelReason::user("drain"));
+        let helper = format!("{:?}", result_rx.recv(&cx).await);
+        let joined = outcome(&handle.join(&cx).await);
+        assert_eq!(
+            joined, "ok:(true, true)",
+            "the cancelled task reached its User cleanup budget before spawning"
+        );
+        assert_eq!(
+            helper, "Ok(Ok(1100))",
+            "the helper is not bound by the cleanup quota"
+        );
+        observe([("join", joined), ("helper", helper)])
+    })
+}
+
 fn spawn_blocking_returns_its_value(cx: Cx) -> ScenarioFuture {
     Box::pin(async move {
         let mut handle = cx.spawn_blocking(|_cx| 41u32 + 1).expect("spawn_blocking");
@@ -2020,10 +2299,17 @@ fn aborted_rwlock_writer_admits_the_queued_reader(cx: Cx) -> ScenarioFuture {
 /// when cancelled. The other waiter must still finish: the dropped waiter
 /// passes the notification on, or, if it consumed the notification before
 /// the abort landed, a second notification wakes the other.
+///
+/// Whether the first waiter consumed the notification is recorded by the
+/// waiter itself. Its join result cannot say: when the abort lands during the
+/// poll that consumes the notification, the join reports the unacknowledged
+/// abort (v0.4.3 task-level attribution) and discards "notified", so the root
+/// would never wake the second waiter (br-asupersync-5uf9cq).
 fn aborted_notified_waiter_passes_the_notification_on(cx: Cx) -> ScenarioFuture {
     Box::pin(async move {
         let notify = Arc::new(Notify::new());
-        let spawn_waiter = || {
+        let first_consumed = Arc::new(AtomicBool::new(false));
+        let spawn_waiter = |consumed: Arc<AtomicBool>| {
             let n = Arc::clone(&notify);
             cx.spawn(move |task_cx| async move {
                 let (_hold, mut never) = mpsc::channel::<u32>(1);
@@ -2034,6 +2320,7 @@ fn aborted_notified_waiter_passes_the_notification_on(cx: Cx) -> ScenarioFuture 
                         return std::task::Poll::Ready("cancelled");
                     }
                     if notified.as_mut().poll(poll_cx).is_ready() {
+                        consumed.store(true, Ordering::SeqCst);
                         return std::task::Poll::Ready("notified");
                     }
                     std::task::Poll::Pending
@@ -2042,18 +2329,18 @@ fn aborted_notified_waiter_passes_the_notification_on(cx: Cx) -> ScenarioFuture 
             })
             .expect("spawn waiter")
         };
-        let mut first = spawn_waiter();
+        let mut first = spawn_waiter(Arc::clone(&first_consumed));
         while notify.waiter_count() < 1 {
             yield_now().await;
         }
-        let mut second = spawn_waiter();
+        let mut second = spawn_waiter(Arc::new(AtomicBool::new(false)));
         while notify.waiter_count() < 2 {
             yield_now().await;
         }
         notify.notify_one();
         first.abort();
         let first_joined = first.join(&cx).await;
-        if matches!(first_joined, Ok("notified")) {
+        if first_consumed.load(Ordering::SeqCst) {
             notify.notify_one();
         }
         let second_joined = second.join(&cx).await;
@@ -2279,8 +2566,71 @@ differential!(
     []
 );
 differential!(differential_race_all, race_all_drains_every_loser, []);
+differential!(
+    differential_race_all_panicking_winner,
+    race_all_panicking_winner_still_drains_losers,
+    []
+);
+
+/// The multi-thread `block_on` root (`#[asupersync::main]`'s `main`) is not
+/// polled by a worker, but workers run the tasks it spawns, so a race whose
+/// winner panics must drain its losers there too. It used to poll them once
+/// with a no-op waker and return while they were still running.
+#[test]
+fn panicking_winners_drain_their_losers_on_the_block_on_root() {
+    let cases: [(Scenario, &str, &str); 2] = [
+        (
+            Scenario {
+                name: "race_panicking_winner_still_drains_loser",
+                run: race_panicking_winner_still_drains_loser,
+                schedule_dependent: &[],
+            },
+            "loser_drained_before_return",
+            "true",
+        ),
+        (
+            Scenario {
+                name: "race_all_panicking_winner_still_drains_losers",
+                run: race_all_panicking_winner_still_drains_losers,
+                schedule_dependent: &[],
+            },
+            "losers_drained_before_return",
+            "true,true",
+        ),
+    ];
+    for (scenario, field, drained) in &cases {
+        for repeat in 0..NATIVE_REPEATS {
+            let observation = run_native_root(NATIVE_WORKERS, scenario);
+            assert_eq!(
+                observation.get(field).map(String::as_str),
+                Some(*drained),
+                "{} on the block_on root #{repeat}: {observation:?}",
+                scenario.name
+            );
+        }
+    }
+}
 differential!(differential_quorum, quorum_two_of_three_drains_the_straggler, []);
-differential!(differential_hedge, hedge_backup_wins_and_drains_the_primary, []);
+differential!(
+    differential_dropped_scope_timeout,
+    dropped_scope_timeout_stops_its_operation,
+    ["started"]
+);
+differential!(
+    differential_dropped_quorum,
+    dropped_quorum_stops_its_branches,
+    ["started"]
+);
+differential!(
+    differential_dropped_first_ok,
+    dropped_first_ok_stops_its_attempt,
+    ["started"]
+);
+differential!(
+    differential_hedge,
+    hedge_backup_wins_and_drains_the_primary,
+    []
+);
 differential!(
     differential_hedge_panicking_backup,
     hedge_panicking_backup_still_drains_the_primary,
@@ -2371,6 +2721,16 @@ differential!(
 differential!(
     differential_region_poll_quota,
     region_poll_quota_stops_a_busy_task,
+    []
+);
+differential!(
+    differential_region_poll_quota_without_checkpoints,
+    region_poll_quota_cancels_a_task_that_never_checkpoints,
+    []
+);
+differential!(
+    differential_cleanup_spawned_helper_quota,
+    cleanup_spawned_helper_is_not_bound_by_the_cleanup_quota,
     []
 );
 differential!(

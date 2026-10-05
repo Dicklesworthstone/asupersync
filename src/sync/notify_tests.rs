@@ -6133,4 +6133,43 @@ mod tests {
 
         crate::test_complete!("audit_notify_multi_waiter_ordering_accumulated_permits");
     }
+
+    /// The tokio pattern (create, check the condition, then await) lost a
+    /// broadcast sent between the check and the first poll; nothing could
+    /// enroll the future earlier. `enable` arms it from its creation.
+    #[test]
+    fn enabled_notified_receives_a_broadcast_sent_before_its_first_poll() {
+        init_test("enabled_notified_receives_a_broadcast_sent_before_its_first_poll");
+        let notify = Notify::new();
+
+        let mut enabled = notify.notified();
+        assert!(
+            !Pin::new(&mut enabled).enable(),
+            "nothing has been sent yet"
+        );
+        notify.notify_waiters();
+        assert!(poll_once(&mut enabled).is_ready());
+
+        // A broadcast between creation and enable also counts, and enable
+        // reports it.
+        let mut late = notify.notified();
+        notify.notify_waiters();
+        assert!(Pin::new(&mut late).enable());
+        assert!(poll_once(&mut late).is_ready());
+
+        // Without enable the documented first-poll behaviour is unchanged.
+        let mut plain = notify.notified();
+        notify.notify_waiters();
+        assert!(poll_once(&mut plain).is_pending());
+
+        // After the first poll enable changes nothing.
+        assert!(!Pin::new(&mut plain).enable());
+        notify.notify_waiters();
+        assert!(poll_once(&mut plain).is_ready());
+        assert!(
+            Pin::new(&mut plain).enable(),
+            "a completed future reports true"
+        );
+        crate::test_complete!("enabled_notified_receives_a_broadcast_sent_before_its_first_poll");
+    }
 }

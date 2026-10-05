@@ -402,6 +402,107 @@ fn native_cancellation_capture_contains_ack_before_completion() {
     }
 }
 
+const PANIC_WITNESS: &str = "6hewgp handle-spawned panic";
+
+fn panic_on_purpose() -> u32 {
+    panic!("{PANIC_WITNESS}")
+}
+
+/// Resolves to `Err(payload)` when awaiting `join` re-raises its task's panic.
+async fn catch_join<F: Future>(join: F) -> std::thread::Result<F::Output> {
+    let mut join = std::pin::pin!(join);
+    poll_fn(|cx| {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| join.as_mut().poll(cx))) {
+            Ok(poll) => poll.map(Ok),
+            Err(payload) => std::task::Poll::Ready(Err(payload)),
+        }
+    })
+    .await
+}
+
+/// asupersync-6hewgp: a task spawned through `RuntimeHandle` whose future
+/// panics re-raises the payload on its join handle and is recorded Panicked,
+/// as `Cx::spawn` and state tasks are. The record used to say Ok, so metrics,
+/// the root region's close outcome and this capture all reported a success.
+/// Covers both spawn admission modes and the owner-thread local lane.
+#[test]
+fn native_handle_spawned_panic_is_recorded_panicked() {
+    use asupersync::runtime::JoinError;
+    use asupersync::runtime::config::SpawnAdmissionMode;
+    // Every variant is observed before one comparison, so a failure names
+    // each spawn path that still records the wrong outcome.
+    let mut observed = Vec::new();
+    for mode in [SpawnAdmissionMode::Direct, SpawnAdmissionMode::Mailbox] {
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(2)
+            .spawn_admission(mode)
+            .capture_schedules(true)
+            .build()
+            .unwrap();
+        let ok = runtime.handle().spawn_checked(async {
+            asupersync::runtime::yield_now().await;
+            7_u32
+        });
+        let panicking = runtime.handle().spawn_checked(async {
+            asupersync::runtime::yield_now().await;
+            panic_on_purpose()
+        });
+        assert_eq!(join_native(&runtime, ok).ok(), Some(7), "{mode:?}");
+        match join_native(&runtime, panicking) {
+            Err(JoinError::Panicked(payload)) => {
+                assert_eq!(payload.message(), PANIC_WITNESS, "{mode:?}");
+            }
+            other => panic!("{mode:?}: the panicking task joined as {other:?}"),
+        }
+        let snapshot = completed_capture(&runtime);
+        let mut outcomes: Vec<_> = snapshot
+            .terminal_outcomes()
+            .iter()
+            .map(|(_, outcome)| *outcome)
+            .collect();
+        outcomes.sort();
+        observed.push((format!("{mode:?}"), outcomes));
+        assert!(runtime.shutdown_timeout(WATCHDOG));
+    }
+
+    let runtime = RuntimeBuilder::current_thread()
+        .capture_schedules(true)
+        .build()
+        .unwrap();
+    let handle = runtime.handle();
+    let joined = runtime.block_on(async move {
+        let join = handle.spawn_local(async {
+            asupersync::runtime::yield_now().await;
+            panic_on_purpose()
+        });
+        catch_join(join).await
+    });
+    let payload = joined.expect_err("the local join re-raises its task's panic");
+    assert_eq!(
+        payload.downcast_ref::<String>().map(String::as_str),
+        Some(PANIC_WITNESS)
+    );
+    let snapshot = completed_capture(&runtime);
+    // The current-thread capture also lists an Ok task besides the local
+    // one, so only the panicking task's outcome is compared here.
+    let outcomes: Vec<_> = snapshot
+        .terminal_outcomes()
+        .iter()
+        .map(|(_, outcome)| *outcome)
+        .filter(|outcome| *outcome != Severity::Ok)
+        .collect();
+    observed.push(("local lane".to_string(), outcomes));
+    assert!(runtime.shutdown_timeout(WATCHDOG));
+
+    let expected = [
+        ("Direct", vec![Severity::Ok, Severity::Panicked]),
+        ("Mailbox", vec![Severity::Ok, Severity::Panicked]),
+        ("local lane", vec![Severity::Panicked]),
+    ]
+    .map(|(label, outcomes)| (label.to_string(), outcomes));
+    assert_eq!(observed, expected);
+}
+
 #[test]
 fn disabled_capture_emits_no_scheduler_observations() {
     let runtime = RuntimeBuilder::new().worker_threads(2).build().unwrap();

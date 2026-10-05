@@ -1558,6 +1558,10 @@ impl CancelStateMachine for TimerStateMachine {
 #[derive(Debug)]
 pub struct CancelProtocolValidator {
     validation_level: ValidationLevel,
+    /// Whether entities are registered and transitions checked at all. An
+    /// untracked validator ([`Self::untracked`]) keeps no state machines and
+    /// reports every transition valid.
+    tracking: bool,
     region_machines: HashMap<RegionId, RegionStateMachine>,
     task_machines: HashMap<TaskId, TaskStateMachine>,
     obligation_machines: HashMap<ObligationId, ObligationStateMachine>,
@@ -1573,6 +1577,7 @@ impl CancelProtocolValidator {
     pub fn new(validation_level: ValidationLevel) -> Self {
         Self {
             validation_level,
+            tracking: true,
             region_machines: HashMap::new(),
             task_machines: HashMap::new(),
             obligation_machines: HashMap::new(),
@@ -1583,20 +1588,50 @@ impl CancelProtocolValidator {
         }
     }
 
+    /// A validator that registers nothing and reports every transition valid.
+    ///
+    /// The runtime state uses it in release builds: validation only feeds
+    /// violation diagnostics (no runtime decision depends on it), while
+    /// tracking costs map inserts, lookups and removals under a global mutex
+    /// on every task spawn and completion
+    /// (br-asupersync-issue65-criticisms-kpmoy5.1.8).
+    #[must_use]
+    pub(crate) fn untracked() -> Self {
+        Self {
+            tracking: false,
+            ..Self::new(ValidationLevel::None)
+        }
+    }
+
+    /// Whether this validator registers entities and checks transitions.
+    #[must_use]
+    pub fn is_tracking(&self) -> bool {
+        self.tracking
+    }
+
     /// Register a new region for tracking.
     pub fn register_region(&mut self, region_id: RegionId) {
+        if !self.tracking {
+            return;
+        }
         let machine = RegionStateMachine::new(region_id, self.validation_level);
         self.region_machines.insert(region_id, machine);
     }
 
     /// Register a new task for tracking.
     pub fn register_task(&mut self, task_id: TaskId, region_id: RegionId) {
+        if !self.tracking {
+            return;
+        }
         let machine = TaskStateMachine::new(task_id, region_id, self.validation_level);
         self.task_machines.insert(task_id, machine);
     }
 
     /// Register a new obligation for tracking.
     pub fn register_obligation(&mut self, obligation_id: ObligationId) {
+        if !self.tracking {
+            return;
+        }
         let machine = ObligationStateMachine::new(obligation_id, self.validation_level);
         self.obligation_machines.insert(obligation_id, machine);
     }
@@ -1610,35 +1645,53 @@ impl CancelProtocolValidator {
     /// rather than overwriting. Call this from the task completion/recycle path
     /// (br-asupersync-cancelvalidator-leak-mdvuf9).
     pub fn remove_task(&mut self, task_id: TaskId) {
+        if !self.tracking {
+            return;
+        }
         self.task_machines.remove(&task_id);
     }
 
     /// Remove a region's state machine once the region is fully closed and
     /// retired (br-asupersync-cancelvalidator-leak-mdvuf9).
     pub fn remove_region(&mut self, region_id: RegionId) {
+        if !self.tracking {
+            return;
+        }
         self.region_machines.remove(&region_id);
     }
 
     /// Remove an obligation's state machine once it is fully resolved
     /// (committed or aborted) (br-asupersync-cancelvalidator-leak-mdvuf9).
     pub fn remove_obligation(&mut self, obligation_id: ObligationId) {
+        if !self.tracking {
+            return;
+        }
         self.obligation_machines.remove(&obligation_id);
     }
 
     /// Register a new channel for tracking.
     pub fn register_channel(&mut self, channel_id: u64) {
+        if !self.tracking {
+            return;
+        }
         let machine = ChannelStateMachine::new(channel_id, self.validation_level);
         self.channel_machines.insert(channel_id, machine);
     }
 
     /// Register a new IO operation for tracking.
     pub fn register_io_operation(&mut self, operation_id: u64, io_handle: u64) {
+        if !self.tracking {
+            return;
+        }
         let machine = IoStateMachine::new(operation_id, io_handle, self.validation_level);
         self.io_machines.insert(operation_id, machine);
     }
 
     /// Register a new timer for tracking.
     pub fn register_timer(&mut self, timer_id: u64, deadline: Time) {
+        if !self.tracking {
+            return;
+        }
         let machine = TimerStateMachine::new(timer_id, deadline, self.validation_level);
         self.timer_machines.insert(timer_id, machine);
     }
@@ -1675,6 +1728,9 @@ impl CancelProtocolValidator {
         event: RegionEvent,
         context: &RegionContext,
     ) -> TransitionResult {
+        if !self.tracking {
+            return TransitionResult::Valid;
+        }
         if let Some(machine) = self.region_machines.get_mut(&region_id) {
             let result = machine.transition(event, context);
             if let TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. } =
@@ -1721,6 +1777,9 @@ impl CancelProtocolValidator {
         event: TaskEvent,
         context: &TaskContext,
     ) -> TransitionResult {
+        if !self.tracking {
+            return TransitionResult::Valid;
+        }
         if let Some(machine) = self.task_machines.get_mut(&task_id) {
             let result = machine.transition(event, context);
             if let TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. } =
@@ -1798,6 +1857,9 @@ impl CancelProtocolValidator {
         event: ObligationEvent,
         context: &ObligationContext,
     ) -> TransitionResult {
+        if !self.tracking {
+            return TransitionResult::Valid;
+        }
         if let Some(machine) = self.obligation_machines.get_mut(&obligation_id) {
             let result = machine.transition(event, context);
             if let TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. } =
@@ -1826,6 +1888,9 @@ impl CancelProtocolValidator {
         event: ChannelEvent,
         context: &ChannelContext,
     ) -> TransitionResult {
+        if !self.tracking {
+            return TransitionResult::Valid;
+        }
         if let Some(machine) = self.channel_machines.get_mut(&channel_id) {
             let result = machine.transition(event, context);
             if let TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. } =
@@ -1854,6 +1919,9 @@ impl CancelProtocolValidator {
         event: IoEvent,
         context: &IoContext,
     ) -> TransitionResult {
+        if !self.tracking {
+            return TransitionResult::Valid;
+        }
         if let Some(machine) = self.io_machines.get_mut(&operation_id) {
             let result = machine.transition(event, context);
             if let TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. } =
@@ -1882,6 +1950,9 @@ impl CancelProtocolValidator {
         event: TimerEvent,
         context: &TimerContext,
     ) -> TransitionResult {
+        if !self.tracking {
+            return TransitionResult::Valid;
+        }
         if let Some(machine) = self.timer_machines.get_mut(&timer_id) {
             let result = machine.transition(event, context);
             if let TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. } =
@@ -1998,6 +2069,48 @@ mod tests {
             (0, 0, 0),
             "remove_* must drop the state machines so the maps do not leak"
         );
+    }
+
+    /// The untracked validator (release runtime) keeps no state machines and
+    /// reports every transition valid, including transitions the tracked
+    /// validator would reject. The tracked validator is unchanged.
+    #[test]
+    fn untracked_validator_registers_nothing_and_reports_valid() {
+        let region_id = RegionId::new_for_test(1, 0);
+        let task_id = TaskId::new_for_test(1, 0);
+        let context = task_context(task_id, region_id);
+
+        let mut untracked = CancelProtocolValidator::untracked();
+        assert!(!untracked.is_tracking());
+        untracked.register_region(region_id);
+        untracked.register_task(task_id, region_id);
+        untracked.register_obligation(ObligationId::new_for_test(1, 0));
+        let (regions, tasks, obligations, ..) = untracked.stats();
+        assert_eq!((regions, tasks, obligations), (0, 0, 0));
+        // Complete before Start is a protocol violation when tracked.
+        assert_eq!(
+            untracked.validate_task_transition_without_logging(
+                task_id,
+                TaskEvent::Complete,
+                &context
+            ),
+            TransitionResult::Valid
+        );
+        assert_eq!(untracked.violation_count(), 0);
+        untracked.remove_task(task_id);
+
+        let mut tracked = CancelProtocolValidator::new(ValidationLevel::Basic);
+        assert!(tracked.is_tracking());
+        tracked.register_task(task_id, region_id);
+        assert!(matches!(
+            tracked.validate_task_transition_without_logging(
+                task_id,
+                TaskEvent::Complete,
+                &context
+            ),
+            TransitionResult::Invalid { .. }
+        ));
+        assert_eq!(tracked.violation_count(), 1);
     }
 
     fn channel_context(channel_id: u64) -> ChannelContext {

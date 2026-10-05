@@ -159,7 +159,12 @@ fn blocking_helper_boundary_census_requires_classification() {
     // drained variants mint the owning runtime's request Cx and delegate to
     // that same SPAWN-checked Cx gateway.
     // The two private free-helper dispatchers preserve pool/thread fallbacks.
+    // The crate-private `cx/io_gate.rs` `spawn_blocking_io` is the fs entry
+    // points' capability gate: it refuses without IO, then delegates to the
+    // free helper unchanged, so placement is the free helper's
+    // (asupersync-issue65-criticisms-kpmoy5.5.3).
     let expected = [
+        ("cx/io_gate.rs", "spawn_blocking_io", 1),
         ("runtime/spawn_blocking.rs", "spawn_blocking", 1),
         ("runtime/spawn_blocking.rs", "spawn_blocking_io", 1),
         ("runtime/spawn_blocking.rs", "spawn_blocking_on_pool", 1),

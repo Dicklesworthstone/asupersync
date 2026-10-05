@@ -13,7 +13,7 @@ use asupersync::codec::Decoder;
 use asupersync::cx::Cx;
 use asupersync::http::h1::server::HostPolicy;
 use asupersync::http::h2::connection::{CLIENT_PREFACE, ReceivedFrame};
-use asupersync::http::h2::frame::{GoAwayFrame, Setting, SettingsFrame};
+use asupersync::http::h2::frame::{GoAwayFrame, HeadersFrame, Setting, SettingsFrame};
 use asupersync::http::h2::listener::{Http2Listener, Http2ListenerConfig};
 use asupersync::http::h2::{
     Connection, ErrorCode, Frame, FrameCodec, Header, Http2Client, Http2ClientError, Settings,
@@ -98,6 +98,58 @@ fn public_http2_client_uploads_and_downloads_beyond_both_initial_windows() {
         });
         quiescent(&runtime);
     }
+}
+
+/// The client advertises receive windows that track max_response_body,
+/// capped at 16 MiB. Only a response larger than that cap makes the server
+/// wait for the client's WINDOW_UPDATE frames, so this download crosses it.
+/// Without the client's receive-side refill the server stalls at 16 MiB and
+/// the request times out.
+#[test]
+fn public_http2_client_downloads_beyond_its_largest_receive_window() {
+    const DOWNLOAD: usize = 16 * 1024 * 1024 + 1024 * 1024 + 7;
+    let runtime = runtime(2);
+    let handle = runtime.handle();
+    runtime.block_on(async move {
+        let listener = Http2Listener::bind_with_config(
+            "127.0.0.1:0",
+            |request: Request| async move {
+                assert_eq!(request.method, Method::Get);
+                let body: Vec<u8> = (0..DOWNLOAD).map(|index| (index % 253) as u8).collect();
+                Response::new(200, "OK", body)
+            },
+            config(),
+        )
+        .await
+        .unwrap();
+        let address = listener.local_addr().unwrap();
+        let shutdown = listener.shutdown_signal();
+        let server = handle
+            .clone()
+            .try_spawn(async move { listener.run(&handle).await })
+            .unwrap();
+        let cx = Cx::current().unwrap();
+        let response = Http2Client::new()
+            .timeout(Duration::from_secs(60))
+            .max_response_body(2 * DOWNLOAD)
+            .get(format!("http://{address}/download"))
+            .send(&cx)
+            .await
+            .expect("the download completes once the client refills its windows");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body.len(), DOWNLOAD);
+        assert!(
+            response
+                .body
+                .iter()
+                .enumerate()
+                .all(|(index, byte)| usize::from(*byte) == index % 253),
+            "the downloaded body is byte-identical"
+        );
+        assert!(shutdown.begin_drain(Duration::from_secs(2)));
+        server.await.unwrap();
+    });
+    quiescent(&runtime);
 }
 
 struct Peer {
@@ -559,6 +611,147 @@ fn a_server_declaring_enable_push_zero_is_served() {
                 .expect("a server may send SETTINGS_ENABLE_PUSH=0");
             assert_eq!(response.status, 200);
             assert_eq!(response.text().unwrap(), "ok");
+        });
+        peer.join().unwrap();
+        quiescent(&runtime);
+    }
+}
+
+/// A scripted peer without an HTTP/2 state machine, so it can declare settings
+/// that its own side would then enforce against the client.
+struct RawPeer {
+    io: std::net::TcpStream,
+    codec: FrameCodec,
+    input: BytesMut,
+}
+
+impl RawPeer {
+    fn accept(listener: std::net::TcpListener) -> Self {
+        let (mut io, _) = listener.accept().unwrap();
+        io.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        io.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut preface = [0u8; 24];
+        io.read_exact(&mut preface).unwrap();
+        assert_eq!(&preface, CLIENT_PREFACE);
+        Self {
+            io,
+            codec: FrameCodec::new(),
+            input: BytesMut::new(),
+        }
+    }
+
+    fn frame(&mut self, frame: Frame) {
+        let mut bytes = BytesMut::new();
+        frame.encode(&mut bytes).unwrap();
+        self.io.write_all(&bytes).unwrap();
+        self.io.flush().unwrap();
+    }
+
+    /// The frames the client sends until one matches `stop` or `deadline`
+    /// passes, and whether it closed the connection by then.
+    fn frames_until(
+        &mut self,
+        deadline: Instant,
+        stop: impl Fn(&Frame) -> bool,
+    ) -> (Vec<Frame>, bool) {
+        let mut frames = Vec::new();
+        loop {
+            while let Some(frame) = self.codec.decode(&mut self.input).unwrap() {
+                let stopped = stop(&frame);
+                frames.push(frame);
+                if stopped {
+                    return (frames, false);
+                }
+            }
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return (frames, false);
+            };
+            if remaining.is_zero() {
+                return (frames, false);
+            }
+            self.io.set_read_timeout(Some(remaining)).unwrap();
+            let mut bytes = [0u8; 8192];
+            match self.io.read(&mut bytes) {
+                Ok(0) => return (frames, true),
+                Ok(read) => self.input.extend_from_slice(&bytes[..read]),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {
+                    return (frames, true);
+                }
+                Err(error) => panic!("reading the client's frames failed: {error}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn a_server_declaring_max_concurrent_streams_zero_is_waited_for_until_it_admits_a_stream() {
+    for workers in [1, 2] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = std::thread::spawn(move || {
+            let mut peer = RawPeer::accept(listener);
+            // RFC 9113 §6.5.2: zero is a legal SETTINGS_MAX_CONCURRENT_STREAMS
+            // that a peer is expected to raise again shortly.
+            peer.frame(Frame::Settings(SettingsFrame::new(vec![
+                Setting::MaxConcurrentStreams(0),
+            ])));
+            let (held, closed) =
+                peer.frames_until(Instant::now() + Duration::from_millis(300), |_| false);
+            assert!(
+                !closed,
+                "the client gave up on a legal zero stream limit: {held:?}"
+            );
+            assert!(
+                held.iter()
+                    .any(|frame| matches!(frame, Frame::Settings(settings) if settings.ack)),
+                "the client never acknowledged the zero stream limit: {held:?}"
+            );
+            assert!(
+                !held.iter().any(|frame| matches!(frame, Frame::Headers(_))),
+                "the client opened a stream while the limit was zero: {held:?}"
+            );
+            peer.frame(Frame::Settings(SettingsFrame::ack()));
+            peer.frame(Frame::Settings(SettingsFrame::new(vec![
+                Setting::MaxConcurrentStreams(1),
+            ])));
+            let (frames, closed) = peer
+                .frames_until(Instant::now() + Duration::from_secs(5), |frame| {
+                    matches!(frame, Frame::Headers(_))
+                });
+            let id = frames
+                .iter()
+                .find_map(|frame| match frame {
+                    Frame::Headers(headers) => Some(headers.stream_id),
+                    _ => None,
+                })
+                .unwrap_or_else(|| {
+                    panic!("no request once the limit was raised (closed: {closed}): {frames:?}")
+                });
+            // HPACK static table entry 8 is ":status: 200".
+            peer.frame(Frame::Headers(HeadersFrame::new(
+                id,
+                Bytes::from_static(&[0x88]),
+                true,
+                true,
+            )));
+            let (_, closed) = peer.frames_until(Instant::now() + Duration::from_secs(5), |_| false);
+            assert!(closed, "the client kept its connection after the response");
+        });
+        let runtime = runtime(workers);
+        runtime.block_on(async move {
+            let cx = Cx::current().unwrap();
+            let response = Http2Client::new()
+                .timeout(Duration::from_secs(10))
+                .get(format!("http://{address}/zero-streams"))
+                .send(&cx)
+                .await
+                .expect("the client waits until the server admits a stream");
+            assert_eq!(response.status, 200);
         });
         peer.join().unwrap();
         quiescent(&runtime);

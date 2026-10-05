@@ -154,6 +154,19 @@
       "notes": "Source-local test name (897d33b51): it asserts the authenticated driver waits for a real quorum instead of returning a placeholder. A negative assertion, not a stub."
     },
     {
+      "id": "src-pbft-readme-deprecated-submit-fixed-response",
+      "paths": [
+        "src/distributed/consensus/README.md"
+      ],
+      "terms": [
+        "returns a fixed placeholder response"
+      ],
+      "disposition": "product-bug-follow-up",
+      "support_class": "blocked_follow_up",
+      "blocker_bead_id": "asupersync-gap-snapshot-transport-swim-pbft-e6drlx",
+      "notes": "The consensus README (f08f14298, bi2462.124) says that the deprecated PbftConsensus::submit returns a fixed placeholder response. This documents the same gap as src-pbft-submit-experimental-fixed-response; no PBFT completion claim follows from this classification."
+    },
+    {
       "id": "src-atp-protocol-e701-fail-closed",
       "paths": [
         "src/net/atp/protocol/outcome.rs"

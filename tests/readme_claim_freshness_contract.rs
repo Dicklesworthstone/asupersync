@@ -456,8 +456,13 @@ fn public_docs_match_the_shipped_contracts() {
         );
     }
 
-    assert!(race.contains("(#cx).race_drained(vec!"));
-    assert!(race.contains("(#cx).race_drained_timeout("));
+    // race! names its engine method from these parts since c3e02f310 added
+    // factory races: every expansion still calls a `race_drained*` method.
+    assert!(race.contains(
+        "let prefix = if factories { \"race_drained_with\" } else { \"race_drained\" };"
+    ));
+    assert!(race.contains("(#cx).#method(vec![#(#boxed_futures),*]).await"));
+    assert!(race.contains("(#cx).#method(#duration, vec![#(#boxed_futures),*]).await"));
     assert!(join.matches("::core::future::poll_fn").count() >= 2);
     assert!(select.contains("(#cx).race_drained(::std::vec!"));
     assert!(select.contains("::core::future::poll_fn"));

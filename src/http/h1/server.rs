@@ -1146,9 +1146,28 @@ where
                 self.config.request_timeout_header_cap,
             );
 
-            let upgrade_request = req.clone();
+            // Only an upgrade-aware listener checks a handoff against its
+            // request, and a request with a body or trailers can never hand
+            // off. Keep a copy just for that case: copying every request
+            // cost a copy of its whole body, up to max_body_size.
+            let upgrade_request = (admit_upgrade && req.body.is_empty() && req.trailers.is_empty())
+                .then(|| req.clone());
             let mut forced_close = false;
-            let output = match ServerRequestRegion::mint("h1", request_budget, request_now) {
+            // The request context derives from the connection's own context
+            // when there is one, so work a handler spawns belongs to the
+            // connection's region instead of the root
+            // (br-asupersync-vqppo5). Callers outside any task keep the
+            // runtime mint.
+            let region = match conn_cx.as_ref() {
+                Some(connection_cx) => Some(ServerRequestRegion::mint_from_connection(
+                    "h1",
+                    request_budget,
+                    request_now,
+                    connection_cx,
+                )),
+                None => ServerRequestRegion::mint("h1", request_budget, request_now),
+            };
+            let output = match region {
                 Some(region) => {
                     // Race the whole hop against ForceClosing so slow
                     // handlers don't block shutdown (drop is the backstop).
@@ -1217,6 +1236,9 @@ where
 
             if request_method == Method::Head {
                 suppress_response_body_for_head(&mut resp);
+            } else if declared_length_mismatches_body(&resp) {
+                resp = hop_error_response(request_version, 500, "Internal Server Error");
+                forced_close = true;
             }
 
             // br-asupersync-server-stack-hardening-eeexl1.2 (D2.2b): once the
@@ -1242,7 +1264,18 @@ where
                             "HTTP/1 upgrade refused after listener drain began",
                         ));
                     }
-                    validate_upgrade_handoff(&upgrade_request, &resp, &upgrade)?;
+                    let Some(upgrade_request) = upgrade_request.as_ref() else {
+                        // Same refusals, in the same order, as the check below.
+                        if request_version != Version::Http11 || request_method != Method::Get {
+                            return Err(invalid_upgrade_error(
+                                "WebSocket handoff requires an HTTP/1.1 GET request",
+                            ));
+                        }
+                        return Err(invalid_upgrade_error(
+                            "WebSocket handoff request must not carry a body or trailers",
+                        ));
+                    };
+                    validate_upgrade_handoff(upgrade_request, &resp, &upgrade)?;
                     Some(upgrade)
                 }
                 None => None,
@@ -1627,6 +1660,9 @@ where
             }
             if request_method == Method::Head {
                 suppress_response_body_for_head(&mut response);
+            } else if declared_length_mismatches_body(&response) {
+                response = hop_error_response(request_version, 500, "Internal Server Error");
+                forced_close = true;
             }
             let draining = self
                 .shutdown_signal
@@ -3725,6 +3761,25 @@ fn remove_header(resp: &mut Response, header_name: &str) -> bool {
     resp.headers
         .retain(|(name, _)| !name.eq_ignore_ascii_case(header_name));
     resp.headers.len() != before
+}
+
+/// Whether a handler's response to a non-HEAD request declares a
+/// Content-Length its body does not carry. Written as is, a keep-alive client
+/// would take the difference from the next response (or wait for bytes that
+/// never come), so the server answers 500 and closes instead. Bodyless
+/// statuses carry no body whatever they declare (RFC 9112 6.3).
+fn declared_length_mismatches_body(resp: &Response) -> bool {
+    if (100..=199).contains(&resp.status) || resp.status == 204 || resp.status == 304 {
+        return false;
+    }
+    resp.headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .any(|(_, value)| {
+            let digits = value.trim();
+            !digits.bytes().all(|byte| byte.is_ascii_digit())
+                || digits.parse::<usize>().ok() != Some(resp.body.len())
+        })
 }
 
 fn suppress_response_body_for_head(resp: &mut Response) {
@@ -7124,6 +7179,66 @@ mod tests {
         assert!(!written.ends_with("\r\n\r\nhello"));
     }
 
+    /// A handler that declares a Content-Length its body does not carry used
+    /// to have it written as is: the client then read the next response's
+    /// bytes as this body. HEAD keeps the declared length.
+    #[test]
+    fn serve_refuses_a_declared_length_the_body_does_not_match() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"GET /short HTTP/1.1\r\nHost: localhost\r\n\r\nGET /next HTTP/1.1\r\nHost: localhost\r\n\r\n"
+                .to_vec(),
+            Arc::clone(&written),
+        );
+        let server = Http1Server::with_config(
+            |_req| async move {
+                Response::new(200, "OK", Vec::new()).with_header("Content-Length", "10")
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+        let state = runtime
+            .block_on(async { server.serve(io).await })
+            .expect("serve");
+
+        assert_eq!(
+            state.requests_served, 1,
+            "the connection closes after the 500"
+        );
+        let written = String::from_utf8(written.lock().unwrap().clone())
+            .expect("response should be valid utf8");
+        assert!(written.starts_with("HTTP/1.1 500 "), "{written:?}");
+        assert!(
+            written
+                .to_ascii_lowercase()
+                .contains("\r\nconnection: close\r\n"),
+            "{written:?}"
+        );
+        assert!(!written.contains("Content-Length: 10"), "{written:?}");
+        assert_eq!(written.matches("HTTP/1.1 ").count(), 1, "{written:?}");
+
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"HEAD /short HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let server = Http1Server::with_config(
+            |_req| async move {
+                Response::new(200, "OK", Vec::new()).with_header("Content-Length", "10")
+            },
+            localhost_server_config(),
+        );
+        runtime
+            .block_on(async { server.serve(io).await })
+            .expect("serve head");
+        let written = String::from_utf8(written.lock().unwrap().clone())
+            .expect("response should be valid utf8");
+        assert!(written.starts_with("HTTP/1.1 200 OK\r\n"), "{written:?}");
+        assert!(written.contains("Content-Length: 10\r\n"), "{written:?}");
+    }
+
     #[test]
     fn serve_expect_continue_unblocks_body_waiting_client() {
         let written = Arc::new(Mutex::new(Vec::new()));
@@ -7841,6 +7956,56 @@ mod tests {
             matches!(error, HttpError::Io(ref error) if error.kind() == io::ErrorKind::InvalidData)
         );
         assert!(written.lock().unwrap().is_empty());
+    }
+
+    /// The upgrade check no longer copies a request that carries a body; it
+    /// must still refuse such a handoff with the same errors, in the same
+    /// order.
+    #[test]
+    fn upgradeable_server_refuses_a_handoff_for_a_request_with_a_body() {
+        for (method, expected) in [
+            ("POST", "WebSocket handoff requires an HTTP/1.1 GET request"),
+            (
+                "GET",
+                "WebSocket handoff request must not carry a body or trailers",
+            ),
+        ] {
+            let written = Arc::new(Mutex::new(Vec::new()));
+            let io = TestIo::new(
+                format!(
+                    "{method} /ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n\
+                     Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+                     Sec-WebSocket-Version: 13\r\nContent-Length: 4\r\n\r\nbody"
+                )
+                .into_bytes(),
+                Arc::clone(&written),
+            );
+            let server = Http1Server::with_config_upgradeable(
+                |_request| async move {
+                    let response = Response::new(101, "Switching Protocols", Vec::new())
+                        .with_header("connection", "Upgrade")
+                        .with_header("upgrade", "websocket")
+                        .with_header("sec-websocket-accept", "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+                    Http1Response::new(response)
+                        .with_upgrade(Http1Upgrade::new(|_cx, _io, _read_ahead| async {}))
+                },
+                localhost_server_config(),
+            );
+            let runtime = RuntimeBuilder::current_thread()
+                .build()
+                .expect("build current-thread runtime");
+            let error = match runtime
+                .block_on(async { server.serve_upgradeable_with_peer_addr(io, None).await })
+            {
+                Err(error) => error,
+                Ok(_) => panic!("{method} with a body must refuse handoff"),
+            };
+            assert!(
+                matches!(&error, HttpError::Io(error) if error.to_string().contains(expected)),
+                "{method}: {error:?}"
+            );
+            assert!(written.lock().unwrap().is_empty());
+        }
     }
 
     fn deflate_handoff(offer: Option<&str>) -> Result<Http1ServeOutcome<TestIo>, HttpError> {

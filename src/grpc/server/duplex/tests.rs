@@ -431,6 +431,52 @@ fn decoder(
     (writer, request.into_inner(), cx)
 }
 
+/// Repeated metadata keys (grpc-go's metadata.Pairs("k", "a", "k", "b"),
+/// split cookie headers) are legal. The duplex lane refused them, although
+/// the unary lane accepts the same request; only single-valued fields such
+/// as content-type are refused when repeated.
+#[test]
+fn decode_live_request_accepts_repeated_metadata_but_not_a_repeated_content_type() {
+    let cx = Cx::for_testing();
+    let server = Server::builder().build();
+    let decode = |headers: &[(&str, &str)]| {
+        let head = RequestHead {
+            method: Method::Post,
+            uri: "/native.Duplex/Echo".to_owned(),
+            version: Version::Http11,
+            headers: headers
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect(),
+        };
+        let (_writer, body) = IncomingRequestBody::framed_channel_with_limits(&cx, None, 8, 65535);
+        server
+            .decode_live_request(StreamingServerRequest::new(head, body), 65535)
+            .map(|(_, request)| request)
+    };
+
+    let request = decode(&[
+        ("content-type", "application/grpc"),
+        ("x-tag", "a"),
+        ("x-tag", "b"),
+    ])
+    .expect("repeated metadata is accepted");
+    let tags = request
+        .metadata()
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("x-tag"))
+        .count();
+    assert_eq!(tags, 2, "both values are kept");
+
+    match decode(&[
+        ("content-type", "application/grpc"),
+        ("content-type", "application/grpc"),
+    ]) {
+        Err(status) => assert_eq!(status.code(), Code::InvalidArgument),
+        Ok(_) => panic!("a repeated content-type is refused"),
+    }
+}
+
 fn put(
     writer: &mut crate::http::h1::stream::FramedIncomingRequestBodyWriter,
     cx: &Cx,

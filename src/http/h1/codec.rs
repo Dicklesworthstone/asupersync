@@ -1227,6 +1227,19 @@ fn split_line_crlf(src: &mut BytesMut, max_len: usize) -> Result<Option<BytesMut
     Ok(Some(line))
 }
 
+/// Finds the CRLF ending the chunk-size line at the start of `buf`, for the
+/// streaming decoders. A line is at most `MAX_CHUNK_LINE_LEN` bytes, as in
+/// the buffered codec, so only that much is searched: a longer line is an
+/// error, not a reason to keep buffering and rescanning (CVE-2024-22019).
+pub(super) fn find_chunk_size_line_end(buf: &[u8]) -> Result<Option<usize>, HttpError> {
+    let window = &buf[..buf.len().min(MAX_CHUNK_LINE_LEN + 2)];
+    match window.windows(2).position(|pair| pair == b"\r\n") {
+        Some(line_end) => Ok(Some(line_end)),
+        None if buf.len() >= MAX_CHUNK_LINE_LEN + 2 => Err(HttpError::BadChunkedEncoding),
+        None => Ok(None),
+    }
+}
+
 pub(super) fn parse_chunk_size_line(line: &[u8]) -> Result<usize, HttpError> {
     let line = std::str::from_utf8(line).map_err(|_| HttpError::BadChunkedEncoding)?;
     // RFC 9112 §7.1.1: chunk-ext is tokens and quoted strings, so it holds no
@@ -1682,6 +1695,17 @@ impl Encoder<Response> for Http1Codec {
             return Err(HttpError::TrailersNotAllowed);
         }
 
+        // A response without a body (1xx, 204, 304) never carries chunked
+        // framing: a keep-alive client would read the "0\r\n\r\n" terminator
+        // as the start of the next response (RFC 9112 6.3). An HTTP/1.0
+        // recipient cannot decode chunked at all (RFC 9112 6.1), so its body
+        // goes out with Content-Length. Either way the handler's
+        // Transfer-Encoding and Trailer headers, and its trailers, are dropped.
+        let bodyless =
+            (100..=199).contains(&resp.status) || resp.status == 204 || resp.status == 304;
+        let chunked_on_wire = chunked && !bodyless && resp.version != Version::Http10;
+        let drop_chunked_headers = chunked && !chunked_on_wire;
+
         if !chunked {
             if let Some(cl) = cl {
                 // br-asupersync-lbhaf2: same digit-only validation on the
@@ -1725,12 +1749,12 @@ impl Encoder<Response> for Http1Codec {
             .iter()
             .map(|(name, value)| name.len() + value.len() + 4)
             .sum();
-        let chunk_line_bytes = if chunked && !resp.body.is_empty() {
+        let chunk_line_bytes = if chunked_on_wire && !resp.body.is_empty() {
             upper_hex_len(resp.body.len()) + 2
         } else {
             0
         };
-        let encoded_body_bytes = if chunked {
+        let encoded_body_bytes = if chunked_on_wire {
             chunk_line_bytes + resp.body.len() + 2 + 3 + trailers_bytes + 2
         } else {
             resp.body.len()
@@ -1748,13 +1772,19 @@ impl Encoder<Response> for Http1Codec {
             dst.extend_from_slice(b"\r\n");
 
             for (name, value) in &resp.headers {
+                if drop_chunked_headers
+                    && (name.eq_ignore_ascii_case("transfer-encoding")
+                        || name.eq_ignore_ascii_case("trailer"))
+                {
+                    continue;
+                }
                 dst.extend_from_slice(name.as_bytes());
                 dst.extend_from_slice(b": ");
                 dst.extend_from_slice(value.as_bytes());
                 dst.extend_from_slice(b"\r\n");
             }
 
-            if chunked {
+            if chunked_on_wire {
                 dst.extend_from_slice(b"\r\n");
                 if !resp.body.is_empty() {
                     append_chunk_size_line(dst, resp.body.len());
@@ -1772,8 +1802,7 @@ impl Encoder<Response> for Http1Codec {
                 return Ok(());
             }
 
-            let suppress_content_length =
-                (100..=199).contains(&resp.status) || resp.status == 204 || resp.status == 304;
+            let suppress_content_length = bodyless;
             if !has_content_length && !suppress_content_length {
                 dst.extend_from_slice(b"Content-Length: ");
                 append_decimal(dst, resp.body.len());
@@ -1919,6 +1948,33 @@ mod tests {
                      5;ext=1\r\nhello\r\n0\r\n\r\n";
         let req = decode_one(&mut codec, raw).unwrap().unwrap();
         assert_eq!(req.body, b"hello");
+    }
+
+    #[test]
+    fn chunk_size_line_search_is_bounded_like_the_buffered_codec() {
+        let mut line = b"1;".to_vec();
+        line.resize(MAX_CHUNK_LINE_LEN, b'a');
+        line.extend_from_slice(b"\r\nX");
+        assert_eq!(
+            find_chunk_size_line_end(&line).unwrap(),
+            Some(MAX_CHUNK_LINE_LEN)
+        );
+
+        let mut long = b"1;".to_vec();
+        long.resize(MAX_CHUNK_LINE_LEN + 1, b'a');
+        long.extend_from_slice(b"\r\nX");
+        assert!(matches!(
+            find_chunk_size_line_end(&long),
+            Err(HttpError::BadChunkedEncoding)
+        ));
+        assert!(matches!(
+            find_chunk_size_line_end(&long[..MAX_CHUNK_LINE_LEN + 2]),
+            Err(HttpError::BadChunkedEncoding)
+        ));
+        assert_eq!(
+            find_chunk_size_line_end(&long[..MAX_CHUNK_LINE_LEN + 1]).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -2552,6 +2608,51 @@ mod tests {
         assert!(s.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(s.contains("Content-Length: 5\r\n"));
         assert!(s.ends_with("\r\n\r\nhello"));
+    }
+
+    /// A handler (or a proxy copying upstream headers) can put
+    /// Transfer-Encoding: chunked on a 204 or 304. The terminator it wrote
+    /// was read by a keep-alive client as the start of the next response.
+    #[test]
+    fn encode_bodyless_status_never_writes_chunked_framing() {
+        for status in [103, 204, 304] {
+            let mut codec = Http1Codec::new();
+            let resp = Response::new(status, "", Vec::new())
+                .with_header("ETag", "\"v1\"")
+                .with_header("Transfer-Encoding", "chunked")
+                .with_header("Trailer", "x-digest")
+                .with_trailer("x-digest", "abc");
+            let wire = String::from_utf8(encode_one(&mut codec, resp)).unwrap();
+            assert!(wire.ends_with("ETag: \"v1\"\r\n\r\n"), "{status}: {wire:?}");
+            let lower = wire.to_ascii_lowercase();
+            assert!(!lower.contains("transfer-encoding"), "{status}: {wire:?}");
+            assert!(!lower.contains("trailer"), "{status}: {wire:?}");
+            assert!(!lower.contains("x-digest"), "{status}: {wire:?}");
+        }
+    }
+
+    /// RFC 9112 6.1: chunked is undecodable for an HTTP/1.0 recipient, which
+    /// would take the chunk syntax as body bytes.
+    #[test]
+    fn encode_http10_response_uses_content_length_instead_of_chunked() {
+        let mut codec = Http1Codec::new();
+        let mut resp = Response::new(200, "OK", b"hello".to_vec())
+            .with_header("Transfer-Encoding", "chunked")
+            .with_trailer("x-digest", "abc");
+        resp.version = Version::Http10;
+        let wire = String::from_utf8(encode_one(&mut codec, resp)).unwrap();
+        assert_eq!(wire, "HTTP/1.0 200 OK\r\nContent-Length: 5\r\n\r\nhello");
+
+        // An HTTP/1.1 response keeps its chunked framing and trailers.
+        let mut codec = Http1Codec::new();
+        let resp = Response::new(200, "OK", b"hello".to_vec())
+            .with_header("Transfer-Encoding", "chunked")
+            .with_trailer("x-digest", "abc");
+        let wire = String::from_utf8(encode_one(&mut codec, resp)).unwrap();
+        assert_eq!(
+            wire,
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\nx-digest: abc\r\n\r\n"
+        );
     }
 
     #[test]

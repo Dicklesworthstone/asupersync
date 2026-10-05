@@ -539,15 +539,15 @@ impl TlsAcceptorBuilder {
                         )));
                     }
 
-                    // Additional validation: check certificate is well-formed
+                    // RFC 5280 4.1.2.6: the subject may be empty when a SAN names it.
                     if cert.subject().iter_common_name().next().is_none()
                         && cert.subject().iter_organizational_unit().next().is_none()
                         && cert.subject().iter_organization().next().is_none()
+                        && !matches!(cert.subject_alternative_name(), Ok(Some(_)))
                     {
                         return Err(TlsError::Configuration(format!(
-                            "certificate {} in chain has empty subject. \
-                             Certificate may be malformed (asupersync-jxzrs4)",
-                            i
+                            "certificate {i} in chain has empty subject and no SAN. \
+                             Certificate may be malformed (asupersync-jxzrs4)"
                         )));
                     }
 
@@ -932,8 +932,8 @@ impl TlsAcceptorBuilder {
 
     /// Set maximum TLS fragment size.
     ///
-    /// This limits the size of TLS records. Smaller values may help with
-    /// constrained networks but reduce throughput.
+    /// This limits the size of TLS records to 32..=16389 bytes, checked by
+    /// `build`. Smaller values help constrained networks but cost throughput.
     pub fn max_fragment_size(mut self, size: usize) -> Self {
         self.max_fragment_size = Some(size);
         self
@@ -1137,13 +1137,13 @@ impl TlsAcceptorBuilder {
             // has no documented stability guarantee).
             // TLS 1.2 = 0x0303, TLS 1.3 = 0x0304.
             fn version_ordinal(v: rustls::ProtocolVersion) -> u16 {
-                match v {
-                    rustls::ProtocolVersion::TLSv1_2 => 0x0303,
-                    rustls::ProtocolVersion::TLSv1_3 => 0x0304,
-                    // Unknown / future versions sort high so they're
-                    // excluded by an explicit floor.
-                    _ => 0xFFFF,
-                }
+                // The wire value orders every TLS version, so a bound below
+                // TLS 1.2 is honoured: a TLS 1.1 ceiling leaves no version
+                // (a build error) and a TLS 1.0 floor admits 1.2 and 1.3.
+                // Mapping them to 0xFFFF made the ceiling a no-op and the
+                // floor an error. Unknown values keep their own number, and
+                // DTLS values (0xFEFF and below) sort above every TLS one.
+                u16::from(v)
             }
 
             let min = self.min_protocol.map(version_ordinal);
@@ -1212,6 +1212,13 @@ impl TlsAcceptorBuilder {
 
         // Set max fragment size if specified
         if let Some(size) = self.max_fragment_size {
+            // rustls checks this bound only when each connection is created,
+            // so an out-of-range value would fail every accept() instead.
+            if !(32..=16_389).contains(&size) {
+                return Err(TlsError::Configuration(format!(
+                    "max_fragment_size {size} is outside 32..=16389"
+                )));
+            }
             config.max_fragment_size = Some(size);
         }
 
@@ -2061,6 +2068,52 @@ SrXuVI5uunTgPWuOtJOP+KM=
 
     #[cfg(feature = "tls")]
     #[test]
+    fn protocol_bounds_below_tls12_are_honoured_on_both_builders() {
+        // Every version but 1.2 and 1.3 used to compare as 0xFFFF, so a
+        // TLS 1.1 ceiling capped nothing (the build offered 1.2 and 1.3) and
+        // a TLS 1.0 floor excluded everything.
+        let acceptor = |min: Option<rustls::ProtocolVersion>, max| {
+            let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+            let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+            let mut builder = TlsAcceptorBuilder::new(chain, key);
+            if let Some(min) = min {
+                builder = builder.min_protocol_version(min);
+            }
+            if let Some(max) = max {
+                builder = builder.max_protocol_version(max);
+            }
+            builder.build()
+        };
+        let connector = |min: Option<rustls::ProtocolVersion>, max| {
+            let mut builder = crate::tls::TlsConnectorBuilder::new()
+                .add_root_certificates(Certificate::from_pem(TEST_CERT_PEM).unwrap());
+            if let Some(min) = min {
+                builder = builder.min_protocol_version(min);
+            }
+            if let Some(max) = max {
+                builder = builder.max_protocol_version(max);
+            }
+            builder.build()
+        };
+        let tls11 = Some(rustls::ProtocolVersion::TLSv1_1);
+        let tls10 = Some(rustls::ProtocolVersion::TLSv1_0);
+        assert!(
+            matches!(acceptor(None, tls11), Err(TlsError::Configuration(_))),
+            "a TLS 1.1 ceiling leaves the acceptor no version"
+        );
+        assert!(
+            matches!(connector(None, tls11), Err(TlsError::Configuration(_))),
+            "a TLS 1.1 ceiling leaves the connector no version"
+        );
+        assert!(acceptor(tls10, None).is_ok(), "a TLS 1.0 floor admits 1.2+");
+        assert!(
+            connector(tls10, None).is_ok(),
+            "a TLS 1.0 floor admits 1.2+"
+        );
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
     fn test_min_protocol_tls13_pin_builds_and_handshakes_with_matching_client() {
         // Positive control: when both ends are pinned to TLS 1.3, the
         // handshake succeeds and the negotiated protocol_version on
@@ -2429,6 +2482,57 @@ SrXuVI5uunTgPWuOtJOP+KM=
 
     // ── br-asupersync-jxzrs4: Certificate validation security tests ──
 
+    /// Empty subject, critical SAN DNS:localhost, EC P-256, valid to 2126.
+    /// `openssl req -x509 -subj "/" -addext "subjectAltName=critical,DNS:localhost"`.
+    #[cfg(feature = "tls")]
+    const SAN_ONLY_CERT_PEM: &[u8] = b"-----BEGIN CERTIFICATE-----
+MIIBbzCCARagAwIBAgIUWfnf+Qbqhs8Afd0tAR76sZ2za6owCgYIKoZIzj0EAwIw
+ADAgFw0yNjEwMDMwNDE4MzFaGA8yMTI2MDkwOTA0MTgzMVowADBZMBMGByqGSM49
+AgEGCCqGSM49AwEHA0IABFjD0VfSdEWfrlG2OsO1vLRWv1KyLM4ks/aXG0c1Bu2R
+cpL3GI/H+y/TDwVpBSQrOsC++NTajsFg6HgzbV1yIwujbDBqMB0GA1UdDgQWBBRS
+gXY7+GwPh48l2gUlFyTjomcgTzAfBgNVHSMEGDAWgBRSgXY7+GwPh48l2gUlFyTj
+omcgTzAPBgNVHRMBAf8EBTADAQH/MBcGA1UdEQEB/wQNMAuCCWxvY2FsaG9zdDAK
+BggqhkjOPQQDAgNHADBEAiBOO2mJ0xGv/VEt6OGcHYc6mK5OWbuMXcrz2JvYWxAG
+AgIgWKIcqJZDfB9BgKQSbhhx+02tizbl6qi9xTnA8sfkRZU=
+-----END CERTIFICATE-----
+";
+
+    /// The same key with an empty subject and no SAN, valid to 2126.
+    #[cfg(feature = "tls")]
+    const NAMELESS_CERT_PEM: &[u8] = b"-----BEGIN CERTIFICATE-----
+MIIBVzCB/aADAgECAhRMuHqeb1mPWSxLcH2HlbyevLm6KDAKBggqhkjOPQQDAjAA
+MCAXDTI2MTAwMzA0MTgzMVoYDzIxMjYwOTA5MDQxODMxWjAAMFkwEwYHKoZIzj0C
+AQYIKoZIzj0DAQcDQgAEWMPRV9J0RZ+uUbY6w7W8tFa/UrIsziSz9pcbRzUG7ZFy
+kvcYj8f7L9MPBWkFJCs6wL741NqOwWDoeDNtXXIjC6NTMFEwHQYDVR0OBBYEFFKB
+djv4bA+HjyXaBSUXJOOiZyBPMB8GA1UdIwQYMBaAFFKBdjv4bA+HjyXaBSUXJOOi
+ZyBPMA8GA1UdEwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDSQAwRgIhAKJNraBFMdXo
+ZIGTFola531RnBtvG1rCJaou4VpRVmPNAiEA0Pds0nOzs4y3KpKYs4A2fAuRLuLK
+dEUXP8/OsohM4vU=
+-----END CERTIFICATE-----
+";
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn certificate_validation_accepts_a_san_only_certificate() {
+        // RFC 5280 4.1.2.6 lets a certificate name its subject only in a
+        // SAN; Let's Encrypt's tlsserver and shortlived profiles issue such
+        // certificates.
+        let chain = CertificateChain::from_pem(SAN_ONLY_CERT_PEM).unwrap();
+        let result = TlsAcceptorBuilder::validate_certificate_chain(&chain);
+        assert!(
+            result.is_ok(),
+            "a SAN-only certificate is valid: {result:?}"
+        );
+
+        let chain = CertificateChain::from_pem(NAMELESS_CERT_PEM).unwrap();
+        match TlsAcceptorBuilder::validate_certificate_chain(&chain) {
+            Err(TlsError::Configuration(msg)) => {
+                assert!(msg.contains("has empty subject and no SAN"), "{msg}");
+            }
+            other => panic!("a certificate naming no subject must be refused: {other:?}"),
+        }
+    }
+
     #[cfg(feature = "tls")]
     #[test]
     fn test_certificate_validation_passes_for_valid_cert() {
@@ -2476,6 +2580,32 @@ SrXuVI5uunTgPWuOtJOP+KM=
             "build should succeed with valid certificate: {:?}",
             result
         );
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn build_refuses_a_max_fragment_size_rustls_would_refuse_per_connection() {
+        let build = |size| {
+            let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+            let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+            TlsAcceptorBuilder::new(chain, key)
+                .max_fragment_size(size)
+                .build()
+        };
+        for size in [0, 31, 16_390] {
+            match build(size) {
+                Err(TlsError::Configuration(msg)) => {
+                    assert!(msg.contains("max_fragment_size"), "{msg}");
+                }
+                other => panic!("size {size} must fail build, got {:?}", other.err()),
+            }
+        }
+        for size in [32, 1_024, 16_389] {
+            let acceptor = build(size).expect("an in-range size builds");
+            // The bound matches rustls: a connection can be created.
+            ServerConnection::new(Arc::clone(acceptor.config()))
+                .unwrap_or_else(|e| panic!("size {size}: {e}"));
+        }
     }
 
     #[cfg(feature = "tls")]

@@ -136,6 +136,9 @@ pub async fn write_epoch_stripes(
 /// then succeeds as long as enough symbols survived (see
 /// [`super::raptorq_journal::latest_complete_epoch`]). A missing stripe is the
 /// expected crash case and is silently skipped; any other I/O error propagates.
+/// The scan of a concatenation stops at the first damaged frame and so drops
+/// every later stripe with it; [`DurableTraceJournal`] scans each stripe on its
+/// own instead.
 ///
 /// # Errors
 ///
@@ -157,6 +160,27 @@ pub async fn read_epoch_stripes(
         }
     }
     Ok(out)
+}
+
+/// The CRC-validated frames of every surviving stripe file of `epoch`, each
+/// stripe scanned on its own so a damaged frame ends only its own stripe's scan:
+/// one corrupt failure domain must not take the intact ones down with it.
+#[cfg(not(target_arch = "wasm32"))]
+async fn scan_epoch_stripes(
+    dir: &std::path::Path,
+    epoch: u64,
+    stripe_count: usize,
+) -> std::io::Result<Vec<JournalFrame>> {
+    let mut frames = Vec::new();
+    for index in 0..stripe_count {
+        let path = dir.join(stripe_file_name(epoch, index));
+        match crate::fs::read(&path).await {
+            Ok(bytes) => frames.extend(scan_frames(&bytes).0),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(frames)
 }
 
 /// File name for an epoch's persisted manifest record within a journal directory.
@@ -285,6 +309,12 @@ pub fn decode_epoch_frames(
     let mut config = DecodingConfig::without_auth();
     config.symbol_size = record.symbol_size;
     config.max_block_size = record.max_block_size as usize;
+    // Try each block as soon as K symbols survive. The default 5% overhead
+    // waits for ceil(1.05 * K), so a block left with K..ceil(1.05 * K) symbols,
+    // some of them repair symbols, would never decode although
+    // `DurableTraceJournal::epoch_recoverable` reports it recoverable.
+    config.repair_overhead = 1.0;
+    config.min_overhead = 0;
     let mut decoder = DecodingPipeline::new(config);
     decoder.set_object_params(ObjectParams::new(
         object_id,
@@ -449,7 +479,12 @@ impl DurableTraceJournal {
     }
 
     /// Encode, stripe, and durably persist a checkpoint `epoch`'s bytes (stripe
-    /// files + manifest), returning the persisted [`EpochManifest`].
+    /// files, params record, then manifest), returning the persisted
+    /// [`EpochManifest`].
+    ///
+    /// The manifest is written last because it is what [`discover_epochs`]
+    /// lists: a crash before it leaves the previous epoch as the latest one,
+    /// never an epoch that recovery finds but cannot decode.
     ///
     /// # Errors
     ///
@@ -470,7 +505,6 @@ impl DurableTraceJournal {
         )?
         .ok_or(DurableJournalError::NoStripes)?;
         write_epoch_stripes(&self.config.directory, epoch, &stripes).await?;
-        write_epoch_manifest(&self.config.directory, manifest).await?;
         // Persist the decode metadata (transfer length + layout) so recovery can
         // reconstruct the original bytes, not merely confirm enough symbols
         // survived. symbol_size/max_block_size come from the encode config.
@@ -481,6 +515,7 @@ impl DurableTraceJournal {
             max_block_size: u32::try_from(self.config.encoding.max_block_size).unwrap_or(u32::MAX),
         };
         write_epoch_params(&self.config.directory, record).await?;
+        write_epoch_manifest(&self.config.directory, manifest).await?;
         Ok(manifest)
     }
 
@@ -506,9 +541,8 @@ impl DurableTraceJournal {
         let record = read_epoch_params(&self.config.directory, epoch)
             .await?
             .ok_or(DurableJournalError::MissingParams)?;
-        let survivors =
-            read_epoch_stripes(&self.config.directory, epoch, self.config.stripe_count).await?;
-        let (frames, _) = scan_frames(&survivors);
+        let frames =
+            scan_epoch_stripes(&self.config.directory, epoch, self.config.stripe_count).await?;
         decode_epoch_frames(record, &frames)
     }
 
@@ -537,9 +571,8 @@ impl DurableTraceJournal {
             .await?
             .ok_or(DurableJournalError::MissingParams)?;
         let (source_block_count, _) = record.block_layout();
-        let survivors =
-            read_epoch_stripes(&self.config.directory, epoch, self.config.stripe_count).await?;
-        let (frames, _) = scan_frames(&survivors);
+        let frames =
+            scan_epoch_stripes(&self.config.directory, epoch, self.config.stripe_count).await?;
         // Count only the CRC-validated frames the decoder actually consumes for
         // this epoch (decode_epoch_frames skips any frame from another epoch).
         let surviving_frames = frames.iter().filter(|f| f.header.epoch == epoch).count();
@@ -557,21 +590,35 @@ impl DurableTraceJournal {
     /// directory, decoding its original bytes.
     ///
     /// This is the one-call entry point a trace-recover tool uses given only a
-    /// directory: it finds the highest epoch that still recovers from its
-    /// surviving stripes (see [`Self::latest_recoverable_epoch`]) and decodes it
-    /// (see [`Self::recover_epoch`]), returning `(epoch, bytes)`. `None` when no
-    /// recorded epoch still recovers.
+    /// directory: it walks the recorded epochs newest first, and decodes (see
+    /// [`Self::recover_epoch`]) each one that still recovers from its surviving
+    /// stripes (see [`Self::epoch_recoverable`]), returning the first
+    /// `(epoch, bytes)` that decodes. An epoch whose own records are damaged
+    /// (params record missing or corrupt, or survivors that do not decode) is
+    /// skipped in favour of the next older one. `None` when no recorded epoch
+    /// still recovers.
     ///
     /// # Errors
     ///
-    /// Returns [`DurableJournalError`] for a directory/stripe read failure or a
-    /// decode failure on the selected epoch.
+    /// Returns [`DurableJournalError`] for a directory/stripe read failure, or
+    /// the newest epoch's decode failure when no recoverable epoch decodes.
     pub async fn recover_latest(&self) -> Result<Option<(u64, Vec<u8>)>, DurableJournalError> {
-        let Some(epoch) = self.latest_recoverable_epoch().await? else {
-            return Ok(None);
-        };
-        let bytes = self.recover_epoch(epoch).await?;
-        Ok(Some((epoch, bytes)))
+        let mut epochs = discover_epochs(&self.config.directory).await?;
+        epochs.sort_unstable_by(|left, right| right.cmp(left)); // descending
+        let mut newest_failure = None;
+        for epoch in epochs {
+            if !self.epoch_recoverable_in_scan(epoch).await? {
+                continue;
+            }
+            match self.recover_epoch(epoch).await {
+                Ok(bytes) => return Ok(Some((epoch, bytes))),
+                Err(error) if is_damaged_epoch(&error) => {
+                    newest_failure.get_or_insert(error);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        newest_failure.map_or(Ok(None), Err)
     }
 
     /// Whether `epoch` still fully recovers from the surviving stripe files,
@@ -588,10 +635,19 @@ impl DurableTraceJournal {
         let Some(manifest) = read_epoch_manifest(&self.config.directory, epoch).await? else {
             return Ok(false);
         };
-        let survivors =
-            read_epoch_stripes(&self.config.directory, epoch, self.config.stripe_count).await?;
-        let (frames, _) = scan_frames(&survivors);
+        let frames =
+            scan_epoch_stripes(&self.config.directory, epoch, self.config.stripe_count).await?;
         Ok(latest_complete_epoch(&frames, &[manifest]) == Some(epoch))
+    }
+
+    /// [`Self::epoch_recoverable`] for a scan across epochs: an epoch whose
+    /// manifest record is corrupt counts as not recoverable rather than hiding
+    /// the older epochs behind an error.
+    async fn epoch_recoverable_in_scan(&self, epoch: u64) -> std::io::Result<bool> {
+        match self.epoch_recoverable(epoch).await {
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => Ok(false),
+            result => result,
+        }
     }
 
     /// Every recorded epoch (one with a persisted manifest) in the journal
@@ -607,6 +663,7 @@ impl DurableTraceJournal {
 
     /// The highest recorded epoch that still fully recovers from its surviving
     /// stripe files on disk — the latest checkpoint a recovery tool can restore.
+    /// An epoch whose manifest record is corrupt is skipped.
     ///
     /// # Errors
     ///
@@ -616,11 +673,25 @@ impl DurableTraceJournal {
         let mut epochs = discover_epochs(&self.config.directory).await?;
         epochs.sort_unstable_by(|left, right| right.cmp(left)); // descending
         for epoch in epochs {
-            if self.epoch_recoverable(epoch).await? {
+            if self.epoch_recoverable_in_scan(epoch).await? {
                 return Ok(Some(epoch));
             }
         }
         Ok(None)
+    }
+}
+
+/// Whether `error` reports damage to one epoch's own records (its params record
+/// missing or corrupt, or survivors that do not decode) rather than a failure
+/// to read the journal, so recovery can move on to an older epoch.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_damaged_epoch(error: &DurableJournalError) -> bool {
+    match error {
+        DurableJournalError::MissingParams
+        | DurableJournalError::Incomplete
+        | DurableJournalError::Decoding(_) => true,
+        DurableJournalError::Io(error) => error.kind() == std::io::ErrorKind::InvalidData,
+        DurableJournalError::Encoding(_) | DurableJournalError::NoStripes => false,
     }
 }
 

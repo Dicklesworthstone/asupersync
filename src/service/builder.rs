@@ -12,6 +12,30 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Builder for stacking layers around a service.
+///
+/// # Layer order
+///
+/// The layer added **last** is the outermost: a request passes through it
+/// first, and its `poll_ready` runs first. This is the reverse of
+/// `tower::ServiceBuilder`, where the layer added first is the outermost.
+/// Code ported from tower keeps compiling but changes meaning. For example,
+/// to reject requests while a concurrency limit is saturated, load shedding
+/// must wrap the limit, so it is added after it:
+///
+/// ```ignore
+/// use asupersync::service::ServiceBuilder;
+///
+/// // Sheds: LoadShed(ConcurrencyLimit(svc)).
+/// let svc = ServiceBuilder::new()
+///     .concurrency_limit(10)
+///     .load_shed()
+///     .service(my_service);
+/// ```
+///
+/// The tower spelling, `.load_shed().concurrency_limit(10)`, builds
+/// `ConcurrencyLimit(LoadShed(svc))` here. A saturated limit then makes
+/// requests wait for a permit instead of shedding them, because the load
+/// shedder only sees the readiness of `svc`.
 #[derive(Debug, Clone)]
 pub struct ServiceBuilder<L> {
     layer: L,

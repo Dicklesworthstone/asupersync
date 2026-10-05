@@ -55,14 +55,16 @@
 //! otherwise be invisible; these functions sit on the other side of that
 //! trade.
 
-use super::{Stream, StreamExt};
+use super::Stream;
 use crate::combinator::JoinSet;
-use crate::cx::Cx;
+use crate::cx::{CancelWakerToken, Cx};
 use crate::runtime::yield_now;
 use crate::types::policy::FailFast;
 use crate::types::{CancelReason, Outcome, PanicPayload};
 use std::convert::Infallible;
-use std::future::Future;
+use std::future::{Future, poll_fn};
+use std::pin::Pin;
+use std::task::Poll;
 
 /// Applies `f` to every item of `stream`, keeping at most `limit` items in
 /// flight.
@@ -137,8 +139,8 @@ where
 ///
 /// # Determinism
 ///
-/// Completions are collected through [`JoinSet::join_next`], whose tie-break is
-/// the earliest-spawned ready member. With a deterministic scheduler, the
+/// Completions are collected through [`JoinSet::try_join_next`], whose
+/// tie-break is the earliest-spawned ready member. With a deterministic scheduler, the
 /// reported first failure is therefore deterministic for a given schedule.
 ///
 /// # Example
@@ -207,8 +209,47 @@ where
         }
 
         if !source_done && set.len() < limit {
-            match stream.next().await {
-                Some(item) => {
+            // Wait for the next item while still watching the members and the
+            // caller. Parked on the source alone, a member's failure or the
+            // caller's cancellation went unseen until another item arrived,
+            // which for a quiet source may be never, and that item was then
+            // admitted after the failure.
+            let mut cancel_wake = CancelWake { cx, token: None };
+            let admission = poll_fn(|task| {
+                cancel_wake.token = Some(cx.refresh_cancel_waker(cancel_wake.token, task.waker()));
+                if let Some(outcome) = set.try_join_next() {
+                    return Poll::Ready(Admission::Finished(outcome));
+                }
+                if cx.is_cancel_requested() {
+                    return Poll::Ready(Admission::Cancelled);
+                }
+                match Pin::new(&mut stream).poll_next(task) {
+                    Poll::Ready(Some(item)) => Poll::Ready(Admission::Item(item)),
+                    Poll::Ready(None) => Poll::Ready(Admission::SourceDone),
+                    Poll::Pending => {
+                        // A member's completion registers no waker here: poll
+                        // again cooperatively while any is in flight, the same
+                        // trade as the completion wait below.
+                        if !set.is_empty() {
+                            task.waker().wake_by_ref();
+                        }
+                        Poll::Pending
+                    }
+                }
+            })
+            .await;
+            drop(cancel_wake);
+            match admission {
+                Admission::Finished(outcome) => {
+                    if let Some(failure) = failure_of(outcome) {
+                        terminal = Some(failure);
+                        break 'drive;
+                    }
+                    continue 'drive;
+                }
+                // The check at the top of the loop reports it.
+                Admission::Cancelled => continue 'drive,
+                Admission::Item(item) => {
                     let mut make = f.clone();
                     if let Err(err) = set.spawn(cx, move |item_cx| make(item_cx, item)) {
                         // A member could not be admitted to the region. This is
@@ -224,7 +265,7 @@ where
                     }
                     continue 'drive;
                 }
-                None => {
+                Admission::SourceDone => {
                     source_done = true;
                     continue 'drive;
                 }
@@ -297,6 +338,32 @@ where
         .await;
 
     finish(terminal, drained)
+}
+
+/// What the wait for the next item saw first.
+enum Admission<T, E> {
+    /// The source yielded an item.
+    Item(T),
+    /// The source is exhausted.
+    SourceDone,
+    /// A member finished.
+    Finished(Outcome<(), E>),
+    /// The caller was cancelled.
+    Cancelled,
+}
+
+/// Clears the wait's cancellation-waker registration when the wait ends.
+struct CancelWake<'a> {
+    cx: &'a Cx,
+    token: Option<CancelWakerToken>,
+}
+
+impl Drop for CancelWake<'_> {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take() {
+            self.cx.clear_cancel_waker(token);
+        }
+    }
 }
 
 /// Maps a member outcome to `Some(failure)` when it is not `Ok`.

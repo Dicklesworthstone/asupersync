@@ -2801,8 +2801,8 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     }
 
     let consumption = array(inventory, "execution_consumption");
-    if consumption.len() != 13 {
-        return Err("execution-consumption inventory must contain thirteen groups".to_owned());
+    if consumption.len() != 14 {
+        return Err("execution-consumption inventory must contain fourteen groups".to_owned());
     }
     let consumption_states: BTreeSet<String> = consumption
         .iter()
@@ -3428,14 +3428,26 @@ fn execution_consumption_diagnostics_and_gap_routing_stay_truthful() {
         "scenario.resource_caps",
         "scenario.minimization",
         "scenario.golden_projection.redacted",
+        "scenario.network",
     ] {
         assert!(
             runner.contains(active),
             "runner active route {active} drifted"
         );
     }
+    let consumption = array(&inventory, "execution_consumption");
+    for (group, state) in [
+        ("participants", "PARTIAL"),
+        ("network", "PARTIAL"),
+        ("cancellation", "VALIDATION_ONLY"),
+    ] {
+        assert_eq!(
+            text(find_row(consumption, "field_group", group), "state"),
+            state,
+            "{group} consumption state drifted"
+        );
+    }
     for validation_only in [
-        "scenario.network",
         "scenario.cancellation",
         "scenario.expected_invariants",
         "scenario.include",

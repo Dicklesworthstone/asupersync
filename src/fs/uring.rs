@@ -379,7 +379,7 @@ impl IoUringFile {
     pub fn open_with_flags(path: impl AsRef<Path>, flags: i32, mode: u32) -> io::Result<Self> {
         let path = path.as_ref();
         let c_path = path_to_cstring(path)?;
-
+        crate::cx::io_gate::require_ambient_io("fs::IoUringFile::open")?;
         // Open the descriptor synchronously, then use the file-local io_uring
         // queue for data-path operations. This keeps ownership and cleanup
         // deterministic before any request can be submitted against the fd.

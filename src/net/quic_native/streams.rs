@@ -386,12 +386,16 @@ impl RecvPacketRuns {
     }
 
     fn exceeds(&self, limit: usize) -> bool {
+        self.runs.len() > limit || self.out_of_order() > limit.saturating_sub(1)
+    }
+
+    /// Runs other than a readable one at the read offset.
+    fn out_of_order(&self) -> usize {
         let head = self
             .runs
             .first()
             .is_some_and(|&(start, _)| start == self.read_offset);
-        self.runs.len() > limit
-            || self.runs.len().saturating_sub(usize::from(head)) > limit.saturating_sub(1)
+        self.runs.len().saturating_sub(usize::from(head))
     }
 }
 
@@ -1150,6 +1154,11 @@ impl QuicStream {
         let merged = self.recv_chunks.range(start..=end).count();
         Ok(self.recv_chunks.len() - merged + 1)
     }
+
+    /// Buffered receive runs other than a readable one at the read offset.
+    fn out_of_order_recv_runs(&self) -> usize {
+        self.recv_chunks.len() - usize::from(self.recv_chunks.contains_key(&self.read_offset))
+    }
 }
 
 /// Stream table errors.
@@ -1785,12 +1794,19 @@ impl StreamTable {
     ///
     /// Re-attached to outgoing ACKs so a lost MAX_STREAM_DATA frame cannot
     /// wedge a credit-blocked sender: advertisements are idempotent monotonic
-    /// maxima, so repeating the current limit is always safe.
+    /// maxima, so repeating the current limit is always safe. A stream whose
+    /// final size is known, or whose receive side was reset or stopped, needs
+    /// no more credit (RFC 9000 3.2) and is left out.
     #[must_use]
     pub fn bounded_recv_window_advertisements(&self) -> Vec<(StreamId, u64)> {
         self.streams
             .iter()
-            .filter(|(_, stream)| stream.recv_window_bytes.is_some())
+            .filter(|(_, stream)| {
+                stream.recv_window_bytes.is_some()
+                    && stream.final_size.is_none()
+                    && stream.recv_reset.is_none()
+                    && stream.receive_stopped_error_code.is_none()
+            })
             .map(|(id, stream)| (*id, stream.recv_limit_advertised))
             .collect()
     }
@@ -1906,10 +1922,23 @@ impl StreamTable {
         Ok(())
     }
 
+    /// Out-of-order receive runs buffered across every stream. A readable run
+    /// at a stream's read offset does not count, so a frame that closes a
+    /// head-of-line gap stays admissible however full the budget is.
+    fn out_of_order_recv_runs(&self) -> usize {
+        self.streams
+            .values()
+            .map(QuicStream::out_of_order_recv_runs)
+            .sum()
+    }
+
     /// Check whether accepting a STREAM payload would exceed a fragment cap.
     ///
     /// This is a read-only preflight so callers can reject hostile
     /// fragmentation before flow-control or reassembly state is mutated.
+    /// The connection screens with
+    /// [`Self::stream_reassembly_limits_would_be_exceeded`].
+    #[cfg(test)]
     pub(crate) fn stream_reassembly_fragment_limit_would_be_exceeded(
         &self,
         id: StreamId,
@@ -1917,6 +1946,22 @@ impl StreamTable {
         len: u64,
         is_fin: bool,
         limit: usize,
+    ) -> Result<bool, StreamTableError> {
+        self.stream_reassembly_limits_would_be_exceeded(id, offset, len, is_fin, limit, usize::MAX)
+    }
+
+    /// As [`Self::stream_reassembly_fragment_limit_would_be_exceeded`], and
+    /// also refuse a payload that would take the out-of-order runs buffered
+    /// across every stream above `connection_limit`. The per-stream cap alone
+    /// lets a peer hold that many tiny holes on each of its streams at once.
+    pub(crate) fn stream_reassembly_limits_would_be_exceeded(
+        &self,
+        id: StreamId,
+        offset: u64,
+        len: u64,
+        is_fin: bool,
+        limit: usize,
+        connection_limit: usize,
     ) -> Result<bool, StreamTableError> {
         if id.direction() == StreamDirection::Unidirectional && id.is_local_for(self.role) {
             return Err(StreamTableError::StreamNotReadable(id));
@@ -1950,18 +1995,46 @@ impl StreamTable {
             readable_head_present || incoming_makes_head_readable,
         ));
         let max_out_of_order = limit.saturating_sub(1);
-
-        Ok(projected > limit || projected_out_of_order > max_out_of_order)
+        if projected > limit || projected_out_of_order > max_out_of_order {
+            return Ok(true);
+        }
+        if connection_limit == usize::MAX {
+            return Ok(false);
+        }
+        let elsewhere = self.out_of_order_recv_runs() - stream.out_of_order_recv_runs();
+        Ok(elsewhere.saturating_add(projected_out_of_order) > connection_limit)
     }
 
     /// Screen the entire packet's reassembly budget before any frame effects.
     /// Protocol validation still belongs to the ordinary frame-processing path.
     /// No payloads, send queues, wakers, or other streams are cloned here.
+    /// The connection screens with
+    /// [`Self::packet_reassembly_limits_would_be_exceeded`].
+    #[cfg(test)]
     pub(crate) fn packet_reassembly_fragment_limit_would_be_exceeded(
         &self,
         frames: &[QuicFrame],
         limit: usize,
     ) -> bool {
+        self.packet_reassembly_limits_would_be_exceeded(frames, limit, usize::MAX)
+    }
+
+    /// As [`Self::packet_reassembly_fragment_limit_would_be_exceeded`], and
+    /// also bound the out-of-order runs buffered across every stream by
+    /// `connection_limit` (see [`Self::stream_reassembly_limits_would_be_exceeded`]).
+    pub(crate) fn packet_reassembly_limits_would_be_exceeded(
+        &self,
+        frames: &[QuicFrame],
+        limit: usize,
+        connection_limit: usize,
+    ) -> bool {
+        let stream_frames = frames
+            .iter()
+            .filter(|frame| matches!(frame, QuicFrame::Stream { .. }))
+            .count();
+        if stream_frames == 0 {
+            return false;
+        }
         // An interval adds at most one run. Most packets therefore need only
         // this allocation-free upper bound, even when carrying several streams.
         let could_reach_limit = frames.iter().any(|frame| {
@@ -1974,7 +2047,13 @@ impl StreamTable {
                 .saturating_add(frames.len())
                 > limit.saturating_sub(1)
         });
-        if !could_reach_limit {
+        // Tracked only under a connection limit: the sum visits every stream.
+        let mut out_of_order =
+            (connection_limit != usize::MAX).then(|| self.out_of_order_recv_runs());
+        if !could_reach_limit
+            && out_of_order
+                .is_none_or(|total| total.saturating_add(stream_frames) <= connection_limit)
+        {
             return false;
         }
 
@@ -2014,12 +2093,23 @@ impl StreamTable {
                         // it cannot reach a subsequent reassembly admission.
                         break;
                     };
+                    let before = projection.out_of_order();
                     projection.insert(offset, end);
-                    if projection.exceeds(limit) {
+                    // The total includes this stream's runs, so it is at
+                    // least `before`.
+                    if let Some(total) = out_of_order.as_mut() {
+                        *total = *total - before + projection.out_of_order();
+                    }
+                    if projection.exceeds(limit)
+                        || out_of_order.is_some_and(|total| total > connection_limit)
+                    {
                         return true;
                     }
                 }
                 QuicFrame::ResetStream { .. } => {
+                    if let Some(total) = out_of_order.as_mut() {
+                        *total -= projection.out_of_order();
+                    }
                     projection.runs.clear();
                     projection.reset = true;
                 }
@@ -2633,11 +2723,22 @@ impl AsyncWrite for QuicStreamIo<'_> {
             return Poll::Ready(Ok(0));
         }
         let this = self.get_mut();
+        // Accept what the stream and connection windows allow now, as an
+        // AsyncWrite may. Waiting for credit for the whole buffer never ends
+        // when the peer grants more only after it receives these bytes.
+        let capacity = match this.table.poll_stream_send_capacity(this.id, 1, cx) {
+            Poll::Ready(Ok(capacity)) => capacity,
+            Poll::Ready(Err(err)) => return Poll::Ready(Err(Self::io_error(err))),
+            Poll::Pending => return Poll::Pending,
+        };
+        let len = buf
+            .len()
+            .min(usize::try_from(capacity).unwrap_or(usize::MAX));
         match this
             .table
-            .write_stream_bytes(this.id, Bytes::copy_from_slice(buf), false)
+            .write_stream_bytes(this.id, Bytes::copy_from_slice(&buf[..len]), false)
         {
-            Ok(()) => Poll::Ready(Ok(buf.len())),
+            Ok(()) => Poll::Ready(Ok(len)),
             Err(StreamTableError::Stream(QuicStreamError::Flow(_))) => {
                 this.table.register_write_waker(this.id, cx.waker());
                 Poll::Pending
@@ -2816,6 +2917,72 @@ mod tests {
             );
             assert!(stream.recv_chunks.is_empty());
         }
+    }
+
+    #[test]
+    fn recv_reassembly_connection_budget_spans_streams_and_packets() {
+        use crate::net::atp::protocol::varint::VarInt;
+        let mut table = StreamTable::new(StreamRole::Server, 0, 0, 1 << 20, 1 << 20);
+        let (a, b, c) = (StreamId(0), StreamId(4), StreamId(8));
+        for id in [a, b, c] {
+            table.accept_remote_stream(id).expect("stream");
+        }
+        for (id, offset) in [(a, 1), (a, 3), (b, 1)] {
+            table
+                .receive_stream_bytes(id, offset, Bytes::from_static(b"x"), false)
+                .expect("hole");
+        }
+        let frame = |id: StreamId, offset: u64| QuicFrame::Stream {
+            stream_id: VarInt(id.0),
+            offset: Some(VarInt(offset)),
+            data: Bytes::from_static(b"x"),
+            fin: false,
+        };
+        let before = table.clone();
+
+        // Three holes are held; a connection limit of four admits one more
+        // anywhere, though every stream is far under its own limit of eight.
+        assert!(
+            !table
+                .stream_reassembly_limits_would_be_exceeded(c, 1, 1, false, 8, 4)
+                .expect("preflight")
+        );
+        assert!(
+            table
+                .stream_reassembly_limits_would_be_exceeded(c, 1, 1, false, 8, 3)
+                .expect("preflight")
+        );
+        assert!(!table.packet_reassembly_limits_would_be_exceeded(&[frame(c, 1)], 8, 4));
+        assert!(table.packet_reassembly_limits_would_be_exceeded(
+            &[frame(c, 1), frame(b, 3)],
+            8,
+            4
+        ));
+        // A reset earlier in the packet releases its stream's two holes.
+        let reset = QuicFrame::ResetStream {
+            stream_id: VarInt(a.0),
+            error_code: VarInt(0),
+            final_size: VarInt(4),
+        };
+        assert!(!table.packet_reassembly_limits_would_be_exceeded(
+            &[reset, frame(c, 1), frame(b, 3)],
+            8,
+            4
+        ));
+        // A frame that makes a head readable is not out of order, and joining
+        // b's hole into its head frees a slot for another hole in the packet.
+        assert!(!table.packet_reassembly_limits_would_be_exceeded(
+            &[frame(b, 0), frame(c, 1), frame(c, 3)],
+            8,
+            4
+        ));
+        // Without a connection limit the per-stream screen is unchanged.
+        assert!(!table.packet_reassembly_fragment_limit_would_be_exceeded(
+            &[frame(c, 1), frame(b, 3), frame(c, 5)],
+            8
+        ));
+        assert_eq!(table.stream(a).unwrap(), before.stream(a).unwrap());
+        assert_eq!(table.stream(c).unwrap(), before.stream(c).unwrap());
     }
 
     #[test]
@@ -3142,6 +3309,37 @@ mod tests {
         let counter = std::sync::Arc::new(CountingWake::default());
         let waker = std::task::Waker::from(counter.clone());
         (counter, waker)
+    }
+
+    /// A write larger than the remaining credit used to wait for credit for
+    /// all of it, forever if the peer grants more only after receiving data.
+    #[test]
+    fn stream_io_write_accepts_what_the_window_allows() {
+        let mut table = StreamTable::new(StreamRole::Client, 4, 4, 16, 1 << 20);
+        let id = table.open_local_bidi().expect("open");
+        let (wakes, waker) = counting_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let written = {
+            let mut io = table.stream_io(id).expect("io");
+            Pin::new(&mut io).poll_write(&mut cx, &[7u8; 32])
+        };
+        assert!(matches!(written, Poll::Ready(Ok(16))), "{written:?}");
+        let blocked = {
+            let mut io = table.stream_io(id).expect("io");
+            Pin::new(&mut io).poll_write(&mut cx, &[7u8; 8])
+        };
+        assert!(blocked.is_pending());
+
+        table
+            .increase_stream_send_limit(id, 24)
+            .expect("the peer grants more credit");
+        assert_eq!(wakes.count(), 1, "the blocked writer is woken");
+        let resumed = {
+            let mut io = table.stream_io(id).expect("io");
+            Pin::new(&mut io).poll_write(&mut cx, &[7u8; 16])
+        };
+        assert!(matches!(resumed, Poll::Ready(Ok(8))), "{resumed:?}");
     }
 
     #[test]
@@ -4803,20 +5001,23 @@ mod tests {
         let waker = std::task::Waker::noop().clone();
         let mut cx = Context::from_waker(&waker);
 
+        // A write larger than the window takes what the window allows.
         {
             let mut io = table.stream_io(stream).expect("io");
             let poll = AsyncWrite::poll_write(Pin::new(&mut io), &mut cx, b"abcde");
-            assert!(matches!(poll, Poll::Pending));
-        }
-        assert_eq!(table.connection_send_remaining(), 4);
-        assert_eq!(table.stream(stream).expect("stream").send_offset, 0);
-
-        {
-            let mut io = table.stream_io(stream).expect("io");
-            let poll = AsyncWrite::poll_write(Pin::new(&mut io), &mut cx, b"abcd");
-            assert!(matches!(poll, Poll::Ready(Ok(4))));
+            assert!(matches!(poll, Poll::Ready(Ok(4))), "{poll:?}");
         }
         assert_eq!(table.connection_send_remaining(), 0);
+        assert_eq!(table.stream(stream).expect("stream").send_offset, 4);
+
+        // With no credit left a write is pending and consumes nothing.
+        {
+            let mut io = table.stream_io(stream).expect("io");
+            let poll = AsyncWrite::poll_write(Pin::new(&mut io), &mut cx, b"e");
+            assert!(matches!(poll, Poll::Pending));
+        }
+        assert_eq!(table.connection_send_remaining(), 0);
+        assert_eq!(table.stream(stream).expect("stream").send_offset, 4);
         let frame = table.pop_next_stream_frame(16).expect("stream frame");
         assert_eq!(frame.data.as_ref(), b"abcd");
         assert!(!frame.fin);
@@ -4938,13 +5139,19 @@ mod tests {
 
         let (counter, waker) = counting_waker();
         let mut cx = Context::from_waker(&waker);
+        // The first write fills the stream window; the next one waits.
         {
             let mut io = table.stream_io(stream).expect("io");
             let poll = AsyncWrite::poll_write(Pin::new(&mut io), &mut cx, b"abcde");
+            assert!(matches!(poll, Poll::Ready(Ok(4))), "{poll:?}");
+        }
+        {
+            let mut io = table.stream_io(stream).expect("io");
+            let poll = AsyncWrite::poll_write(Pin::new(&mut io), &mut cx, b"e");
             assert!(matches!(poll, Poll::Pending));
         }
         assert_eq!(counter.count(), 0, "pending write must not self-wake");
-        assert_eq!(table.stream(stream).expect("stream").send_offset, 0);
+        assert_eq!(table.stream(stream).expect("stream").send_offset, 4);
 
         table
             .increase_stream_send_limit(stream, 8)
@@ -4953,11 +5160,14 @@ mod tests {
 
         {
             let mut io = table.stream_io(stream).expect("io");
-            let poll = AsyncWrite::poll_write(Pin::new(&mut io), &mut cx, b"abcde");
-            assert!(matches!(poll, Poll::Ready(Ok(5))));
+            let poll = AsyncWrite::poll_write(Pin::new(&mut io), &mut cx, b"e");
+            assert!(matches!(poll, Poll::Ready(Ok(1))), "{poll:?}");
         }
-        let frame = table.pop_next_stream_frame(16).expect("stream frame");
-        assert_eq!(frame.data.as_ref(), b"abcde");
+        let mut sent = Vec::new();
+        while let Some(frame) = table.pop_next_stream_frame(16) {
+            sent.extend_from_slice(frame.data.as_ref());
+        }
+        assert_eq!(sent, b"abcde");
     }
 
     #[test]

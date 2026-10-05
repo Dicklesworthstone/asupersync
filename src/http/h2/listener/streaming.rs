@@ -191,7 +191,9 @@ struct LiveRequest {
     publication: Option<oneshot::Receiver<BodySource>>,
     source: Option<BodySource>,
     coordinator: Option<Pin<Box<CatchUnwind<JoinHandle<()>>>>>,
-    pending_data: Vec<u8>,
+    // A ring, so taking each chunk off the front never moves the rest of a
+    // receive window that a slow consumer left staged.
+    pending_data: std::collections::VecDeque<u8>,
     pending_trailers: Option<HeaderMap>,
     total_bytes: u64,
     declared_length: Option<u64>,
@@ -292,12 +294,17 @@ impl LiveRequest {
         // how many frames the peer used to spend its advertised credit.
         if !self.pending_data.is_empty() {
             let take = self.pending_data.len().min(REQUEST_CHUNK_BYTES);
-            // Bytes::from(Vec) retains the Vec's capacity. Copy only this
-            // bounded chunk so each queued prefix cannot retain an entire
-            // receive-window allocation; the staging allocation stays owned
-            // by this entry and is covered by its wire-credit reservation.
-            let bytes = Bytes::copy_from_slice(&self.pending_data[..take]);
+            // Copy only this bounded chunk so each queued prefix cannot retain
+            // an entire receive-window allocation; the staging allocation
+            // stays owned by this entry and is covered by its wire-credit
+            // reservation.
+            let mut chunk = Vec::with_capacity(take);
+            let (front, back) = self.pending_data.as_slices();
+            let from_front = front.len().min(take);
+            chunk.extend_from_slice(&front[..from_front]);
+            chunk.extend_from_slice(&back[..take - from_front]);
             self.pending_data.drain(..take);
+            let bytes = Bytes::from(chunk);
             let mut frame = Some(BodyFrame::Data(BytesCursor::new(bytes)));
             match writer.poll_send_frame(cx, poll_cx, &mut frame) {
                 Poll::Pending => return Ok((true, consumed)),
@@ -337,6 +344,9 @@ pub(super) struct StreamingRequests {
     entries: BTreeMap<u32, LiveRequest>,
     early_response_stops: HashSet<u32>,
     reserved_bytes: usize,
+    // Streams whose consumed body bytes were returned to the peer as credit
+    // since the driver last took them; each may send again.
+    credit_released: Vec<u32>,
 }
 
 impl StreamingRequests {
@@ -345,12 +355,19 @@ impl StreamingRequests {
             dispatch,
             entries: BTreeMap::new(),
             early_response_stops: HashSet::new(),
+            credit_released: Vec::new(),
             reserved_bytes: 0,
         }
     }
 
     pub(super) fn is_empty(&self) -> bool {
         self.entries.is_empty() && self.early_response_stops.is_empty()
+    }
+
+    /// Streams that got receive credit back since the last call. Their peers
+    /// may send again, so a stalled-upload clock restarts from now.
+    pub(super) fn take_credit_released(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.credit_released)
     }
 
     pub(super) fn contains(&self, stream_id: u32) -> bool {
@@ -690,7 +707,7 @@ impl StreamingRequests {
                 publication: Some(publication),
                 source: None,
                 coordinator: Some(Box::pin(CatchUnwind { inner: coordinator })),
-                pending_data: Vec::with_capacity(config.wire_credit()),
+                pending_data: std::collections::VecDeque::with_capacity(config.wire_credit()),
                 pending_trailers: None,
                 total_bytes: 0,
                 declared_length,
@@ -749,7 +766,7 @@ impl StreamingRequests {
             return;
         }
         entry.total_bytes = total;
-        entry.pending_data.extend_from_slice(&data);
+        entry.pending_data.extend(data.iter().copied());
         entry.end_stream = end_stream;
     }
 
@@ -824,7 +841,10 @@ impl StreamingRequests {
                         match u32::try_from(consumed).ok().and_then(|bytes| {
                             conn.release_stream_receive_capacity(stream_id, bytes).ok()
                         }) {
-                            Some(()) => progressed = true,
+                            Some(()) => {
+                                self.credit_released.push(stream_id);
+                                progressed = true;
+                            }
                             None => {
                                 entry.fail(IncomingBodyError::AccountingOverflow);
                                 conn.reset_stream(stream_id, ErrorCode::InternalError);

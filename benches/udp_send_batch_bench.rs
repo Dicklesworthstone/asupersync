@@ -31,7 +31,14 @@ impl SendBatchBenchCase {
 
     fn strategy(self) -> UdpSendBatchStrategy {
         match self {
-            Self::PortableLoop | Self::NativeGsoSendmmsg | Self::ConnectedNativeGsoSendmmsg => {
+            // With neither accelerated path preferred, the batch takes the
+            // portable send_to loop. The default strategy goes native on Linux.
+            Self::PortableLoop => UdpSendBatchStrategy {
+                prefer_sendmmsg: false,
+                prefer_gso: false,
+                ..UdpSendBatchStrategy::default()
+            },
+            Self::NativeGsoSendmmsg | Self::ConnectedNativeGsoSendmmsg => {
                 UdpSendBatchStrategy::default()
             }
             Self::NativeSendmmsgOnly | Self::ConnectedNativeSendmmsgOnly => UdpSendBatchStrategy {

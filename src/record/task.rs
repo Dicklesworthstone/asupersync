@@ -16,7 +16,7 @@ use crate::types::{
 use parking_lot::RwLock;
 use smallvec::SmallVec;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::task::Waker;
 // br-asupersync-1w9aot: removed `use std::time::Instant`. The
 // `created_instant` field (production; tracing-integration only) is now
@@ -206,6 +206,10 @@ impl TaskPhase {
 #[derive(Debug)]
 pub struct TaskPhaseCell {
     inner: AtomicU8,
+    /// The live-task count of the task table that holds this record. Every
+    /// phase change goes through [`Self::store`], which keeps the count exact
+    /// even when a record is mutated directly (br-asupersync-bzict6).
+    live_count: Option<Arc<AtomicUsize>>,
 }
 
 impl TaskPhaseCell {
@@ -215,6 +219,25 @@ impl TaskPhaseCell {
     pub fn new(phase: TaskPhase) -> Self {
         Self {
             inner: AtomicU8::new(phase.as_u8()),
+            live_count: None,
+        }
+    }
+
+    /// Counts this cell in `live_count` while its phase is not terminal.
+    pub(crate) fn attach_live_count(&mut self, live_count: Arc<AtomicUsize>) {
+        self.detach_live_count();
+        if !self.load().is_terminal() {
+            live_count.fetch_add(1, Ordering::AcqRel);
+        }
+        self.live_count = Some(live_count);
+    }
+
+    /// Stops counting this cell.
+    pub(crate) fn detach_live_count(&mut self) {
+        if let Some(live_count) = self.live_count.take() {
+            if !self.load().is_terminal() {
+                live_count.fetch_sub(1, Ordering::AcqRel);
+            }
         }
     }
 
@@ -242,7 +265,27 @@ impl TaskPhaseCell {
                 "invalid TaskPhase transition: {current:?} -> {phase:?}"
             );
         }
-        self.inner.store(phase as u8, Ordering::Release);
+        let Some(live_count) = &self.live_count else {
+            self.inner.store(phase as u8, Ordering::Release);
+            return;
+        };
+        let was_live = TaskPhase::from_u8(self.inner.swap(phase as u8, Ordering::AcqRel))
+            .is_some_and(|previous| !previous.is_terminal());
+        match (was_live, !phase.is_terminal()) {
+            (true, false) => {
+                live_count.fetch_sub(1, Ordering::AcqRel);
+            }
+            (false, true) => {
+                live_count.fetch_add(1, Ordering::AcqRel);
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Drop for TaskPhaseCell {
+    fn drop(&mut self) {
+        self.detach_live_count();
     }
 }
 
@@ -714,6 +757,7 @@ impl TaskRecord {
                 if let Some(guard) = inner_guard.as_mut() {
                     guard.budget = new_budget;
                     guard.budget_baseline = new_budget;
+                    guard.cleanup_phase = true;
                 }
                 // Also update polls_remaining to respect tighter quota
                 self.polls_remaining = self.polls_remaining.min(new_budget.poll_quota);
@@ -739,6 +783,7 @@ impl TaskRecord {
                 if let Some(guard) = inner_guard.as_mut() {
                     guard.budget = new_budget;
                     guard.budget_baseline = new_budget;
+                    guard.cleanup_phase = true;
                 }
                 // Also update polls_remaining to respect tighter quota
                 self.polls_remaining = self.polls_remaining.min(new_budget.poll_quota);
@@ -957,6 +1002,7 @@ impl TaskRecord {
         if let Some(cleanup_budget) = active_cleanup_budget {
             guard.budget = cleanup_budget;
             guard.budget_baseline = cleanup_budget;
+            guard.cleanup_phase = true;
             self.polls_remaining = self.polls_remaining.min(cleanup_budget.poll_quota);
         }
         self.cleanup_budget().map(|budget| budget.priority)
@@ -1102,6 +1148,7 @@ impl TaskRecord {
                 let mut guard = inner.write();
                 guard.budget = cleanup_budget;
                 guard.budget_baseline = cleanup_budget;
+                guard.cleanup_phase = true;
             }
             self.polls_remaining = self.polls_remaining.min(cleanup_budget.poll_quota);
         }
@@ -1118,6 +1165,17 @@ impl TaskRecord {
     pub(crate) fn consume_checkpoint_cancel_ack(
         &mut self,
     ) -> CancellationEffects<Option<CheckpointCancelAck>> {
+        // Every pending poll lands here, and almost none carries an
+        // acknowledgement: answer that case from a shared read without
+        // cloning the Arc (br-asupersync-issue65-criticisms-kpmoy5.1.3). The
+        // flag is re-checked under the write lock below.
+        if !self
+            .cx_inner
+            .as_ref()
+            .is_some_and(|inner| inner.read().cancel_acknowledged)
+        {
+            return CancellationEffects::ready(None);
+        }
         let Some(inner) = self.cx_inner.clone() else {
             return CancellationEffects::ready(None);
         };
@@ -1288,6 +1346,7 @@ impl TaskRecord {
                     let mut guard = inner.write();
                     guard.budget = budget;
                     guard.budget_baseline = budget;
+                    guard.cleanup_phase = true;
                 }
                 self.polls_remaining = budget.poll_quota;
 

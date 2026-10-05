@@ -200,6 +200,24 @@
       "source_refs": ["src/runtime/state.rs"]
     },
     {
+      "code": "ASUP-E009",
+      "name": "ambient-io-capability-denied",
+      "area": "core-runtime",
+      "status": "live",
+      "summary": "An ambient I/O entry point refused because the calling task's Cx lacks the IO capability.",
+      "probable_causes": [
+        "The task runs under a Cx narrowed with Cx::push_restriction or Cx::set_current_restricted to a capability set without IO.",
+        "The task belongs to an AppSpec work unit whose required Cx capabilities include neither io nor net."
+      ],
+      "remediation": [
+        "Perform the I/O from a task whose Cx carries the IO capability, or require the io or net capability on the work unit.",
+        "If the narrowing is intended, keep the I/O out of the restricted code and pass results in instead."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E009.md",
+      "since": "0.6.0",
+      "source_refs": ["src/cx/io_gate.rs"]
+    },
+    {
       "code": "ASUP-E101",
       "name": "obligation-leaked",
       "area": "obligations",

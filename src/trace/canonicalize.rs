@@ -56,9 +56,10 @@
 //! - Diekert & Rozenberg, "The Book of Traces" (1995)
 //! - Mazurkiewicz, "Trace theory" (1987)
 
-use crate::trace::event::{TraceData, TraceEvent, TraceEventKind};
-use crate::trace::independence::independent;
+use crate::trace::event::{TraceData, TraceEvent, TraceEventKind, decode_obligation_handoff};
+use crate::trace::independence::{AccessMode, Resource, resource_footprint};
 use crate::util::DetHasher;
+use crate::util::det_hash::DetHashMap;
 use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 
@@ -361,17 +362,7 @@ pub fn canonicalize(events: &[TraceEvent]) -> FoataTrace {
     // Step 1: Compute layer assignment for each event.
     // layer[j] = 1 + max(layer[i]) for all i < j where events[i] and events[j]
     // are dependent.
-    let mut layer_of = vec![0usize; n];
-    let mut max_layer = 0usize;
-
-    for j in 1..n {
-        for i in 0..j {
-            if !independent(&events[i], &events[j]) {
-                layer_of[j] = layer_of[j].max(layer_of[i] + 1);
-            }
-        }
-        max_layer = max_layer.max(layer_of[j]);
-    }
+    let (layer_of, max_layer) = foata_layers(events);
 
     // Step 2: Group events by layer.
     let mut layers: Vec<Vec<TraceEvent>> = vec![vec![]; max_layer + 1];
@@ -400,17 +391,7 @@ pub fn trace_fingerprint(events: &[TraceEvent]) -> u64 {
     }
 
     // Layer assignment (same algorithm as canonicalize).
-    let mut layer_of = vec![0usize; n];
-    let mut max_layer = 0usize;
-
-    for j in 1..n {
-        for i in 0..j {
-            if !independent(&events[i], &events[j]) {
-                layer_of[j] = layer_of[j].max(layer_of[i] + 1);
-            }
-        }
-        max_layer = max_layer.max(layer_of[j]);
-    }
+    let (layer_of, max_layer) = foata_layers(events);
 
     // Group indices by layer, sort within layer, hash.
     let mut layer_indices: Vec<Vec<usize>> = vec![vec![]; max_layer + 1];
@@ -428,6 +409,73 @@ pub fn trace_fingerprint(events: &[TraceEvent]) -> u64 {
         }
     }
     hasher.finish()
+}
+
+/// The Foata layer of each event, and the highest layer.
+///
+/// An event's layer is one more than the highest layer of an earlier event
+/// it depends on, or 0. Two events are dependent exactly when
+/// [`independent`](crate::trace::independence::independent) says no: they
+/// share a sequence number, either one is an undecodable ownership handoff,
+/// or both have footprints that access one resource with at least one write.
+/// Running maxima per sequence number, over undecodable events, over all
+/// events, and per resource (any access, and writes) answer "the highest
+/// dependent layer" without comparing every pair. That costs
+/// O(events * footprint) instead of O(events^2) (br-asupersync-bzict6), and
+/// gives the same layers.
+fn foata_layers(events: &[TraceEvent]) -> (Vec<usize>, usize) {
+    let mut layer_of = Vec::with_capacity(events.len());
+    let mut max_layer = 0usize;
+    let mut highest_any: Option<usize> = None;
+    let mut highest_undecodable: Option<usize> = None;
+    let mut highest_by_seq: DetHashMap<u64, usize> = DetHashMap::default();
+    // Per resource: the highest layer of any access to it, and of a write.
+    let mut highest_by_resource: DetHashMap<Resource, (usize, Option<usize>)> =
+        DetHashMap::default();
+
+    for event in events {
+        let undecodable = decode_obligation_handoff(event).is_err();
+        let footprint = resource_footprint(event);
+        let mut depends_on = highest_by_seq.get(&event.seq).copied();
+        let mut raise = |layer: Option<usize>| {
+            if let Some(layer) = layer {
+                depends_on = Some(depends_on.map_or(layer, |current| current.max(layer)));
+            }
+        };
+        raise(highest_undecodable);
+        if undecodable {
+            raise(highest_any);
+        }
+        for access in &footprint {
+            if let Some(&(any_access, write)) = highest_by_resource.get(&access.resource) {
+                raise(match access.mode {
+                    AccessMode::Write => Some(any_access),
+                    AccessMode::Read => write,
+                });
+            }
+        }
+        let layer = depends_on.map_or(0, |layer| layer + 1);
+
+        layer_of.push(layer);
+        max_layer = max_layer.max(layer);
+        highest_any = Some(highest_any.map_or(layer, |current| current.max(layer)));
+        if undecodable {
+            highest_undecodable =
+                Some(highest_undecodable.map_or(layer, |current| current.max(layer)));
+        }
+        let by_seq = highest_by_seq.entry(event.seq).or_insert(layer);
+        *by_seq = (*by_seq).max(layer);
+        for access in footprint {
+            let (any_access, write) = highest_by_resource
+                .entry(access.resource)
+                .or_insert((layer, None));
+            *any_access = (*any_access).max(layer);
+            if access.mode == AccessMode::Write {
+                *write = Some(write.map_or(layer, |current| current.max(layer)));
+            }
+        }
+    }
+    (layer_of, max_layer)
 }
 
 // === Internal: deterministic event ordering ===
@@ -1519,6 +1567,115 @@ mod tests {
         let mut set = HashSet::new();
         set.insert(k);
         assert!(set.contains(&k2));
+    }
+
+    /// The layer assignment `foata_layers` replaced: compare every pair with
+    /// `independent` (br-asupersync-bzict6).
+    fn pairwise_layers(events: &[TraceEvent]) -> (Vec<usize>, usize) {
+        let n = events.len();
+        let mut layer_of = vec![0usize; n];
+        let mut max_layer = 0usize;
+        for j in 1..n {
+            for i in 0..j {
+                if !crate::trace::independence::independent(&events[i], &events[j]) {
+                    layer_of[j] = layer_of[j].max(layer_of[i] + 1);
+                }
+            }
+            max_layer = max_layer.max(layer_of[j]);
+        }
+        (layer_of, max_layer)
+    }
+
+    fn undecodable_handoff(seq: u64) -> TraceEvent {
+        TraceEvent::user_trace(seq, Time::ZERO, "obligation_handoff_v9 {}")
+    }
+
+    fn close_begin(seq: u64, region: RegionId) -> TraceEvent {
+        TraceEvent::new(
+            seq,
+            Time::ZERO,
+            TraceEventKind::RegionCloseBegin,
+            TraceData::Region {
+                region,
+                parent: None,
+            },
+        )
+    }
+
+    /// `foata_layers` gives every event the layer the pairwise scan gives it,
+    /// on hand-picked edge cases and on pseudo-random traces.
+    #[test]
+    fn foata_layers_match_the_pairwise_scan() {
+        let note = |seq| TraceEvent::user_trace(seq, Time::ZERO, "note");
+        // Footprint-free notes, two reads of one resource, a read after a
+        // write, an undecodable handoff (dependent on everything), and a
+        // duplicate sequence number.
+        let picked = vec![
+            note(1),
+            TraceEvent::spawn(2, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::checkpoint(3, Time::ZERO, 0, 0, 0),
+            TraceEvent::checkpoint(4, Time::ZERO, 1, 0, 0),
+            TraceEvent::spawn(5, Time::ZERO, tid(2), rid(1)),
+            close_begin(6, rid(1)),
+            undecodable_handoff(7),
+            note(8),
+            TraceEvent::spawn(2, Time::ZERO, tid(3), rid(2)),
+            TraceEvent::region_created(10, Time::ZERO, rid(3), Some(rid(2))),
+        ];
+        assert_eq!(foata_layers(&picked), pairwise_layers(&picked));
+
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = |bound: u64| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % bound
+        };
+        for trace in 0..24 {
+            let len = 40 + next(260);
+            let events: Vec<TraceEvent> = (0..len)
+                .map(|k| {
+                    let seq = if next(16) == 0 { next(len) } else { k };
+                    let task = tid(next(6) as u32 + 1);
+                    let region = rid(next(3) as u32 + 1);
+                    let obligation = oid(next(5) as u32 + 1);
+                    match next(12) {
+                        0 => TraceEvent::spawn(seq, Time::ZERO, task, region),
+                        1 => TraceEvent::complete(seq, Time::ZERO, task, region),
+                        2 => TraceEvent::obligation_reserve(
+                            seq,
+                            Time::ZERO,
+                            obligation,
+                            task,
+                            region,
+                            ObligationKind::SendPermit,
+                        ),
+                        3 => TraceEvent::obligation_commit(
+                            seq,
+                            Time::ZERO,
+                            obligation,
+                            task,
+                            region,
+                            ObligationKind::SendPermit,
+                            0,
+                        ),
+                        4 => TraceEvent::checkpoint(seq, Time::ZERO, k, 0, 0),
+                        5 => TraceEvent::time_advance(seq, Time::ZERO, Time::ZERO, Time::MAX),
+                        6 => TraceEvent::timer_scheduled(seq, Time::ZERO, next(3), Time::MAX),
+                        7 => note(seq),
+                        8 => close_begin(seq, region),
+                        9 => TraceEvent::region_created(seq, Time::ZERO, region, Some(rid(1))),
+                        10 if next(4) == 0 => undecodable_handoff(seq),
+                        _ => TraceEvent::poll(seq, Time::ZERO, task, region),
+                    }
+                })
+                .collect();
+            assert_eq!(
+                foata_layers(&events),
+                pairwise_layers(&events),
+                "trace {trace}"
+            );
+        }
     }
 
     /// Metamorphic tests for the Foata normal form: commutation invariance,

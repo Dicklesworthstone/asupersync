@@ -926,9 +926,28 @@ impl EpochConsistencyTracker {
 
     /// The tracker a runtime state keeps for its independent per-table epoch
     /// counters (see [`EpochConsistencyConfig::independent_modules`]).
+    ///
+    /// The runtime advances each table counter itself, under its own lock,
+    /// from the value it last published, so in production the tracker can
+    /// only re-confirm that arithmetic; its receipts reach observers only
+    /// through `tracing` events. It is therefore enabled where it can find or
+    /// report something: this crate's tests, debug builds, and builds with
+    /// `tracing-integration`. Release builds without tracing skip a mutex, an
+    /// `RwLock` write, a map update, telemetry receipts and two clock reads on
+    /// every task spawn and completion
+    /// (br-asupersync-issue65-criticisms-kpmoy5.1.7).
     #[must_use]
     pub(crate) fn for_runtime_tables() -> Self {
-        Self::with_config(EpochConsistencyConfig::independent_modules())
+        let mut config = EpochConsistencyConfig::independent_modules();
+        config.enabled = cfg!(any(test, debug_assertions, feature = "tracing-integration"));
+        Self::with_config(config)
+    }
+
+    /// Whether transitions are recorded at all.
+    #[inline]
+    #[must_use]
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.config.enabled
     }
 
     /// Creates a new epoch consistency tracker with the given configuration.

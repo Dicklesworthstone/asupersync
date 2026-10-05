@@ -10,8 +10,8 @@ use asupersync::runtime::RuntimeBuilder;
 use asupersync::trace::raptorq_journal::{ObjectParamsRecord, latest_complete_epoch, scan_frames};
 use asupersync::trace::raptorq_journal_writer::{
     DurableJournalError, DurableTraceJournal, DurableTraceJournalConfig,
-    encode_and_serialize_epoch, read_epoch_manifest, read_epoch_stripes, stripe_file_name,
-    write_epoch_manifest, write_epoch_stripes,
+    encode_and_serialize_epoch, manifest_file_name, params_file_name, read_epoch_manifest,
+    read_epoch_stripes, stripe_file_name, write_epoch_manifest, write_epoch_stripes,
 };
 use tempfile::tempdir;
 
@@ -719,4 +719,259 @@ fn recovered_trace_replays_round_trip_into_frankenlab_replay() {
         divergence_caught,
         "the replayer must actually verify events -- a wrong event must diverge"
     );
+}
+
+#[test]
+fn a_damaged_stripe_does_not_hide_the_intact_stripes_after_it() {
+    // A failure domain corrupted in place rather than lost: the scan of that
+    // stripe stops at the damaged frame, but the frames on the other stripes
+    // still count. 600 bytes is K = 3; 3 source + 4 repair symbols put frames
+    // 0, 3 and 6 on stripe 0, so stripe 0 keeps its first frame.
+    let dir = tempdir().expect("tempdir");
+    let dir_path = dir.path().to_path_buf();
+    let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+
+    let (recoverable, recovered_exactly, surviving_frames) =
+        runtime.block_on(runtime.handle().spawn(async move {
+            let journal = DurableTraceJournal::new(DurableTraceJournalConfig {
+                directory: dir_path.clone(),
+                encoding: EncodingConfig::default(),
+                repair_count: 4,
+                stripe_count: 3,
+            });
+            let data = varied_payload(600);
+            journal.record_epoch(42, &data).await.expect("record epoch");
+
+            // Flip a byte inside stripe 0's second frame.
+            let stripe0 = dir_path.join(stripe_file_name(42, 0));
+            let mut bytes = std::fs::read(&stripe0).expect("read stripe 0");
+            let middle = bytes.len() / 2;
+            bytes[middle] ^= 0xFF;
+            std::fs::write(&stripe0, &bytes).expect("rewrite stripe 0");
+
+            let recoverable = journal.epoch_recoverable(42).await.expect("judge epoch");
+            let recovered = journal.recover_epoch(42).await.ok();
+            let surviving_frames = journal
+                .recover_epoch_with_proof(42)
+                .await
+                .ok()
+                .map(|(_, proof)| proof.surviving_frames);
+            (recoverable, recovered == Some(data), surviving_frames)
+        }));
+
+    assert!(
+        recoverable,
+        "the intact stripes after a damaged one must still count toward recoverability"
+    );
+    assert!(
+        recovered_exactly,
+        "the epoch must decode byte-exact from stripe 0's first frame plus stripes 1 and 2"
+    );
+    assert_eq!(
+        surviving_frames,
+        Some(5),
+        "1 frame before the damage on stripe 0 plus 2 + 2 on the intact stripes"
+    );
+}
+
+#[test]
+fn an_epoch_whose_params_write_failed_stays_invisible_to_recovery() {
+    // The manifest makes an epoch visible to recovery, so it is written last.
+    // Make the params write fail (a directory sits where its file goes): the
+    // failed epoch must not be listed, and recovery restores the previous one.
+    let dir = tempdir().expect("tempdir");
+    let dir_path = dir.path().to_path_buf();
+    let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+
+    let (failed, listed, latest) = runtime.block_on(runtime.handle().spawn(async move {
+        let journal = DurableTraceJournal::new(DurableTraceJournalConfig {
+            directory: dir_path.clone(),
+            encoding: EncodingConfig::default(),
+            repair_count: 4,
+            stripe_count: 3,
+        });
+        journal
+            .record_epoch(20, &varied_payload(500))
+            .await
+            .expect("record 20");
+        std::fs::create_dir(dir_path.join(params_file_name(30))).expect("block params 30");
+        let failed = journal
+            .record_epoch(30, &varied_payload(700))
+            .await
+            .is_err();
+        let listed = journal.recorded_epochs().await.expect("list epochs");
+        let latest = journal.recover_latest().await.ok().flatten();
+        (failed, listed, latest)
+    }));
+
+    assert!(failed, "record_epoch must report the failed params write");
+    assert_eq!(
+        listed,
+        vec![20],
+        "an epoch without its params record must not have a manifest"
+    );
+    assert_eq!(latest, Some((20, varied_payload(500))));
+}
+
+#[test]
+fn recover_latest_skips_newer_epochs_whose_records_are_damaged() {
+    // An older writer persisted the manifest before the params record, so a
+    // crash between them left an epoch recovery lists but cannot decode; records
+    // can also rot. Each damaged newer epoch gives way to the next older one.
+    let dir = tempdir().expect("tempdir");
+    let dir_path = dir.path().to_path_buf();
+    let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+
+    let (latest, latest_after_bad_manifest, single_epoch_error) =
+        runtime.block_on(runtime.handle().spawn(async move {
+            let journal = DurableTraceJournal::new(DurableTraceJournalConfig {
+                directory: dir_path.clone(),
+                encoding: EncodingConfig::default(),
+                repair_count: 4,
+                stripe_count: 3,
+            });
+            for (epoch, len) in [(10_u64, 410_usize), (20, 420), (30, 430)] {
+                journal
+                    .record_epoch(epoch, &varied_payload(len))
+                    .await
+                    .expect("record epoch");
+            }
+            // 30: params record lost; 20: params record corrupt.
+            std::fs::remove_file(dir_path.join(params_file_name(30))).expect("rm params 30");
+            std::fs::write(dir_path.join(params_file_name(20)), b"not a params record")
+                .expect("corrupt params 20");
+            let latest = journal.recover_latest().await.ok().flatten();
+
+            // A corrupt newest manifest must not hide the epochs behind it.
+            std::fs::write(dir_path.join(manifest_file_name(30)), b"not a manifest")
+                .expect("corrupt manifest 30");
+            let latest_after_bad_manifest = journal.latest_recoverable_epoch().await.ok();
+
+            // When no epoch decodes, the newest failure is still reported.
+            let lone = DurableTraceJournal::new(DurableTraceJournalConfig {
+                directory: dir_path.join("lone"),
+                encoding: EncodingConfig::default(),
+                repair_count: 4,
+                stripe_count: 3,
+            });
+            lone.record_epoch(5, &varied_payload(300))
+                .await
+                .expect("record 5");
+            std::fs::remove_file(dir_path.join("lone").join(params_file_name(5)))
+                .expect("rm params 5");
+            let single_epoch_error = matches!(
+                lone.recover_latest().await,
+                Err(DurableJournalError::MissingParams)
+            );
+            (latest, latest_after_bad_manifest, single_epoch_error)
+        }));
+
+    assert_eq!(
+        latest,
+        Some((10, varied_payload(410))),
+        "recover_latest must fall back past the epochs whose params are missing or corrupt"
+    );
+    assert_eq!(
+        latest_after_bad_manifest,
+        Some(Some(20)),
+        "a corrupt manifest must count as not recoverable, not end the search"
+    );
+    assert!(
+        single_epoch_error,
+        "with no decodable epoch, recover_latest must still report the failure"
+    );
+}
+
+#[test]
+fn k_plus_one_survivors_including_repair_symbols_decode() {
+    // 38 * 256 bytes is K = 38 in one block; two repair symbols make 40, and 39
+    // stripes put one symbol on each stripe but stripe 0 (symbols 0 and 39).
+    // Losing stripe 1 (source symbol 1) leaves 39 = K + 1 symbols, two of them
+    // repair symbols: epoch_recoverable says the epoch recovers, and the decode
+    // must not wait for the ceil(1.05 * K) = 40 symbols that no longer exist.
+    let dir = tempdir().expect("tempdir");
+    let dir_path = dir.path().to_path_buf();
+    let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+
+    let (recoverable, recovered_exactly) = runtime.block_on(runtime.handle().spawn(async move {
+        let journal = DurableTraceJournal::new(DurableTraceJournalConfig {
+            directory: dir_path.clone(),
+            encoding: EncodingConfig::default(),
+            repair_count: 2,
+            stripe_count: 39,
+        });
+        let data = varied_payload(38 * 256);
+        journal.record_epoch(42, &data).await.expect("record epoch");
+        std::fs::remove_file(dir_path.join(stripe_file_name(42, 1))).expect("rm stripe 1");
+
+        let recoverable = journal.epoch_recoverable(42).await.expect("judge epoch");
+        let recovered = journal.recover_epoch(42).await.ok();
+        (recoverable, recovered == Some(data))
+    }));
+
+    assert!(
+        recoverable,
+        "39 distinct symbols for K = 38 must judge recoverable"
+    );
+    assert!(
+        recovered_exactly,
+        "an epoch judged recoverable must decode byte-exact from K + 1 survivors"
+    );
+}
+
+#[test]
+fn block_layout_is_computed_without_walking_the_blocks() {
+    // A params record read back from disk can claim any size; the layout must
+    // not take one step per block (2^64 here). It must also match the
+    // planner's walk on ordinary sizes.
+    let walk = |object_size: u64, symbol_size: u64, max_block_size: u64| {
+        let (mut blocks, mut max_k, mut offset) = (0_u64, 0_u64, 0_u64);
+        while offset < object_size {
+            let len = max_block_size.min(object_size - offset);
+            max_k = max_k.max(len.div_ceil(symbol_size));
+            offset += len;
+            blocks += 1;
+        }
+        (
+            u16::try_from(blocks).unwrap_or(u16::MAX),
+            u16::try_from(max_k).unwrap_or(u16::MAX),
+        )
+    };
+    for object_size in [1_u64, 255, 256, 257, 600, 4096, 70_000] {
+        for symbol_size in [1_u16, 7, 256] {
+            for max_block_size in [1_u32, 300, 1024, 1 << 20] {
+                let record = ObjectParamsRecord {
+                    epoch: 1,
+                    object_size,
+                    symbol_size,
+                    max_block_size,
+                };
+                assert_eq!(
+                    record.block_layout(),
+                    walk(
+                        object_size,
+                        u64::from(symbol_size),
+                        u64::from(max_block_size)
+                    ),
+                    "layout of {object_size} bytes, {symbol_size}-byte symbols, \
+                     {max_block_size}-byte blocks"
+                );
+            }
+        }
+    }
+
+    let huge = ObjectParamsRecord {
+        epoch: 1,
+        object_size: u64::MAX,
+        symbol_size: 1,
+        max_block_size: 1,
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(huge.block_layout());
+    });
+    let layout = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("block_layout of a 2^64-block record must return promptly");
+    assert_eq!(layout, (u16::MAX, 1));
 }

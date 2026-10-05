@@ -1008,6 +1008,87 @@ fn loss_injection_recovers_via_repair_symbols() {
     assert_eq!(got, payload, "lossy transfer must still be byte-identical");
 }
 
+/// A runtime like the loopback helpers' but with a blocking pool, as ATP
+/// deployments configure for RaptorQ work.
+fn pooled_runtime() -> asupersync::runtime::Runtime {
+    RuntimeBuilder::multi_thread()
+        .worker_threads(2)
+        .blocking_threads(0, 4)
+        .enable_platform_reactor(true)
+        .build()
+        .expect("pooled runtime")
+}
+
+/// A pool turns on the parallel encode and decode paths, and with them a
+/// liveness-probe echo that can reach the sender after round 0. The sender
+/// used to answer that echo with a second ObjectComplete, then act on each
+/// later verdict one round late; the receiver committed while the sender was
+/// still spraying, and the sender reported the committed transfer as failed
+/// with "Connection refused" (asupersync-fjg6ng: 7 of 8 runs before the fix).
+#[test]
+fn loss_injection_with_blocking_pools_commits_on_both_sides() {
+    let payload: Vec<u8> = (0..160_019u32)
+        .map(|i| (i.wrapping_mul(40503) >> 7) as u8)
+        .collect();
+    for iteration in 0..6 {
+        let root = unique_tmp("loss_pooled");
+        let src_dir = root.join("src");
+        let dst_dir = root.join("dst");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::create_dir_all(&dst_dir).unwrap();
+        let src_file = src_dir.join("lossy.bin");
+        std::fs::write(&src_file, &payload).unwrap();
+        let lossy = RqConfig {
+            debug_drop_one_in: 7,
+            ..test_config()
+        };
+
+        let (addr_tx, addr_rx) = mpsc::channel::<SocketAddr>();
+        let receiver_dst = dst_dir.clone();
+        let receiver = thread::spawn(move || {
+            let runtime = pooled_runtime();
+            runtime.block_on(runtime.handle().spawn(async move {
+                let cx = Cx::current().expect("receiver cx");
+                let listener = TcpListener::bind("127.0.0.1:0").await?;
+                addr_tx.send(listener.local_addr()?).expect("send addr");
+                receive_once_with_options(
+                    &cx,
+                    &listener,
+                    "127.0.0.1",
+                    &receiver_dst,
+                    test_config(),
+                    "receiver",
+                    RqReceiveOptions::default(),
+                )
+                .await
+            }))
+        });
+        let addr = addr_rx.recv().expect("receiver bound address");
+        let sender = pooled_runtime();
+        let send = sender
+            .block_on(sender.handle().spawn(async move {
+                let cx = Cx::current().expect("sender cx");
+                send_path(&cx, addr, &src_file, lossy, "sender").await
+            }))
+            .unwrap_or_else(|error| panic!("iteration {iteration}: send failed: {error:?}"));
+        let recv = receiver
+            .join()
+            .expect("receiver thread")
+            .unwrap_or_else(|error| panic!("iteration {iteration}: receive failed: {error:?}"));
+
+        assert!(
+            send.receipt.committed,
+            "iteration {iteration}: sender saw no commit"
+        );
+        assert!(
+            recv.committed,
+            "iteration {iteration}: receiver did not commit"
+        );
+        let got = std::fs::read(dst_dir.join("lossy.bin")).expect("received file");
+        assert_eq!(got, payload, "iteration {iteration}: bytes must round-trip");
+    }
+}
+
 #[test]
 fn dead_control_port_fails_closed() {
     let root = unique_tmp("dead");

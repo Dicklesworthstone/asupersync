@@ -356,3 +356,242 @@ fn drain_root_region_times_out_within_bound_for_non_cooperative_work() {
         "the drain must give up at its bound, not wait for the blocking task; waited {waited:?}"
     );
 }
+
+/// A task inside a child region that spawns through the runtime handle
+/// spawns into the ROOT region: the child region's close neither waits for
+/// nor cancels that task, and only the root drain cancels and drains it
+/// (br-asupersync-issue65-criticisms-kpmoy5.2.3).
+fn handle_spawn_escapes_the_callers_child_region(runtime: asupersync::runtime::Runtime) {
+    let started = Arc::new(AtomicBool::new(false));
+    let polls = Arc::new(AtomicUsize::new(0));
+    let cancel_kind = Arc::new(std::sync::Mutex::new(None));
+    let started_for_task = Arc::clone(&started);
+    let polls_for_task = Arc::clone(&polls);
+    let kind_for_task = Arc::clone(&cancel_kind);
+    let kind_for_check = Arc::clone(&cancel_kind);
+    let kind_after_child_close = runtime.block_on(async move {
+        let cx = Cx::current().expect("root cx");
+        let child = cx
+            .open_child_region(asupersync::cx::ChildRegionSpec::inherit())
+            .await
+            .expect("child region");
+        let mut spawner = child
+            .cx()
+            .spawn(move |_inner| async move {
+                let handle = asupersync::runtime::Runtime::current_handle()
+                    .expect("a runtime task can reach its runtime handle");
+                handle.spawn_with_cx(move |escaped| async move {
+                    started_for_task.store(true, Ordering::SeqCst);
+                    while escaped.checkpoint().is_ok() {
+                        polls_for_task.fetch_add(1, Ordering::SeqCst);
+                        yield_now().await;
+                    }
+                    *kind_for_task.lock().unwrap() = escaped.cancel_reason().map(|r| r.kind);
+                });
+            })
+            .expect("spawn in the child region");
+        spawner
+            .join(child.cx())
+            .await
+            .expect("the spawning task finishes");
+        wait_started(&started).await;
+        child
+            .close()
+            .await
+            .expect("the child region closes without waiting for the escaped task");
+        let kind = *kind_for_check.lock().unwrap();
+        // Still running after the close: it keeps passing checkpoints.
+        let polls_at_close = polls.load(Ordering::SeqCst);
+        for _ in 0..100_000 {
+            if polls.load(Ordering::SeqCst) > polls_at_close {
+                return kind;
+            }
+            yield_now().await;
+        }
+        panic!("the escaped task stopped running when its spawner's region closed");
+    });
+    assert_eq!(
+        kind_after_child_close, None,
+        "closing the child region must not cancel a root-region task"
+    );
+    assert_eq!(
+        runtime.drain_root_region(Duration::from_secs(5)),
+        RootDrainOutcome::Quiescent
+    );
+    assert_eq!(
+        *cancel_kind.lock().unwrap(),
+        Some(asupersync::CancelKind::Shutdown),
+        "the root drain cancels the escaped task"
+    );
+}
+
+#[test]
+fn handle_spawn_escapes_the_callers_child_region_until_root_drain() {
+    handle_spawn_escapes_the_callers_child_region(
+        RuntimeBuilder::multi_thread()
+            .build()
+            .expect("build runtime"),
+    );
+}
+
+#[test]
+fn handle_spawn_escapes_the_callers_child_region_until_root_drain_current_thread() {
+    handle_spawn_escapes_the_callers_child_region(
+        RuntimeBuilder::current_thread()
+            .build()
+            .expect("build runtime"),
+    );
+}
+
+/// Parks until released and ignores cancellation: a task that never reaches
+/// a checkpoint or a cancel-aware await.
+type Gate = Arc<(AtomicBool, std::sync::Mutex<Option<std::task::Waker>>)>;
+
+struct Released(Gate);
+
+impl Future for Released {
+    type Output = ();
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        let (released, waker) = &*self.0;
+        *waker.lock().unwrap() = Some(cx.waker().clone());
+        if released.load(Ordering::SeqCst) {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    }
+}
+
+fn release(gate: &Gate) {
+    gate.0.store(true, Ordering::SeqCst);
+    if let Some(waker) = gate.1.lock().unwrap().take() {
+        waker.wake();
+    }
+}
+
+/// `ChildRegion::close_within` gives up at its bound and names the task that
+/// ignores cancellation. The region keeps owning that task: the cooperative
+/// sibling is drained, and once the straggler is released the runtime reaches
+/// quiescence (br-asupersync-issue65-criticisms-kpmoy5.2.4).
+fn close_within_names_the_straggler_and_keeps_owning_it(runtime: asupersync::runtime::Runtime) {
+    use asupersync::cx::{ChildRegionCloseOutcome, ChildRegionSpec};
+
+    let bound = Duration::from_millis(50);
+    runtime.block_on(async move {
+        let cx = Cx::current().expect("root cx");
+        let child = cx
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .expect("child region");
+        let cooperative_started = Arc::new(AtomicBool::new(false));
+        let cooperative_flag = Arc::clone(&cooperative_started);
+        let cooperative_done = Arc::new(AtomicBool::new(false));
+        let done_flag = Arc::clone(&cooperative_done);
+        let mut cooperative = child
+            .cx()
+            .spawn(move |task_cx| async move {
+                cooperative_flag.store(true, Ordering::SeqCst);
+                while task_cx.checkpoint().is_ok() {
+                    yield_now().await;
+                }
+                done_flag.store(true, Ordering::SeqCst);
+            })
+            .expect("spawn the cooperative task");
+        let gate: Gate = Arc::new((AtomicBool::new(false), std::sync::Mutex::new(None)));
+        let gate_for_task = Arc::clone(&gate);
+        let straggler_started = Arc::new(AtomicBool::new(false));
+        let straggler_flag = Arc::clone(&straggler_started);
+        let straggler_id = Arc::new(std::sync::Mutex::new(None));
+        let id_slot = Arc::clone(&straggler_id);
+        let mut straggler = child
+            .cx()
+            .spawn(move |task_cx| async move {
+                *id_slot.lock().unwrap() = Some(task_cx.task_id());
+                straggler_flag.store(true, Ordering::SeqCst);
+                Released(gate_for_task).await;
+            })
+            .expect("spawn the straggler");
+        wait_started(&cooperative_started).await;
+        wait_started(&straggler_started).await;
+
+        let report = child.close_within(bound).await.expect("close report");
+        assert_eq!(report.outcome, ChildRegionCloseOutcome::TimedOut);
+        let expected = (*straggler_id.lock().unwrap()).expect("the straggler ran");
+        assert_eq!(report.stragglers, vec![expected]);
+        assert!(
+            report.elapsed >= bound && report.elapsed < Duration::from_secs(5),
+            "the report comes at the bound, not before and not much later: {:?}",
+            report.elapsed
+        );
+        let _ = cooperative.join(&cx).await;
+        assert!(
+            cooperative_done.load(Ordering::SeqCst),
+            "the cooperative task observed the close and finished"
+        );
+        release(&gate);
+        let _ = straggler.join(&cx).await;
+    });
+    assert_eq!(
+        runtime.drain_root_region(Duration::from_secs(5)),
+        RootDrainOutcome::Quiescent
+    );
+}
+
+#[test]
+fn close_within_names_the_straggler_and_keeps_owning_it_multi_thread() {
+    close_within_names_the_straggler_and_keeps_owning_it(
+        RuntimeBuilder::multi_thread()
+            .build()
+            .expect("build runtime"),
+    );
+}
+
+#[test]
+fn close_within_names_the_straggler_and_keeps_owning_it_current_thread() {
+    close_within_names_the_straggler_and_keeps_owning_it(
+        RuntimeBuilder::current_thread()
+            .build()
+            .expect("build runtime"),
+    );
+}
+
+/// Without a straggler, `close_within` reports quiescence well inside its
+/// bound, with no straggler list.
+#[test]
+fn close_within_reports_quiescence_when_every_task_cooperates() {
+    use asupersync::cx::{ChildRegionCloseOutcome, ChildRegionSpec};
+
+    let runtime = RuntimeBuilder::multi_thread()
+        .build()
+        .expect("build runtime");
+    runtime.block_on(async move {
+        let cx = Cx::current().expect("root cx");
+        let child = cx
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .expect("child region");
+        let started = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&started);
+        let _task = child
+            .cx()
+            .spawn(move |task_cx| async move {
+                flag.store(true, Ordering::SeqCst);
+                while task_cx.checkpoint().is_ok() {
+                    yield_now().await;
+                }
+            })
+            .expect("spawn");
+        wait_started(&started).await;
+        let report = child
+            .close_within(Duration::from_secs(30))
+            .await
+            .expect("close report");
+        assert_eq!(report.outcome, ChildRegionCloseOutcome::Quiescent);
+        assert!(report.stragglers.is_empty());
+        assert!(report.elapsed < Duration::from_secs(30));
+    });
+}

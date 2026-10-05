@@ -1241,10 +1241,107 @@ fn native_pid(pid: u32) -> Result<libc::pid_t> {
 fn read_pid_file(path: &Path) -> Result<u32> {
     let pid_content = std::fs::read_to_string(path)
         .map_err(|e| cli_error(format!("Failed to read PID file: {e}")))?;
-    pid_content
+    let pid: u32 = pid_content
         .trim()
         .parse()
-        .map_err(|e| cli_error(format!("Invalid PID in file: {e}")))
+        .map_err(|e| cli_error(format!("Invalid PID in file: {e}")))?;
+    // kill(0, ..) signals the caller's whole process group and PID 1 is init:
+    // neither can be an ATP daemon (asupersync-fas2rq).
+    if pid <= 1 {
+        return Err(cli_error(format!(
+            "Invalid PID in file: {pid} cannot name an ATP daemon"
+        )));
+    }
+    Ok(pid)
+}
+
+/// Whether `pid` names a live ATP daemon process. A PID file can outlive its
+/// daemon and the PID can be reused, so a PID read from the file is signalled
+/// only after this check (asupersync-fas2rq).
+fn pid_is_atpd(pid: u32) -> bool {
+    let target = sysinfo::Pid::from_u32(pid);
+    let mut system = sysinfo::System::new();
+    system.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::Some(&[target]),
+        true,
+        sysinfo::ProcessRefreshKind::nothing().with_exe(sysinfo::UpdateKind::OnlyIfNotSet),
+    );
+    let is_atpd = |name: &std::ffi::OsStr| name.to_string_lossy().starts_with("atpd");
+    system.process(target).is_some_and(|process| {
+        is_atpd(process.name()) || process.exe().and_then(Path::file_name).is_some_and(is_atpd)
+    })
+}
+
+/// This daemon's entry in its `--pid-file`, which `atpd stop`, `status` and
+/// `reload` read to find it. Written at start and removed on exit while it
+/// still names this process (asupersync-fas2rq).
+struct PidFileClaim {
+    path: PathBuf,
+    pid: u32,
+}
+
+impl PidFileClaim {
+    /// Claim `path` for this process. A file naming another live ATP daemon
+    /// refuses the start; one left behind by a daemon that died is replaced.
+    /// An unwritable path only warns, as before, so an unprivileged start with
+    /// the default /var/run path still runs.
+    fn acquire(path: &Path) -> Result<Option<Self>> {
+        let pid = std::process::id();
+        for _ in 0..2 {
+            match OpenOptions::new().write(true).create_new(true).open(path) {
+                Ok(mut file) => {
+                    file.write_all(pid.to_string().as_bytes())?;
+                    file.sync_all()?;
+                    return Ok(Some(Self {
+                        path: path.to_path_buf(),
+                        pid,
+                    }));
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if let Ok(owner) = read_pid_file(path)
+                        && owner != pid
+                        && pid_is_atpd(owner)
+                    {
+                        return Err(cli_error(format!(
+                            "ATP daemon already running (PID {owner}, PID file {})",
+                            path.display()
+                        )));
+                    }
+                    warn!(path = %path.display(), "replacing a stale ATP daemon PID file");
+                    if let Err(err) = std::fs::remove_file(path) {
+                        warn!(
+                            path = %path.display(),
+                            %err,
+                            "cannot replace the stale PID file; `atpd stop`, `status` and \
+                             `reload` will not find this daemon"
+                        );
+                        return Ok(None);
+                    }
+                }
+                Err(err) => {
+                    warn!(
+                        path = %path.display(),
+                        %err,
+                        "cannot write the PID file; `atpd stop`, `status` and `reload` will not \
+                         find this daemon unless --pid-file names a writable path"
+                    );
+                    return Ok(None);
+                }
+            }
+        }
+        Err(cli_error(format!(
+            "another process keeps recreating the PID file {}",
+            path.display()
+        )))
+    }
+}
+
+impl Drop for PidFileClaim {
+    fn drop(&mut self) {
+        if read_pid_file(&self.path).ok() == Some(self.pid) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 }
 
 fn directory_stats(path: &Path) -> Result<DirectoryStats> {
@@ -1378,6 +1475,10 @@ fn serve_diagnostics_connection(
     snapshot: &Arc<Mutex<DaemonHealthSnapshot>>,
     transfer_stats: &TransferStats,
 ) -> Result<()> {
+    // The endpoint thread serves one connection at a time and is joined at
+    // shutdown, so an idle client must not hold it (asupersync-fas2rq).
+    stream.set_read_timeout(Some(DIAGNOSTICS_IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(DIAGNOSTICS_IO_TIMEOUT))?;
     let mut request = [0u8; 1024];
     let _ = stream.read(&mut request);
 
@@ -1466,6 +1567,8 @@ fn start_daemon(cli: AtpdCli, args: StartArgs) -> Result<()> {
     apply_start_overrides(&mut config, args);
 
     prepare_daemon_directories(&config)?;
+    // Held until this function returns, on every path out of the daemon.
+    let _pid_file = PidFileClaim::acquire(&cli.pid_file)?;
 
     // Initialize runtime
     let runtime = RuntimeBuilder::new()
@@ -1586,6 +1689,10 @@ async fn run_daemon_service(
     // transfer port cannot be bound. A transfer daemon that is not listening
     // for transfers must not run "healthy", and diagnostics must never claim a
     // bind address that no socket backs.
+    // Before any listener accepts: a SIGINT/SIGTERM during startup is queued
+    // for the drain below instead of killing an in-flight receive by the
+    // default action and leaving its staging behind (asupersync-fas2rq).
+    let signal_rx = install_signal_listener()?;
     let transfer_stats = Arc::new(TransferStats::default());
     let transfer_listener_addr = {
         use asupersync::net::TcpListener as AsupTcpListener;
@@ -1687,7 +1794,6 @@ async fn run_daemon_service(
         "ATP daemon state initialized"
     );
 
-    let signal_rx = install_signal_listener()?;
     let started_at_micros = current_time_micros()?;
     let reload_count = 0u64;
     let health_snapshot = Arc::new(Mutex::new(DaemonHealthSnapshot::from_state(
@@ -1725,6 +1831,9 @@ async fn run_daemon_service(
     };
 
     let mut reload_count = reload_count;
+    // A reload that cannot be applied fails the daemon closed, but only after
+    // its transfer listeners drain, like any other stop (br-asupersync-ks43rc).
+    let mut reload_failure = None;
     loop {
         match signal_rx.recv_timeout(Duration::from_secs(
             daemon_state
@@ -1735,9 +1844,18 @@ async fn run_daemon_service(
                 .max(1),
         )) {
             Ok(DaemonSignal::Reload) => {
-                let reloaded = load_daemon_config(&config_path)?;
-                prepare_daemon_directories(&reloaded)?;
-                let reloaded_identity = load_identity_store(&identity_store_path(&reloaded))?;
+                let loaded = load_daemon_config(&config_path).and_then(|reloaded| {
+                    prepare_daemon_directories(&reloaded)?;
+                    let identity = load_identity_store(&identity_store_path(&reloaded))?;
+                    Ok((reloaded, identity))
+                });
+                let (reloaded, reloaded_identity) = match loaded {
+                    Ok(loaded) => loaded,
+                    Err(error) => {
+                        reload_failure = Some(error);
+                        break;
+                    }
+                };
                 if reloaded.network.bind_addr != config.network.bind_addr {
                     warn!(
                         configured = %reloaded.network.bind_addr,
@@ -1763,18 +1881,20 @@ async fn run_daemon_service(
                 config = reloaded;
                 daemon_state.config = config.clone();
                 reload_count = reload_count.saturating_add(1);
-                *health_snapshot
-                    .lock()
-                    .map_err(|_| cli_error("diagnostics snapshot mutex poisoned"))? =
-                    DaemonHealthSnapshot::from_state(
-                        &daemon_state,
-                        &reloaded_identity,
-                        &compiled_app.start_order,
-                        transfer_listener_addr,
-                        quic_transfer_listener_addr,
-                        started_at_micros,
-                        reload_count,
-                    );
+                let Ok(mut snapshot) = health_snapshot.lock() else {
+                    reload_failure = Some(cli_error("diagnostics snapshot mutex poisoned"));
+                    break;
+                };
+                *snapshot = DaemonHealthSnapshot::from_state(
+                    &daemon_state,
+                    &reloaded_identity,
+                    &compiled_app.start_order,
+                    transfer_listener_addr,
+                    quic_transfer_listener_addr,
+                    started_at_micros,
+                    reload_count,
+                );
+                drop(snapshot);
                 info!(reload_count, "ATP daemon configuration reloaded");
             }
             Ok(DaemonSignal::Interrupt | DaemonSignal::Terminate) => {
@@ -1798,7 +1918,11 @@ async fn run_daemon_service(
         }
     }
 
-    info!("Received shutdown signal, stopping daemon...");
+    if let Some(error) = &reload_failure {
+        warn!(%error, "ATP daemon configuration reload failed; draining listeners and stopping");
+    } else {
+        info!("Received shutdown signal, stopping daemon...");
+    }
     let drained = transfer_stats.stop_and_drain(daemon_state.config.service.shutdown_timeout_secs);
     for event in compiled_app.shutdown_events() {
         match event.role {
@@ -1813,7 +1937,7 @@ async fn run_daemon_service(
     if let Some(endpoint) = diagnostics_endpoint {
         endpoint.stop();
     }
-    drained
+    reload_failure.map_or(drained, Err)
 }
 
 fn stop_daemon(cli: AtpdCli) -> Result<()> {
@@ -1826,6 +1950,15 @@ fn stop_daemon(cli: AtpdCli) -> Result<()> {
     }
 
     let pid = read_pid_file(&cli.pid_file)?;
+    if !pid_is_atpd(pid) {
+        println!(
+            "ATP daemon is not running (stale PID file: process {pid} is not an ATP daemon)"
+        );
+        if let Err(err) = std::fs::remove_file(&cli.pid_file) {
+            warn!("Failed to remove stale PID file: {}", err);
+        }
+        return Ok(());
+    }
 
     #[cfg(unix)]
     {
@@ -1844,6 +1977,7 @@ fn stop_daemon(cli: AtpdCli) -> Result<()> {
             // Wait out the daemon's own drain bound before escalating (ks43rc)
             let start = Instant::now();
             let timeout = stop_wait_bound(&cli.config);
+            let mut forced = false;
 
             loop {
                 // Check if process still exists using native libc call (signal 0)
@@ -1857,19 +1991,39 @@ fn stop_daemon(cli: AtpdCli) -> Result<()> {
                 if start.elapsed() > timeout {
                     warn!("Graceful shutdown timeout, sending SIGKILL");
                     let _ = unsafe { libc::kill(native_pid, libc::SIGKILL) };
+                    forced = true;
                     break;
                 }
 
                 std::thread::sleep(Duration::from_millis(100));
             }
 
-            // Remove PID file
-            if let Err(e) = std::fs::remove_file(&cli.pid_file) {
-                warn!("Failed to remove PID file: {}", e);
-            } else {
-                info!("Removed PID file");
+            // A force-killed daemon is gone only once the PID stops existing.
+            let killed_at = Instant::now();
+            while forced && process_is_running(pid) {
+                if killed_at.elapsed() > STOP_KILL_CONFIRM {
+                    return Err(cli_error(format!(
+                        "ATP daemon (PID {pid}) is still running after SIGKILL"
+                    )));
+                }
+                std::thread::sleep(Duration::from_millis(50));
             }
 
+            // Remove PID file (a daemon that exited cleanly removed its own)
+            match std::fs::remove_file(&cli.pid_file) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    warn!("Failed to remove PID file: {}", e);
+                }
+                _ => info!("Removed PID file"),
+            }
+
+            if forced {
+                // Not a clean stop: receives still in flight were killed.
+                return Err(cli_error(format!(
+                    "ATP daemon (PID {pid}) did not stop within {} s and was force-killed",
+                    timeout.as_secs()
+                )));
+            }
             println!("ATP daemon stopped successfully");
         } else {
             // Check errno for specific error
@@ -1976,13 +2130,13 @@ fn show_status(cli: AtpdCli) -> Result<()> {
 
     let pid = read_pid_file(&cli.pid_file)?;
 
-    if process_is_running(pid) {
+    if process_is_running(pid) && pid_is_atpd(pid) {
         println!("ATP daemon: RUNNING (PID: {})", pid);
         println!("PID file: {}", cli.pid_file.display());
         println!("Config file: {}", cli.config.display());
     } else {
         println!("ATP daemon: STOPPED (stale PID file)");
-        warn!("PID file exists but process {} is not running", pid);
+        warn!("PID file exists but process {} is not a running ATP daemon", pid);
     }
 
     Ok(())
@@ -1999,6 +2153,14 @@ fn reload_daemon(cli: AtpdCli) -> Result<()> {
         )));
     }
     let pid = read_pid_file(&cli.pid_file)?;
+    // SIGHUP's default action terminates an unrelated process that reused the PID.
+    if !pid_is_atpd(pid) {
+        return Err(cli_error(format!(
+            "cannot reload ATP daemon: PID file {} names process {pid}, which is not a \
+             running ATP daemon",
+            cli.pid_file.display()
+        )));
+    }
 
     reload_daemon_by_platform(pid, &cli.config)
 }
@@ -2363,6 +2525,13 @@ fn end_by_default_signal_action(signal: i32) -> ! {
 
 /// Extra time `atpd stop` allows beyond the daemon's drain bound.
 const STOP_WAIT_MARGIN_SECS: u64 = 5;
+
+/// How long `atpd stop` waits for a force-killed daemon to disappear.
+#[cfg(unix)]
+const STOP_KILL_CONFIRM: Duration = Duration::from_secs(5);
+
+/// Read and write bound for one diagnostics connection.
+const DIAGNOSTICS_IO_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long `atpd stop` waits for the daemon to exit before forcing it.
 ///

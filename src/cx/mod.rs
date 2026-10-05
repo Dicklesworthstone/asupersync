@@ -63,6 +63,8 @@ pub mod child_region;
 pub mod cx;
 pub mod dynamic_service;
 pub mod dynamic_supervisor;
+pub mod fiber;
+pub(crate) mod io_gate;
 pub mod macaroon;
 pub mod registry;
 pub mod resource_bracket;
@@ -84,7 +86,10 @@ pub use capacity_ticket::{
     CapacityTicketRefusal, CapacityTicketRequest, CapacityTicketWorkKind, request_capacity_ticket,
     request_capacity_ticket_from_budget,
 };
-pub use child_region::{ChildRegion, ChildRegionError, ChildRegionOpening, ChildRegionSpec};
+pub use child_region::{
+    ChildRegion, ChildRegionCloseOutcome, ChildRegionCloseReport, ChildRegionError,
+    ChildRegionOpening, ChildRegionSpec,
+};
 pub(crate) use cx::CancelWakerToken;
 pub use cx::{
     BudgetStats, CapabilityLayerSnapshot, CapabilitySnapshot, CostBudgetStats, Cx,
@@ -99,6 +104,8 @@ pub use dynamic_supervisor::{
     DynamicRegionOutcome, DynamicSupervisor, DynamicSupervisorConfig, DynamicSupervisorError,
     DynamicSupervisorReport, DynamicWorkerConfig, SharedRestartConfig, SharedRestartStatus,
 };
+pub use fiber::{FiberHandle, FiberScope};
+pub use io_gate::{IoCapabilityDenied, WithAmbient};
 pub use macaroon::{
     BindError, CaveatPredicate, MacaroonKeyRing, MacaroonToken, VerificationContext,
     VerificationError,

@@ -2269,6 +2269,22 @@ impl<Caps> Cx<Caps> {
         self.inner.read().budget
     }
 
+    /// The budget new work started by this task inherits: tasks it spawns and
+    /// scopes and regions it opens. That is its live budget, except while the
+    /// task runs its cancellation cleanup. The cleanup budget's poll quota then
+    /// bounds only this task's own drain, so the new work carries no poll
+    /// quota from it. A flush or drain helper spawned during cleanup would
+    /// otherwise be cancelled with `PollQuota` after 50 to 1000 polls
+    /// (br-asupersync-0fvvq9).
+    fn inherited_budget(&self) -> Budget {
+        let inner = self.inner.read();
+        if inner.cleanup_phase {
+            inner.budget.with_poll_quota(u32::MAX)
+        } else {
+            inner.budget
+        }
+    }
+
     /// Returns the explicit capability/resource budget carried by this context.
     #[inline]
     #[must_use]
@@ -3014,7 +3030,11 @@ impl<Caps> Cx<Caps> {
                     budget_priority = budget.priority,
                     "cancel observed at checkpoint"
                 );
+                // The reason rides on the error, because the joiner may only
+                // ever see the error (br-asupersync-issue65-criticisms-kpmoy5.3.6).
+                // The `Err(...)` expression stays whole: source audits pin it.
                 Err(crate::error::Error::new(crate::error::ErrorKind::Cancelled))
+                    .map_err(|error| error.with_cancel_reason_from(cancel_reason))
             } else {
                 trace!(
                     task_id = ?task,
@@ -3947,9 +3967,9 @@ impl<Caps> Cx<Caps> {
 
     /// Races multiple futures, waiting for the first to complete.
     ///
-    /// This method is used by the `race!` macro. It runs the provided futures
-    /// concurrently (inline, not spawned) and returns the result of the first
-    /// one to complete. Losers are dropped (cancelled).
+    /// It runs the provided futures concurrently (inline, not spawned) and
+    /// returns the result of the first one to complete. Losers are dropped
+    /// (cancelled). The `race!` macro does not use it: see [`Cx::race_drained`].
     ///
     /// # Cancellation vs Draining
     ///
@@ -4072,7 +4092,7 @@ impl<Caps> Cx<Caps> {
     /// quiescence guarantees.
     #[must_use]
     pub fn scope(&self) -> crate::cx::Scope<'static> {
-        let budget = self.budget();
+        let budget = self.inherited_budget();
         debug!(
             task_id = ?self.task_id(),
             region_id = ?self.region_id(),
@@ -4156,7 +4176,9 @@ impl<Caps> Cx<Caps> {
             // meets these values with the region record, but cannot recover
             // constraints held only by this Cx. Carry them in the request so
             // opening a child cannot restore authority the caller gave up.
-            budget: self.budget().meet(spec.budget.unwrap_or(Budget::INFINITE)),
+            budget: self
+                .inherited_budget()
+                .meet(spec.budget.unwrap_or(Budget::INFINITE)),
             capability_budget: self
                 .capability_budget()
                 .meet(spec.capability_budget.unwrap_or(CapabilityBudget::UNSPECIFIED)),
@@ -4191,7 +4213,7 @@ impl<Caps> Cx<Caps> {
     /// ```
     #[must_use]
     pub fn scope_with_budget(&self, budget: Budget) -> crate::cx::Scope<'static> {
-        let parent_budget = self.budget();
+        let parent_budget = self.inherited_budget();
         let deadline_tightened = match (parent_budget.deadline, budget.deadline) {
             (Some(parent), Some(child)) => child < parent,
             (None, Some(_)) => true,
@@ -4298,8 +4320,11 @@ impl Cx<cap::All> {
     /// Because branches run as spawned tasks, each must be `Send + 'static` and
     /// the output `T` must be `Send + 'static`, and this context must be
     /// runtime-wired (carry a spawn gateway). A branch that fails admission
-    /// fails the race closed with [`JoinError::Cancelled`]; already-spawned
-    /// siblings are cancelled as the race future unwinds.
+    /// fails the race closed with [`JoinError::Cancelled`]. A region limit or
+    /// closing region refuses through the branch's handle, and every admitted
+    /// sibling is cancelled and drained first. When the runtime itself refuses
+    /// the spawn (its spawn gateway is gone), the already-spawned siblings are
+    /// asked to cancel but are not awaited.
     ///
     /// **A branch must use its own context to observe loser cancellation.**
     /// Cancellation targets the branch's spawned task. A prebuilt future that
@@ -4337,14 +4362,19 @@ impl Cx<cap::All> {
             match self.spawn_in(&scope, move |_child| future) {
                 Ok(handle) => handles.push(handle),
                 Err(_spawn_err) => {
-                    // Fail closed: dropping the already-spawned handles requests
-                    // their cancellation. Surface the admission failure as a
-                    // cancellation so the `race!` caller never observes a
-                    // partially-built race silently succeeding.
-                    drop(handles);
-                    return Err(JoinError::Cancelled(CancelReason::user(
-                        "race! branch spawn failed",
-                    )));
+                    // Fail closed, and ask the branches that did spawn to
+                    // cancel: dropping a TaskHandle does not cancel its task.
+                    // A synchronous refusal means the runtime's spawn gateway
+                    // is gone (or this context cannot spawn), so they are not
+                    // awaited: nothing guarantees that they can still
+                    // finish. Region limits and closing regions refuse through
+                    // the branch's handle instead, which race_all handles by
+                    // draining (br-asupersync-issue65-criticisms-kpmoy5.2.1).
+                    let reason = CancelReason::user("race! branch spawn failed");
+                    for handle in &handles {
+                        handle.abort_with_reason(reason.clone());
+                    }
+                    return Err(JoinError::Cancelled(reason));
                 }
             }
         }
@@ -4508,7 +4538,7 @@ where
         };
         self.spawn_via_gateway(
             self.region_id(),
-            self.budget(),
+            self.inherited_budget(),
             self.capability_budget(),
             &gateway,
             &pending,
@@ -4537,7 +4567,7 @@ where
         };
         self.spawn_via_gateway(
             self.region_id(),
-            self.budget(),
+            self.inherited_budget(),
             self.capability_budget(),
             &gateway,
             &pending,
@@ -4906,7 +4936,7 @@ where
         };
         self.spawn_local_via_lane(
             self.region_id(),
-            self.budget(),
+            self.inherited_budget(),
             self.capability_budget(),
             &gateway,
             &pending,

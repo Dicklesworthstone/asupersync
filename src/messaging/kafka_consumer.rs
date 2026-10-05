@@ -1411,6 +1411,35 @@ fn consumer_record_from_message(message: &rdkafka::message::BorrowedMessage<'_>)
     }
 }
 
+/// Rebases a broker poll result still buffered when `seek` moves
+/// `(topic, partition)` to `offset` (a poll was cancelled after its broker
+/// poll finished). A record it holds for that partition was fetched before the
+/// seek and is dropped: the broker fetches again from the new offset. Its
+/// snapshot takes the new position, so applying it later cannot move the
+/// partition back to where it was before the seek. A record for another
+/// partition is kept.
+#[cfg(feature = "kafka")]
+fn rebase_buffered_after_seek(
+    buffered: &mut Option<Result<BrokerPollOutcome, KafkaError>>,
+    topic: &str,
+    partition: i32,
+    offset: i64,
+) {
+    if let Some(Ok(outcome)) = buffered {
+        if outcome
+            .record
+            .as_ref()
+            .is_some_and(|record| record.topic == topic && record.partition == partition)
+        {
+            outcome.record = None;
+        }
+        outcome
+            .snapshot
+            .positions
+            .insert((topic.to_string(), partition), offset);
+    }
+}
+
 #[cfg(feature = "kafka")]
 fn apply_broker_snapshot(state: &mut ConsumerState, snapshot: BrokerSnapshot) {
     let previous_assignments = state.assigned_partitions.clone();
@@ -1610,6 +1639,7 @@ impl KafkaConsumer {
         if self.closed.load(Ordering::Acquire) {
             return Err(KafkaError::Config("consumer is closed".to_string()));
         }
+        let resubscribed = !state.subscribed_topics.is_empty();
         state.subscribed_topics = normalized;
         #[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
         {
@@ -1634,7 +1664,13 @@ impl KafkaConsumer {
             }
         }
         state.positions.clear();
-        state.rebalance_generation = 0;
+        // The generation is monotonic: a new subscription is a membership
+        // change, so group metadata captured before it must never validate
+        // again. Resetting it to 0 let two later rebalances bring stale
+        // metadata back to a matching generation (asupersync-lde436).
+        if resubscribed {
+            state.rebalance_generation = state.rebalance_generation.saturating_add(1);
+        }
         state.last_revoked_partitions.clear();
         drop(state);
         self.state_notify.notify_waiters();
@@ -1819,10 +1855,12 @@ impl KafkaConsumer {
                 loop {
                     cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
                     let now = now_fn();
-                    if !first_iteration && now >= deadline {
-                        return Ok(None);
-                    }
 
+                    // The result of the broker poll that just finished is
+                    // taken before the deadline is checked. Checked first,
+                    // a record fetched as the deadline passed (its offset
+                    // already stored under auto-commit) stayed buffered, and
+                    // the next poll replayed it, even after a seek.
                     let buffered_res = self.buffered_outcome.lock().take();
                     if let Some(res) = buffered_res {
                         match res {
@@ -1892,6 +1930,10 @@ impl KafkaConsumer {
                         }
                         first_iteration = false;
                         continue;
+                    }
+
+                    if !first_iteration && now >= deadline {
+                        return Ok(None);
                     }
 
                     let wait_for = if timeout.is_zero() {
@@ -2292,6 +2334,7 @@ impl KafkaConsumer {
             let topic = tpo.topic.clone();
             let partition = tpo.partition;
             let offset = tpo.offset;
+            let buffered_outcome = Arc::clone(&self.buffered_outcome);
             crate::runtime::spawn_blocking::spawn_blocking_on_thread(move || {
                 let _guard = broker_ops.lock();
                 consumer
@@ -2301,7 +2344,9 @@ impl KafkaConsumer {
                         Offset::Offset(offset),
                         Duration::from_secs(1),
                     )
-                    .map_err(map_consumer_error)
+                    .map_err(map_consumer_error)?;
+                rebase_buffered_after_seek(&mut buffered_outcome.lock(), &topic, partition, offset);
+                Ok::<(), KafkaError>(())
             })
             .await?;
         }
@@ -2585,6 +2630,61 @@ mod tests {
         lock_deterministic_broker_for_tests,
     };
     use crate::test_utils::run_test_with_cx;
+
+    /// A broker poll result still buffered when the application seeks (a poll
+    /// cancelled after its broker poll finished) kept its pre-seek record and
+    /// position: the next poll delivered a record from before the seek and
+    /// moved the partition back.
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn seek_rebases_a_buffered_poll_result() {
+        let outcome = |partition| BrokerPollOutcome {
+            record: Some(ConsumerRecord {
+                topic: "orders".to_string(),
+                partition,
+                offset: 41,
+                key: None,
+                payload: b"x".to_vec(),
+                timestamp: None,
+                headers: Vec::new(),
+            }),
+            snapshot: BrokerSnapshot {
+                assigned_partitions: [("orders".to_string(), 0), ("orders".to_string(), 1)]
+                    .into_iter()
+                    .collect(),
+                positions: [
+                    (("orders".to_string(), 0), 42),
+                    (("orders".to_string(), 1), 9),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            transient_error: None,
+        };
+
+        let mut buffered = Some(Ok(outcome(0)));
+        rebase_buffered_after_seek(&mut buffered, "orders", 0, 0);
+        let Some(Ok(rebased)) = buffered else {
+            panic!("the outcome stays buffered");
+        };
+        assert!(
+            rebased.record.is_none(),
+            "the record fetched before the seek is dropped"
+        );
+        assert_eq!(rebased.snapshot.positions[&("orders".to_string(), 0)], 0);
+        assert_eq!(rebased.snapshot.positions[&("orders".to_string(), 1)], 9);
+
+        let mut other = Some(Ok(outcome(1)));
+        rebase_buffered_after_seek(&mut other, "orders", 0, 0);
+        let Some(Ok(kept)) = other else {
+            panic!("the outcome stays buffered");
+        };
+        assert_eq!(
+            kept.record.map(|record| record.partition),
+            Some(1),
+            "a record for another partition is kept"
+        );
+    }
 
     #[test]
     fn transactional_offsets_validate_batches_and_membership_before_enrollment() {
@@ -3444,6 +3544,37 @@ mod tests {
                 vec![("orders".to_string(), 0)]
             );
             assert_eq!(consumer.position("orders", 1), None);
+        });
+    }
+
+    // asupersync-lde436 item 5: subscribe() reset the generation to 0, so a
+    // rebalance after a re-subscribe brought metadata captured before it back
+    // to a matching generation and assignment, and it validated again.
+    #[test]
+    fn group_metadata_from_before_a_resubscribe_never_validates_again() {
+        #[cfg(not(feature = "kafka"))]
+        let _broker = deterministic_broker_guard();
+        run_test_with_cx(|cx| async move {
+            let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
+            consumer.subscribe(&cx, &["orders"]).await.unwrap();
+            assert_eq!(consumer.rebalance_generation(), 0);
+            let owned = [TopicPartitionOffset::new("orders", 1, 0)];
+            consumer.rebalance(&cx, &owned).await.unwrap();
+            let before = consumer.group_metadata_for_state_test();
+
+            consumer.subscribe(&cx, &["orders"]).await.unwrap();
+            consumer.rebalance(&cx, &owned).await.unwrap();
+            assert_eq!(consumer.assigned_partitions(), vec![("orders".to_string(), 1)]);
+            assert!(
+                consumer.rebalance_generation() > before.generation(),
+                "generation {} after a re-subscribe, {} before it",
+                consumer.rebalance_generation(),
+                before.generation()
+            );
+            assert!(matches!(
+                before.prepare_offsets(&owned),
+                Err(KafkaError::Transaction(_))
+            ));
         });
     }
 

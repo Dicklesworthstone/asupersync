@@ -176,18 +176,49 @@ fn schedule_internal_does_not_touch_priority_heap_on_spawn_path() {
 
 #[test]
 fn region_add_task_uses_vec_push_for_amortized_o_one() {
-    // Pin (link 2): RegionRecord::add_task pushes onto the
-    // region's inner Vec<TaskId>. Vec::push is amortized
-    // O(1) — occasional reallocation but bounded total
-    // cost.
+    // Pin (link 2): RegionRecord::add_task appends to the
+    // region's member list with a Vec::push (amortized O(1))
+    // after an O(1) duplicate check. Before
+    // br-asupersync-issue65-criticisms-kpmoy5.1.4 the duplicate
+    // check was a linear Vec::contains, so a spawn into a region
+    // holding N tasks cost O(N); members are now indexed by a
+    // hash map once a region grows past a small threshold.
     let source = read("src/record/region.rs");
 
     assert!(
-        source.contains("inner.tasks.push("),
-        "REGRESSION: RegionRecord::add_task no longer uses \
-         Vec::push. If it became HashMap insert or BTree \
-         insert, per-spawn cost grows logarithmically — \
-         spawn-storm regression.",
+        source.contains("inner.tasks.push_absent(task);"),
+        "REGRESSION: RegionRecord::add_task no longer appends \
+         through TaskMembership::push_absent.",
+    );
+
+    let push_marker = "fn push_absent(&mut self, task: TaskId) {";
+    let start = source
+        .find(push_marker)
+        .expect("TaskMembership::push_absent");
+    let end = source[start..]
+        .find("\n    }\n")
+        .expect("push_absent close");
+    let body = &source[start..start + end];
+    assert!(
+        body.contains("self.slots.push(Some(task));")
+            && body.contains("index.insert(task, position);"),
+        "REGRESSION: TaskMembership::push_absent no longer \
+         appends with Vec::push and records the position in \
+         the member index, so spawn or the next membership \
+         test may scan the whole region — spawn-storm \
+         regression.",
+    );
+
+    let position_marker = "fn position(&self, task: TaskId) -> Option<usize> {";
+    let start = source
+        .find(position_marker)
+        .expect("TaskMembership::position");
+    let end = source[start..].find("\n    }\n").expect("position close");
+    assert!(
+        source[start..start + end].contains("Some(index) => index.get(&task).copied(),"),
+        "REGRESSION: an indexed region no longer answers \
+         membership from its index; the duplicate check in \
+         add_task becomes O(N) per spawn.",
     );
 }
 

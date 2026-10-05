@@ -4106,14 +4106,26 @@ impl LabRuntime {
             >,
         )> = Vec::with_capacity(commands.len());
         let mut finalizer_publications = Vec::new();
+        let mut live_task_publications = Vec::new();
+        let mut watch_wakers = Vec::new();
+        let mut watch_retries = Vec::new();
         for command in commands {
             match command {
                 crate::runtime::spawn_mailbox::RegionCommand::Create(request) => {
                     let (slot, outcome) = self.state.open_child_region_command(request);
                     publications.push((slot, outcome));
                 }
+                crate::runtime::spawn_mailbox::RegionCommand::Watch(command) => {
+                    match self.state.apply_watch_command(command, None) {
+                        crate::monitor::WatchApply::Done(waker) => watch_wakers.extend(waker),
+                        crate::monitor::WatchApply::Retry(command) => watch_retries.push(command),
+                    }
+                }
                 crate::runtime::spawn_mailbox::RegionCommand::RegisterFinalizer(request) => {
                     finalizer_publications.push(request.apply(&mut self.state));
+                }
+                crate::runtime::spawn_mailbox::RegionCommand::LiveTasks(query) => {
+                    live_task_publications.push(query.apply(&self.state));
                 }
                 crate::runtime::spawn_mailbox::RegionCommand::Cancel { region_id, reason } => {
                     self.state.close_region_command(region_id, &reason);
@@ -4141,6 +4153,17 @@ impl LabRuntime {
         }
         for publication in finalizer_publications {
             publication.publish();
+        }
+        for publication in live_task_publications {
+            publication.publish();
+        }
+        for waker in watch_wakers {
+            waker.wake();
+        }
+        for command in watch_retries {
+            self.spawn_mailbox.enqueue_region_command(
+                crate::runtime::spawn_mailbox::RegionCommand::Watch(command),
+            );
         }
     }
 
@@ -5539,26 +5562,35 @@ impl LabRuntime {
 
     fn futurelock_violations(&self) -> Vec<InvariantViolation> {
         let threshold = self.config.futurelock_max_idle_steps;
-        if threshold == 0 {
+        // A task's idle count is `steps - last_polled_step`, never more than
+        // `steps`, so no task can pass the threshold before the run does.
+        // This runs every step: it must not walk the task table
+        // (br-asupersync-bzict6).
+        if threshold == 0 || self.steps <= threshold {
             return Vec::new();
         }
 
         let current_step = self.steps;
         let mut violations = Vec::new();
 
-        for (_, task) in self.state.tasks_iter() {
-            if task.state.is_terminal() {
+        // One pass over the obligations, grouped by holder. `TaskId` orders by
+        // arena slot, so holders come out in `tasks_iter` order and each
+        // `held` list keeps `obligations_iter` order.
+        let mut held_by_holder = std::collections::BTreeMap::<TaskId, Vec<ObligationId>>::new();
+        for (_, obligation) in self.state.obligations_iter() {
+            if obligation.is_pending() {
+                held_by_holder
+                    .entry(obligation.holder)
+                    .or_default()
+                    .push(obligation.id);
+            }
+        }
+
+        for (holder, held) in held_by_holder {
+            let Some(task) = self.state.task(holder) else {
                 continue;
-            }
-
-            let mut held = Vec::new();
-            for (_, obligation) in self.state.obligations_iter() {
-                if obligation.is_pending() && obligation.holder == task.id {
-                    held.push(obligation.id);
-                }
-            }
-
-            if held.is_empty() {
+            };
+            if task.state.is_terminal() {
                 continue;
             }
 
@@ -8296,6 +8328,144 @@ mod tests {
             violations.is_empty()
         );
         crate::test_complete!("polled_task_not_flagged_as_futurelocked");
+    }
+
+    /// A task record that is never polled, so its idle count is the step count.
+    fn never_polled_task(runtime: &mut LabRuntime, root: RegionId) -> TaskId {
+        let task_idx = runtime.state.insert_task(TaskRecord::new(
+            TaskId::from_arena(ArenaIndex::new(0, 0)),
+            root,
+            Budget::INFINITE,
+        ));
+        let task_id = TaskId::from_arena(task_idx);
+        runtime.state.task_mut(task_id).unwrap().id = task_id;
+        task_id
+    }
+
+    fn futurelocked(runtime: &LabRuntime) -> Vec<(TaskId, u64, Vec<ObligationId>)> {
+        runtime
+            .futurelock_violations()
+            .into_iter()
+            .map(|violation| match violation {
+                InvariantViolation::Futurelock {
+                    task,
+                    idle_steps,
+                    held,
+                    ..
+                } => (task, idle_steps, held),
+                other => panic!("unexpected violation: {other:?}"),
+            })
+            .collect()
+    }
+
+    /// The per-step check groups obligations by holder in one pass
+    /// (br-asupersync-bzict6). It must report what the task-by-task scan
+    /// reported: the same tasks in task-table order, each with its pending
+    /// obligations in obligation-table order.
+    #[test]
+    fn futurelock_scan_matches_the_task_by_task_scan() {
+        init_test("futurelock_scan_matches_the_task_by_task_scan");
+        let config = LabConfig::new(42)
+            .futurelock_max_idle_steps(3)
+            .panic_on_futurelock(false);
+        let mut runtime = LabRuntime::new(config);
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let [a, b, c, d] = std::array::from_fn(|_| never_polled_task(&mut runtime, root));
+
+        // Obligations interleave their holders; b's only one is resolved and d
+        // is polled just before the check.
+        let mut obligation = |holder| {
+            runtime
+                .state
+                .create_obligation(ObligationKind::SendPermit, holder, root, None)
+                .expect("create obligation")
+        };
+        let c1 = obligation(c);
+        let a1 = obligation(a);
+        let c2 = obligation(c);
+        let b1 = obligation(b);
+        let _d1 = obligation(d);
+        runtime
+            .state
+            .commit_obligation(b1)
+            .expect("commit b's obligation");
+
+        for _ in 0..5 {
+            runtime.step();
+        }
+        runtime
+            .state
+            .task_mut(d)
+            .unwrap()
+            .mark_polled(runtime.steps);
+
+        let threshold = runtime.config.futurelock_max_idle_steps;
+        let task_by_task: Vec<_> = runtime
+            .state
+            .tasks_iter()
+            .filter(|(_, task)| !task.state.is_terminal())
+            .filter_map(|(_, task)| {
+                let held: Vec<_> = runtime
+                    .state
+                    .obligations_iter()
+                    .filter(|(_, o)| o.is_pending() && o.holder == task.id)
+                    .map(|(_, o)| o.id)
+                    .collect();
+                let idle_steps = runtime.steps.saturating_sub(task.last_polled_step);
+                (!held.is_empty() && idle_steps > threshold).then_some((task.id, idle_steps, held))
+            })
+            .collect();
+
+        let actual = futurelocked(&runtime);
+        crate::assert_with_log!(
+            actual == task_by_task,
+            "grouped scan equals task-by-task scan",
+            task_by_task,
+            actual
+        );
+        let expected = vec![(a, 5, vec![a1]), (c, 5, vec![c1, c2])];
+        crate::assert_with_log!(actual == expected, "futurelocked tasks", expected, actual);
+        crate::test_complete!("futurelock_scan_matches_the_task_by_task_scan");
+    }
+
+    /// Skipping the scan while the step count is within the threshold must
+    /// not delay detection: a never-polled holder is reported on the first
+    /// step past the threshold.
+    #[test]
+    fn futurelock_is_detected_on_the_first_step_past_the_threshold() {
+        init_test("futurelock_is_detected_on_the_first_step_past_the_threshold");
+        let config = LabConfig::new(42)
+            .futurelock_max_idle_steps(3)
+            .panic_on_futurelock(false);
+        let mut runtime = LabRuntime::new(config);
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let task = never_polled_task(&mut runtime, root);
+        let held = runtime
+            .state
+            .create_obligation(ObligationKind::SendPermit, task, root, None)
+            .expect("create obligation");
+
+        for _ in 0..3 {
+            runtime.step();
+        }
+        let at_threshold = futurelocked(&runtime);
+        crate::assert_with_log!(
+            at_threshold.is_empty(),
+            "nothing at step 3",
+            Vec::<(TaskId, u64, Vec<ObligationId>)>::new(),
+            at_threshold
+        );
+
+        runtime.step();
+        let past_threshold = futurelocked(&runtime);
+        let expected = vec![(task, 4, vec![held])];
+        crate::assert_with_log!(
+            past_threshold == expected,
+            "reported at step 4",
+            expected,
+            past_threshold
+        );
+        crate::test_complete!("futurelock_is_detected_on_the_first_step_past_the_threshold");
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //!
 //! Phase 0 uses synchronous std::fs calls under async wrappers.
 
-use crate::runtime::spawn_blocking_io;
+use crate::cx::io_gate::spawn_blocking_io;
 use crate::stream::Stream;
 use std::ffi::OsString;
 use std::io;

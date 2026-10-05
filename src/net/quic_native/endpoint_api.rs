@@ -193,10 +193,13 @@ impl QuicConnection {
     ///
     /// This stays crate-private so application code cannot bypass the
     /// role-aware stream API or replay handshake transitions manually.
-    // Every caller lives on the `tls`-gated UDP connection driver, so gating
-    // this on `test` too made `cargo test --lib` without `tls` fail
-    // `deny(dead_code)` (main was red from ccb5af622 until this change).
-    #[cfg(feature = "tls")]
+    // The production callers live on the `tls`-gated UDP connection driver;
+    // the other callers are the HTTP/3 adapter's and web router's `http3`
+    // tests. Gating this on every `test` build made `cargo test --lib`
+    // without `tls` fail `deny(dead_code)` (main was red from ccb5af622),
+    // and gating it on `tls` alone broke those tests' build without `tls`
+    // (asupersync-j6c2l7).
+    #[cfg(any(feature = "tls", all(test, feature = "http3")))]
     pub(crate) fn inner_mut(&mut self) -> &mut NativeQuicConnection {
         &mut self.inner
     }

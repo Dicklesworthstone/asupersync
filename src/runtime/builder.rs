@@ -446,7 +446,7 @@ impl NativeThreadHostServices {
                     let guard = dm_state
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let now = guard.now;
+                    let (logical_now, driver) = (guard.now, guard.timer_driver_handle());
                     let mut tasks = guard
                         .tasks_iter()
                         .map(|(_, record)| DeadlineTaskSnapshot::from_task_record(record))
@@ -466,7 +466,7 @@ impl NativeThreadHostServices {
                                 .map(|(_, record)| DeadlineTaskSnapshot::from_task_record(record)),
                         );
                     }
-                    monitor.check_snapshots(now, tasks);
+                    monitor.check_snapshots(driver.map_or(logical_now, |d| d.now()), tasks);
                 }
             })
             .ok();
@@ -4136,16 +4136,11 @@ impl Runtime {
     ///   checked holder authority.
     pub fn block_on<F: Future>(&self, future: F) -> F::Output {
         let _guard = ScopedRuntimeHandle::new(self.handle());
-        // #41: install an ambient Cx backed by this runtime's drivers
-        // (IO + timer + blocking pool + observability). Without it,
-        // `Cx::current()` returns None inside the polled future, so
-        // public async networking APIs (e.g. `TcpListener::accept`)
-        // fall back to a tight `accept4` / `WouldBlock` poll instead
-        // of waiting through the configured reactor. Wrap the existing
-        // execution path in `_cx_guard` so the Cx is installed for the
-        // duration of the future poll and uninstalled on return —
-        // mirrors `block_on_with_cx` but builds the Cx for callers
-        // who don't have a request-scoped one to thread in.
+        // #41: install an ambient Cx backed by this runtime's drivers (IO, timer, blocking pool,
+        // observability). Without it `Cx::current()` is None inside the polled future, and public
+        // async networking (e.g. `TcpListener::accept`) spins on `WouldBlock` instead of waiting
+        // through the reactor. `_cx_guard` installs it for the poll and removes it on return, as
+        // `block_on_with_cx` does for a caller that has a request-scoped Cx.
         let request_cx = self.request_cx_with_budget(Budget::INFINITE);
         let _cx_guard = crate::cx::Cx::set_current(Some(request_cx.clone()));
         // GH#58 / br-asupersync-94jh37: on a `RuntimeBuilder::current_thread()`
@@ -4172,6 +4167,11 @@ impl Runtime {
         let _caller_cx_guard = registration
             .as_ref()
             .map(|registration| crate::cx::Cx::set_current(Some(registration.cx.clone())));
+        // Workers drive the tasks this root spawns, so the root may wait for them as a worker
+        // would: a race whose winner panics joins its losers instead of polling them once.
+        let _driven = (self.inner.current_thread_driver.get().is_none()
+            && self.inner.config.worker_threads > 0)
+            .then(crate::runtime::scheduler::three_lane::ScopedSchedulerDriven::enter);
         run_future_with_budget(
             future,
             self.inner.config.poll_budget,
@@ -5042,11 +5042,11 @@ impl RuntimeHandle {
         Some(inner.scheduler.preemption_fairness_certificates())
     }
 
-    /// Spawn a task from outside async context.
+    /// Spawn a task into the runtime's root region, from outside async context.
     ///
-    /// Panics if the runtime is no longer available or if the root region
-    /// rejects admission. Use [`RuntimeHandle::try_spawn`] to handle those
-    /// failures explicitly.
+    /// Called inside a task, it escapes that task's region (prefer `Cx::spawn` there):
+    /// only root drain or shutdown cancels it. Panics if the runtime is unavailable or
+    /// admission is rejected; [`RuntimeHandle::try_spawn`] returns those errors instead.
     pub fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
     where
         F: Future + Send + 'static,
@@ -5056,8 +5056,8 @@ impl RuntimeHandle {
             .expect("failed to create runtime task")
     }
 
-    /// Spawn a task from outside async context, returning runtime-availability
-    /// or admission errors instead of panicking.
+    /// Like [`RuntimeHandle::spawn`] (root region, cancelled only by root drain or
+    /// shutdown), but returns runtime-availability or admission errors instead of panicking.
     pub fn try_spawn<F>(&self, future: F) -> Result<JoinHandle<F::Output>, SpawnError>
     where
         F: Future + Send + 'static,
@@ -5090,10 +5090,10 @@ impl RuntimeHandle {
             .and_then(|inner| inner.browser_pump.get().map(Arc::clone))
     }
 
-    /// Spawns a local `!Send` future pinned to the runtime's single worker thread.
+    /// Spawns a local `!Send` future pinned to the runtime's single worker thread, into
+    /// the root region: like [`RuntimeHandle::spawn`], it outlives the caller's region.
     ///
     /// # Panics
-    ///
     /// Panics if the runtime is no longer available or admission is denied.
     pub fn spawn_local<F>(&self, future: F) -> LocalJoinHandle<F::Output>
     where
@@ -5104,7 +5104,7 @@ impl RuntimeHandle {
             .expect("failed to spawn local task")
     }
 
-    /// Tries to spawn a local `!Send` future pinned to the runtime's single worker thread.
+    /// Tries to spawn a local `!Send` root-region task; see [`RuntimeHandle::spawn_local`].
     ///
     /// # Errors
     ///
@@ -5120,8 +5120,8 @@ impl RuntimeHandle {
 
 /// Spawn a task with a [`Cx`](crate::cx::Cx) from outside async context.
     ///
-    /// Creates a child Cx in the runtime's root region and passes it to the
-    /// factory closure. The Cx observes shutdown cancellation when
+    /// Creates a Cx in the runtime's root region (never the caller's region) and
+    /// passes it to the factory closure. The Cx observes shutdown cancellation when
     /// [`Runtime::shutdown_drained`] or [`Runtime::drain_root_region`] runs.
     /// Dropping a runtime or calling `shutdown_timeout` alone does not run
     /// cooperative cancellation cleanup.
@@ -5152,8 +5152,8 @@ impl RuntimeHandle {
 /// Spawn a task with a [`Cx`](crate::cx::Cx) from outside async context,
     /// returning runtime-availability or admission errors instead of panicking.
     ///
-    /// Creates a child Cx in the runtime's root region and passes it to the
-    /// factory closure. The Cx observes shutdown cancellation when
+    /// Creates a Cx in the runtime's root region (never the caller's region) and
+    /// passes it to the factory closure. The Cx observes shutdown cancellation when
     /// [`Runtime::shutdown_drained`] or [`Runtime::drain_root_region`] runs.
     /// Dropping a runtime or calling `shutdown_timeout` alone does not run
     /// cooperative cancellation cleanup.
@@ -5402,6 +5402,18 @@ impl<F: Future> Future for CatchUnwind<F> {
             Ok(Poll::Ready(v)) => Poll::Ready(Ok(v)),
             Err(payload) => Poll::Ready(Err(payload)),
         }
+    }
+}
+
+/// The outcome a handle-spawned task records for the runtime. A caught panic
+/// is recorded Panicked, as for `Cx::spawn`, while the payload itself goes to
+/// the `JoinHandle`, which re-raises it (asupersync-6hewgp).
+fn handle_spawn_outcome<T>(result: &std::thread::Result<T>) -> crate::types::Outcome<(), ()> {
+    match result {
+        Ok(_) => crate::types::Outcome::Ok(()),
+        Err(payload) => crate::types::Outcome::Panicked(crate::types::PanicPayload::new(
+            crate::cx::scope::payload_to_string(payload),
+        )),
     }
 }
 
@@ -6041,12 +6053,12 @@ impl RuntimeInner {
                 clock.clone(),
                 Arc::downgrade(&spawn_liveness),
             )));
-            // Obligation mailbox (br-asupersync-bi2462.13): same notifier and
-            // liveness token as the spawn gateway; drained by the workers
-            // next to spawn admissions.
+            // Obligation mailbox (bi2462.13), drained next to spawn admissions; checked lock-free.
+            let om = Arc::new(crate::runtime::obligation_mailbox::ObligationMailbox::new());
+            scheduler.attach_obligation_mailbox(&om);
             guard.set_obligation_gateway(Arc::new(
                 crate::runtime::obligation_mailbox::ObligationGateway::new(
-                    Arc::new(crate::runtime::obligation_mailbox::ObligationMailbox::new()),
+                    Arc::clone(&om),
                     scheduler.spawn_enqueued_notifier(),
                     Arc::downgrade(&spawn_liveness),
                 ),
@@ -6170,16 +6182,14 @@ impl RuntimeInner {
 
         let wrapped = async move {
             let result = CatchUnwind { inner: future }.await;
+            let outcome = handle_spawn_outcome(&result);
             task_producer.complete(result);
+            outcome
         };
 
         let provisional = self.next_request_task_id();
-        let factory: crate::runtime::spawn_mailbox::LocalSpawnFactoryFn = Box::new(move |_cx| {
-            Box::pin(async move {
-                wrapped.await;
-                crate::types::Outcome::Ok(())
-            })
-        });
+        let factory: crate::runtime::spawn_mailbox::LocalSpawnFactoryFn =
+            Box::new(move |_cx| Box::pin(wrapped));
 
         let cancel_producer = JoinProducer::new(Arc::clone(&join_state));
         let error_producer = JoinProducer::new(Arc::clone(&join_state));
@@ -6236,9 +6246,12 @@ impl RuntimeInner {
 
         let wrapped = async move {
             // Ensure panics in the spawned task don't take down a worker thread. If the join
-            // handle is awaited, we re-raise the original panic payload on the awaiter.
+            // handle is awaited, we re-raise the original panic payload on the awaiter. The
+            // task record still gets the Panicked outcome (metrics, capture, region close).
             let result = CatchUnwind { inner: future }.await;
+            let outcome = handle_spawn_outcome(&result);
             task_producer.complete(result);
+            outcome
         };
 
         // Mailbox admission mode (br-asupersync-dx-core-api-v2-u1z5hn.1.3):
@@ -6255,15 +6268,11 @@ impl RuntimeInner {
                 .map(|counter| counter.reserve());
             let cancel_producer = JoinProducer::new(Arc::clone(&join_state));
             let provisional = mailbox.allocate_task_id();
-            let outcome_wrapped = async move {
-                wrapped.await;
-                crate::types::Outcome::Ok(())
-            };
             let mut request = crate::runtime::spawn_mailbox::SpawnRequest::new(
                 provisional,
                 self.root_region,
                 Budget::new(),
-                crate::runtime::stored_task::StoredTask::new_with_id(outcome_wrapped, provisional),
+                crate::runtime::stored_task::StoredTask::new_with_id(wrapped, provisional),
             )
             .with_unadmitted_cancel(Box::new(move |reason| {
                 // Keep admission cancellation distinct from generic runtime
@@ -6304,14 +6313,24 @@ impl RuntimeInner {
                     )
                 },
             );
-            let (task_id, _handle, spawn_effects) = guard
-                .create_task_with_deferred_spawn_effects_in(
+            // Store `wrapped` itself so the record keeps its outcome. The
+            // state-task wrapper would record Ok for the panic `wrapped`
+            // already caught; its TaskHandle here was always discarded.
+            let system_cx = crate::runtime::RuntimeState::unread_caller_cx();
+            let (task_id, _handle, _cx, _result_tx, spawn_effects) = guard
+                .create_task_infrastructure_in::<()>(
+                    system_cx,
                     self.root_region,
                     Budget::new(),
-                    wrapped,
+                    false,
                     &mut target,
                     &crate::runtime::state::AdmissionRegionTarget::Embedded,
                 )?;
+            guard.store_spawned_task_in(
+                &mut target,
+                task_id,
+                crate::runtime::StoredTask::new_with_id(wrapped, task_id),
+            );
             (task_id, spawn_effects)
         };
 
@@ -6354,10 +6373,10 @@ impl RuntimeInner {
                 },
             );
 
-            let system_cx = guard.create_system_cx();
+            let system_cx = crate::runtime::RuntimeState::unread_caller_cx();
             let (task_id, _handle, cx, _result_tx, spawn_effects) = guard
                 .create_task_infrastructure_in::<()>(
-                    &system_cx,
+                    system_cx,
                     self.root_region,
                     Budget::new(),
                     false,
@@ -13271,9 +13290,12 @@ worker_threads = 16
 // in this file stay where they are.
 impl Runtime {
     /// Enables an obligation leak monitor for this runtime: a
-    /// [`crate::obligation::eprocess::LeakMonitor::change_detector`], whose
-    /// expected number of observations before a false alarm is at least
-    /// `1/alpha`.
+    /// [`crate::obligation::eprocess::LeakMonitor::change_detector`] over
+    /// `horizon` resolved obligations. The probability of a false alarm
+    /// within them is at most `alpha`. Choose `horizon` to cover the whole
+    /// monitored period, for example `10^9`: the detection delay grows only
+    /// with its logarithm, while a short horizon makes a latched false alarm
+    /// on a busy runtime likely.
     ///
     /// Every obligation the runtime commits or aborts after this call feeds
     /// the monitor its age at resolution, exactly once, and a leaked
@@ -13286,18 +13308,20 @@ impl Runtime {
     /// its evidence.
     ///
     /// # Panics
-    /// If `config` is invalid (see [`crate::obligation::eprocess::LeakMonitor::new`]).
-    /// The configuration is checked before the runtime state is locked.
+    /// If `config` or `horizon` is invalid (see
+    /// [`crate::obligation::eprocess::LeakMonitor::change_detector`]). They are
+    /// checked before the runtime state is locked.
     pub fn enable_obligation_leak_monitor(
         &self,
         config: crate::obligation::eprocess::MonitorConfig,
+        horizon: u64,
     ) {
-        let _validated = crate::obligation::eprocess::LeakMonitor::new(config);
+        let _validated = crate::obligation::eprocess::LeakMonitor::change_detector(config, horizon);
         self.inner
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .enable_obligation_leak_monitor(config);
+            .enable_obligation_leak_monitor(config, horizon);
     }
 
     /// The obligation leak monitor's current snapshot, or `None` when

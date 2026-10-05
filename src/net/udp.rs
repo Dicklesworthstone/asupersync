@@ -128,7 +128,17 @@ pub const UDP_MAX_BATCH_SIZE: usize = 1000;
 /// plain sendmmsg.
 pub const UDP_DEFAULT_GSO_SEGMENT_BYTES: usize = 1456;
 /// Maximum UDP GSO segments planned into one super-packet.
+///
+/// A super-packet is also limited to [`UDP_GSO_MAX_SUPER_PACKET_BYTES`] of
+/// payload, so full-size segments fit fewer than this many.
 pub const UDP_MAX_GSO_SEGMENTS: usize = 64;
+/// Largest payload the planner puts in one UDP GSO super-packet.
+///
+/// The kernel refuses a UDP send whose payload exceeds one IP datagram with
+/// `EMSGSIZE`, GSO included: 65,535 bytes less the 20-byte IPv4 header and the
+/// 8-byte UDP header. IPv6 allows 20 bytes more; the planner uses the smaller
+/// limit for both.
+const UDP_GSO_MAX_SUPER_PACKET_BYTES: usize = 65_507;
 /// Maximum datagrams planned into one sendmmsg syscall batch.
 pub const UDP_MAX_SENDMMSG_BATCH: usize = 1024;
 
@@ -915,12 +925,15 @@ impl UdpSendBatchPlan {
             && packets_share_destination(packets)
         {
             fixed_gso_segment_bytes(packets, strategy.gso_segment_bytes)
+                .filter(|&bytes| gso_segments_within_datagram_limit(bytes) >= 2)
         } else {
             None
         };
 
         if let Some(gso_segment_bytes) = gso_segment_bytes {
-            let segments_per_packet = datagrams.min(max_gso_segments);
+            let segments_per_packet = datagrams
+                .min(max_gso_segments)
+                .min(gso_segments_within_datagram_limit(gso_segment_bytes));
             let super_packets = div_ceil_usize(datagrams, segments_per_packet);
             let can_sendmmsg = strategy.prefer_sendmmsg
                 && matches!(capabilities.sendmmsg, UdpCapability::Supported)
@@ -1001,12 +1014,15 @@ impl UdpSendBatchPlan {
             && capability_permits_gso(capabilities.gso, strategy.allow_unknown_gso)
         {
             fixed_gso_payload_segment_bytes(payloads, strategy.gso_segment_bytes)
+                .filter(|&bytes| gso_segments_within_datagram_limit(bytes) >= 2)
         } else {
             None
         };
 
         if let Some(gso_segment_bytes) = gso_segment_bytes {
-            let segments_per_packet = datagrams.min(max_gso_segments);
+            let segments_per_packet = datagrams
+                .min(max_gso_segments)
+                .min(gso_segments_within_datagram_limit(gso_segment_bytes));
             let super_packets = div_ceil_usize(datagrams, segments_per_packet);
             let can_sendmmsg = strategy.prefer_sendmmsg
                 && matches!(capabilities.sendmmsg, UdpCapability::Supported)
@@ -1106,6 +1122,14 @@ fn fixed_gso_payload_segment_bytes(payloads: &[&[u8]], max_segment_bytes: usize)
         .iter()
         .all(|payload| payload.len() == segment_bytes)
         .then_some(segment_bytes)
+}
+
+/// Segments of `segment_bytes` that fit in one GSO super-packet. The planner
+/// does not use GSO when fewer than two fit.
+#[inline]
+#[must_use]
+fn gso_segments_within_datagram_limit(segment_bytes: usize) -> usize {
+    UDP_GSO_MAX_SUPER_PACKET_BYTES / segment_bytes.max(1)
 }
 
 #[inline]
@@ -1246,6 +1270,28 @@ fn native_send_error_would_block(error: nix::errno::Errno) -> bool {
     error == nix::errno::Errno::EAGAIN
         || error == nix::errno::Errno::EWOULDBLOCK
         || error == nix::errno::Errno::ENOBUFS
+}
+
+/// Whether a refused GSO send means GSO cannot work on this socket: a kernel
+/// without `UDP_SEGMENT`, a device without checksum offload, or a segment the
+/// path refuses. Any other error, such as `ECONNREFUSED` left by an earlier
+/// ICMP error on a connected socket, concerns that one send. The batch then
+/// falls back for that send only and GSO stays enabled.
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "linux", target_os = "android")
+))]
+#[inline]
+#[must_use]
+fn gso_send_error_disables_gso(error: nix::errno::Errno) -> bool {
+    matches!(
+        error,
+        nix::errno::Errno::EINVAL
+            | nix::errno::Errno::EIO
+            | nix::errno::Errno::EMSGSIZE
+            | nix::errno::Errno::EOPNOTSUPP
+            | nix::errno::Errno::ENOPROTOOPT
+    )
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -1661,7 +1707,10 @@ pub fn fallback_io_driver_probe() -> Option<FallbackIoDriverProbe> {
 ///    socket is polled under a `Cx` that carries an ambient driver, so the
 ///    fallback never captures a socket that a runtime later adopts;
 /// 2. an existing registration is re-armed in place (oneshot reactor
-///    interest is re-armed per poll; the `will_wake` guard skips the clone);
+///    interest is re-armed per poll; the `will_wake` guard skips the clone).
+///    The socket has one waiter, so a read wait and a write wait in the same
+///    poll both stay armed until the next event
+///    (`IoRegistration::rearm_accumulating`);
 /// 3. otherwise the fd is registered on the ambient driver when present,
 ///    else on the fallback driver, and only when neither exists (or the
 ///    reactor refuses the fd) does the caller take the legacy self-wake.
@@ -1673,6 +1722,67 @@ pub struct ReactorRegistration {
     /// re-made on the ambient driver the next time the socket is polled under
     /// a `Cx` that carries one.
     on_fallback: bool,
+    /// Waiters of the socket's `&self` methods, made on the first
+    /// [`arm_shared`](Self::arm_shared).
+    #[cfg(unix)]
+    shared_waiters: Option<Arc<SharedWaiters>>,
+}
+
+/// Tasks parked in a socket's `&self` methods, which several tasks can call
+/// at once (br-asupersync-unix-socket-audit-alx18f). The reactor holds one
+/// waker per registration, so the registration is armed with this list
+/// instead: a readiness event wakes every waiter, and each one re-polls and
+/// re-arms if it is still blocked. The listeners' `AcceptWaiters` work the
+/// same way.
+#[cfg(unix)]
+#[derive(Debug, Default)]
+struct SharedWaiters {
+    waiters: parking_lot::Mutex<Vec<std::task::Waker>>,
+}
+
+#[cfg(unix)]
+impl SharedWaiters {
+    /// Adds `waker` unless it is already listed. A waiter whose future was
+    /// dropped stays listed until the next event; past 32 entries the oldest
+    /// is woken and evicted, so a live one re-registers and a stale one goes.
+    fn register(&self, waker: &std::task::Waker) {
+        let mut waiters = self.waiters.lock();
+        if waiters.iter().any(|existing| existing.will_wake(waker)) {
+            return;
+        }
+        if waiters.len() >= 32 {
+            let evicted = waiters.remove(0);
+            drop(waiters);
+            evicted.wake();
+            waiters = self.waiters.lock();
+        }
+        waiters.push(waker.clone());
+    }
+
+    /// Removes every waiter and returns all but `current`.
+    fn take_others(&self, current: &std::task::Waker) -> Vec<std::task::Waker> {
+        let mut waiters = std::mem::take(&mut *self.waiters.lock());
+        waiters.retain(|waiter| !waiter.will_wake(current));
+        waiters
+    }
+
+    fn wake_all(&self) {
+        let waiters = std::mem::take(&mut *self.waiters.lock());
+        for waiter in waiters {
+            waiter.wake();
+        }
+    }
+}
+
+#[cfg(unix)]
+impl std::task::Wake for SharedWaiters {
+    fn wake(self: Arc<Self>) {
+        self.wake_all();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.wake_all();
+    }
 }
 
 /// Outcome of [`ReactorRegistration::arm`].
@@ -1693,6 +1803,8 @@ impl ReactorRegistration {
         Self {
             registration: None,
             on_fallback: false,
+            #[cfg(unix)]
+            shared_waiters: None,
         }
     }
 
@@ -1703,6 +1815,8 @@ impl ReactorRegistration {
         Self {
             registration,
             on_fallback: false,
+            #[cfg(unix)]
+            shared_waiters: None,
         }
     }
 
@@ -1761,7 +1875,7 @@ impl ReactorRegistration {
         if let Some(registration) = &mut self.registration {
             #[cfg(any(test, feature = "test-internals"))]
             fallback_io_probe::bump_if(self.on_fallback, &fallback_io_probe::REARMS);
-            match registration.rearm(interest, waker) {
+            match registration.rearm_accumulating(interest, waker) {
                 Ok(true) => return Ok(Armed::Parked),
                 // Slab slot gone: fall through to a fresh registration.
                 Ok(false) => self.clear(),
@@ -1787,6 +1901,32 @@ impl ReactorRegistration {
             }
             FreshRegistration::SelfWake => Ok(Armed::SelfWake),
         }
+    }
+
+    /// Like [`arm`](Self::arm), for a `&self` socket method that several
+    /// tasks can wait in at once (br-asupersync-unix-socket-audit-alx18f).
+    /// `waker` joins the shared waiter list and the registration is armed
+    /// with the list, so arming for one caller never drops another caller's
+    /// wakeup. When no reactor will deliver a wake (`SelfWake` or an error),
+    /// the other listed waiters are returned: the caller wakes them after
+    /// releasing the lock that guards `self`, so each re-polls on its own.
+    #[cfg(unix)]
+    pub(crate) fn arm_shared(
+        &mut self,
+        source: &dyn crate::runtime::reactor::Source,
+        interest: Interest,
+        waker: &std::task::Waker,
+    ) -> (io::Result<Armed>, Vec<std::task::Waker>) {
+        let waiters = Arc::clone(self.shared_waiters.get_or_insert_with(Default::default));
+        waiters.register(waker);
+        let dispatch = std::task::Waker::from(Arc::clone(&waiters));
+        let armed = self.arm(source, interest, &dispatch);
+        let stranded = if matches!(armed, Ok(Armed::Parked)) {
+            Vec::new()
+        } else {
+            waiters.take_others(waker)
+        };
+        (armed, stranded)
     }
 
     /// Hands the live registration and its fallback flag to another owner of
@@ -2046,6 +2186,10 @@ pub struct UdpSocket {
 
 impl UdpSocket {
     /// Bind to the given address.
+    ///
+    /// Refuses with [`IoCapabilityDenied`](crate::cx::IoCapabilityDenied)
+    /// when the calling task's `Cx` lacks the IO capability. `connect` and
+    /// `send_to` refuse the same way, through address resolution.
     pub async fn bind<A: ToSocketAddrs + Send + 'static>(addr: A) -> io::Result<Self> {
         #[cfg(target_arch = "wasm32")]
         {
@@ -2055,6 +2199,7 @@ impl UdpSocket {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
+            crate::cx::io_gate::require_ambient_io("net::UdpSocket::bind")?;
             let addrs = lookup_all(addr).await?;
             if addrs.is_empty() {
                 return Err(io::Error::new(
@@ -2472,7 +2617,12 @@ impl UdpSocket {
             let address_family =
                 local_addr.map_or(UdpAddressFamily::Unknown, UdpAddressFamily::from);
             let dual_stack = match address_family {
-                UdpAddressFamily::Ipv6 => UdpCapability::Unknown,
+                // IPV6_V6ONLY off means the socket also carries IPv4 traffic.
+                UdpAddressFamily::Ipv6 => match sock.only_v6() {
+                    Ok(false) => UdpCapability::Supported,
+                    Ok(true) => UdpCapability::Unsupported,
+                    Err(_) => UdpCapability::Unknown,
+                },
                 UdpAddressFamily::Ipv4 => UdpCapability::Unsupported,
                 UdpAddressFamily::Unknown => UdpCapability::Unknown,
             };
@@ -2911,9 +3061,9 @@ impl UdpSocket {
                     NativeSendBatchAttempt::WouldBlock => {
                         return Ok(NativeSendBatchAttempt::WouldBlock);
                     }
-                    NativeSendBatchAttempt::Unavailable => {
-                        self.gso_demoted = true;
-                    }
+                    // The attempt demoted GSO itself if the error showed GSO
+                    // cannot work here; either way this batch falls back.
+                    NativeSendBatchAttempt::Unavailable => {}
                 }
             }
         }
@@ -2970,9 +3120,9 @@ impl UdpSocket {
                     NativeSendBatchAttempt::WouldBlock => {
                         return Ok(NativeSendBatchAttempt::WouldBlock);
                     }
-                    NativeSendBatchAttempt::Unavailable => {
-                        self.gso_demoted = true;
-                    }
+                    // The attempt demoted GSO itself if the error showed GSO
+                    // cannot work here; either way this batch falls back.
+                    NativeSendBatchAttempt::Unavailable => {}
                 }
             }
         }
@@ -3046,7 +3196,10 @@ impl UdpSocket {
                 Err(err) if native_send_error_would_block(err) && report.packets_processed == 0 => {
                     return Ok(NativeSendBatchAttempt::WouldBlock);
                 }
-                Err(_) if report.packets_processed == 0 => {
+                Err(err) if report.packets_processed == 0 => {
+                    if gso_send_error_disables_gso(err) {
+                        self.gso_demoted = true;
+                    }
                     return Ok(NativeSendBatchAttempt::Unavailable);
                 }
                 Err(err) => {
@@ -3140,7 +3293,10 @@ impl UdpSocket {
                 Err(err) if native_send_error_would_block(err) && report.packets_processed == 0 => {
                     return Ok(NativeSendBatchAttempt::WouldBlock);
                 }
-                Err(_) if report.packets_processed == 0 => {
+                Err(err) if report.packets_processed == 0 => {
+                    if gso_send_error_disables_gso(err) {
+                        self.gso_demoted = true;
+                    }
                     return Ok(NativeSendBatchAttempt::Unavailable);
                 }
                 Err(err) => {
@@ -3795,9 +3951,11 @@ mod tests {
         assert_eq!(plan.path, UdpSendBatchPath::GsoSendmmsg);
         assert_eq!(plan.datagrams, 130);
         assert_eq!(plan.payload_bytes, 130 * UDP_DEFAULT_GSO_SEGMENT_BYTES);
+        // 44 full-size segments fill the 65,507-byte limit, so 130 datagrams
+        // make 3 super-packets: 2 sendmmsg calls of at most 2.
         assert_eq!(plan.estimated_syscalls, 2);
         assert_eq!(plan.gso_segment_bytes, Some(UDP_DEFAULT_GSO_SEGMENT_BYTES));
-        assert_eq!(plan.gso_segments_per_packet, Some(64));
+        assert_eq!(plan.gso_segments_per_packet, Some(44));
     }
 
     #[test]
@@ -3860,7 +4018,10 @@ mod tests {
             UdpSendBatchStrategy::default(),
         );
 
-        assert_eq!(plan.path, UdpSendBatchPath::Gso);
+        // 64 full-size segments are 93,184 bytes, more than one UDP datagram
+        // can carry, so the window goes out as 44 + 20 segments in one
+        // sendmmsg call.
+        assert_eq!(plan.path, UdpSendBatchPath::GsoSendmmsg);
         assert_eq!(plan.datagrams, UDP_MAX_GSO_SEGMENTS);
         assert_eq!(
             plan.payload_bytes,
@@ -3868,7 +4029,10 @@ mod tests {
         );
         assert_eq!(plan.estimated_syscalls, 1);
         assert_eq!(plan.gso_segment_bytes, Some(UDP_DEFAULT_GSO_SEGMENT_BYTES));
-        assert_eq!(plan.gso_segments_per_packet, Some(UDP_MAX_GSO_SEGMENTS));
+        assert_eq!(plan.gso_segments_per_packet, Some(44));
+        let segments = plan.gso_segments_per_packet.unwrap();
+        assert!(segments * UDP_DEFAULT_GSO_SEGMENT_BYTES <= UDP_GSO_MAX_SUPER_PACKET_BYTES);
+        assert!((segments + 1) * UDP_DEFAULT_GSO_SEGMENT_BYTES > UDP_GSO_MAX_SUPER_PACKET_BYTES);
     }
 
     #[test]
@@ -3891,7 +4055,7 @@ mod tests {
         assert_eq!(plan.datagrams, UDP_MAX_GSO_SEGMENTS * 2 + 1);
         assert_eq!(plan.estimated_syscalls, 1);
         assert_eq!(plan.gso_segment_bytes, Some(UDP_DEFAULT_GSO_SEGMENT_BYTES));
-        assert_eq!(plan.gso_segments_per_packet, Some(UDP_MAX_GSO_SEGMENTS));
+        assert_eq!(plan.gso_segments_per_packet, Some(44));
     }
 
     #[cfg(any(
@@ -4035,36 +4199,48 @@ mod tests {
     #[test]
     fn udp_send_batch_plan_accepts_large_quic_gso_segment_when_strategy_raises_limit() {
         let dst = socket_addr("127.0.0.1:9000");
-        let payloads = vec![vec![7; 65_000]; 4];
-        let packets = payloads
-            .iter()
-            .map(|payload| UdpOutboundDatagram {
-                dst_addr: dst,
-                payload,
-            })
-            .collect::<Vec<_>>();
+        let plan_four_of = |segment_bytes: usize| {
+            let payloads = vec![vec![7; segment_bytes]; 4];
+            let packets = payloads
+                .iter()
+                .map(|payload| UdpOutboundDatagram {
+                    dst_addr: dst,
+                    payload,
+                })
+                .collect::<Vec<_>>();
+            UdpSendBatchPlan::for_packets(
+                &packets,
+                UdpSendAccelerationCapabilities {
+                    sendmmsg: UdpCapability::Supported,
+                    gso: UdpCapability::Supported,
+                    max_sendmmsg_batch: UDP_MAX_SENDMMSG_BATCH,
+                    max_gso_segments: UDP_MAX_GSO_SEGMENTS,
+                },
+                UdpSendBatchStrategy {
+                    gso_segment_bytes: 65_000,
+                    max_gso_segments: 4,
+                    ..UdpSendBatchStrategy::default()
+                },
+            )
+        };
 
-        let plan = UdpSendBatchPlan::for_packets(
-            &packets,
-            UdpSendAccelerationCapabilities {
-                sendmmsg: UdpCapability::Supported,
-                gso: UdpCapability::Supported,
-                max_sendmmsg_batch: UDP_MAX_SENDMMSG_BATCH,
-                max_gso_segments: UDP_MAX_GSO_SEGMENTS,
-            },
-            UdpSendBatchStrategy {
-                gso_segment_bytes: 65_000,
-                max_gso_segments: 4,
-                ..UdpSendBatchStrategy::default()
-            },
-        );
-
+        // Four 16,000-byte segments fit one UDP datagram.
+        let plan = plan_four_of(16_000);
         assert_eq!(plan.path, UdpSendBatchPath::Gso);
         assert_eq!(plan.datagrams, 4);
+        assert_eq!(plan.payload_bytes, 64_000);
+        assert_eq!(plan.estimated_syscalls, 1);
+        assert_eq!(plan.gso_segment_bytes, Some(16_000));
+        assert_eq!(plan.gso_segments_per_packet, Some(4));
+
+        // Two 65,000-byte segments never fit one, which the kernel would
+        // refuse with EMSGSIZE, so the batch is planned without GSO.
+        let plan = plan_four_of(65_000);
+        assert_eq!(plan.path, UdpSendBatchPath::Sendmmsg);
         assert_eq!(plan.payload_bytes, 260_000);
         assert_eq!(plan.estimated_syscalls, 1);
-        assert_eq!(plan.gso_segment_bytes, Some(65_000));
-        assert_eq!(plan.gso_segments_per_packet, Some(4));
+        assert_eq!(plan.gso_segment_bytes, None);
+        assert_eq!(plan.gso_segments_per_packet, None);
     }
 
     #[cfg(any(
@@ -4830,6 +5006,127 @@ mod tests {
                 .collect::<Vec<_>>();
             received_payloads.sort_by_key(|payload| payload[0]);
             assert_eq!(received_payloads, payloads);
+        });
+    }
+
+    /// Receive `count` datagrams of at most `max_bytes`, sorted by first byte.
+    async fn recv_sorted_payloads(
+        receiver: &mut UdpSocket,
+        count: usize,
+        max_bytes: usize,
+    ) -> Vec<Vec<u8>> {
+        let mut payloads = Vec::with_capacity(count);
+        while payloads.len() < count {
+            let batch = receiver
+                .recv_batch_from(count - payloads.len(), max_bytes)
+                .await
+                .unwrap();
+            payloads.extend(batch.packets.into_iter().map(|packet| packet.payload));
+        }
+        payloads.sort_by_key(|payload| payload[0]);
+        payloads
+    }
+
+    // An ATP-RQ send window is UDP_MAX_GSO_SEGMENTS datagrams of up to
+    // UDP_DEFAULT_GSO_SEGMENT_BYTES: 93,184 bytes, more than one UDP datagram
+    // can carry. Planned as one super-packet, the kernel refused it with
+    // EMSGSIZE, the batch fell back to plain sendmmsg, and the socket never
+    // used GSO again.
+    #[test]
+    fn udp_batch_send_keeps_gso_for_a_full_rq_window() {
+        future::block_on(async {
+            let mut receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            receiver
+                .tune_buffers(UdpBufferConfig {
+                    recv_buffer_bytes: Some(4 * 1024 * 1024),
+                    send_buffer_bytes: None,
+                })
+                .unwrap();
+            let receiver_addr = receiver.local_addr().unwrap();
+            let payloads = (0..UDP_MAX_GSO_SEGMENTS)
+                .map(|idx| vec![idx as u8; UDP_DEFAULT_GSO_SEGMENT_BYTES])
+                .collect::<Vec<_>>();
+            let window_bytes = UDP_DEFAULT_GSO_SEGMENT_BYTES * payloads.len();
+            let native = build_supports_native_sendmmsg();
+            let gso = UdpSendAccelerationCapabilities::default().gso;
+
+            let mut connected = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            connected.connect(receiver_addr).await.unwrap();
+            let payload_refs = payloads.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            let sent = connected.send_connected_batch(&payload_refs).await.unwrap();
+            assert_eq!(sent.packets_processed, payloads.len());
+            assert_eq!(sent.bytes_processed, window_bytes);
+            assert_eq!(sent.native_send_batch_used, native);
+            assert_eq!(sent.gso_send_used, build_supports_udp_gso());
+            assert_eq!(sent.error, None);
+            assert_eq!(connected.send_acceleration_capabilities().gso, gso);
+            let received =
+                recv_sorted_payloads(&mut receiver, payloads.len(), UDP_DEFAULT_GSO_SEGMENT_BYTES)
+                    .await;
+            assert_eq!(received, payloads);
+
+            let mut unconnected = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let packets = payloads
+                .iter()
+                .map(|payload| UdpOutboundDatagram {
+                    dst_addr: receiver_addr,
+                    payload,
+                })
+                .collect::<Vec<_>>();
+            let sent = unconnected.send_batch_to(&packets).await.unwrap();
+            assert_eq!(sent.packets_processed, payloads.len());
+            assert_eq!(sent.bytes_processed, window_bytes);
+            assert_eq!(sent.native_send_batch_used, native);
+            assert_eq!(sent.gso_send_used, build_supports_udp_gso());
+            assert_eq!(sent.error, None);
+            assert_eq!(unconnected.send_acceleration_capabilities().gso, gso);
+            let received =
+                recv_sorted_payloads(&mut receiver, payloads.len(), UDP_DEFAULT_GSO_SEGMENT_BYTES)
+                    .await;
+            assert_eq!(received, payloads);
+        });
+    }
+
+    // Any refused first GSO send used to disable GSO for the socket's lifetime,
+    // even an error that has nothing to do with GSO (here EACCES, a limited
+    // broadcast without SO_BROADCAST; in practice also ECONNREFUSED left on a
+    // connected socket by an earlier ICMP port-unreachable).
+    #[test]
+    fn udp_batch_send_keeps_gso_after_a_send_error_unrelated_to_gso() {
+        future::block_on(async {
+            let mut receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let receiver_addr = receiver.local_addr().unwrap();
+            let mut sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let payloads = (0..4)
+                .map(|idx| vec![idx as u8; UDP_DEFAULT_GSO_SEGMENT_BYTES])
+                .collect::<Vec<_>>();
+            let gso = UdpSendAccelerationCapabilities::default().gso;
+
+            let broadcast = socket_addr("255.255.255.255:9");
+            let refused = payloads
+                .iter()
+                .map(|payload| UdpOutboundDatagram {
+                    dst_addr: broadcast,
+                    payload,
+                })
+                .collect::<Vec<_>>();
+            assert!(sender.send_batch_to(&refused).await.is_err());
+            assert_eq!(sender.send_acceleration_capabilities().gso, gso);
+
+            let packets = payloads
+                .iter()
+                .map(|payload| UdpOutboundDatagram {
+                    dst_addr: receiver_addr,
+                    payload,
+                })
+                .collect::<Vec<_>>();
+            let sent = sender.send_batch_to(&packets).await.unwrap();
+            assert_eq!(sent.packets_processed, payloads.len());
+            assert_eq!(sent.gso_send_used, build_supports_udp_gso());
+            let received =
+                recv_sorted_payloads(&mut receiver, payloads.len(), UDP_DEFAULT_GSO_SEGMENT_BYTES)
+                    .await;
+            assert_eq!(received, payloads);
         });
     }
 

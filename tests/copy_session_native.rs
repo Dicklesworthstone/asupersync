@@ -199,6 +199,94 @@ fn bidirectional(multithread: bool) {
     drop(runtime);
 }
 
+/// A reverse-proxy shape over the crate's own `TcpStream`s. The client uploads a
+/// request much larger than the socket buffers, and the upstream reads all of it
+/// before answering. While the copy's write to the upstream is parked on a full
+/// socket, its read from the upstream is parked too. Both readiness interests on
+/// that one socket must stay armed. If the read's interest replaced the
+/// write's, nothing would wake the copy once the upstream drained its buffer,
+/// and the client would get no answer.
+fn proxy_upload_then_response(multithread: bool) {
+    // Far more than the ~64 KiB the small buffers and windows can hold. Small
+    // loopback buffers move only a few hundred KB/s, even through a blocking
+    // std proxy, so a larger upload only slows the test.
+    const REQUEST: usize = 1024 * 1024;
+    const RESPONSE: usize = 4 * 1024 * 1024;
+    let (a, mut client) = pair();
+    // Small fixed buffers between the copy and the upstream, so the copy's
+    // write to it parks even on hosts tuned for large TCP windows.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut upstream = StdTcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (local, _) = listener.accept().unwrap();
+    socket2::SockRef::from(&upstream)
+        .set_recv_buffer_size(16 * 1024)
+        .unwrap();
+    socket2::SockRef::from(&local)
+        .set_send_buffer_size(16 * 1024)
+        .unwrap();
+    local.set_nonblocking(true).unwrap();
+    // With buffers this small, Nagle would wait out delayed ACKs.
+    local.set_nodelay(true).unwrap();
+    upstream.set_nodelay(true).unwrap();
+    upstream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    upstream
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let b = TcpStream::from_std(local).unwrap();
+    let client = std::thread::spawn(move || {
+        let request: Vec<u8> = (0..REQUEST).map(|index| (index % 251) as u8).collect();
+        client.write_all(&request).unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        response
+    });
+    let upstream = std::thread::spawn(move || {
+        // Start reading late, so the copy's write to the upstream is parked on
+        // a full socket by then.
+        std::thread::sleep(Duration::from_millis(200));
+        let mut request = vec![0; REQUEST];
+        upstream.read_exact(&mut request).unwrap();
+        let intact = request
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| usize::from(*byte) == index % 251);
+        upstream.write_all(&vec![7; RESPONSE]).unwrap();
+        upstream.shutdown(Shutdown::Write).unwrap();
+        let mut rest = Vec::new();
+        upstream.read_to_end(&mut rest).unwrap();
+        (intact, rest.len())
+    });
+    // An explicit runtime reactor: the sockets must park on it, not on the
+    // process-global fallback driver.
+    let builder = if multithread {
+        RuntimeBuilder::new().worker_threads(2)
+    } else {
+        RuntimeBuilder::current_thread()
+    };
+    let runtime = builder
+        .with_reactor(asupersync::runtime::reactor::create_reactor().unwrap())
+        .build()
+        .unwrap();
+    let owner = runtime.request_cx_with_budget(Budget::INFINITE);
+    let totals = runtime.block_on_with_cx(owner.clone(), async move {
+        let mut session = BidirectionalCopySession::new(a, b);
+        session.run(&owner).await.expect("the proxy copy completes")
+    });
+    assert_eq!(totals, (REQUEST as u64, RESPONSE as u64));
+    let response = client.join().unwrap();
+    assert_eq!(response.len(), RESPONSE);
+    assert!(response.iter().all(|byte| *byte == 7));
+    assert_eq!(upstream.join().unwrap(), (true, 0));
+    drop(runtime);
+}
+
+#[test]
+fn proxy_upload_then_response_current_thread() { bounded(|| proxy_upload_then_response(false)); }
+#[test]
+fn proxy_upload_then_response_two_workers() { bounded(|| proxy_upload_then_response(true)); }
 #[test]
 fn one_way_parked_cancellation_and_resume_current_thread() { bounded(|| one_way(false)); }
 #[test]

@@ -1836,6 +1836,124 @@ fn native_h3_session_routes_real_stream_bytes_and_survives_reset() {
     ));
 }
 
+// A body was written as one DATA frame, so a request or response body larger
+// than the receiver's max_frame_payload_size (1 MiB by default) closed the
+// connection: this crate's own client could not POST more than that to its own
+// server. Bodies now go out as DATA frames of at most the sender's limit.
+#[test]
+#[cfg(feature = "http3")]
+fn native_h3_bodies_larger_than_the_frame_limit_go_out_as_bounded_data_frames() {
+    const LIMIT: usize = 4096;
+    let cx = test_cx();
+    let config = NativeQuicConnectionConfig {
+        max_local_bidi: 16,
+        max_local_uni: 8,
+        send_window: 1 << 18,
+        recv_window: 1 << 18,
+        connection_send_limit: 4 << 20,
+        connection_recv_limit: 4 << 20,
+        ..NativeQuicConnectionConfig::default()
+    };
+    let mut client = QuicConnection::client(config);
+    let mut server = QuicConnection::server(config);
+    client.record_verified_server_identity();
+    establish_loopback(&cx, &mut client, &mut server).expect("establish native QUIC pair");
+    let bounded = |endpoint_role| H3ConnectionConfig {
+        endpoint_role,
+        max_frame_payload_size: LIMIT,
+        ..H3ConnectionConfig::default()
+    };
+    let mut client_h3 =
+        NativeH3Session::with_config(bounded(asupersync::http::h3_native::H3EndpointRole::Client));
+    let mut server_h3 =
+        NativeH3Session::with_config(bounded(asupersync::http::h3_native::H3EndpointRole::Server));
+    client_h3
+        .initialize(&cx, &mut client, H3Settings::default())
+        .expect("initialize client H3");
+    server_h3
+        .initialize(&cx, &mut server, H3Settings::default())
+        .expect("initialize server H3");
+    let _ = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    let _ = pump_h3_events(&cx, &mut server, &mut client, &mut client_h3);
+
+    let body = Bytes::from(
+        (0..20_000_u32)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>(),
+    );
+    let data_on = |events: &[NativeH3Event], stream| {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                NativeH3Event::Data { stream_id, bytes } if *stream_id == stream => {
+                    Some(bytes.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    // Within the receiver's limit each frame arrives whole, as one event.
+    let expected_frames = [LIMIT, LIMIT, LIMIT, LIMIT, 20_000 - 4 * LIMIT];
+
+    let request = H3RequestHead::new(
+        H3PseudoHeaders {
+            method: Some("POST".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("api.example.test".to_string()),
+            path: Some("/upload".to_string()),
+            ..H3PseudoHeaders::default()
+        },
+        vec![],
+    )
+    .expect("valid request");
+    let stream = client_h3
+        .send_request(&cx, &mut client, &request, body.clone())
+        .expect("send request");
+    let (server_events, _) = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    let request_data = data_on(&server_events, stream);
+    assert_eq!(
+        request_data
+            .iter()
+            .map(|bytes| bytes.len())
+            .collect::<Vec<_>>(),
+        expected_frames,
+        "request DATA frames: {server_events:?}"
+    );
+    assert_eq!(
+        request_data
+            .iter()
+            .flat_map(|bytes| bytes.iter().copied())
+            .collect::<Vec<_>>(),
+        body.to_vec()
+    );
+    assert!(server_events.iter().any(|event| matches!(
+        event,
+        NativeH3Event::Finished { stream_id } if *stream_id == stream
+    )));
+
+    let response = H3ResponseHead::new(200, vec![]).expect("valid response");
+    server_h3
+        .send_response(&cx, &mut server, stream, &response, body.clone())
+        .expect("send response");
+    let (client_events, _) = pump_h3_events(&cx, &mut server, &mut client, &mut client_h3);
+    let response_data = data_on(&client_events, stream);
+    assert_eq!(
+        response_data
+            .iter()
+            .map(|bytes| bytes.len())
+            .collect::<Vec<_>>(),
+        expected_frames,
+        "response DATA frames: {client_events:?}"
+    );
+    assert_eq!(
+        response_data
+            .iter()
+            .flat_map(|bytes| bytes.iter().copied())
+            .collect::<Vec<_>>(),
+        body.to_vec()
+    );
+}
+
 #[test]
 #[cfg(feature = "http3")]
 fn native_h3_router_dispatches_completed_streams_and_refuses_invalid_messages() {
@@ -3468,6 +3586,320 @@ fn native_h3_session_rejects_a_malformed_request_without_ending_its_siblings() {
         head,
     }));
     assert!(events.contains(&NativeH3Event::Finished { stream_id: second }));
+}
+
+#[test]
+#[cfg(feature = "http3")]
+fn native_h3_session_rejects_malformed_trailers_without_ending_its_siblings() {
+    let cx = test_cx();
+    let (mut client, mut server, mut server_h3) = static_h3_server_after_settings(&cx);
+    let request_head = |path: &str| {
+        H3RequestHead::new(
+            H3PseudoHeaders {
+                method: Some("GET".to_string()),
+                scheme: Some("https".to_string()),
+                authority: Some("example.test".to_string()),
+                path: Some(path.to_string()),
+                ..H3PseudoHeaders::default()
+            },
+            vec![],
+        )
+        .expect("valid request head")
+    };
+
+    // A valid request whose trailer section QPACK decodes but HTTP/3 forbids:
+    // a literal field line with the uppercase name X-Bad.
+    let trailed = request_head("/trailed");
+    let mut wire = Vec::new();
+    H3Frame::Headers(qpack_encode_request_field_section(&trailed).expect("encode request head"))
+        .encode(&mut wire)
+        .expect("encode request HEADERS");
+    H3Frame::Headers(vec![
+        0x00, 0x00, 0x25, b'X', b'-', b'B', b'a', b'd', 0x01, b'v',
+    ])
+    .encode(&mut wire)
+    .expect("encode malformed trailers");
+    let first = client
+        .open_bidi_stream(&cx)
+        .expect("open the request stream with malformed trailers");
+    client
+        .write_stream(&cx, first, Bytes::from(wire), true)
+        .expect("send the request with malformed trailers");
+
+    let sibling = request_head("/ok");
+    let mut valid = Vec::new();
+    H3Frame::Headers(qpack_encode_request_field_section(&sibling).expect("encode request head"))
+        .encode(&mut valid)
+        .expect("encode valid HEADERS");
+    let second = client
+        .open_bidi_stream(&cx)
+        .expect("open valid request stream");
+    client
+        .write_stream(&cx, second, Bytes::from(valid), true)
+        .expect("send valid request");
+
+    // RFC 9114 section 4.1.2: the malformed trailers make that request
+    // malformed, a stream error. They used to close the whole connection.
+    let (events, _) = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    assert_eq!(events.len(), 4, "{events:?}");
+    assert!(events.contains(&NativeH3Event::RequestHeaders {
+        stream_id: first,
+        head: trailed,
+    }));
+    assert!(events.contains(&NativeH3Event::StreamReset {
+        stream_id: first,
+        error_code: 0x10e,
+        final_size: 0,
+    }));
+    assert!(events.contains(&NativeH3Event::RequestHeaders {
+        stream_id: second,
+        head: sibling,
+    }));
+    assert!(events.contains(&NativeH3Event::Finished { stream_id: second }));
+}
+
+#[test]
+#[cfg(feature = "http3")]
+fn native_h3_client_resets_only_the_stream_with_a_malformed_response() {
+    let cx = test_cx();
+    let config = NativeQuicConnectionConfig::default();
+    let mut client = QuicConnection::client(config);
+    let mut server = QuicConnection::server(config);
+    client.record_verified_server_identity();
+    establish_loopback(&cx, &mut client, &mut server).expect("establish native QUIC pair");
+    let mut client_h3 = NativeH3Session::client();
+    let mut server_h3 = NativeH3Session::server();
+    client_h3
+        .initialize(&cx, &mut client, H3Settings::default())
+        .expect("initialize static client H3");
+    server_h3
+        .initialize(&cx, &mut server, H3Settings::default())
+        .expect("initialize static server H3");
+    let _ = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    let _ = pump_h3_events(&cx, &mut server, &mut client, &mut client_h3);
+
+    let request = |path: &str| {
+        H3RequestHead::new(
+            H3PseudoHeaders {
+                method: Some("GET".to_string()),
+                scheme: Some("https".to_string()),
+                authority: Some("example.test".to_string()),
+                path: Some(path.to_string()),
+                ..H3PseudoHeaders::default()
+            },
+            vec![],
+        )
+        .expect("valid request head")
+    };
+    let mut send = |path: &str| {
+        client_h3
+            .send_request(&cx, &mut client, &request(path), Bytes::new())
+            .expect("send H3 request")
+    };
+    let (bad_head, bad_trailers, ok) = (send("/a"), send("/b"), send("/c"));
+    let _ = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+
+    // A field section QPACK decodes but HTTP/3 forbids: :status 200 (static
+    // index 25), then a literal field line with the uppercase name X-Bad.
+    let uppercase = |with_status: bool| {
+        let mut section = vec![0x00, 0x00];
+        if with_status {
+            section.push(0xD9);
+        }
+        section.extend_from_slice(&[0x25, b'X', b'-', b'B', b'a', b'd', 0x01, b'v']);
+        section
+    };
+    let mut wire = Vec::new();
+    H3Frame::Headers(uppercase(true))
+        .encode(&mut wire)
+        .expect("encode malformed response HEADERS");
+    server
+        .write_stream(&cx, bad_head, Bytes::from(wire), true)
+        .expect("send malformed response");
+    let head = H3ResponseHead::new(200, vec![]).expect("valid response head");
+    let mut wire = Vec::new();
+    H3Frame::Headers(qpack_encode_response_field_section(&head).expect("encode response head"))
+        .encode(&mut wire)
+        .expect("encode response HEADERS");
+    H3Frame::Headers(uppercase(false))
+        .encode(&mut wire)
+        .expect("encode malformed trailers");
+    server
+        .write_stream(&cx, bad_trailers, Bytes::from(wire), true)
+        .expect("send response with malformed trailers");
+    let body = Bytes::from_static(b"still served");
+    server_h3
+        .send_response(&cx, &mut server, ok, &head, body.clone())
+        .expect("send valid response");
+
+    // RFC 9114 section 4.1.2: a malformed response is a stream error of type
+    // H3_MESSAGE_ERROR. It used to close the connection, failing every other
+    // request on it.
+    let (events, _) = pump_h3_events(&cx, &mut server, &mut client, &mut client_h3);
+    let reset = |stream_id| NativeH3Event::StreamReset {
+        stream_id,
+        error_code: 0x10e,
+        final_size: 0,
+    };
+    assert!(events.contains(&reset(bad_head)), "{events:?}");
+    assert!(events.contains(&NativeH3Event::ResponseHeaders {
+        stream_id: bad_trailers,
+        head: head.clone(),
+    }));
+    assert!(events.contains(&reset(bad_trailers)), "{events:?}");
+    assert!(events.contains(&NativeH3Event::ResponseHeaders {
+        stream_id: ok,
+        head,
+    }));
+    assert!(events.contains(&NativeH3Event::Data {
+        stream_id: ok,
+        bytes: body,
+    }));
+    assert!(events.contains(&NativeH3Event::Finished { stream_id: ok }));
+}
+
+#[test]
+#[cfg(feature = "http3")]
+fn native_h3_session_resets_a_request_stream_that_ends_before_its_headers() {
+    let cx = test_cx();
+    let (mut client, mut server, mut server_h3) = static_h3_server_after_settings(&cx);
+
+    // One request stream ends with no bytes at all, another after only a
+    // frame of a reserved type, which a receiver ignores.
+    let empty = client
+        .open_bidi_stream(&cx)
+        .expect("open the empty request stream");
+    client
+        .write_stream(&cx, empty, Bytes::new(), true)
+        .expect("end the stream before any HEADERS");
+    let mut reserved = Vec::new();
+    H3Frame::Unknown {
+        frame_type: 0x21,
+        payload: vec![1, 2, 3],
+    }
+    .encode(&mut reserved)
+    .expect("encode a reserved frame");
+    let unknown_only = client
+        .open_bidi_stream(&cx)
+        .expect("open the reserved-frame request stream");
+    client
+        .write_stream(&cx, unknown_only, Bytes::from(reserved), true)
+        .expect("end the stream after a reserved frame");
+
+    let head = H3RequestHead::new(
+        H3PseudoHeaders {
+            method: Some("GET".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("example.test".to_string()),
+            path: Some("/ok".to_string()),
+            ..H3PseudoHeaders::default()
+        },
+        vec![],
+    )
+    .expect("valid request head");
+    let mut valid = Vec::new();
+    H3Frame::Headers(qpack_encode_request_field_section(&head).expect("encode request head"))
+        .encode(&mut valid)
+        .expect("encode valid HEADERS");
+    let sibling = client
+        .open_bidi_stream(&cx)
+        .expect("open valid request stream");
+    client
+        .write_stream(&cx, sibling, Bytes::from(valid), true)
+        .expect("send valid request");
+
+    // RFC 9114 section 4.1: the server aborts an incomplete request stream
+    // with H3_REQUEST_INCOMPLETE. It used to close the whole connection.
+    let (events, _) = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    let incomplete = |stream_id| NativeH3Event::StreamReset {
+        stream_id,
+        error_code: 0x10d,
+        final_size: 0,
+    };
+    assert!(events.contains(&incomplete(empty)), "{events:?}");
+    assert!(events.contains(&incomplete(unknown_only)), "{events:?}");
+    assert!(events.contains(&NativeH3Event::RequestHeaders {
+        stream_id: sibling,
+        head,
+    }));
+    assert!(events.contains(&NativeH3Event::Finished { stream_id: sibling }));
+}
+
+#[test]
+#[cfg(feature = "http3")]
+fn native_h3_client_resets_a_response_that_ends_before_its_final_headers() {
+    let cx = test_cx();
+    let config = NativeQuicConnectionConfig::default();
+    let mut client = QuicConnection::client(config);
+    let mut server = QuicConnection::server(config);
+    client.record_verified_server_identity();
+    establish_loopback(&cx, &mut client, &mut server).expect("establish native QUIC pair");
+    let mut client_h3 = NativeH3Session::client();
+    let mut server_h3 = NativeH3Session::server();
+    client_h3
+        .initialize(&cx, &mut client, H3Settings::default())
+        .expect("initialize static client H3");
+    server_h3
+        .initialize(&cx, &mut server, H3Settings::default())
+        .expect("initialize static server H3");
+    let _ = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    let _ = pump_h3_events(&cx, &mut server, &mut client, &mut client_h3);
+
+    let request = |path: &str| {
+        H3RequestHead::new(
+            H3PseudoHeaders {
+                method: Some("GET".to_string()),
+                scheme: Some("https".to_string()),
+                authority: Some("example.test".to_string()),
+                path: Some(path.to_string()),
+                ..H3PseudoHeaders::default()
+            },
+            vec![],
+        )
+        .expect("valid request head")
+    };
+    let mut send = |path: &str| {
+        client_h3
+            .send_request(&cx, &mut client, &request(path), Bytes::new())
+            .expect("send H3 request")
+    };
+    let (hints_only, ok) = (send("/a"), send("/b"));
+    let _ = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+
+    // A 103 and then FIN: the response never gets its final HEADERS.
+    let informational = H3ResponseHead::new(103, vec![]).expect("valid informational response");
+    server_h3
+        .send_informational_response(&cx, &mut server, hints_only, &informational)
+        .expect("queue informational response");
+    server
+        .write_stream(&cx, hints_only, Bytes::new(), true)
+        .expect("end the response stream");
+    let head = H3ResponseHead::new(200, vec![]).expect("valid response head");
+    let body = Bytes::from_static(b"still served");
+    server_h3
+        .send_response(&cx, &mut server, ok, &head, body.clone())
+        .expect("send valid response");
+
+    // RFC 9114 section 4.1.2: the incomplete response is malformed, a stream
+    // error of type H3_MESSAGE_ERROR. It used to close the connection.
+    let (events, _) = pump_h3_events(&cx, &mut server, &mut client, &mut client_h3);
+    assert!(
+        events.contains(&NativeH3Event::StreamReset {
+            stream_id: hints_only,
+            error_code: 0x10e,
+            final_size: 0,
+        }),
+        "{events:?}"
+    );
+    assert!(events.contains(&NativeH3Event::ResponseHeaders {
+        stream_id: ok,
+        head,
+    }));
+    assert!(events.contains(&NativeH3Event::Data {
+        stream_id: ok,
+        bytes: body,
+    }));
+    assert!(events.contains(&NativeH3Event::Finished { stream_id: ok }));
 }
 
 #[test]

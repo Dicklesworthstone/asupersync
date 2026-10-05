@@ -3220,7 +3220,21 @@ impl RedisClient {
     #[allow(clippy::unused_async)]
     pub async fn connect(cx: &Cx, url: &str) -> Result<Self, RedisError> {
         cx.checkpoint().map_err(|_| RedisError::Cancelled)?;
-        let config = RedisConfig::from_url(url)?;
+        Self::connect_with_config(cx, RedisConfig::from_url(url)?).await
+    }
+
+    /// Connect to Redis with an explicit [`RedisConfig`].
+    ///
+    /// Use this to change what a URL cannot express: the RESP
+    /// [`protocol_limits`](RedisConfig::protocol_limits) (for example a
+    /// `max_frame_size` above the 16 MiB default, for values up to Redis'
+    /// 512 MB), the Pub/Sub and RESP3 push backlogs, or (with the `tls`
+    /// feature) the `tls_connector` used for `rediss://`, such as one
+    /// trusting a private CA. Start from [`RedisConfig::from_url`] and adjust
+    /// the fields.
+    #[allow(clippy::unused_async)]
+    pub async fn connect_with_config(cx: &Cx, config: RedisConfig) -> Result<Self, RedisError> {
+        cx.checkpoint().map_err(|_| RedisError::Cancelled)?;
         let config_for_factory = config.clone();
         let resp3_push_backlog =
             Arc::new(parking_lot::Mutex::new(RedisResp3PushBacklog::default()));
@@ -3684,6 +3698,7 @@ impl RedisClient {
             client: self,
             encoded: Vec::new(),
             changes_connection_state: false,
+            changes_reply_count: false,
         }
     }
 }
@@ -3935,6 +3950,33 @@ fn opens_connection_protocol_state(args: &[&[u8]]) -> bool {
                 .is_some_and(|subcommand| subcommand.eq_ignore_ascii_case(b"REPLY")))
 }
 
+/// Commands after which replies no longer follow one per command: the
+/// subscriber-mode family and MONITOR stream replies, SYNC/PSYNC send a
+/// replication stream, and CLIENT REPLY OFF/SKIP suppresses replies.
+fn changes_reply_count(args: &[&[u8]]) -> bool {
+    let Some(command) = args.first() else {
+        return false;
+    };
+    let streaming = [
+        "SUBSCRIBE",
+        "PSUBSCRIBE",
+        "SSUBSCRIBE",
+        "UNSUBSCRIBE",
+        "PUNSUBSCRIBE",
+        "SUNSUBSCRIBE",
+        "MONITOR",
+        "SYNC",
+        "PSYNC",
+    ];
+    streaming
+        .iter()
+        .any(|name| command.eq_ignore_ascii_case(name.as_bytes()))
+        || (command.eq_ignore_ascii_case(b"CLIENT")
+            && args
+                .get(1)
+                .is_some_and(|subcommand| subcommand.eq_ignore_ascii_case(b"REPLY")))
+}
+
 /// Commands whose effect outlives their reply on the same connection: the
 /// protocol openers plus database, identity, protocol-version, cluster-routing
 /// and client-attribute changes. A pooled connection that ran one is closed
@@ -4122,6 +4164,7 @@ pub struct Pipeline<'a> {
     client: &'a RedisClient,
     encoded: Vec<Vec<u8>>,
     changes_connection_state: bool,
+    changes_reply_count: bool,
 }
 
 impl Pipeline<'_> {
@@ -4140,6 +4183,7 @@ impl Pipeline<'_> {
         encode_command_into(&mut buf, args);
         self.encoded.push(buf);
         self.changes_connection_state |= changes_connection_state(args);
+        self.changes_reply_count |= changes_reply_count(args);
         self
     }
 
@@ -4159,6 +4203,15 @@ impl Pipeline<'_> {
     /// connection — those discard the pooled connection because its
     /// protocol state is no longer reliable. (br-asupersync-pr32li)
     pub async fn exec(self, cx: &Cx) -> Result<Vec<Result<RespValue, RedisError>>, RedisError> {
+        // One reply is read per queued command. A command after which that
+        // no longer holds hung the read (CLIENT REPLY OFF/SKIP) or paired
+        // replies with the wrong commands (multi-channel SUBSCRIBE, MONITOR).
+        if self.changes_reply_count {
+            return Err(RedisError::Protocol(
+                "a pipeline cannot run SUBSCRIBE, MONITOR, SYNC or CLIENT REPLY: they change how many replies follow; use the Pub/Sub API".into(),
+            ));
+        }
+
         let mut conn = DiscardOnDropGuard::new(self.client.acquire(cx).await?);
 
         // Ensure AUTH/SELECT have been run on this connection.
@@ -4430,6 +4483,8 @@ struct PubSubControlGuard<'a> {
     snapshot_channels: Vec<String>,
     snapshot_patterns: Vec<String>,
     active: bool,
+    /// Whether this command has received any subscription acknowledgement.
+    acknowledged: bool,
 }
 
 impl<'a> PubSubControlGuard<'a> {
@@ -4440,6 +4495,7 @@ impl<'a> PubSubControlGuard<'a> {
             snapshot_patterns: pubsub.patterns.clone(),
             pubsub,
             active: true,
+            acknowledged: false,
         })
     }
 
@@ -4451,8 +4507,21 @@ impl<'a> PubSubControlGuard<'a> {
         self.pubsub.conn.write_command(cx, args).await
     }
 
-    async fn read_next_event(&mut self, cx: &Cx) -> Result<PubSubEvent, RedisError> {
-        self.pubsub.read_next_event(cx).await
+    /// Reads the next reply to this control command. An error reply before
+    /// any acknowledgement means the server refused the whole command (Redis
+    /// checks ACL permissions and arguments before subscribing to anything),
+    /// so nothing changed: the guard is released without invalidating the
+    /// connection or its buffered messages, and the server's error returned.
+    /// An error after an acknowledgement still fails closed.
+    async fn read_control_event(&mut self, cx: &Cx) -> Result<PubSubEvent, RedisError> {
+        let response = self.pubsub.conn.read_pubsub_response(cx).await?;
+        if let RespValue::Error(message) = &response
+            && !self.acknowledged
+        {
+            self.active = false;
+            return Err(RedisError::from_redis_error_message(message));
+        }
+        RedisPubSub::parse_event(response)
     }
 
     async fn read_ping_event(
@@ -4529,6 +4598,7 @@ impl<'a> PubSubControlGuard<'a> {
                 channel,
                 remaining,
             } => {
+                self.acknowledged = true;
                 let expected_kind = action.expected_kind();
                 if kind != expected_kind {
                     return Err(RedisError::Protocol(format!(
@@ -4917,6 +4987,10 @@ impl RedisPubSub {
     }
 
     /// Subscribe to one or more channels.
+    ///
+    /// A command the server refuses outright, such as an ACL `-NOPERM`,
+    /// returns the server's error and leaves the existing subscriptions and
+    /// buffered messages usable.
     pub async fn subscribe(&mut self, cx: &Cx, channels: &[&str]) -> Result<(), RedisError> {
         if channels.is_empty() {
             return Err(RedisError::Protocol(
@@ -4937,7 +5011,7 @@ impl RedisPubSub {
             .map(|channel| (*channel).to_string())
             .collect();
         while !expected_acks.is_empty() {
-            let event = guard.read_next_event(cx).await?;
+            let event = guard.read_control_event(cx).await?;
             guard.handle_control_event(
                 PubSubControlAction::SubscribeChannel,
                 &mut expected_acks,
@@ -4950,6 +5024,8 @@ impl RedisPubSub {
     }
 
     /// Subscribe to one or more glob-style patterns.
+    ///
+    /// A refused command is handled as for [`subscribe`](Self::subscribe).
     pub async fn psubscribe(&mut self, cx: &Cx, patterns: &[&str]) -> Result<(), RedisError> {
         if patterns.is_empty() {
             return Err(RedisError::Protocol(
@@ -4970,7 +5046,7 @@ impl RedisPubSub {
             .map(|pattern| (*pattern).to_string())
             .collect();
         while !expected_acks.is_empty() {
-            let event = guard.read_next_event(cx).await?;
+            let event = guard.read_control_event(cx).await?;
             guard.handle_control_event(
                 PubSubControlAction::SubscribePattern,
                 &mut expected_acks,
@@ -5008,7 +5084,7 @@ impl RedisPubSub {
                 .collect()
         };
         while !expected_acks.is_empty() {
-            let event = guard.read_next_event(cx).await?;
+            let event = guard.read_control_event(cx).await?;
             guard.handle_control_event(
                 PubSubControlAction::UnsubscribeChannel,
                 &mut expected_acks,
@@ -5045,7 +5121,7 @@ impl RedisPubSub {
                 .collect()
         };
         while !expected_acks.is_empty() {
-            let event = guard.read_next_event(cx).await?;
+            let event = guard.read_control_event(cx).await?;
             guard.handle_control_event(
                 PubSubControlAction::UnsubscribePattern,
                 &mut expected_acks,

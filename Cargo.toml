@@ -676,8 +676,8 @@ sqlx = { version = "0.9", default-features = false, features = ["mysql", "runtim
 redis = "1.2"
 # External RFC 6330 decoder for byte-level RaptorQ interoperability checks
 raptorq = "2.0"
-# Tokio for differential semaphore fairness conformance testing
-tokio = { version = "1.0", features = ["rt", "sync", "time"] }
+# Tokio for semaphore fairness conformance and the tokio rows of benches/runtime_vs_tokio.rs
+tokio = { version = "1.0", features = ["rt", "rt-multi-thread", "sync", "time", "net", "io-util"] }
 
 [target.'cfg(not(windows))'.dev-dependencies]
 # Criterion 0.8 depends on `alloca` on Windows, which requires a C compiler
@@ -1412,6 +1412,11 @@ path = "tests/rwlock_test.rs"
 required-features = ["test-internals"]
 
 [[test]]
+name = "scheduler_idle_dispatch_lock_free"
+path = "tests/scheduler_idle_dispatch_lock_free.rs"
+required-features = ["lock-metrics"]
+
+[[test]]
 name = "scheduler_loom"
 path = "tests/scheduler_loom.rs"
 required-features = ["loom-tests"]
@@ -1648,6 +1653,12 @@ required-features = ["test-internals", "criterion-benches"]
 name = "spawn_throughput"
 harness = false
 required-features = ["test-internals", "criterion-benches"]
+
+# Same-process asupersync vs tokio head-to-head (br-asupersync-issue65-criticisms-kpmoy5.1.1).
+[[bench]]
+name = "runtime_vs_tokio"
+harness = false
+required-features = ["criterion-benches"]
 
 [[bench]]
 name = "injector_throughput"

@@ -739,7 +739,11 @@ impl<C: Codec> GrpcClient<C> {
     /// Deterministic loopback is supported by [`Self::server_streaming`], not
     /// this native method. Missing I/O/timer authority, invalid configuration,
     /// unavailable compression and transport metadata overrides refuse before
-    /// dialing. Setup includes DNS, TCP, TLS, encoding and response headers.
+    /// dialing. Setup, bounded by the channel's connect timeout, includes DNS,
+    /// TCP, TLS, encoding, writing the request and the server's HTTP/2
+    /// SETTINGS. It does not include response headers, which grpc-go and
+    /// grpc-java servers send with the first message: a Watch whose first
+    /// event is slow waits under the call deadline and keepalive only.
     ///
     /// ```no_run
     /// use asupersync::{Cx, bytes::Bytes};
@@ -1359,17 +1363,14 @@ async fn native_h2_unary(
     )?;
     let config = channel.config().clone();
     let tls_connector = channel.tls_connector().cloned();
-    let timeout = effective_native_call_timeout(&config);
+    let io = native_h2_unary_io(target, config, tls_connector, path, &metadata, body);
+    let Some(timeout) = effective_native_call_timeout(&metadata) else {
+        return io.await;
+    };
     let now = cx
         .timer_driver()
         .map_or_else(crate::time::wall_now, |timer| timer.now());
-    match crate::time::timeout(
-        now,
-        timeout,
-        native_h2_unary_io(target, config, tls_connector, path, &metadata, body),
-    )
-    .await
-    {
+    match crate::time::timeout(now, timeout, io).await {
         Ok(result) => result,
         Err(_) => Err(Status::deadline_exceeded(format!(
             "native HTTP/2 gRPC call exceeded its {timeout:?} deadline"
@@ -1377,10 +1378,24 @@ async fn native_h2_unary(
     }
 }
 
+/// The call's local deadline is the one sent on the wire: the final
+/// `grpc-timeout` (the per-request override or the channel default, already
+/// met with the caller's budget), or the budget alone. Without either the
+/// call has no deadline. `connect_timeout` bounds only connecting and the TLS
+/// handshake; it used to cut off every unary call that had no timeout of its
+/// own at 5 s, and a longer per-request `grpc-timeout` at the channel's.
 #[cfg(not(target_arch = "wasm32"))]
-fn effective_native_call_timeout(config: &ChannelConfig) -> Duration {
-    let configured = config.timeout.unwrap_or(config.connect_timeout);
-    ambient_remaining_budget().map_or(configured, |remaining| configured.min(remaining))
+fn effective_native_call_timeout(metadata: &Metadata) -> Option<Duration> {
+    let wire = match metadata.get("grpc-timeout") {
+        Some(super::streaming::MetadataValue::Ascii(value)) => {
+            super::server::parse_grpc_timeout(value)
+        }
+        _ => None,
+    };
+    match (wire, ambient_remaining_budget()) {
+        (Some(wire), Some(remaining)) => Some(wire.min(remaining)),
+        (wire, remaining) => wire.or(remaining),
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1764,17 +1779,20 @@ impl NativeUnaryAccumulator {
         Ok(())
     }
 
+    /// END_STREAM ends the call whether or not it carried grpc-status. A
+    /// proxy's 404 or 503 has none, and waiting for one hung the call until
+    /// its deadline.
     fn is_complete(&self) -> bool {
-        self.stream_ended && self.grpc_status.is_some()
+        self.stream_ended
     }
 
     fn finish(self) -> Result<NativeUnaryWireResponse, Status> {
-        if self.http_status != Some(200) {
-            return Err(Status::unavailable(format!(
-                "gRPC server returned HTTP status {}",
-                self.http_status
-                    .map_or_else(|| "missing".to_owned(), |status| status.to_string())
-            )));
+        match (self.http_status, self.grpc_status) {
+            // A trailers-only grpc-status takes precedence over the HTTP
+            // status, as on the streaming lanes.
+            (Some(200), _) | (Some(_), Some(_)) => {}
+            (Some(status), None) => return Err(super::native_stream::http_fallback(status)),
+            (None, _) => return Err(Status::internal("gRPC response is missing HTTP status")),
         }
         if !self.content_type_valid {
             return Err(Status::internal(
@@ -3385,6 +3403,71 @@ mod tests {
         assert_eq!(encode_grpc_timeout(Duration::from_millis(1)), "1m");
         assert_eq!(encode_grpc_timeout(Duration::from_nanos(1)), "1n");
         assert_eq!(encode_grpc_timeout(Duration::from_micros(1500)), "1500u");
+    }
+
+    /// The unary timer used `config.timeout.unwrap_or(connect_timeout)`, so
+    /// a call with no deadline was cut off at 5 s and a longer per-request
+    /// `grpc-timeout` at the channel's. It now follows the wire header.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_unary_deadline_is_the_wire_grpc_timeout() {
+        assert_eq!(effective_native_call_timeout(&Metadata::new()), None);
+        let mut metadata = Metadata::new();
+        assert!(metadata.insert("grpc-timeout", "30S"));
+        assert_eq!(
+            effective_native_call_timeout(&metadata),
+            Some(Duration::from_secs(30))
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn unary_headers(pairs: &[(&str, &str)], end_stream: bool) -> ReceivedFrame {
+        ReceivedFrame::Headers {
+            stream_id: 1,
+            headers: pairs
+                .iter()
+                .map(|(name, value)| Header::new(*name, *value))
+                .collect(),
+            end_stream,
+        }
+    }
+
+    /// A response that ends without grpc-status (a proxy's 404 or 503) was
+    /// never complete, so the call hung until its deadline.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_unary_response_without_grpc_status_completes_with_the_http_mapping() {
+        for (http, code) in [
+            ("404", Code::Unimplemented),
+            ("503", Code::Unavailable),
+            ("401", Code::Unauthenticated),
+        ] {
+            let mut accumulator = NativeUnaryAccumulator::new(1024);
+            accumulator
+                .observe(1, unary_headers(&[(":status", http)], true))
+                .expect("headers");
+            assert!(accumulator.is_complete(), "END_STREAM ends the call");
+            let status = accumulator.finish().expect_err("not a gRPC response");
+            assert_eq!(status.code(), code, "HTTP {http}");
+        }
+
+        // A trailers-only grpc-status on a non-200 response wins.
+        let mut accumulator = NativeUnaryAccumulator::new(1024);
+        accumulator
+            .observe(
+                1,
+                unary_headers(
+                    &[
+                        (":status", "503"),
+                        ("content-type", "application/grpc"),
+                        ("grpc-status", "8"),
+                    ],
+                    true,
+                ),
+            )
+            .expect("headers");
+        let status = accumulator.finish().expect_err("grpc-status 8");
+        assert_eq!(status.code(), Code::ResourceExhausted);
     }
 
     #[test]

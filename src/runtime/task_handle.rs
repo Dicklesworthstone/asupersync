@@ -733,6 +733,36 @@ impl<T> TaskHandle<T> {
             || (self.barrier.is_open() && (self.receiver.is_ready() || self.receiver.is_closed()))
     }
 
+    /// Returns true once the task has published its terminal result (or closed
+    /// its join channel), whether or not its retirement barrier has opened.
+    ///
+    /// Implicit ownership cleanup (a dropped set or race) uses this, not
+    /// [`Self::is_finished`], to decide whether a member still needs a
+    /// cancellation request. Between publication and record retirement the
+    /// task has already finished, and an abort would only stamp a cancellation
+    /// onto its context (br-asupersync-yhueis applied the same rule to
+    /// `JoinFuture::drop`).
+    #[inline]
+    #[must_use]
+    pub(crate) fn terminal_published(&self) -> bool {
+        self.terminal_consumed || self.receiver.is_ready() || self.receiver.is_closed()
+    }
+
+    /// A handle whose retirement barrier is `barrier`, as a runtime spawn
+    /// creates it, for tests that need a published but unretired member.
+    #[cfg(test)]
+    pub(crate) fn with_retirement_barrier_for_test(
+        task_id: TaskId,
+        receiver: oneshot::Receiver<Result<T, JoinError>>,
+        inner: Weak<RwLock<CxInner>>,
+        barrier: Arc<RetirementBarrier>,
+    ) -> Self {
+        Self {
+            barrier,
+            ..Self::new(task_id, receiver, inner)
+        }
+    }
+
     /// Waits for the task to complete and returns its result.
     ///
     /// This method yields until the spawned task completes, then returns its output value.
@@ -2421,5 +2451,20 @@ mod tests {
             }))
         );
         crate::test_complete!("task_handle_snapshot_scrubs_ids");
+    }
+}
+
+// Monitor and link targets (br-asupersync-issue65-criticisms-kpmoy5.6.1).
+impl<T> TaskHandle<T> {
+    /// The id this handle reports now and, for a mailbox spawn, the slot that
+    /// admission fills with the canonical id. A monitor or link made right
+    /// after the spawn resolves the canonical id through the slot.
+    pub(crate) fn watch_target_parts(
+        &self,
+    ) -> (
+        TaskId,
+        Option<Arc<crate::runtime::spawn_mailbox::AdmittedTaskSlot>>,
+    ) {
+        (self.task_id(), self.admitted.clone())
     }
 }

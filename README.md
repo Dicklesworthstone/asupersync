@@ -9,7 +9,7 @@
 <img src="asupersync_diagram.webp" alt="Asupersync Architecture - Regions, Tasks, and Quiescence" width="700">
 
 [![License: MIT+Rider](https://img.shields.io/badge/License-MIT%2BOpenAI%2FAnthropic%20Rider-blue.svg)](./LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-nightly-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-stable_1.95%2B-orange.svg)](#minimum-supported-rust-version)
 [![Status: Active Development](https://img.shields.io/badge/Status-Active%20Development-brightgreen)](https://github.com/Dicklesworthstone/asupersync)
 [![Live Demo](https://img.shields.io/badge/Live_Demo-WASM_Interactive-blueviolet)](https://dicklesworthstone.github.io/asupersync/asupersync_web_demo.html)
 
@@ -47,15 +47,26 @@ controlled schedules deterministic and replayable.
 
 | Guarantee | What It Means |
 |-----------|---------------|
-| **No orphan tasks** | Every spawned task is owned by a region; region close waits for all children |
-| **Cancel-correctness** | Covered primitives use request → drain → finalize and publish their partial-effect boundaries; this is not a blanket guarantee for arbitrary I/O or adapters |
-| **Scoped cleanup bounds** | Budgets are sufficient conditions only where a concrete responsiveness bound is published; non-cooperative work can still delay quiescence indefinitely |
-| **No silent drops** | Covered two-phase primitives use reserve/commit so uncommitted work aborts cleanly and committed sends are never half-sent |
-| **Deterministic testing** | Lab runtime: virtual time, deterministic scheduling, trace replay |
-| **Adaptive preemption fairness** | Default-on discounted UCB1 policy tunes cancel-streak limits over `{4, 8, 16, 32, 64}` at deterministic epoch boundaries |
-| **Drain progress certificates** | Conditional range-bounded Azuma/Freedman candidates accompany deterministic phase and projected-confidence diagnostics |
-| **Spectral early warnings** | Wait-graph spectral monitor combines conformal bounds and anytime-valid evidence |
-| **Capability security** | Runtime effect APIs flow through explicit `Cx` or capability tokens; host-boundary and test-only exceptions stay named and scoped |
+| **No orphan tasks** | Every spawned task is owned by a region; region close waits for all children. Tasks you spawn through a `Cx` belong to that `Cx`'s region. Tasks spawned through a `RuntimeHandle` belong to the root region and are drained when the runtime shuts down. |
+| **Cancellation is a request** | Cancelling a task asks it to stop. It keeps running until it reaches a cancellation point (`cx.checkpoint()` or a cancel-aware await), so it can finish its own async cleanup and return a value. A task that never reaches one is never forcibly stopped, and it holds up its region's close. |
+| **Cleanup bounds** | Cleanup budgets are advisory on the production runtime: a task that keeps running past its budget is not stopped. `Runtime::shutdown_timeout` bounds how long the caller waits for teardown. |
+| **No silent drops** | A channel send can reserve capacity first and commit later, so a cancelled send never loses or half-sends a message. A one-call `send()` exists for the common case. |
+| **Deterministic testing** | Lab runtime: virtual time, deterministic scheduling, trace replay. The same seed reproduces the same schedule. |
+| **Capability-scoped effects** | Spawning, timers and runtime-managed effects go through an explicit `Cx`. Most public I/O entry points (`TcpStream::connect`, `File::open`) take no `Cx` and check no capability today; that work is tracked as `asupersync-issue65-criticisms-kpmoy5.5`. |
+
+These guarantees are enforced by the runtime, not by the type system. They cost
+time per task: see [Measured against tokio](#measured-against-tokio).
+
+**Experimental scheduling policy and diagnostics.** These are not guarantees:
+
+- Adaptive cancel preemption (on by default): a discounted UCB1 policy picks the
+  cancel-streak limit from `{4, 8, 16, 32, 64}` at deterministic epoch
+  boundaries. Whether it beats a fixed limit is still being measured.
+- Drain progress certificates: periodic estimates of how close a draining
+  region is to quiescence, with conditional bounds. They report; they do not
+  change scheduling.
+- Spectral early warnings: a wait-graph spectral monitor that runs only when
+  the scheduling governor is enabled (off by default).
 
 ---
 
@@ -99,6 +110,7 @@ If you already know tokio, this section maps the primitives you use daily to the
 | `tokio::spawn_blocking(f)` | `cx.spawn_blocking(\|cx\| f())` | Same idea when the runtime has a blocking pool: `#[main]`/`#[test]` configure one on demand (`blocking = N`, `0` opts out). A bare `RuntimeBuilder::new()` ships with `blocking_threads(0, 0)`, and without a pool the closure runs inline on the async worker. |
 | `tokio::select!` | `race!(cx, { move \|child\| a(child), move \|child\| b(child) })` or `cx.race_drained_with(...)` | Returns only after the winner is selected and every loser is protocol-cancelled and drained. Each branch receives its own child `Cx`; pass it to the branch's operations. A prebuilt branch that awaits on the caller's `cx` (for example `rx.recv(&cx)`) never sees its cancellation, so the drain waits for it to finish on its own. See [`docs/macro-dsl.md`](./docs/macro-dsl.md#race). |
 | `tokio::join!` | `join!(a, b)`; use `JoinSet::join_all(cx)` for dynamic arity | Inline branches complete together; spawned dynamic members remain region-owned and are collected in spawn order. See [`macros_basic.rs`](./examples/macros_basic.rs). |
+| `FuturesUnordered` / `join_all` over borrowed data | `cx::fiber::scope(\|s\| async move { s.spawn(fut) })` | Fibers run concurrently inside the calling task, may borrow from its stack (no `'static`), and the scope waits for all of them. They are not parallel; use tasks for that. See [`fibers_borrowing.rs`](./examples/fibers_borrowing.rs). |
 | `tokio::time::sleep(dur)` | `sleep(now, dur)` | Takes current `Time` instead of reading the clock implicitly. Works with virtual time in lab runtime. |
 | `tokio::time::timeout(dur, fut)` | `timeout(now, dur, fut)` or `cx.scope().timeout(&cx, dur, \|cx\| op)` | `time::timeout` returns `Result<T, Elapsed>` and drops the inner future when the clock wins; `Scope::timeout` spawns the operation as a region task and cancels **and drains** it on expiry, reporting a late terminal outcome instead of losing it. |
 | `tokio::time::interval(dur)` | `interval(now, dur)` | Same `MissedTickBehavior` options (Burst, Delay, Skip). |
@@ -305,6 +317,11 @@ async fn my_task(cx: &Cx) {
 ```
 
 Swap `Cx` to change interpretation: production vs. lab vs. distributed.
+I/O entry points such as `TcpStream::connect(addr)` and `File::open(path)` take no `Cx`, so they
+check the calling task's context: without the IO capability they refuse with
+[`[ASUP-E009]`](./docs/error_codes/ASUP-E009.md). Threads outside the runtime are not affected.
+`cx.with_ambient(future)` checks them against an explicit `cx` instead. `spawn_blocking` still
+runs its closure under a restricted context (`asupersync-issue65-criticisms-kpmoy5.5`).
 This is not a blanket claim that every internal helper is `Cx`-threaded:
 host-boundary code such as OS entropy for temporary file names, legacy sync DNS
 wall-clock timing, and test/support harnesses must keep their authority
@@ -318,6 +335,14 @@ The lab runtime provides:
 - **Deterministic scheduling**: same seed → same execution
 - **Trace capture/replay**: debug production issues locally
 - **Schedule exploration**: race-guided deterministic seed exploration with Mazurkiewicz/Foata trace-class deduplication
+- **Invariant oracles**: every `LabRuntime` report checks 9 of the 24 built-in
+  oracles from runtime state: task leak, obligation leak, quiescence, loser
+  drain, finalizer, region tree, deadline monotonicity, the cancellation
+  protocol and DOWN-message order
+  (`lab::oracle::LAB_RUNTIME_FED_ORACLE_NAMES`). Nothing in the runtime feeds
+  the other 15 yet (channel atomicity, waker dedup, actor and supervision
+  oracles among them); reports list them as passed and count them as not fed
+  (asupersync-52hxjz).
 
 Concurrency bugs become reproducible test failures.
 
@@ -451,6 +476,8 @@ So you can "peek" after every scheduling step and still control type-I error, wh
 
 `LabRuntime` feeds the monitor one observation per run that advances the lab (`run_until_quiescent_with_report`); a plain `report()` re-reads the same state and adds no evidence. The rejected invariants are available from `runtime.oracles.eprocess_rejected_invariants()`.
 
+What it does not add: each observation is the oracle's own pass/fail verdict for that run (`EProcessMonitor::observe_report`), and a lab run is deterministic. The e-process can therefore reject only an invariant whose oracle has already reported a violation. It summarizes the violation rate across runs and seeds with an anytime-valid bound. It does not detect anything the oracle verdicts miss.
+
 ### Distribution-Free Conformal Calibration for Lab Metrics
 
 For lab metrics that benefit from calibrated prediction sets, Asupersync uses split conformal calibration (`src/lab/conformal.rs`) with finite-sample, distribution-free guarantees (under exchangeability):
@@ -479,16 +506,17 @@ Determinism is treated as a first-class algorithmic constraint across the codeba
 
 ## How Asupersync Compares
 
-| Feature | Asupersync | async-std | smol |
-|---------|------------|-----------|------|
-| **Structured concurrency** | ✅ Enforced | ❌ Manual | ❌ Manual |
-| **Cancel-correctness** | ⚠️ Protocol on covered surfaces; adapter boundaries are lane-scoped | ⚠️ Drop-based | ⚠️ Drop-based |
-| **No orphan tasks** | ✅ Guaranteed | ❌ spawn detaches | ❌ spawn detaches |
-| **Bounded cleanup** | ⚠️ Published cooperative-path bounds only | ❌ Best-effort | ❌ Best-effort |
-| **Deterministic testing** | ✅ Built-in | ❌ External tools | ❌ External tools |
-| **Obligation tracking** | ✅ Runtime-tracked affine tokens with leak detection | ❌ None | ❌ None |
-| **Ecosystem** | ✅ Broad support-class-scoped built-in surface (runtime, net, HTTP/1.1+H2, TLS, WebSocket, gRPC, DB, distributed primitives; adapter lanes stay explicitly bounded) | ⚠️ Medium | ⚠️ Small |
-| **Maturity** | ⚠️ Experimental, pre-1.0, actively hardened; broad replacement is not independently established | ✅ Production | ✅ Production |
+| Feature | Asupersync | tokio | async-std | smol |
+|---------|------------|-------|-----------|------|
+| **Structured concurrency** | ✅ Built in: every task belongs to a region | ⚠️ Opt-in (`JoinSet`, `TaskTracker`) | ❌ Manual | ❌ Manual |
+| **Cancellation** | ⚠️ Request → drain → finalize on covered surfaces; a cancelled task can finish async cleanup and return a value | ⚠️ Drop-based; `CancellationToken` for cooperative cancellation | ⚠️ Drop-based | ⚠️ Drop-based |
+| **No orphan tasks** | ✅ For `Cx` spawns; `RuntimeHandle` spawns belong to the root region | ❌ `spawn` detaches (`JoinSet` aborts on drop) | ❌ spawn detaches | ❌ spawn detaches |
+| **Bounded cleanup** | ⚠️ Advisory budgets; a non-cooperative task holds up region close | ❌ Best-effort | ❌ Best-effort | ❌ Best-effort |
+| **Deterministic testing** | ✅ Built-in lab runtime | ⚠️ Paused time; schedule exploration via external tools (loom, turmoil) | ❌ External tools | ❌ External tools |
+| **Obligation tracking** | ✅ Runtime-tracked permits and leases with leak detection | ❌ None | ❌ None | ❌ None |
+| **Per-task cost** | ⚠️ Several times tokio's (see [Measured against tokio](#measured-against-tokio)) | ✅ The reference point | — | — |
+| **Ecosystem** | ✅ Broad support-class-scoped built-in surface (runtime, net, HTTP/1.1+H2, TLS, WebSocket, gRPC, DB, distributed primitives; adapter lanes stay explicitly bounded) | ✅ Largest; most async crates assume it | ⚠️ Medium | ⚠️ Small |
+| **Maturity** | ⚠️ Experimental, pre-1.0; used in production by the author's own projects, no known independent production user | ✅ Production | ✅ Production | ✅ Production |
 
 **When to evaluate Asupersync:**
 - Internal or experimental systems that can validate every selected adapter and
@@ -499,6 +527,8 @@ Determinism is treated as a first-class algorithmic constraint across the codeba
   against established runtimes
 
 **When to consider alternatives:**
+- You need the lowest per-task overhead: tokio's spawn, yield and channels cost
+  several times less (measured in [Measured against tokio](#measured-against-tokio))
 - You need strict drop-in compatibility with libraries that are hard-wired to Tokio runtime traits
 - Rapid prototyping where correctness guarantees aren't yet critical
 
@@ -765,32 +795,38 @@ minisign -Vm asupersync-linux-amd64.tar.gz -p release/keys/asupersync.pub
 
 ### Minimum Supported Rust Version
 
-Asupersync uses **Rust Edition 2024**. Contributor and release lanes track the
-pinned **nightly** toolchain in `rust-toolchain.toml` because the default feature
-set includes `nightly-outcome-try` for `Outcome` `Try`/`?` ergonomics.
+Asupersync uses **Rust Edition 2024** and builds on **stable Rust with its
+default features**. The one nightly-only piece is `?` on `Outcome`, from the
+default `nightly-outcome-try` feature. The build script probes the compiler.
+On nightly, the feature works as it always has. On stable or beta, it is
+inactive: the crate builds without the `Try` impls, and Cargo prints a warning
+for local builds. Contributor and release lanes track the pinned **nightly**
+toolchain in `rust-toolchain.toml`, so the crate's own tests and examples keep
+`?` on `Outcome`.
 
-The audited stable subset is checked with default features disabled and
-`proc-macros` enabled:
+The stable lane checks the default features and the minimal subset (default
+features disabled, `proc-macros` enabled) on Rust 1.95.0. That is the oldest
+stable compiler the dependency graph accepts today (`sysinfo` 0.39 requires
+1.95):
 
 ```bash
 bash scripts/run_stable_lane_e2e.sh
 ```
 
-That runner drives `cargo +stable check`, `clippy`, and the focused `Outcome`
-unit tests through RCH with the shared stable-lane target directory. Stable
-consumers must use `--no-default-features --features proc-macros` until the
-nightly `Outcome` `Try` surface is migrated or disabled by default.
+That runner drives `cargo +1.95.0 check` (default features and the minimal
+subset), `clippy`, and the focused `Outcome` unit tests through RCH with the
+shared stable-lane target directory. Set `STABLE_RUST_TOOLCHAIN` to check
+another stable release.
 
 ### Downstream dependency resolution
 
 Asupersync's repository `Cargo.lock` governs this workspace; it does not pin a
-downstream consumer's resolution. Default-feature consumers should use the
-current contributor/release pin, `nightly-2026-08-31`, from
-`rust-toolchain.toml`. That exact snapshot is a compatibility instruction, not
-a numeric stable MSRV or promised lower bound. The stable subset currently has
-no numeric MSRV claim because `Cargo.toml` does not declare `rust-version`, and
-the stable lane remains limited to `--no-default-features --features
-proc-macros`.
+downstream consumer's resolution. Default-feature consumers on stable Rust
+need 1.95 or newer, the floor that today's dependency graph sets. Consumers who
+want `?` on `Outcome` should use the contributor/release nightly pin,
+`nightly-2026-08-31`, from `rust-toolchain.toml`; another nightly works only if
+its `Try` traits still match. `Cargo.toml` does not declare `rust-version`, so
+1.95 is the lane's checked floor, not a promised lower bound.
 
 Updated entry macros also support older `0.4.x` runtimes. When the runtime
 lacks `Runtime::drain_root_region`, omitting `drain_ms` preserves its legacy
@@ -928,7 +964,6 @@ impl Cx {
 │  │    SendPermit ──→ send() or abort()                                 │   │
 │  │    Ack        ──→ commit() or nack()                                │   │
 │  │    Lease      ──→ renew() or expire()                               │   │
-│  │    IoOp       ──→ complete() or cancel()                            │   │
 │  │                                                                     │   │
 │  │    Invariant: region_close requires all obligations resolved        │   │
 │  │                                                                     │   │
@@ -987,7 +1022,7 @@ Scheduler behavior is intentionally explicit:
 
 ### Sharded Runtime State and Lock Discipline
 
-Runtime state is split into independently locked shards so hot-path polling can proceed without serializing every region or obligation mutation.
+Runtime state can be split into independently locked shards, so hot-path polling can proceed without serializing every region or obligation mutation. This is opt-in (`RuntimeBuilder::with_sharded_state(true)`); the default keeps the state behind one lock.
 
 - Shard A (`tasks`): task table, stored futures, intrusive queue links.
 - Shard B (`regions`): region ownership tree and state transitions.
@@ -995,7 +1030,7 @@ Runtime state is split into independently locked shards so hot-path polling can 
 - Shard D (`instrumentation`): trace and metrics surfaces.
 - Shard E (`config`): immutable runtime config.
 
-Multi-shard operations use `ShardGuard` with canonical acquisition order `E -> D -> B -> A -> C`, and debug checks enforce that order to prevent deadlocks (`src/runtime/sharded_state.rs`). Shard locks are `ContendedMutex` instances, and optional `lock-metrics` instrumentation can measure wait/hold behavior (`src/sync/contended_mutex.rs`).
+Multi-shard operations take shard locks in the canonical order `E -> D -> B -> A -> C` to prevent deadlocks. `ShardGuard` (`src/runtime/sharded_state.rs`) checks that order in debug builds, but only tests use it today; the sharded runtime paths lock shards directly, so in production the order is a convention, not a checked one. Shard locks are `ContendedMutex` instances, and optional `lock-metrics` instrumentation can measure wait/hold behavior (`src/sync/contended_mutex.rs`).
 
 ### Region Heap Handles and Quiescent Reclamation
 
@@ -1014,15 +1049,72 @@ Asupersync exposes runtime controls that are usually hidden behind ad hoc instru
 |---------|-----|------------------|
 | Logical clock mode | `RuntimeBuilder::logical_clock_mode(...)` | Select Lamport, Vector, or Hybrid logical clocks for causal ordering; defaults are chosen from runtime context and carried into event timelines (`src/runtime/config.rs`, `src/trace/distributed/vclock.rs`, `src/runtime/state.rs`) |
 | Cancel attribution bounds | `RuntimeBuilder::cancel_attribution_config(...)` | Bound cancellation cause-chain depth and memory while preserving root-cause lineage and explicit truncation metadata when limits are hit (`src/types/cancel.rs`, `src/runtime/state.rs`) |
+| Cancel reason on errors | `Error::cancel_reason()` | The error from `cx.checkpoint()` (and `Error::cancelled`) carries the structured `CancelReason`: kind, origin and cause chain. A joiner that only sees the task's `Ok(Err(error))` can still tell why it was cancelled (`src/error.rs`) |
 | Deadline monitor | `RuntimeBuilder::deadline_monitoring(...)` | Run a background monitor with configurable check cadence, warning thresholds, adaptive history percentiles, and custom warning callbacks (`src/runtime/deadline_monitor.rs`, `src/runtime/builder.rs`) |
 
 - Deadline checks are logical-time aware and fall back to wall-clock progression when logical time is stable, so stalled-task warnings work in both lab and production-style runs (`src/runtime/deadline_monitor.rs`).
 - Warning emission is per-task deduplicated until task removal, so deadline diagnostics stay high-signal under repeated scans (`src/runtime/deadline_monitor.rs`).
 - Deadline warnings carry the most recent checkpoint message when available, which makes stalled-task alerts actionable without digging through a full trace first (`src/runtime/deadline_monitor.rs`).
 
-## How We Made It Fast
+<a id="how-we-made-it-fast"></a>
 
-This runtime got fast through many small, verified runtime changes by the project owner and collaborating coding agents. The method stayed consistent: profile the hot paths, remove one source of contention or allocation at a time, then keep cancellation and determinism guarantees intact.
+## Performance
+
+### Measured against tokio
+
+Asupersync does more work per task than tokio. Every task gets a region
+membership, a cancellation state machine and a terminal-result channel, and
+two-phase permits are tracked as obligations. That bookkeeping costs time.
+These numbers come from one process running both runtimes. The build was a
+release build with default features. The host was one 10-CPU RCH worker. The
+date was 2026-10-03, and the source was that of commit `c2d7715ae`. Each figure
+is p50 per operation at n = 1,000, and the ranges span two runs.
+
+| Operation | Asupersync | tokio | Ratio |
+|-----------|------------|-------|-------|
+| spawn + join from a task, 4 workers | 7.24–7.52 µs | 0.40–0.41 µs | 18× |
+| spawn + join from `block_on`, current-thread | 4.87–5.30 µs | 0.39 µs | 12–14× |
+| `yield_now`, 4 workers | 0.83–1.02 µs | 0.24 µs | 3.4–4.2× |
+| `yield_now`, current-thread | 0.55–0.58 µs | 0.13 µs | 4.3–4.5× |
+| mpsc ping-pong round trip, 4 workers | 2.96–3.04 µs | 0.27–0.28 µs | 11× |
+| mpsc ping-pong round trip, current-thread | 1.85–1.90 µs | 0.24–0.25 µs | 7.6× |
+| fan-out child: `fiber::scope` vs tokio spawn + join, current-thread | 0.44–0.46 µs | 0.39 µs | 1.1–1.2× |
+| fan-out child: `fiber::scope` vs tokio spawn + join, 4 workers | 0.34 µs | 0.40–0.41 µs | 0.8× |
+
+**Reading the table:**
+- Spawning a task, yielding and channel round trips are several times slower
+  than tokio.
+- For most servers, a few microseconds per task is small next to network and
+  disk latency.
+- For workloads that spawn millions of tiny tasks per second, or exchange
+  messages in a tight loop, the difference matters.
+- For fine-grained fan-out inside one task, use `fiber::scope`. It costs about
+  as much as a tokio task, but fibers run concurrently on one thread, not in
+  parallel. Tokio's own in-task equivalent is `futures::stream::FuturesUnordered`.
+
+These numbers already include the October 2026 cuts:
+- an O(1) region task set;
+- verification-only monitors switched off in release builds;
+- an obligation-free one-call `mpsc::send`, which made ping-pong 2.7–4.1× faster;
+- no global-state lock per scheduler dispatch for spawn admission.
+
+The remaining work items are listed under `asupersync-issue65-criticisms-kpmoy5.1`.
+
+To reproduce, run `benches/runtime_vs_tokio.rs`, which puts tokio and asupersync
+side by side in the same Criterion groups:
+
+```text
+cargo bench -p asupersync --bench runtime_vs_tokio --features criterion-benches -- --noplot
+```
+
+The in-repo bench builds asupersync with the test-only features that the
+`conformance` dev-dependency enables. For default-feature numbers like the
+table above, build the same code in a separate crate that depends on
+asupersync normally.
+
+### What has been optimized so far
+
+The method stayed consistent across many small, verified runtime changes: profile the hot paths, remove one source of contention or allocation at a time, then keep cancellation and determinism guarantees intact.
 
 - **Scheduler lock traffic**: dispatch uses a multi-phase path, and local cancel/timed/ready checks run under one local lock acquisition instead of repeated lock round-trips (`src/runtime/scheduler/three_lane.rs`).
 - **Hot-path task isolation**: scheduler queues can run against a dedicated sharded `TaskTable`, so push/pop/steal paths avoid full runtime-state lock pressure (`src/runtime/task_table.rs`, `src/runtime/scheduler/local_queue.rs`, `src/runtime/scheduler/three_lane.rs`).
@@ -1037,7 +1129,7 @@ This runtime got fast through many small, verified runtime changes by the projec
 - **Steal-path locality shortcuts**: local queues track whether any pinned local tasks are present; when none are present, stealers take a no-branch non-local path, and when locals do exist they are skipped/restored with `SmallVec` to keep the common path allocation-free (`src/runtime/scheduler/local_queue.rs`, `src/runtime/scheduler/intrusive.rs`).
 - **Backpressure without silent drops**: global ready-queue limits emit capacity warnings while still scheduling work, preserving structured-concurrency guarantees instead of dropping tasks (`src/runtime/scheduler/three_lane.rs`, `src/runtime/config.rs`).
 - **Reactor fast paths**: I/O registration rearm paths cache waker state, and stale token/fd cleanup is explicit, which keeps event loops moving under churn (`src/runtime/io_driver.rs`, `src/runtime/reactor/*`).
-- **Timer wheel tuned for real cancellation workloads**: timer cancel is generation-based O(1), long deadlines spill into overflow and are promoted back in range, and coalescing windows can batch nearby wakeups with minimum-group gating (`src/time/wheel.rs`, `src/time/driver.rs`).
+- **Timer wheel tuned for real cancellation workloads**: timer cancel is generation-based O(1), long deadlines spill into overflow and are promoted back in range, and the wheel supports coalescing windows that batch nearby wakeups with minimum-group gating, though no runtime setting enables them yet (`src/time/wheel.rs`, `src/time/driver.rs`).
 - **Panic containment on worker threads**: task polling is guarded so panics are converted into terminal `Outcome::Panicked`, dependents/finalizers are still driven, and one bad task does not take down a worker lane (`src/runtime/scheduler/three_lane.rs`, `src/runtime/builder.rs`).
 - **Timer behavior measured where it matters**: the timer benchmark corpus includes direct wheel-vs-`BTreeMap`/`BinaryHeap` comparisons; the documented 10K corpus (release-perf profile, 2026-06-01) records a ~27x cancel-path advantage over `BTreeMap`, and the wheel now also wins the mixed insert/cancel/expire workload outright (`benches/timer_wheel.rs`).
 - **Stable memory handles with deterministic reuse**: region-heap generation indices prevent ABA-style stale-handle reuse while preserving deterministic allocation/reuse patterns (`src/runtime/region_heap.rs`).
@@ -1707,7 +1799,7 @@ Current contract:
 - `join!` and `join_all!` pin every branch once and poll all unfinished branches concurrently inside one `poll_fn`; neither macro serializes branches.
 - `race!` expands only to the drain-correct `Cx::race_drained*` family: spawned losers are protocol-cancelled and drained before return. Prefer the factory form (`move |child| work(child)`), where each branch receives its own child `Cx`: loser cancellation targets the branch's task, so a prebuilt branch awaiting on the caller's `cx` never observes it and the drain waits for that branch to finish on its own. On a `race!` `timeout:` expiry, the factory form cancels and drains every branch and returns `Err(JoinError::Cancelled(_))`; the prebuilt form abandons the race by drop.
 - Blocking `select!` is also drain-correct; its `else` form instead polls each branch exactly once in source order, returns immediately, and drops all still-pending branches without draining.
-- Branches used by drain-correct `race!` and blocking `select!` must be `Send + 'static`, and the `Cx` must carry spawn authority. Direct `Cx::race*` calls remain the lower-level drop-on-cancel surface for inline, non-`'static` futures.
+- Branches used by drain-correct `race!` and blocking `select!` must be `Send + 'static`, and the `Cx` must carry spawn authority. The direct `Cx::race`, `race_named`, `race_timeout` and `race_timeout_named` calls also take boxed `Send + 'static` futures; they are the lower-level surface that drops the losing futures when the race ends instead of draining them.
 - Minimal builds without `proc-macros` do not have a usable macro DSL fallback: `join!` and `race!` intentionally fail with `compile_error!`, while `scope!`, `spawn!`, `join_all!`, and `select!` are unavailable until `proc-macros` is re-enabled.
 
 Compile-fail tests (via `trybuild`) verify that incorrect usage produces clear
@@ -1788,14 +1880,14 @@ deterministic lab runtime.
 | Supervisor | A compiled, deterministic restart *topology* over regions (boot ordering, dependencies, shutdown budgets). `CompiledSupervisor::bind_managed` runs it live: a failed child is cancelled, drained and restarted one-for-one, one-for-all or rest-for-one under a shared intensity/backoff policy (`src/supervision.rs`, used by `src/app.rs`). Actors also restart on failure individually (`src/actor.rs`) |
 | Link | Failure propagation rule (sibling/parent coupling; deterministic) |
 | Monitor + DOWN | Observation without coupling: deterministic notifications |
-| Registry | Names as lease obligations: reserve/commit or abort (no stale names) |
+| Registry | Names as leases: reserve/commit or abort; dropping an unresolved lease panics (the lease is not yet a runtime-ledger obligation, so region close does not wait for it) |
 | call/cast | Request/response and mailbox protocols with bounded drain on cancel |
 
 ### Why Spork Is Strictly Stronger
 
 - Determinism: the lab runtime makes OTP-style debugging reproducible (seeded schedules, trace capture/replay, schedule exploration).
 - Cancel-correctness: cancellation is a protocol (request -> drain -> finalize), so covered OTP-style shutdown paths carry explicit budgets and can publish concrete cleanup bounds; non-cooperative paths retain the no-universal-bound caveat above.
-- No silent leaks for runtime-tracked obligations: regions cannot close with live children or unresolved registered permits/acks/leases, so "forgot to reply" and "stale name" become runtime or test-oracle failures instead of silent success.
+- No silent leaks for runtime-tracked obligations: regions cannot close with live children or unresolved registered permits/acks/leases, so "forgot to reply" becomes a runtime or test-oracle failure instead of silent success. A name lease is a standalone drop-bomb token today: dropping it unresolved panics, but region close does not check it.
 
 ### Where To Look In The Repo
 
@@ -1821,8 +1913,8 @@ Asupersync has formal semantics backing its engineering.
 | **Traces** | Mazurkiewicz equivalence (partial orders) | DPOR-style guided exploration (not certified-optimal DPOR), stable replay |
 | **Cancellation** | Two-player game with budgets | Scoped completeness when modeled responsiveness assumptions hold and budgets are sufficient |
 | **Adaptive scheduling** | Discounted UCB1 over `{4, 8, 16, 32, 64}` | Default-on dynamic preemption control with deterministic epoch updates |
-| **Drain certificates** | Signed-step range bounds + empirical phase diagnostics | Conditional, auditable progress evidence for cancellation drain |
-| **Structural diagnostics** | Spectral graph theory + conformal + e-processes | Early warning on wait-graph fragmentation with calibrated alarms |
+| **Drain certificates** | Signed-step range bounds + empirical phase diagnostics | Conditional, auditable progress evidence for cancellation drain; the current-horizon tail bounds are the trivial `1`, so the phase labels carry the signal |
+| **Structural diagnostics** | Spectral graph theory + conformal + e-processes | Early warning on wait-graph fragmentation with calibrated alarms, computed on demand through `Diagnostics` |
 
 See [`asupersync_v4_formal_semantics.md`](./asupersync_v4_formal_semantics.md) for the complete operational semantics.
 
@@ -1835,8 +1927,8 @@ Asupersync is intentionally "math-forward": it uses advanced math and theory-gra
 | Mechanism | Current status |
 |-----------|----------------|
 | Discounted-UCB1 scheduler control | Implemented, default-on runtime scheduling control surface |
-| Drain progress diagnostics | Implemented cancellation progress diagnostics |
-| Spectral wait-graph health | Implemented observability diagnostic; advisory early warning, not a standalone deadlock proof |
+| Drain progress diagnostics | Implemented cancellation progress diagnostics; the HTTP/1 and HTTP/2 graceful-drain supervisor uses them, and the scheduler only with `enable_governor` (off by default). The current-horizon tail bounds are the trivial `1` |
+| Spectral wait-graph health | Implemented observability diagnostic, computed when `Diagnostics::analyze_structural_health` is called; the scheduler runs its own copy only with `enable_governor` (off by default). Advisory early warning, not a standalone deadlock proof |
 | Mazurkiewicz/Foata trace canonicalization and DPOR | Implemented lab/trace exploration machinery |
 | Persistent homology trace scoring | Implemented lab exploration prototype; used to prioritize interesting schedules, not a production runtime gate |
 | Sheaf-style saga consistency and TLA+ export | Implemented analysis/export APIs for verification workflows; the in-process saga executor does not run the sheaf check |
@@ -1853,7 +1945,7 @@ Asupersync is intentionally "math-forward": it uses advanced math and theory-gra
 
 `src/observability/spectral_health.rs` computes Laplacian-spectrum diagnostics and an early-warning severity model (`none/watch/warning/critical`) over the live wait graph. It combines spectral trend analysis, nonparametric dependence tests, split-conformal next-step bounds, and an anytime-valid e-process, so structural degradation can be detected with calibrated confidence before hard failures.
 
-Status: production-facing observability path. The classification is intentionally advisory: zero or falling spectral connectivity is a topology signal, while explicit trapped-cycle evidence remains a separate deadlock proof.
+Status: an on-demand observability diagnostic. `Diagnostics::analyze_structural_health` computes it when called, and the scheduler runs its own copy only with `enable_governor`, which is off by default. The classification is intentionally advisory: zero or falling spectral connectivity is a topology signal, while explicit trapped-cycle evidence remains a separate deadlock proof.
 
 ### Mazurkiewicz Trace Monoid + Foata Normal Form (DPOR Equivalence Classes)
 
@@ -1895,7 +1987,7 @@ Payoff: catches split-brain-style saga states that evade purely pairwise conflic
 
 ### Anytime-Valid Invariant Monitoring (E-Processes, Ville's Inequality)
 
-The lab runtime monitors invariants (task leaks, obligation leaks, region quiescence) with e-processes (`src/lab/oracle/eprocess.rs`), adding one observation per run that advances the lab. Separately, `src/obligation/eprocess.rs` provides an obligation-leak monitor. It is opt-in: `Runtime::enable_obligation_leak_monitor` installs a Shiryaev–Roberts change detector that the runtime feeds with each committed or aborted obligation's age (each counted once). A leaked obligation alarms it at once, and the alarm latches. `Runtime::obligation_leak_monitor_snapshot` reads its statistic and alert state. Its guarantee is an average run length: the expected number of observations before a false alarm is at least 1/α, for ages within the documented null. An obligation that is never resolved is not observed until its holder completes. The lab invariant monitors are anytime-valid e-processes: a supermartingale-based framework that supports optional stopping without "peeking penalties".
+The lab runtime monitors invariants (task leaks, obligation leaks, region quiescence) with e-processes (`src/lab/oracle/eprocess.rs`), adding one observation per run that advances the lab. Separately, `src/obligation/eprocess.rs` provides an obligation-leak monitor. It is opt-in: `Runtime::enable_obligation_leak_monitor` installs a Shiryaev–Roberts change detector that the runtime feeds with each committed or aborted obligation's age (each counted once). A leaked obligation alarms it at once, including one the `Recover` leak policy aborts, and the alarm latches. `Runtime::obligation_leak_monitor_snapshot` reads its statistic and alert state. The detector is enabled over a horizon of resolutions: for ages within the documented null, the probability of a false alarm within that horizon is at most α (its threshold is horizon/α). An obligation that is never resolved is not observed until its holder completes. The lab invariant monitors are anytime-valid e-processes: a supermartingale-based framework that supports optional stopping without "peeking penalties".
 
 Payoff: turn long-running exploration into statistically sound monitoring, with deterministic, explainable rejection thresholds.
 
@@ -1993,7 +2085,7 @@ Asupersync is feature-light by default; the lab runtime is available without fla
 | `metrics` | OpenTelemetry metrics provider (Tokio-free normal graph; OTLP protobuf helpers are fuzz/test-only) | No |
 | `tracing-integration` | Tracing spans/logging integration | No |
 | `proc-macros` | `scope!`, `spawn!`, `join!`, `join_all!`, `race!`, `select!`, plus `#[main]`, `#[test]`, and `#[lab_test]` | Yes |
-| `nightly-outcome-try` | Nightly-only `Outcome` `Try`/residual impls that enable `?` ergonomics | Yes |
+| `nightly-outcome-try` | `Outcome` `Try`/residual impls that enable `?`; active only on a nightly compiler (on stable the crate builds without them) | Yes |
 | `runtime-core` | Compatibility marker for the planned runtime module split; gates nothing yet | Yes |
 | `native-runtime` | Compatibility marker for the planned runtime module split; a compile error on wasm32 browser builds, gates nothing else yet | Yes |
 | `tower` | Tower `Service` adapter support | No |
@@ -2051,14 +2143,15 @@ meant for applications: `channel-mpsc-select-e2e`, `cross-subsystem-recovery-e2e
 
 ### Minimum Supported Rust Version
 
-Rust **nightly** remains the default contributor/release toolchain (Edition
-2024, pinned by `rust-toolchain.toml`) because default features include
-`nightly-outcome-try`.
+Default features build on stable Rust 1.95 or newer (Edition 2024). On stable,
+`nightly-outcome-try` is inactive, so `?` on `Outcome` is unavailable. Rust
+**nightly** remains the contributor/release toolchain (pinned by
+`rust-toolchain.toml`), where `nightly-outcome-try` provides `?` on `Outcome`.
 
-The checked stable subset is `cargo +stable` with default features disabled and
-`proc-macros` enabled. Use `scripts/run_stable_lane_e2e.sh` for the canonical
-local/RCH runner; it emits structured per-stage logs and a `summary.json` for
-the stable-lane artifact.
+The stable lane checks default features and the minimal subset (default
+features disabled, `proc-macros` enabled) on Rust 1.95.0. Use
+`scripts/run_stable_lane_e2e.sh` for the canonical local/RCH runner; it emits
+structured per-stage logs and a `summary.json` for the stable-lane artifact.
 
 ### Semver Policy
 
@@ -2272,8 +2365,15 @@ for JavaScript and TypeScript applications via `wasm-bindgen`. Be precise
 about what crosses that boundary today: the wasm ABI exported by
 `asupersync-browser-core` is a structured lifecycle ledger (regions, scopes,
 task handles, capability-gated `fetch`/`WebSocket` calls, and fail-closed
-scope-close ordering), not a scheduler. Browser work runs on the host's own
-promises and event loop; no Rust future is polled inside the wasm module.
+scope-close ordering), not a scheduler. A JavaScript `task_spawn` records a
+handle for work that runs on the host's own promises and event loop. Rust
+futures are polled inside the module in two places only. Each ABI `fetch`
+request runs as a Rust future driven by `wasm-bindgen-futures`. Rust code
+that links `asupersync-browser-core` directly can also run `!Send` futures on
+its bounded, scope-owned local executor (`local::spawn_local_future`, with
+`fetch::fetch_bytes` for awaitable fetches). Neither path is the native `Cx`
+runtime: there is no work stealing, and cancellation drops the future instead
+of draining it.
 
 ### What works today
 
@@ -2500,7 +2600,7 @@ GA.
 | WebSocket | ⚠️ Runtime surface shipped; live RFC6455 conformance coverage now wires extension negotiation plus broader framing/control/close/masking/fragmentation harnesses, with runtime e2e coverage still lane-specific |
 | HTTP/3 (default static-only QPACK; opt-in dynamic QPACK field-section and instruction-stream state machine) | ⚠️ Partial implementation: an established-connection adapter drives control and request/response lifecycle over native QUIC stream bytes, including static-QPACK headers/trailers, informational responses, GOAWAY, cancellation, resets, and reliable STREAM/control-frame recovery. A caller-driven `NativeH3Router` bridge assembles bounded requests through FIN, detaches bounded caller-scoped Router dispatches, and emits validated final responses on the originating stream while isolating per-stream refusal/reset. The feature-gated `NativeH3Listener` adds autonomous multi-peer TLS admission, runtime-owned request tasks, buffered and produced responses, deadlines, and graceful shutdown over native UDP. Opt-in streaming request ingress admits handlers at HEADERS, applies static body policy before admission, and uses bounded request-task-owned DATA queues with per-stream backpressure and FIN validation. The earlier buffered listener compiled; the new request-streaming implementation and native regressions have source review, with full native compilation/execution still unverified. The live request path also carries a bounded final trailer section through the body queue and requires actual FIN before EOF. The native opt-in state machine separately supports dynamic QPACK field sections/tables, Huffman strings, encoder/decoder instruction-stream processing, and bounded blocked-stream scheduling. Deployment readiness, CONNECT, migration, 0-RTT, and external interop evidence remain open, so this is not a claim of h3/quinn drop-in parity or full QUIC deployment parity. |
 | Database clients (SQLite, PostgreSQL, MySQL) | ✅ Implemented |
-| Actor supervision (GenServer, links, monitors) | ✅ Implemented |
+| Actor supervision (GenServer, links, monitors) | ✅ GenServers, actors and supervisors. `cx.spawn_gen_server(server, capacity)`, `cx.spawn_actor(actor, capacity)` and `cx.spawn_supervised_actor(factory, strategy, capacity)` run them as tasks in the caller's region, on the native runtime and in the lab. Monitors and links fire when the watched task ends. `cx.monitor(&handle)` delivers one DOWN with the exit reason; `cx.link(peer)` cancels the other side of an abnormal exit (`CancelKind::LinkedExit`); `cx.link_trapping(peer)` delivers the peer's exit instead. A GenServer gets the same through `GenServerHandle::monitor` / `link` / `link_trapping`, as `SystemMsg::Down` / `SystemMsg::Exit` in `handle_info`. |
 | DPOR-style race-guided seed exploration | ⚠️ Implemented as trace analysis, seed derivation, and equivalence-class telemetry; no exact-prefix backtracking or completeness claim |
 | Distributed runtime (remote tasks, sagas, leases, recovery) | Protocol/state-machine, lease, idempotency, saga, native V3 TCP+mTLS runtime/service, Unix static process host, strict statically linked application-registry hosting, and caller-owned single-destination active discovery implemented; deterministic, in-process, cross-process localhost, and one terminal two-worker RCH mTLS proof shipped. Dynamic plugins/code shipping, route persistence, restart-durable idempotency, and general production-WAN reliability remain open. |
 | RaptorQ fountain coding for snapshot distribution | Codec, replica assignment, quorum recovery, and native `tls`-gated `RemoteSymbolTransport` implemented, with cross-process test scenarios. Current execution evidence and deployment scope must be assessed separately; this is not arbitrary Rust-future migration or general production-WAN reliability. |
@@ -2688,7 +2788,32 @@ Asupersync has its own runtime with explicit capabilities. For code that needs t
 
 ### Is this production-ready?
 
-Asupersync is active development software with a fully implemented core runtime surface (deterministic kernel, parallel scheduler, TCP/HTTP/TLS, database clients, distributed runtime primitives, actor/supervision model, and deterministic verification harnesses), plus a shipped WebSocket runtime lane whose live RFC6455 conformance coverage is still partial. Phase 6 hardening is still active for release gates and external-boundary/browser adapter maturity, so shipped support is lane-specific rather than blanket-GA across every adapter surface; use [`docs/integration.md`](./docs/integration.md) and [`docs/WASM.md`](./docs/WASM.md) as the live source of truth for support class and rollout posture. It is a strong fit for internal systems where correctness guarantees and deterministic debugging are primary requirements.
+Not in the sense tokio is. Asupersync is experimental, pre-1.0 software.
+
+**Who uses it:** the author's own projects run on it in production. No
+independent production user is known.
+
+**What is implemented:**
+- the core runtime: deterministic kernel, parallel scheduler, TCP/HTTP/TLS,
+  database clients, distributed runtime primitives, the actor and supervision
+  model, and the deterministic verification harnesses;
+- a WebSocket runtime lane whose live RFC6455 conformance coverage is still
+  partial.
+
+**What is still in progress:**
+- release gates, and the maturity of external-boundary and browser adapters,
+  are still being hardened;
+- shipped support is lane-specific, not blanket-GA across every adapter
+  surface. Use [`docs/integration.md`](./docs/integration.md) and
+  [`docs/WASM.md`](./docs/WASM.md) as the live source of truth for support class
+  and rollout posture.
+
+**Cost:** a task costs several times what a tokio task costs (see
+[Measured against tokio](#measured-against-tokio)).
+
+**Where it fits:** internal systems where structured cancellation, obligation
+tracking and deterministic debugging matter more than the last microsecond per
+task.
 
 ### How do I report bugs?
 

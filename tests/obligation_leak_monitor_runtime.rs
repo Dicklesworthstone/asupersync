@@ -12,6 +12,7 @@ use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::obligation::eprocess::{AlertState, MonitorConfig};
 use asupersync::record::{ObligationAbortReason, ObligationKind};
 use asupersync::runtime::RuntimeBuilder;
+use asupersync::runtime::config::ObligationLeakResponse;
 use asupersync::types::Budget;
 use std::time::{Duration, Instant};
 
@@ -21,6 +22,10 @@ const FAST: MonitorConfig = MonitorConfig {
     expected_lifetime_ns: 1_000_000,
     min_observations: 3,
 };
+
+/// Detector horizon: a false alarm within 10^6 resolutions has probability
+/// at most alpha, and the threshold is 10^6 / 0.01 = 10^8.
+const HORIZON: u64 = 1_000_000;
 
 fn log(case: &str, detail: String) {
     eprintln!(
@@ -33,7 +38,7 @@ fn log(case: &str, detail: String) {
 fn lab_monitor_is_off_until_enabled() {
     let mut lab = LabRuntime::new(LabConfig::new(1));
     assert!(lab.state.obligation_leak_monitor_snapshot().is_none());
-    lab.state.enable_obligation_leak_monitor(FAST);
+    lab.state.enable_obligation_leak_monitor(FAST, HORIZON);
     let snapshot = lab
         .state
         .obligation_leak_monitor_snapshot()
@@ -57,7 +62,7 @@ fn lab_monitor_counts_each_resolution_once_and_stays_clear_for_fast_obligations(
         .expect("reserve early obligation");
     lab.state.commit_obligation(early).expect("commit early");
 
-    lab.state.enable_obligation_leak_monitor(FAST);
+    lab.state.enable_obligation_leak_monitor(FAST, HORIZON);
     let obligations: Vec<_> = (0..20)
         .map(|_| {
             lab.state
@@ -97,12 +102,13 @@ fn lab_monitor_counts_each_resolution_once_and_stays_clear_for_fast_obligations(
 
 /// Many on-time resolutions must not bury the evidence of a later slowdown.
 /// A plain e-process fed 200 fast obligations needs about eleven obligations
-/// held 1 s against 1 ms before it alarms; the runtime's change detector
-/// alarms on the first, and the alarm latches through later fast ones.
+/// held 1 s against 1 ms before it alarms; the runtime's change detector, at
+/// a 10^8 threshold, alarms on the third, and the alarm latches through later
+/// fast ones.
 #[test]
 fn lab_monitor_detects_a_slowdown_after_many_healthy_resolutions() {
     let mut lab = LabRuntime::new(LabConfig::new(5));
-    lab.state.enable_obligation_leak_monitor(FAST);
+    lab.state.enable_obligation_leak_monitor(FAST, HORIZON);
     let region = lab.state.create_root_region(Budget::INFINITE);
     let (task, _handle) = lab
         .state
@@ -129,13 +135,19 @@ fn lab_monitor_detects_a_slowdown_after_many_healthy_resolutions() {
         .obligation_leak_monitor_snapshot()
         .expect("enabled monitor");
     assert_eq!(healthy.alert_state, AlertState::Clear);
+    resolve(&mut lab, 1_000_000_000, 2);
+    let two_slow = lab
+        .state
+        .obligation_leak_monitor_snapshot()
+        .expect("enabled monitor");
+    assert_eq!(two_slow.alert_state, AlertState::Clear, "{two_slow:?}");
     resolve(&mut lab, 1_000_000_000, 1);
     let slow = lab
         .state
         .obligation_leak_monitor_snapshot()
         .expect("enabled monitor");
     log("slowdown", format!("healthy={healthy:?} slow={slow:?}"));
-    assert_eq!(slow.observations, 201);
+    assert_eq!(slow.observations, 203);
     assert_eq!(slow.alert_state, AlertState::Alert, "{slow:?}");
     resolve(&mut lab, 10_000, 50);
     let after = lab
@@ -149,7 +161,7 @@ fn lab_monitor_detects_a_slowdown_after_many_healthy_resolutions() {
 #[test]
 fn lab_monitor_alerts_when_obligations_outlive_their_expected_lifetime() {
     let mut lab = LabRuntime::new(LabConfig::new(3));
-    lab.state.enable_obligation_leak_monitor(FAST);
+    lab.state.enable_obligation_leak_monitor(FAST, HORIZON);
     let region = lab.state.create_root_region(Budget::INFINITE);
     let (task, _handle) = lab
         .state
@@ -196,7 +208,7 @@ fn lab_monitor_alerts_when_obligations_outlive_their_expected_lifetime() {
 #[test]
 fn lab_monitor_alarms_on_a_leaked_obligation_and_counts_it_once() {
     let mut lab = LabRuntime::new(LabConfig::new(4).panic_on_leak(false));
-    lab.state.enable_obligation_leak_monitor(FAST);
+    lab.state.enable_obligation_leak_monitor(FAST, HORIZON);
     let region = lab.state.create_root_region(Budget::INFINITE);
     let (task, _handle) = lab
         .state
@@ -227,16 +239,58 @@ fn lab_monitor_alarms_on_a_leaked_obligation_and_counts_it_once() {
     assert_eq!(snapshot.alert_count, 1);
 }
 
+/// Under the `Recover` policy a leaked obligation is aborted for cleanup, but
+/// it is still a leak to the monitor. Its abort used to feed the monitor the
+/// leak's age instead (here 0 ns, an on-time resolution), and the monitor
+/// stayed clear.
+#[test]
+fn lab_monitor_alarms_on_a_leak_the_recover_policy_aborts() {
+    let mut lab = LabRuntime::new(LabConfig::new(6).panic_on_leak(false));
+    lab.state
+        .set_obligation_leak_response(ObligationLeakResponse::Recover);
+    lab.state.enable_obligation_leak_monitor(FAST, HORIZON);
+    let region = lab.state.create_root_region(Budget::INFINITE);
+    let (task, _handle) = lab
+        .state
+        .create_task(region, Budget::INFINITE, async {})
+        .expect("create holder task");
+    lab.state
+        .create_obligation(ObligationKind::IoOp, task, region, None)
+        .expect("reserve obligation");
+    lab.scheduler.lock().schedule(task, 0);
+    // The holder completes normally while still holding the obligation.
+    lab.run_until_quiescent();
+    let snapshot = lab
+        .state
+        .obligation_leak_monitor_snapshot()
+        .expect("enabled monitor");
+    log(
+        "recovered-leak",
+        format!("leak_count={} {snapshot:?}", lab.state.leak_count()),
+    );
+    assert_eq!(lab.state.leak_count(), 1);
+    assert_eq!(
+        snapshot.observations, 1,
+        "a recovered leak is observed once"
+    );
+    assert_eq!(snapshot.alert_state, AlertState::Alert, "{snapshot:?}");
+    assert!(snapshot.e_value.is_infinite(), "{snapshot:?}");
+    assert_eq!(snapshot.alert_count, 1);
+}
+
 #[test]
 fn native_runtime_monitor_observes_checked_obligations() {
     let runtime = RuntimeBuilder::new().worker_threads(1).build().unwrap();
     assert!(runtime.obligation_leak_monitor_snapshot().is_none());
     // A 10 s expected lifetime: these obligations resolve far faster.
-    runtime.enable_obligation_leak_monitor(MonitorConfig {
-        alpha: 0.01,
-        expected_lifetime_ns: 10_000_000_000,
-        min_observations: 3,
-    });
+    runtime.enable_obligation_leak_monitor(
+        MonitorConfig {
+            alpha: 0.01,
+            expected_lifetime_ns: 10_000_000_000,
+            min_observations: 3,
+        },
+        HORIZON,
+    );
     let join = runtime.handle().spawn(async {
         let cx = Cx::current().expect("admitted task context");
         let holder = cx.task_id();

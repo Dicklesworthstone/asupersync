@@ -3180,7 +3180,15 @@ pub fn qpack_decode_trailer_field_section(
 ) -> Result<Vec<(String, String)>, H3NativeError> {
     let plan = qpack_decode_field_section_with_context(input, mode, qpack_context)?;
     let fields = qpack_plan_to_header_fields(&plan, qpack_context)?;
-    for (name, value) in &fields {
+    validate_trailer_fields(&fields)?;
+    Ok(fields)
+}
+
+/// The HTTP-level checks on a decoded trailer section: valid field names and
+/// values, and no pseudo-headers. A section that fails them is malformed, a
+/// stream error, unlike one QPACK cannot decode.
+pub(crate) fn validate_trailer_fields(fields: &[(String, String)]) -> Result<(), H3NativeError> {
+    for (name, value) in fields {
         validate_header_name(name)?;
         validate_header_value(value)?;
         if name.starts_with(':') {
@@ -3189,7 +3197,7 @@ pub fn qpack_decode_trailer_field_section(
             ));
         }
     }
-    Ok(fields)
+    Ok(())
 }
 
 /// Decode a wire-level response field section with optional size limit enforcement.
@@ -3534,7 +3542,7 @@ pub(crate) fn header_fields_to_request_head(
     H3RequestHead::new(pseudo, headers)
 }
 
-fn header_fields_to_response_head(
+pub(crate) fn header_fields_to_response_head(
     fields: &[(String, String)],
 ) -> Result<H3ResponseHead, H3NativeError> {
     let mut status: Option<u16> = None;
@@ -3987,6 +3995,19 @@ impl H3RequestStreamState {
     }
 }
 
+/// What a client has told its peer about server push (RFC 9114 §4.6).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum LocalPushLimit {
+    /// Nothing declared: received push IDs are not bounded, as before the
+    /// declaration methods existed.
+    #[default]
+    Undeclared,
+    /// The client sends no MAX_PUSH_ID, so every push ID exceeds the maximum.
+    Refused,
+    /// The largest MAX_PUSH_ID the client has sent.
+    Max(u64),
+}
+
 /// Push-stream state: push ID header plus response frame progression.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct H3PushStreamState {
@@ -4010,6 +4031,7 @@ pub struct H3ConnectionState {
     qpack_decoder_stream_id: Option<u64>,
     goaway_id: Option<u64>,
     max_push_id_received: Option<u64>,
+    local_push_limit: LocalPushLimit,
 }
 
 impl H3ConnectionState {
@@ -4051,6 +4073,55 @@ impl H3ConnectionState {
             qpack_decoder_stream_id: None,
             goaway_id: None,
             max_push_id_received: None,
+            local_push_limit: LocalPushLimit::Undeclared,
+        }
+    }
+
+    /// Declares that this client sends no MAX_PUSH_ID, so it allows no server
+    /// push. Every push ID it then receives, in a CANCEL_PUSH, a PUSH_PROMISE
+    /// or a push-stream header, exceeds the maximum and is a connection error
+    /// (RFC 9114 §4.6, §7.2.3). Without a declaration, received push IDs are
+    /// not bounded. Has no effect on a server, which receives no pushes, or
+    /// after [`Self::on_local_max_push_id`], whose maximum cannot decrease.
+    pub fn refuse_server_push(&mut self) {
+        if self.config.endpoint_role == H3EndpointRole::Client
+            && self.local_push_limit == LocalPushLimit::Undeclared
+        {
+            self.local_push_limit = LocalPushLimit::Refused;
+        }
+    }
+
+    /// Records a MAX_PUSH_ID frame this client sent. Received push IDs above
+    /// the maximum are then connection errors (RFC 9114 §4.6, §7.2.3).
+    ///
+    /// # Errors
+    /// Refuses a server endpoint, and a maximum below one already sent
+    /// (§7.2.7).
+    pub fn on_local_max_push_id(&mut self, push_id: u64) -> Result<(), H3NativeError> {
+        if self.config.endpoint_role != H3EndpointRole::Client {
+            return Err(H3NativeError::ControlProtocol(
+                "server must not send MAX_PUSH_ID",
+            ));
+        }
+        if let LocalPushLimit::Max(previous) = self.local_push_limit
+            && push_id < previous
+        {
+            return Err(H3NativeError::ControlProtocol(
+                "MAX_PUSH_ID must not decrease",
+            ));
+        }
+        self.local_push_limit = LocalPushLimit::Max(push_id);
+        Ok(())
+    }
+
+    /// A push ID a client received, bounded by what it declared.
+    fn check_received_push_id(&self, push_id: u64) -> Result<(), H3NativeError> {
+        match self.local_push_limit {
+            LocalPushLimit::Undeclared => Ok(()),
+            LocalPushLimit::Max(max) if push_id <= max => Ok(()),
+            LocalPushLimit::Max(_) | LocalPushLimit::Refused => Err(
+                H3NativeError::ControlProtocol("push ID above the MAX_PUSH_ID this client sent"),
+            ),
         }
     }
 
@@ -4061,6 +4132,18 @@ impl H3ConnectionState {
             }
         }
         self.finished_request_streams.contains(&stream_id)
+    }
+
+    /// Whether an unfinished request stream has yet to receive its initial
+    /// HEADERS (on a client, its final response HEADERS), so that ending it
+    /// now would leave the message incomplete.
+    #[cfg(feature = "http3")]
+    pub(crate) fn request_stream_lacks_initial_headers(&self, stream_id: u64) -> bool {
+        !self.is_request_stream_finished(stream_id)
+            && self
+                .request_streams
+                .get(&stream_id)
+                .is_none_or(|state| state.header_blocks_seen == 0)
     }
 
     /// Process a control-stream frame.
@@ -4094,6 +4177,12 @@ impl H3ConnectionState {
             return Err(H3NativeError::ControlProtocol(
                 "CANCEL_PUSH names a push ID above MAX_PUSH_ID",
             ));
+        }
+        // A client bounds a server's CANCEL_PUSH by the maximum it declared.
+        if self.config.endpoint_role == H3EndpointRole::Client
+            && let H3Frame::CancelPush(id) = frame
+        {
+            self.check_received_push_id(*id)?;
         }
         if let H3Frame::Goaway(id) = frame {
             if self.config.endpoint_role == H3EndpointRole::Client
@@ -4138,6 +4227,9 @@ impl H3ConnectionState {
             return Err(H3NativeError::ControlProtocol(
                 "client must not send PUSH_PROMISE",
             ));
+        }
+        if let H3Frame::PushPromise { push_id, .. } = frame {
+            self.check_received_push_id(*push_id)?;
         }
         if self.is_request_stream_finished(stream_id) {
             return Err(H3NativeError::ControlProtocol(
@@ -4332,6 +4424,8 @@ impl H3ConnectionState {
                 ));
             }
         }
+        // §4.6: a push stream above the client's maximum is H3_ID_ERROR.
+        self.check_received_push_id(push_id)?;
 
         let state = self
             .push_streams

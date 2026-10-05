@@ -30,6 +30,8 @@ struct TcpSocketState {
     reuseaddr: bool,
     nodelay: Option<bool>,
     keepalive: KeepaliveConfig,
+    /// `TCP_USER_TIMEOUT`; `None` leaves the kernel default.
+    user_timeout: Option<Duration>,
     #[cfg(unix)]
     reuseport: bool,
 }
@@ -45,6 +47,7 @@ impl TcpSocket {
                 reuseaddr: false,
                 nodelay: None,
                 keepalive: KeepaliveConfig::Default,
+                user_timeout: None,
                 #[cfg(unix)]
                 reuseport: false,
             }),
@@ -61,6 +64,7 @@ impl TcpSocket {
                 reuseaddr: false,
                 nodelay: None,
                 keepalive: KeepaliveConfig::Default,
+                user_timeout: None,
                 #[cfg(unix)]
                 reuseport: false,
             }),
@@ -99,6 +103,21 @@ impl TcpSocket {
         Ok(())
     }
 
+    /// Sets `TCP_USER_TIMEOUT` for the stream or listener created from this
+    /// handle; see [`TcpStream::set_user_timeout`]. It is applied at
+    /// `connect` or `listen`, and streams accepted from the listener inherit
+    /// it. `None` leaves the kernel default.
+    ///
+    /// # Errors
+    ///
+    /// `io::ErrorKind::Unsupported` on platforms without the option (it exists
+    /// on Linux, Android, Fuchsia and Cygwin).
+    pub fn set_user_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        super::user_timeout::check_supported("TcpSocket::set_user_timeout")?;
+        self.state.lock().user_timeout = timeout;
+        Ok(())
+    }
+
     /// Sets the SO_REUSEPORT option on this socket (Unix only).
     #[cfg(unix)]
     pub fn set_reuseport(&self, reuseport: bool) -> io::Result<()> {
@@ -128,6 +147,9 @@ impl TcpSocket {
     }
 
     /// Starts listening, returning a TCP listener.
+    ///
+    /// Refuses with [`IoCapabilityDenied`](crate::cx::IoCapabilityDenied)
+    /// when the calling task's `Cx` lacks the IO capability.
     pub fn listen(self, backlog: u32) -> io::Result<TcpListener> {
         #[cfg(target_arch = "wasm32")]
         {
@@ -138,6 +160,7 @@ impl TcpSocket {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
+            crate::cx::io_gate::require_ambient_io("net::TcpSocket::listen")?;
             let state = self.state.into_inner();
             let addr = state.bound.ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, "socket is not bound")
@@ -169,6 +192,9 @@ impl TcpSocket {
     }
 
     /// Connects this socket, returning a TCP stream.
+    ///
+    /// Refuses with [`IoCapabilityDenied`](crate::cx::IoCapabilityDenied)
+    /// when the calling task's `Cx` lacks the IO capability.
     pub async fn connect(self, addr: SocketAddr) -> io::Result<TcpStream> {
         #[cfg(target_arch = "wasm32")]
         {
@@ -179,6 +205,7 @@ impl TcpSocket {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
+            crate::cx::io_gate::require_ambient_io("net::TcpSocket::connect")?;
             let state = self.state.into_inner();
 
             if !family_matches(state.family, addr) {
@@ -228,6 +255,10 @@ fn apply_socket_options(socket: &socket2::Socket, state: &TcpSocketState) -> io:
         }
         KeepaliveConfig::Disabled => socket.set_keepalive(false)?,
         KeepaliveConfig::Default => {}
+    }
+
+    if let Some(timeout) = state.user_timeout {
+        super::user_timeout::set_socket_user_timeout(socket, Some(timeout))?;
     }
 
     Ok(())

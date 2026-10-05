@@ -333,7 +333,11 @@ impl UnixListener {
     /// ```ignore
     /// let listener = UnixListener::bind("/tmp/my_socket.sock").await?;
     /// ```
+    ///
+    /// Refuses with [`IoCapabilityDenied`](crate::cx::IoCapabilityDenied)
+    /// when the calling task's `Cx` lacks the IO capability.
     pub async fn bind<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        crate::cx::io_gate::require_ambient_io("net::UnixListener::bind")?;
         let path = path.as_ref();
 
         reject_non_socket_bind_path(path)?;
@@ -363,6 +367,7 @@ impl UnixListener {
     pub async fn bind_abstract(name: &[u8]) -> io::Result<Self> {
         use std::os::linux::net::SocketAddrExt;
 
+        crate::cx::io_gate::require_ambient_io("net::UnixListener::bind_abstract")?;
         let addr = SocketAddr::from_abstract_name(name)?;
         let inner = net::UnixListener::bind_addr(&addr)?;
         inner.set_nonblocking(true)?;

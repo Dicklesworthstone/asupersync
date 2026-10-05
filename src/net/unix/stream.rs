@@ -35,10 +35,10 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 fn connect_in_progress(err: &io::Error) -> bool {
-    matches!(
-        err.kind(),
-        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-    ) || err.raw_os_error() == Some(libc::EINPROGRESS)
+    // A full AF_UNIX backlog returns EAGAIN and abandons the attempt, so it is
+    // returned as WouldBlock, as tokio does; waiting for writability waited,
+    // spinning, for a connection that would never be made.
+    err.kind() == io::ErrorKind::Interrupted || err.raw_os_error() == Some(libc::EINPROGRESS)
 }
 
 fn cancelled_poll<T>() -> Poll<io::Result<T>> {
@@ -230,10 +230,10 @@ impl UnixStream {
     /// let stream = UnixStream::connect("/tmp/my_socket.sock").await?;
     /// ```
     pub async fn connect<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        crate::cx::io_gate::require_ambient_io("net::UnixStream::connect")?;
         let domain = Domain::UNIX;
         let socket = Socket::new(domain, Type::STREAM, None)?;
         socket.set_nonblocking(true)?;
-
         let sock_addr = SockAddr::unix(path)?;
         let registration = match socket.connect(&sock_addr) {
             Ok(()) => None,
@@ -271,7 +271,7 @@ impl UnixStream {
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
         use std::path::PathBuf;
-
+        crate::cx::io_gate::require_ambient_io("net::UnixStream::connect_abstract")?;
         // `socket2::SockAddr` can represent Linux abstract namespace addresses
         // by encoding a leading NUL byte in the AF_UNIX path bytes.
         let mut path_bytes = Vec::with_capacity(name.len() + 1);
@@ -477,7 +477,7 @@ impl UnixStream {
             match send_with_ancillary_impl(self.inner.as_raw_fd(), buf, ancillary) {
                 Ok(n) => Poll::Ready(Ok(n)),
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    self.pending_on_interest(cx, Interest::WRITABLE)
+                    self.pending_on_shared_interest(cx, Interest::WRITABLE)
                 }
                 Err(e) => Poll::Ready(Err(e)),
             }
@@ -546,7 +546,7 @@ impl UnixStream {
             match recv_with_ancillary_impl(self.inner.as_raw_fd(), buf, ancillary) {
                 Ok(n) => Poll::Ready(Ok(n)),
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    self.pending_on_interest(cx, Interest::READABLE)
+                    self.pending_on_shared_interest(cx, Interest::READABLE)
                 }
                 Err(e) => Poll::Ready(Err(e)),
             }
@@ -841,8 +841,28 @@ fn recvmsg_with_raw_ancillary(
             )
         })?;
 
+        // Received descriptors are close-on-exec, as std makes them, so they
+        // do not leak into every child process the receiver spawns.
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd",
+            target_os = "dragonfly",
+        ))]
+        let flags = libc::MSG_CMSG_CLOEXEC;
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd",
+            target_os = "dragonfly",
+        )))]
+        let flags = 0;
         let bytes = loop {
-            let rc = libc::recvmsg(fd, &mut msg, 0);
+            let rc = libc::recvmsg(fd, &mut msg, flags);
             if rc >= 0 {
                 break usize::try_from(rc).map_err(|_| {
                     io::Error::new(io::ErrorKind::InvalidData, "recvmsg byte count overflow")
@@ -870,6 +890,17 @@ fn recvmsg_with_raw_ancillary(
                     for index in 0..fd_count {
                         let received_fd = std::ptr::read_unaligned(data.add(index));
                         if received_fd >= 0 {
+                            // No MSG_CMSG_CLOEXEC here (macOS): set the flag
+                            // on each descriptor instead.
+                            #[cfg(not(any(
+                                target_os = "linux",
+                                target_os = "android",
+                                target_os = "freebsd",
+                                target_os = "netbsd",
+                                target_os = "openbsd",
+                                target_os = "dragonfly",
+                            )))]
+                            libc::fcntl(received_fd, libc::F_SETFD, libc::FD_CLOEXEC);
                             received_fds.push(received_fd);
                         }
                     }
@@ -883,6 +914,35 @@ fn recvmsg_with_raw_ancillary(
     };
 
     Ok((bytes, received_fds, truncated))
+}
+
+impl UnixStream {
+    /// `Pending` for the `&self` ancillary methods, which several tasks can
+    /// wait in at once through a shared stream. Each caller joins the
+    /// registration's shared waiter list instead of replacing its waker, so
+    /// a reader parked before a writer is still woken when data arrives
+    /// (br-asupersync-unix-socket-audit-alx18f).
+    fn pending_on_shared_interest<T>(
+        &self,
+        cx: &Context<'_>,
+        interest: Interest,
+    ) -> Poll<io::Result<T>> {
+        let (armed, stranded) =
+            self.registration
+                .lock()
+                .arm_shared(&*self.inner, interest, cx.waker());
+        for waiter in stranded {
+            waiter.wake();
+        }
+        match armed {
+            Ok(Armed::Parked) => Poll::Pending,
+            Ok(Armed::SelfWake) => {
+                crate::net::tcp::stream::fallback_rewake(cx);
+                Poll::Pending
+            }
+            Err(err) => Poll::Ready(Err(err)),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1013,6 +1073,146 @@ mod tests {
                 1,
                 "the ambient driver now owns the stream's readiness waker"
             );
+        }
+    }
+
+    /// br-asupersync-unix-socket-audit-alx18f item 2: several tasks can wait
+    /// in the `&self` ancillary methods of one shared stream. Each wait used
+    /// to replace the registration's single waker, so only the task that
+    /// parked last was woken. These run without a `Cx`, so the waits park on
+    /// the process-global fallback driver and its pump delivers the wakes.
+    mod shared_ancillary_waiters {
+        use super::*;
+        use crate::net::udp::fallback_io_test_support::signal_waker;
+        use crate::net::unix::SocketAncillary;
+        use std::io::Write;
+        use std::time::Duration;
+
+        /// Writes into `stream` until its send direction would block.
+        fn fill_send_buffer(stream: &UnixStream) {
+            let mut writer = &*stream.inner;
+            for chunk_len in [65_536_usize, 1] {
+                let chunk = vec![0u8; chunk_len];
+                loop {
+                    match writer.write(&chunk) {
+                        Ok(_) => {}
+                        Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
+                        Err(err) => panic!("filling the send buffer: {err}"),
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn a_reader_is_woken_although_a_writer_parked_after_it() {
+            assert!(
+                Cx::current().is_none(),
+                "test must run without an ambient Cx"
+            );
+            let (stream, peer) = UnixStream::pair().expect("socket pair");
+            fill_send_buffer(&stream);
+            let (_reader_signal, reader_waker, reader_rx) = signal_waker();
+            let (_writer_signal, writer_waker, _writer_rx) = signal_waker();
+            let mut read_buf = [0u8; 16];
+            let mut read_ancillary = SocketAncillary::new(64);
+            let mut write_ancillary = SocketAncillary::new(64);
+            let payload = [7u8; 64];
+
+            let mut recv = Box::pin(stream.recv_with_ancillary(&mut read_buf, &mut read_ancillary));
+            assert!(
+                recv.as_mut()
+                    .poll(&mut Context::from_waker(&reader_waker))
+                    .is_pending()
+            );
+            let mut send = Box::pin(stream.send_with_ancillary(&payload, &mut write_ancillary));
+            assert!(
+                send.as_mut()
+                    .poll(&mut Context::from_waker(&writer_waker))
+                    .is_pending(),
+                "the send buffer is full, so the writer parks after the reader"
+            );
+
+            (&*peer.inner).write_all(b"wake").expect("peer write");
+            reader_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the reader is woken when data arrives, although the writer parked later");
+            let len = match recv.as_mut().poll(&mut Context::from_waker(&reader_waker)) {
+                Poll::Ready(Ok(len)) => len,
+                other => panic!("expected the bytes after the wake, got {other:?}"),
+            };
+            drop(recv);
+            assert_eq!(&read_buf[..len], b"wake");
+            drop(send);
+        }
+
+        #[test]
+        fn two_readers_are_both_woken_and_the_one_left_waiting_is_woken_again() {
+            assert!(
+                Cx::current().is_none(),
+                "test must run without an ambient Cx"
+            );
+            let (stream, peer) = UnixStream::pair().expect("socket pair");
+            let (_first_signal, first_waker, first_rx) = signal_waker();
+            let (_second_signal, second_waker, second_rx) = signal_waker();
+            let mut first_buf = [0u8; 16];
+            let mut second_buf = [0u8; 16];
+            let mut first_ancillary = SocketAncillary::new(64);
+            let mut second_ancillary = SocketAncillary::new(64);
+
+            let mut first =
+                Box::pin(stream.recv_with_ancillary(&mut first_buf, &mut first_ancillary));
+            let mut second =
+                Box::pin(stream.recv_with_ancillary(&mut second_buf, &mut second_ancillary));
+            assert!(
+                first
+                    .as_mut()
+                    .poll(&mut Context::from_waker(&first_waker))
+                    .is_pending()
+            );
+            assert!(
+                second
+                    .as_mut()
+                    .poll(&mut Context::from_waker(&second_waker))
+                    .is_pending()
+            );
+
+            (&*peer.inner).write_all(b"wake").expect("peer write");
+            first_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the reader that parked first is woken");
+            second_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the reader that parked second is woken");
+
+            let first_len = match first.as_mut().poll(&mut Context::from_waker(&first_waker)) {
+                Poll::Ready(Ok(len)) => len,
+                other => panic!("the first reader takes the bytes, got {other:?}"),
+            };
+            assert!(
+                second
+                    .as_mut()
+                    .poll(&mut Context::from_waker(&second_waker))
+                    .is_pending(),
+                "nothing is left for the second reader, so it parks again"
+            );
+
+            (&*peer.inner)
+                .write_all(b"more")
+                .expect("second peer write");
+            second_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the reader that parked again is woken by the next data");
+            let second_len = match second
+                .as_mut()
+                .poll(&mut Context::from_waker(&second_waker))
+            {
+                Poll::Ready(Ok(len)) => len,
+                other => panic!("the second reader takes the next bytes, got {other:?}"),
+            };
+            drop(first);
+            drop(second);
+            assert_eq!(&first_buf[..first_len], b"wake");
+            assert_eq!(&second_buf[..second_len], b"more");
         }
     }
 
@@ -1367,6 +1567,81 @@ mod tests {
             nix::unistd::close(fd).expect("close received fd");
         });
         crate::test_complete!("test_send_recv_with_ancillary");
+    }
+
+    /// Received descriptors were not close-on-exec, so every child process
+    /// the receiver spawned inherited them. std passes MSG_CMSG_CLOEXEC.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn received_fds_are_close_on_exec() {
+        use crate::net::unix::{AncillaryMessage, SocketAncillary};
+        use std::os::unix::io::AsRawFd;
+
+        futures_lite::future::block_on(async {
+            let (tx, rx) = UnixStream::pair().expect("pair");
+            let (pipe_read, _pipe_write) = nix::unistd::pipe().expect("pipe");
+            let mut send = SocketAncillary::new(128);
+            assert!(send.add_fds(&[pipe_read.as_raw_fd()]));
+            tx.send_with_ancillary(b"fd", &mut send)
+                .await
+                .expect("send_with_ancillary");
+            let mut buf = [0_u8; 8];
+            let mut recv = SocketAncillary::new(128);
+            rx.recv_with_ancillary(&mut buf, &mut recv)
+                .await
+                .expect("recv_with_ancillary");
+            let mut received = None;
+            for message in recv.messages() {
+                let AncillaryMessage::ScmRights(fds) = message;
+                for fd in fds {
+                    received = Some(fd);
+                }
+            }
+            let fd = received.expect("a descriptor was received");
+            // /proc/self/fdinfo reports O_CLOEXEC in `flags` for a
+            // close-on-exec descriptor.
+            let fdinfo =
+                std::fs::read_to_string(format!("/proc/self/fdinfo/{fd}")).expect("read fdinfo");
+            let flags = fdinfo
+                .lines()
+                .find_map(|line| line.strip_prefix("flags:"))
+                .map(|value| u32::from_str_radix(value.trim(), 8).expect("octal flags"))
+                .expect("fdinfo flags line");
+            nix::unistd::close(fd).expect("close received fd");
+            assert_ne!(
+                flags & libc::O_CLOEXEC as u32,
+                0,
+                "the received descriptor must be close-on-exec"
+            );
+        });
+    }
+
+    /// A full AF_UNIX backlog makes connect return EAGAIN and abandon the
+    /// attempt. connect treated that as "in progress" and waited, spinning,
+    /// for a connection that would never be made, even after the server
+    /// drained its backlog.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn connect_to_a_full_backlog_returns_would_block_instead_of_hanging() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("full.sock");
+        let listener = Socket::new(Domain::UNIX, Type::STREAM, None).expect("socket");
+        listener
+            .bind(&SockAddr::unix(&path).expect("socket address"))
+            .expect("bind");
+        listener.listen(0).expect("listen");
+        let _queued = net::UnixStream::connect(&path).expect("the first connect fills the backlog");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let target = path.clone();
+        std::thread::spawn(move || {
+            let result = futures_lite::future::block_on(UnixStream::connect(&target));
+            let _ = tx.send(result.map(drop).map_err(|err| err.kind()));
+        });
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("connect must return rather than wait for a connection that never comes");
+        assert_eq!(result, Err(io::ErrorKind::WouldBlock));
     }
 
     #[test]

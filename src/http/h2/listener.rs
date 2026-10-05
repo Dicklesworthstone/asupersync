@@ -3478,7 +3478,22 @@ where
                     }
                 }
                 #[cfg(feature = "http2-streaming")]
-                DriverEvent::StreamingProgress => {}
+                DriverEvent::StreamingProgress => {
+                    // Returned credit lets a peer send again: its stalled-upload
+                    // clock restarts from now.
+                    #[cfg(feature = "http2-streaming")]
+                    if let Some(incoming) = &mut incoming {
+                        for stream_id in incoming.take_credit_released() {
+                            refresh_live_request_idle(
+                                &mut pending_stream_idle_deadlines,
+                                incoming,
+                                stream_id,
+                                stream_idle_timeout,
+                                time_getter,
+                            );
+                        }
+                    }
+                }
                 DriverEvent::ForceClose => {
                     // Escalation: drop the transport; spawned handler hops are
                     // raced against ForceClosing and request-region teardown is
@@ -3565,6 +3580,25 @@ where
                     return Ok(());
                 }
                 DriverEvent::StreamIdleTimeout(stream_id) => {
+                    // The timeout bounds a stalled upload. A peer whose stream
+                    // credit is spent cannot send: a handler that has not read
+                    // its body holds the upload, so the clock waits for credit.
+                    #[cfg(feature = "http2-streaming")]
+                    if let Some(incoming) = &incoming
+                        && incoming.awaits_input(stream_id)
+                        && conn
+                            .stream(stream_id)
+                            .is_some_and(|stream| stream.recv_window() <= 0)
+                    {
+                        refresh_live_request_idle(
+                            &mut pending_stream_idle_deadlines,
+                            incoming,
+                            stream_id,
+                            stream_idle_timeout,
+                            time_getter,
+                        );
+                        continue;
+                    }
                     #[cfg(feature = "http2-streaming")]
                     if let Some(incoming) = &mut incoming {
                         incoming.fail(
@@ -4419,11 +4453,19 @@ pub struct Http2ListenerConfig {
     pub idle_timeout: Option<Duration>,
     /// Maximum inactivity interval for an individual request stream.
     ///
-    /// The deadline is reset whenever request HEADERS or DATA arrives. It also
-    /// bounds handler execution after END_STREAM because this listener buffers
-    /// request bodies before dispatch. Expiry resets only the affected stream
-    /// with CANCEL and drops the associated handler future; the multiplexed
-    /// connection remains available to other streams. `None` disables it.
+    /// The deadline is reset whenever request HEADERS or DATA arrives. With
+    /// buffered request bodies (the default) it also bounds handler execution
+    /// after END_STREAM, because the body is buffered before dispatch. With
+    /// `http2-streaming` bodies it bounds only a stalled upload:
+    /// - it is reset when the handler's reads release flow-control credit;
+    /// - it waits while the stream's window is spent because the handler has
+    ///   not read the body;
+    /// - it is cleared once the body has ended, so it does not bound the
+    ///   handler after END_STREAM.
+    ///
+    /// Expiry resets only the affected stream with CANCEL and drops the
+    /// associated handler future; the multiplexed connection remains
+    /// available to other streams. `None` disables it.
     pub stream_idle_timeout: Option<Duration>,
     /// Time source for shutdown bookkeeping and drain supervision.
     pub time_getter: fn() -> Time,

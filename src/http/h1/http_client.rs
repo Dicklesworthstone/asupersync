@@ -598,8 +598,9 @@ pub enum RetryPolicy {
     /// Retry idempotent methods on retryable response status codes.
     ///
     /// A valid `Retry-After` delta-seconds header is honored before the retry;
-    /// a response asking for more than 60 seconds is returned instead. The same
-    /// policy also keeps the stale pooled-connection retry enabled.
+    /// a response asking for more than 60 seconds, or giving `Retry-After` in
+    /// another form such as an HTTP-date, is returned instead. The same policy
+    /// also keeps the stale pooled-connection retry enabled.
     IdempotentStatusCodes {
         /// Maximum number of response-status retries after the first attempt.
         max_retries: u32,
@@ -632,7 +633,13 @@ impl RetryPolicy {
             return None;
         }
 
-        let delay = retry_after_delay(&response.headers).unwrap_or(std::time::Duration::ZERO);
+        // A Retry-After that is not delta-seconds, such as an HTTP-date, asks
+        // for a wait this client does not compute, so the response is returned
+        // rather than retried at once.
+        let delay = match get_header(&response.headers, "Retry-After") {
+            None => std::time::Duration::ZERO,
+            Some(value) => parse_retry_after_delta(&value)?,
+        };
         // A server asking for a longer wait than the client will sleep gets its
         // response returned, not a request parked for that long.
         (delay <= MAX_RETRY_AFTER).then_some(delay)
@@ -751,9 +758,10 @@ impl HttpClientBuilder {
     /// Retries idempotent methods on retryable response status codes.
     ///
     /// Valid `Retry-After` delta-seconds response headers are honored before
-    /// retrying. A response asking for more than 60 seconds is returned
-    /// without a retry. Use [`Self::no_retries`] when no automatic retry
-    /// behavior is desired.
+    /// retrying. A response asking for more than 60 seconds, or giving
+    /// `Retry-After` in another form such as an HTTP-date, is returned without
+    /// a retry. Use [`Self::no_retries`] when no automatic retry behavior is
+    /// desired.
     #[must_use]
     pub fn retry_idempotent_statuses(mut self, max_retries: u32) -> Self {
         self.config.retry_policy = RetryPolicy::IdempotentStatusCodes { max_retries };
@@ -2367,21 +2375,31 @@ impl HttpClient {
         self.cleanup_expired_idle_connections(now);
 
         if reuse_idle {
-            let mut pool = self.pool.lock();
-            let mut idle = self.idle_connections.lock();
-            match pool.try_acquire(&key, now) {
-                Some(pool_id) => {
-                    if let Some(io) = Self::take_idle_connection_locked(&mut idle, &key, pool_id) {
-                        return Ok(AcquiredConnection {
-                            pool_id: Some(pool_id),
-                            io,
-                            fresh: false,
-                        });
-                    }
-                    // Metadata can be stale if a prior request failed before reinserting.
-                    pool.remove(&key, pool_id);
+            loop {
+                let taken = {
+                    let mut pool = self.pool.lock();
+                    let mut idle = self.idle_connections.lock();
+                    let Some(pool_id) = pool.try_acquire(&key, now) else {
+                        break;
+                    };
+                    let Some(io) = Self::take_idle_connection_locked(&mut idle, &key, pool_id)
+                    else {
+                        // Metadata can be stale if a prior request failed before reinserting.
+                        pool.remove(&key, pool_id);
+                        break;
+                    };
+                    (pool_id, io)
+                };
+                let (pool_id, mut io) = taken;
+                if idle_connection_is_reusable(&mut io) {
+                    return Ok(AcquiredConnection {
+                        pool_id: Some(pool_id),
+                        io,
+                        fresh: false,
+                    });
                 }
-                None => {}
+                // The server closed it, or sent something, while it was idle.
+                self.pool.lock().remove(&key, pool_id);
             }
         }
 
@@ -2535,6 +2553,27 @@ struct AcquiredConnection {
     pool_id: Option<u64>,
     io: ClientIo,
     fresh: bool,
+}
+
+/// Whether an idle pooled connection can carry another request, judged by
+/// one read that must not complete.
+///
+/// - EOF: the server closed the connection while it was idle. Keep-alive
+///   timeouts of a few seconds are common, well under the pool's idle timeout.
+/// - Bytes: the server sent something unsolicited, such as a 408 before
+///   closing.
+///
+/// Either way a request written there would fail, or read a response that is
+/// not its own. TLS bookkeeping such as a session ticket is consumed by the
+/// TLS layer and still reads as pending.
+fn idle_connection_is_reusable(io: &mut ClientIo) -> bool {
+    let mut task_cx = Context::from_waker(std::task::Waker::noop());
+    let mut probe = [0_u8; 1];
+    let mut buf = ReadBuf::new(&mut probe);
+    matches!(
+        Pin::new(io).poll_read(&mut task_cx, &mut buf),
+        Poll::Pending
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3023,13 +3062,13 @@ fn socks5_reply_message(code: u8) -> &'static str {
 }
 
 fn connection_can_be_reused(response: &Response, req_method: &Method) -> bool {
-    if response.status == 101
-        || response
-            .headers
-            .iter()
-            .any(|(name, _)| name.eq_ignore_ascii_case("upgrade"))
-        || header_has_token(&response.headers, "connection", "upgrade")
-    {
+    // Only a 101 switches protocols (RFC 9110 section 7.8). A server may
+    // advertise Upgrade on any other response, with Connection: Upgrade
+    // marking that header hop-by-hop: Apache's mod_http2 sends
+    // "Upgrade: h2,h2c" on ordinary responses. That connection is still
+    // HTTP/1.1. A request that asked to upgrade is never pooled
+    // (request_forbids_connection_reuse).
+    if response.status == 101 {
         return false;
     }
 
@@ -3053,7 +3092,12 @@ fn connection_can_be_reused(response: &Response, req_method: &Method) -> bool {
 
     match response.version {
         Version::Http11 => !header_has_token(&response.headers, "connection", "close"),
-        Version::Http10 => header_has_token(&response.headers, "connection", "keep-alive"),
+        // RFC 9112 §6.1: Transfer-Encoding in an HTTP/1.0 message means its
+        // framing is faulty; close the connection after this response.
+        Version::Http10 => {
+            !has_transfer_encoding
+                && header_has_token(&response.headers, "connection", "keep-alive")
+        }
         // Unreachable for this h1 client (responses are parsed from h1 wire
         // text), but HTTP/2 connections are persistent by default and carry
         // no Connection header semantics (RFC 9113 §8.2.2).
@@ -3085,10 +3129,6 @@ fn method_is_idempotent_for_response_retry(method: &Method) -> bool {
 
 fn status_is_retriable_response(status: u16) -> bool {
     matches!(status, 408 | 425 | 429 | 500 | 502 | 503 | 504)
-}
-
-fn retry_after_delay(headers: &[(String, String)]) -> Option<std::time::Duration> {
-    get_header(headers, "Retry-After").and_then(|value| parse_retry_after_delta(&value))
 }
 
 fn parse_retry_after_delta(value: &str) -> Option<std::time::Duration> {
@@ -3173,30 +3213,68 @@ fn resolve_redirect(current: &ParsedUrl, location: &str) -> String {
         };
     }
 
-    // Absolute path
-    if location.starts_with('/') {
-        let scheme = match current.scheme {
-            Scheme::Http => "http",
-            Scheme::Https => "https",
-        };
-        return format!("{scheme}://{}:{}{location}", current.host, current.port);
-    }
-
-    // Relative path (append to current path's directory).
-    // Strip query string and fragment first — rfind('/') must only see the path component.
-    let path_only = current
-        .path
-        .split_once(&['?', '#'][..])
-        .map_or(current.path.as_str(), |(p, _)| p);
-    let base_path = path_only.rfind('/').map_or("/", |i| &path_only[..=i]);
+    // A relative reference resolves against the current URL as RFC 3986
+    // section 5.2.2 describes. The fragment is never sent (RFC 9110 section
+    // 7.1).
     let scheme = match current.scheme {
         Scheme::Http => "http",
         Scheme::Https => "https",
     };
-    format!(
-        "{scheme}://{}:{}{base_path}{location}",
-        current.host, current.port
-    )
+    let location = location.split('#').next().unwrap_or_default();
+    let (base_path, base_query) = match current.path.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (current.path.as_str(), None),
+    };
+    let (ref_path, ref_query) = match location.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (location, None),
+    };
+    let (path, query) = if ref_path.is_empty() {
+        // Same resource; a query in the reference replaces the base query.
+        (base_path.to_owned(), ref_query.or(base_query))
+    } else if ref_path.starts_with('/') {
+        (remove_dot_segments(ref_path), ref_query)
+    } else {
+        // Merge with the base path's directory.
+        let directory = base_path.rfind('/').map_or("/", |i| &base_path[..=i]);
+        (
+            remove_dot_segments(&format!("{directory}{ref_path}")),
+            ref_query,
+        )
+    };
+    let authority = format!("{scheme}://{}:{}", current.host, current.port);
+    match query {
+        Some(query) => format!("{authority}{path}?{query}"),
+        None => format!("{authority}{path}"),
+    }
+}
+
+/// Removes `.` and `..` segments from an absolute path (RFC 3986 section
+/// 5.2.4). A path ending in either keeps its trailing slash, and `..` never
+/// climbs above the root.
+fn remove_dot_segments(path: &str) -> String {
+    let mut segments: Vec<&str> = Vec::new();
+    let mut trailing_slash = false;
+    for segment in path.split('/').skip(1) {
+        trailing_slash = false;
+        match segment {
+            "." => trailing_slash = true,
+            ".." => {
+                segments.pop();
+                trailing_slash = true;
+            }
+            other => segments.push(other),
+        }
+    }
+    let mut resolved = String::with_capacity(path.len());
+    for segment in segments {
+        resolved.push('/');
+        resolved.push_str(segment);
+    }
+    if trailing_slash || resolved.is_empty() {
+        resolved.push('/');
+    }
+    resolved
 }
 
 /// Returns `true` if two parsed URLs share the same origin (scheme + host + port).
@@ -3906,6 +3984,62 @@ mod tests {
         let current = ParsedUrl::parse("http://example.com/dir/old?return=/home").unwrap();
         let result = resolve_redirect(&current, "new");
         assert_eq!(result, "http://example.com:80/dir/new");
+    }
+
+    // RFC 3986 section 5.4's reference resolution examples, base
+    // http://a/b/c/d;p?q (fragments dropped: they are never sent). The
+    // resolver appended every relative Location to the base directory: "?y"
+    // became /b/c/?y, "../g" was sent literally, and "#s" lost the path.
+    #[test]
+    fn resolve_redirect_follows_rfc_3986_reference_resolution() {
+        let base = ParsedUrl::parse("http://a/b/c/d;p?q").unwrap();
+        for (reference, expected) in [
+            // 5.4.1 normal examples
+            ("g", "/b/c/g"),
+            ("./g", "/b/c/g"),
+            ("g/", "/b/c/g/"),
+            ("/g", "/g"),
+            ("?y", "/b/c/d;p?y"),
+            ("g?y", "/b/c/g?y"),
+            ("#s", "/b/c/d;p?q"),
+            ("g#s", "/b/c/g"),
+            ("g?y#s", "/b/c/g?y"),
+            (";x", "/b/c/;x"),
+            ("g;x", "/b/c/g;x"),
+            ("g;x?y#s", "/b/c/g;x?y"),
+            ("", "/b/c/d;p?q"),
+            (".", "/b/c/"),
+            ("./", "/b/c/"),
+            ("..", "/b/"),
+            ("../", "/b/"),
+            ("../g", "/b/g"),
+            ("../..", "/"),
+            ("../../", "/"),
+            ("../../g", "/g"),
+            // 5.4.2 abnormal examples
+            ("../../../g", "/g"),
+            ("../../../../g", "/g"),
+            ("/./g", "/g"),
+            ("/../g", "/g"),
+            ("g.", "/b/c/g."),
+            (".g", "/b/c/.g"),
+            ("g..", "/b/c/g.."),
+            ("..g", "/b/c/..g"),
+            ("./../g", "/b/g"),
+            ("./g/.", "/b/c/g/"),
+            ("g/./h", "/b/c/g/h"),
+            ("g/../h", "/b/c/h"),
+            ("g;x=1/./y", "/b/c/g;x=1/y"),
+            ("g;x=1/../y", "/b/c/y"),
+            ("g?y/./x", "/b/c/g?y/./x"),
+            ("g?y/../x", "/b/c/g?y/../x"),
+        ] {
+            assert_eq!(
+                resolve_redirect(&base, reference),
+                format!("http://a:80{expected}"),
+                "reference {reference:?}"
+            );
+        }
     }
 
     // =========================================================================
@@ -5777,6 +5911,39 @@ mod tests {
         }
     }
 
+    // An HTTP-date Retry-After (RFC 9110 section 10.2.3) was read as "no
+    // delay", so a 503 asking clients to come back in an hour was retried
+    // back to back. A Retry-After the client cannot read now returns the
+    // response.
+    #[test]
+    fn retry_after_that_is_not_delta_seconds_returns_the_response() {
+        let policy = RetryPolicy::IdempotentStatusCodes { max_retries: 3 };
+        let response = |headers: Vec<(String, String)>| Response {
+            version: Version::Http11,
+            status: 503,
+            reason: "Service Unavailable".to_owned(),
+            headers,
+            body: Vec::new(),
+            trailers: Vec::new(),
+        };
+        for retry_after in ["Wed, 21 Oct 2015 07:28:00 GMT", "soon", "-1", ""] {
+            assert_eq!(
+                policy.response_retry_delay(
+                    &Method::Get,
+                    &response(vec![("Retry-After".to_owned(), retry_after.to_owned())]),
+                    0
+                ),
+                None,
+                "Retry-After: {retry_after:?} must not retry at once"
+            );
+        }
+        assert_eq!(
+            policy.response_retry_delay(&Method::Get, &response(Vec::new()), 0),
+            Some(std::time::Duration::ZERO),
+            "without Retry-After the retry is immediate, as before"
+        );
+    }
+
     #[test]
     fn stale_reuse_retry_dials_a_new_connection_instead_of_another_idle_one() {
         use std::io::{Read, Write};
@@ -5932,6 +6099,18 @@ mod tests {
         };
         assert!(connection_can_be_reused(&response, &Method::Get));
 
+        let chunked = Response {
+            headers: vec![
+                ("Transfer-Encoding".into(), "chunked".into()),
+                ("Connection".into(), "keep-alive".into()),
+            ],
+            ..response.clone()
+        };
+        assert!(
+            !connection_can_be_reused(&chunked, &Method::Get),
+            "an HTTP/1.0 response with Transfer-Encoding is never pooled"
+        );
+
         let no_header = Response {
             headers: Vec::new(),
             ..response
@@ -5983,6 +6162,34 @@ mod tests {
             trailers: Vec::new(),
         };
         assert!(!connection_can_be_reused(&response, &Method::Get));
+    }
+
+    // Apache's mod_http2 advertises "Upgrade: h2,h2c" with "Connection:
+    // Upgrade, Keep-Alive" on ordinary responses. Any Upgrade header used to
+    // disable reuse, so every request to such a server paid a new TCP and TLS
+    // handshake. Only a 101 switches protocols.
+    #[test]
+    fn an_upgrade_advertisement_on_an_ordinary_response_keeps_the_connection() {
+        let response = Response {
+            version: Version::Http11,
+            status: 200,
+            reason: "OK".into(),
+            headers: vec![
+                ("Upgrade".into(), "h2,h2c".into()),
+                ("Connection".into(), "Upgrade, Keep-Alive".into()),
+                ("Content-Length".into(), "2".into()),
+            ],
+            body: b"ok".to_vec(),
+            trailers: Vec::new(),
+        };
+        assert!(connection_can_be_reused(&response, &Method::Get));
+
+        let switching = Response {
+            status: 101,
+            reason: "Switching Protocols".into(),
+            ..response
+        };
+        assert!(!connection_can_be_reused(&switching, &Method::Get));
     }
 
     #[test]
@@ -6379,6 +6586,136 @@ mod tests {
             stats.connections_created >= 2,
             "client should establish a fresh connection after stale pooled reuse fails"
         );
+    }
+
+    fn read_stale_test_request_head(stream: &mut std::net::TcpStream) {
+        use std::io::Read;
+        let mut buf = [0_u8; 1024];
+        let mut request = Vec::new();
+        loop {
+            let n = stream.read(&mut buf).expect("read request");
+            assert!(n > 0, "request must arrive before peer closes");
+            request.extend_from_slice(&buf[..n]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+    }
+
+    // A POST is not retried after a failed reuse, so a pooled connection the
+    // server closed while idle (keep-alive timeouts of a few seconds are
+    // common) failed every such POST with "connection closed before response
+    // headers". An idle connection is now checked before it is reused.
+    #[test]
+    fn post_after_the_server_closed_the_idle_pooled_connection_uses_a_fresh_one() {
+        use std::io::Write;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = std::thread::spawn(move || {
+            let (mut first, _) = listener.accept().expect("accept first connection");
+            read_stale_test_request_head(&mut first);
+            first
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok",
+                )
+                .expect("write first response");
+            first.flush().expect("flush first response");
+            std::thread::sleep(Duration::from_millis(50));
+            drop(first);
+
+            let (mut second, _) = listener.accept().expect("accept second connection");
+            read_stale_test_request_head(&mut second);
+            second
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nfresh",
+                )
+                .expect("write second response");
+            second.flush().expect("flush second response");
+        });
+
+        let client = HttpClient::builder()
+            .max_connections_per_host(1)
+            .max_total_connections(1)
+            .build();
+        let cx = Cx::for_testing();
+        let url = format!("http://{addr}/submit");
+
+        let first = block_on(client.send_post(&cx, &url, b"a".to_vec()))
+            .expect("first POST should succeed");
+        assert_eq!(first.body, b"ok");
+
+        std::thread::sleep(Duration::from_millis(100));
+
+        let second = block_on(client.send_post(&cx, &url, b"b".to_vec()))
+            .expect("a POST after the idle connection closed uses a fresh connection");
+        assert_eq!(second.status, 200);
+        assert_eq!(second.body, b"fresh");
+
+        server.join().expect("server thread should join");
+        assert_eq!(client.pool_stats().connections_created, 2);
+    }
+
+    // A server may answer an idle keep-alive connection with a 408 before it
+    // closes it. Reusing that connection returned the 408 as the response to
+    // the next request.
+    #[test]
+    fn an_unsolicited_408_on_an_idle_pooled_connection_is_not_the_next_response() {
+        use std::io::Write;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = std::thread::spawn(move || {
+            let (mut first, _) = listener.accept().expect("accept first connection");
+            read_stale_test_request_head(&mut first);
+            first
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok",
+                )
+                .expect("write first response");
+            first.flush().expect("flush first response");
+            std::thread::sleep(Duration::from_millis(20));
+            first
+                .write_all(
+                    b"HTTP/1.1 408 Request Timeout\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                )
+                .expect("write unsolicited 408");
+            first.flush().expect("flush unsolicited 408");
+
+            let (mut second, _) = listener.accept().expect("accept second connection");
+            read_stale_test_request_head(&mut second);
+            second
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nfresh",
+                )
+                .expect("write second response");
+            second.flush().expect("flush second response");
+            drop(first);
+        });
+
+        let client = HttpClient::builder()
+            .max_connections_per_host(1)
+            .max_total_connections(1)
+            .build();
+        let cx = Cx::for_testing();
+        let url = format!("http://{addr}/healthz");
+
+        let first = block_on(client.send_get(&cx, &url)).expect("first GET should succeed");
+        assert_eq!(first.body, b"ok");
+
+        std::thread::sleep(Duration::from_millis(100));
+
+        let second = block_on(client.send_get(&cx, &url)).expect("second GET should succeed");
+        assert_eq!(
+            second.status, 200,
+            "the idle connection's 408 is not this response"
+        );
+        assert_eq!(second.body, b"fresh");
+
+        server.join().expect("server thread should join");
+        assert_eq!(client.pool_stats().connections_created, 2);
     }
 
     #[test]

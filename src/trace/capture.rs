@@ -87,13 +87,11 @@ impl ScheduleCaptureSnapshot {
     /// the projected completions, so a strict replay can compare them
     /// (br-asupersync-bi2462.8).
     ///
-    /// An outcome is the runtime's record of how the task ended, which
-    /// depends on how it was spawned. `RuntimeHandle::spawn` catches a panic
-    /// in its future, re-raises it on the `JoinHandle` and records Ok. A
-    /// state task, such as a Lab reconstruction made with
-    /// `RuntimeState::create_task`, records Panicked. Reconstruct a panicking
-    /// handle-spawned task so that it ends the same way, for example by
-    /// catching the panic inside the Lab task's future.
+    /// An outcome is the runtime's record of how the task ended. A task whose
+    /// future panicked is recorded Panicked whichever API spawned it:
+    /// `RuntimeHandle::spawn` also re-raises the payload on its
+    /// `JoinHandle`, and a Lab reconstruction made with
+    /// `RuntimeState::create_task` records Panicked too (asupersync-6hewgp).
     #[must_use]
     pub fn terminal_outcomes(&self) -> &[(TaskId, Severity)] {
         &self.terminal_outcomes

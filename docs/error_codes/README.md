@@ -29,6 +29,7 @@ lands.
 | ASUP-E006 | live | core-runtime | [Region at capacity](./ASUP-E006.md) |
 | ASUP-E007 | live | core-runtime | [Authorization denied](./ASUP-E007.md) |
 | ASUP-E008 | live | core-runtime | [Admission slot already reserved](./ASUP-E008.md) |
+| ASUP-E009 | live | core-runtime | [Ambient I/O capability denied](./ASUP-E009.md) |
 | ASUP-E101 | live | obligations | [Obligation leaked](./ASUP-E101.md) |
 | ASUP-E102 | live | obligations | [Obligation double resolve](./ASUP-E102.md) |
 | ASUP-E103 | live | obligations | [Root-region obligation](./ASUP-E103.md) |

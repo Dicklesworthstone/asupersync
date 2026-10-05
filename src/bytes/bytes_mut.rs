@@ -129,7 +129,21 @@ impl BytesMut {
             .checked_add(additional)
             .expect("BytesMut required capacity overflow");
         if required > self.active_capacity() {
-            self.compact_front();
+            if self.start >= len {
+                // The consumed prefix is at least as large as the live bytes,
+                // so moving them is paid for by the room it frees.
+                self.compact_front();
+            } else {
+                // Moving the live bytes would free only `start` bytes: a loop
+                // of small advances and appends on a full buffer then moved the
+                // whole buffer for every append. Reallocate with headroom
+                // instead, one copy per doubling, as the `bytes` crate does.
+                let mut grown =
+                    Vec::with_capacity(required.max(self.data.capacity().saturating_mul(2)));
+                grown.extend_from_slice(self.active());
+                self.data = grown;
+                self.start = 0;
+            }
         }
     }
 
@@ -869,6 +883,42 @@ mod tests {
             capacity_still_reused
         );
         crate::test_complete!("bytes_mut_split_to_all_reclaims_front_capacity_for_reuse");
+    }
+
+    /// A full buffer consumed and refilled in small steps (a write buffer
+    /// draining to a slow peer) used to move all of its live bytes to the
+    /// front for every append, because each move freed only one step.
+    #[test]
+    fn bytes_mut_small_advance_then_append_does_not_move_the_buffer_each_time() {
+        init_test("bytes_mut_small_advance_then_append_does_not_move_the_buffer_each_time");
+        const FULL: usize = 64 * 1024;
+        const STEP: usize = 16;
+        let mut b = BytesMut::with_capacity(FULL);
+        b.resize(FULL, 0);
+        let mut expected: std::collections::VecDeque<u8> = std::iter::repeat_n(0, FULL).collect();
+        let mut moves = 0usize;
+        for round in 0..1000usize {
+            let before = b.as_ptr();
+            b.advance(STEP);
+            let byte = u8::try_from(round % 251).unwrap_or(0);
+            b.put_slice(&[byte; STEP]);
+            if b.as_ptr() != before.wrapping_add(STEP) {
+                moves += 1;
+            }
+            expected.drain(..STEP);
+            expected.extend(std::iter::repeat_n(byte, STEP));
+        }
+        crate::assert_with_log!(
+            moves <= 1,
+            "the live bytes moved at most once",
+            "<=1",
+            moves
+        );
+        let contents_kept = b.iter().copied().eq(expected.iter().copied());
+        crate::assert_with_log!(contents_kept, "contents", true, contents_kept);
+        crate::test_complete!(
+            "bytes_mut_small_advance_then_append_does_not_move_the_buffer_each_time"
+        );
     }
 
     #[test]

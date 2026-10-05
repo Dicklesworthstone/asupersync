@@ -587,6 +587,80 @@ fn h2_live_produced_response_outlives_stream_idle_timeout_after_request_input_en
     }
 }
 
+/// The per-stream idle timeout bounds a STALLED upload. A client that has
+/// spent its whole stream window cannot send: while the handler has not read
+/// the body, the server holds the upload, and the timeout must not fail the
+/// request. Once the handler reads and credit returns, the upload finishes.
+#[test]
+fn h2_stream_idle_timeout_waits_while_the_handler_holds_the_upload_credit() {
+    const IDLE: Duration = Duration::from_millis(300);
+    for workers in [1, 2] {
+        run(workers, async move {
+            let handler = move |request: StreamingServerRequest| async move {
+                if request.head.uri == "/survivor" {
+                    return Http2ProducedResponse::buffered(H1Response::new(
+                        200,
+                        "OK",
+                        b"survived".to_vec(),
+                    ));
+                }
+                // Leave the whole stream window unread for several idle periods.
+                let cx = Cx::current().expect("handler context");
+                asupersync::time::sleep(cx.now(), IDLE * 3).await;
+                let mut body = request.body;
+                let mut received = 0_usize;
+                while let Some(frame) =
+                    poll_fn(|poll_cx| Pin::new(&mut body).poll_frame(poll_cx)).await
+                {
+                    match frame.expect("the held upload is not cut off") {
+                        BodyFrame::Data(data) => received += data.remaining(),
+                        BodyFrame::Trailers(_) => panic!("unexpected request trailers"),
+                    }
+                }
+                Http2ProducedResponse::buffered(H1Response::new(
+                    200,
+                    "OK",
+                    received.to_string().into_bytes(),
+                ))
+            };
+            let mut config = config();
+            config.listener = config.listener.stream_idle_timeout(Some(IDLE));
+            exercise_produced_with_config(
+                handler,
+                config,
+                Settings::client(),
+                move |mut client, in_flight| async move {
+                    let started = Instant::now();
+                    let stream = client
+                        .open("POST", "/upload", Some(INITIAL_WINDOW + 3), false)
+                        .await;
+                    client
+                        .data(stream, Bytes::from(vec![7_u8; INITIAL_WINDOW]), false)
+                        .await;
+                    // Queued until the handler reads and credit returns.
+                    client.data(stream, Bytes::from_static(b"end"), true).await;
+                    let expected = (INITIAL_WINDOW + 3).to_string();
+                    client.response(stream, "200", expected.as_bytes()).await;
+                    let elapsed = started.elapsed();
+                    eprintln!(
+                        "{{\"scenario\":\"held-upload-credit\",\"workers\":{workers},\"idle_ms\":{},\"response_ms\":{}}}",
+                        IDLE.as_millis(),
+                        elapsed.as_millis()
+                    );
+                    assert!(
+                        elapsed >= IDLE * 2,
+                        "the upload must have been held past the idle timeout: {elapsed:?}"
+                    );
+                    wait_requests_drained(&in_flight).await;
+                    client.survivor().await;
+                    client
+                },
+            )
+            .await;
+        });
+    }
+}
+
 /// A producer that fails while its request upload is unfinished resets the
 /// stream exactly once. The early-stop NO_ERROR reset for an unfinished upload
 /// must not follow the failure's reset (br-asupersync-jz8jfr).
