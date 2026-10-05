@@ -6059,7 +6059,7 @@ impl RuntimeInner {
             guard.set_obligation_gateway(Arc::new(
                 crate::runtime::obligation_mailbox::ObligationGateway::new(
                     Arc::clone(&om),
-                    scheduler.spawn_enqueued_notifier(),
+                    scheduler.obligation_posted_notifier(),
                     Arc::downgrade(&spawn_liveness),
                 ),
             ));
