@@ -68,8 +68,9 @@
 //! slot, so the nested call drives the same worker on the same thread (its
 //! own accounting task, its own bounded drain) and hands it back before the outer poll
 //! resumes; this nests to any depth. Distinct runtimes nest the same way on
-//! one thread. Every piece of thread-local worker state is a scoped guard
-//! (scheduler, fast queue, local-ready queue, worker id, lane owner,
+//! one thread, including back into an outer one (A -> B -> A, which drives
+//! the outer runtime's parked worker). Every piece of thread-local worker
+//! state is a scoped guard (scheduler, fast queue, local-ready queue, worker id, lane owner,
 //! local-store key, ambient `Cx`) restored when the inner drive ends, each
 //! runtime's `!Send` futures live in their own per-runtime store, and
 //! local-spawn requests parked by an outer root of a different runtime are
@@ -423,14 +424,23 @@ impl CurrentThreadDriver {
     /// Obtains the worker for a drive on the calling thread: re-entrantly
     /// from a root of this runtime being polled here, otherwise from the
     /// background thread. `None` means the caller must poll directly.
+    ///
+    /// The re-entrancy slot is checked first, whoever owns the lane: it only
+    /// yields a worker parked by a drive on this thread, and that drive's
+    /// root can be further up the stack under another runtime's drive
+    /// (A -> B -> A), where the lane belongs to B and the background thread
+    /// no longer has the worker to lend.
     fn borrow_for_drive(&self, scheduler: &ThreeLaneScheduler) -> Option<WorkerLoan<'_>> {
-        if self.worker_active_on_this_thread() {
-            let worker = self.take_reentrant()?;
+        if let Some(worker) = self.take_reentrant() {
             return Some(WorkerLoan {
                 driver: self,
                 worker: Some(worker),
                 return_to: LoanReturn::Reentrant,
             });
+        }
+        if self.worker_active_on_this_thread() {
+            // A task of this runtime is being polled: its worker is busy.
+            return None;
         }
         let worker = self.acquire(scheduler)?;
         Some(WorkerLoan {

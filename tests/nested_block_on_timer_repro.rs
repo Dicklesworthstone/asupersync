@@ -11,6 +11,10 @@
 //! Each scenario runs on a scratch thread with a watchdog so a regression
 //! shows up as a test failure with a clear message instead of a hung test
 //! binary.
+//!
+//! The `block_on_back_into_the_outer_runtime_*` tests cover re-entry into an
+//! outer runtime (A -> B -> A, br-asupersync-kopidb H2): the innermost call
+//! must drive rt_a's worker, which the outer drive parked on this thread.
 
 #![allow(missing_docs)]
 
@@ -139,5 +143,84 @@ fn reentrant_block_on_with_reactor_fires_timeout() {
             .build()
             .expect("build rt_b");
         rt_a.block_on(async { rt_b.block_on(async { rt_b.block_on(await_inner_timeout()) }) })
+    });
+}
+
+/// Run `scenario` on a scratch thread and return its value; fail (not hang)
+/// if it does not finish within the watchdog window.
+fn value_within_watchdog<T: Send + 'static>(
+    name: &str,
+    scenario: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name(format!("repro-{name}"))
+        .spawn(move || {
+            let _ = tx.send(scenario());
+        })
+        .expect("spawn scenario thread");
+    match rx.recv_timeout(WATCHDOG) {
+        Ok(value) => value,
+        Err(mpsc::RecvTimeoutError::Timeout) => panic!(
+            "{name}: nested block_on did not finish within {WATCHDOG:?}; the inner call \
+             could not drive the outer runtime's worker parked on this thread"
+        ),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("{name}: scenario thread panicked before reporting")
+        }
+    }
+}
+
+/// A -> B -> A: a root of rt_a enters rt_b.block_on, whose root enters
+/// rt_a.block_on again. rt_a's worker is parked on this thread by the outer
+/// drive, so the inner call must drive it (nothing else can) to run the task
+/// it joins.
+#[test]
+fn block_on_back_into_the_outer_runtime_joins_its_task() {
+    let value = value_within_watchdog("a-b-a-join", || {
+        let rt_a = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build rt_a");
+        let rt_b = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build rt_b");
+        rt_a.block_on(async {
+            rt_b.block_on(async { rt_a.block_on(rt_a.handle().spawn(async { 7_u32 })) })
+        })
+    });
+    assert_eq!(value, 7);
+}
+
+/// A -> B -> A with a `!Send` task the outer rt_a root queued before entering
+/// rt_b: the inner rt_a call admits and polls it on this thread.
+#[test]
+fn block_on_back_into_the_outer_runtime_joins_a_local_task_of_its_root() {
+    let value = value_within_watchdog("a-b-a-local", || {
+        let rt_a = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build rt_a");
+        let rt_b = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build rt_b");
+        rt_a.block_on(async {
+            let local = rt_a.spawn_local(async { *std::rc::Rc::new(11_u32) });
+            rt_b.block_on(async { rt_a.block_on(local) })
+                .expect("the local task completes")
+        })
+    });
+    assert_eq!(value, 11);
+}
+
+/// A -> B -> A with a timer awaited by the innermost root.
+#[test]
+fn block_on_back_into_the_outer_runtime_fires_timeout() {
+    run_with_watchdog("a-b-a-timeout", || {
+        let rt_a = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build rt_a");
+        let rt_b = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build rt_b");
+        rt_a.block_on(async { rt_b.block_on(async { rt_a.block_on(await_inner_timeout()) }) })
     });
 }
