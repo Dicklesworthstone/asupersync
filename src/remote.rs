@@ -5031,14 +5031,18 @@ where
     let terminal = loop {
         let mut deadline = Box::pin(crate::time::sleep_until(expires_at));
         let raced = std::future::poll_fn(|task_cx| {
+            // A result the handler already published stands, even if the lease
+            // ran out while this task waited to run: nothing cancelled the
+            // handler, and reporting Cancelled would discard (and cache) work
+            // that completed.
+            if let std::task::Poll::Ready(joined) = task.poll_join(task_cx) {
+                return std::task::Poll::Ready(RemoteServiceV3Race::Completed(joined));
+            }
             if remote_service_lease_expired(cx.now(), expires_at) {
                 return std::task::Poll::Ready(RemoteServiceV3Race::Expired);
             }
             if deadline.as_mut().poll(task_cx).is_ready() {
                 return std::task::Poll::Ready(RemoteServiceV3Race::Expired);
-            }
-            if let std::task::Poll::Ready(joined) = task.poll_join(task_cx) {
-                return std::task::Poll::Ready(RemoteServiceV3Race::Completed(joined));
             }
             if flush_pending {
                 return match framed.poll_flush(task_cx) {
@@ -5480,13 +5484,17 @@ async fn remote_service_dispatch_with_lease(
     }
 
     let raced = std::future::poll_fn(|task_cx| {
+        // As in the V3 session: a result already published stands.
+        if let std::task::Poll::Ready(joined) = task.poll_join(task_cx) {
+            return std::task::Poll::Ready(LeaseRace::Completed(joined));
+        }
         if remote_service_lease_expired(cx.now(), expires_at) {
             return std::task::Poll::Ready(LeaseRace::Expired);
         }
         if deadline.as_mut().poll(task_cx).is_ready() {
             return std::task::Poll::Ready(LeaseRace::Expired);
         }
-        task.poll_join(task_cx).map(LeaseRace::Completed)
+        std::task::Poll::Pending
     })
     .await;
 

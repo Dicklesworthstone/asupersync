@@ -2004,6 +2004,195 @@ fn remote_tls_v3_wait_receives_terminal_after_expiry_cleanup_drains() {
     assert_eq!(operator.active_connections(), 0);
 }
 
+/// Registers `name` with a handler that blocks its (only) runtime thread for
+/// `block`, longer than the request's lease, and then returns its input: the
+/// connection task next runs after the lease ran out, with the result already
+/// published.
+#[cfg(feature = "tls")]
+fn registry_with_a_handler_that_outlives_its_lease(
+    name: &'static str,
+    block: Duration,
+) -> RemoteComputationRegistry {
+    let mut computations = RemoteComputationRegistry::new();
+    computations
+        .register::<Vec<u8>, Vec<u8>, _, _>(name, move |_cx, invocation| async move {
+            thread::sleep(block);
+            Ok(RemoteOutcome::Success(
+                invocation.into_request().input.into_data(),
+            ))
+        })
+        .expect("blocking handler should register");
+    computations
+}
+
+#[cfg(feature = "tls")]
+fn pinned_policy(
+    version: RemoteProtocolVersion,
+    computations: &RemoteComputationRegistry,
+    origin: &NodeId,
+    name: &'static str,
+) -> RemotePeerAdmissionPolicy {
+    let certificates = Certificate::from_pem(TEST_CERT_PEM).expect("TLS fixture should parse");
+    let peer_certificate = certificates
+        .first()
+        .expect("TLS fixture should contain a leaf certificate")
+        .clone();
+    let mut peer_pins = CertificatePinSet::new();
+    peer_pins.add(
+        CertificatePin::compute_spki_sha256(&peer_certificate)
+            .expect("fixture certificate should produce an SPKI pin"),
+    );
+    let mut policy =
+        RemotePeerAdmissionPolicy::new(version, computations.schema_registry().clone());
+    policy
+        .grant_tls_peer(origin.clone(), peer_pins, [name])
+        .expect("certificate-bound grant should be valid");
+    policy
+}
+
+/// A V2 handler that published its result is reported with that result,
+/// even when the lease ran out before the connection task saw it; before, the
+/// lease check ran first and the completed work was reported (and cached for
+/// retries with the same key) as Cancelled.
+#[cfg(feature = "tls")]
+#[test]
+fn remote_tls_v2_returns_a_result_published_after_the_lease_ran_out() {
+    let name = "proof.v2-late-result";
+    let computations =
+        registry_with_a_handler_that_outlives_its_lease(name, Duration::from_millis(400));
+    let origin = NodeId::new("origin-v2-late-result");
+    let policy = pinned_policy(RemoteProtocolVersion::V2, &computations, &origin, name);
+    let request = remote_service_wire_request_with_lease(
+        policy.hello_for(origin),
+        name,
+        7401,
+        0x7401,
+        b"late-but-done",
+        Duration::from_millis(100),
+    );
+    let (acceptor, connector) = remote_client_test_mtls_pair();
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("late-result runtime should build");
+    let service = runtime
+        .block_on(RemoteComputationService::bind(
+            "127.0.0.1:0",
+            acceptor,
+            policy,
+            computations,
+            RemoteComputationServiceConfig::new()
+                .with_max_connections(Some(1))
+                .with_drain_timeout(Duration::from_secs(1)),
+        ))
+        .expect("late-result service should bind");
+    let endpoint = service
+        .local_addr()
+        .expect("late-result service should expose its address");
+    let client_operator = service.handle();
+    let client = thread::spawn(move || {
+        let response = call_tls_remote_service(endpoint, &connector, &request);
+        assert!(client_operator.begin_drain());
+        response
+    });
+    runtime
+        .block_on(async move {
+            let cx = Cx::current().expect("runtime should install a late-result context");
+            service.run(&cx).await
+        })
+        .expect("late-result service should drain cleanly");
+    let response = client.join().expect("late-result client should not panic");
+    assert!(
+        matches!(
+            response,
+            RemoteServiceWireResponse::Outcome {
+                remote_task_id: 7401,
+                outcome: RemoteServiceWireOutcome::Success(ref output),
+            } if output.as_slice() == b"late-but-done"
+        ),
+        "the published result must be returned: {response:?}"
+    );
+}
+
+/// The V3 session form of the same race.
+#[cfg(feature = "tls")]
+#[test]
+fn remote_tls_v3_returns_a_result_published_after_the_lease_ran_out() {
+    let name = "proof.v3-late-result";
+    let computations =
+        registry_with_a_handler_that_outlives_its_lease(name, Duration::from_millis(400));
+    let origin = NodeId::new("origin-v3-late-result");
+    let policy = pinned_policy(RemoteProtocolVersion::V3, &computations, &origin, name);
+    let request = remote_service_wire_request_with_lease(
+        policy.hello_for(origin),
+        name,
+        7402,
+        0x7402,
+        b"late-but-done",
+        Duration::from_millis(100),
+    );
+    let (acceptor, connector) = remote_client_test_mtls_pair();
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("V3 late-result runtime should build");
+    let service = runtime
+        .block_on(RemoteComputationService::bind(
+            "127.0.0.1:0",
+            acceptor,
+            policy,
+            computations,
+            RemoteComputationServiceConfig::new()
+                .with_max_connections(Some(1))
+                .with_drain_timeout(Duration::from_secs(1)),
+        ))
+        .expect("V3 late-result service should bind");
+    let endpoint = service
+        .local_addr()
+        .expect("V3 late-result service should expose its address");
+    let client_operator = service.handle();
+    let client = RemoteComputationClient::new(
+        endpoint,
+        "localhost",
+        connector,
+        RemoteComputationClientConfig::new()
+            .with_max_attempts(1)
+            .with_attempt_timeout(Duration::from_secs(5)),
+    )
+    .expect("V3 late-result client should build");
+    let client_thread = thread::spawn(move || {
+        let start = block_on(client.start_session(&Cx::for_testing(), &request))
+            .expect("V3 late-result request should be accepted");
+        let terminal = match start {
+            RemoteComputationSessionStart::Running(session) => {
+                block_on(session.wait(&Cx::for_testing()))
+                    .expect("V3 late-result client should receive a terminal")
+            }
+            RemoteComputationSessionStart::Terminal(response) => response,
+            _ => panic!("V3 late-result start returned an unknown future variant"),
+        };
+        assert!(client_operator.begin_drain());
+        terminal
+    });
+    runtime
+        .block_on(async move {
+            let cx = Cx::current().expect("runtime should install a V3 late-result context");
+            service.run(&cx).await
+        })
+        .expect("V3 late-result service should drain cleanly");
+    let terminal = client_thread
+        .join()
+        .expect("V3 late-result client should not panic");
+    assert!(
+        matches!(
+            terminal,
+            RemoteServiceWireResponse::Outcome {
+                remote_task_id: 7402,
+                outcome: RemoteServiceWireOutcome::Success(ref output),
+            } if output.as_slice() == b"late-but-done"
+        ),
+        "the published result must be returned: {terminal:?}"
+    );
+}
+
 #[cfg(feature = "tls")]
 #[test]
 fn remote_tls_v3_start_decodes_admission_rejection_as_terminal() {
