@@ -416,6 +416,89 @@ impl Drop for IdleReactorTurn {
     }
 }
 
+/// Consecutive dispatches a worker may take from its LIFO slot before the
+/// slot's task goes to the global ready lane, so a chain of tasks waking each
+/// other cannot starve other ready work (tokio uses the same bound).
+const MAX_LIFO_DISPATCHES: u8 = 3;
+
+thread_local! {
+    /// While this worker executes a task: its runtime's coordinator (by
+    /// address) and the task (br-asupersync-issue65-criticisms-kpmoy5.1.11).
+    static EXECUTING: Cell<Option<(usize, TaskId)>> = const { Cell::new(None) };
+    /// A ready task woken by the task this worker is executing. The worker
+    /// runs it next instead of sending it through the global injector and
+    /// unparking another worker: (runtime key, task, priority).
+    static LIFO_SLOT: Cell<Option<(usize, TaskId, u8)>> = const { Cell::new(None) };
+}
+
+/// Ready wakes placed in a LIFO slot, for the test that proves the path runs.
+#[cfg(test)]
+static LIFO_SLOT_WAKES: AtomicUsize = AtomicUsize::new(0);
+
+/// Where a ready wake goes when the waking thread is executing a task.
+enum LifoWake {
+    /// Not applicable: another thread, another runtime, or a self-wake.
+    NotLocal,
+    /// Placed in the empty slot.
+    Placed,
+    /// Placed, displacing an older task that must go to the global lane.
+    Displaced(TaskId, u8),
+}
+
+/// Puts `task` in this thread's LIFO slot when the thread is executing a
+/// different task of the same runtime.
+fn claim_lifo_wake(coordinator: &Arc<WorkerCoordinator>, task: TaskId, priority: u8) -> LifoWake {
+    let key = Arc::as_ptr(coordinator).addr();
+    let executing_other = EXECUTING.with(|executing| {
+        matches!(executing.get(), Some((owner, current)) if owner == key && current != task)
+    });
+    if !executing_other {
+        // A self-wake (yield_now) keeps the global lane, so a task looping
+        // on it cannot starve other work through the slot.
+        return LifoWake::NotLocal;
+    }
+    #[cfg(test)]
+    LIFO_SLOT_WAKES.fetch_add(1, Ordering::Relaxed);
+    match LIFO_SLOT.with(|slot| slot.replace(Some((key, task, priority)))) {
+        Some((owner, older, older_priority)) if owner == key => {
+            LifoWake::Displaced(older, older_priority)
+        }
+        _ => LifoWake::Placed,
+    }
+}
+
+/// Marks the task this worker executes for the guard's lifetime.
+struct ExecutingTask {
+    previous: Option<(usize, TaskId)>,
+}
+
+impl ExecutingTask {
+    fn enter(coordinator: &Arc<WorkerCoordinator>, task: TaskId) -> Self {
+        let key = Arc::as_ptr(coordinator).addr();
+        let previous = EXECUTING.with(|executing| executing.replace(Some((key, task))));
+        Self { previous }
+    }
+}
+
+impl Drop for ExecutingTask {
+    fn drop(&mut self) {
+        EXECUTING.with(|executing| executing.set(self.previous));
+    }
+}
+
+/// Takes this thread's LIFO slot if it holds a task of the runtime behind
+/// `coordinator`.
+fn take_lifo_task(coordinator: &Arc<WorkerCoordinator>) -> Option<(TaskId, u8)> {
+    let key = Arc::as_ptr(coordinator).addr();
+    LIFO_SLOT.with(|slot| match slot.get() {
+        Some((owner, task, priority)) if owner == key => {
+            slot.set(None);
+            Some((task, priority))
+        }
+        _ => None,
+    })
+}
+
 #[inline]
 fn select_io_poll_timeout(
     idle_timeout: Option<Duration>,
@@ -2314,6 +2397,8 @@ impl ThreeLaneScheduler {
                 ),
                 scheduler_verification: SCHEDULER_VERIFICATION_DEFAULT,
                 fast_queue_dispatch_streak: 0,
+                lifo_streak: 0,
+                lifo_enabled: false,
                 fast_queue_fairness_limit: 4, // Allow max 4 consecutive stolen work dispatches
                 timed_dispatch_streak: 0,
                 timed_fairness_limit: 6, // Allow max 6 consecutive EDF dispatches before FIFO fairness
@@ -3495,6 +3580,15 @@ pub struct ThreeLaneWorker {
     /// Tracks fairness between stolen work and local work to prevent starvation.
     /// When this counter exceeds a threshold, local work gets priority.
     fast_queue_dispatch_streak: usize,
+    /// Consecutive dispatches taken from this worker's LIFO slot; bounded by
+    /// [`MAX_LIFO_DISPATCHES`] (br-asupersync-issue65-criticisms-kpmoy5.1.11).
+    lifo_streak: u8,
+    /// Whether tasks an execution wakes may go to the LIFO slot. Only
+    /// `run_loop_until` sets it: its next dispatch always follows an
+    /// execution, and it empties the slot when it stops. `run_once` and other
+    /// direct `execute` callers decide whether to park from queues that
+    /// cannot see the slot, so they keep the ordinary path.
+    lifo_enabled: bool,
     /// Maximum consecutive fast_queue dispatches before yielding to local work.
     ///
     /// Fairness guarantee: local work will be checked after at most this many
@@ -5350,6 +5444,7 @@ impl ThreeLaneWorker {
         // GH#58: local tasks whose future lives on this thread but that were
         // woken while the worker ran elsewhere are runnable again here.
         self.rescue_stranded_local_tasks();
+        let lifo_was_enabled = std::mem::replace(&mut self.lifo_enabled, true);
 
         'dispatch: loop {
             if self.shutdown.load(Ordering::Relaxed) {
@@ -5584,6 +5679,15 @@ impl ThreeLaneWorker {
             // We've given other work a chance during the backoff period.
             self.cancel_streak = 0;
             self.ready_dispatch_streak = 0;
+        }
+        // The loop can stop between an execution and the next dispatch. A
+        // task still in this worker's LIFO slot then goes to the global lane,
+        // so it is neither stranded on this thread nor seen by a later
+        // runtime (br-asupersync-issue65-criticisms-kpmoy5.1.11).
+        self.lifo_enabled = lifo_was_enabled;
+        if let Some((task, priority)) = take_lifo_task(&self.coordinator) {
+            self.global.inject_ready(task, priority);
+            self.coordinator.wake_one();
         }
         self.publish_preemption_fairness_certificate();
     }
@@ -6779,6 +6883,10 @@ impl ThreeLaneWorker {
             return None;
         }
 
+        if let Some(task) = self.take_lifo_dispatch() {
+            return Some(task);
+        }
+
         if let Some(task) = self.try_phase3_ready_work() {
             return Some(task);
         }
@@ -6867,6 +6975,26 @@ impl ThreeLaneWorker {
         }
 
         self.global.pop_ready()
+    }
+
+    /// The task a just-executed task woke on this worker (its LIFO slot),
+    /// unless the worker already took [`MAX_LIFO_DISPATCHES`] from the slot in
+    /// a row: then the task goes to the global ready lane and the ordinary
+    /// phases choose, so other ready work is reached
+    /// (br-asupersync-issue65-criticisms-kpmoy5.1.11).
+    fn take_lifo_dispatch(&mut self) -> Option<TaskId> {
+        let Some((task, priority)) = take_lifo_task(&self.coordinator) else {
+            self.lifo_streak = 0;
+            return None;
+        };
+        if self.lifo_streak >= MAX_LIFO_DISPATCHES {
+            self.lifo_streak = 0;
+            self.global.inject_ready(task, priority);
+            return None;
+        }
+        self.lifo_streak += 1;
+        self.record_ready_dispatch();
+        Some(self.dispatch_with_adaptive_epoch(task))
     }
 
     fn try_phase3_ready_work(&mut self) -> Option<TaskId> {
@@ -8284,6 +8412,13 @@ impl ThreeLaneWorker {
             completed: false,
             stored: Some(stored),
         };
+        // Tasks this one wakes, while it is polled and while its completion
+        // is published, go to this worker's LIFO slot. Declared after `guard`
+        // so it is cleared first: wakes from an unwind's cleanup take the
+        // ordinary path (br-asupersync-issue65-criticisms-kpmoy5.1.11).
+        let _executing = self
+            .lifo_enabled
+            .then(|| ExecutingTask::enter(&self.coordinator, task_id));
 
         // The worker dispatch quantum is one `Future::poll`. Do not loop on a
         // self-woken task here: returning to `next_task()` is what lets cancel,
@@ -9012,6 +9147,14 @@ struct ThreeLaneWaker {
 }
 
 impl ThreeLaneWaker {
+    fn record_enqueue(&self) {
+        if let Some(collector) = &self.scheduler_evidence {
+            collector
+                .lock()
+                .record_task_enqueue(self.task_id, crate::time::wall_now().as_nanos());
+        }
+    }
+
     #[inline]
     fn schedule(&self) {
         if self.wake_state.notify() {
@@ -9035,13 +9178,23 @@ impl ThreeLaneWaker {
             if is_cancelling {
                 self.global.inject_cancel(self.task_id, priority);
             } else {
-                self.global.inject_ready(self.task_id, priority);
+                match claim_lifo_wake(&self.coordinator, self.task_id, priority) {
+                    LifoWake::NotLocal => self.global.inject_ready(self.task_id, priority),
+                    // The task this worker is executing woke it: the worker
+                    // runs it next, with no global push and no unpark
+                    // (br-asupersync-issue65-criticisms-kpmoy5.1.11).
+                    LifoWake::Placed => {
+                        self.record_enqueue();
+                        return;
+                    }
+                    // The slot keeps the newest wake; the task it displaced
+                    // takes the ordinary path and wakes a worker below.
+                    LifoWake::Displaced(older, older_priority) => {
+                        self.global.inject_ready(older, older_priority);
+                    }
+                }
             }
-            if let Some(collector) = &self.scheduler_evidence {
-                collector
-                    .lock()
-                    .record_task_enqueue(self.task_id, crate::time::wall_now().as_nanos());
-            }
+            self.record_enqueue();
             match claim_turn_wake(&self.coordinator) {
                 TurnWake::RunHere => {}
                 TurnWake::WakeHelper => self.coordinator.wake_one_parker(),
@@ -9314,6 +9467,109 @@ mod idle_reactor_turn_tests {
         assert!(
             kept > 0,
             "the idle reactor leader kept none of its socket wakes"
+        );
+    }
+}
+
+#[cfg(test)]
+mod lifo_slot_tests {
+    use super::*;
+    use crate::channel::mpsc;
+    use crate::runtime::RuntimeBuilder;
+    use std::sync::atomic::AtomicBool;
+
+    /// br-asupersync-issue65-criticisms-kpmoy5.1.11: a task woken by the task
+    /// a worker is executing goes to that worker's LIFO slot, and a ping-pong
+    /// over capacity-1 channels still delivers every message.
+    #[test]
+    fn a_task_woken_by_the_executing_task_goes_to_the_lifo_slot() {
+        let before = LIFO_SLOT_WAKES.load(Ordering::Relaxed);
+        let rt = RuntimeBuilder::new()
+            .worker_threads(4)
+            .build()
+            .expect("four-worker runtime");
+        let total = rt.block_on(rt.handle().spawn(async move {
+            let cx = crate::Cx::current().expect("a spawned task has a Cx");
+            let (ping_tx, mut ping_rx) = mpsc::channel::<u32>(1);
+            let (pong_tx, mut pong_rx) = mpsc::channel::<u32>(1);
+            let mut echo = cx
+                .spawn(move |cx| async move {
+                    while let Ok(value) = ping_rx.recv(&cx).await {
+                        if pong_tx.send(&cx, value + 1).await.is_err() {
+                            break;
+                        }
+                    }
+                })
+                .expect("spawn the echo task");
+            let mut total = 0u32;
+            for value in 0..1000u32 {
+                ping_tx.send(&cx, value).await.expect("ping");
+                total += pong_rx.recv(&cx).await.expect("pong");
+            }
+            drop(ping_tx);
+            let _ = echo.join(&cx).await;
+            total
+        }));
+        assert_eq!(total, (1..=1000u32).sum::<u32>(), "every message answered");
+        let placed = LIFO_SLOT_WAKES.load(Ordering::Relaxed) - before;
+        assert!(placed > 0, "no wake went to a LIFO slot");
+    }
+
+    /// Two tasks that wake each other forever on a one-worker runtime keep
+    /// refilling the worker's LIFO slot. The bound on consecutive slot
+    /// dispatches must still let a third ready task run.
+    #[test]
+    fn a_chain_of_tasks_waking_each_other_cannot_starve_other_ready_work() {
+        let (ran_tx, ran_rx) = std::sync::mpsc::channel::<()>();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_chain = Arc::clone(&stop);
+        // The runtime runs on its own thread, so a starved task fails this
+        // test by timeout instead of hanging it.
+        std::thread::spawn(move || {
+            let rt = RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("one-worker runtime");
+            rt.block_on(rt.handle().spawn(async move {
+                let cx = crate::Cx::current().expect("a spawned task has a Cx");
+                let (ping_tx, mut ping_rx) = mpsc::channel::<u32>(1);
+                let (pong_tx, mut pong_rx) = mpsc::channel::<u32>(1);
+                let mut first = cx
+                    .spawn(move |cx| async move {
+                        while !stop_chain.load(Ordering::Acquire) {
+                            if ping_tx.send(&cx, 1).await.is_err() {
+                                break;
+                            }
+                            if pong_rx.recv(&cx).await.is_err() {
+                                break;
+                            }
+                        }
+                    })
+                    .expect("spawn the first chain task");
+                let mut second = cx
+                    .spawn(move |cx| async move {
+                        while let Ok(value) = ping_rx.recv(&cx).await {
+                            if pong_tx.send(&cx, value).await.is_err() {
+                                break;
+                            }
+                        }
+                    })
+                    .expect("spawn the second chain task");
+                let mut other = cx
+                    .spawn(move |_| async move {
+                        let _ = ran_tx.send(());
+                    })
+                    .expect("spawn the other task");
+                let _ = other.join(&cx).await;
+                let _ = first.join(&cx).await;
+                let _ = second.join(&cx).await;
+            }));
+        });
+        let ran = ran_rx.recv_timeout(Duration::from_secs(10));
+        stop.store(true, Ordering::Release);
+        assert!(
+            ran.is_ok(),
+            "a task outside the waking chain never ran: the LIFO slot starved it"
         );
     }
 }
