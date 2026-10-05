@@ -765,6 +765,24 @@ struct GenServerCell<S: GenServer> {
     system: Arc<SystemLane<S>>,
 }
 
+impl<S: GenServer> Drop for GenServerCell<S> {
+    /// A cell dropped before its loop resolved the mailbox (the server's task
+    /// was denied admission, or torn down before its first poll) still holds
+    /// queued calls whose reply permits are armed obligations. Dropping them
+    /// would trip the `[ASUP-E101]` drop bomb on whichever thread drops the
+    /// cell, a scheduler worker included. Abort them instead, so their callers
+    /// get an error (br-asupersync-c9b5nb). After the loop's own drain
+    /// this finds nothing.
+    fn drop(&mut self) {
+        self.mailbox.close();
+        while let Ok(envelope) = self.mailbox.try_recv() {
+            if let Envelope::Call { reply_permit, .. } = envelope {
+                let _ = session::TrackedOneshotPermit::abort(reply_permit);
+            }
+        }
+    }
+}
+
 /// System messages the runtime delivers to a server outside its bounded
 /// mailbox: DOWN notifications of its monitors and exit signals of its
 /// trapping links (br-asupersync-issue65-criticisms-kpmoy5.6.1). A full
@@ -882,6 +900,27 @@ impl GenServerStateCell {
     fn store(&self, state: ActorState) {
         self.state
             .store(encode_actor_state(state), Ordering::Release);
+    }
+
+    /// Moves to `Running` unless `stop()` already asked for `Stopping`, in one
+    /// atomic step: a load-then-store let a `stop()` landing in between be
+    /// overwritten, leaving the server running and its join pending forever
+    /// (br-asupersync-c9b5nb).
+    fn start_running(&self) {
+        let stopping = encode_actor_state(ActorState::Stopping);
+        let running = encode_actor_state(ActorState::Running);
+        let mut current = self.state.load(Ordering::Acquire);
+        while current != stopping {
+            match self.state.compare_exchange_weak(
+                current,
+                running,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(actual) => current = actual,
+            }
+        }
     }
 }
 
@@ -1958,9 +1997,7 @@ async fn run_gen_server_loop<S: GenServer>(
     // Only transition to Running if stop() wasn't called before the server started.
     // stop() sets Stopping before scheduling; we must honour that signal so the
     // poll_fn guard in the message loop can detect the pre-stop and break.
-    if cell.state.load() != ActorState::Stopping {
-        cell.state.store(ActorState::Running);
-    }
+    cell.state.start_running();
 
     // Phase 1: Initialization
     // Skip init when either the Cx is cancelled or the server was pre-stopped
@@ -3133,6 +3170,37 @@ mod tests {
         runtime.run_until_quiescent();
 
         crate::test_complete!("gen_server_spawn_and_cast");
+    }
+
+    #[test]
+    fn dropping_an_unrun_server_aborts_its_queued_calls() {
+        // A server task dropped before its first poll (admission denied, or a
+        // teardown) dropped its mailbox with a queued call whose reply permit
+        // was still armed, and the obligation drop bomb panicked on the
+        // dropping thread.
+        init_test("dropping_an_unrun_server_aborts_its_queued_calls");
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let cx = lab_spawn_cx(&mut runtime, region, Budget::INFINITE);
+        let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
+        let (handle, stored) = scope
+            .spawn_gen_server(&mut runtime.state, &cx, Counter { count: 0 }, 32)
+            .expect("spawn counter");
+
+        let mut call = std::pin::pin!(handle.call(&cx, CounterCall::Get));
+        let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(
+            call.as_mut().poll(&mut task_cx).is_pending(),
+            "the call is queued and waits for its reply"
+        );
+
+        drop(stored);
+        let result = call.as_mut().poll(&mut task_cx);
+        assert!(
+            matches!(result, std::task::Poll::Ready(Err(_))),
+            "the queued call fails once its server is gone"
+        );
+        crate::test_complete!("dropping_an_unrun_server_aborts_its_queued_calls");
     }
 
     #[test]
