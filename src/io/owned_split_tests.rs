@@ -405,3 +405,107 @@ fn inner_poll_panic_releases_the_stream_for_the_other_half() {
     ));
     assert_eq!(read.reunite(write).unwrap().output, b"after panic");
 }
+
+/// A stream with one waker for both directions, like a plain `TcpStream`:
+/// every pending poll replaces the waker it keeps.
+struct SingleWaiterStream {
+    waker: Arc<Mutex<Option<Waker>>>,
+}
+
+impl AsyncRead for SingleWaiterStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        _buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        *self.waker.lock().unwrap() = Some(cx.waker().clone());
+        Poll::Pending
+    }
+}
+
+impl AsyncWrite for SingleWaiterStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        _buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        *self.waker.lock().unwrap() = Some(cx.waker().clone());
+        Poll::Pending
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// Parks a reader, then a writer, on a single-waiter stream in two tasks.
+fn park_both_halves_on_a_single_waiter_stream() -> (
+    OwnedReadHalf<SingleWaiterStream>,
+    OwnedWriteHalf<SingleWaiterStream>,
+    Arc<Mutex<Option<Waker>>>,
+    Arc<Counter>,
+    Arc<Counter>,
+) {
+    let kept = Arc::new(Mutex::new(None));
+    let (mut read, mut write) = split_owned(SingleWaiterStream {
+        waker: Arc::clone(&kept),
+    });
+    let (reader, reader_waker) = counting_waker();
+    let (writer, writer_waker) = counting_waker();
+    let mut byte = [0; 1];
+    assert!(
+        Pin::new(&mut read)
+            .poll_read(
+                &mut Context::from_waker(&reader_waker),
+                &mut ReadBuf::new(&mut byte)
+            )
+            .is_pending()
+    );
+    assert!(
+        Pin::new(&mut write)
+            .poll_write(&mut Context::from_waker(&writer_waker), b"x")
+            .is_pending()
+    );
+    (read, write, kept, reader, writer)
+}
+
+#[test]
+fn a_single_waiter_stream_wakes_both_halves_parked_on_it() {
+    let (_read, _write, kept, reader, writer) = park_both_halves_on_a_single_waiter_stream();
+
+    // The stream's readiness fires the one waker it kept.
+    kept.lock()
+        .unwrap()
+        .take()
+        .expect("the stream kept a waker")
+        .wake();
+    assert_eq!(
+        reader.0.load(Ordering::SeqCst),
+        1,
+        "the reader that parked first must be woken, not only the writer that parked after it"
+    );
+    assert_eq!(writer.0.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_dropped_half_releases_the_waker_it_parked_on_the_stream() {
+    let (read, _write, kept, reader, writer) = park_both_halves_on_a_single_waiter_stream();
+    drop(read);
+    assert_eq!(
+        Arc::strong_count(&reader),
+        1,
+        "the dropped reader's waker must not stay parked"
+    );
+
+    kept.lock()
+        .unwrap()
+        .take()
+        .expect("the stream kept a waker")
+        .wake();
+    assert_eq!(reader.0.load(Ordering::SeqCst), 0);
+    assert_eq!(writer.0.load(Ordering::SeqCst), 1);
+}

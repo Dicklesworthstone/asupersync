@@ -17,13 +17,20 @@
 //!
 //! The inner poll must return for the other half to progress. This adapter
 //! cannot make a blocking or non-cooperative stream cooperative.
+//!
+//! # Wakeups
+//!
+//! Every poll hands the stream one waker that wakes each half parked on it, so
+//! a stream that keeps a single waker for both directions (a plain
+//! `TcpStream`, a TLS stream over one) still wakes a parked reader when a
+//! writer parks after it, and the reverse.
 
 use super::{AsyncRead, AsyncReadVectored, AsyncWrite, ReadBuf};
 use std::fmt;
 use std::io::{self, IoSlice, IoSliceMut};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll, Wake, Waker};
 
 /// Split an owned duplex stream into independently movable halves.
 ///
@@ -36,12 +43,15 @@ where
     T: AsyncRead + AsyncWrite + Unpin,
 {
     let write_vectored = stream.is_write_vectored();
+    let parked = Arc::new(ParkedHalves::default());
     let shared = Arc::new(Shared {
         state: Mutex::new(State {
             stream: Some(stream),
             waiter: None,
         }),
         write_vectored,
+        stream_waker: Waker::from(Arc::clone(&parked)),
+        parked,
     });
     (
         OwnedReadHalf {
@@ -57,6 +67,15 @@ enum Side {
     Write,
 }
 
+impl Side {
+    const fn index(self) -> usize {
+        match self {
+            Self::Read => 0,
+            Self::Write => 1,
+        }
+    }
+}
+
 struct State<T> {
     stream: Option<T>,
     // There are exactly two non-cloneable halves. While one owns the stream,
@@ -67,6 +86,66 @@ struct State<T> {
 struct Shared<T> {
     state: Mutex<State<T>>,
     write_vectored: bool,
+    /// The waker every poll of the stream gets: it wakes [`Self::parked`].
+    stream_waker: Waker,
+    parked: Arc<ParkedHalves>,
+}
+
+/// The halves parked on the stream itself, as opposed to the split's lock. A
+/// single-waiter stream keeps one waker for both directions: handed each
+/// half's own waker, a write that parks would replace the waker of a read that
+/// parked first, and the read's readiness would then wake only the writer.
+#[derive(Default)]
+struct ParkedHalves {
+    wakers: Mutex<[Option<Waker>; 2]>,
+}
+
+impl ParkedHalves {
+    fn lock(&self) -> MutexGuard<'_, [Option<Waker>; 2]> {
+        self.wakers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+
+    /// Records `waker` for `side`. Waker callbacks run outside the lock.
+    fn park(&self, side: Side, waker: &Waker) {
+        let current = self.lock()[side.index()]
+            .as_ref()
+            .is_some_and(|parked| parked.will_wake(waker));
+        if current {
+            return;
+        }
+        let replacement = waker.clone();
+        let stale = self.lock()[side.index()].replace(replacement);
+        drop(stale);
+    }
+
+    fn unpark(&self, side: Side) {
+        let stale = self.lock()[side.index()].take();
+        drop(stale);
+    }
+}
+
+impl Wake for ParkedHalves {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        let parked = std::mem::take(&mut *self.lock());
+        // Wake both halves even if the first waker panics, then re-raise.
+        let mut first_panic = None;
+        for waker in parked.into_iter().flatten() {
+            if let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.wake()))
+            {
+                first_panic.get_or_insert(payload);
+            }
+        }
+        if let Some(payload) = first_panic {
+            std::panic::resume_unwind(payload);
+        }
+    }
 }
 
 impl<T> Shared<T> {
@@ -125,9 +204,16 @@ struct StreamGuard<'a, T> {
     stream: Option<T>,
 }
 
-impl<T> StreamGuard<'_, T> {
+impl<'a, T> StreamGuard<'a, T> {
     fn stream_mut(&mut self) -> &mut T {
         self.stream.as_mut().expect("owned split guard has a stream")
+    }
+
+    /// Parks `side`'s waker and returns the context to poll the stream with.
+    fn stream_context(&self, side: Side, cx: &Context<'_>) -> Context<'a> {
+        let shared: &'a Shared<T> = self.shared;
+        shared.parked.park(side, cx.waker());
+        Context::from_waker(&shared.stream_waker)
     }
 }
 
@@ -229,12 +315,14 @@ impl<T> OwnedWriteHalf<T> {
 impl<T> Drop for OwnedReadHalf<T> {
     fn drop(&mut self) {
         self.shared.clear_waiter(Side::Read);
+        self.shared.parked.unpark(Side::Read);
     }
 }
 
 impl<T> Drop for OwnedWriteHalf<T> {
     fn drop(&mut self) {
         self.shared.clear_waiter(Side::Write);
+        self.shared.parked.unpark(Side::Write);
     }
 }
 
@@ -270,7 +358,8 @@ impl<T: AsyncRead + Unpin> AsyncRead for OwnedReadHalf<T> {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let mut guard = std::task::ready!(self.shared.poll_acquire(Side::Read, cx));
-        Pin::new(guard.stream_mut()).poll_read(cx, buf)
+        let mut stream_cx = guard.stream_context(Side::Read, cx);
+        Pin::new(guard.stream_mut()).poll_read(&mut stream_cx, buf)
     }
 }
 
@@ -281,7 +370,8 @@ impl<T: AsyncReadVectored + Unpin> AsyncReadVectored for OwnedReadHalf<T> {
         bufs: &mut [IoSliceMut<'_>],
     ) -> Poll<io::Result<usize>> {
         let mut guard = std::task::ready!(self.shared.poll_acquire(Side::Read, cx));
-        Pin::new(guard.stream_mut()).poll_read_vectored(cx, bufs)
+        let mut stream_cx = guard.stream_context(Side::Read, cx);
+        Pin::new(guard.stream_mut()).poll_read_vectored(&mut stream_cx, bufs)
     }
 }
 
@@ -292,7 +382,8 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for OwnedWriteHalf<T> {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let mut guard = std::task::ready!(self.shared.poll_acquire(Side::Write, cx));
-        Pin::new(guard.stream_mut()).poll_write(cx, buf)
+        let mut stream_cx = guard.stream_context(Side::Write, cx);
+        Pin::new(guard.stream_mut()).poll_write(&mut stream_cx, buf)
     }
 
     fn poll_write_vectored(
@@ -301,7 +392,8 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for OwnedWriteHalf<T> {
         bufs: &[IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
         let mut guard = std::task::ready!(self.shared.poll_acquire(Side::Write, cx));
-        Pin::new(guard.stream_mut()).poll_write_vectored(cx, bufs)
+        let mut stream_cx = guard.stream_context(Side::Write, cx);
+        Pin::new(guard.stream_mut()).poll_write_vectored(&mut stream_cx, bufs)
     }
 
     fn is_write_vectored(&self) -> bool {
@@ -310,12 +402,14 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for OwnedWriteHalf<T> {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let mut guard = std::task::ready!(self.shared.poll_acquire(Side::Write, cx));
-        Pin::new(guard.stream_mut()).poll_flush(cx)
+        let mut stream_cx = guard.stream_context(Side::Write, cx);
+        Pin::new(guard.stream_mut()).poll_flush(&mut stream_cx)
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let mut guard = std::task::ready!(self.shared.poll_acquire(Side::Write, cx));
-        Pin::new(guard.stream_mut()).poll_shutdown(cx)
+        let mut stream_cx = guard.stream_context(Side::Write, cx);
+        Pin::new(guard.stream_mut()).poll_shutdown(&mut stream_cx)
     }
 }
 
