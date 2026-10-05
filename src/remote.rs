@@ -3520,11 +3520,17 @@ impl RemoteServicePeerIdempotency {
         self.execution_rejections
             .retain(|_, rejection| now < rejection.expires_at);
     }
+
+    fn is_empty(&self) -> bool {
+        self.store.len() == 0 && self.execution_rejections.is_empty()
+    }
 }
 
 #[cfg(feature = "tls")]
 struct RemoteServiceIdempotencyInner {
     peers: BTreeMap<NodeId, RemoteServicePeerIdempotency>,
+    /// When every peer's expired records are next swept.
+    next_sweep: Time,
 }
 
 #[cfg(feature = "tls")]
@@ -3550,6 +3556,7 @@ impl RemoteServiceIdempotency {
         Self {
             inner: Mutex::new(RemoteServiceIdempotencyInner {
                 peers: BTreeMap::new(),
+                next_sweep: Time::ZERO,
             }),
             retention,
             max_records_per_peer,
@@ -3563,6 +3570,17 @@ impl RemoteServiceIdempotency {
         now: Time,
     ) -> RemoteServiceIdempotencyAdmission {
         let mut inner = self.inner.lock();
+        // A peer's expired records (inputs and outcomes) were evicted only
+        // when that peer was admitted again, so a peer that went quiet kept
+        // them for the life of the process. Sweep every peer at most once per
+        // retention period, and drop peers left with nothing.
+        if now >= inner.next_sweep {
+            inner.peers.retain(|_, peer_state| {
+                peer_state.evict_expired(now);
+                !peer_state.is_empty()
+            });
+            inner.next_sweep = now + self.retention;
+        }
         let peer_state = inner
             .peers
             .entry(peer.clone())
@@ -13387,6 +13405,45 @@ mod tests {
     // -----------------------------------------------------------------------
     // Saga tests (tmh.2.3)
     // -----------------------------------------------------------------------
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn remote_service_idempotency_frees_an_idle_peers_expired_records() {
+        let cx = Cx::for_testing();
+        let retention = Duration::from_secs(10);
+        let state = RemoteServiceIdempotency::new(retention, 16);
+        let (quiet, active) = (NodeId::new("quiet-peer"), NodeId::new("active-peer"));
+        let start = Time::from_secs(100);
+        for raw in 1..=3 {
+            let request = test_spawn_request(&cx, RemoteTaskId::from_raw(raw));
+            assert!(matches!(
+                state.admit(&quiet, &request, start),
+                RemoteServiceIdempotencyAdmission::Execute
+            ));
+            assert!(state.complete_outcome(
+                &quiet,
+                request.idempotency_key,
+                request.remote_task_id,
+                RemoteOutcome::Success(vec![0; 1024]),
+                start,
+            ));
+        }
+        assert_eq!(state.inner.lock().peers[&quiet].store.len(), 3);
+
+        // Only another peer is admitted once the quiet peer's records expired.
+        let later = start + retention + Duration::from_secs(1);
+        let request = test_spawn_request(&cx, RemoteTaskId::from_raw(9));
+        assert!(matches!(
+            state.admit(&active, &request, later),
+            RemoteServiceIdempotencyAdmission::Execute
+        ));
+        let inner = state.inner.lock();
+        assert!(
+            !inner.peers.contains_key(&quiet),
+            "an idle peer's expired records must be freed"
+        );
+        assert_eq!(inner.peers[&active].store.len(), 1);
+    }
 
     #[test]
     fn saga_successful_completion() {
