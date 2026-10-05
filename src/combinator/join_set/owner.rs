@@ -6,6 +6,8 @@ use std::future::{Future, poll_fn};
 use std::pin::pin;
 use std::task::Poll;
 
+mod fail_fast;
+
 impl<T, E, P> JoinSet<'_, T, E, P>
 where
     P: Policy,
