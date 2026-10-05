@@ -7,7 +7,7 @@
 //! blocking the async runtime. It supports:
 //!
 //! - **Capacity management**: Configurable min/max threads with dynamic scaling
-//! - **Fairness**: FIFO ordering with priority support
+//! - **Fairness**: FIFO ordering (a task's priority is recorded but not yet used)
 //! - **Cancellation**: Soft cancellation with completion tracking
 //! - **Shutdown**: Graceful shutdown with bounded drain timeout
 //!
@@ -26,8 +26,9 @@
 //! ## Cancellation
 //!
 //! Blocking operations cannot be interrupted mid-execution. Instead, cancellation
-//! is "soft": the task is marked cancelled, but the blocking closure runs to
-//! completion. The completion notification is suppressed for cancelled tasks.
+//! is "soft": the task is marked cancelled, but a closure that already started
+//! runs to completion, and one still queued is skipped. Either way the task's
+//! completion is signalled, so waiting on its handle returns.
 //!
 //! # Example
 //!
@@ -80,12 +81,17 @@ fn blocking_thread_sleep(duration: Duration) {
     thread::sleep(duration);
 }
 
-fn timeout_deadline(timeout: Duration, time_getter: TimeGetter) -> Instant {
-    time_getter() + timeout
+/// `None` when the timeout reaches past what `Instant` can represent (such as
+/// `Duration::MAX`): the wait then has no deadline instead of panicking on the
+/// overflow (br-asupersync-2u7bpm).
+fn timeout_deadline(timeout: Duration, time_getter: TimeGetter) -> Option<Instant> {
+    time_getter().checked_add(timeout)
 }
 
-fn timeout_remaining(deadline: Instant, time_getter: TimeGetter) -> Duration {
-    deadline.saturating_duration_since(time_getter())
+fn timeout_remaining(deadline: Option<Instant>, time_getter: TimeGetter) -> Duration {
+    deadline.map_or(Duration::MAX, |deadline| {
+        deadline.saturating_duration_since(time_getter())
+    })
 }
 
 fn drain_thread_handles(handles: &mut Vec<ThreadJoinHandle<()>>) -> Vec<ThreadJoinHandle<()>> {
@@ -1821,6 +1827,16 @@ mod tests {
         handle.wait();
         assert!(handle.is_done());
         assert_eq!(counter.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn huge_timeouts_wait_without_a_deadline_instead_of_panicking() {
+        // br-asupersync-2u7bpm: `Instant + Duration::MAX` overflowed and
+        // panicked, after shutdown had already begun in shutdown_and_wait.
+        let pool = BlockingPool::new(1, 1);
+        let handle = pool.spawn(|| thread::sleep(Duration::from_millis(20)));
+        assert!(handle.wait_timeout(Duration::MAX));
+        assert!(pool.shutdown_and_wait(Duration::MAX));
     }
 
     #[test]
