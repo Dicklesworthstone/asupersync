@@ -17,6 +17,9 @@ use std::future::{Future, poll_fn};
 use std::pin::{Pin, pin};
 use std::task::{Context, Poll};
 
+mod client_streaming;
+pub use client_streaming::NativeClientStreamingCall;
+
 const PROGRESS_BUDGET: usize = 32;
 
 /// A native bidirectional RPC driven by response demand.
