@@ -530,7 +530,11 @@ impl Http1ClientCodec {
 
         match crate::codec::Decoder::decode(self, src)? {
             Some(frame) => Ok(Some(frame)),
-            None if src.is_empty() => Ok(None),
+            // Only between responses is an end of input a clean end of the
+            // stream. Mid-body the decoder may already have consumed every
+            // buffered byte, and the response is truncated, not complete
+            // (br-asupersync-vxmjgn).
+            None if src.is_empty() && matches!(self.state, ClientDecodeState::Head) => Ok(None),
             None => Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "incomplete frame at EOF",
@@ -2694,6 +2698,34 @@ mod tests {
         assert!(codec.decode(&mut buf).unwrap().is_none());
         let resp = codec.decode_eof(&mut buf).unwrap().unwrap();
         assert_eq!(resp.body, b"hello");
+    }
+
+    #[test]
+    fn decode_eof_mid_response_is_an_error_not_a_clean_end() {
+        // A peer that closes after a response head whose body has not arrived,
+        // or after the chunked decoder consumed every buffered byte, leaves
+        // nothing buffered; decode_eof reported a clean end of the stream
+        // instead of the truncated response.
+        for raw in [
+            &b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n"[..],
+            &b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n"[..],
+        ] {
+            let mut codec = Http1ClientCodec::new();
+            let mut buf = BytesMut::from(raw);
+            assert!(codec.decode(&mut buf).unwrap().is_none());
+            assert!(buf.is_empty(), "the decoder consumed what it could");
+            let result = codec.decode_eof(&mut buf);
+            assert!(
+                matches!(&result, Err(HttpError::Io(err)) if err.kind() == std::io::ErrorKind::UnexpectedEof),
+                "{result:?}"
+            );
+        }
+
+        // Between responses an end of input is still a clean end.
+        let mut codec = Http1ClientCodec::new();
+        let mut buf = BytesMut::from(&b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"[..]);
+        assert_eq!(codec.decode(&mut buf).unwrap().unwrap().body, b"ok");
+        assert!(codec.decode_eof(&mut buf).unwrap().is_none());
     }
 
     #[test]
