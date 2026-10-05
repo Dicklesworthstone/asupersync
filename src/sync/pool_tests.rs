@@ -5144,4 +5144,103 @@ mod tests {
             "pool_close_destroys_resources_already_waiting_in_the_return_channel"
         );
     }
+
+    #[test]
+    fn an_idle_checkout_wakes_the_waiter_its_detach_moves_into_the_window() {
+        // An acquirer that takes an idle resource stays queued through its
+        // health check while `available` already counts the checkout. A
+        // waiter that polls in that gap finds itself outside the window and
+        // parks; the taker's detach moves it inside and must wake it.
+        init_test("an_idle_checkout_wakes_the_waiter_its_detach_moves_into_the_window");
+        struct CountWakes(Arc<std::sync::atomic::AtomicUsize>);
+        impl std::task::Wake for CountWakes {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        std::thread_local! {
+            static DURING_HEALTH_CHECK: RefCell<Option<Box<dyn FnOnce()>>> =
+                const { RefCell::new(None) };
+        }
+        let pool: &'static _ = Box::leak(Box::new(
+            GenericPool::with_time_getter(
+                simple_factory,
+                PoolConfig::with_max_size(2).health_check_on_acquire(true),
+                checked_pool_close_race_now,
+            )
+            .with_health_check(|_: &u32| {
+                let hook = DURING_HEALTH_CHECK.with(|hook| hook.borrow_mut().take());
+                if let Some(hook) = hook {
+                    hook();
+                }
+                true
+            }),
+        ));
+        let cx: &'static Cx = Box::leak(Box::new(Cx::for_testing()));
+        let x = futures_lite::future::block_on(pool.acquire(cx)).expect("x");
+        let y = futures_lite::future::block_on(pool.acquire(cx)).expect("y");
+
+        // A finds the pool full. The pool clock's next read, inside A's first
+        // idle probe, returns both resources, so A's wait queues it at the
+        // front of an open window: eligible at once, with no return waker, so
+        // no dispatcher handoff can stand in for the wake under test.
+        TEST_CHECKED_POOL_CLOSE_CALLBACK.with(|callback| {
+            *callback.borrow_mut() = Some(Box::new(move || drop((x, y))));
+        });
+        // During A's health check, B polls once and parks behind A.
+        let b_wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let b_waker = Waker::from(Arc::new(CountWakes(Arc::clone(&b_wakes))));
+        let b = std::rc::Rc::new(RefCell::new(pool.acquire(cx)));
+        let b_in_check = std::rc::Rc::clone(&b);
+        let waker_in_check = b_waker.clone();
+        DURING_HEALTH_CHECK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let polled = b_in_check
+                    .borrow_mut()
+                    .as_mut()
+                    .poll(&mut Context::from_waker(&waker_in_check));
+                assert!(polled.is_pending(), "B parks while A holds its queue slot");
+            }));
+        });
+
+        let a = futures_lite::future::block_on(pool.acquire(cx)).expect("a");
+        DURING_HEALTH_CHECK.with(|hook| assert!(hook.borrow().is_none(), "B was polled"));
+        assert_eq!(pool.stats().idle, 1, "one idle resource is left for B");
+        assert_eq!(
+            b_wakes.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "A's detach wakes B, whom it moved into the window"
+        );
+        let polled = b
+            .borrow_mut()
+            .as_mut()
+            .poll(&mut Context::from_waker(&b_waker));
+        assert!(
+            matches!(polled, Poll::Ready(Ok(_))),
+            "B takes the idle resource"
+        );
+        drop(a);
+        crate::test_complete!("an_idle_checkout_wakes_the_waiter_its_detach_moves_into_the_window");
+    }
+
+    #[test]
+    fn return_to_pool_discards_a_resource_marked_broken() {
+        init_test("return_to_pool_discards_a_resource_marked_broken");
+        let pool = GenericPool::with_time_getter(
+            simple_factory,
+            PoolConfig::with_max_size(1),
+            test_pool_time_now,
+        );
+        let cx = Cx::for_testing();
+        let mut conn = futures_lite::future::block_on(pool.acquire(&cx)).expect("acquire");
+        conn.mark_broken();
+        conn.return_to_pool();
+        let stats = pool.stats();
+        assert_eq!(
+            stats.idle, 0,
+            "a broken resource never re-enters the idle pool"
+        );
+        assert_eq!(stats.active, 0, "its slot is released");
+        crate::test_complete!("return_to_pool_discards_a_resource_marked_broken");
+    }
 }

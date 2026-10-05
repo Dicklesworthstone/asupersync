@@ -537,9 +537,14 @@ impl<R> PooledResource<R> {
 
     /// Explicitly return the resource to the pool.
     ///
-    /// This discharges the return obligation.
+    /// This discharges the return obligation. A resource flagged with
+    /// [`mark_broken`](Self::mark_broken) is discarded instead, as on drop.
     pub fn return_to_pool(mut self) {
-        self.return_inner();
+        if self.is_broken {
+            self.discard_inner();
+        } else {
+            self.return_inner();
+        }
     }
 
     /// Mark the resource as broken and discard it.
@@ -1147,6 +1152,8 @@ struct DetachedPoolWakers {
     state_waker: Option<DeferredWaker>,
     return_waker: Option<DeferredWaker>,
     next_dispatcher: Option<Waker>,
+    /// The waiter that the detach moved into the FIFO window.
+    marginal_waker: Option<Waker>,
 }
 
 impl DetachedPoolWakers {
@@ -1157,9 +1164,13 @@ impl DetachedPoolWakers {
             state_waker,
             return_waker,
             next_dispatcher,
+            marginal_waker,
         } = self;
         if let Some(next) = next_dispatcher {
             next.wake();
+        }
+        if let Some(marginal) = marginal_waker {
+            marginal.wake();
         }
         drop(state_waker);
         drop(return_waker);
@@ -1399,6 +1410,7 @@ where
                 state_waker: retired_state_waker,
                 return_waker: retired_return_waker,
                 next_dispatcher,
+                marginal_waker: None,
             }
             .retire();
         }
@@ -2211,14 +2223,28 @@ where
     }
 
     /// Detach a waiter by ID without retiring its task waker under the lock.
-    fn detach_waiter(&self, id: u64) -> Option<DeferredWaker> {
+    ///
+    /// Also returns the waker of the waiter this detach moves into the FIFO
+    /// window, as `WaiterCleanup` does. An acquirer that took an idle
+    /// resource stays queued through its health check while `available`
+    /// already counts the checkout, so a waiter that polled in that gap saw
+    /// itself outside the window and parked; nothing else wakes it.
+    fn detach_waiter(&self, id: u64) -> (Option<DeferredWaker>, Option<Waker>) {
         let mut state = self.state.lock();
-        state
-            .waiters
-            .iter()
-            .position(|waiter| waiter.id == id)
-            .and_then(|position| state.waiters.remove(position))
-            .map(|waiter| waiter.waker)
+        let Some(position) = state.waiters.iter().position(|waiter| waiter.id == id) else {
+            return (None, None);
+        };
+        let retired = state.waiters.remove(position).map(|waiter| waiter.waker);
+        let marginal = if state.closed {
+            None
+        } else {
+            let total = state.active + state.idle.len() + state.creating;
+            let available = state.idle.len() + self.config.max_size.saturating_sub(total);
+            (position < available && available > 0 && available - 1 < state.waiters.len())
+                .then(|| state.waiters[available - 1].waker.clone_waker())
+        };
+        drop(state);
+        (retired, marginal)
     }
 
     /// Detach a return-dispatch waiter and preserve the dispatcher baton.
@@ -2243,12 +2269,13 @@ where
 
     /// Detach both registrations for one acquire before running user code.
     fn detach_waiter_registrations(&self, id: u64) -> DetachedPoolWakers {
-        let state_waker = self.detach_waiter(id);
+        let (state_waker, marginal_waker) = self.detach_waiter(id);
         let (return_waker, next_dispatcher) = self.detach_return_waker(id);
         DetachedPoolWakers {
             state_waker,
             return_waker,
             next_dispatcher,
+            marginal_waker,
         }
     }
 
@@ -2368,6 +2395,7 @@ where
                             state_waker: retired_state_waker,
                             return_waker: retired_return_waker,
                             next_dispatcher,
+                            marginal_waker: None,
                         }
                         .retire();
                     }
