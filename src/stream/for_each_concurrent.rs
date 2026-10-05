@@ -58,12 +58,18 @@
 use super::Stream;
 use crate::combinator::JoinSet;
 use crate::cx::{CancelWakerToken, Cx};
+use crate::runtime::yield_now;
 use crate::types::policy::FailFast;
 use crate::types::{CancelReason, Outcome, PanicPayload};
 use std::convert::Infallible;
 use std::future::{Future, poll_fn};
 use std::pin::{Pin, pin};
 use std::task::Poll;
+
+/// Bound admission work even when both the source and spawn gateway stay
+/// ready. The user-provided concurrency limit is a resource ceiling, not a
+/// cooperative scheduling budget.
+const CONCURRENT_ADMISSION_BUDGET: usize = 1024;
 
 /// Applies `f` to every item of `stream`, keeping at most `limit` items in
 /// flight.
@@ -136,6 +142,15 @@ where
 /// instead, because a panic is never an expected consequence of the
 /// cancellation this function itself requested.
 ///
+/// # Scheduler cooperation
+///
+/// An always-ready source with a large concurrency limit cannot admit its
+/// entire workload in one uninterrupted burst: admission yields periodically
+/// so other tasks can run and publish failures or cancellation. Pending waits
+/// still park on real source, member, and cancellation wakeups. This bounds
+/// admission count, not the duration of an individual source poll or factory
+/// clone; those operations must themselves return.
+///
 /// # Determinism
 ///
 /// Completions are collected through [`JoinSet::join_next`] and
@@ -185,6 +200,7 @@ where
     let mut stream = stream;
     let mut set: JoinSet<'static, (), E, FailFast> = JoinSet::in_cx(cx);
     let mut source_done = false;
+    let mut admissions_since_yield = 0usize;
     let mut terminal: Option<Outcome<(), E>> = None;
 
     'drive: loop {
@@ -269,6 +285,11 @@ where
                             "try_for_each_concurrent: could not admit item to region: {err}"
                         ))));
                         break 'drive;
+                    }
+                    admissions_since_yield += 1;
+                    if admissions_since_yield >= CONCURRENT_ADMISSION_BUDGET {
+                        admissions_since_yield = 0;
+                        yield_now().await;
                     }
                     continue 'drive;
                 }
