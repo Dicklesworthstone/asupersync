@@ -100,7 +100,8 @@ impl<Caps: CapSetRuntimeMask> Cx<Caps> {
     /// including cancellation by drop before its first poll and panic unwinding.
     /// The previous ambient context is restored after both polling and cleanup.
     /// This does not scope work already performed while constructing `future`,
-    /// nor the later destruction of an output returned to the caller.
+    /// nor the later destruction of an output returned to the caller. Use
+    /// [`Self::with_ambient_fn`] to include synchronous future construction.
     ///
     /// ```ignore
     /// let stream = cx.with_ambient(TcpStream::connect(addr)).await?;
@@ -117,9 +118,39 @@ impl<Caps: CapSetRuntimeMask> Cx<Caps> {
             future: Some(future),
         }
     }
+
+    /// Construct, poll and destroy a future under this explicit context.
+    ///
+    /// Unlike passing an already constructed future to [`Self::with_ambient`],
+    /// this runs the synchronous body of `make` under the supplied capability
+    /// mask too. Use it for adapters whose constructors consult the ambient
+    /// context or perform effects before returning their future.
+    ///
+    /// The factory is invoked once, on the first poll, not when this method is
+    /// called. Dropping the returned future before polling does not invoke the
+    /// factory; its captures are still destroyed under the supplied context.
+    /// Factory panic cleanup, subsequent polls, and destruction of the produced
+    /// future use that same context. Every poll/drop restores the previous
+    /// ambient context; no thread-local guard is held across an await.
+    ///
+    /// Constructing the closure and its captures happens at the call site,
+    /// outside this boundary. Output values returned to the caller belong to
+    /// the caller. This does not spawn a task, install a cancellation checkpoint,
+    /// or supply asynchronous cleanup for an operation abandoned by drop.
+    /// Factories and futures may borrow; owned ones do not borrow this `Cx`.
+    pub fn with_ambient_fn<Make, F>(
+        &self,
+        make: Make,
+    ) -> WithAmbient<Caps, impl Future<Output = F::Output> + use<Caps, Make, F>>
+    where
+        Make: FnOnce() -> F,
+        F: Future,
+    {
+        self.with_ambient(async move { make().await })
+    }
 }
 
-/// Future returned by [`Cx::with_ambient`].
+/// Future returned by [`Cx::with_ambient`] and [`Cx::with_ambient_fn`].
 #[pin_project::pin_project(PinnedDrop)]
 #[must_use = "futures do nothing unless polled"]
 pub struct WithAmbient<Caps, F> {
@@ -346,5 +377,129 @@ mod tests {
         assert_eq!(*events.borrow(), [("drop", false)]);
         assert!(require_ambient_io("parent").is_ok());
         assert_eq!(Cx::restriction_depth(), depth);
+    }
+
+    #[test]
+    fn factory_is_lazy_and_scopes_construction_polling_and_pending_cleanup() {
+        let _parent = Cx::set_current(Some(Cx::for_testing()));
+        let depth = Cx::restriction_depth();
+        let cx = Cx::for_testing().restrict::<cap::None>();
+        let events = Events::default();
+        let mut future = Box::pin(cx.with_ambient_fn(|| {
+            events.borrow_mut().push(("construct", require_ambient_io("test.construct").is_ok()));
+            Probe::new(&events, Behavior::Pending)
+        }));
+        assert!(events.borrow().is_empty(), "factory must not run at construction");
+        let mut task = Context::from_waker(Waker::noop());
+        assert!(future.as_mut().poll(&mut task).is_pending());
+        assert!(future.as_mut().poll(&mut task).is_pending());
+        drop(future);
+        assert_eq!(*events.borrow(), [
+            ("construct", false), ("poll", false), ("poll", false), ("drop", false),
+        ]);
+        assert!(require_ambient_io("parent").is_ok());
+        assert_eq!(Cx::restriction_depth(), depth);
+    }
+
+    #[test]
+    fn ready_factory_drops_inner_future_once_under_its_context() {
+        let _parent = Cx::set_current(Some(Cx::for_testing()));
+        let cx = Cx::for_testing().restrict::<cap::None>();
+        let events = Events::default();
+        let mut future = Box::pin(cx.with_ambient_fn(|| {
+            events.borrow_mut().push(("construct", require_ambient_io("test.construct").is_ok()));
+            Probe::new(&events, Behavior::Ready)
+        }));
+        assert!(future.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_ready());
+        drop(future);
+        assert_eq!(*events.borrow(), [("construct", false), ("poll", false), ("drop", false)]);
+        assert!(require_ambient_io("parent").is_ok());
+    }
+
+    #[test]
+    fn unpolled_factory_drops_captures_without_invoking_factory() {
+        let _parent = Cx::set_current(Some(Cx::for_testing()));
+        let cx = Cx::for_testing().restrict::<cap::None>();
+        let calls = Rc::new(Cell::new(0));
+        let called = Rc::clone(&calls);
+        let events = Events::default();
+        let capture = Probe::new(&events, Behavior::Pending);
+        let future = cx.with_ambient_fn(move || {
+            called.set(called.get() + 1);
+            capture
+        });
+        drop(future);
+        assert_eq!(calls.get(), 0);
+        assert_eq!(*events.borrow(), [("drop", false)]);
+        assert!(require_ambient_io("parent").is_ok());
+    }
+
+    #[test]
+    fn factory_panic_cleans_captures_and_restores_the_parent() {
+        let _parent = Cx::set_current(Some(Cx::for_testing()));
+        let depth = Cx::restriction_depth();
+        let cx = Cx::for_testing().restrict::<cap::None>();
+        let events = Events::default();
+        let capture = Probe::new(&events, Behavior::Pending);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let mut future = Box::pin(cx.with_ambient_fn(move || -> std::future::Ready<()> {
+                let _capture = capture;
+                assert!(require_ambient_io("test.construct").is_err());
+                panic!("intentional factory panic");
+            }));
+            let _ = future.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+        }));
+        assert!(result.is_err());
+        assert_eq!(*events.borrow(), [("drop", false)]);
+        assert!(require_ambient_io("parent").is_ok());
+        assert_eq!(Cx::restriction_depth(), depth);
+    }
+
+    #[test]
+    fn owned_factory_future_is_send_static_and_does_not_borrow_receiver() {
+        fn assert_send_static<T: Send + 'static>(_: &T) {}
+        let future = {
+            let cx = Cx::for_testing();
+            cx.with_ambient_fn(|| std::future::ready(73_u8))
+        };
+        assert_send_static(&future);
+        assert_eq!(futures_lite::future::block_on(future), 73);
+    }
+
+    #[test]
+    fn factory_and_output_may_borrow_without_static_bounds() {
+        let cx = Cx::for_testing();
+        let text = String::from("borrowed adapter state");
+        let result = futures_lite::future::block_on(
+            cx.with_ambient_fn(|| std::future::ready(text.as_str())),
+        );
+        assert_eq!(result, text);
+    }
+
+    #[test]
+    fn factory_uses_explicit_authority_not_the_polling_tasks_restriction() {
+        let cx = Cx::for_testing();
+        let _parent = cx.restrict::<cap::None>().set_current_restricted();
+        let depth = Cx::restriction_depth();
+        let result = futures_lite::future::block_on(cx.with_ambient_fn(|| {
+            std::future::ready(require_ambient_io("test.construct").is_ok())
+        }));
+        assert!(result);
+        assert!(require_ambient_io("parent").is_err());
+        assert_eq!(Cx::restriction_depth(), depth);
+    }
+
+    #[test]
+    fn returned_outputs_are_owned_by_the_caller_not_the_ambient_wrapper() {
+        let _parent = Cx::set_current(Some(Cx::for_testing()));
+        let cx = Cx::for_testing().restrict::<cap::None>();
+        let events = Events::default();
+        let output = futures_lite::future::block_on(cx.with_ambient_fn(|| {
+            assert!(require_ambient_io("test.construct").is_err());
+            std::future::ready(Probe::new(&events, Behavior::Pending))
+        }));
+        assert!(events.borrow().is_empty());
+        drop(output);
+        assert_eq!(*events.borrow(), [("drop", true)]);
     }
 }
