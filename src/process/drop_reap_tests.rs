@@ -7,12 +7,19 @@
 //! use waitpid(-1) or install a process-wide SIGCHLD handler.
 
 use super::{Child, Command, Stdio};
+use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
+use crate::runtime::reactor::{Events, Interest, Reactor, Source, Token};
+use crate::types::{Budget, RegionId, TaskId};
 use nix::errno::Errno;
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd::Pid;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process as std_process;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -263,4 +270,136 @@ fn kill_on_drop_still_terminates_and_reaps_the_child() {
     let pid = child.id().unwrap();
     drop(child);
     wait_for("kill-on-drop child was reaped", || !exists(&proc_path(pid)));
+}
+
+/// Records, when a token is deregistered, whether the fd registered under it
+/// is still the same open file (br-asupersync-reactor-audit-dofi11 LOW 2). The
+/// /proc link target, not just the fd number, is compared, so an fd number
+/// reused by a concurrent test cannot pass for the original pipe.
+struct FdOpenAtDeregisterReactor {
+    inner: crate::runtime::LabReactor,
+    registered: Mutex<Vec<(Token, i32, Option<PathBuf>)>>,
+    open_at_deregister: Mutex<Vec<(i32, bool)>>,
+}
+
+fn fd_target(fd: i32) -> Option<PathBuf> {
+    fs::read_link(format!("/proc/self/fd/{fd}")).ok()
+}
+
+impl Reactor for FdOpenAtDeregisterReactor {
+    fn register(&self, source: &dyn Source, token: Token, interest: Interest) -> io::Result<()> {
+        let fd = source.as_raw_fd();
+        self.registered
+            .lock()
+            .unwrap()
+            .push((token, fd, fd_target(fd)));
+        self.inner.register(source, token, interest)
+    }
+
+    fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
+        self.inner.modify(token, interest)
+    }
+
+    fn deregister(&self, token: Token) -> io::Result<()> {
+        let entry = self
+            .registered
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(registered, _, _)| *registered == token)
+            .map(|(_, fd, target)| (*fd, target.clone()));
+        if let Some((fd, target)) = entry {
+            let open = target.is_some() && fd_target(fd) == target;
+            self.open_at_deregister.lock().unwrap().push((fd, open));
+        }
+        self.inner.deregister(token)
+    }
+
+    fn poll(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<usize> {
+        self.inner.poll(events, timeout)
+    }
+
+    fn wake(&self) -> io::Result<()> {
+        self.inner.wake()
+    }
+
+    fn registration_count(&self) -> usize {
+        self.inner.registration_count()
+    }
+}
+
+#[test]
+fn child_pipes_leave_the_reactor_before_their_fd_closes() {
+    let reactor = Arc::new(FdOpenAtDeregisterReactor {
+        inner: crate::runtime::LabReactor::new(),
+        registered: Mutex::new(Vec::new()),
+        open_at_deregister: Mutex::new(Vec::new()),
+    });
+    let driver = crate::runtime::IoDriverHandle::new(reactor.clone());
+    let cx = crate::cx::Cx::new_with_observability(
+        RegionId::new_for_test(0, 1),
+        TaskId::new_for_test(0, 0),
+        Budget::INFINITE,
+        None,
+        Some(driver),
+        None,
+    );
+    let _guard = crate::cx::Cx::set_current(Some(cx));
+
+    let mut child = Command::new("sleep")
+        .arg("30")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin().unwrap();
+    let mut stdout = child.stdout().unwrap();
+    let mut stderr = child.stderr().unwrap();
+    let mut task_cx = Context::from_waker(Waker::noop());
+
+    // Every pipe parks on the reactor: the child never writes, and it never
+    // reads, so its stdin pipe fills.
+    let mut byte = [0u8; 1];
+    assert!(
+        Pin::new(&mut stdout)
+            .poll_read(&mut task_cx, &mut ReadBuf::new(&mut byte))
+            .is_pending()
+    );
+    assert!(
+        Pin::new(&mut stderr)
+            .poll_read(&mut task_cx, &mut ReadBuf::new(&mut byte))
+            .is_pending()
+    );
+    let chunk = [0u8; 4096];
+    let mut parked = false;
+    for _ in 0..1024 {
+        match Pin::new(&mut stdin).poll_write(&mut task_cx, &chunk) {
+            Poll::Ready(Ok(_)) => {}
+            Poll::Ready(Err(err)) => panic!("write to the child's stdin: {err}"),
+            Poll::Pending => {
+                parked = true;
+                break;
+            }
+        }
+    }
+    assert!(parked, "the child's stdin pipe never filled");
+    assert_eq!(reactor.registered.lock().unwrap().len(), 3);
+
+    drop(stdin);
+    drop(stdout);
+    drop(stderr);
+    let seen = reactor.open_at_deregister.lock().unwrap().clone();
+    assert_eq!(
+        seen.len(),
+        3,
+        "every pipe leaves the reactor on drop: {seen:?}"
+    );
+    assert!(
+        seen.iter().all(|&(_, open)| open),
+        "a pipe closed its fd before leaving the reactor: {seen:?}"
+    );
+
+    child.kill().unwrap();
+    child.wait().unwrap();
 }
