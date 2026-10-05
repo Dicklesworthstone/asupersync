@@ -393,9 +393,7 @@ impl IoDriver {
             }
         }
 
-        for waker in self.waker_buf.drain(..) {
-            waker.wake();
-        }
+        wake_each(self.waker_buf.drain(..));
 
         Ok(n)
     }
@@ -789,9 +787,7 @@ impl IoDriverHandle {
                 on_event(&event, interest);
             }
 
-            for waker in wakers {
-                waker.wake();
-            }
+            wake_each(wakers);
 
             poll_result.map(Some)
         } else {
@@ -1057,6 +1053,24 @@ impl std::fmt::Debug for IoDriver {
             .field("events_capacity", &self.events.capacity())
             .field("stats", &self.stats)
             .finish_non_exhaustive()
+    }
+}
+
+/// Wakes every waker of one dispatch batch, then re-raises the first panic.
+/// The batch's one-shot registrations have already fired, so a waker left
+/// unwoken because an earlier one panicked would never be woken again
+/// (br-asupersync-reactor-audit-dofi11).
+fn wake_each(wakers: impl IntoIterator<Item = Waker>) {
+    let mut first_panic = None;
+    for waker in wakers {
+        if let Err(payload) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.wake()))
+        {
+            first_panic.get_or_insert(payload);
+        }
+    }
+    if let Some(payload) = first_panic {
+        std::panic::resume_unwind(payload);
     }
 }
 
@@ -3110,6 +3124,75 @@ mod tests {
         assert!(callback_executed.load(std::sync::atomic::Ordering::SeqCst));
         assert_eq!(events, 1);
         assert!(waker_state.flag.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    struct PanickingWaker;
+
+    impl Wake for PanickingWaker {
+        fn wake(self: Arc<Self>) {
+            panic!("this waker panics on purpose");
+        }
+    }
+
+    /// Registers a well-behaved waker, a panicking one and another
+    /// well-behaved one, all ready in one batch, so one of the well-behaved
+    /// wakers comes after the panicking one whatever the dispatch order.
+    fn ready_batch_around_a_panicking_waker(
+        reactor: &LabReactor,
+        register_waker: &mut dyn FnMut(Waker) -> Token,
+    ) -> [Arc<FlagWaker>; 2] {
+        let (before, before_state) = create_test_waker();
+        let (after, after_state) = create_test_waker();
+        let tokens = [
+            register_waker(before),
+            register_waker(Waker::from(Arc::new(PanickingWaker))),
+            register_waker(after),
+        ];
+        for token in tokens {
+            reactor
+                .register(&TestFdSource, token, Interest::READABLE)
+                .expect("register");
+            reactor.inject_event(token, Event::readable(token), Duration::ZERO);
+        }
+        [before_state, after_state]
+    }
+
+    #[test]
+    fn a_panicking_waker_does_not_strand_the_rest_of_its_batch() {
+        init_test("a_panicking_waker_does_not_strand_the_rest_of_its_batch");
+        let reactor = Arc::new(LabReactor::new());
+        let mut driver = IoDriver::new(reactor.clone());
+        let states = ready_batch_around_a_panicking_waker(&reactor, &mut |waker| {
+            driver.register_waker(waker)
+        });
+
+        let turn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            driver.turn(Some(Duration::from_millis(10)))
+        }));
+        assert!(turn.is_err(), "the waker's panic still reaches the caller");
+        for state in &states {
+            assert!(state.flag.load(Ordering::SeqCst), "every other waker fired");
+        }
+        crate::test_complete!("a_panicking_waker_does_not_strand_the_rest_of_its_batch");
+    }
+
+    #[test]
+    fn a_panicking_waker_does_not_strand_the_rest_of_a_handle_turn() {
+        init_test("a_panicking_waker_does_not_strand_the_rest_of_a_handle_turn");
+        let reactor = Arc::new(LabReactor::new());
+        let driver = IoDriverHandle::new(reactor.clone());
+        let states = ready_batch_around_a_panicking_waker(&reactor, &mut |waker| {
+            driver.lock().register_waker(waker)
+        });
+
+        let turn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            driver.turn_with(Some(Duration::from_millis(10)), |_, _| {})
+        }));
+        assert!(turn.is_err(), "the waker's panic still reaches the caller");
+        for state in &states {
+            assert!(state.flag.load(Ordering::SeqCst), "every other waker fired");
+        }
+        crate::test_complete!("a_panicking_waker_does_not_strand_the_rest_of_a_handle_turn");
     }
 }
 
