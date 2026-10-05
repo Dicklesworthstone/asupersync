@@ -39,8 +39,8 @@
 //! ```
 
 use crate::runtime::reactor::{
-    Event, Events, Interest, IoReactorCapabilitySnapshot, Reactor, SlabToken, Source, Token,
-    TokenSlab,
+    Event, Events, Interest, IoReactorBackend, IoReactorCapabilitySnapshot, Reactor, SlabToken,
+    Source, Token, TokenSlab,
 };
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -666,6 +666,7 @@ impl IoDriverHandle {
             Arc::downgrade(&self.inner),
             interest,
             self.reactor.clone(),
+            !matches!(self.capabilities.backend(), IoReactorBackend::Epoll),
         ))
     }
 
@@ -825,6 +826,15 @@ pub struct IoRegistration {
     /// Persistent explicit deregistration failures leave Drop armed for one
     /// final best-effort cleanup pass.
     deregistered: bool,
+    /// Whether an interest change (`rearm`, `set_interest`) must wake a
+    /// reactor blocked in `poll` for that wait to see the change. An epoll
+    /// wait does without it: `epoll_ctl` on a ready fd queues the event and
+    /// wakes the blocked `epoll_wait` in the kernel, and the wait holds no
+    /// lock the change needs. Waking anyway cost each re-arm an eventfd write
+    /// and the reactor thread a spurious return from its wait. io_uring needs
+    /// the wake (the change goes through the shared ring), and backends this
+    /// module cannot identify keep it (br-asupersync-issue65-criticisms-kpmoy5.1).
+    interest_change_wakes_reactor: bool,
 }
 
 impl IoRegistration {
@@ -833,6 +843,7 @@ impl IoRegistration {
         driver: Weak<Mutex<IoDriver>>,
         interest: Interest,
         reactor: Arc<dyn Reactor>,
+        interest_change_wakes_reactor: bool,
     ) -> Self {
         Self {
             token,
@@ -841,6 +852,7 @@ impl IoRegistration {
             reactor,
             cached_waker: None,
             deregistered: false,
+            interest_change_wakes_reactor,
         }
     }
 
@@ -849,6 +861,14 @@ impl IoRegistration {
         // blocking wait after any sampled visibility check but before we submit
         // the fresh register/modify/deregister operation.
         let _ = self.reactor.wake();
+    }
+
+    /// Wakes the reactor before an interest change unless its blocked wait
+    /// sees the change by itself; see `interest_change_wakes_reactor`.
+    fn wake_polling_reactor_for_interest_change(&self) {
+        if self.interest_change_wakes_reactor {
+            self.wake_polling_reactor();
+        }
     }
 
     /// Returns the registration token.
@@ -874,7 +894,7 @@ impl IoRegistration {
 
     /// Updates the interest set for this registration.
     pub fn set_interest(&mut self, interest: Interest) -> io::Result<()> {
-        self.wake_polling_reactor();
+        self.wake_polling_reactor_for_interest_change();
         let Some(driver) = self.driver.upgrade() else {
             return Err(io::Error::new(
                 io::ErrorKind::NotConnected,
@@ -933,7 +953,7 @@ impl IoRegistration {
         waker: &Waker,
         accumulate: bool,
     ) -> io::Result<bool> {
-        self.wake_polling_reactor();
+        self.wake_polling_reactor_for_interest_change();
         let Some(driver) = self.driver.upgrade() else {
             return Err(io::Error::new(
                 io::ErrorKind::NotConnected,
@@ -2977,8 +2997,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     mod epoll_integration {
         use super::*;
-        use crate::runtime::reactor::EpollReactor;
-        use std::io::Write;
+        use crate::runtime::reactor::{EpollReactor, IoUringCapabilityPolicy};
+        use std::io::{Read, Write};
         use std::os::unix::net::UnixStream;
 
         #[test]
@@ -3046,6 +3066,169 @@ mod tests {
 
             driver.deregister(token).expect("deregister should succeed");
             crate::test_complete!("io_driver_with_epoll_reactor_writable");
+        }
+
+        /// A real epoll reactor that reports a chosen backend in its capability
+        /// snapshot and counts `wake` calls.
+        struct CountingEpoll {
+            inner: EpollReactor,
+            backend: IoReactorBackend,
+            wakes: AtomicUsize,
+        }
+
+        impl CountingEpoll {
+            fn new(backend: IoReactorBackend) -> Self {
+                Self {
+                    inner: EpollReactor::new().expect("create reactor"),
+                    backend,
+                    wakes: AtomicUsize::new(0),
+                }
+            }
+        }
+
+        impl Reactor for CountingEpoll {
+            fn capability_snapshot(&self) -> IoReactorCapabilitySnapshot {
+                IoReactorCapabilitySnapshot::from_policy(
+                    self.backend,
+                    None,
+                    IoUringCapabilityPolicy::default(),
+                    [None, None, None, None, None, None],
+                )
+            }
+
+            fn register(
+                &self,
+                source: &dyn Source,
+                token: Token,
+                interest: Interest,
+            ) -> io::Result<()> {
+                self.inner.register(source, token, interest)
+            }
+
+            fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
+                self.inner.modify(token, interest)
+            }
+
+            fn deregister(&self, token: Token) -> io::Result<()> {
+                self.inner.deregister(token)
+            }
+
+            fn poll(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<usize> {
+                self.inner.poll(events, timeout)
+            }
+
+            fn wake(&self) -> io::Result<()> {
+                self.wakes.fetch_add(1, Ordering::SeqCst);
+                self.inner.wake()
+            }
+
+            fn registration_count(&self) -> usize {
+                self.inner.registration_count()
+            }
+        }
+
+        /// br-asupersync-issue65-criticisms-kpmoy5.1: on an epoll-backed
+        /// driver an interest change does not wake the reactor. A backend the
+        /// driver cannot identify still gets the wake on every change.
+        #[test]
+        fn epoll_interest_changes_skip_the_reactor_wake_other_backends_keep_it() {
+            super::init_test("epoll_interest_changes_skip_the_reactor_wake_other_backends_keep_it");
+            for (backend, wakes_per_change) in [
+                (IoReactorBackend::Epoll, 0usize),
+                (IoReactorBackend::Injected, 1usize),
+            ] {
+                let reactor = Arc::new(CountingEpoll::new(backend));
+                let handle = IoDriverHandle::new(reactor.clone());
+                let (sock, _peer) = UnixStream::pair().expect("create socket pair");
+                let (waker, _state) = create_test_waker();
+                let mut registration = handle
+                    .register(&sock, Interest::READABLE, waker.clone())
+                    .expect("register");
+                let before = reactor.wakes.load(Ordering::SeqCst);
+                for _ in 0..10 {
+                    assert!(
+                        registration
+                            .rearm(Interest::READABLE, &waker)
+                            .expect("rearm")
+                    );
+                }
+                registration
+                    .set_interest(Interest::READABLE)
+                    .expect("set_interest");
+                let wakes = reactor.wakes.load(Ordering::SeqCst) - before;
+                assert_eq!(
+                    wakes,
+                    11 * wakes_per_change,
+                    "{backend:?}: reactor wakes for 10 re-arms and 1 set_interest"
+                );
+            }
+            crate::test_complete!(
+                "epoll_interest_changes_skip_the_reactor_wake_other_backends_keep_it"
+            );
+        }
+
+        /// Skipping the wake is sound only because an epoll wait blocked on
+        /// another thread sees a re-arm: the event must arrive with no
+        /// reactor wake at all.
+        #[test]
+        fn epoll_rearm_reaches_a_poll_blocked_on_another_thread() {
+            super::init_test("epoll_rearm_reaches_a_poll_blocked_on_another_thread");
+            let reactor = Arc::new(CountingEpoll::new(IoReactorBackend::Epoll));
+            let handle = IoDriverHandle::new(reactor.clone());
+            let (sock, mut peer) = UnixStream::pair().expect("create socket pair");
+            sock.set_nonblocking(true).expect("nonblocking");
+            let (waker, state) = create_test_waker();
+            let mut registration = handle
+                .register(&sock, Interest::READABLE, waker.clone())
+                .expect("register");
+
+            // Fire and consume the oneshot event so the registration is disarmed.
+            peer.write_all(b"1").expect("write");
+            let first = handle
+                .turn_with(Some(Duration::from_secs(5)), |_, _| {})
+                .expect("turn");
+            assert!(first >= 1, "first readable event");
+            let mut buf = [0u8; 8];
+            let drained = (&sock).read(&mut buf).expect("drain the first byte");
+            assert_eq!(drained, 1, "drained the first write");
+            let woken_before = state.count.load(Ordering::SeqCst);
+            let wakes_before = reactor.wakes.load(Ordering::SeqCst);
+
+            let poller = handle.clone();
+            let blocked = std::thread::spawn(move || {
+                let start = std::time::Instant::now();
+                let polled = poller
+                    .turn_with(Some(Duration::from_secs(30)), |_, _| {})
+                    .expect("blocked turn");
+                (polled, start.elapsed())
+            });
+            // Let the poll block, then make the socket readable while the
+            // registration is disarmed, so nothing is delivered until the re-arm.
+            std::thread::sleep(Duration::from_millis(200));
+            peer.write_all(b"2").expect("write");
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(
+                registration
+                    .rearm(Interest::READABLE, &waker)
+                    .expect("rearm")
+            );
+
+            let (polled, elapsed) = blocked.join().expect("poller thread");
+            assert!(polled >= 1, "the blocked poll returned the re-armed event");
+            assert!(
+                elapsed < Duration::from_secs(10),
+                "the blocked poll waited {elapsed:?} for the re-arm"
+            );
+            assert!(
+                state.count.load(Ordering::SeqCst) > woken_before,
+                "the re-armed event woke the waker"
+            );
+            assert_eq!(
+                reactor.wakes.load(Ordering::SeqCst),
+                wakes_before,
+                "no reactor wake was used"
+            );
+            crate::test_complete!("epoll_rearm_reaches_a_poll_blocked_on_another_thread");
         }
     }
 
