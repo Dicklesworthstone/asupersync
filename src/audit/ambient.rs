@@ -119,7 +119,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     },
     AmbientFinding {
         file: "runtime/blocking_pool.rs",
-        line: 1281,
+        line: 1314,
         evidence_pattern: "thread::Builder::new()",
         category: AmbientCategory::Spawn,
         severity: Severity::Low,

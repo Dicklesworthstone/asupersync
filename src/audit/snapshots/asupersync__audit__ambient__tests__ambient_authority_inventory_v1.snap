@@ -121,7 +121,7 @@ expression: inventory
 3	Io	net/quic_native/forensic_log.rs	std::fs::File::create
 2	Io	net/quic_native/handshake_driver.rs	std::net::UdpSocket
 1	Io	net/stun.rs	std::net::UdpSocket
-3	Io	net/tcp/listener.rs	TcpListener::
+2	Io	net/tcp/listener.rs	TcpListener::
 2	Io	net/tcp/listener.rs	TcpStream::
 1	Io	net/tcp/socket.rs	TcpListener::
 1	Io	net/tcp/socket.rs	TcpStream::
@@ -260,7 +260,7 @@ expression: inventory
 68	Time	net/atp/transport_quic/native_link.rs	Instant::now()
 17	Time	net/atp/transport_rq/mod.rs	Instant::now()
 2	Time	net/atp/udp/mod.rs	Instant::now()
-2	Time	net/dns/resolver.rs	Instant::now()
+4	Time	net/dns/resolver.rs	Instant::now()
 5	Time	net/quic_native/connection_manager.rs	Instant::now()
 4	Time	net/quic_native/endpoint.rs	Instant::now()
 4	Time	net/quic_native/handshake_driver.rs	Instant::now()
@@ -270,6 +270,7 @@ expression: inventory
 1	Time	observability/mod.rs	std::time::SystemTime::now()
 1	Time	observability/network_diagnostics.rs	std::time::SystemTime::now()
 2	Time	observability/otel_structured_concurrency.rs	SystemTime::now()
+2	Time	observability/otlp_trace_exporter.rs	Instant::now()
 1	Time	observability/otlp_trace_exporter.rs	std::time::Instant::now()
 8	Time	observability/pressure_governor.rs	Instant::now()
 2	Time	observability/relay_dashboard.rs	Instant::now()
@@ -482,7 +483,6 @@ expression: inventory
 1	Io	net/stun.rs	std::net::UdpSocket	let socket = std::net::UdpSocket::bind(local_addr)
 1	Io	net/tcp/listener.rs	TcpListener::	TcpListener::poll_accept(self, cx)
 1	Io	net/tcp/listener.rs	TcpListener::	match net::TcpListener::bind(addr) {
-1	Io	net/tcp/listener.rs	TcpListener::	std::future::poll_fn(|cx| TcpListener::poll_accept(self, cx))
 1	Io	net/tcp/listener.rs	TcpStream::	Poll::Ready(TcpStream::from_std(stream).map(|stream| (stream, addr)))
 1	Io	net/tcp/listener.rs	TcpStream::	TcpStream::from_std(stream).map(|stream| (stream, addr)),
 1	Io	net/tcp/socket.rs	TcpListener::	TcpListener::from_std(socket.into())
@@ -838,7 +838,9 @@ expression: inventory
 1	Time	net/atp/transport_rq/mod.rs	Instant::now()	self.beacons.mark_peer_activity(Instant::now());
 1	Time	net/atp/udp/mod.rs	Instant::now()	let receive_time = Instant::now();
 1	Time	net/atp/udp/mod.rs	Instant::now()	receive_time: Instant::now(),
+1	Time	net/dns/resolver.rs	Instant::now()	let deadline = Instant::now().checked_add(self.config.timeout);
 2	Time	net/dns/resolver.rs	Instant::now()	started: Instant::now(),
+1	Time	net/dns/resolver.rs	Instant::now()	|| deadline.is_some_and(|deadline| Instant::now() >= deadline)
 1	Time	net/quic_native/connection_manager.rs	Instant::now()	clock_origin: Instant::now(),
 3	Time	net/quic_native/connection_manager.rs	Instant::now()	instant_origin: Instant::now(),
 1	Time	net/quic_native/connection_manager.rs	Instant::now()	last_activity: Instant::now(),
@@ -861,6 +863,8 @@ expression: inventory
 1	Time	observability/network_diagnostics.rs	std::time::SystemTime::now()	timestamp: std::time::SystemTime::now(),
 1	Time	observability/otel_structured_concurrency.rs	SystemTime::now()	created_at: SystemTime::now(),
 1	Time	observability/otel_structured_concurrency.rs	SystemTime::now()	let now = SystemTime::now();
+1	Time	observability/otlp_trace_exporter.rs	Instant::now()	if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+1	Time	observability/otlp_trace_exporter.rs	Instant::now()	self.drain(usize::MAX, Instant::now().checked_add(self.batch_timeout))
 1	Time	observability/otlp_trace_exporter.rs	std::time::Instant::now()	let flush_start = std::time::Instant::now();
 1	Time	observability/pressure_governor.rs	Instant::now()	last_coordination: Instant::now(),
 1	Time	observability/pressure_governor.rs	Instant::now()	let coordination_duration = Instant::now().duration_since(coordination_start);
