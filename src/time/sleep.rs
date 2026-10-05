@@ -344,6 +344,16 @@ fn readiness_waker(ready: Arc<AtomicBool>, inner: Waker) -> Waker {
 ///
 /// For standalone use without a runtime, you can provide a time getter.
 ///
+/// # Cancellation
+///
+/// Under a task context, an explicit cancellation request (anything but a
+/// timeout or deadline) completes a pending `Sleep` early, so the task reaches
+/// its next checkpoint instead of waiting out the deadline. A `Sleep` first
+/// polled after the request completes after one trip through the scheduler,
+/// so a loop that awaits sleeps and never checks for cancellation keeps
+/// yielding once per turn until it does. Inside a masked section the sleep
+/// runs to its deadline.
+///
 /// # Cancel Safety
 ///
 /// `Sleep` is cancel-safe. Dropping it simply stops the wait with no
@@ -784,8 +794,17 @@ impl Sleep {
                     && current.checkpoint().is_err()
             })
         {
-            self.polled
-                .store(true, std::sync::atomic::Ordering::Relaxed);
+            // A Sleep first polled after its task was cancelled completes only
+            // after one trip through the scheduler. A loop that awaits a fresh
+            // Sleep each turn and never checks for cancellation would otherwise
+            // find every Sleep ready at once and spin inside a single poll,
+            // pinning its worker (a current_thread runtime freezes) where no
+            // cleanup budget can reach it (br-asupersync-2u7bpm). A Sleep that
+            // was already parked completes at once, as before.
+            if !self.polled.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
             self.completed
                 .store(true, std::sync::atomic::Ordering::Release);
             self.cancel_active_registration();
