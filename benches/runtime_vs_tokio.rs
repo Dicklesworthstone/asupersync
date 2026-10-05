@@ -28,6 +28,11 @@
 //!   64-byte request. Throughput comes from Criterion. Round-trip p50/p99
 //!   are printed as `tcp_rr latency ...` lines before the group runs (only
 //!   when no filter is given or a filter names `tcp_rr`).
+//! - `http1_hello`: `conns` keep-alive connections to asupersync's HTTP/1.1
+//!   server (`Http1Listener::run_in`, a handler answering a 5-byte body),
+//!   each client sending 200 `GET /` requests one after another. asupersync
+//!   only: hyper is not a dependency of this crate. Latency lines print as
+//!   for `tcp_rr`.
 //!
 //! Timing starts inside the parent future: runtime construction and
 //! `block_on` entry are excluded on both sides. Run with:
@@ -528,9 +533,9 @@ fn tokio_tcp_rr(rt: &tokio::runtime::Runtime, conns: usize, record: bool) -> RrB
 }
 
 /// Prints the pooled round-trip latency percentiles of
-/// `TCP_RR_LATENCY_BATCHES` recorded batches. Criterion reports throughput;
-/// it has no percentile output.
-fn report_tcp_rr_latency(row: &str, conns: usize, mut batch: impl FnMut() -> RrBatch) {
+/// `TCP_RR_LATENCY_BATCHES` recorded batches of `group`. Criterion reports
+/// throughput; it has no percentile output.
+fn report_rr_latency(group: &str, row: &str, conns: usize, mut batch: impl FnMut() -> RrBatch) {
     let mut elapsed = Duration::ZERO;
     let mut latencies = Vec::new();
     for _ in 0..TCP_RR_LATENCY_BATCHES {
@@ -544,12 +549,133 @@ fn report_tcp_rr_latency(row: &str, conns: usize, mut batch: impl FnMut() -> RrB
         Duration::from_nanos(latencies[index]).as_secs_f64() * 1e6
     };
     println!(
-        "tcp_rr latency {row}/{conns}: {} round trips, p50 {:.1} us, p99 {:.1} us, {:.0} round trips/s",
+        "{group} latency {row}/{conns}: {} round trips, p50 {:.1} us, p99 {:.1} us, {:.0} round trips/s",
         latencies.len(),
         at(50),
         at(99),
         latencies.len() as f64 / elapsed.as_secs_f64(),
     );
+}
+
+/// Keep-alive requests each `http1_hello` connection sends per batch.
+const HTTP1_REQUESTS: usize = 200;
+const HTTP1_REQUEST: &[u8] = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+
+/// Reads one HTTP/1.1 response with a `Content-Length` body from `stream`,
+/// keeping bytes past it in `buf` for the next response.
+async fn read_http1_response(
+    stream: &mut asupersync::net::TcpStream,
+    buf: &mut Vec<u8>,
+) -> std::io::Result<()> {
+    use asupersync::io::AsyncReadExt;
+
+    let mut chunk = [0u8; 1024];
+    loop {
+        if let Some(head_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            let head = std::str::from_utf8(&buf[..head_end]).map_err(std::io::Error::other)?;
+            let body_len = head
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .ok_or_else(|| std::io::Error::other("response without Content-Length"))?;
+            let total = head_end + 4 + body_len;
+            if buf.len() >= total {
+                buf.drain(..total);
+                return Ok(());
+            }
+        }
+        let n = stream.read(&mut chunk).await?;
+        if n == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
+}
+
+/// `conns` keep-alive connections to asupersync's HTTP/1.1 server
+/// (`Http1Listener::run_in`), whose handler answers every request with a
+/// fixed 5-byte body. Each client sends `HTTP1_REQUESTS` requests one after
+/// another. Connection setup and shutdown are outside the timed span.
+fn asup_http1_hello(rt: &Runtime, conns: usize, record: bool) -> RrBatch {
+    use asupersync::http::h1::server::HostPolicy;
+    use asupersync::http::h1::{Http1Config, Http1Listener, Http1ListenerConfig, Response};
+    use asupersync::io::AsyncWriteExt;
+    use asupersync::net::TcpStream;
+
+    rt.block_on(rt.handle().spawn(async move {
+        let cx = Cx::current().expect("a spawned task has a Cx");
+        // The default host policy rejects every request: allow the one name
+        // the client sends.
+        let config = Http1ListenerConfig::default().http_config(
+            Http1Config::default().host_policy(HostPolicy::AllowList(vec!["localhost".to_owned()])),
+        );
+        let listener = Http1Listener::bind_with_config(
+            "127.0.0.1:0",
+            |_request| async { Response::new(200, "OK", b"hello".to_vec()) },
+            config,
+        )
+        .await
+        .expect("bind the HTTP/1.1 listener");
+        let addr = listener.local_addr().expect("listener address");
+        let shutdown = listener.shutdown_signal();
+        let mut server = cx
+            .spawn(move |cx| async move {
+                let _ = listener.run_in(&cx).await;
+            })
+            .expect("spawn the listener");
+        let mut streams = Vec::with_capacity(conns);
+        for _ in 0..conns {
+            let stream = TcpStream::connect(addr).await.expect("connect");
+            stream.set_nodelay(true).expect("client nodelay");
+            streams.push(stream);
+        }
+
+        let start = Instant::now();
+        let mut clients = Vec::with_capacity(conns);
+        for mut stream in streams {
+            let client = cx.spawn(move |_| async move {
+                let mut latencies = Vec::with_capacity(if record { HTTP1_REQUESTS } else { 0 });
+                let mut buf = Vec::with_capacity(1024);
+                for _ in 0..HTTP1_REQUESTS {
+                    let sent = Instant::now();
+                    stream.write_all(HTTP1_REQUEST).await.expect("request");
+                    read_http1_response(&mut stream, &mut buf)
+                        .await
+                        .expect("response");
+                    if record {
+                        latencies.push(nanos(sent.elapsed()));
+                    }
+                }
+                latencies
+            });
+            clients.push(client.expect("spawn client task"));
+        }
+        let mut latencies = Vec::new();
+        for mut client in clients {
+            latencies.extend(client.join(&cx).await.expect("client task"));
+        }
+        let elapsed = start.elapsed();
+        shutdown.trigger_immediate();
+        let _ = server.join(&cx).await;
+        (elapsed, latencies)
+    }))
+}
+
+/// Whether this run's benchmark filters can select `http1_hello`; its latency
+/// report runs only then.
+fn http1_hello_selected() -> bool {
+    let filters: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|arg| !arg.starts_with('-'))
+        .collect();
+    filters.is_empty()
+        || filters.iter().any(|filter| {
+            filter.contains("http1_hello") || "http1_hello".starts_with(filter.as_str())
+        })
 }
 
 /// Times `iters` batches of `n` operations with the clock inside the parent.
@@ -730,8 +856,12 @@ fn bench_tcp_rr(c: &mut Criterion) {
     let tokio = tokio_multi_io();
     if tcp_rr_selected() {
         for conns in [1usize, 64] {
-            report_tcp_rr_latency("tokio", conns, || tokio_tcp_rr(&tokio, conns, true));
-            report_tcp_rr_latency("asupersync", conns, || asup_tcp_rr(&asup, conns, true));
+            report_rr_latency("tcp_rr", "tokio", conns, || {
+                tokio_tcp_rr(&tokio, conns, true)
+            });
+            report_rr_latency("tcp_rr", "asupersync", conns, || {
+                asup_tcp_rr(&asup, conns, true)
+            });
         }
     }
     let mut group = c.benchmark_group("tcp_rr");
@@ -748,6 +878,28 @@ fn bench_tcp_rr(c: &mut Criterion) {
     group.finish();
 }
 
+/// asupersync's HTTP/1.1 server only: hyper is not a dependency of this
+/// crate, so there is no tokio row here (the standalone probe compares).
+fn bench_http1_hello(c: &mut Criterion) {
+    let asup = asup_multi();
+    if http1_hello_selected() {
+        for conns in [1usize, 64] {
+            report_rr_latency("http1_hello", "asupersync", conns, || {
+                asup_http1_hello(&asup, conns, true)
+            });
+        }
+    }
+    let mut group = c.benchmark_group("http1_hello");
+    group.sample_size(20);
+    for conns in [1usize, 64] {
+        group.throughput(Throughput::Elements((conns * HTTP1_REQUESTS) as u64));
+        group.bench_function(BenchmarkId::new("asupersync", conns), |b| {
+            b.iter_custom(|iters| timed(iters, || asup_http1_hello(&asup, conns, false).0));
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     runtime_vs_tokio,
     bench_spawn_join,
@@ -758,6 +910,7 @@ criterion_group!(
     bench_mutex_contended,
     bench_yield_storm,
     bench_join_set,
-    bench_tcp_rr
+    bench_tcp_rr,
+    bench_http1_hello
 );
 criterion_main!(runtime_vs_tokio);
