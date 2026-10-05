@@ -58,12 +58,11 @@
 use super::Stream;
 use crate::combinator::JoinSet;
 use crate::cx::{CancelWakerToken, Cx};
-use crate::runtime::yield_now;
 use crate::types::policy::FailFast;
 use crate::types::{CancelReason, Outcome, PanicPayload};
 use std::convert::Infallible;
 use std::future::{Future, poll_fn};
-use std::pin::Pin;
+use std::pin::{Pin, pin};
 use std::task::Poll;
 
 /// Applies `f` to every item of `stream`, keeping at most `limit` items in
@@ -139,7 +138,8 @@ where
 ///
 /// # Determinism
 ///
-/// Completions are collected through [`JoinSet::try_join_next`], whose
+/// Completions are collected through [`JoinSet::join_next`] and
+/// [`JoinSet::try_join_next`], whose
 /// tie-break is the earliest-spawned ready member. With a deterministic scheduler, the
 /// reported first failure is therefore deterministic for a given schedule.
 ///
@@ -214,31 +214,38 @@ where
             // caller's cancellation went unseen until another item arrived,
             // which for a quiet source may be never, and that item was then
             // admitted after the failure.
-            let mut cancel_wake = CancelWake { cx, token: None };
-            let admission = poll_fn(|task| {
-                cancel_wake.token = Some(cx.refresh_cancel_waker(cancel_wake.token, task.waker()));
-                if let Some(outcome) = set.try_join_next() {
-                    return Poll::Ready(Admission::Finished(outcome));
-                }
-                if cx.is_cancel_requested() {
-                    return Poll::Ready(Admission::Cancelled);
-                }
-                match Pin::new(&mut stream).poll_next(task) {
-                    Poll::Ready(Some(item)) => Poll::Ready(Admission::Item(item)),
-                    Poll::Ready(None) => Poll::Ready(Admission::SourceDone),
-                    Poll::Pending => {
-                        // A member's completion registers no waker here: poll
-                        // again cooperatively while any is in flight, the same
-                        // trade as the completion wait below.
-                        if !set.is_empty() {
-                            task.waker().wake_by_ref();
+            let admission = {
+                let mut cancel_wake = CancelWake { cx, token: None };
+                let mut waiting_for_member = !set.is_empty();
+                let mut completion = pin!(set.join_next(cx));
+                poll_fn(|task| {
+                    // Register before inspecting cancellation, so a request
+                    // racing this poll cannot leave the caller parked.
+                    cancel_wake.token =
+                        Some(cx.refresh_cancel_waker(cancel_wake.token, task.waker()));
+                    if waiting_for_member {
+                        match completion.as_mut().poll(task) {
+                            Poll::Ready(Some(outcome)) => {
+                                return Poll::Ready(Admission::Finished(outcome));
+                            }
+                            Poll::Ready(None) => waiting_for_member = false,
+                            Poll::Pending => {}
                         }
-                        Poll::Pending
                     }
-                }
-            })
-            .await;
-            drop(cancel_wake);
+                    if cx.is_cancel_requested() {
+                        return Poll::Ready(Admission::Cancelled);
+                    }
+                    match Pin::new(&mut stream).poll_next(task) {
+                        Poll::Ready(Some(item)) => Poll::Ready(Admission::Item(item)),
+                        Poll::Ready(None) => Poll::Ready(Admission::SourceDone),
+                        Poll::Pending => Poll::Pending,
+                    }
+                })
+                .await
+                // Dropping a borrowed join_next wait neither consumes nor
+                // cancels pending members. The set retains their handles and
+                // wake registrations when the source wins this wait.
+            };
             match admission {
                 Admission::Finished(outcome) => {
                     if let Some(failure) = failure_of(outcome) {
@@ -276,37 +283,27 @@ where
             break 'drive;
         }
 
-        // Either at the concurrency ceiling, or the source is exhausted with
-        // members still running. Wait for the next completion — but stay
-        // responsive to cancellation while doing so.
-        //
-        // This deliberately does NOT use `JoinSet::join_next`, which is
-        // documented as uninterruptible: it waits for a member's terminal
-        // outcome so that no-orphan accounting always holds. That is the right
-        // default for a caller who will eventually be satisfied, and it
-        // DEADLOCKS here. An item that only terminates *because* it was
-        // cancelled can never terminate while this loop is parked waiting for
-        // it, because the parked loop never reaches the cancellation check and
-        // therefore never reaches the drain that would cancel it. Measured, not
-        // theorised: parking here burned the lab's entire 100_000-step budget
-        // and came back non-quiescent
-        // (tests/stream_for_each_concurrent_lab_proof.rs).
-        //
-        // TRADEOFF: polling cooperatively costs one wakeup per scheduler turn
-        // while waiting, where parking would cost none. That is the price of
-        // being cancellable, and it is the correct trade for a combinator whose
-        // entire reason to exist is drain-on-cancel.
-        let mut completed = None;
-        loop {
-            if let Some(outcome) = set.try_join_next() {
-                completed = Some(outcome);
-                break;
-            }
-            if cx.is_cancel_requested() || set.is_empty() {
-                break;
-            }
-            yield_now().await;
-        }
+        // Park on member completion AND caller cancellation. Awaiting only
+        // join_next would deadlock when members need our cancellation request
+        // to terminate. Registering both wake sources preserves that drain
+        // guarantee without a self-waking readiness scan on every turn.
+        let completed = {
+            let mut cancel_wake = CancelWake { cx, token: None };
+            let mut completion = pin!(set.join_next(cx));
+            poll_fn(|task| {
+                cancel_wake.token =
+                    Some(cx.refresh_cancel_waker(cancel_wake.token, task.waker()));
+                if let Poll::Ready(outcome) = completion.as_mut().poll(task) {
+                    return Poll::Ready(outcome);
+                }
+                if cx.is_cancel_requested() {
+                    Poll::Ready(None)
+                } else {
+                    Poll::Pending
+                }
+            })
+            .await
+        };
 
         match completed {
             Some(outcome) => {
