@@ -85,6 +85,8 @@ use crate::runtime::state::SpawnError;
 use crate::types::policy::FailFast;
 use crate::types::{CancelReason, Outcome, PanicPayload, Policy, Severity};
 
+mod owner;
+
 /// A dynamically-sized collection of tasks spawned into a single region, whose
 /// results are collected as four-valued [`Outcome`]s.
 ///
