@@ -420,7 +420,7 @@ fn public_docs_match_the_shipped_contracts() {
         "`race!` expands only to the drain-correct `Cx::race_drained*` family: spawned losers are protocol-cancelled and drained before return.",
         "Blocking `select!` is also drain-correct; its `else` form instead polls each branch exactly once in source order, returns immediately, and drops all still-pending branches without draining.",
         "Supported root macros in `proc-macros` builds are `scope!`, `spawn!`, `join!`, `join_all!`, `race!`, and `select!`; the root also exports the `#[main]`, `#[test]`, and `#[lab_test]` entry attributes.",
-        "Default-On Adaptive Cancel Preemption (Discounted UCB1)",
+        "Opt-In Adaptive Cancel Preemption (Discounted UCB1)",
         "`{4, 8, 16, 32, 64}`",
         "`cell.get_or_init(|| async { ... }).await`",
         "pub fn masked<F, R>(&self, f: F) -> R;",
@@ -438,6 +438,7 @@ fn public_docs_match_the_shipped_contracts() {
         "losers are cancelled by drop, not drained",
         "Deterministic EXP3/Hedge policy tunes cancel streak limits",
         "EXP3/Hedge scheduler control",
+        "Default-On Adaptive Cancel Preemption",
     ] {
         assert!(
             !readme.contains(stale),
@@ -469,7 +470,7 @@ fn public_docs_match_the_shipped_contracts() {
     assert!(scheduler.contains("Discounted UCB1 policy for adaptive cancel-streak limits."));
     assert!(scheduler.contains("const ADAPTIVE_STREAK_ARMS: [usize; 5] = [4, 8, 16, 32, 64];"));
     assert!(scheduler.contains("const ADAPTIVE_UCB_DISCOUNT: f64 = 0.95;"));
-    assert!(runtime_config.contains("enable_adaptive_cancel_streak: true,"));
+    assert!(runtime_config.contains("enable_adaptive_cancel_streak: false,"));
     assert!(cx.contains("pub fn masked<F, R>(&self, f: F) -> R"));
     assert!(once_cell.contains("F: FnOnce() -> Fut"));
     assert!(pool.contains("pub fn return_to_pool"));

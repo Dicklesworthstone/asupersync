@@ -59,9 +59,11 @@ time per task: see [Measured against tokio](#measured-against-tokio).
 
 **Experimental scheduling policy and diagnostics.** These are not guarantees:
 
-- Adaptive cancel preemption (on by default): a discounted UCB1 policy picks the
-  cancel-streak limit from `{4, 8, 16, 32, 64}` at deterministic epoch
-  boundaries. Whether it beats a fixed limit is still being measured.
+- Adaptive cancel preemption (opt-in, `enable_adaptive_cancel_streak(true)`): a
+  discounted UCB1 policy picks the cancel-streak limit from `{4, 8, 16, 32, 64}`
+  at deterministic epoch boundaries. Measured against the fixed limit of 16 on
+  two hosts, it did not beat it on cancel-heavy work and was 1-29% slower on
+  spawn+join, yield and channel round trips, so the default is the fixed limit.
 - Drain progress certificates: periodic estimates of how close a draining
   region is to quiescence, with conditional bounds. They report; they do not
   change scheduling.
@@ -417,11 +419,15 @@ combine(b1, b2) =
 
 This is the kind of structure that lets us reason about cancellation protocols and bounded cleanup with proof-friendly, compositional rules.
 
-### Default-On Adaptive Cancel Preemption (Discounted UCB1)
+### Opt-In Adaptive Cancel Preemption (Discounted UCB1)
 
-Scheduler preemption is not fixed to one static cancel-streak limit. By default,
-each worker runs a deterministic discounted-UCB1 selector over
-`{4, 8, 16, 32, 64}` (starting at `16`). At fixed epoch boundaries (128
+By default the scheduler uses a fixed cancel-streak limit of 16. With
+`RuntimeBuilder::enable_adaptive_cancel_streak(true)`, each worker runs a
+deterministic discounted-UCB1 selector over `{4, 8, 16, 32, 64}` (starting at
+`16`). Measured in one process against the fixed limit on two hosts
+(2026-10-05), it did not beat it on cancel-heavy workloads and was 1-29% slower
+on spawn+join, `yield_now` and channel round trips, which is why it is off by
+default. At fixed epoch boundaries (128
 dispatches by default), it discounts prior pull mass by `0.95`, updates the
 selected arm from a reward that blends Lyapunov decrease with deadline, fairness, and
 fallback penalties, then chooses the next upper-confidence arm. An
@@ -1016,7 +1022,7 @@ Scheduler behavior is intentionally explicit:
 - Workers track fairness telemetry (`fairness_yields`, `max_cancel_streak`) so starvation claims can be checked against runtime counters, not guesses (`src/runtime/scheduler/three_lane.rs`).
 - Local dispatch uses single-lock multi-lane pops (`try_local_any_lane` and `pop_any_lane_with_hint`) to reduce lock traffic on the hot path while keeping lane ordering rules intact (`src/runtime/scheduler/three_lane.rs`).
 - An optional Lyapunov governor can steer lane ordering from periodic runtime snapshots. It is off by default, and when enabled it runs at a configurable interval (`governor_interval`, default `32`) (`src/runtime/config.rs`, `src/runtime/builder.rs`, `src/runtime/scheduler/three_lane.rs`).
-- Adaptive cancel preemption is enabled by default as a deterministic discounted-UCB1 controller: workers choose among `{4, 8, 16, 32, 64}` at fixed epoch boundaries using reward signals that blend Lyapunov decrease, fairness pressure, deadline pressure, and fallback pressure (`src/runtime/scheduler/three_lane.rs`, `src/runtime/config.rs`, `src/runtime/builder.rs`).
+- Adaptive cancel preemption is available as an opt-in deterministic discounted-UCB1 controller: workers choose among `{4, 8, 16, 32, 64}` at fixed epoch boundaries using reward signals that blend Lyapunov decrease, fairness pressure, deadline pressure, and fallback pressure (`src/runtime/scheduler/three_lane.rs`, `src/runtime/config.rs`, `src/runtime/builder.rs`).
 - When governor mode is enabled, scheduling suggestions can be modulated by a decision contract with Bayesian posterior updates over `healthy`, `congested`, `unstable`, and `partitioned` runtime states (`src/runtime/scheduler/decision_contract.rs`, `src/runtime/scheduler/three_lane.rs`).
 - Dispatch follows an explicit multi-phase path: global lanes, fast ready paths, one local-lane lock acquisition, steal attempts, then fallback cancel handling (`src/runtime/scheduler/three_lane.rs`).
 - Worker wakeups are coordinated through round-robin targeted unparks, with a bitmask fast path when worker count is a power of two (`src/runtime/scheduler/three_lane.rs`).
@@ -1917,7 +1923,7 @@ Asupersync has formal semantics backing its engineering.
 | **Obligations** | Linear-logic discipline: resources resolved exactly once (Rust is affine, so enforcement is `#[must_use]` + runtime leak detection, not purely static) | Leaked obligations are loudly detected at region close instead of silently dropped |
 | **Traces** | Mazurkiewicz equivalence (partial orders) | DPOR-style guided exploration (not certified-optimal DPOR), stable replay |
 | **Cancellation** | Two-player game with budgets | Scoped completeness when modeled responsiveness assumptions hold and budgets are sufficient |
-| **Adaptive scheduling** | Discounted UCB1 over `{4, 8, 16, 32, 64}` | Default-on dynamic preemption control with deterministic epoch updates |
+| **Adaptive scheduling** | Discounted UCB1 over `{4, 8, 16, 32, 64}` | Opt-in dynamic preemption control with deterministic epoch updates |
 | **Drain certificates** | Signed-step range bounds + empirical phase diagnostics | Conditional, auditable progress evidence for cancellation drain; the current-horizon tail bounds are the trivial `1`, so the phase labels carry the signal |
 | **Structural diagnostics** | Spectral graph theory + conformal + e-processes | Early warning on wait-graph fragmentation with calibrated alarms, computed on demand through `Diagnostics` |
 
@@ -1940,7 +1946,7 @@ Asupersync is intentionally "math-forward": it uses advanced math and theory-gra
 
 ### Online Control of Cancel Preemption (Discounted UCB1)
 
-`src/runtime/scheduler/three_lane.rs` includes a deterministic discounted-UCB1 controller that selects cancel-streak limits from `{4, 8, 16, 32, 64}` at fixed epoch boundaries. It is enabled by default and updates from a bounded reward combining progress, fairness, deadline, and fallback components while an e-process monitors epoch rewards. This is a nonstationary stochastic-bandit control surface; the seeded opt-in EXP3 controller belongs to ATP transport adaptation, not scheduler preemption.
+`src/runtime/scheduler/three_lane.rs` includes a deterministic discounted-UCB1 controller that selects cancel-streak limits from `{4, 8, 16, 32, 64}` at fixed epoch boundaries. It is opt-in (off by default) and updates from a bounded reward combining progress, fairness, deadline, and fallback components while an e-process monitors epoch rewards. This is a nonstationary stochastic-bandit control surface; the seeded opt-in EXP3 controller belongs to ATP transport adaptation, not scheduler preemption.
 
 ### Drain Progress Diagnostics (Freedman + Azuma + Phase Labels)
 

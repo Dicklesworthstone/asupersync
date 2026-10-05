@@ -26,7 +26,7 @@
 //! | `enable_governor` | `false` |
 //! | `governor_interval` | `32` |
 //! | `enable_read_biased_region_snapshot` | `false` |
-//! | `enable_adaptive_cancel_streak` | `true` |
+//! | `enable_adaptive_cancel_streak` | `false` |
 //! | `adaptive_cancel_streak_epoch_steps` | `128` |
 //! | `adaptive_ready_batch` | disabled |
 
@@ -2010,10 +2010,11 @@ pub struct RuntimeConfig {
     /// that count directly, while write-heavy or invalidated cases fall back to
     /// the authoritative region-table scan.
     pub enable_read_biased_region_snapshot: bool,
-    /// Enable adaptive cancel-lane streak selection.
+    /// Enable adaptive cancel-lane streak selection (off by default).
     ///
     /// When enabled, workers use a deterministic discounted-UCB1 policy over
     /// `{4, 8, 16, 32, 64}` to adapt the base cancel-streak limit across epochs.
+    /// When disabled, the limit is the fixed `cancel_lane_max_streak`.
     pub enable_adaptive_cancel_streak: bool,
     /// Number of dispatches per adaptive cancel-streak epoch.
     ///
@@ -2233,7 +2234,12 @@ impl Default for RuntimeConfig {
             enable_governor: false,
             governor_interval: 32,
             enable_read_biased_region_snapshot: false,
-            enable_adaptive_cancel_streak: true,
+            // Measured against the fixed limit of 16 in one process on two
+            // hosts (2026-10-05), the adaptive policy did not beat it on
+            // cancel-heavy workloads and was 1-29% slower on spawn+join, yield
+            // and channel round trips, so the fixed limit is the default; the
+            // policy stays an opt-in (br-asupersync-issue65-criticisms-kpmoy5.1.12).
+            enable_adaptive_cancel_streak: false,
             adaptive_cancel_streak_epoch_steps: 128,
             // br-asupersync-8fuxnt: default is the unified single-mutex
             // backing store to preserve all pre-bead behavior. Sharded is
@@ -9285,9 +9291,9 @@ mod tests {
             config.cancel_lane_max_streak
         );
         crate::assert_with_log!(
-            config.enable_adaptive_cancel_streak,
+            !config.enable_adaptive_cancel_streak,
             "enable_adaptive_cancel_streak",
-            true,
+            false,
             config.enable_adaptive_cancel_streak
         );
         crate::assert_with_log!(
@@ -10125,9 +10131,9 @@ mod tests {
             config.enable_read_biased_region_snapshot
         );
         crate::assert_with_log!(
-            config.enable_adaptive_cancel_streak,
-            "adaptive cancel streak enabled by default",
-            true,
+            !config.enable_adaptive_cancel_streak,
+            "adaptive cancel streak disabled by default",
+            false,
             config.enable_adaptive_cancel_streak
         );
         crate::assert_with_log!(

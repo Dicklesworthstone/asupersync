@@ -231,6 +231,29 @@ AppSpec work units that require neither the io nor the net capability. Grant
 the capability, or run the call under an explicit context with
 `cx.with_ambient(future)`.
 
+### Behavior change — adaptive cancel preemption is opt-in
+
+`RuntimeConfig::enable_adaptive_cancel_streak` now defaults to `false`. A
+default runtime uses the fixed cancel-streak limit of 16
+(`cancel_lane_max_streak`), as `LabRuntime` already did. The discounted-UCB1
+selector over `{4, 8, 16, 32, 64}` is unchanged and remains available through
+`RuntimeBuilder::enable_adaptive_cancel_streak(true)`. The 64-core host
+profiles keep enabling it explicitly.
+
+Measured in one process with interleaved rounds (adaptive vs fixed 16, four
+workers, default features, two hosts), the selector did not beat the fixed
+limit on cancel-heavy workloads:
+- the drain time of 2,000 or 10,000 aborted tasks was about the same;
+- the latency of ready work during the drain was mixed: better on some
+  percentiles, worse on others.
+
+On plain work it was slower on spawn+join, `yield_now` and channel round
+trips. That was 23-29% on one host. On the other, spawn+join was 16% slower,
+ping-pong 11% and `yield_now` 1%. Spawn from four producers was within noise.
+The owner's delegated rule (keep it on only if it wins on cancel-heavy work
+and loses nowhere else) therefore makes the fixed limit the default
+(`asupersync-issue65-criticisms-kpmoy5.1.12`).
+
 ### Native GenServers and actors
 
 `Cx::spawn_gen_server`, `Cx::spawn_actor` and `Cx::spawn_supervised_actor`
