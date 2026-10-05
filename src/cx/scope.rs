@@ -2077,11 +2077,11 @@ impl<P: Policy> Scope<'_, P> {
     ///
     /// This is the drain-correct counterpart of
     /// [`crate::time::timeout`], which drops the inner future when the clock
-    /// wins. Here the operation is spawned as a region task; when
-    /// `duration` elapses first (or the caller is cancelled) the task is
-    /// protocol-cancelled with [`CancelReason::timeout`] and then **joined**
-    /// before this method returns, so the operation's cleanup has run and the
-    /// region cannot observe an abandoned child.
+    /// wins. Here the operation is spawned as a region task; when `duration`
+    /// elapses first the task is protocol-cancelled with
+    /// [`CancelReason::timeout`] (with the caller's own reason when the caller
+    /// is cancelled first) and then **joined** before this method returns, so
+    /// the operation's cleanup has run and the region cannot observe an abandoned child.
     ///
     /// The operation is spawned through the ordinary [`Cx::spawn_in`] path,
     /// so the result classification follows the runtime's acknowledged-value
