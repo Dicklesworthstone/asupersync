@@ -2303,6 +2303,32 @@ mod managed {
             self.cx.checkpoint().is_err()
         }
 
+        /// Whether the supervisor's own budget deadline (`with_budget`) has
+        /// passed. It bounds the supervisor's root region, not this
+        /// controller, so the controller's checkpoint never sees it.
+        fn deadline_passed(&self) -> bool {
+            self.supervisor
+                .budget
+                .is_some_and(|budget| budget.is_past_deadline(self.cx.now()))
+        }
+
+        /// Past its deadline the supervisor stops: every new generation would
+        /// die at its first checkpoint, so restarting would only spend the
+        /// restart budget and report the deadline as a restart limit.
+        fn record_deadline(&mut self) {
+            if matches!(self.report.outcome, Outcome::Ok(())) {
+                let region = self.report.region.unwrap_or_else(|| self.cx.region_id());
+                self.report.outcome = Outcome::Cancelled(
+                    CancelReason::with_origin(
+                        crate::types::CancelKind::Deadline,
+                        region,
+                        self.cx.now(),
+                    )
+                    .with_message("managed supervisor budget deadline passed"),
+                );
+            }
+        }
+
         fn record_cancel(&mut self) {
             if !matches!(self.report.outcome, Outcome::Panicked(_)) {
                 self.report.outcome = Outcome::Cancelled(
@@ -3008,6 +3034,14 @@ mod managed {
                     }
                     continue;
                 }
+                if self.deadline_passed() {
+                    if let Err(error) = self.drain(failed).await {
+                        self.record_error(error);
+                        return;
+                    }
+                    self.record_deadline();
+                    return;
+                }
                 let now = self.cx.now().as_nanos();
                 let mut verdict = self.tracker.evaluate_with_budget(now, &self.cx.budget());
                 if matches!(verdict, RestartVerdict::Denied { .. })
@@ -3114,6 +3148,10 @@ mod managed {
                 for index in restart {
                     if self.cancelled() {
                         self.record_cancel();
+                        return;
+                    }
+                    if self.deadline_passed() {
+                        self.record_deadline();
                         return;
                     }
                     if let Some(dependency) = self.dependency_unavailable(index) {
@@ -3646,6 +3684,71 @@ mod managed {
             assert_eq!(report.restart_batches, 0);
             assert_eq!(started.load(Ordering::SeqCst), 1);
             assert!(matches!(report.children[0].outcome, Outcome::Err(())));
+            clean(&mut lab, root);
+        }
+
+        /// A supervisor's own budget deadline (`with_budget`) stops it. Past the
+        /// deadline every new generation dies at its first checkpoint, so it
+        /// must not restart Permanent children into it, report the deadline as a
+        /// restart limit, or (under Escalate) cancel its parent's region.
+        #[test]
+        fn managed_budget_deadline_stops_the_supervisor_instead_of_restarting() {
+            let mut lab = LabRuntime::new(LabConfig::new(0x34_0021).max_steps(8192));
+            let root = lab.state.create_root_region(Budget::INFINITE);
+            let started = Arc::new(AtomicUsize::new(0));
+            let counter = Arc::clone(&started);
+            let binding = ManagedChildBinding::new(
+                "child",
+                ManagedRestartMode::Permanent,
+                move |cx: Cx, _| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    async move {
+                        let _ = cx.checkpoint();
+                        Outcome::<(), ()>::Ok(())
+                    }
+                },
+            );
+            let managed = SupervisorBuilder::new("managed-test")
+                .with_restart_policy(RestartPolicy::OneForOne)
+                .with_budget(Budget::INFINITE.with_deadline(crate::types::Time::ZERO))
+                .child(
+                    ChildSpec::new("child", legacy_must_not_run)
+                        .with_shutdown_budget(Budget::new().with_poll_quota(17)),
+                )
+                .compile()
+                .unwrap()
+                .bind_managed(
+                    vec![binding],
+                    config(RestartPolicy::OneForOne, 2).with_escalation(EscalationPolicy::Escalate),
+                )
+                .unwrap();
+            let result = Arc::new(Mutex::new(None));
+            let publication = Arc::clone(&result);
+            let (parent, mut join) = lab
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    *publication.lock() = Some(managed.run(&Cx::current().unwrap()).await);
+                })
+                .unwrap();
+            lab.scheduler.lock().schedule(parent, 0);
+            lab.run_until_idle();
+            let report = result
+                .lock()
+                .take()
+                .expect("the supervisor stops on its deadline");
+            assert!(
+                matches!(
+                    report.outcome,
+                    Outcome::Cancelled(ref reason)
+                        if reason.kind == crate::types::CancelKind::Deadline
+                ),
+                "{:?}",
+                report.outcome
+            );
+            assert_eq!(report.restart_batches, 0);
+            assert_eq!(report.escalations, 0);
+            assert_eq!(started.load(Ordering::SeqCst), 1);
+            assert!(matches!(join.try_join(), Ok(Some(()))));
             clean(&mut lab, root);
         }
 
