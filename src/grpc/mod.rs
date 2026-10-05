@@ -68,6 +68,8 @@ pub mod interceptor;
 pub mod native_stream;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native_streaming;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod native_upload;
 pub mod protobuf;
 pub mod reflection;
 #[cfg(test)]
@@ -113,6 +115,8 @@ pub use interceptor::{
 pub use native_stream::{NativeDuplexEvent, NativeDuplexStream, NativeStreamConfig, NativeStreamKeepalive};
 #[cfg(not(target_arch = "wasm32"))]
 pub use native_streaming::NativeServerStream;
+#[cfg(not(target_arch = "wasm32"))]
+pub use native_upload::NativeBidiStream;
 pub use protobuf::{
     ProstCodec, ProtoCodec, ProtoCodecError, ProtoMessage, ProtobufError, SymmetricProstCodec,
     SymmetricProtoCodec, UnknownFields,

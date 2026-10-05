@@ -1,7 +1,7 @@
 //! Capability context and scope API.
 //!
 //! The [`Cx`] type is the capability token that provides access to runtime effects.
-//! The [`Scope`] type provides the API for spawning work within a region.
+//! The [`Scope`] type provides the API for spawning tasks and creating child regions.
 //!
 //! All effects in Asupersync flow through explicit capabilities, ensuring
 //! no ambient authority exists.
@@ -66,6 +66,7 @@ pub mod dynamic_supervisor;
 pub mod fiber;
 pub(crate) mod io_gate;
 pub mod macaroon;
+mod owned_join;
 pub mod registry;
 pub mod resource_bracket;
 pub mod scope;
