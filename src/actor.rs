@@ -978,6 +978,14 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
         let mut drained: u64 = 0;
         let mut drain_yield_counter = 0u32;
         loop {
+            // An abort or region cancel that lands during the drain ends it
+            // like one that landed before it: the buffered tail is dropped.
+            if cx.checkpoint().is_err() {
+                cx.trace("actor::drain_cancelled");
+                drop(pending_drain_message.take());
+                while let Ok(_msg) = cell.mailbox.try_recv() {}
+                break;
+            }
             let msg = match pending_drain_message.take() {
                 Some(msg) => msg,
                 None => match cell.mailbox.try_recv() {
@@ -2394,6 +2402,89 @@ mod tests {
         assert_eq!(handle.state.load(), ActorState::Stopped);
 
         crate::test_complete!("native_actor_graceful_drain_continues_after_handler_panic");
+    }
+
+    /// An abort that lands while a graceful drain is running ends the drain:
+    /// the handler in flight finishes, the rest of the buffered tail is
+    /// dropped unhandled, and on_stop still runs.
+    #[test]
+    fn abort_during_a_graceful_drain_drops_the_rest_of_the_tail() {
+        #[derive(Debug)]
+        struct SlowFirstActor {
+            events: Arc<parking_lot::Mutex<Vec<&'static str>>>,
+        }
+
+        impl Actor for SlowFirstActor {
+            type Message = u8;
+
+            fn on_start(&mut self, _cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                self.events.lock().push("start");
+                Box::pin(async {})
+            }
+
+            fn handle(
+                &mut self,
+                cx: &Cx,
+                msg: u8,
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                if msg == 0 {
+                    self.events.lock().push("handle-0");
+                    // Parks until the actor is cancelled.
+                    let cx = cx.clone();
+                    return Box::pin(std::future::poll_fn(move |_| {
+                        if cx.checkpoint().is_err() {
+                            Poll::Ready(())
+                        } else {
+                            Poll::Pending
+                        }
+                    }));
+                }
+                self.events.lock().push("handle-later");
+                Box::pin(async {})
+            }
+
+            fn on_stop(&mut self, _cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                self.events.lock().push("stop");
+                Box::pin(async {})
+            }
+        }
+
+        init_test("abort_during_a_graceful_drain_drops_the_rest_of_the_tail");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx: Cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(root, Budget::INFINITE);
+        let events = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let actor = SlowFirstActor {
+            events: Arc::clone(&events),
+        };
+        let (handle, mut stored) = scope
+            .spawn_actor(&mut state, &cx, actor, 8)
+            .expect("spawn actor");
+        for msg in 0..=3 {
+            handle.try_send(msg).expect("queue drain fixture");
+        }
+        handle.stop();
+
+        let mut task_cx = Context::from_waker(Waker::noop());
+        assert!(
+            stored.poll(&mut task_cx).is_pending(),
+            "the drain parks in the first handler"
+        );
+        assert_eq!(*events.lock(), vec!["start", "handle-0"]);
+
+        handle.abort();
+        assert!(
+            stored.poll(&mut task_cx).is_ready(),
+            "the aborted drain finishes without handling the tail"
+        );
+        assert_eq!(
+            *events.lock(),
+            vec!["start", "handle-0", "stop"],
+            "messages 1..=3 are dropped once the abort lands"
+        );
+
+        crate::test_complete!("abort_during_a_graceful_drain_drops_the_rest_of_the_tail");
     }
 
     /// E2E: ActorRef liveness tracks actor lifecycle (Created -> Stopping -> Stopped).
