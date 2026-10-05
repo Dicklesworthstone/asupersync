@@ -1538,12 +1538,12 @@ channel; application consumption still depends on the receiver making progress.
 
 | Primitive | Location | Notes |
 |-----------|----------|-------|
-| **Mutex** | `src/sync/mutex.rs` | Fair, cancel-safe, tracks contention |
+| **Mutex** | `src/sync/mutex.rs` | Fair, cancel-safe (contention metrics: `ContendedMutex`) |
 | **RwLock** | `src/sync/rwlock.rs` | Writer preference with reader batching |
 | **Semaphore** | `src/sync/semaphore.rs` | Counting, with permit-as-obligation model |
 | **Barrier** | `src/sync/barrier.rs` | N-way synchronization point |
 | **Notify** | `src/sync/notify.rs` | One-time or multi-waiter notification |
-| **OnceLock** | `src/sync/once_cell.rs` | Async one-time initialization |
+| **OnceCell** | `src/sync/once_cell.rs` | Async one-time initialization |
 | **ContendedMutex** | `src/sync/contended_mutex.rs` | Mutex with contention metrics |
 | **Pool** | `src/sync/pool.rs` | Object pool with obligation-tracked checkout and return-on-drop |
 

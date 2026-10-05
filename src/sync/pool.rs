@@ -296,9 +296,10 @@ pub trait Pool: Send + Sync {
 
     /// Check if a resource is still healthy/usable.
     ///
-    /// Called before returning an idle resource from the pool. If this
-    /// returns `false`, the resource is discarded and another is tried
-    /// (or a new one is created).
+    /// A hook for pool implementations to call from their own acquire path.
+    /// [`GenericPool`] does not call it: it checks idle resources with the
+    /// closure given to [`GenericPool::with_health_check`] when
+    /// [`PoolConfig::health_check_on_acquire`] is enabled.
     ///
     /// The default implementation assumes all resources are healthy.
     ///

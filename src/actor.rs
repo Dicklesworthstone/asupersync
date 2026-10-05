@@ -5,7 +5,10 @@
 //! model:
 //!
 //! - **Region-owned**: Actors are spawned within a region and cannot outlive it.
-//! - **Cancel-safe mailbox**: Messages use the two-phase reserve/send pattern.
+//! - **Bounded mailbox**: `try_send` never waits; `send` waits for capacity,
+//!   and a `send` future dropped while it waits drops its message.
+//!   `ActorRef::reserve` is the two-phase reserve/commit that keeps the
+//!   message in the caller's hands until a slot is secured.
 //! - **Lifecycle hooks**: `on_start` and `on_stop` for initialization and cleanup.
 //!
 //! # Example
@@ -241,8 +244,11 @@ pub trait Actor: Send + 'static {
 /// - A sender for the actor's mailbox
 /// - A task handle for join/abort operations
 ///
-/// When the handle is dropped, the mailbox sender is dropped, which causes
-/// the actor loop to exit after processing remaining messages.
+/// Dropping the handle drops its mailbox sender but does not stop the actor.
+/// The actor exits after its remaining messages only once every sender is
+/// gone, including each [`ActorRef`] and any live join future. Until then it
+/// keeps running in its region, so a `join` without [`stop`](Self::stop),
+/// [`abort`](Self::abort) or cancellation does not finish.
 #[derive(Debug)]
 pub struct ActorHandle<A: Actor> {
     actor_id: ActorId,
@@ -259,9 +265,13 @@ pub struct ActorHandle<A: Actor> {
 }
 
 impl<A: Actor> ActorHandle<A> {
-    /// Send a message to the actor using two-phase reserve/send.
+    /// Send a message to the actor, waiting for mailbox capacity.
     ///
-    /// Returns an error if the actor has stopped or the mailbox is full.
+    /// Returns an error if the actor has stopped, or with the message if the
+    /// caller is cancelled while waiting. If this future is dropped while it
+    /// waits, the message is dropped with it; [`try_send`](Self::try_send)
+    /// never waits, and [`ActorRef::reserve`] (via [`sender`](Self::sender))
+    /// keeps the message until a slot is secured.
     pub async fn send(&self, cx: &Cx, msg: A::Message) -> Outcome<(), SendError<A::Message>> {
         match self.sender.send(cx, msg).await {
             Ok(()) => Outcome::ok(()),
@@ -521,7 +531,11 @@ impl<M> Clone for ActorRef<M> {
 }
 
 impl<M: Send + 'static> ActorRef<M> {
-    /// Send a message to the actor.
+    /// Send a message to the actor, waiting for mailbox capacity.
+    ///
+    /// If this future is dropped while it waits, the message is dropped with
+    /// it; [`reserve`](Self::reserve) keeps the message until a slot is
+    /// secured.
     pub async fn send(&self, cx: &Cx, msg: M) -> Outcome<(), SendError<M>> {
         match self.sender.send(cx, msg).await {
             Ok(()) => Outcome::ok(()),

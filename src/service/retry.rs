@@ -965,14 +965,16 @@ impl<Request: Clone + 'static, Res, E> Policy<Request, Res, E> for ExponentialBa
 pub enum RequestClassification {
     /// Safe to retry on any error (GET, HEAD, OPTIONS, etc.)
     Idempotent,
-    /// Only retry on network errors, not application errors (POST, PUT, etc.)
+    /// Never retried (POST, PUT, etc.): the policy cannot tell a network
+    /// error from an application error, so it fails closed rather than
+    /// replay a side effect.
     NonIdempotent,
 }
 
 /// Smart retry policy that considers request idempotency.
 ///
 /// Idempotent requests (GET, HEAD) can be retried on any error.
-/// Non-idempotent requests (POST, PUT) are only retried on network/infrastructure errors.
+/// Non-idempotent requests (POST, PUT) are not retried.
 pub struct SmartRetry<Request> {
     backoff: ExponentialBackoff<Request>,
     classification: RequestClassification,
