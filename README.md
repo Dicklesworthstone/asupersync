@@ -358,6 +358,9 @@ The runtime design is backed by a small-step operational semantics (`asupersync_
 
 The proof posture is exact: these are Lean-checked **model** invariants with theorem and executable-test linkage. The production Rust runtime has not been proved to refine that model. This is therefore not a blanket mechanized proof of the executor, adapters, protocol implementations, platform backends, or distributed transports. Broader runtime-facing claims stay tiered through TLA+/TLC exports, lab/refinement oracles, and lane-specific coverage artifacts. The CI job `lean-build` is defined to run `lake build` on the pinned toolchain and upload a hash-bound receipt, but GitHub Actions is disabled for this repository, so it does not currently run; the last recorded local build is in `formal/lean/coverage/lake_build_receipt.txt`. The canonical proof command is `RCH_REQUIRE_REMOTE=1 rch exec -- lake --dir formal/lean build`; see [`artifacts/formal_proof_posture_contract_v1.json`](./artifacts/formal_proof_posture_contract_v1.json), [`tests/formal_proof_posture_contract.rs`](./tests/formal_proof_posture_contract.rs), and [`formal/README.md`](./formal/README.md).
 
+<details>
+<summary><b>Proof lanes, signoff packets and swarm governance</b>: maintainer and agent material that maps each proof claim to its checked artifact, test and proof lane. Expand for details.</summary>
+
 Some checked artifacts retain the legacy markers `Lean-checked core invariants cover the six non-negotiable runtime invariants` and `checks the six non-negotiable runtime invariants`. In this README those phrases mean coverage of the six abstract-model rows only; they do not assert a Rust refinement proof.
 
 The canonical proof-command coverage map is [`artifacts/proof_lane_manifest_v1.json`](./artifacts/proof_lane_manifest_v1.json), checked by [`tests/proof_lane_manifest_contract.rs`](./tests/proof_lane_manifest_contract.rs). It records which `RCH_REQUIRE_REMOTE=1 rch exec -- ...` lane covers each production graph, feature graph, fuzz smoke, lib/all-target/clippy/rustdoc frontier, and formal proof guarantee, plus what each lane explicitly does not prove. It also carries proof-lane resource-envelope classes for expected timeout, memory, remote-required, and no-local-fallback semantics; those classes harden proof admission metadata and do not replace OS-level RCH worker cgroup limits. The claim/status dashboard is [`artifacts/proof_status_snapshot_v1.json`](./artifacts/proof_status_snapshot_v1.json), checked by [`tests/proof_status_snapshot_contract.rs`](./tests/proof_status_snapshot_contract.rs); it maps README/AGENTS proof claims to manifest lanes and validation-frontier blocker rows. Its top-level `created_date` is the contract inception date, not a whole-dashboard freshness receipt: inspect each claim's `proof_evidence_status` and, for `fresh-rch-pass`, its bounded `evidence_date`. A mapped `green` row identifies a canonical unblocked lane but does not by itself prove a current RCH pass. The nightly differential workflow runs the bounded-age assertion as a local drift alarm; that cadence check does not replace terminal remote-required RCH evidence for any claim row.
@@ -399,6 +402,8 @@ The clean-overlay proof orchestration contract is [`artifacts/clean_overlay_proo
 The proof-traffic final signoff is [`artifacts/proof_traffic_final_signoff_v1.json`](./artifacts/proof_traffic_final_signoff_v1.json), checked by [`tests/proof_traffic_final_signoff_contract.rs`](./tests/proof_traffic_final_signoff_contract.rs), and documented in [`docs/proof_traffic_control.md`](./docs/proof_traffic_control.md). Its focused manifest lane is `proof-traffic-final-signoff`; cite it only for A1-A5 proof-traffic evidence aggregation, the capability-drift gate, admission receipt taxonomy, clean-overlay handshake, proof parking lot, blocked-loop e2e packet, proof manifest/status rows, README/AGENTS markers, no-local-fallback/no-peer-cancel policies, dependency-cycle receipt/checklist, and no-claim boundaries. It does not prove peer-dirt exclusion without supported capability evidence plus an admitted command and terminal execution evidence, release readiness, broad workspace health, runtime correctness, performance improvement, live RCH fleet availability, local Cargo fallback approval, permission to delete files, or permission to cancel peer builds.
 
 The fourth-wave governor proof map is anchored by [`docs/fourth_wave_swarm_governor_runbook.md`](./docs/fourth_wave_swarm_governor_runbook.md) and checked by `fourth-wave-governor-signoff-runbook` in [`tests/fourth_wave_swarm_governor_runbook_contract.rs`](./tests/fourth_wave_swarm_governor_runbook_contract.rs). The final aggregate signoff is [`artifacts/fourth_wave_governor_final_signoff_v1.json`](./artifacts/fourth_wave_governor_final_signoff_v1.json), checked by `fourth-wave-governor-final-signoff` in [`tests/fourth_wave_governor_final_signoff_contract.rs`](./tests/fourth_wave_governor_final_signoff_contract.rs). The proof-status dashboard separates `fourth-wave-governor-schema-contract`, `fourth-wave-governor-policy-engine`, `fourth-wave-swarm-replay-corpus`, `fourth-wave-runtime-bridge-contract`, and the fourth-wave benchmark no-claim contract. The fourth-wave final aggregated signoff is a scoped executable operator report only: the benchmark contract records no fresh benchmark result and does not prove p95 improvement, throughput improvement, no regression, production-on-by-default control, broad workspace health, or RCH fleet availability.
+
+</details>
 
 One example: the cancellation/cleanup **budget** composes as a semiring-like object (componentwise `min`, with priority as `max`), which makes "who constrains whom?" algebraic instead of ad-hoc:
 
@@ -2015,6 +2020,9 @@ Payoff: bridge from deterministic runtime traces to model-checking workflows whe
 
 ---
 
+<details>
+<summary><b>Dependency budget, supply-chain policy and CI-provenance contracts</b>: maintainer material on the checked gates that bound this crate's dependency graph. Expand for details.</summary>
+
 ## Dependency budget contract
 
 The checked
@@ -2054,6 +2062,8 @@ table contract. Its verdict is `PASS_SCOPED_KEEP_DEFER`, not release green. See
 [`docs/dependency_ci_provenance_final_signoff.md`](docs/dependency_ci_provenance_final_signoff.md)
 for replay and no-claim boundaries. The signoff grants no package-manager,
 dependency-cutover, file-deletion, or local-Cargo-fallback authority.
+
+</details>
 
 ## Using Asupersync as a Dependency
 
@@ -2643,6 +2653,9 @@ GA.
 
 ## Phase 6 Policy Gates
 
+<details>
+<summary>How changes to <code>main</code> are gated: the direct-main lane, the SLO policy proof loop, the gate matrix, preflight commands and rollout. Maintainer and agent material. Expand for details.</summary>
+
 Phase 6 ships as a continuous hardening track rather than a one-shot release. The repository itself is main-only: agents land direct commits on `main`, then mirror the legacy compatibility ref as required by the repo workflow. Phase 6 therefore has two explicit enforcement lanes instead of a single PR-only story:
 
 - **Direct-main agent lane:** before committing or pushing a substantive change, run the local `rch` preflight gates that apply to the touched surface and commit any required artifact with the change.
@@ -2761,6 +2774,8 @@ All four gates are defined, but GitHub Actions is disabled for this repository (
 Concrete escape valves are limited and intentional: a benchmark regression that reflects an intentional algorithmic change is resolved by re-recording `artifacts/baseline.json` (not by waiving the gate); a golden mismatch is resolved by committing the reviewed behavior change, running the fail-closed golden candidate flow above from that clean commit, reviewing the retrieved exact-set candidate, and committing the promoted registry separately (not by skipping the bench); a proof note that turns out to be insufficient is resolved by extending the note (not by removing it). The infrastructure intentionally has no `[skip ci]`-style waiver.
 
 If you are landing a change that touches a hot-path or safety-critical directory, generate the artifact (flamegraph or proof note) before committing the change to `main`. Re-running validation without committing the required artifact does not satisfy the direct-main gate.
+
+</details>
 
 ---
 
