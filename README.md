@@ -1077,24 +1077,42 @@ Asupersync does more work per task than tokio. Every task gets a region
 membership, a cancellation state machine and a terminal-result channel, and
 two-phase permits are tracked as obligations. That bookkeeping costs time.
 These numbers come from one process running both runtimes. The build was a
-release build with default features. The host was one 10-CPU RCH worker. The
-date was 2026-10-03, and the source was that of commit `c2d7715ae`. Each figure
-is p50 per operation at n = 1,000, and the ranges span two runs.
+release build with default features. The date was 2026-10-05, and the source
+was that of commit `5ae9d443e`. The same probe ran on three RCH workers: a
+16-CPU host, a 10-CPU host shared with other builds at the time, and a busy
+64-CPU host. Each figure is p50 per operation at n = 1,000. The ranges span
+the three hosts, so shared-host noise is part of the range: the widest row
+(spawn + join from a task) was 13.5× on the least loaded host.
 
 | Operation | Asupersync | tokio | Ratio |
 |-----------|------------|-------|-------|
-| spawn + join from a task, 4 workers | 7.24–7.52 µs | 0.40–0.41 µs | 18× |
-| spawn + join from `block_on`, current-thread | 4.87–5.30 µs | 0.39 µs | 12–14× |
-| `yield_now`, 4 workers | 0.83–1.02 µs | 0.24 µs | 3.4–4.2× |
-| `yield_now`, current-thread | 0.55–0.58 µs | 0.13 µs | 4.3–4.5× |
-| mpsc ping-pong round trip, 4 workers | 2.96–3.04 µs | 0.27–0.28 µs | 11× |
-| mpsc ping-pong round trip, current-thread | 1.85–1.90 µs | 0.24–0.25 µs | 7.6× |
-| fan-out child: `fiber::scope` vs tokio spawn + join, current-thread | 0.44–0.46 µs | 0.39 µs | 1.1–1.2× |
-| fan-out child: `fiber::scope` vs tokio spawn + join, 4 workers | 0.34 µs | 0.40–0.41 µs | 0.8× |
+| spawn + join from a task, 4 workers | 4.2–12.4 µs | 0.31–0.68 µs | 9–27× |
+| spawn + join from `block_on`, current-thread | 3.0–7.1 µs | 0.21–0.51 µs | 10–14× |
+| `yield_now`, 4 workers | 0.35–0.58 µs | 0.23–0.56 µs | 1.0–2.0× |
+| `yield_now`, current-thread | 0.30–0.57 µs | 0.09–0.15 µs | 3.2–3.9× |
+| mpsc ping-pong round trip, 4 workers | 1.26–1.77 µs | 0.20–0.57 µs | 3.1–6.3× |
+| mpsc ping-pong round trip, current-thread | 1.26–1.76 µs | 0.17–0.30 µs | 5.8–7.5× |
+| fan-out child: `fiber::scope` vs tokio spawn + join, current-thread | 0.21–0.56 µs | 0.21–0.51 µs | 0.9–1.1× |
+| fan-out child: `fiber::scope` vs tokio spawn + join, 4 workers | 0.20–0.39 µs | 0.31–0.68 µs | 0.55–0.85× |
 
-**Reading the table:**
-- Spawning a task, yielding and channel round trips are several times slower
-  than tokio.
+Server-shaped rows, also from one process. The TCP rows come from the same
+three hosts, and each loopback connection makes 200 round trips of a 64-byte
+message. The HTTP/1.1 rows come from one host, with 200 keep-alive requests per
+connection. The last column is tokio's throughput over asupersync's:
+
+| Workload | Asupersync | tokio | tokio is faster by |
+|----------|------------|-------|--------------------|
+| TCP request/response, 1 connection | 30–44 K round trips/s | 46–76 K | 1.55–1.7× |
+| TCP request/response, 64 connections | 93–129 K round trips/s | 123–144 K | 1.1–1.3× |
+| HTTP/1.1 keep-alive `GET`, 1 connection (one 64-CPU host; vs hyper 1.x) | 22 K requests/s | 44 K | 2.0× |
+| HTTP/1.1 keep-alive `GET`, 64 connections (same host; vs hyper 1.x) | 64 K requests/s | 134 K | 2.1× |
+
+**Reading the tables:**
+- Spawning a task, current-thread yields and channel round trips are still
+  several times slower than tokio. A yield on 4 workers is within 2× of
+  tokio's.
+- Loopback TCP round trips are 1.1–1.7× slower, and the HTTP/1.1 server serves
+  about half of hyper's requests per second.
 - For most servers, a few microseconds per task is small next to network and
   disk latency.
 - For workloads that spawn millions of tiny tasks per second, or exchange
@@ -1107,7 +1125,12 @@ These numbers already include the October 2026 cuts:
 - an O(1) region task set;
 - verification-only monitors switched off in release builds;
 - an obligation-free one-call `mpsc::send`, which made ping-pong 2.7–4.1× faster;
-- no global-state lock per scheduler dispatch for spawn admission.
+- no global-state lock per scheduler dispatch for spawn admission;
+- a LIFO slot for a task woken by the task its worker is running (ping-pong
+  2.8×, spawn + join 1.3× in a same-process A/B);
+- a fixed cancel-streak limit of 16 instead of the adaptive selector by default;
+- no reactor wake on an epoll re-arm, and none for an obligation post made on
+  a worker (semaphore acquire/release 1.7–2.1× in a same-process A/B).
 
 The remaining work items are listed under `asupersync-issue65-criticisms-kpmoy5.1`.
 
