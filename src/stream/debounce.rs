@@ -170,9 +170,13 @@ impl<S: Stream> Stream for Debounce<S> {
                 let wake_deadline = wall_clock_now().saturating_add_nanos(remaining_nanos);
                 *this.timer = Some(Box::pin(Sleep::new(wake_deadline)));
             }
-            // Poll the timer to register the waker for delayed wakeup.
+            // Poll the timer to register the waker for delayed wakeup. The
+            // timer is only a wake source, not a cancellation point: a
+            // cancel-aware poll completes at once while the task is cancelled,
+            // and re-arming it would spin until the period really elapsed
+            // (br-asupersync-jqhteu).
             if let Some(ref mut timer) = *this.timer {
-                if Pin::new(timer).poll(cx).is_ready() {
+                if timer.as_mut().poll_deadline(cx).is_ready() {
                     *this.timer = None;
                     let now = (this.time_getter)();
                     let elapsed = Duration::from_nanos(now.duration_since(received_at));
@@ -189,10 +193,10 @@ impl<S: Stream> Stream for Debounce<S> {
                     let wake_deadline = wall_clock_now().saturating_add_nanos(remaining_nanos);
                     let mut new_timer = Box::pin(Sleep::new(wake_deadline));
                     // Registration can complete immediately if the deadline
-                    // elapsed or the ambient task was cancelled. Reset before
-                    // retaining the timer: Sleep cannot be polled after Ready.
-                    // A wake still cannot override the configured quiet clock.
-                    if new_timer.as_mut().poll(cx).is_ready() {
+                    // elapsed. Reset before retaining the timer: Sleep cannot
+                    // be polled after Ready. A wake still cannot override the
+                    // configured quiet clock.
+                    if new_timer.as_mut().poll_deadline(cx).is_ready() {
                         new_timer.as_mut().get_mut().reset(wake_deadline);
                         cx.waker().wake_by_ref();
                     }
@@ -511,15 +515,16 @@ mod tests {
         assert_eq!(timer.pending_count(), 1);
         runtime_cx.cancel_with(CancelKind::User, Some("cancel debounce wait"));
 
-        // Cancellation completes both the parked Sleep and its freshly armed
-        // replacement without advancing the configured quiet clock. The old
-        // path stored a completed replacement and panicked on the second poll.
+        // The timer is a wake source, not a cancellation point: cancellation
+        // neither completes it early nor makes the stream wake itself (which
+        // spun until the quiet period really elapsed, br-asupersync-jqhteu).
+        // The item stays buffered and the timer stays armed.
         for _ in 0..2 {
             woke.store(false, Ordering::SeqCst);
             assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Pending);
             assert_eq!(stream.pending, Some((7, Time::ZERO)));
-            assert!(woke.load(Ordering::SeqCst));
-            assert_eq!(timer.pending_count(), 0);
+            assert!(!woke.load(Ordering::SeqCst), "no self-wake while cancelled");
+            assert_eq!(timer.pending_count(), 1);
         }
 
         set_test_time(Time::from_millis(5).as_nanos());
