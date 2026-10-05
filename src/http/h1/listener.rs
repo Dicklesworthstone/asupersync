@@ -331,19 +331,35 @@ impl Http1ListenerConfig {
 /// Ties together [`TcpListener`], [`Http1Server`], [`ConnectionManager`],
 /// and [`ShutdownSignal`] into a complete accept loop with graceful shutdown.
 ///
+/// # Host policy
+///
+/// The default [`Http1Config`] uses
+/// [`HostPolicy::RejectUnknown`](crate::http::h1::server::HostPolicy::RejectUnknown),
+/// which answers every request `421 Misdirected Request`. A server built with [`Http1Listener::bind`]
+/// and no further configuration therefore serves nothing. Name the hosts it
+/// answers for with [`Http1Config::host_policy`] and
+/// [`Http1Listener::bind_with_config`], as below.
+///
 /// # Example
 ///
 /// ```ignore
 /// use asupersync::http::h1::listener::{Http1Listener, Http1ListenerConfig};
+/// use asupersync::http::h1::server::{HostPolicy, Http1Config};
 /// use asupersync::http::h1::types::Response;
 /// use asupersync::runtime::RuntimeBuilder;
 ///
 /// let runtime = RuntimeBuilder::current_thread().build()?;
 /// let handle = runtime.handle();
 /// runtime.block_on(async {
-///     let listener = Http1Listener::bind("127.0.0.1:8080", |req| async {
-///         Response::new(200, "OK", b"Hello".to_vec())
-///     })
+///     let config = Http1ListenerConfig::default().http_config(
+///         Http1Config::default()
+///             .host_policy(HostPolicy::AllowList(vec!["localhost".to_owned()])),
+///     );
+///     let listener = Http1Listener::bind_with_config(
+///         "127.0.0.1:8080",
+///         |req| async { Response::new(200, "OK", b"Hello".to_vec()) },
+///         config,
+///     )
 ///     .await?;
 ///
 ///     // In another task: listener.begin_drain();
@@ -372,6 +388,10 @@ where
 {
     /// Bind a listener whose handler returns the established plain response
     /// type. The exact output preserves inference for existing handlers.
+    ///
+    /// It uses the default configuration, whose host policy rejects every
+    /// request with `421` (see "Host policy" on [`Http1Listener`]). Use
+    /// [`Self::bind_with_config`] to name the allowed hosts.
     pub async fn bind<A: ToSocketAddrs + Send + 'static>(addr: A, handler: F) -> io::Result<Self> {
         Self::bind_upgradeable(addr, handler).await
     }

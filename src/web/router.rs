@@ -3163,7 +3163,12 @@ impl Router {
     ///
     /// ```ignore
     /// let app = Router::new().route("/health", get(health));
-    /// let listener = Http1Listener::bind("127.0.0.1:8080", app.into_http_handler()).await?;
+    /// // The default host policy answers every request 421: name the hosts.
+    /// let config = Http1ListenerConfig::default().http_config(
+    ///     Http1Config::default().host_policy(HostPolicy::AllowList(vec!["localhost".to_owned()])),
+    /// );
+    /// let listener =
+    ///     Http1Listener::bind_with_config("127.0.0.1:8080", app.into_http_handler(), config).await?;
     /// listener.run(&runtime_handle).await?;
     /// ```
     #[must_use]
