@@ -39,8 +39,8 @@
 //! ```
 
 use crate::runtime::reactor::{
-    Event, Events, Interest, IoReactorCapabilitySnapshot, Reactor, SlabToken, Source, Token,
-    TokenSlab,
+    Event, Events, Interest, IoReactorBackend, IoReactorCapabilitySnapshot, Reactor, SlabToken,
+    Source, Token, TokenSlab,
 };
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -375,12 +375,10 @@ impl IoDriver {
         self.waker_buf.clear();
         let mut seen_tokens = std::collections::HashSet::<Token>::new();
 
-        // Dispatch wakers for ready events
+        // Collect the wakers for ready events before any callback runs.
         for event in &self.events {
-            let interest = self.interests.get(&event.token).copied();
             // The event disarmed the one-shot registration.
             self.undispatched.remove(&event.token);
-            on_event(event, interest);
             if !seen_tokens.insert(event.token) {
                 continue;
             }
@@ -393,9 +391,15 @@ impl IoDriver {
             }
         }
 
-        for waker in self.waker_buf.drain(..) {
-            waker.wake();
-        }
+        let (events, interests) = (&self.events, &self.interests);
+        run_callbacks_then_wake(
+            || {
+                for event in events {
+                    on_event(event, interests.get(&event.token).copied());
+                }
+            },
+            self.waker_buf.drain(..),
+        );
 
         Ok(n)
     }
@@ -668,6 +672,7 @@ impl IoDriverHandle {
             Arc::downgrade(&self.inner),
             interest,
             self.reactor.clone(),
+            !matches!(self.capabilities.backend(), IoReactorBackend::Epoll),
         ))
     }
 
@@ -785,13 +790,14 @@ impl IoDriverHandle {
 
             drop(guard);
 
-            for (event, interest) in event_data {
-                on_event(&event, interest);
-            }
-
-            for waker in wakers {
-                waker.wake();
-            }
+            run_callbacks_then_wake(
+                || {
+                    for (event, interest) in event_data {
+                        on_event(&event, interest);
+                    }
+                },
+                wakers,
+            );
 
             poll_result.map(Some)
         } else {
@@ -829,6 +835,15 @@ pub struct IoRegistration {
     /// Persistent explicit deregistration failures leave Drop armed for one
     /// final best-effort cleanup pass.
     deregistered: bool,
+    /// Whether an interest change (`rearm`, `set_interest`) must wake a
+    /// reactor blocked in `poll` for that wait to see the change. An epoll
+    /// wait does without it: `epoll_ctl` on a ready fd queues the event and
+    /// wakes the blocked `epoll_wait` in the kernel, and the wait holds no
+    /// lock the change needs. Waking anyway cost each re-arm an eventfd write
+    /// and the reactor thread a spurious return from its wait. io_uring needs
+    /// the wake (the change goes through the shared ring), and backends this
+    /// module cannot identify keep it (br-asupersync-issue65-criticisms-kpmoy5.1).
+    interest_change_wakes_reactor: bool,
 }
 
 impl IoRegistration {
@@ -837,6 +852,7 @@ impl IoRegistration {
         driver: Weak<Mutex<IoDriver>>,
         interest: Interest,
         reactor: Arc<dyn Reactor>,
+        interest_change_wakes_reactor: bool,
     ) -> Self {
         Self {
             token,
@@ -845,6 +861,7 @@ impl IoRegistration {
             reactor,
             cached_waker: None,
             deregistered: false,
+            interest_change_wakes_reactor,
         }
     }
 
@@ -853,6 +870,14 @@ impl IoRegistration {
         // blocking wait after any sampled visibility check but before we submit
         // the fresh register/modify/deregister operation.
         let _ = self.reactor.wake();
+    }
+
+    /// Wakes the reactor before an interest change unless its blocked wait
+    /// sees the change by itself; see `interest_change_wakes_reactor`.
+    fn wake_polling_reactor_for_interest_change(&self) {
+        if self.interest_change_wakes_reactor {
+            self.wake_polling_reactor();
+        }
     }
 
     /// Returns the registration token.
@@ -878,7 +903,7 @@ impl IoRegistration {
 
     /// Updates the interest set for this registration.
     pub fn set_interest(&mut self, interest: Interest) -> io::Result<()> {
-        self.wake_polling_reactor();
+        self.wake_polling_reactor_for_interest_change();
         let Some(driver) = self.driver.upgrade() else {
             return Err(io::Error::new(
                 io::ErrorKind::NotConnected,
@@ -937,7 +962,7 @@ impl IoRegistration {
         waker: &Waker,
         accumulate: bool,
     ) -> io::Result<bool> {
-        self.wake_polling_reactor();
+        self.wake_polling_reactor_for_interest_change();
         let Some(driver) = self.driver.upgrade() else {
             return Err(io::Error::new(
                 io::ErrorKind::NotConnected,
@@ -1057,6 +1082,39 @@ impl std::fmt::Debug for IoDriver {
             .field("events_capacity", &self.events.capacity())
             .field("stats", &self.stats)
             .finish_non_exhaustive()
+    }
+}
+
+/// Wakes every waker of one dispatch batch, then re-raises the first panic.
+/// The batch's one-shot registrations have already fired, so a waker left
+/// unwoken because an earlier one panicked would never be woken again
+/// (br-asupersync-reactor-audit-dofi11).
+fn wake_each(wakers: impl IntoIterator<Item = Waker>) {
+    let mut first_panic = None;
+    for waker in wakers {
+        if let Err(payload) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.wake()))
+        {
+            first_panic.get_or_insert(payload);
+        }
+    }
+    if let Some(payload) = first_panic {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+/// Runs a batch's per-event callbacks, then wakes its wakers. A panicking
+/// callback is re-raised only after every waker was woken: the batch's
+/// one-shot registrations have already fired, so wakers dropped by the
+/// unwind would never be woken again (br-asupersync-n89rul L4, the same class
+/// as dofi11). When both panic, the callback's panic is the one re-raised.
+fn run_callbacks_then_wake(callbacks: impl FnOnce(), wakers: impl IntoIterator<Item = Waker>) {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(callbacks)) {
+        Ok(()) => wake_each(wakers),
+        Err(payload) => {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| wake_each(wakers)));
+            std::panic::resume_unwind(payload);
+        }
     }
 }
 
@@ -2963,8 +3021,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     mod epoll_integration {
         use super::*;
-        use crate::runtime::reactor::EpollReactor;
-        use std::io::Write;
+        use crate::runtime::reactor::{EpollReactor, IoUringCapabilityPolicy};
+        use std::io::{Read, Write};
         use std::os::unix::net::UnixStream;
 
         #[test]
@@ -3032,6 +3090,169 @@ mod tests {
 
             driver.deregister(token).expect("deregister should succeed");
             crate::test_complete!("io_driver_with_epoll_reactor_writable");
+        }
+
+        /// A real epoll reactor that reports a chosen backend in its capability
+        /// snapshot and counts `wake` calls.
+        struct CountingEpoll {
+            inner: EpollReactor,
+            backend: IoReactorBackend,
+            wakes: AtomicUsize,
+        }
+
+        impl CountingEpoll {
+            fn new(backend: IoReactorBackend) -> Self {
+                Self {
+                    inner: EpollReactor::new().expect("create reactor"),
+                    backend,
+                    wakes: AtomicUsize::new(0),
+                }
+            }
+        }
+
+        impl Reactor for CountingEpoll {
+            fn capability_snapshot(&self) -> IoReactorCapabilitySnapshot {
+                IoReactorCapabilitySnapshot::from_policy(
+                    self.backend,
+                    None,
+                    IoUringCapabilityPolicy::default(),
+                    [None, None, None, None, None, None],
+                )
+            }
+
+            fn register(
+                &self,
+                source: &dyn Source,
+                token: Token,
+                interest: Interest,
+            ) -> io::Result<()> {
+                self.inner.register(source, token, interest)
+            }
+
+            fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
+                self.inner.modify(token, interest)
+            }
+
+            fn deregister(&self, token: Token) -> io::Result<()> {
+                self.inner.deregister(token)
+            }
+
+            fn poll(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<usize> {
+                self.inner.poll(events, timeout)
+            }
+
+            fn wake(&self) -> io::Result<()> {
+                self.wakes.fetch_add(1, Ordering::SeqCst);
+                self.inner.wake()
+            }
+
+            fn registration_count(&self) -> usize {
+                self.inner.registration_count()
+            }
+        }
+
+        /// br-asupersync-issue65-criticisms-kpmoy5.1: on an epoll-backed
+        /// driver an interest change does not wake the reactor. A backend the
+        /// driver cannot identify still gets the wake on every change.
+        #[test]
+        fn epoll_interest_changes_skip_the_reactor_wake_other_backends_keep_it() {
+            super::init_test("epoll_interest_changes_skip_the_reactor_wake_other_backends_keep_it");
+            for (backend, wakes_per_change) in [
+                (IoReactorBackend::Epoll, 0usize),
+                (IoReactorBackend::Injected, 1usize),
+            ] {
+                let reactor = Arc::new(CountingEpoll::new(backend));
+                let handle = IoDriverHandle::new(reactor.clone());
+                let (sock, _peer) = UnixStream::pair().expect("create socket pair");
+                let (waker, _state) = create_test_waker();
+                let mut registration = handle
+                    .register(&sock, Interest::READABLE, waker.clone())
+                    .expect("register");
+                let before = reactor.wakes.load(Ordering::SeqCst);
+                for _ in 0..10 {
+                    assert!(
+                        registration
+                            .rearm(Interest::READABLE, &waker)
+                            .expect("rearm")
+                    );
+                }
+                registration
+                    .set_interest(Interest::READABLE)
+                    .expect("set_interest");
+                let wakes = reactor.wakes.load(Ordering::SeqCst) - before;
+                assert_eq!(
+                    wakes,
+                    11 * wakes_per_change,
+                    "{backend:?}: reactor wakes for 10 re-arms and 1 set_interest"
+                );
+            }
+            crate::test_complete!(
+                "epoll_interest_changes_skip_the_reactor_wake_other_backends_keep_it"
+            );
+        }
+
+        /// Skipping the wake is sound only because an epoll wait blocked on
+        /// another thread sees a re-arm: the event must arrive with no
+        /// reactor wake at all.
+        #[test]
+        fn epoll_rearm_reaches_a_poll_blocked_on_another_thread() {
+            super::init_test("epoll_rearm_reaches_a_poll_blocked_on_another_thread");
+            let reactor = Arc::new(CountingEpoll::new(IoReactorBackend::Epoll));
+            let handle = IoDriverHandle::new(reactor.clone());
+            let (sock, mut peer) = UnixStream::pair().expect("create socket pair");
+            sock.set_nonblocking(true).expect("nonblocking");
+            let (waker, state) = create_test_waker();
+            let mut registration = handle
+                .register(&sock, Interest::READABLE, waker.clone())
+                .expect("register");
+
+            // Fire and consume the oneshot event so the registration is disarmed.
+            peer.write_all(b"1").expect("write");
+            let first = handle
+                .turn_with(Some(Duration::from_secs(5)), |_, _| {})
+                .expect("turn");
+            assert!(first >= 1, "first readable event");
+            let mut buf = [0u8; 8];
+            let drained = (&sock).read(&mut buf).expect("drain the first byte");
+            assert_eq!(drained, 1, "drained the first write");
+            let woken_before = state.count.load(Ordering::SeqCst);
+            let wakes_before = reactor.wakes.load(Ordering::SeqCst);
+
+            let poller = handle.clone();
+            let blocked = std::thread::spawn(move || {
+                let start = std::time::Instant::now();
+                let polled = poller
+                    .turn_with(Some(Duration::from_secs(30)), |_, _| {})
+                    .expect("blocked turn");
+                (polled, start.elapsed())
+            });
+            // Let the poll block, then make the socket readable while the
+            // registration is disarmed, so nothing is delivered until the re-arm.
+            std::thread::sleep(Duration::from_millis(200));
+            peer.write_all(b"2").expect("write");
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(
+                registration
+                    .rearm(Interest::READABLE, &waker)
+                    .expect("rearm")
+            );
+
+            let (polled, elapsed) = blocked.join().expect("poller thread");
+            assert!(polled >= 1, "the blocked poll returned the re-armed event");
+            assert!(
+                elapsed < Duration::from_secs(10),
+                "the blocked poll waited {elapsed:?} for the re-arm"
+            );
+            assert!(
+                state.count.load(Ordering::SeqCst) > woken_before,
+                "the re-armed event woke the waker"
+            );
+            assert_eq!(
+                reactor.wakes.load(Ordering::SeqCst),
+                wakes_before,
+                "no reactor wake was used"
+            );
+            crate::test_complete!("epoll_rearm_reaches_a_poll_blocked_on_another_thread");
         }
     }
 
@@ -3110,6 +3331,147 @@ mod tests {
         assert!(callback_executed.load(std::sync::atomic::Ordering::SeqCst));
         assert_eq!(events, 1);
         assert!(waker_state.flag.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    struct PanickingWaker;
+
+    impl Wake for PanickingWaker {
+        fn wake(self: Arc<Self>) {
+            panic!("this waker panics on purpose");
+        }
+    }
+
+    /// Registers a well-behaved waker, a panicking one and another
+    /// well-behaved one, all ready in one batch, so one of the well-behaved
+    /// wakers comes after the panicking one whatever the dispatch order.
+    fn ready_batch_around_a_panicking_waker(
+        reactor: &LabReactor,
+        register_waker: &mut dyn FnMut(Waker) -> Token,
+    ) -> [Arc<FlagWaker>; 2] {
+        let (before, before_state) = create_test_waker();
+        let (after, after_state) = create_test_waker();
+        let tokens = [
+            register_waker(before),
+            register_waker(Waker::from(Arc::new(PanickingWaker))),
+            register_waker(after),
+        ];
+        for token in tokens {
+            reactor
+                .register(&TestFdSource, token, Interest::READABLE)
+                .expect("register");
+            reactor.inject_event(token, Event::readable(token), Duration::ZERO);
+        }
+        [before_state, after_state]
+    }
+
+    #[test]
+    fn a_panicking_waker_does_not_strand_the_rest_of_its_batch() {
+        init_test("a_panicking_waker_does_not_strand_the_rest_of_its_batch");
+        let reactor = Arc::new(LabReactor::new());
+        let mut driver = IoDriver::new(reactor.clone());
+        let states = ready_batch_around_a_panicking_waker(&reactor, &mut |waker| {
+            driver.register_waker(waker)
+        });
+
+        let turn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            driver.turn(Some(Duration::from_millis(10)))
+        }));
+        assert!(turn.is_err(), "the waker's panic still reaches the caller");
+        for state in &states {
+            assert!(state.flag.load(Ordering::SeqCst), "every other waker fired");
+        }
+        crate::test_complete!("a_panicking_waker_does_not_strand_the_rest_of_its_batch");
+    }
+
+    #[test]
+    fn a_panicking_waker_does_not_strand_the_rest_of_a_handle_turn() {
+        init_test("a_panicking_waker_does_not_strand_the_rest_of_a_handle_turn");
+        let reactor = Arc::new(LabReactor::new());
+        let driver = IoDriverHandle::new(reactor.clone());
+        let states = ready_batch_around_a_panicking_waker(&reactor, &mut |waker| {
+            driver.lock().register_waker(waker)
+        });
+
+        let turn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            driver.turn_with(Some(Duration::from_millis(10)), |_, _| {})
+        }));
+        assert!(turn.is_err(), "the waker's panic still reaches the caller");
+        for state in &states {
+            assert!(state.flag.load(Ordering::SeqCst), "every other waker fired");
+        }
+        crate::test_complete!("a_panicking_waker_does_not_strand_the_rest_of_a_handle_turn");
+    }
+
+    /// Registers two well-behaved wakers, both ready in one batch.
+    fn ready_batch_of_two(
+        reactor: &LabReactor,
+        register_waker: &mut dyn FnMut(Waker) -> Token,
+    ) -> [Arc<FlagWaker>; 2] {
+        let (first, first_state) = create_test_waker();
+        let (second, second_state) = create_test_waker();
+        for waker in [first, second] {
+            let token = register_waker(waker);
+            reactor
+                .register(&TestFdSource, token, Interest::READABLE)
+                .expect("register");
+            reactor.inject_event(token, Event::readable(token), Duration::ZERO);
+        }
+        [first_state, second_state]
+    }
+
+    /// br-asupersync-n89rul L4: an event callback that panics on the batch's
+    /// first event still lets every waker of the batch fire, and the panic
+    /// still reaches the caller.
+    #[test]
+    fn a_panicking_event_callback_does_not_strand_its_batch() {
+        init_test("a_panicking_event_callback_does_not_strand_its_batch");
+        let reactor = Arc::new(LabReactor::new());
+        let mut driver = IoDriver::new(reactor.clone());
+        let states = ready_batch_of_two(&reactor, &mut |waker| driver.register_waker(waker));
+
+        let turn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            driver.turn_with(Some(Duration::from_millis(10)), |_, _| {
+                panic!("this callback panics on purpose");
+            })
+        }));
+        assert!(
+            turn.is_err(),
+            "the callback's panic still reaches the caller"
+        );
+        for state in &states {
+            assert!(
+                state.flag.load(Ordering::SeqCst),
+                "every waker of the batch fired"
+            );
+        }
+        crate::test_complete!("a_panicking_event_callback_does_not_strand_its_batch");
+    }
+
+    /// The same through `IoDriverHandle::turn_with`, which the runtime's
+    /// workers drive.
+    #[test]
+    fn a_panicking_event_callback_does_not_strand_a_handle_turn() {
+        init_test("a_panicking_event_callback_does_not_strand_a_handle_turn");
+        let reactor = Arc::new(LabReactor::new());
+        let driver = IoDriverHandle::new(reactor.clone());
+        let states = ready_batch_of_two(&reactor, &mut |waker| driver.lock().register_waker(waker));
+
+        let turn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            driver.turn_with(Some(Duration::from_millis(10)), |_, _| {
+                panic!("this callback panics on purpose");
+            })
+        }));
+        assert!(
+            turn.is_err(),
+            "the callback's panic still reaches the caller"
+        );
+        for state in &states {
+            assert!(
+                state.flag.load(Ordering::SeqCst),
+                "every waker of the batch fired"
+            );
+        }
+        crate::test_complete!("a_panicking_event_callback_does_not_strand_a_handle_turn");
     }
 }
 

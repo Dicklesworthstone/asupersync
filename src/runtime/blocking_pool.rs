@@ -7,7 +7,7 @@
 //! blocking the async runtime. It supports:
 //!
 //! - **Capacity management**: Configurable min/max threads with dynamic scaling
-//! - **Fairness**: FIFO ordering with priority support
+//! - **Fairness**: FIFO ordering (a task's priority is recorded but not yet used)
 //! - **Cancellation**: Soft cancellation with completion tracking
 //! - **Shutdown**: Graceful shutdown with bounded drain timeout
 //!
@@ -26,8 +26,9 @@
 //! ## Cancellation
 //!
 //! Blocking operations cannot be interrupted mid-execution. Instead, cancellation
-//! is "soft": the task is marked cancelled, but the blocking closure runs to
-//! completion. The completion notification is suppressed for cancelled tasks.
+//! is "soft": the task is marked cancelled, but a closure that already started
+//! runs to completion, and one still queued is skipped. Either way the task's
+//! completion is signalled, so waiting on its handle returns.
 //!
 //! # Example
 //!
@@ -80,12 +81,17 @@ fn blocking_thread_sleep(duration: Duration) {
     thread::sleep(duration);
 }
 
-fn timeout_deadline(timeout: Duration, time_getter: TimeGetter) -> Instant {
-    time_getter() + timeout
+/// `None` when the timeout reaches past what `Instant` can represent (such as
+/// `Duration::MAX`): the wait then has no deadline instead of panicking on the
+/// overflow (br-asupersync-2u7bpm).
+fn timeout_deadline(timeout: Duration, time_getter: TimeGetter) -> Option<Instant> {
+    time_getter().checked_add(timeout)
 }
 
-fn timeout_remaining(deadline: Instant, time_getter: TimeGetter) -> Duration {
-    deadline.saturating_duration_since(time_getter())
+fn timeout_remaining(deadline: Option<Instant>, time_getter: TimeGetter) -> Duration {
+    deadline.map_or(Duration::MAX, |deadline| {
+        deadline.saturating_duration_since(time_getter())
+    })
 }
 
 fn drain_thread_handles(handles: &mut Vec<ThreadJoinHandle<()>>) -> Vec<ThreadJoinHandle<()>> {
@@ -999,14 +1005,16 @@ fn try_enqueue_task(inner: &Arc<BlockingPoolInner>, task: BlockingTask) -> bool 
         match affinity.route_task(&inner.pending_count, task) {
             Ok(()) => return true,
             Err(task) => {
-                inner.queue.push(task);
                 inner.pending_count.fetch_add(1, Ordering::Relaxed);
+                inner.queue.push(task);
                 return true;
             }
         }
     }
-    inner.queue.push(task);
+    // Count the task before publishing it, as `route_task` does: a worker that
+    // pops it at once must not take `pending_count` below zero.
     inner.pending_count.fetch_add(1, Ordering::Relaxed);
+    inner.queue.push(task);
     true
 }
 
@@ -1051,7 +1059,7 @@ fn blocking_pool_current_max_threads(inner: &BlockingPoolInner) -> usize {
     inner.live_max_threads.load(Ordering::Relaxed)
 }
 
-fn blocking_pool_set_max_threads(inner: &BlockingPoolInner, requested: usize) -> usize {
+fn blocking_pool_set_max_threads(inner: &Arc<BlockingPoolInner>, requested: usize) -> usize {
     // The live spawn cap must never reach 0 for a constructed pool. `max_threads`
     // is asserted >= 1 at construction (a max_threads == 0 runtime simply has no
     // pool and rejects `spawn_blocking`), and a pool that accepts work must be
@@ -1069,11 +1077,16 @@ fn blocking_pool_set_max_threads(inner: &BlockingPoolInner, requested: usize) ->
         .max(1)
         .min(inner.max_threads);
     inner.live_max_threads.store(applied, Ordering::Relaxed);
+    // Jobs queued under a lower cap get their threads now, not one per later
+    // submission (br-asupersync-2u7bpm).
+    if !inner.shutdown.load(Ordering::Acquire) {
+        maybe_spawn_thread_on_inner(inner);
+    }
     applied
 }
 
 fn blocking_pool_apply_pool_sizing_decision(
-    inner: &BlockingPoolInner,
+    inner: &Arc<BlockingPoolInner>,
     decision: &PoolSizingDecision,
 ) -> Option<usize> {
     match decision.action {
@@ -1434,19 +1447,30 @@ fn maybe_spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
     // active_threads concurrently is guaranteed to observe our pending work (or
     // we observe its decrement and spawn a replacement). Prevents a stranded
     // task on a min_threads==0 pool on weak memory models (no-op on x86).
-    std::sync::atomic::fence(Ordering::SeqCst);
-    let active = inner.active_threads.load(Ordering::Relaxed);
-    let busy = inner.busy_threads.load(Ordering::Relaxed);
-    let pending = inner.pending_count.load(Ordering::Relaxed);
-
-    // Spawn a new thread if:
+    //
+    // Spawn while:
     // 1. We're below max_threads
     // 2. The number of pending tasks exceeds the number of idle threads
     //    (idle = active - busy). This handles bursts of tasks correctly
     //    even before threads have woken up to increment `busy_threads`.
-    let idle = active.saturating_sub(busy);
-    if active < inner.live_max_threads.load(Ordering::Relaxed) && pending > idle {
+    // More than one thread can be due at once, after a raised cap or several
+    // queued tasks; each spawn claims its `active_threads` slot before it
+    // returns, so the next pass sees it.
+    loop {
+        std::sync::atomic::fence(Ordering::SeqCst);
+        let active = inner.active_threads.load(Ordering::Relaxed);
+        let busy = inner.busy_threads.load(Ordering::Relaxed);
+        let pending = inner.pending_count.load(Ordering::Relaxed);
+        let idle = active.saturating_sub(busy);
+        if active >= inner.live_max_threads.load(Ordering::Relaxed) || pending <= idle {
+            return;
+        }
         spawn_thread_on_inner(inner);
+        if inner.active_threads.load(Ordering::Relaxed) <= active {
+            // No worker was added (the cap was reached concurrently, or the
+            // thread could not be spawned); the next submission retries.
+            return;
+        }
     }
 }
 
@@ -1493,8 +1517,12 @@ fn blocking_worker_loop(inner: &BlockingPoolInner, assigned_cohort: Option<usize
                 BlockingTaskDequeueKind::Global | BlockingTaskDequeueKind::Spill => 0,
             };
 
-            inner.pending_count.fetch_sub(1, Ordering::Relaxed);
+            // Busy first: between the two updates this worker must not look
+            // idle while it holds a task, or a task submitted in that window
+            // sees an idle thread, spawns none, and waits behind this one
+            // although the cap allows more threads (br-asupersync-2u7bpm).
             inner.busy_threads.fetch_add(1, Ordering::Relaxed);
+            inner.pending_count.fetch_sub(1, Ordering::Relaxed);
 
             // Check if task was cancelled before execution. A skipped task still
             // owns its captures, whose destructors may block: destroy them
@@ -1799,6 +1827,63 @@ mod tests {
         handle.wait();
         assert!(handle.is_done());
         assert_eq!(counter.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn huge_timeouts_wait_without_a_deadline_instead_of_panicking() {
+        // br-asupersync-2u7bpm: `Instant + Duration::MAX` overflowed and
+        // panicked, after shutdown had already begun in shutdown_and_wait.
+        let pool = BlockingPool::new(1, 1);
+        let handle = pool.spawn(|| thread::sleep(Duration::from_millis(20)));
+        assert!(handle.wait_timeout(Duration::MAX));
+        assert!(pool.shutdown_and_wait(Duration::MAX));
+    }
+
+    #[test]
+    fn raising_the_cap_starts_threads_for_jobs_already_queued() {
+        // br-asupersync-2u7bpm: set_max_threads only stored the new cap, so jobs
+        // queued under a lower cap waited for later submissions to spawn
+        // threads, one per submission. Each of these three jobs waits until all
+        // three have started, so all three see that in time only if raising the
+        // cap starts threads for the two still queued.
+        let pool = BlockingPool::new(0, 4);
+        pool.set_max_threads(1);
+        let started = Arc::new(AtomicUsize::new(0));
+        let met = Arc::new(AtomicUsize::new(0));
+        let handles: Vec<_> = (0..3)
+            .map(|_| {
+                let started = Arc::clone(&started);
+                let met = Arc::clone(&met);
+                pool.spawn(move || {
+                    started.fetch_add(1, Ordering::SeqCst);
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    while Instant::now() < deadline {
+                        if started.load(Ordering::SeqCst) == 3 {
+                            met.fetch_add(1, Ordering::SeqCst);
+                            return;
+                        }
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                })
+            })
+            .collect();
+
+        let running_by = Instant::now() + Duration::from_secs(5);
+        while started.load(Ordering::SeqCst) == 0 {
+            assert!(Instant::now() < running_by, "the first job must start");
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(pool.pending_count(), 2, "two jobs wait under the cap of 1");
+
+        assert_eq!(pool.set_max_threads(3), 3);
+        for handle in &handles {
+            handle.wait();
+        }
+        assert_eq!(
+            met.load(Ordering::SeqCst),
+            3,
+            "all three jobs must run at once after the cap is raised"
+        );
     }
 
     #[test]

@@ -33,13 +33,14 @@ use crate::net::unix::stream::UnixStream;
 use crate::runtime::reactor::Interest;
 use crate::stream::Stream;
 use parking_lot::Mutex;
-use std::future::poll_fn;
+use std::future::Future;
 use std::io;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::{self, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
@@ -50,20 +51,66 @@ const FALLBACK_ACCEPT_BACKOFF: Duration = Duration::from_millis(1);
 
 #[derive(Debug, Default)]
 struct AcceptWaiters {
-    waiters: Mutex<Vec<Waker>>,
+    waiters: Mutex<Vec<AcceptWaiter>>,
+    next_owner: AtomicU64,
+}
+
+/// One task waiting for a connection. `owner` identifies an `accept()`
+/// future, which removes its own entry when it is dropped; entries without an
+/// owner come from direct `poll_accept` callers.
+#[derive(Debug)]
+struct AcceptWaiter {
+    owner: Option<u64>,
+    waker: Waker,
 }
 
 impl AcceptWaiters {
-    fn register(&self, waker: &Waker) {
+    fn next_owner(&self) -> u64 {
+        self.next_owner.fetch_add(1, AtomicOrdering::Relaxed)
+    }
+
+    fn register(&self, owner: Option<u64>, waker: &Waker) {
         let mut waiters = self.waiters.lock();
-        if waiters.iter().any(|existing| existing.will_wake(waker)) {
+        if owner.is_some() {
+            // An accept() future keeps one entry, updated in place and removed
+            // when the future is dropped, so it never has to be evicted.
+            if let Some(entry) = waiters.iter_mut().find(|entry| entry.owner == owner) {
+                entry.waker.clone_from(waker);
+            } else {
+                waiters.push(AcceptWaiter {
+                    owner,
+                    waker: waker.clone(),
+                });
+            }
             return;
         }
-        if waiters.len() >= 32 {
-            let evicted = waiters.remove(0);
-            evicted.wake();
+        if waiters
+            .iter()
+            .any(|existing| existing.owner.is_none() && existing.waker.will_wake(waker))
+        {
+            return;
         }
-        waiters.push(waker.clone());
+        // A direct poll_accept caller cannot be told apart from an abandoned
+        // one, so those entries stay capped. Evicting live accept() futures
+        // instead made each evicted waiter evict the next: with 33 tasks
+        // accepting on one listener they woke each other forever.
+        if waiters.iter().filter(|entry| entry.owner.is_none()).count() >= 32 {
+            if let Some(index) = waiters.iter().position(|entry| entry.owner.is_none()) {
+                // Wake the evicted waiter so its task can re-register
+                // rather than hang forever with a lost wakeup.
+                waiters.remove(index).waker.wake();
+            }
+        }
+        waiters.push(AcceptWaiter {
+            owner: None,
+            waker: waker.clone(),
+        });
+    }
+
+    fn remove(&self, owner: u64) {
+        self.waiters
+            .lock()
+            .retain(|entry| entry.owner != Some(owner));
     }
 
     fn wake_all(&self) {
@@ -72,7 +119,7 @@ impl AcceptWaiters {
             std::mem::take(&mut *guard)
         };
         for waiter in waiters {
-            waiter.wake();
+            waiter.waker.wake();
         }
     }
 
@@ -82,10 +129,32 @@ impl AcceptWaiters {
             std::mem::take(&mut *guard)
         };
         for waiter in waiters {
-            if !waiter.will_wake(current) {
-                waiter.wake();
+            if !waiter.waker.will_wake(current) {
+                waiter.waker.wake();
             }
         }
+    }
+}
+
+/// The future `accept()` returns. It owns one entry in the listener's waiter
+/// list and removes it when dropped, so any number of tasks can wait on one
+/// listener without evicting one another.
+struct AcceptFuture<'a> {
+    listener: &'a UnixListener,
+    owner: u64,
+}
+
+impl Future for AcceptFuture<'_> {
+    type Output = io::Result<(UnixStream, SocketAddr)>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.listener.poll_accept_as(cx, Some(self.owner))
+    }
+}
+
+impl Drop for AcceptFuture<'_> {
+    fn drop(&mut self) {
+        self.listener.accept_waiters.remove(self.owner);
     }
 }
 
@@ -404,11 +473,26 @@ impl UnixListener {
     /// }
     /// ```
     pub async fn accept(&self) -> io::Result<(UnixStream, SocketAddr)> {
-        poll_fn(|cx| self.poll_accept(cx)).await
+        self.accept_future().await
+    }
+
+    fn accept_future(&self) -> AcceptFuture<'_> {
+        AcceptFuture {
+            listener: self,
+            owner: self.accept_waiters.next_owner(),
+        }
     }
 
     /// Polls for an incoming connection using reactor wakeups.
     pub fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<io::Result<(UnixStream, SocketAddr)>> {
+        self.poll_accept_as(cx, None)
+    }
+
+    fn poll_accept_as(
+        &self,
+        cx: &mut Context<'_>,
+        owner: Option<u64>,
+    ) -> Poll<io::Result<(UnixStream, SocketAddr)>> {
         if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
@@ -418,7 +502,7 @@ impl UnixListener {
                 Poll::Ready(UnixStream::from_std(stream).map(|stream| (stream, addr)))
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                self.accept_waiters.register(cx.waker());
+                self.accept_waiters.register(owner, cx.waker());
                 if let Err(err) = self.register_interest() {
                     self.accept_waiters.wake_others(cx.waker());
                     return Poll::Ready(Err(err));
@@ -935,6 +1019,56 @@ mod tests {
         assert!(matches!(listener.poll_accept(&mut cx1), Poll::Ready(Ok(_))));
 
         crate::test_complete!("listener_fanout_wakes_all_pending_accept_waiters");
+    }
+
+    /// More accept() futures than the 32-entry cap the waiter list used to
+    /// evict from: registering one must not wake another (the 33rd used to
+    /// evict and wake the first, which evicted the next, forever), and a
+    /// dropped accept() future must take its waiter with it.
+    #[test]
+    fn many_pending_accepts_neither_wake_each_other_nor_outlive_their_futures() {
+        init_test("many_pending_accepts_neither_wake_each_other_nor_outlive_their_futures");
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("many_accepts.sock");
+        let std_listener = net::UnixListener::bind(&path).expect("bind failed");
+        std_listener
+            .set_nonblocking(true)
+            .expect("nonblocking failed");
+        let reactor = Arc::new(LabReactor::new());
+        let driver = IoDriverHandle::new(reactor);
+        let cx_cap = Cx::new_with_observability(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            Some(driver),
+            None,
+        );
+        let _guard = Cx::set_current(Some(cx_cap));
+        let listener = UnixListener::from_std(std_listener).expect("from_std failed");
+        let hits: Vec<Arc<AtomicUsize>> = (0..40).map(|_| Arc::new(AtomicUsize::new(0))).collect();
+        let wakers: Vec<Waker> = hits
+            .iter()
+            .map(|hits| {
+                Waker::from(Arc::new(CountingWaker {
+                    hits: Arc::clone(hits),
+                }))
+            })
+            .collect();
+        let mut accepts: Vec<_> = (0..40).map(|_| Box::pin(listener.accept())).collect();
+        for (accept, waker) in accepts.iter_mut().zip(&wakers) {
+            let mut task_cx = Context::from_waker(waker);
+            assert!(accept.as_mut().poll(&mut task_cx).is_pending());
+        }
+        let woken: usize = hits.iter().map(|hits| hits.load(Ordering::SeqCst)).sum();
+        assert_eq!(woken, 0, "a pending accept must not wake another");
+        assert_eq!(listener.accept_waiters.waiters.lock().len(), 40);
+
+        drop(accepts);
+        assert!(
+            listener.accept_waiters.waiters.lock().is_empty(),
+            "a dropped accept() future must remove its waiter"
+        );
     }
 
     #[test]

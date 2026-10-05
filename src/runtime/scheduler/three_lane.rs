@@ -416,6 +416,89 @@ impl Drop for IdleReactorTurn {
     }
 }
 
+/// Consecutive dispatches a worker may take from its LIFO slot before the
+/// slot's task goes to the global ready lane, so a chain of tasks waking each
+/// other cannot starve other ready work (tokio uses the same bound).
+const MAX_LIFO_DISPATCHES: u8 = 3;
+
+thread_local! {
+    /// While this worker executes a task: its runtime's coordinator (by
+    /// address) and the task (br-asupersync-issue65-criticisms-kpmoy5.1.11).
+    static EXECUTING: Cell<Option<(usize, TaskId)>> = const { Cell::new(None) };
+    /// A ready task woken by the task this worker is executing. The worker
+    /// runs it next instead of sending it through the global injector and
+    /// unparking another worker: (runtime key, task, priority).
+    static LIFO_SLOT: Cell<Option<(usize, TaskId, u8)>> = const { Cell::new(None) };
+}
+
+/// Ready wakes placed in a LIFO slot, for the test that proves the path runs.
+#[cfg(test)]
+static LIFO_SLOT_WAKES: AtomicUsize = AtomicUsize::new(0);
+
+/// Where a ready wake goes when the waking thread is executing a task.
+enum LifoWake {
+    /// Not applicable: another thread, another runtime, or a self-wake.
+    NotLocal,
+    /// Placed in the empty slot.
+    Placed,
+    /// Placed, displacing an older task that must go to the global lane.
+    Displaced(TaskId, u8),
+}
+
+/// Puts `task` in this thread's LIFO slot when the thread is executing a
+/// different task of the same runtime.
+fn claim_lifo_wake(coordinator: &Arc<WorkerCoordinator>, task: TaskId, priority: u8) -> LifoWake {
+    let key = Arc::as_ptr(coordinator).addr();
+    let executing_other = EXECUTING.with(|executing| {
+        matches!(executing.get(), Some((owner, current)) if owner == key && current != task)
+    });
+    if !executing_other {
+        // A self-wake (yield_now) keeps the global lane, so a task looping
+        // on it cannot starve other work through the slot.
+        return LifoWake::NotLocal;
+    }
+    #[cfg(test)]
+    LIFO_SLOT_WAKES.fetch_add(1, Ordering::Relaxed);
+    match LIFO_SLOT.with(|slot| slot.replace(Some((key, task, priority)))) {
+        Some((owner, older, older_priority)) if owner == key => {
+            LifoWake::Displaced(older, older_priority)
+        }
+        _ => LifoWake::Placed,
+    }
+}
+
+/// Marks the task this worker executes for the guard's lifetime.
+struct ExecutingTask {
+    previous: Option<(usize, TaskId)>,
+}
+
+impl ExecutingTask {
+    fn enter(coordinator: &Arc<WorkerCoordinator>, task: TaskId) -> Self {
+        let key = Arc::as_ptr(coordinator).addr();
+        let previous = EXECUTING.with(|executing| executing.replace(Some((key, task))));
+        Self { previous }
+    }
+}
+
+impl Drop for ExecutingTask {
+    fn drop(&mut self) {
+        EXECUTING.with(|executing| executing.set(self.previous));
+    }
+}
+
+/// Takes this thread's LIFO slot if it holds a task of the runtime behind
+/// `coordinator`.
+fn take_lifo_task(coordinator: &Arc<WorkerCoordinator>) -> Option<(TaskId, u8)> {
+    let key = Arc::as_ptr(coordinator).addr();
+    LIFO_SLOT.with(|slot| match slot.get() {
+        Some((owner, task, priority)) if owner == key => {
+            slot.set(None);
+            Some((task, priority))
+        }
+        _ => None,
+    })
+}
+
 #[inline]
 fn select_io_poll_timeout(
     idle_timeout: Option<Duration>,
@@ -1044,6 +1127,15 @@ impl WorkerCoordinator {
         self.notify_wake();
     }
 
+    /// Wakes the I/O driver, so a worker blocked in the reactor as its idle
+    /// leader returns and re-checks its queues.
+    #[inline]
+    pub(crate) fn wake_io_driver(&self) {
+        if let Some(io) = &self.io_driver {
+            let _ = io.wake();
+        }
+    }
+
     /// Publishes one concrete Parker permit without calling the reactor.
     ///
     /// RuntimeState uses this beneath its outer lock after enqueueing deferred
@@ -1271,6 +1363,33 @@ impl Drop for ScopedLocalReady {
             *cell.borrow_mut() = self.prev.take();
         });
     }
+}
+
+/// Whether this thread is running the dispatch loop of the worker that owns
+/// `queue`. That loop checks `local_ready` before it waits again, so a wake
+/// raised here needs no reactor wake (br-asupersync-kopidb H1).
+#[inline]
+fn thread_drives_local_ready(queue: &Arc<LocalReadyQueue>) -> bool {
+    CURRENT_LOCAL_READY
+        .try_with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, queue))
+        })
+        .unwrap_or(false)
+}
+
+/// Whether this thread is running the dispatch loop of a worker that owns
+/// one of `queues`.
+#[inline]
+fn thread_drives_any_local_ready(queues: &[Arc<LocalReadyQueue>]) -> bool {
+    CURRENT_LOCAL_READY
+        .try_with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .is_some_and(|current| queues.iter().any(|queue| Arc::ptr_eq(current, queue)))
+        })
+        .unwrap_or(false)
 }
 
 /// Schedules a local (`!Send`) task on the current thread's non-stealable queue.
@@ -2314,6 +2433,8 @@ impl ThreeLaneScheduler {
                 ),
                 scheduler_verification: SCHEDULER_VERIFICATION_DEFAULT,
                 fast_queue_dispatch_streak: 0,
+                lifo_streak: 0,
+                lifo_enabled: false,
                 fast_queue_fairness_limit: 4, // Allow max 4 consecutive stolen work dispatches
                 timed_dispatch_streak: 0,
                 timed_fairness_limit: 6, // Allow max 6 consecutive EDF dispatches before FIFO fairness
@@ -3262,6 +3383,31 @@ impl ThreeLaneScheduler {
         Arc::new(move || coordinator.wake_one())
     }
 
+    /// Returns the notifier the obligation gateway calls after each post.
+    /// Call before [`Self::take_workers`].
+    ///
+    /// A post made inside the dispatch loop of one of this scheduler's
+    /// workers wakes nobody: that worker applies obligation posts on its next
+    /// dispatch and does not park or block in the reactor while any remain.
+    /// mpsc reserve + send and `Semaphore::acquire` post twice per operation,
+    /// and each wake was an unpark plus an eventfd write that got an idle
+    /// worker up to take the state lock (br-asupersync-e6igie M1). A post
+    /// from any other thread wakes one worker as before.
+    #[must_use]
+    pub(crate) fn obligation_posted_notifier(&self) -> Arc<dyn Fn() + Send + Sync> {
+        let coordinator = Arc::clone(&self.coordinator);
+        let worker_queues: Vec<Arc<LocalReadyQueue>> = self
+            .workers
+            .iter()
+            .map(|worker| Arc::clone(&worker.local_ready))
+            .collect();
+        Arc::new(move || {
+            if !thread_drives_any_local_ready(&worker_queues) {
+                coordinator.wake_one();
+            }
+        })
+    }
+
     pub fn take_workers(&mut self) -> Vec<ThreeLaneWorker> {
         std::mem::take(&mut self.workers).into_vec()
     }
@@ -3365,12 +3511,12 @@ pub struct ThreeLaneWorker {
     /// (VecDeque, O(1)) instead of the PriorityScheduler (BinaryHeap,
     /// O(log n)). Stealers use FIFO ordering for cache-friendliness.
     pub fast_queue: LocalQueue,
-    /// Prefetched FIFO slice from the global ready queue.
+    /// Scratch space for a batch drained from the global ready queue.
     ///
     /// When the shared ready queue is deep, the worker drains a bounded batch
-    /// into this buffer so subsequent phase-3 ready dispatches stay local and
-    /// avoid repeatedly contending on the injector atomics. The buffer is kept
-    /// in reverse order so `pop()` yields the oldest prefetched task first.
+    /// in one pass to avoid repeatedly contending on the injector atomics,
+    /// dispatches the oldest task and moves the rest to its stealable
+    /// `fast_queue`. The buffer is empty between dispatches.
     global_ready_buffer: Vec<PriorityTask>,
     /// Stealers for other workers' fast queues (O(1) steal).
     fast_stealers: SmallVec<[local_queue::Stealer; 16]>,
@@ -3495,6 +3641,15 @@ pub struct ThreeLaneWorker {
     /// Tracks fairness between stolen work and local work to prevent starvation.
     /// When this counter exceeds a threshold, local work gets priority.
     fast_queue_dispatch_streak: usize,
+    /// Consecutive dispatches taken from this worker's LIFO slot; bounded by
+    /// [`MAX_LIFO_DISPATCHES`] (br-asupersync-issue65-criticisms-kpmoy5.1.11).
+    lifo_streak: u8,
+    /// Whether tasks an execution wakes may go to the LIFO slot. Only
+    /// `run_loop_until` sets it: its next dispatch always follows an
+    /// execution, and it empties the slot when it stops. `run_once` and other
+    /// direct `execute` callers decide whether to park from queues that
+    /// cannot see the slot, so they keep the ordinary path.
+    lifo_enabled: bool,
     /// Maximum consecutive fast_queue dispatches before yielding to local work.
     ///
     /// Fairness guarantee: local work will be checked after at most this many
@@ -5226,7 +5381,8 @@ impl ThreeLaneWorker {
         // Do not block in I/O while spawn admission work remains. A denied
         // request produces no runnable task; without this mailbox check, the
         // next request could wait for the full idle I/O timeout before the
-        // scheduler loop revisits admission.
+        // scheduler loop revisits admission. Obligation posts left over from
+        // this worker's own polls woke nobody, so they count as work too.
         let io_timeout = if quick_poll {
             Some(Duration::ZERO)
         } else {
@@ -5237,7 +5393,8 @@ impl ThreeLaneWorker {
                     || self
                         .spawn_mailbox
                         .as_ref()
-                        .is_some_and(|mailbox| !mailbox.is_empty()),
+                        .is_some_and(|mailbox| !mailbox.is_empty())
+                    || self.obligation_posts_queued(),
             )
         };
 
@@ -5350,6 +5507,7 @@ impl ThreeLaneWorker {
         // GH#58: local tasks whose future lives on this thread but that were
         // woken while the worker ran elsewhere are runnable again here.
         self.rescue_stranded_local_tasks();
+        let lifo_was_enabled = std::mem::replace(&mut self.lifo_enabled, true);
 
         'dispatch: loop {
             if self.shutdown.load(Ordering::Relaxed) {
@@ -5418,6 +5576,7 @@ impl ThreeLaneWorker {
                         .spawn_mailbox
                         .as_ref()
                         .is_some_and(|mailbox| !mailbox.is_empty())
+                    || self.obligation_posts_queued()
                 {
                     break;
                 }
@@ -5584,6 +5743,15 @@ impl ThreeLaneWorker {
             // We've given other work a chance during the backoff period.
             self.cancel_streak = 0;
             self.ready_dispatch_streak = 0;
+        }
+        // The loop can stop between an execution and the next dispatch. A
+        // task still in this worker's LIFO slot then goes to the global lane,
+        // so it is neither stranded on this thread nor seen by a later
+        // runtime (br-asupersync-issue65-criticisms-kpmoy5.1.11).
+        self.lifo_enabled = lifo_was_enabled;
+        if let Some((task, priority)) = take_lifo_task(&self.coordinator) {
+            self.global.inject_ready(task, priority);
+            self.coordinator.wake_one();
         }
         self.publish_preemption_fairness_certificate();
     }
@@ -6224,6 +6392,14 @@ impl ThreeLaneWorker {
                     self.task_table.as_ref(),
                 );
             }
+            drop(state);
+            // Posts made on a worker wake nobody (see
+            // `ThreeLaneScheduler::obligation_posted_notifier`). When one burst
+            // outgrows this batch, wake a worker for the rest, so a pump step
+            // that reports idle does not leave them behind.
+            if self.obligation_posts_queued() {
+                self.coordinator.wake_one();
+            }
         }
 
         let Some(mailbox) = self.spawn_mailbox.as_ref() else {
@@ -6779,6 +6955,10 @@ impl ThreeLaneWorker {
             return None;
         }
 
+        if let Some(task) = self.take_lifo_dispatch() {
+            return Some(task);
+        }
+
         if let Some(task) = self.try_phase3_ready_work() {
             return Some(task);
         }
@@ -6859,14 +7039,46 @@ impl ThreeLaneWorker {
                 .global
                 .pop_ready_batch_into(batch_size, &mut self.global_ready_buffer);
             if drained > 0 {
-                self.global_ready_buffer.reverse();
                 self.preemption_metrics.global_ready_batch_drains += 1;
                 self.preemption_metrics.global_ready_batch_tasks += drained as u64;
-                return self.global_ready_buffer.pop();
+                // The rest of the batch goes to this worker's stealable queue,
+                // not a private buffer: held privately it was invisible to idle
+                // peers, which parked while this worker ran a long poll
+                // (br-asupersync-5khftq M2). Pushed newest first, so the
+                // owner's LIFO pops still dispatch the batch oldest first.
+                let first = self.global_ready_buffer[0];
+                let rest: SmallVec<[TaskId; 16]> = self.global_ready_buffer[1..]
+                    .iter()
+                    .rev()
+                    .map(|prefetched| prefetched.task)
+                    .collect();
+                self.global_ready_buffer.clear();
+                self.fast_queue.push_many(&rest);
+                return Some(first);
             }
         }
 
         self.global.pop_ready()
+    }
+
+    /// The task a just-executed task woke on this worker (its LIFO slot),
+    /// unless the worker already took [`MAX_LIFO_DISPATCHES`] from the slot in
+    /// a row: then the task goes to the global ready lane and the ordinary
+    /// phases choose, so other ready work is reached
+    /// (br-asupersync-issue65-criticisms-kpmoy5.1.11).
+    fn take_lifo_dispatch(&mut self) -> Option<TaskId> {
+        let Some((task, priority)) = take_lifo_task(&self.coordinator) else {
+            self.lifo_streak = 0;
+            return None;
+        };
+        if self.lifo_streak >= MAX_LIFO_DISPATCHES {
+            self.lifo_streak = 0;
+            self.global.inject_ready(task, priority);
+            return None;
+        }
+        self.lifo_streak += 1;
+        self.record_ready_dispatch();
+        Some(self.dispatch_with_adaptive_epoch(task))
     }
 
     fn try_phase3_ready_work(&mut self) -> Option<TaskId> {
@@ -8284,6 +8496,13 @@ impl ThreeLaneWorker {
             completed: false,
             stored: Some(stored),
         };
+        // Tasks this one wakes, while it is polled and while its completion
+        // is published, go to this worker's LIFO slot. Declared after `guard`
+        // so it is cleared first: wakes from an unwind's cleanup take the
+        // ordinary path (br-asupersync-issue65-criticisms-kpmoy5.1.11).
+        let _executing = self
+            .lifo_enabled
+            .then(|| ExecutingTask::enter(&self.coordinator, task_id));
 
         // The worker dispatch quantum is one `Future::poll`. Do not loop on a
         // self-woken task here: returning to `next_task()` is what lets cancel,
@@ -8582,11 +8801,12 @@ impl ThreeLaneWorker {
     ) -> PolledCompletionArtifacts {
         // Sample an injected clock before any task/state lock is acquired.
         let capture_time = self.schedule_capture.get().map(|_| self.capture_now());
-        // The holder must still be in its dispatch table when Reserve posts
-        // are admitted. Release B before the existing detach phase takes A;
-        // the drainer acquires A/C in the ordinary minting order itself.
-        self.drain_completion_obligation_posts(task_id);
         if self.task_table.is_some() {
+            // The holder must still be in its dispatch table when Reserve
+            // posts are admitted. Release B before the existing detach phase
+            // takes A; the drainer acquires A/C in the ordinary minting order
+            // itself.
+            self.drain_completion_obligation_posts(task_id);
             // The sharded table owns the authoritative record. Reconcile the
             // checkpoint receipt and terminal outcome there, then detach the
             // record before taking RuntimeState. This avoids both the
@@ -8640,13 +8860,18 @@ impl ThreeLaneWorker {
                 finalizer_publication,
             }
         } else {
-            // Unified fallback: one state acquisition covers ack consumption,
-            // the terminal transition, cross-cutting completion, finalizer
-            // discovery, and dependent wakes.
+            // Unified fallback: one state acquisition covers the holder's
+            // obligation backlog, ack consumption, the terminal transition,
+            // cross-cutting completion, finalizer discovery, and dependent
+            // wakes. The record stays in this table until `task_completed`, so
+            // its Reserve posts are admitted first, as on the sharded path
+            // (br-asupersync-e6igie M2: this took the state lock twice).
             let mut state = self
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.revoke_obligation_admission_before_completion(task_id, None);
+            let _ = state.drain_obligation_posts_before_completion(None);
             let (cancel_ack, cancel_wakes) =
                 Self::consume_cancel_ack_locked(&mut state, task_id).into_parts();
             if let (Some(receipt), Some(now)) = (cancel_ack.as_ref(), capture_time) {
@@ -8747,6 +8972,14 @@ impl ThreeLaneWorker {
             retirement_cx_inner,
             finalizer_publication,
         }
+    }
+
+    /// Whether obligation posts are waiting in this runtime's mailbox.
+    #[inline]
+    fn obligation_posts_queued(&self) -> bool {
+        self.obligation_mailbox
+            .as_ref()
+            .is_some_and(|mailbox| !mailbox.is_empty())
     }
 
     fn drain_completion_obligation_posts(&self, task_id: TaskId) {
@@ -9012,6 +9245,14 @@ struct ThreeLaneWaker {
 }
 
 impl ThreeLaneWaker {
+    fn record_enqueue(&self) {
+        if let Some(collector) = &self.scheduler_evidence {
+            collector
+                .lock()
+                .record_task_enqueue(self.task_id, crate::time::wall_now().as_nanos());
+        }
+    }
+
     #[inline]
     fn schedule(&self) {
         if self.wake_state.notify() {
@@ -9035,13 +9276,23 @@ impl ThreeLaneWaker {
             if is_cancelling {
                 self.global.inject_cancel(self.task_id, priority);
             } else {
-                self.global.inject_ready(self.task_id, priority);
+                match claim_lifo_wake(&self.coordinator, self.task_id, priority) {
+                    LifoWake::NotLocal => self.global.inject_ready(self.task_id, priority),
+                    // The task this worker is executing woke it: the worker
+                    // runs it next, with no global push and no unpark
+                    // (br-asupersync-issue65-criticisms-kpmoy5.1.11).
+                    LifoWake::Placed => {
+                        self.record_enqueue();
+                        return;
+                    }
+                    // The slot keeps the newest wake; the task it displaced
+                    // takes the ordinary path and wakes a worker below.
+                    LifoWake::Displaced(older, older_priority) => {
+                        self.global.inject_ready(older, older_priority);
+                    }
+                }
             }
-            if let Some(collector) = &self.scheduler_evidence {
-                collector
-                    .lock()
-                    .record_task_enqueue(self.task_id, crate::time::wall_now().as_nanos());
-            }
+            self.record_enqueue();
             match claim_turn_wake(&self.coordinator) {
                 TurnWake::RunHere => {}
                 TurnWake::WakeHelper => self.coordinator.wake_one_parker(),
@@ -9113,6 +9364,14 @@ impl ThreeLaneLocalWaker {
                     .record_task_enqueue(self.task_id, crate::time::wall_now().as_nanos());
             }
             self.parker.unpark();
+            // The owning worker may be the idle reactor leader, blocked in the
+            // I/O driver where its parker cannot reach it; it would see this
+            // task only at the next reactor timeout (up to the next timer).
+            // A wake raised on the thread running that worker's loop needs no
+            // reactor wake (br-asupersync-kopidb H1).
+            if !thread_drives_local_ready(&self.local_ready) {
+                self.coordinator.wake_io_driver();
+            }
             self.coordinator.notify_wake();
         }
     }
@@ -9240,6 +9499,11 @@ impl ThreeLaneLocalCancelWaker {
                 .record_task_enqueue(self.task_id, crate::time::wall_now().as_nanos());
         }
         self.parker.unpark();
+        // As in ThreeLaneLocalWaker::schedule: reach an owner blocked in the
+        // reactor unless this thread runs its loop (br-asupersync-kopidb H1).
+        if !thread_drives_local_ready(&self.local_ready) {
+            self.coordinator.wake_io_driver();
+        }
         self.coordinator.notify_wake();
     }
 }
@@ -9314,6 +9578,318 @@ mod idle_reactor_turn_tests {
         assert!(
             kept > 0,
             "the idle reactor leader kept none of its socket wakes"
+        );
+    }
+}
+
+#[cfg(test)]
+mod lifo_slot_tests {
+    use super::*;
+    use crate::channel::mpsc;
+    use crate::runtime::RuntimeBuilder;
+    use std::sync::atomic::AtomicBool;
+
+    /// br-asupersync-issue65-criticisms-kpmoy5.1.11: a task woken by the task
+    /// a worker is executing goes to that worker's LIFO slot, and a ping-pong
+    /// over capacity-1 channels still delivers every message.
+    #[test]
+    fn a_task_woken_by_the_executing_task_goes_to_the_lifo_slot() {
+        let before = LIFO_SLOT_WAKES.load(Ordering::Relaxed);
+        let rt = RuntimeBuilder::new()
+            .worker_threads(4)
+            .build()
+            .expect("four-worker runtime");
+        let total = rt.block_on(rt.handle().spawn(async move {
+            let cx = crate::Cx::current().expect("a spawned task has a Cx");
+            let (ping_tx, mut ping_rx) = mpsc::channel::<u32>(1);
+            let (pong_tx, mut pong_rx) = mpsc::channel::<u32>(1);
+            let mut echo = cx
+                .spawn(move |cx| async move {
+                    while let Ok(value) = ping_rx.recv(&cx).await {
+                        if pong_tx.send(&cx, value + 1).await.is_err() {
+                            break;
+                        }
+                    }
+                })
+                .expect("spawn the echo task");
+            let mut total = 0u32;
+            for value in 0..1000u32 {
+                ping_tx.send(&cx, value).await.expect("ping");
+                total += pong_rx.recv(&cx).await.expect("pong");
+            }
+            drop(ping_tx);
+            let _ = echo.join(&cx).await;
+            total
+        }));
+        assert_eq!(total, (1..=1000u32).sum::<u32>(), "every message answered");
+        let placed = LIFO_SLOT_WAKES.load(Ordering::Relaxed) - before;
+        assert!(placed > 0, "no wake went to a LIFO slot");
+    }
+
+    /// Two tasks that wake each other forever on a one-worker runtime keep
+    /// refilling the worker's LIFO slot. The bound on consecutive slot
+    /// dispatches must still let a third ready task run.
+    #[test]
+    fn a_chain_of_tasks_waking_each_other_cannot_starve_other_ready_work() {
+        let (ran_tx, ran_rx) = std::sync::mpsc::channel::<()>();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_chain = Arc::clone(&stop);
+        // The runtime runs on its own thread, so a starved task fails this
+        // test by timeout instead of hanging it.
+        std::thread::spawn(move || {
+            let rt = RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("one-worker runtime");
+            rt.block_on(rt.handle().spawn(async move {
+                let cx = crate::Cx::current().expect("a spawned task has a Cx");
+                let (ping_tx, mut ping_rx) = mpsc::channel::<u32>(1);
+                let (pong_tx, mut pong_rx) = mpsc::channel::<u32>(1);
+                let mut first = cx
+                    .spawn(move |cx| async move {
+                        while !stop_chain.load(Ordering::Acquire) {
+                            if ping_tx.send(&cx, 1).await.is_err() {
+                                break;
+                            }
+                            if pong_rx.recv(&cx).await.is_err() {
+                                break;
+                            }
+                        }
+                    })
+                    .expect("spawn the first chain task");
+                let mut second = cx
+                    .spawn(move |cx| async move {
+                        while let Ok(value) = ping_rx.recv(&cx).await {
+                            if pong_tx.send(&cx, value).await.is_err() {
+                                break;
+                            }
+                        }
+                    })
+                    .expect("spawn the second chain task");
+                let mut other = cx
+                    .spawn(move |_| async move {
+                        let _ = ran_tx.send(());
+                    })
+                    .expect("spawn the other task");
+                let _ = other.join(&cx).await;
+                let _ = first.join(&cx).await;
+                let _ = second.join(&cx).await;
+            }));
+        });
+        let ran = ran_rx.recv_timeout(Duration::from_secs(10));
+        stop.store(true, Ordering::Release);
+        assert!(
+            ran.is_ok(),
+            "a task outside the waking chain never ran: the LIFO slot starved it"
+        );
+    }
+}
+
+#[cfg(test)]
+mod local_wake_reactor_tests {
+    use super::*;
+    use crate::channel::{mpsc, oneshot};
+    use crate::runtime::RuntimeBuilder;
+
+    /// br-asupersync-kopidb H1: a `!Send` local task woken from a plain thread
+    /// runs promptly while its worker idles in the reactor with a far timer
+    /// armed. Before the fix the wake only unparked the worker, which was
+    /// blocked in the reactor, so the task waited for the 30 s timer.
+    #[test]
+    fn a_local_task_woken_from_another_thread_does_not_wait_for_the_reactor_timeout() {
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<Duration>();
+        std::thread::spawn(move || {
+            let rt = RuntimeBuilder::current_thread()
+                .build()
+                .expect("current-thread runtime");
+            let elapsed = rt.block_on(rt.handle().spawn(async move {
+                let cx = crate::Cx::current().expect("a spawned task has a Cx");
+                // A 30 s timer, so an idle reactor turn waits up to 30 s. The
+                // task waits in a cancel-aware recv, so the abort below ends it.
+                let (_keep, mut never) = mpsc::channel::<u8>(1);
+                let mut sleeper = cx
+                    .spawn(move |cx| async move {
+                        let _ = crate::time::timeout(
+                            cx.now(),
+                            Duration::from_secs(30),
+                            never.recv(&cx),
+                        )
+                        .await;
+                    })
+                    .expect("spawn the timer task");
+                let (tx, mut rx) = oneshot::channel::<u32>();
+                let mut local = cx
+                    .spawn_local(move |cx| async move { rx.recv(&cx).await.ok() })
+                    .expect("spawn the local task");
+                let sender = std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(50));
+                    let _ = tx.send_blocking(7);
+                });
+                let start = std::time::Instant::now();
+                let value = local.join(&cx).await.expect("the local task");
+                let elapsed = start.elapsed();
+                assert_eq!(value, Some(7), "the local task received the value");
+                sender.join().expect("the sender thread");
+                sleeper.abort();
+                let _ = sleeper.join(&cx).await;
+                elapsed
+            }));
+            let _ = done_tx.send(elapsed);
+        });
+        let elapsed = done_rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the runtime thread finished");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the local task waited {elapsed:?}: its wake did not reach the worker blocked in the reactor"
+        );
+    }
+}
+
+#[cfg(test)]
+mod obligation_post_wake_tests {
+    use super::*;
+    use crate::channel::mpsc;
+    use crate::record::ObligationKind;
+    use crate::runtime::RuntimeBuilder;
+    use std::sync::atomic::AtomicUsize;
+
+    /// br-asupersync-e6igie M1: a post made inside the dispatch loop of one of
+    /// the scheduler's workers wakes nobody; a post from a plain thread, or
+    /// from another scheduler's worker, wakes one worker.
+    #[test]
+    fn an_obligation_post_wakes_a_worker_only_from_outside_this_schedulers_workers() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let scheduler = ThreeLaneScheduler::new(2, &state);
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&wakes);
+        scheduler.coordinator.set_wake_notifier(Arc::new(move || {
+            counted.fetch_add(1, Ordering::Relaxed);
+        }));
+        let notify = scheduler.obligation_posted_notifier();
+
+        notify();
+        assert_eq!(
+            wakes.load(Ordering::Relaxed),
+            1,
+            "a post from a plain thread wakes a worker"
+        );
+
+        {
+            let _worker = ScopedLocalReady::new(Arc::clone(&scheduler.workers[1].local_ready));
+            notify();
+        }
+        assert_eq!(
+            wakes.load(Ordering::Relaxed),
+            1,
+            "a post made on one of this scheduler's workers woke a worker"
+        );
+
+        let other_state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let other = ThreeLaneScheduler::new(1, &other_state);
+        {
+            let _worker = ScopedLocalReady::new(Arc::clone(&other.workers[0].local_ready));
+            notify();
+        }
+        assert_eq!(
+            wakes.load(Ordering::Relaxed),
+            2,
+            "a post made on another scheduler's worker wakes one of this scheduler's workers"
+        );
+    }
+
+    /// The posts above wake nobody, so the posting worker must apply all of
+    /// them itself before it waits. A task on a one-worker runtime reserves
+    /// 200 channel permits in one poll, more than one 64-post drain batch,
+    /// and then waits with a 30 s timer armed. Every reservation must show up
+    /// as a live obligation promptly, not when the worker leaves the reactor.
+    #[test]
+    fn a_worker_applies_its_own_obligation_posts_before_it_blocks_in_the_reactor() {
+        const PERMITS: usize = 200;
+        let rt = RuntimeBuilder::new()
+            .worker_threads(1)
+            .build()
+            .expect("one-worker runtime");
+        let diagnostics = rt.diagnostics();
+        let (keep, mut never) = mpsc::channel::<u8>(1);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<TaskId>();
+        let holder = rt.handle().spawn(async move {
+            let cx = crate::Cx::current().expect("a spawned task has a Cx");
+            let (tx, _rx) = mpsc::channel::<u8>(PERMITS);
+            let mut permits = Vec::with_capacity(PERMITS);
+            for _ in 0..PERMITS {
+                permits.push(tx.reserve(&cx).await.expect("reserve capacity"));
+            }
+            let _ = ready_tx.send(cx.task_id());
+            // A 30 s timer, so an idle reactor turn waits up to 30 s. Dropping
+            // `keep` below ends the wait.
+            let _ = crate::time::timeout(cx.now(), Duration::from_secs(30), never.recv(&cx)).await;
+            drop(permits);
+        });
+        let holder_id = ready_rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the holder reserved its permits");
+        let kind = format!("{:?}", ObligationKind::SendPermit);
+        let start = std::time::Instant::now();
+        let mut live = 0;
+        while start.elapsed() < Duration::from_secs(5) {
+            live = diagnostics
+                .find_leaked_obligations()
+                .into_iter()
+                .filter(|record| {
+                    record.holder_task == Some(holder_id) && record.obligation_type == kind
+                })
+                .count();
+            if live == PERMITS {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let elapsed = start.elapsed();
+        drop(keep);
+        rt.block_on(holder);
+        assert_eq!(
+            live, PERMITS,
+            "after {elapsed:?} only {live} of {PERMITS} reservations were applied: the worker blocked in the reactor with its own obligation posts queued"
+        );
+    }
+}
+
+#[cfg(test)]
+mod global_ready_batch_tests {
+    use super::*;
+
+    /// br-asupersync-5khftq M2: the rest of a batch drained from a deep global
+    /// ready queue waits in the draining worker's stealable queue, so an idle
+    /// peer can take it while that worker runs a long poll.
+    #[test]
+    fn the_rest_of_a_global_ready_batch_can_be_stolen_by_an_idle_peer() {
+        let state = local_queue::LocalQueue::test_state(10);
+        let mut scheduler = ThreeLaneScheduler::new(2, &state);
+        for i in 0..8u32 {
+            scheduler.inject_ready(TaskId::new_for_test(1, i), 50);
+        }
+        let global = Arc::clone(&scheduler.global);
+        let mut workers = scheduler.take_workers();
+
+        assert_eq!(
+            workers[0].try_ready_work(),
+            Some(TaskId::new_for_test(1, 0)),
+            "the oldest task is dispatched first"
+        );
+        assert_eq!(
+            workers[0].preemption_metrics().global_ready_batch_tasks,
+            4,
+            "a deep global queue is drained in a batch of four"
+        );
+        // Busy peers empty the global lane.
+        while global.pop_ready().is_some() {}
+
+        let batch: Vec<TaskId> = (1..4).map(|i| TaskId::new_for_test(1, i)).collect();
+        let stolen = workers[1].try_steal();
+        assert!(
+            stolen.is_some_and(|task| batch.contains(&task)),
+            "an idle peer could not reach the drained batch: stole {stolen:?}"
         );
     }
 }

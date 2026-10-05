@@ -489,6 +489,72 @@ fn abort_and_join_complete_promptly_for_a_timer_parked_native_child() {
     }));
 }
 
+/// br-asupersync-2u7bpm: a cancelled task whose loop awaits a fresh sleep on
+/// every turn, and never checks for cancellation, must keep returning to the
+/// scheduler. Each such Sleep used to be ready on its first poll, so the loop
+/// ran all its remaining turns inside one poll, and an endless loop froze its
+/// worker (here, the whole current-thread runtime). The loop is bounded so the
+/// old behaviour fails this test instead of hanging it.
+#[test]
+fn a_cancelled_loop_of_sleeps_returns_to_the_scheduler_every_turn() {
+    const TURNS: usize = 200;
+    let runtime = RuntimeBuilder::current_thread()
+        .with_reactor(create_reactor().expect("create native reactor"))
+        .build()
+        .expect("build current-thread runtime");
+
+    runtime.block_on(runtime.handle().spawn(async {
+        let cx = Cx::current().expect("runtime task installs a current Cx");
+        let turns = Arc::new(AtomicUsize::new(0));
+        let child_turns = Arc::clone(&turns);
+        let mut child = cx
+            .spawn(move |child_cx| async move {
+                while child_turns.fetch_add(1, Ordering::AcqRel) + 1 < TURNS {
+                    asupersync::time::sleep(child_cx.now(), Duration::from_secs(10)).await;
+                }
+            })
+            .expect("spawn a loop of sleeps");
+
+        let timer = cx
+            .timer_driver()
+            .expect("native task must inherit the runtime timer driver");
+        let parked_by = Instant::now() + Duration::from_secs(2);
+        while !(turns.load(Ordering::Acquire) == 1 && timer.pending_count() == 1) {
+            assert!(
+                Instant::now() < parked_by,
+                "the loop must park in its first 10-second sleep before abort",
+            );
+            yield_now().await;
+        }
+
+        child.abort();
+        let mut seen = Vec::new();
+        let finished_by = Instant::now() + Duration::from_secs(5);
+        loop {
+            let now = turns.load(Ordering::Acquire);
+            seen.push(now);
+            if now >= TURNS {
+                break;
+            }
+            assert!(
+                Instant::now() < finished_by,
+                "the cancelled loop must run out its turns, reached {now}",
+            );
+            yield_now().await;
+        }
+        assert!(
+            seen.iter().any(|&turn| turn > 1 && turn < TURNS),
+            "the parent must run between the cancelled loop's turns, saw {seen:?}",
+        );
+        let _ = child.join(&cx).await;
+        assert_eq!(
+            timer.pending_count(),
+            0,
+            "no sleep of the cancelled loop may stay registered",
+        );
+    }));
+}
+
 #[test]
 fn run_test_preserves_typed_cancellation_from_a_parked_spawn() {
     asupersync::test_utils::run_test(|| async {

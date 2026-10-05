@@ -59,9 +59,11 @@ time per task: see [Measured against tokio](#measured-against-tokio).
 
 **Experimental scheduling policy and diagnostics.** These are not guarantees:
 
-- Adaptive cancel preemption (on by default): a discounted UCB1 policy picks the
-  cancel-streak limit from `{4, 8, 16, 32, 64}` at deterministic epoch
-  boundaries. Whether it beats a fixed limit is still being measured.
+- Adaptive cancel preemption (opt-in, `enable_adaptive_cancel_streak(true)`): a
+  discounted UCB1 policy picks the cancel-streak limit from `{4, 8, 16, 32, 64}`
+  at deterministic epoch boundaries. Measured against the fixed limit of 16 on
+  two hosts, it did not beat it on cancel-heavy work and was 1-29% slower on
+  spawn+join, yield and channel round trips, so the default is the fixed limit.
 - Drain progress certificates: periodic estimates of how close a draining
   region is to quiescence, with conditional bounds. They report; they do not
   change scheduling.
@@ -358,6 +360,9 @@ The runtime design is backed by a small-step operational semantics (`asupersync_
 
 The proof posture is exact: these are Lean-checked **model** invariants with theorem and executable-test linkage. The production Rust runtime has not been proved to refine that model. This is therefore not a blanket mechanized proof of the executor, adapters, protocol implementations, platform backends, or distributed transports. Broader runtime-facing claims stay tiered through TLA+/TLC exports, lab/refinement oracles, and lane-specific coverage artifacts. The CI job `lean-build` is defined to run `lake build` on the pinned toolchain and upload a hash-bound receipt, but GitHub Actions is disabled for this repository, so it does not currently run; the last recorded local build is in `formal/lean/coverage/lake_build_receipt.txt`. The canonical proof command is `RCH_REQUIRE_REMOTE=1 rch exec -- lake --dir formal/lean build`; see [`artifacts/formal_proof_posture_contract_v1.json`](./artifacts/formal_proof_posture_contract_v1.json), [`tests/formal_proof_posture_contract.rs`](./tests/formal_proof_posture_contract.rs), and [`formal/README.md`](./formal/README.md).
 
+<details>
+<summary><b>Proof lanes, signoff packets and swarm governance</b>: maintainer and agent material that maps each proof claim to its checked artifact, test and proof lane. Expand for details.</summary>
+
 Some checked artifacts retain the legacy markers `Lean-checked core invariants cover the six non-negotiable runtime invariants` and `checks the six non-negotiable runtime invariants`. In this README those phrases mean coverage of the six abstract-model rows only; they do not assert a Rust refinement proof.
 
 The canonical proof-command coverage map is [`artifacts/proof_lane_manifest_v1.json`](./artifacts/proof_lane_manifest_v1.json), checked by [`tests/proof_lane_manifest_contract.rs`](./tests/proof_lane_manifest_contract.rs). It records which `RCH_REQUIRE_REMOTE=1 rch exec -- ...` lane covers each production graph, feature graph, fuzz smoke, lib/all-target/clippy/rustdoc frontier, and formal proof guarantee, plus what each lane explicitly does not prove. It also carries proof-lane resource-envelope classes for expected timeout, memory, remote-required, and no-local-fallback semantics; those classes harden proof admission metadata and do not replace OS-level RCH worker cgroup limits. The claim/status dashboard is [`artifacts/proof_status_snapshot_v1.json`](./artifacts/proof_status_snapshot_v1.json), checked by [`tests/proof_status_snapshot_contract.rs`](./tests/proof_status_snapshot_contract.rs); it maps README/AGENTS proof claims to manifest lanes and validation-frontier blocker rows. Its top-level `created_date` is the contract inception date, not a whole-dashboard freshness receipt: inspect each claim's `proof_evidence_status` and, for `fresh-rch-pass`, its bounded `evidence_date`. A mapped `green` row identifies a canonical unblocked lane but does not by itself prove a current RCH pass. The nightly differential workflow runs the bounded-age assertion as a local drift alarm; that cadence check does not replace terminal remote-required RCH evidence for any claim row.
@@ -400,6 +405,8 @@ The proof-traffic final signoff is [`artifacts/proof_traffic_final_signoff_v1.js
 
 The fourth-wave governor proof map is anchored by [`docs/fourth_wave_swarm_governor_runbook.md`](./docs/fourth_wave_swarm_governor_runbook.md) and checked by `fourth-wave-governor-signoff-runbook` in [`tests/fourth_wave_swarm_governor_runbook_contract.rs`](./tests/fourth_wave_swarm_governor_runbook_contract.rs). The final aggregate signoff is [`artifacts/fourth_wave_governor_final_signoff_v1.json`](./artifacts/fourth_wave_governor_final_signoff_v1.json), checked by `fourth-wave-governor-final-signoff` in [`tests/fourth_wave_governor_final_signoff_contract.rs`](./tests/fourth_wave_governor_final_signoff_contract.rs). The proof-status dashboard separates `fourth-wave-governor-schema-contract`, `fourth-wave-governor-policy-engine`, `fourth-wave-swarm-replay-corpus`, `fourth-wave-runtime-bridge-contract`, and the fourth-wave benchmark no-claim contract. The fourth-wave final aggregated signoff is a scoped executable operator report only: the benchmark contract records no fresh benchmark result and does not prove p95 improvement, throughput improvement, no regression, production-on-by-default control, broad workspace health, or RCH fleet availability.
 
+</details>
+
 One example: the cancellation/cleanup **budget** composes as a semiring-like object (componentwise `min`, with priority as `max`), which makes "who constrains whom?" algebraic instead of ad-hoc:
 
 ```text
@@ -412,11 +419,15 @@ combine(b1, b2) =
 
 This is the kind of structure that lets us reason about cancellation protocols and bounded cleanup with proof-friendly, compositional rules.
 
-### Default-On Adaptive Cancel Preemption (Discounted UCB1)
+### Opt-In Adaptive Cancel Preemption (Discounted UCB1)
 
-Scheduler preemption is not fixed to one static cancel-streak limit. By default,
-each worker runs a deterministic discounted-UCB1 selector over
-`{4, 8, 16, 32, 64}` (starting at `16`). At fixed epoch boundaries (128
+By default the scheduler uses a fixed cancel-streak limit of 16. With
+`RuntimeBuilder::enable_adaptive_cancel_streak(true)`, each worker runs a
+deterministic discounted-UCB1 selector over `{4, 8, 16, 32, 64}` (starting at
+`16`). Measured in one process against the fixed limit on two hosts
+(2026-10-05), it did not beat it on cancel-heavy workloads and was 1-29% slower
+on spawn+join, `yield_now` and channel round trips, which is why it is off by
+default. At fixed epoch boundaries (128
 dispatches by default), it discounts prior pull mass by `0.95`, updates the
 selected arm from a reward that blends Lyapunov decrease with deadline, fairness, and
 fallback penalties, then chooses the next upper-confidence arm. An
@@ -1011,7 +1022,7 @@ Scheduler behavior is intentionally explicit:
 - Workers track fairness telemetry (`fairness_yields`, `max_cancel_streak`) so starvation claims can be checked against runtime counters, not guesses (`src/runtime/scheduler/three_lane.rs`).
 - Local dispatch uses single-lock multi-lane pops (`try_local_any_lane` and `pop_any_lane_with_hint`) to reduce lock traffic on the hot path while keeping lane ordering rules intact (`src/runtime/scheduler/three_lane.rs`).
 - An optional Lyapunov governor can steer lane ordering from periodic runtime snapshots. It is off by default, and when enabled it runs at a configurable interval (`governor_interval`, default `32`) (`src/runtime/config.rs`, `src/runtime/builder.rs`, `src/runtime/scheduler/three_lane.rs`).
-- Adaptive cancel preemption is enabled by default as a deterministic discounted-UCB1 controller: workers choose among `{4, 8, 16, 32, 64}` at fixed epoch boundaries using reward signals that blend Lyapunov decrease, fairness pressure, deadline pressure, and fallback pressure (`src/runtime/scheduler/three_lane.rs`, `src/runtime/config.rs`, `src/runtime/builder.rs`).
+- Adaptive cancel preemption is available as an opt-in deterministic discounted-UCB1 controller: workers choose among `{4, 8, 16, 32, 64}` at fixed epoch boundaries using reward signals that blend Lyapunov decrease, fairness pressure, deadline pressure, and fallback pressure (`src/runtime/scheduler/three_lane.rs`, `src/runtime/config.rs`, `src/runtime/builder.rs`).
 - When governor mode is enabled, scheduling suggestions can be modulated by a decision contract with Bayesian posterior updates over `healthy`, `congested`, `unstable`, and `partitioned` runtime states (`src/runtime/scheduler/decision_contract.rs`, `src/runtime/scheduler/three_lane.rs`).
 - Dispatch follows an explicit multi-phase path: global lanes, fast ready paths, one local-lane lock acquisition, steal attempts, then fallback cancel handling (`src/runtime/scheduler/three_lane.rs`).
 - Worker wakeups are coordinated through round-robin targeted unparks, with a bitmask fast path when worker count is a power of two (`src/runtime/scheduler/three_lane.rs`).
@@ -1066,24 +1077,42 @@ Asupersync does more work per task than tokio. Every task gets a region
 membership, a cancellation state machine and a terminal-result channel, and
 two-phase permits are tracked as obligations. That bookkeeping costs time.
 These numbers come from one process running both runtimes. The build was a
-release build with default features. The host was one 10-CPU RCH worker. The
-date was 2026-10-03, and the source was that of commit `c2d7715ae`. Each figure
-is p50 per operation at n = 1,000, and the ranges span two runs.
+release build with default features. The date was 2026-10-05, and the source
+was that of commit `5ae9d443e`. The same probe ran on three RCH workers: a
+16-CPU host, a 10-CPU host shared with other builds at the time, and a busy
+64-CPU host. Each figure is p50 per operation at n = 1,000. The ranges span
+the three hosts, so shared-host noise is part of the range: the widest row
+(spawn + join from a task) was 13.5× on the least loaded host.
 
 | Operation | Asupersync | tokio | Ratio |
 |-----------|------------|-------|-------|
-| spawn + join from a task, 4 workers | 7.24–7.52 µs | 0.40–0.41 µs | 18× |
-| spawn + join from `block_on`, current-thread | 4.87–5.30 µs | 0.39 µs | 12–14× |
-| `yield_now`, 4 workers | 0.83–1.02 µs | 0.24 µs | 3.4–4.2× |
-| `yield_now`, current-thread | 0.55–0.58 µs | 0.13 µs | 4.3–4.5× |
-| mpsc ping-pong round trip, 4 workers | 2.96–3.04 µs | 0.27–0.28 µs | 11× |
-| mpsc ping-pong round trip, current-thread | 1.85–1.90 µs | 0.24–0.25 µs | 7.6× |
-| fan-out child: `fiber::scope` vs tokio spawn + join, current-thread | 0.44–0.46 µs | 0.39 µs | 1.1–1.2× |
-| fan-out child: `fiber::scope` vs tokio spawn + join, 4 workers | 0.34 µs | 0.40–0.41 µs | 0.8× |
+| spawn + join from a task, 4 workers | 4.2–12.4 µs | 0.31–0.68 µs | 9–27× |
+| spawn + join from `block_on`, current-thread | 3.0–7.1 µs | 0.21–0.51 µs | 10–14× |
+| `yield_now`, 4 workers | 0.35–0.58 µs | 0.23–0.56 µs | 1.0–2.0× |
+| `yield_now`, current-thread | 0.30–0.57 µs | 0.09–0.15 µs | 3.2–3.9× |
+| mpsc ping-pong round trip, 4 workers | 1.26–1.77 µs | 0.20–0.57 µs | 3.1–6.3× |
+| mpsc ping-pong round trip, current-thread | 1.26–1.76 µs | 0.17–0.30 µs | 5.8–7.5× |
+| fan-out child: `fiber::scope` vs tokio spawn + join, current-thread | 0.21–0.56 µs | 0.21–0.51 µs | 0.9–1.1× |
+| fan-out child: `fiber::scope` vs tokio spawn + join, 4 workers | 0.20–0.39 µs | 0.31–0.68 µs | 0.55–0.85× |
 
-**Reading the table:**
-- Spawning a task, yielding and channel round trips are several times slower
-  than tokio.
+Server-shaped rows, also from one process. The TCP rows come from the same
+three hosts, and each loopback connection makes 200 round trips of a 64-byte
+message. The HTTP/1.1 rows come from one host, with 200 keep-alive requests per
+connection. The last column is tokio's throughput over asupersync's:
+
+| Workload | Asupersync | tokio | tokio is faster by |
+|----------|------------|-------|--------------------|
+| TCP request/response, 1 connection | 30–44 K round trips/s | 46–76 K | 1.55–1.7× |
+| TCP request/response, 64 connections | 93–129 K round trips/s | 123–144 K | 1.1–1.3× |
+| HTTP/1.1 keep-alive `GET`, 1 connection (one 64-CPU host; vs hyper 1.x) | 22 K requests/s | 44 K | 2.0× |
+| HTTP/1.1 keep-alive `GET`, 64 connections (same host; vs hyper 1.x) | 64 K requests/s | 134 K | 2.1× |
+
+**Reading the tables:**
+- Spawning a task, current-thread yields and channel round trips are still
+  several times slower than tokio. A yield on 4 workers is within 2× of
+  tokio's.
+- Loopback TCP round trips are 1.1–1.7× slower, and the HTTP/1.1 server serves
+  about half of hyper's requests per second.
 - For most servers, a few microseconds per task is small next to network and
   disk latency.
 - For workloads that spawn millions of tiny tasks per second, or exchange
@@ -1096,7 +1125,12 @@ These numbers already include the October 2026 cuts:
 - an O(1) region task set;
 - verification-only monitors switched off in release builds;
 - an obligation-free one-call `mpsc::send`, which made ping-pong 2.7–4.1× faster;
-- no global-state lock per scheduler dispatch for spawn admission.
+- no global-state lock per scheduler dispatch for spawn admission;
+- a LIFO slot for a task woken by the task its worker is running (ping-pong
+  2.8×, spawn + join 1.3× in a same-process A/B);
+- a fixed cancel-streak limit of 16 instead of the adaptive selector by default;
+- no reactor wake on an epoll re-arm, and none for an obligation post made on
+  a worker (semaphore acquire/release 1.7–2.1× in a same-process A/B).
 
 The remaining work items are listed under `asupersync-issue65-criticisms-kpmoy5.1`.
 
@@ -1129,7 +1163,7 @@ The method stayed consistent across many small, verified runtime changes: profil
 - **Steal-path locality shortcuts**: local queues track whether any pinned local tasks are present; when none are present, stealers take a no-branch non-local path, and when locals do exist they are skipped/restored with `SmallVec` to keep the common path allocation-free (`src/runtime/scheduler/local_queue.rs`, `src/runtime/scheduler/intrusive.rs`).
 - **Backpressure without silent drops**: global ready-queue limits emit capacity warnings while still scheduling work, preserving structured-concurrency guarantees instead of dropping tasks (`src/runtime/scheduler/three_lane.rs`, `src/runtime/config.rs`).
 - **Reactor fast paths**: I/O registration rearm paths cache waker state, and stale token/fd cleanup is explicit, which keeps event loops moving under churn (`src/runtime/io_driver.rs`, `src/runtime/reactor/*`).
-- **Timer wheel tuned for real cancellation workloads**: timer cancel is generation-based O(1), long deadlines spill into overflow and are promoted back in range, and the wheel supports coalescing windows that batch nearby wakeups with minimum-group gating, though no runtime setting enables them yet (`src/time/wheel.rs`, `src/time/driver.rs`).
+- **Timer wheel tuned for real cancellation workloads**: timer cancel is generation-based O(1), long deadlines spill into overflow and are promoted back in range, and the wheel supports coalescing windows that batch nearby wakeups with minimum-group gating. Coalescing is off by default; a runtime enables it with `RuntimeBuilder::with_timer_driver(TimerDriverHandle::with_wall_clock_coalescing(..))`, and a coalesced timer fires at the first window boundary at or after its deadline, never before it (`src/time/wheel.rs`, `src/time/driver.rs`).
 - **Panic containment on worker threads**: task polling is guarded so panics are converted into terminal `Outcome::Panicked`, dependents/finalizers are still driven, and one bad task does not take down a worker lane (`src/runtime/scheduler/three_lane.rs`, `src/runtime/builder.rs`).
 - **Timer behavior measured where it matters**: the timer benchmark corpus includes direct wheel-vs-`BTreeMap`/`BinaryHeap` comparisons; the documented 10K corpus (release-perf profile, 2026-06-01) records a ~27x cancel-path advantage over `BTreeMap`, and the wheel now also wins the mixed insert/cancel/expire workload outright (`benches/timer_wheel.rs`).
 - **Stable memory handles with deterministic reuse**: region-heap generation indices prevent ABA-style stale-handle reuse while preserving deterministic allocation/reuse patterns (`src/runtime/region_heap.rs`).
@@ -1538,12 +1572,12 @@ channel; application consumption still depends on the receiver making progress.
 
 | Primitive | Location | Notes |
 |-----------|----------|-------|
-| **Mutex** | `src/sync/mutex.rs` | Fair, cancel-safe, tracks contention |
+| **Mutex** | `src/sync/mutex.rs` | Fair, cancel-safe (contention metrics: `ContendedMutex`) |
 | **RwLock** | `src/sync/rwlock.rs` | Writer preference with reader batching |
 | **Semaphore** | `src/sync/semaphore.rs` | Counting, with permit-as-obligation model |
 | **Barrier** | `src/sync/barrier.rs` | N-way synchronization point |
 | **Notify** | `src/sync/notify.rs` | One-time or multi-waiter notification |
-| **OnceLock** | `src/sync/once_cell.rs` | Async one-time initialization |
+| **OnceCell** | `src/sync/once_cell.rs` | Async one-time initialization |
 | **ContendedMutex** | `src/sync/contended_mutex.rs` | Mutex with contention metrics |
 | **Pool** | `src/sync/pool.rs` | Object pool with obligation-tracked checkout and return-on-drop |
 
@@ -1912,7 +1946,7 @@ Asupersync has formal semantics backing its engineering.
 | **Obligations** | Linear-logic discipline: resources resolved exactly once (Rust is affine, so enforcement is `#[must_use]` + runtime leak detection, not purely static) | Leaked obligations are loudly detected at region close instead of silently dropped |
 | **Traces** | Mazurkiewicz equivalence (partial orders) | DPOR-style guided exploration (not certified-optimal DPOR), stable replay |
 | **Cancellation** | Two-player game with budgets | Scoped completeness when modeled responsiveness assumptions hold and budgets are sufficient |
-| **Adaptive scheduling** | Discounted UCB1 over `{4, 8, 16, 32, 64}` | Default-on dynamic preemption control with deterministic epoch updates |
+| **Adaptive scheduling** | Discounted UCB1 over `{4, 8, 16, 32, 64}` | Opt-in dynamic preemption control with deterministic epoch updates |
 | **Drain certificates** | Signed-step range bounds + empirical phase diagnostics | Conditional, auditable progress evidence for cancellation drain; the current-horizon tail bounds are the trivial `1`, so the phase labels carry the signal |
 | **Structural diagnostics** | Spectral graph theory + conformal + e-processes | Early warning on wait-graph fragmentation with calibrated alarms, computed on demand through `Diagnostics` |
 
@@ -1935,7 +1969,7 @@ Asupersync is intentionally "math-forward": it uses advanced math and theory-gra
 
 ### Online Control of Cancel Preemption (Discounted UCB1)
 
-`src/runtime/scheduler/three_lane.rs` includes a deterministic discounted-UCB1 controller that selects cancel-streak limits from `{4, 8, 16, 32, 64}` at fixed epoch boundaries. It is enabled by default and updates from a bounded reward combining progress, fairness, deadline, and fallback components while an e-process monitors epoch rewards. This is a nonstationary stochastic-bandit control surface; the seeded opt-in EXP3 controller belongs to ATP transport adaptation, not scheduler preemption.
+`src/runtime/scheduler/three_lane.rs` includes a deterministic discounted-UCB1 controller that selects cancel-streak limits from `{4, 8, 16, 32, 64}` at fixed epoch boundaries. It is opt-in (off by default) and updates from a bounded reward combining progress, fairness, deadline, and fallback components while an e-process monitors epoch rewards. This is a nonstationary stochastic-bandit control surface; the seeded opt-in EXP3 controller belongs to ATP transport adaptation, not scheduler preemption.
 
 ### Drain Progress Diagnostics (Freedman + Azuma + Phase Labels)
 
@@ -2015,6 +2049,9 @@ Payoff: bridge from deterministic runtime traces to model-checking workflows whe
 
 ---
 
+<details>
+<summary><b>Dependency budget, supply-chain policy and CI-provenance contracts</b>: maintainer material on the checked gates that bound this crate's dependency graph. Expand for details.</summary>
+
 ## Dependency budget contract
 
 The checked
@@ -2054,6 +2091,8 @@ table contract. Its verdict is `PASS_SCOPED_KEEP_DEFER`, not release green. See
 [`docs/dependency_ci_provenance_final_signoff.md`](docs/dependency_ci_provenance_final_signoff.md)
 for replay and no-claim boundaries. The signoff grants no package-manager,
 dependency-cutover, file-deletion, or local-Cargo-fallback authority.
+
+</details>
 
 ## Using Asupersync as a Dependency
 
@@ -2643,6 +2682,9 @@ GA.
 
 ## Phase 6 Policy Gates
 
+<details>
+<summary>How changes to <code>main</code> are gated: the direct-main lane, the SLO policy proof loop, the gate matrix, preflight commands and rollout. Maintainer and agent material. Expand for details.</summary>
+
 Phase 6 ships as a continuous hardening track rather than a one-shot release. The repository itself is main-only: agents land direct commits on `main`, then mirror the legacy compatibility ref as required by the repo workflow. Phase 6 therefore has two explicit enforcement lanes instead of a single PR-only story:
 
 - **Direct-main agent lane:** before committing or pushing a substantive change, run the local `rch` preflight gates that apply to the touched surface and commit any required artifact with the change.
@@ -2761,6 +2803,8 @@ All four gates are defined, but GitHub Actions is disabled for this repository (
 Concrete escape valves are limited and intentional: a benchmark regression that reflects an intentional algorithmic change is resolved by re-recording `artifacts/baseline.json` (not by waiving the gate); a golden mismatch is resolved by committing the reviewed behavior change, running the fail-closed golden candidate flow above from that clean commit, reviewing the retrieved exact-set candidate, and committing the promoted registry separately (not by skipping the bench); a proof note that turns out to be insufficient is resolved by extending the note (not by removing it). The infrastructure intentionally has no `[skip ci]`-style waiver.
 
 If you are landing a change that touches a hot-path or safety-critical directory, generate the artifact (flamegraph or proof note) before committing the change to `main`. Re-running validation without committing the required artifact does not satisfy the direct-main gate.
+
+</details>
 
 ---
 

@@ -231,6 +231,29 @@ AppSpec work units that require neither the io nor the net capability. Grant
 the capability, or run the call under an explicit context with
 `cx.with_ambient(future)`.
 
+### Behavior change — adaptive cancel preemption is opt-in
+
+`RuntimeConfig::enable_adaptive_cancel_streak` now defaults to `false`. A
+default runtime uses the fixed cancel-streak limit of 16
+(`cancel_lane_max_streak`), as `LabRuntime` already did. The discounted-UCB1
+selector over `{4, 8, 16, 32, 64}` is unchanged and remains available through
+`RuntimeBuilder::enable_adaptive_cancel_streak(true)`. The 64-core host
+profiles keep enabling it explicitly.
+
+Measured in one process with interleaved rounds (adaptive vs fixed 16, four
+workers, default features, two hosts), the selector did not beat the fixed
+limit on cancel-heavy workloads:
+- the drain time of 2,000 or 10,000 aborted tasks was about the same;
+- the latency of ready work during the drain was mixed: better on some
+  percentiles, worse on others.
+
+On plain work it was slower on spawn+join, `yield_now` and channel round
+trips. That was 23-29% on one host. On the other, spawn+join was 16% slower,
+ping-pong 11% and `yield_now` 1%. Spawn from four producers was within noise.
+The owner's delegated rule (keep it on only if it wins on cancel-heavy work
+and loses nowhere else) therefore makes the fixed limit the default
+(`asupersync-issue65-criticisms-kpmoy5.1.12`).
+
 ### Native GenServers and actors
 
 `Cx::spawn_gen_server`, `Cx::spawn_actor` and `Cx::spawn_supervised_actor`
@@ -372,6 +395,65 @@ Lost data and hangs:
   CONTINUATION frames is taken instead of failing as `STREAM_CLOSED`.
 - `BytesMut` grows instead of moving its whole live region on every small
   advance-then-append cycle.
+
+### Fixed by the 2026-10-04 audits
+
+A second round of read-only audits (runtime, time, I/O, HTTP, streams,
+GenServer, remote and supervision) found the defects below; each fix landed
+with a regression test that fails on the old code, and the commit messages
+carry the details and receipts.
+
+Hangs and lost wakeups:
+
+- A cancelled task whose loop only awaits `sleep` returns to the scheduler
+  every turn; it used to run every remaining turn inside one poll, pinning
+  its worker (a current-thread runtime froze). A sleep that was already
+  parked still completes at once when its task is cancelled.
+- `stream::merge` over more than 64 streams polls every child again after
+  one wakes it; an item on a child outside the next scan window was lost.
+- `io::split_owned` halves in two tasks both wake over a stream that keeps
+  one waker (a plain `TcpStream`, a TLS stream).
+- A panicking waker no longer leaves the other tasks woken by the same
+  reactor turn unwoken.
+- Any number of tasks can accept on one TCP or Unix listener; 33 or more
+  used to wake each other forever.
+- The blocking pool starts a thread for every queued job its cap allows,
+  including after the cap is raised; a job submitted while a worker picked
+  up another could wait behind it, deadlocking two jobs that wait on each
+  other.
+- A GenServer dropped before it runs aborts its queued calls (the obligation
+  drop bomb used to panic a scheduler worker), and a `stop()` racing the
+  server's start is no longer lost.
+- `race` and `race_all` on the multi-thread `block_on` root drain their
+  losers when the winner panics; dropping a `Scope::timeout`, `quorum` or
+  `first_ok` future asks the branches it started to stop.
+- The remote computation service returns a handler result published before
+  it saw the lease expire, instead of reporting and caching `Cancelled`.
+
+Protocol and data:
+
+- HTTP/2: trailers and a final empty DATA frame wait behind DATA blocked on
+  flow control; a response (any gRPC unary reply larger than the client's
+  window) used to send `END_STREAM` before its body.
+- `Http1ClientCodec` reports a response cut off mid-body at end of input as
+  `UnexpectedEof` instead of a clean end of the stream.
+- A managed supervisor stops when its own budget deadline passes instead of
+  restarting children into a dead region.
+
+Resource use:
+
+- A chunked symbol upload allocates its declared size once; one-byte chunks
+  made every append copy the whole upload under the shared staging lock.
+- The remote service frees an idle peer's expired idempotency records.
+- The timer wheel drops cancelled timers in bounded batches and finds the
+  next deadline without scanning every stored entry under its lock.
+- A pending TCP connect waits for its writable event instead of re-polling
+  every millisecond; `Debounce` no longer spins while its task is cancelled.
+- Child-process pipes leave the reactor before closing their file
+  descriptor, so a reused descriptor number no longer collides with a stale
+  registration.
+- `BlockingTaskHandle::wait_timeout` and `BlockingPool::shutdown_and_wait`
+  accept any timeout (`Duration::MAX` used to panic).
 
 ### UDP launch-time sends and the socket error queue (Linux, GH #73)
 

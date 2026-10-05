@@ -993,7 +993,7 @@ async fn wait_for_connect(socket: &Socket) -> io::Result<Option<IoRegistration>>
                     }
                 }
 
-                fallback_rewake(cx);
+                // Registered: its WRITABLE event wakes us (no 1 ms rewake).
                 Poll::Pending
             }
             Err(err) => Poll::Ready(Err(err)),
@@ -3035,5 +3035,58 @@ mod tests {
         assert_eq!(result, 0, "getsockopt SO_KEEPALIVE should succeed");
         // Non-zero is the portable "enabled" read-back (macOS reports 8).
         assert_ne!(keepalive_val, 0, "SO_KEEPALIVE should be enabled");
+    }
+
+    /// A connect parked on the reactor waits for its WRITABLE event. It used to
+    /// also arm a 1 ms fallback timer on every poll, so a pending connect
+    /// re-polled itself about a thousand times a second
+    /// (br-asupersync-24j2of).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_registered_pending_connect_arms_no_fallback_timer() {
+        // A listener whose accept queue is full drops the next SYN, so a
+        // connect to it stays in progress.
+        let listener = Socket::new(Domain::IPV4, Type::STREAM, None).expect("listener socket");
+        listener
+            .bind(&SocketAddr::from(([127, 0, 0, 1], 0)).into())
+            .expect("bind listener");
+        listener.listen(0).expect("listen");
+        let addr = listener
+            .local_addr()
+            .expect("listener addr")
+            .as_socket()
+            .expect("inet addr");
+        let _queued = net::TcpStream::connect_timeout(&addr, Duration::from_secs(1))
+            .expect("fill the accept queue");
+        let socket = Socket::new(Domain::IPV4, Type::STREAM, None).expect("client socket");
+        socket.set_nonblocking(true).expect("nonblocking");
+        match socket.connect(&addr.into()) {
+            Err(err) if connect_in_progress(&err) => {}
+            other => panic!("the connect must stay in progress: {other:?}"),
+        }
+
+        let timer = crate::time::TimerDriverHandle::with_wall_clock();
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            Some(IoDriverHandle::new(Arc::new(LabReactor::new()))),
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let _guard = Cx::set_current(Some(cx));
+        let mut wait = std::pin::pin!(wait_for_connect(&socket));
+        let mut task_cx = Context::from_waker(Waker::noop());
+        assert!(
+            wait.as_mut().poll(&mut task_cx).is_pending(),
+            "the connect is still in progress"
+        );
+        assert_eq!(
+            timer.pending_count(),
+            0,
+            "a connect parked on the reactor must not arm the 1 ms fallback timer"
+        );
     }
 }

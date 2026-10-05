@@ -19,6 +19,9 @@
 //!   rollback for path operations
 //! - `sync_all`, `sync_data`: A started sync may finish after its future drops
 //! - Owned seek/read cancellation is ordered, not rollback-safe
+//! - [`scoped::ScopedFs`]: explicit I/O + spawn authority and region-owned
+//!   blocking work; bounded reads checkpoint between fixed-size reads and
+//!   reject oversized input rather than returning a truncated success
 //!
 //! File I/O retains its inherited blocking-pool placement when task-spawn
 //! authority is restricted. A runtime without a blocking pool uses the existing
@@ -64,6 +67,7 @@ mod open_options;
 mod path_ops;
 pub mod platform;
 mod read_dir;
+pub mod scoped;
 pub mod vfs;
 
 #[cfg(all(target_os = "linux", feature = "io-uring"))]

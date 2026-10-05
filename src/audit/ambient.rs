@@ -119,7 +119,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     },
     AmbientFinding {
         file: "runtime/blocking_pool.rs",
-        line: 1281,
+        line: 1314,
         evidence_pattern: "thread::Builder::new()",
         category: AmbientCategory::Spawn,
         severity: Severity::Low,
@@ -1550,7 +1550,11 @@ fn test_function() {
     // under src/: grpc native_stream and server duplex tests.rs, plus the
     // QUIC handshake-driver tests (UDP peers, threads, eprintln). No scanner
     // exemption or detection pattern changed.
-    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 809;
+    // 809 -> 812 (br-asupersync-reactor-audit-dofi11, reviewed at 0bc2f6e57):
+    // the snapshot rows re-blessed with the listener waiter rewrite (one
+    // accept site fewer) and the 10-03 DNS resolver and OTLP exporter fixes
+    // (two clock reads each, inside their own timeouts).
+    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 812;
 
     fn src_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src")

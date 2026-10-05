@@ -97,8 +97,11 @@ where
 
 /// A layer that applies circuit-breaker protection to requests.
 ///
-/// Cloned services share one breaker instance so endpoint health is tracked
-/// across all handles produced from this layer.
+/// Each service this layer builds gets its own breaker, which clones of that
+/// service share. To track one endpoint's health across separately built
+/// services, build them around one breaker with
+/// [`CircuitBreaker::from_shared`] or
+/// [`CircuitBreaker::from_shared_with_classifier`].
 #[derive(Debug, Clone)]
 pub struct CircuitBreakerLayer<C = DefaultClassifier> {
     policy: CircuitBreakerPolicy,

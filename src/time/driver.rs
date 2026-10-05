@@ -12,7 +12,7 @@ use std::sync::{Arc, Weak};
 use std::task::Waker;
 use std::time::Duration;
 
-use super::wheel::{TimerWheel, WakerBatch};
+use super::wheel::{CoalescingConfig, TimerWheel, TimerWheelConfig, WakerBatch};
 
 #[inline]
 fn duration_to_nanos_saturating(duration: Duration) -> u64 {
@@ -449,10 +449,30 @@ impl<T: TimeSource> TimerDriver<T> {
     /// Creates a new timer driver with the given time source.
     #[must_use]
     pub fn with_clock(clock: std::sync::Arc<T>) -> Self {
+        Self::with_clock_and_config(
+            clock,
+            TimerWheelConfig::default(),
+            CoalescingConfig::default(),
+        )
+    }
+
+    /// Creates a timer driver whose wheel uses `config` for its overflow
+    /// limits and `coalescing` for wakeup batching.
+    ///
+    /// With coalescing enabled, the timers of one coalescing window fire
+    /// together at the end of that window: never before a timer's deadline,
+    /// at most one window after it (br-asupersync-7yq1pv). [`Self::with_clock`]
+    /// keeps coalescing off.
+    #[must_use]
+    pub fn with_clock_and_config(
+        clock: std::sync::Arc<T>,
+        config: TimerWheelConfig,
+        coalescing: CoalescingConfig,
+    ) -> Self {
         let now = clock.now();
         Self {
             clock,
-            wheel: Mutex::new(TimerWheel::new_at(now)),
+            wheel: Mutex::new(TimerWheel::with_config(now, config, coalescing)),
             observed_deadline: AtomicU64::new(u64::MAX),
             armed: AtomicBool::new(false),
             deadline_reactors: Mutex::new(Vec::new()),
@@ -830,6 +850,37 @@ impl TimerDriverHandle {
     pub fn with_wall_clock() -> Self {
         let clock = Arc::new(WallClock::new());
         let driver = Arc::new(TimerDriver::with_clock(clock));
+        Self::new(driver)
+    }
+
+    /// Creates a wall-clock timer driver that batches nearby wakeups.
+    ///
+    /// The timers of one `coalescing` window fire together at the end of that
+    /// window, so a sleep never wakes before its deadline and can wake up to
+    /// one window after it. Install it with
+    /// [`RuntimeBuilder::with_timer_driver`](crate::runtime::RuntimeBuilder::with_timer_driver)
+    /// (br-asupersync-7yq1pv):
+    ///
+    /// ```
+    /// use asupersync::runtime::RuntimeBuilder;
+    /// use asupersync::time::{CoalescingConfig, TimerDriverHandle};
+    /// use std::time::Duration;
+    ///
+    /// let timers = TimerDriverHandle::with_wall_clock_coalescing(
+    ///     CoalescingConfig::enabled_with_window(Duration::from_millis(1)),
+    /// );
+    /// let runtime = RuntimeBuilder::new().with_timer_driver(timers).build()?;
+    /// # drop(runtime);
+    /// # Ok::<(), asupersync::Error>(())
+    /// ```
+    #[must_use]
+    pub fn with_wall_clock_coalescing(coalescing: CoalescingConfig) -> Self {
+        let clock = Arc::new(WallClock::new());
+        let driver = Arc::new(TimerDriver::with_clock_and_config(
+            clock,
+            TimerWheelConfig::default(),
+            coalescing,
+        ));
         Self::new(driver)
     }
 
@@ -1543,9 +1594,12 @@ mod tests {
         crate::test_complete!("timer_driver_next_deadline_clamps_overdue_timer_to_now");
     }
 
+    // br-asupersync-m85zfi LOW 3: a coalesced group fires at the end of its
+    // window, never before a member's deadline. This test used to expect the
+    // group to be due immediately (1 ms).
     #[test]
-    fn timer_driver_next_deadline_returns_now_for_coalescing_ready_group() {
-        init_test("timer_driver_next_deadline_returns_now_for_coalescing_ready_group");
+    fn timer_driver_next_deadline_reports_the_window_end_for_a_coalesced_group() {
+        init_test("timer_driver_next_deadline_reports_the_window_end_for_a_coalesced_group");
         let clock = Arc::new(VirtualClock::new());
         let driver = TimerDriver {
             clock: clock.clone(),
@@ -1567,14 +1621,130 @@ mod tests {
         clock.set(Time::from_millis(1));
 
         let actual = driver.next_deadline();
-        let expected = Some(Time::from_millis(1));
+        let expected = Some(Time::from_millis(5));
         crate::assert_with_log!(
             actual == expected,
-            "driver reports immediate wake when coalescing can fire now",
+            "driver reports the window end for the coalesced group",
             expected,
             actual
         );
-        crate::test_complete!("timer_driver_next_deadline_returns_now_for_coalescing_ready_group");
+        crate::test_complete!(
+            "timer_driver_next_deadline_reports_the_window_end_for_a_coalesced_group"
+        );
+    }
+
+    // br-asupersync-7yq1pv + m85zfi LOW 3: a driver built with coalescing
+    // fires a window's timers together at the window end, never early.
+    #[test]
+    fn coalescing_driver_fires_a_window_at_its_end_and_never_early() {
+        init_test("coalescing_driver_fires_a_window_at_its_end_and_never_early");
+        let clock = Arc::new(VirtualClock::new());
+        let driver = TimerDriver::with_clock_and_config(
+            clock.clone(),
+            TimerWheelConfig::default(),
+            CoalescingConfig::enabled_with_window(Duration::from_millis(100)),
+        );
+        let first = Arc::new(AtomicBool::new(false));
+        let second = Arc::new(AtomicBool::new(false));
+        driver.register(Time::from_millis(30), waker_that_sets(first.clone()));
+        driver.register(Time::from_millis(31), waker_that_sets(second.clone()));
+
+        clock.set(Time::from_millis(31));
+        let fired = driver.process_timers();
+        crate::assert_with_log!(fired == 0, "due timers wait for the window end", 0, fired);
+        let next = driver.next_deadline();
+        crate::assert_with_log!(
+            next == Some(Time::from_millis(100)),
+            "the window end is the next deadline",
+            Some(Time::from_millis(100)),
+            next
+        );
+
+        clock.set(Time::from_millis(100));
+        let fired = driver.process_timers();
+        crate::assert_with_log!(fired == 2, "the window fires together", 2, fired);
+        crate::assert_with_log!(
+            first.load(Ordering::SeqCst) && second.load(Ordering::SeqCst),
+            "both wakers ran",
+            true,
+            first.load(Ordering::SeqCst) && second.load(Ordering::SeqCst)
+        );
+        crate::test_complete!("coalescing_driver_fires_a_window_at_its_end_and_never_early");
+    }
+
+    // The wall-clock handle really carries its coalescing setting. A fresh
+    // wall clock starts near zero, so with a one-hour window a timer 30 s out
+    // belongs to the window that ends at one hour.
+    #[test]
+    fn wall_clock_coalescing_handle_reports_the_window_end() {
+        init_test("wall_clock_coalescing_handle_reports_the_window_end");
+        let coalesced = TimerDriverHandle::with_wall_clock_coalescing(
+            CoalescingConfig::enabled_with_window(Duration::from_hours(1)),
+        );
+        let plain = TimerDriverHandle::with_wall_clock();
+        let mut timers = Vec::new();
+        let mut deadlines = Vec::new();
+        for handle in [&coalesced, &plain] {
+            let deadline = handle.now() + Duration::from_secs(30);
+            timers.push(handle.register(deadline, futures_waker()));
+            deadlines.push(deadline);
+        }
+
+        let next = coalesced.next_deadline();
+        crate::assert_with_log!(
+            next == Some(Time::from_secs(3600)),
+            "the coalescing driver waits for the window end",
+            Some(Time::from_secs(3600)),
+            next
+        );
+        let next = plain.next_deadline();
+        crate::assert_with_log!(
+            next == Some(deadlines[1]),
+            "the plain driver reports the timer's own deadline",
+            Some(deadlines[1]),
+            next
+        );
+        crate::test_complete!("wall_clock_coalescing_handle_reports_the_window_end");
+    }
+
+    // A runtime built with a coalescing driver never wakes a sleep before its
+    // deadline. An early-firing window (the old behavior) completed a sleep
+    // as soon as the timer wheel first ran.
+    #[test]
+    fn runtime_with_a_coalescing_timer_driver_never_wakes_a_sleep_early() {
+        const WINDOW_NS: u64 = 50_000_000;
+        init_test("runtime_with_a_coalescing_timer_driver_never_wakes_a_sleep_early");
+        let timers = TimerDriverHandle::with_wall_clock_coalescing(
+            CoalescingConfig::enabled_with_window(Duration::from_nanos(WINDOW_NS)),
+        );
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .with_timer_driver(timers)
+            .build()
+            .expect("build runtime");
+        // Read both instants from the runtime's (coalescing) timer clock.
+        let (deadline, woke) = runtime.block_on(async {
+            let cx = crate::cx::Cx::current().expect("runtime context");
+            let start = cx.now();
+            crate::time::sleep(start, Duration::from_millis(30)).await;
+            (start + Duration::from_millis(30), cx.now())
+        });
+        // A lone timer is a group of one: it fires at the first window
+        // boundary at or after its deadline. Waking at the deadline itself
+        // would mean the runtime is not using the coalescing driver.
+        let window_end = Time::from_nanos(deadline.as_nanos().div_ceil(WINDOW_NS) * WINDOW_NS);
+        crate::assert_with_log!(
+            woke >= window_end,
+            "the sleep wakes at its window end, never before its deadline",
+            window_end,
+            woke
+        );
+        crate::assert_with_log!(
+            woke < window_end + Duration::from_secs(5),
+            "the sleep wakes promptly once its window ends",
+            "under 5 s after the window end",
+            woke
+        );
+        crate::test_complete!("runtime_with_a_coalescing_timer_driver_never_wakes_a_sleep_early");
     }
 
     #[test]

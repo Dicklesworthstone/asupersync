@@ -6,7 +6,9 @@
 use super::Stream;
 use std::collections::VecDeque;
 use std::pin::Pin;
-use std::task::{Context, Poll, Waker};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll, Wake, Waker};
 
 /// Cooperative budget for child-stream scans in a single poll.
 ///
@@ -21,13 +23,12 @@ pub struct Merge<S> {
     streams: VecDeque<S>,
     /// Round-robin cursor for fair polling without moving elements.
     next_index: usize,
-    /// Waker installed on the child streams during the current pending sweep.
-    ///
-    /// Used only to detect executor migration so the registration counter can
-    /// reset; child streams are polled with the live `cx` waker regardless.
-    waker: Option<Waker>,
+    /// Records child wakes and forwards them to the task; the children are
+    /// polled with [`Self::child_waker`], made from it.
+    child_wake: Arc<ChildWake>,
+    child_waker: Waker,
     /// Count of child streams that have returned `Pending` (and therefore
-    /// registered [`Self::waker`]) since the last progress or waker change.
+    /// registered [`Self::child_waker`]) since the last progress or child wake.
     ///
     /// A cooperative-budget yield re-wakes the task to continue scanning only
     /// while this is below the live child count. Once every remaining child has
@@ -41,10 +42,12 @@ impl<S> Merge<S> {
     /// Creates a new `Merge` from the given streams.
     #[inline]
     pub(crate) fn new(streams: impl IntoIterator<Item = S>) -> Self {
+        let child_wake = Arc::new(ChildWake::default());
         Self {
             streams: streams.into_iter().collect(),
             next_index: 0,
-            waker: None,
+            child_waker: Waker::from(Arc::clone(&child_wake)),
+            child_wake,
             pending_registered: 0,
         }
     }
@@ -86,6 +89,40 @@ impl<S> Merge<S> {
 
 impl<S: Unpin> Unpin for Merge<S> {}
 
+/// The waker a [`Merge`]'s children are polled with: it records that a child
+/// woke the merge, then wakes the merge's task.
+#[derive(Debug, Default)]
+struct ChildWake {
+    woken: AtomicBool,
+    task: parking_lot::Mutex<Option<Waker>>,
+}
+
+impl ChildWake {
+    fn set_task(&self, waker: &Waker) {
+        let mut task = self.task.lock();
+        if !task
+            .as_ref()
+            .is_some_and(|current| current.will_wake(waker))
+        {
+            *task = Some(waker.clone());
+        }
+    }
+}
+
+impl Wake for ChildWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.woken.store(true, Ordering::Release);
+        let task = self.task.lock().clone();
+        if let Some(task) = task {
+            task.wake();
+        }
+    }
+}
+
 impl<S> Stream for Merge<S>
 where
     S: Stream + Unpin,
@@ -93,31 +130,32 @@ where
     type Item = S::Item;
 
     #[inline]
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let initial_len = self.streams.len();
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        let initial_len = this.streams.len();
         if initial_len == 0 {
             return Poll::Ready(None);
         }
 
-        // Reset the pending-registration counter if the executor changed the
-        // waker under us (task migrated); the children registered a now-stale
-        // waker, so we must re-sweep before we are allowed to park.
-        match &self.waker {
-            Some(w) if w.will_wake(cx.waker()) => {}
-            _ => {
-                self.waker = Some(cx.waker().clone());
-                self.pending_registered = 0;
-            }
+        // The children always get `child_waker`, which forwards to the
+        // current task waker, so a migrated task needs no re-sweep. A child
+        // wake does: the woken child may sit outside the window this poll can
+        // scan, or have been scanned earlier in this sweep, so every child is
+        // polled again before the merge may park (br-asupersync-jqhteu).
+        this.child_wake.set_task(cx.waker());
+        if this.child_wake.woken.swap(false, Ordering::AcqRel) {
+            this.pending_registered = 0;
         }
+        let mut child_cx = Context::from_waker(&this.child_waker);
 
-        let start = self.next_index.min(initial_len.saturating_sub(1));
+        let start = this.next_index.min(initial_len.saturating_sub(1));
         // Track how many original streams we've visited (removals don't reduce the budget).
         let mut remaining = initial_len;
         let mut i = start;
         let mut scanned_this_poll = 0usize;
 
         while remaining > 0 {
-            let len = self.streams.len();
+            let len = this.streams.len();
             if len == 0 {
                 return Poll::Ready(None);
             }
@@ -125,27 +163,27 @@ where
                 i = 0;
             }
 
-            match Pin::new(&mut self.streams[i]).poll_next(cx) {
+            match Pin::new(&mut this.streams[i]).poll_next(&mut child_cx) {
                 Poll::Ready(Some(item)) => {
-                    let new_len = self.streams.len();
-                    self.next_index = if i + 1 >= new_len { 0 } else { i + 1 };
+                    let new_len = this.streams.len();
+                    this.next_index = if i + 1 >= new_len { 0 } else { i + 1 };
                     // Progress: a delivered item invalidates the pending-sweep
                     // count so the next poll re-registers before it may park.
-                    self.pending_registered = 0;
+                    this.pending_registered = 0;
                     return Poll::Ready(Some(item));
                 }
                 Poll::Ready(None) => {
                     // Stream exhausted; remove it. The active set changed, so the
                     // pending-registration invariant no longer holds — reset.
-                    self.streams.remove(i);
-                    self.pending_registered = 0;
+                    this.streams.remove(i);
+                    this.pending_registered = 0;
                     remaining -= 1;
                     scanned_this_poll += 1;
                     if scanned_this_poll >= MERGE_COOPERATIVE_POLL_BUDGET && remaining > 0 {
-                        self.next_index = if self.streams.is_empty() {
+                        this.next_index = if this.streams.is_empty() {
                             0
                         } else {
-                            i % self.streams.len()
+                            i % this.streams.len()
                         };
                         // Removals are progress (the set shrinks toward empty),
                         // so continuing next tick terminates; this self-wake is
@@ -159,22 +197,22 @@ where
                 Poll::Pending => {
                     // This child registered the current waker; record it so the
                     // combinator can park once every live child has registered.
-                    self.pending_registered = self.pending_registered.saturating_add(1);
+                    this.pending_registered = this.pending_registered.saturating_add(1);
                 }
             }
             remaining -= 1;
             scanned_this_poll += 1;
             if scanned_this_poll >= MERGE_COOPERATIVE_POLL_BUDGET && remaining > 0 {
-                self.next_index = if self.streams.is_empty() {
+                this.next_index = if this.streams.is_empty() {
                     0
                 } else {
-                    (i + 1) % self.streams.len()
+                    (i + 1) % this.streams.len()
                 };
                 // Only yield-and-rewake while there is still an unregistered
                 // child to scan. Once every live child has registered the
                 // current waker, a self-wake would busy-loop at 100% CPU with no
                 // possible progress, so park and rely on the children's wakers.
-                if self.pending_registered < self.streams.len() {
+                if this.pending_registered < this.streams.len() {
                     cx.waker().wake_by_ref();
                 }
                 return Poll::Pending;
@@ -182,12 +220,12 @@ where
             i += 1;
         }
 
-        self.next_index = if self.streams.is_empty() {
+        this.next_index = if this.streams.is_empty() {
             0
         } else {
-            i % self.streams.len()
+            i % this.streams.len()
         };
-        if self.streams.is_empty() {
+        if this.streams.is_empty() {
             Poll::Ready(None)
         } else {
             Poll::Pending
@@ -792,6 +830,124 @@ mod tests {
         tracing::info!(total = items.len(), "merge total");
         crate::assert_with_log!(items == expected, "no loss", expected, items);
         crate::test_complete!("merge_backpressure_resume_no_loss");
+    }
+
+    /// A child that is pending until opened. It keeps the last waker it was
+    /// polled with and wakes it once when opened, as a channel receiver does.
+    #[derive(Debug)]
+    struct Gate {
+        id: usize,
+        open: Arc<AtomicBool>,
+        waker: Arc<std::sync::Mutex<Option<Waker>>>,
+    }
+
+    impl Stream for Gate {
+        type Item = usize;
+
+        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if self.open.swap(false, Ordering::SeqCst) {
+                return Poll::Ready(Some(self.id));
+            }
+            *self.waker.lock().unwrap() = Some(cx.waker().clone());
+            Poll::Pending
+        }
+    }
+
+    struct GateHandle {
+        open: Arc<AtomicBool>,
+        waker: Arc<std::sync::Mutex<Option<Waker>>>,
+    }
+
+    impl GateHandle {
+        fn open(&self) {
+            self.open.store(true, Ordering::SeqCst);
+            if let Some(waker) = self.waker.lock().unwrap().take() {
+                waker.wake();
+            }
+        }
+    }
+
+    fn gated_merge(count: usize) -> (Merge<Gate>, Vec<GateHandle>) {
+        let mut gates = Vec::with_capacity(count);
+        let mut handles = Vec::with_capacity(count);
+        for id in 0..count {
+            let open = Arc::new(AtomicBool::new(false));
+            let waker = Arc::new(std::sync::Mutex::new(None));
+            gates.push(Gate {
+                id,
+                open: Arc::clone(&open),
+                waker: Arc::clone(&waker),
+            });
+            handles.push(GateHandle { open, waker });
+        }
+        (merge(gates), handles)
+    }
+
+    /// Polls as an executor would: again while the merge woke itself, and
+    /// stops at an item or once it parks without a self-wake (`None`).
+    fn drive(stream: &mut Merge<Gate>, cx: &mut Context<'_>, woke: &AtomicBool) -> Option<usize> {
+        for _ in 0..64 {
+            woke.store(false, Ordering::SeqCst);
+            match Pin::new(&mut *stream).poll_next(cx) {
+                Poll::Ready(Some(id)) => return Some(id),
+                Poll::Ready(None) => panic!("the gated children never end"),
+                Poll::Pending if !woke.load(Ordering::SeqCst) => return None,
+                Poll::Pending => {}
+            }
+        }
+        panic!("the merge kept waking itself without parking");
+    }
+
+    #[test]
+    fn merge_polls_a_woken_child_outside_its_next_scan_window() {
+        // br-asupersync-jqhteu: once a full sweep had parked the merge, a poll
+        // scanned one 64-child window and parked again, so a woken child
+        // outside it was never polled and its spent waker never fired again.
+        init_test("merge_polls_a_woken_child_outside_its_next_scan_window");
+        let count = MERGE_COOPERATIVE_POLL_BUDGET * 3 + 8;
+        let (mut stream, gates) = gated_merge(count);
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(TrackWaker(woke.clone())));
+        let mut cx = Context::from_waker(&waker);
+        assert_eq!(
+            drive(&mut stream, &mut cx, &woke),
+            None,
+            "every child is pending"
+        );
+
+        // The child just behind the cursor is the last one the next window reaches.
+        let target = (stream.next_index + count - 1) % count;
+        gates[target].open();
+        assert!(
+            woke.load(Ordering::SeqCst),
+            "the opened child wakes the task"
+        );
+        assert_eq!(drive(&mut stream, &mut cx, &woke), Some(target));
+        crate::test_complete!("merge_polls_a_woken_child_outside_its_next_scan_window");
+    }
+
+    #[test]
+    fn merge_polls_a_child_that_woke_after_its_scan_in_the_same_sweep() {
+        // A child scanned in the second window wakes before the third: the
+        // sweep's last window does not reach it again, so a merge that only
+        // restarts its sweep on a poll it did not wake itself would park here.
+        init_test("merge_polls_a_child_that_woke_after_its_scan_in_the_same_sweep");
+        let count = MERGE_COOPERATIVE_POLL_BUDGET * 3 + 8;
+        let (mut stream, gates) = gated_merge(count);
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(TrackWaker(woke.clone())));
+        let mut cx = Context::from_waker(&waker);
+        for _ in 0..2 {
+            woke.store(false, Ordering::SeqCst);
+            assert!(Pin::new(&mut stream).poll_next(&mut cx).is_pending());
+            assert!(woke.load(Ordering::SeqCst), "the sweep continues");
+        }
+        assert_eq!(stream.next_index, MERGE_COOPERATIVE_POLL_BUDGET * 2);
+
+        let target = MERGE_COOPERATIVE_POLL_BUDGET + 6;
+        gates[target].open();
+        assert_eq!(drive(&mut stream, &mut cx, &woke), Some(target));
+        crate::test_complete!("merge_polls_a_child_that_woke_after_its_scan_in_the_same_sweep");
     }
 
     #[test]

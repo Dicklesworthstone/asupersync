@@ -1460,8 +1460,8 @@ pub(crate) enum RegionCommand {
 /// Crate-private query behind [`crate::cx::ChildRegion::close_within`]: the
 /// tasks of a region subtree that have not completed. It is collected under
 /// the runtime state lock and published after the lock is released, like a
-/// finalizer acknowledgment. A completed task leaves its region's task list,
-/// so the list is exactly the region's live tasks.
+/// finalizer acknowledgment. It lists the unfinished tasks; with an external
+/// task table, a task that has just turned terminal can still appear once.
 pub(crate) struct RegionLiveTasksQuery {
     region_id: RegionId,
     reply: crate::channel::oneshot::Sender<Vec<TaskId>>,

@@ -131,7 +131,7 @@
 //! | [`browser_ready_handoff_limit`](RuntimeBuilder::browser_ready_handoff_limit) | 0 (disabled) | Max ready dispatch burst before host-turn handoff |
 //! | [`browser_worker_offload`](RuntimeBuilder::browser_worker_offload) | disabled | Browser worker offload policy contract |
 //! | [`cancel_lane_max_streak`](RuntimeBuilder::cancel_lane_max_streak) | 16 | Max consecutive cancel dispatches |
-//! | [`enable_adaptive_cancel_streak`](RuntimeBuilder::enable_adaptive_cancel_streak) | true | Enable regret-bounded adaptive cancel streak |
+//! | [`enable_adaptive_cancel_streak`](RuntimeBuilder::enable_adaptive_cancel_streak) | false | Enable regret-bounded adaptive cancel streak |
 //! | [`adaptive_cancel_streak_epoch_steps`](RuntimeBuilder::adaptive_cancel_streak_epoch_steps) | 128 | Dispatches per adaptive epoch |
 //! | [`root_region_limits`](RuntimeBuilder::root_region_limits) | None | Admission limits for the root region |
 //! | [`observability`](RuntimeBuilder::observability) | None | Attach structured logging collectors |
@@ -3013,8 +3013,8 @@ impl RuntimeBuilder {
 
     /// Enable or disable adaptive cancel-streak scheduling.
     ///
-    /// When enabled, workers run a deterministic no-regret online policy that
-    /// updates the base cancel streak limit across fixed-length epochs.
+    /// Off by default. When enabled, workers run a deterministic discounted-UCB1
+    /// policy that updates the base cancel streak limit across fixed-length epochs.
     #[must_use]
     pub fn enable_adaptive_cancel_streak(mut self, enable: bool) -> Self {
         self.config.enable_adaptive_cancel_streak = enable;
@@ -6059,7 +6059,7 @@ impl RuntimeInner {
             guard.set_obligation_gateway(Arc::new(
                 crate::runtime::obligation_mailbox::ObligationGateway::new(
                     Arc::clone(&om),
-                    scheduler.spawn_enqueued_notifier(),
+                    scheduler.obligation_posted_notifier(),
                     Arc::downgrade(&spawn_liveness),
                 ),
             ));

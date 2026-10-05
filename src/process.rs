@@ -3209,8 +3209,8 @@ impl Drop for Child {
 /// ```
 #[derive(Debug)]
 pub struct ChildStdin {
+    registration: ReactorRegistration, // dropped first: deregisters before the fd closes
     inner: Option<std_process::ChildStdin>,
-    registration: ReactorRegistration,
 }
 
 impl ChildStdin {
@@ -3369,9 +3369,9 @@ impl AsyncWrite for ChildStdin {
 /// ```
 #[derive(Debug)]
 pub struct ChildStdout {
-    inner: std_process::ChildStdout,
     #[cfg(unix)]
-    registration: ReactorRegistration,
+    registration: ReactorRegistration, // dropped first: deregisters before the fd closes
+    inner: std_process::ChildStdout,
 }
 
 impl ChildStdout {
@@ -3469,9 +3469,9 @@ impl AsyncRead for ChildStdout {
 /// ```
 #[derive(Debug)]
 pub struct ChildStderr {
-    inner: std_process::ChildStderr,
     #[cfg(unix)]
-    registration: ReactorRegistration,
+    registration: ReactorRegistration, // dropped first: deregisters before the fd closes
+    inner: std_process::ChildStderr,
 }
 
 impl ChildStderr {
