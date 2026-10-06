@@ -225,12 +225,15 @@ impl MethodRouter {
         self.on(METHOD_OPTIONS, handler)
     }
 
-    /// Add `other`'s methods to this route; `other` wins for a method both
-    /// register, as a later `.get(..)` on one method router does. A body
-    /// policy is kept from this router, or taken from `other` if this one
-    /// has none.
+    /// Add `other`'s methods to this route. For a method both register, this
+    /// route's handler is kept: the first registration of a pattern and
+    /// method answers, as it did when each registration was a separate route
+    /// matched in order. A body policy is kept from this router, or taken
+    /// from `other` if this one has none.
     fn merge(&mut self, other: Self) {
-        self.handlers.extend(other.handlers);
+        for (method, handler) in other.handlers {
+            self.handlers.entry(method).or_insert(handler);
+        }
         if self.body_policy.is_none() {
             self.body_policy = other.body_policy;
         }
@@ -6181,6 +6184,27 @@ mod tests {
         let resp = router.handle(Request::new("DELETE", "/a"));
         assert_eq!(resp.status, StatusCode::METHOD_NOT_ALLOWED);
         assert_eq!(resp.header_value("allow"), Some("GET, POST"));
+    }
+
+    #[test]
+    fn routing_the_same_pattern_and_method_twice_keeps_the_first_handler() {
+        // Merging the registrations let the second GET /a replace the first;
+        // the first one answered when each registration was its own route.
+        let router = Router::new()
+            .route("/a", get(FnHandler::new(ok_handler)))
+            .route(
+                "/a",
+                get(FnHandler::new(created_handler)).post(FnHandler::new(created_handler)),
+            );
+
+        assert_eq!(
+            router.handle(Request::new("GET", "/a")).status,
+            StatusCode::OK
+        );
+        assert_eq!(
+            router.handle(Request::new("POST", "/a")).status,
+            StatusCode::CREATED
+        );
     }
 
     #[test]
