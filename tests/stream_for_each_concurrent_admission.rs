@@ -4,7 +4,7 @@
 
 #![allow(missing_docs)]
 
-use asupersync::lab::run_async_under_lab;
+use asupersync::lab::{LabConfig, run_async_under_lab_with_config};
 use asupersync::runtime::{JoinError, yield_now};
 use asupersync::stream::{Stream, for_each_concurrent, try_for_each_concurrent};
 use asupersync::sync::{OwnedSemaphorePermit, Semaphore};
@@ -16,6 +16,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
 const ITEMS: usize = 4096;
+
+/// Admitting and running `ITEMS` children records about 20,500 trace events
+/// (5,100 for the cancelled run), and the lab-test contract fails a run whose
+/// trace overflowed its buffer (`scenario_failed_due_to_trace_truncation`).
+/// The default buffer keeps 4096.
+fn lab_config(seed: u64) -> LabConfig {
+    LabConfig::new(seed).trace_capacity(1 << 16)
+}
 
 struct CountedSource {
     admitted: Arc<AtomicUsize>,
@@ -39,7 +47,7 @@ impl Stream for CountedSource {
 fn a_large_limit_yields_admission_without_losing_or_duplicating_items() {
     let admitted = Arc::new(AtomicUsize::new(0));
     let seen = Arc::new((0..ITEMS).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>());
-    let ((first_burst, outcome), report) = run_async_under_lab(0xB200, {
+    let ((first_burst, outcome), report) = run_async_under_lab_with_config(lab_config(0xB200), {
         let admitted = Arc::clone(&admitted);
         let seen = Arc::clone(&seen);
         move |cx| async move {
@@ -89,7 +97,7 @@ fn cancellation_at_an_admission_yield_stops_growth_and_drains_started_children()
     let finished = Arc::new(AtomicUsize::new(0));
     let finished_at_return = Arc::new(AtomicUsize::new(0));
 
-    let (joined, report) = run_async_under_lab(0xB201, {
+    let (joined, report) = run_async_under_lab_with_config(lab_config(0xB201), {
         let admitted = Arc::clone(&admitted);
         let first_burst = Arc::clone(&first_burst);
         let started = Arc::clone(&started);
