@@ -1005,11 +1005,21 @@ where
     }
 
     fn write_path_cancelled(op_cx: Option<&Cx>, is_open: bool) -> bool {
-        is_open
-            && match op_cx {
-                Some(cx) => cx.checkpoint().is_err(),
-                None => crate::cx::Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false),
+        match op_cx {
+            // An explicitly supplied operation context stays authoritative after
+            // a Close frame moves the handshake to CloseSent, as on the split
+            // halves. Otherwise close() writing its Close frame to a peer that
+            // stopped reading could no longer observe cancellation and hung
+            // forever (br-asupersync-fmw87f).
+            Some(cx) => cx.checkpoint().is_err(),
+            // Callers without an explicit context keep the established
+            // behaviour: ambient cancellation counts only while the connection
+            // is open.
+            None => {
+                is_open
+                    && crate::cx::Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false)
             }
+        }
     }
 
     async fn flush_write_buf_with_cx(&mut self, op_cx: Option<&Cx>) -> Result<(), WsError> {
@@ -1035,7 +1045,7 @@ where
                         "cancelled",
                     )));
                 }
-                if is_open {
+                if is_open || op_cx.is_some() {
                     if let Some(guard) = cancel_wake.as_mut() {
                         guard.refresh(task_cx.waker());
                     }
@@ -1057,7 +1067,7 @@ where
             if Self::write_path_cancelled(op_cx, is_open) {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
             }
-            if is_open {
+            if is_open || op_cx.is_some() {
                 if let Some(guard) = cancel_wake.as_mut() {
                     guard.refresh(task_cx.waker());
                 }
@@ -1094,7 +1104,7 @@ where
             if Self::write_path_cancelled(op_cx, is_open) {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
             }
-            if is_open {
+            if is_open || op_cx.is_some() {
                 if let Some(guard) = cancel_wake.as_mut() {
                     guard.refresh(task_cx.waker());
                 }
@@ -1128,7 +1138,7 @@ where
             if Self::write_path_cancelled(op_cx, is_open) {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
             }
-            if is_open {
+            if is_open || op_cx.is_some() {
                 if let Some(guard) = cancel_wake.as_mut() {
                     guard.refresh(task_cx.waker());
                 }
@@ -2779,6 +2789,76 @@ mod tests {
                 "retrying close must finish the original close frame without appending a second one"
             );
         });
+    }
+
+    /// close() whose Close frame parks on a peer that stopped reading ends
+    /// when its explicit Cx is cancelled (br-asupersync-fmw87f). The handshake
+    /// is CloseSent by then, and the write path ignored cancellation in that
+    /// state, so close() hung forever. NeverWritableIo never self-wakes: only
+    /// the registered cancel waker can re-poll the task.
+    #[test]
+    fn close_on_a_stalled_peer_ends_when_cancelled() {
+        struct NeverWritableIo;
+        impl AsyncRead for NeverWritableIo {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                _buf: &mut ReadBuf<'_>,
+            ) -> Poll<io::Result<()>> {
+                Poll::Pending
+            }
+        }
+        impl AsyncWrite for NeverWritableIo {
+            fn poll_write(
+                self: Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                _buf: &[u8],
+            ) -> Poll<io::Result<usize>> {
+                Poll::Pending
+            }
+            fn poll_flush(
+                self: Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+            ) -> Poll<io::Result<()>> {
+                Poll::Pending
+            }
+            fn poll_shutdown(
+                self: Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+            ) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        let cx = Cx::for_testing();
+        let canceller = cx.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let closer = std::thread::Builder::new()
+            .name("ws-stalled-close".into())
+            .spawn(move || {
+                let result = future::block_on(async {
+                    let mut ws =
+                        WebSocket::from_upgraded(NeverWritableIo, WebSocketConfig::default());
+                    ws.close(&cx, CloseReason::normal()).await
+                });
+                let _ = done_tx.send(result);
+            })
+            .expect("spawn closer thread");
+
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        canceller.cancel_with(
+            crate::types::CancelKind::User,
+            Some("external cancel while the close frame is parked"),
+        );
+
+        let result = done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("cancel must end a close parked on a stalled peer; close() never returned");
+        closer.join().expect("closer thread");
+        assert!(
+            matches!(result, Err(WsError::Io(ref e)) if e.kind() == io::ErrorKind::Interrupted),
+            "expected an Interrupted cancel, got {result:?}"
+        );
     }
 
     #[test]
