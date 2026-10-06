@@ -376,3 +376,77 @@ fn deadline_meets_channel_request_and_parent_without_using_connect_timeout() {
     assert!(metadata.insert("grpc-timeout", "1S"));
     assert_eq!(call_deadline(&cx, &metadata, &config, Time::ZERO).unwrap_err().code(), Code::InvalidArgument);
 }
+
+fn connect_timeout_channel(timeout: Duration) -> Channel {
+    complete(
+        Channel::builder("http://localhost:50051")
+            .connect_timeout(timeout)
+            .connect(),
+    )
+    .unwrap()
+}
+
+/// br-asupersync-grpc-client-server-audit-jq0c7j item 10(a): connect_timeout
+/// bounded the wait for the response HEADERS. grpc-go and grpc-java send them
+/// lazily, with the first message, so a Watch whose first event came after
+/// connect_timeout failed with DEADLINE_EXCEEDED. It now bounds only the
+/// HTTP/2 handshake.
+#[test]
+fn connect_timeout_bounds_the_handshake_not_a_lazy_first_response() {
+    let clock = Arc::new(VirtualClock::new());
+    let cx = context(&clock);
+    // The server's SETTINGS arrive at once; its headers come with the first event.
+    let wire = Wire::new(frame(4, 0, 0, &[]));
+    let channel = connect_timeout_channel(Duration::from_secs(1));
+    let mut open = Box::pin(channel.server_streaming_on(
+        &cx,
+        ScriptIo(Arc::clone(&wire)),
+        "/s/Watch",
+        Request::new(Bytes::new()),
+        IdentityCodec,
+    ));
+    let mut task = Context::from_waker(Waker::noop());
+    assert!(open.as_mut().poll(&mut task).is_pending());
+
+    clock.advance_to(Time::from_secs(3));
+    wire.append(&header_block(
+        &[(":status", "200"), ("content-type", "application/grpc")],
+        false,
+    ));
+    wire.append(&frame(0, 0, 1, &envelope(b"first event")));
+    let Poll::Ready(result) = open.as_mut().poll(&mut task) else {
+        panic!("the response headers were buffered");
+    };
+    let mut client =
+        result.expect("headers after connect_timeout are accepted once SETTINGS arrived");
+    assert_eq!(
+        complete(client.message()).unwrap().unwrap().as_ref(),
+        b"first event"
+    );
+}
+
+/// The handshake itself stays bounded: a peer that never sends SETTINGS
+/// fails at connect_timeout.
+#[test]
+fn connect_timeout_still_bounds_a_peer_that_never_sends_settings() {
+    let clock = Arc::new(VirtualClock::new());
+    let cx = context(&clock);
+    let wire = Wire::new(Vec::new());
+    let channel = connect_timeout_channel(Duration::from_secs(1));
+    let mut open = Box::pin(channel.server_streaming_on(
+        &cx,
+        ScriptIo(Arc::clone(&wire)),
+        "/s/Watch",
+        Request::new(Bytes::new()),
+        IdentityCodec,
+    ));
+    let mut task = Context::from_waker(Waker::noop());
+    assert!(open.as_mut().poll(&mut task).is_pending());
+
+    clock.advance_to(Time::from_secs(1));
+    match open.as_mut().poll(&mut task) {
+        Poll::Ready(Err(status)) => assert_eq!(status.code(), Code::DeadlineExceeded),
+        Poll::Ready(Ok(_)) => panic!("a stream opened without a handshake"),
+        Poll::Pending => panic!("the handshake wait outlived connect_timeout"),
+    }
+}
