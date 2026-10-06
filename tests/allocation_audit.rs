@@ -1943,8 +1943,9 @@ fn spawn_join_allocations_per_task_stay_within_budget() {
 
 /// Ceiling for [`spawn_join_allocations_per_task_stay_within_budget`].
 ///
-/// Measured 30.07 allocations (5,626 bytes) per task on 2026-10-03, in the
-/// `postgres,test-internals` test build. The ceiling leaves 20% for builds
-/// with more instrumentation features, and still catches a regression of six
-/// or more allocations per task.
-const SPAWN_JOIN_ALLOCATION_BUDGET: f64 = 36.0;
+/// Measured 24.07 allocations (5,058 bytes) per task on 2026-10-05, in the
+/// `postgres,test-internals` test build (30.07 on 2026-10-03, before the
+/// kpmoy5.1.9 cuts). The ceiling leaves 20% for builds with more
+/// instrumentation features, and still catches a regression of five or more
+/// allocations per task.
+const SPAWN_JOIN_ALLOCATION_BUDGET: f64 = 29.0;
