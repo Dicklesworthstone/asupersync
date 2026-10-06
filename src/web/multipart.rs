@@ -2526,20 +2526,9 @@ fn parse_disposition_param(disposition: &str, param: &str) -> Option<String> {
     }
 
     let search = format!("{param}=");
-    let lower = disposition.to_ascii_lowercase();
-    // Find the param ensuring it's not a suffix of another param (e.g. "name=" inside "filename=").
-    // The match must be preceded by start-of-string, ';', space, or tab.
-    let idx = {
-        let mut start = 0;
-        loop {
-            let pos = lower[start..].find(&search)?;
-            let abs = start + pos;
-            if abs == 0 || matches!(lower.as_bytes()[abs - 1], b';' | b' ' | b'\t') {
-                break abs;
-            }
-            start = abs + search.len();
-        }
-    };
+    // Not a suffix of another param (e.g. "name=" inside "filename=") and not
+    // inside a quoted value.
+    let idx = find_disposition_param(disposition, &search)?;
     let after = &disposition[idx + search.len()..];
 
     let raw_value = after.strip_prefix('"').map_or_else(
@@ -2579,20 +2568,40 @@ fn parse_disposition_param(disposition: &str, param: &str) -> Option<String> {
     }
 }
 
+/// Byte offset of `search` (`name=`, `filename*=`, ...) where it starts a
+/// parameter: at the start or after `;` or whitespace, and outside any quoted
+/// value. Inside quotes it is value text: in
+/// `filename="x; name=evil;"; name="real"` the field is `real`, as a proxy or
+/// WAF parses it (br-asupersync-a1q12q).
+fn find_disposition_param(disposition: &str, search: &str) -> Option<usize> {
+    let lower = disposition.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let (mut in_quotes, mut escaped) = (false, false);
+    for (idx, &byte) in bytes.iter().enumerate() {
+        if in_quotes {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_quotes = false;
+            }
+            continue;
+        }
+        if byte == b'"' {
+            in_quotes = true;
+        } else if bytes[idx..].starts_with(search.as_bytes())
+            && (idx == 0 || matches!(bytes[idx - 1], b';' | b' ' | b'\t'))
+        {
+            return Some(idx);
+        }
+    }
+    None
+}
+
 fn parse_disposition_ext_param(disposition: &str, param: &str) -> Option<String> {
     let search = format!("{param}*=");
-    let lower = disposition.to_ascii_lowercase();
-    let idx = {
-        let mut start = 0;
-        loop {
-            let pos = lower[start..].find(&search)?;
-            let abs = start + pos;
-            if abs == 0 || matches!(lower.as_bytes()[abs - 1], b';' | b' ' | b'\t') {
-                break abs;
-            }
-            start = abs + search.len();
-        }
-    };
+    let idx = find_disposition_param(disposition, &search)?;
 
     let after = &disposition[idx + search.len()..];
     let end = after.find([';', ' ', '\t']).unwrap_or(after.len());
@@ -2811,6 +2820,19 @@ mod tests {
     fn parse_disposition_missing() {
         let d = "form-data; name=\"field\"";
         assert!(parse_disposition_param(d, "filename").is_none());
+    }
+
+    #[test]
+    fn parse_disposition_ignores_parameter_text_inside_quotes() {
+        // br-asupersync-a1q12q: `name=` inside the quoted filename was taken
+        // as the field name, unlike a proxy or WAF parsing the same header.
+        let d = r#"form-data; filename="x; name=evil; filename*=UTF-8''y"; name="real""#;
+        assert_eq!(parse_disposition_param(d, "name").unwrap(), "real");
+        // The quoted `filename*=` is value text too (sanitizing drops the `*`).
+        assert_eq!(
+            parse_disposition_param(d, "filename").unwrap(),
+            "x; name=evil; filename=UTF-8''y"
+        );
     }
 
     // ================================================================
