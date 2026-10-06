@@ -3723,6 +3723,68 @@ impl<Caps> Cx<Caps> {
         crate::types::task_context::CancelWakeEffects::new(wakers).dispatch();
     }
 
+    /// Derives a cancellation scope inside this task: the context of one
+    /// fiber (br-asupersync-issue65-criticisms-kpmoy5.3.1).
+    ///
+    /// | Shared with this context | Owned by the derived context |
+    /// | --- | --- |
+    /// | task and region identity: obligations, spawns and traces stay this task's | cancellation flag, reason and acknowledgement |
+    /// | drivers, gateways, observability and the capability mask | cancel-waker registrations |
+    /// | the budget, as a snapshot (the runtime charges the task's own) | mask depth and checkpoint progress |
+    ///
+    /// Cancelling the derived context never cancels this one. This one's
+    /// cancellation reaches it through [`Self::observable_cancel_reason`] and
+    /// [`Self::inherit_cancel`], which its owner calls each time it runs.
+    #[must_use]
+    pub(crate) fn derive_cancel_scope(&self) -> Self {
+        let child = {
+            let parent = self.inner.read();
+            let mut child = CxInner::new(parent.region, parent.task, parent.budget);
+            child.task_type.clone_from(&parent.task_type);
+            child.budget_baseline = parent.budget_baseline;
+            child.capability_budget = parent.capability_budget;
+            child.cleanup_phase = parent.cleanup_phase;
+            child
+        };
+        let inner = Arc::new(parking_lot::RwLock::new(child));
+        let cancellation = inner.read().cancellation_state();
+        Self {
+            inner,
+            cancellation,
+            observability: Arc::clone(&self.observability),
+            handles: Arc::clone(&self.handles),
+            runtime_mask: self.runtime_mask,
+            _caps: PhantomData,
+        }
+    }
+
+    /// The reason to pass on to derived scopes, if this context's
+    /// cancellation is observable: requested, and not masked. A masked
+    /// context is finishing cleanup its derived scopes may be part of, so
+    /// they keep running until the mask is released.
+    #[must_use]
+    pub(crate) fn observable_cancel_reason(&self) -> Option<CancelReason> {
+        let inner = self.inner.read();
+        if !inner.is_cancel_requested() || inner.mask_depth > 0 {
+            return None;
+        }
+        Some(inner.cancel_reason.clone().unwrap_or_else(|| {
+            CancelReason::new(CancelKind::ParentCancelled)
+                .with_region(inner.region)
+                .with_task(inner.task)
+        }))
+    }
+
+    /// Cancels this derived scope with its parent's `reason`, unless it is
+    /// already cancelled. Returns whether it cancelled.
+    pub(crate) fn inherit_cancel(&self, reason: &CancelReason) -> bool {
+        if self.inner.read().is_cancel_requested() {
+            return false;
+        }
+        self.cancel_with_reason(reason.clone());
+        true
+    }
+
     /// Cancels without building a full attribution chain (performance-critical path).
     ///
     /// Use this when attribution isn't needed and minimizing allocations is important.
@@ -8487,5 +8549,66 @@ mod tests {
         // CapMask::all(). Production access is removed via cfg-gate;
         // this assertion just pins that the test path is unchanged.
         assert_eq!(cx.runtime_mask, cap::CapMask::all());
+    }
+
+    // --- derive_cancel_scope (br-asupersync-issue65-criticisms-kpmoy5.3.1) ---
+
+    #[test]
+    fn a_derived_scope_shares_the_task_and_owns_its_cancellation() {
+        let parent = Cx::for_testing();
+        let child = parent.derive_cancel_scope();
+        assert_eq!(
+            child.task_id(),
+            parent.task_id(),
+            "obligations stay the task's"
+        );
+        assert_eq!(child.region_id(), parent.region_id());
+        assert!(Arc::ptr_eq(&child.handles, &parent.handles), "same drivers");
+        child.cancel_with(CancelKind::User, Some("the child alone"));
+        assert!(child.is_cancel_requested());
+        assert!(child.checkpoint().is_err());
+        assert!(!parent.is_cancel_requested(), "the parent is untouched");
+        assert!(parent.checkpoint().is_ok());
+    }
+
+    #[test]
+    fn a_derived_scope_inherits_its_parents_cancellation_once() {
+        let parent = Cx::for_testing();
+        let child = parent.derive_cancel_scope();
+        assert!(parent.observable_cancel_reason().is_none());
+        parent.cancel_with(CancelKind::Shutdown, Some("parent cancelled"));
+        let reason = parent
+            .observable_cancel_reason()
+            .expect("an unmasked cancellation is observable");
+        assert!(child.inherit_cancel(&reason), "the child is cancelled");
+        assert!(!child.inherit_cancel(&reason), "only once");
+        assert_eq!(
+            child.cancel_reason().map(|reason| reason.kind),
+            Some(CancelKind::Shutdown),
+            "with the parent's reason"
+        );
+    }
+
+    #[test]
+    fn a_masked_parent_does_not_pass_its_cancellation_on() {
+        let parent = Cx::for_testing();
+        parent.cancel_with(CancelKind::User, Some("cancelled while masked"));
+        parent.masked(|| {
+            assert!(
+                parent.observable_cancel_reason().is_none(),
+                "cleanup under a mask keeps its derived scopes running"
+            );
+        });
+        assert!(parent.observable_cancel_reason().is_some());
+    }
+
+    #[test]
+    fn a_derived_scopes_mask_does_not_leak_to_its_parent() {
+        let parent = Cx::for_testing();
+        let child = parent.derive_cancel_scope();
+        child.masked(|| {
+            assert_eq!(child.inner.read().mask_depth, 1);
+            assert_eq!(parent.inner.read().mask_depth, 0);
+        });
     }
 }

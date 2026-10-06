@@ -35,14 +35,26 @@
 //!   remaining fibers, including any they start, and resolves only once all
 //!   of them have finished. Starting a fiber after that panics: it could
 //!   never run.
-//! - **Cancellation** is the calling task's: fibers observe it through the
-//!   task's `Cx` at their own cancellation points, finish their cleanup, and
-//!   the scope drains. Nothing is dropped mid-flight unless the scope future
-//!   itself is dropped, which drops its fibers with it; a handle that
-//!   outlived it then resolves as [`JoinError::Cancelled`].
-//! - **Panics.** A panicking fiber is caught. Awaiting its handle yields
-//!   [`JoinError::Panicked`]; a panic no handle observed is re-raised when the
-//!   scope finishes, so it cannot vanish silently.
+//! - **Cancellation.** A scope started inside a task gives each fiber its
+//!   own context, derived from the task's: while a fiber runs,
+//!   [`Cx::current`](crate::cx::Cx::current) is that context. It shares the
+//!   task's identity, region, drivers and budget, but has its own
+//!   cancellation state. The task's cancellation reaches every fiber (unless
+//!   the task is inside a masked section), [`FiberHandle::cancel`] cancels
+//!   one fiber, and neither cancels the task. Fibers observe cancellation at
+//!   their own cancellation points, finish their cleanup, and the scope
+//!   drains. Nothing is dropped mid-flight unless the scope future itself is
+//!   dropped, which drops its fibers with it; a handle that outlived it then
+//!   resolves as [`JoinError::Cancelled`]. Code in a fiber that passes the
+//!   task's `Cx` (captured from outside) to a cancel-aware call observes the
+//!   task's cancellation only; use `Cx::current()` inside the fiber to
+//!   observe the fiber's own.
+//! - **Panics.** A panicking fiber is caught, and its sibling fibers are
+//!   cancelled (fail-fast: their contexts report a `FailFast`
+//!   cancellation); the scope's body keeps running. Awaiting the panicked
+//!   fiber's handle yields [`JoinError::Panicked`]; a panic no handle
+//!   observed is re-raised when the scope finishes, so it cannot vanish
+//!   silently.
 //! - **Scheduling.** Each poll of the scope polls the body and every ready
 //!   fiber once. A fiber that wakes itself is polled again on the task's next
 //!   turn, so a busy fiber cannot monopolize the worker.
@@ -53,16 +65,19 @@
 //!
 //! # Cost
 //!
-//! Starting a fiber costs one boxed future and one shared completion cell; a
-//! wake handle is allocated only when no finished fiber's slot can be reused.
-//! It never touches runtime-global state. A poll of the scope takes the
+//! Starting a fiber costs one boxed future and one shared completion cell,
+//! plus its derived context when the scope runs inside a task; a wake handle
+//! is allocated only when no finished fiber's slot can be reused. It never
+//! touches runtime-global state. A poll of the scope takes the
 //! fiber table lock twice however many fibers are ready, and wakes raised
 //! inside that poll on the polling thread re-wake the task at most once.
 //! That makes fibers the cheapest structured concurrency in the runtime
 //! (br-asupersync-issue65-criticisms-kpmoy5.3.2).
 
+use crate::cx::Cx;
 use crate::runtime::JoinError;
 use crate::types::outcome::PanicPayload;
+use crate::types::{CancelKind, CancelReason};
 use parking_lot::Mutex;
 use std::cell::Cell;
 use std::future::{Future, poll_fn};
@@ -165,6 +180,9 @@ struct FiberSlot<'env> {
     /// `None` only while the fiber is being polled.
     waker: Option<Waker>,
     wake: Arc<FiberWake>,
+    /// The fiber's own context, derived from the scope's task; `None` when
+    /// the slot is free or the scope runs outside any task.
+    cx: Option<Cx>,
 }
 
 #[derive(Default)]
@@ -181,6 +199,7 @@ struct Running<'env> {
     index: usize,
     future: Option<FiberFuture<'env>>,
     waker: Option<Waker>,
+    cx: Option<Cx>,
     finished: bool,
 }
 
@@ -194,6 +213,11 @@ struct ScopeState<'env> {
     queue: Arc<ReadyQueue>,
     next_fiber_id: AtomicU64,
     unobserved_panics: UnobservedPanics,
+    /// The context of the task running the scope (`Cx::current()` when it
+    /// started), from which each fiber derives its own.
+    task_cx: Option<Cx>,
+    /// Raised when a fiber panics; the scope then cancels its siblings.
+    fiber_panicked: Arc<AtomicBool>,
 }
 
 /// Handle to the fibers of one [`scope`], given to the scope's body.
@@ -283,10 +307,27 @@ impl<T> Drop for FiberCompletion<T> {
 /// Awaiting yields `Ok(value)`, or [`JoinError::Panicked`] if the fiber
 /// panicked, or [`JoinError::Cancelled`] if the scope future was dropped
 /// before the fiber finished. Dropping the handle does not stop the fiber:
-/// the scope still waits for it.
+/// the scope still waits for it. [`cancel`](Self::cancel) asks it to stop.
 #[must_use = "a fiber keeps running even if its handle is dropped; await it to observe its result"]
 pub struct FiberHandle<T> {
     completion: Arc<Completion<T>>,
+    cx: Option<Cx>,
+}
+
+impl<T> FiberHandle<T> {
+    /// Requests cancellation of this fiber alone.
+    ///
+    /// The fiber's context (its [`Cx::current`]) then reports cancellation
+    /// at its next checkpoint, and cancel-aware waits registered on it wake.
+    /// Cancellation is cooperative: the fiber still runs to completion, and
+    /// the scope still waits for it. The calling task and the other fibers
+    /// are not cancelled. A scope started outside any task has no fiber
+    /// contexts, and then this does nothing.
+    pub fn cancel(&self) {
+        if let Some(cx) = &self.cx {
+            cx.cancel_with(CancelKind::User, Some("fiber cancelled through its handle"));
+        }
+    }
 }
 
 impl<T> std::fmt::Debug for FiberHandle<T> {
@@ -336,9 +377,14 @@ impl<T> Future for FiberHandle<T> {
 }
 
 /// Runs one fiber to completion, catching a panic, and publishes the result.
+/// A panic raises `panicked`, so the scope cancels the fiber's siblings.
 /// `completion` is dropped with this future, which marks the fiber abandoned
 /// if it never finished, even when it was never polled.
-async fn run_fiber<F: Future>(future: F, completion: FiberCompletion<F::Output>) {
+async fn run_fiber<F: Future>(
+    future: F,
+    completion: FiberCompletion<F::Output>,
+    panicked: Arc<AtomicBool>,
+) {
     let mut future = pin!(future);
     let result = poll_fn(|cx| {
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| future.as_mut().poll(cx))) {
@@ -352,6 +398,9 @@ async fn run_fiber<F: Future>(future: F, completion: FiberCompletion<F::Output>)
         }
     })
     .await;
+    if result.is_err() {
+        panicked.store(true, Ordering::Release);
+    }
     completion.0.finish(result);
 }
 
@@ -363,6 +412,8 @@ impl<'env> FiberScope<'env> {
                 queue: Arc::new(ReadyQueue::default()),
                 next_fiber_id: AtomicU64::new(0),
                 unobserved_panics: Arc::new(Mutex::new(Vec::new())),
+                task_cx: Cx::current(),
+                fiber_panicked: Arc::new(AtomicBool::new(false)),
             }),
         }
     }
@@ -387,8 +438,12 @@ impl<'env> FiberScope<'env> {
             state: Mutex::new(HandleState::Running(None)),
             unobserved_panics: Arc::clone(&self.state.unobserved_panics),
         });
-        let fiber: FiberFuture<'env> =
-            Box::pin(run_fiber(future, FiberCompletion(Arc::clone(&completion))));
+        let fiber: FiberFuture<'env> = Box::pin(run_fiber(
+            future,
+            FiberCompletion(Arc::clone(&completion)),
+            Arc::clone(&self.state.fiber_panicked),
+        ));
+        let fiber_cx = self.state.task_cx.as_ref().map(Cx::derive_cancel_scope);
         let index = {
             let mut guard = self.state.set.lock();
             let set = &mut *guard;
@@ -400,6 +455,7 @@ impl<'env> FiberScope<'env> {
                 let slot = &mut set.slots[index];
                 slot.wake.queued.store(true, Ordering::Release);
                 slot.future = Some(fiber);
+                slot.cx.clone_from(&fiber_cx);
                 index
             } else {
                 let index = set.slots.len();
@@ -412,6 +468,7 @@ impl<'env> FiberScope<'env> {
                     future: Some(fiber),
                     waker: Some(Waker::from(Arc::clone(&wake))),
                     wake,
+                    cx: fiber_cx.clone(),
                 });
                 index
             };
@@ -419,7 +476,10 @@ impl<'env> FiberScope<'env> {
             index
         };
         self.state.queue.schedule(index);
-        FiberHandle { completion }
+        FiberHandle {
+            completion,
+            cx: fiber_cx,
+        }
     }
 
     /// Number of fibers started in this scope that have not finished.
@@ -450,8 +510,39 @@ impl ScopeState<'_> {
         }
     }
 
+    /// Passes cancellation on to the live fibers' contexts: the task's own,
+    /// when it is observable (requested and not masked), and a fail-fast
+    /// cancellation after a fiber panicked. A cancelled fiber's waits wake,
+    /// so it is polled in this pass or the next.
+    fn propagate_cancellation(&self) {
+        let panicked = self.fiber_panicked.swap(false, Ordering::AcqRel);
+        let from_task = self.task_cx.as_ref().and_then(Cx::observable_cancel_reason);
+        if !panicked && from_task.is_none() {
+            return;
+        }
+        let contexts: Vec<Cx> = self
+            .set
+            .lock()
+            .slots
+            .iter()
+            .filter_map(|slot| slot.cx.clone())
+            .collect();
+        let fail_fast = panicked.then(|| {
+            CancelReason::new(CancelKind::FailFast).with_message("a sibling fiber panicked")
+        });
+        for cx in &contexts {
+            if let Some(reason) = &from_task {
+                cx.inherit_cancel(reason);
+            }
+            if let Some(reason) = &fail_fast {
+                cx.inherit_cancel(reason);
+            }
+        }
+    }
+
     /// Polls every ready fiber once. Returns whether any fiber is still live.
     fn poll_fibers(&self) -> bool {
+        self.propagate_cancellation();
         let ready = std::mem::take(&mut *self.queue.ready.lock());
         if ready.is_empty() {
             return self.set.lock().live > 0;
@@ -472,6 +563,7 @@ impl ScopeState<'_> {
                         index,
                         future: Some(future),
                         waker: slot.waker.take(),
+                        cx: slot.cx.clone(),
                         finished: false,
                     });
                 }
@@ -479,10 +571,13 @@ impl ScopeState<'_> {
         }
         for fiber in &mut running {
             if let (Some(future), Some(waker)) = (fiber.future.as_mut(), fiber.waker.as_ref()) {
+                // Inside the fiber, the ambient context is the fiber's own.
+                let current = fiber.cx.take().map(|cx| Cx::set_current(Some(cx)));
                 fiber.finished = future
                     .as_mut()
                     .poll(&mut Context::from_waker(waker))
                     .is_ready();
+                drop(current);
             }
         }
         let live = {
@@ -492,6 +587,7 @@ impl ScopeState<'_> {
                 let slot = &mut set.slots[fiber.index];
                 slot.waker = fiber.waker.take();
                 if fiber.finished {
+                    slot.cx = None;
                     set.free.push(fiber.index);
                     set.live -= 1;
                 } else {
@@ -502,6 +598,11 @@ impl ScopeState<'_> {
         };
         // `running` still owns the finished fibers, dropped here unlocked.
         drop(running);
+        // A fiber that panicked in this pass cancels its siblings now, so a
+        // sibling parked on cancellation wakes even if nothing else does.
+        if self.fiber_panicked.load(Ordering::Acquire) {
+            self.propagate_cancellation();
+        }
         live
     }
 
@@ -983,5 +1084,171 @@ mod tests {
             .await
         });
         assert_eq!(block_on(task), (0..64).map(|i| i * 2).sum::<usize>());
+    }
+
+    // --- Per-fiber cancellation (br-asupersync-issue65-criticisms-kpmoy5.3.1/.3.2) ---
+
+    /// Runs `future` with `task_cx` as the ambient context, outside any
+    /// runtime: the scope takes it as its task's context.
+    fn block_on_in<F: Future>(task_cx: &Cx, future: F) -> F::Output {
+        let _current = Cx::set_current(Some(task_cx.clone()));
+        futures_lite::future::block_on(future)
+    }
+
+    /// Runs `test` on a scratch thread and fails, instead of hanging, if a
+    /// cancellation it waits for never arrives.
+    fn within_watchdog<T: Send + 'static>(test: impl FnOnce() -> T + Send + 'static) -> T {
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(test());
+        });
+        match result.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(value) => value,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("a fiber waited 10 s for a cancellation that never reached it")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("the test thread panicked")
+            }
+        }
+    }
+
+    /// Resolves with the ambient context's cancellation reason (inside a
+    /// fiber, the fiber's own), parking on its cancel waker until then.
+    fn until_cancelled() -> impl Future<Output = CancelReason> {
+        poll_fn(|task_cx| {
+            let cx = Cx::current().expect("an ambient context");
+            if !cx.is_cancel_requested() {
+                cx.register_cancel_waker(task_cx.waker());
+                if !cx.is_cancel_requested() {
+                    return Poll::Pending;
+                }
+            }
+            Poll::Ready(
+                cx.cancel_reason()
+                    .expect("a cancelled context has a reason"),
+            )
+        })
+    }
+
+    #[test]
+    fn inside_a_fiber_the_ambient_context_is_the_fibers_own() {
+        let task_cx = Cx::for_testing();
+        let task_ref = &task_cx;
+        block_on_in(&task_cx, async {
+            scope(|s| async move {
+                s.spawn(async move {
+                    let fiber_cx = Cx::current().expect("the fiber's context");
+                    assert_eq!(fiber_cx.task_id(), task_ref.task_id(), "same task");
+                    assert_eq!(fiber_cx.region_id(), task_ref.region_id(), "same region");
+                    fiber_cx.cancel_with(CancelKind::User, Some("the fiber's own"));
+                    assert!(fiber_cx.is_cancel_requested());
+                })
+                .await
+                .expect("fiber");
+            })
+            .await;
+        });
+        assert!(
+            !task_cx.is_cancel_requested(),
+            "cancelling a fiber's context does not cancel the task"
+        );
+    }
+
+    #[test]
+    fn a_fiber_handle_cancels_only_its_fiber() {
+        let (first, second, task_cancelled) = within_watchdog(|| {
+            let task_cx = Cx::for_testing();
+            let (first, second) = block_on_in(&task_cx, async {
+                scope(|s| async move {
+                    let a = s.spawn(until_cancelled());
+                    let b = s.spawn(until_cancelled());
+                    a.cancel();
+                    let first = a.await.expect("a");
+                    assert_eq!(s.live(), 1, "b is still waiting");
+                    b.cancel();
+                    (first, b.await.expect("b"))
+                })
+                .await
+            });
+            (first, second, task_cx.is_cancel_requested())
+        });
+        assert_eq!(first.kind, CancelKind::User);
+        assert_eq!(second.kind, CancelKind::User);
+        assert!(!task_cancelled, "the task is not cancelled");
+    }
+
+    #[test]
+    fn the_tasks_cancellation_reaches_every_fiber() {
+        let reasons = within_watchdog(|| {
+            let task_cx = Cx::for_testing();
+            let task_ref = &task_cx;
+            block_on_in(&task_cx, async {
+                scope(|s| async move {
+                    let waiting: Vec<_> = (0..3).map(|_| s.spawn(until_cancelled())).collect();
+                    crate::runtime::yield_now().await;
+                    task_ref.cancel_with(CancelKind::Shutdown, Some("the task is cancelled"));
+                    let mut reasons = Vec::new();
+                    for handle in waiting {
+                        reasons.push(handle.await.expect("fiber"));
+                    }
+                    reasons
+                })
+                .await
+            })
+        });
+        assert_eq!(reasons.len(), 3);
+        for reason in reasons {
+            assert_eq!(reason.kind, CancelKind::Shutdown, "the task's own reason");
+        }
+    }
+
+    #[test]
+    fn a_fiber_started_after_the_task_was_cancelled_starts_cancelled() {
+        let reason = within_watchdog(|| {
+            let task_cx = Cx::for_testing();
+            task_cx.cancel_with(CancelKind::User, Some("cancelled before the fiber"));
+            block_on_in(&task_cx, async {
+                scope(|s| async move { s.spawn(until_cancelled()).await.expect("fiber") }).await
+            })
+        });
+        assert_eq!(reason.kind, CancelKind::User);
+    }
+
+    #[test]
+    fn a_panicking_fiber_cancels_its_siblings() {
+        let (panicked, sibling, task_cancelled) = within_watchdog(|| {
+            let task_cx = Cx::for_testing();
+            let (panicked, sibling) = block_on_in(&task_cx, async {
+                scope(|s| async move {
+                    let sibling = s.spawn(until_cancelled());
+                    let failing = s.spawn(async {
+                        crate::runtime::yield_now().await;
+                        panic!("this fiber fails");
+                    });
+                    let panicked = failing.await.is_err();
+                    (panicked, sibling.await.expect("sibling"))
+                })
+                .await
+            });
+            (panicked, sibling, task_cx.is_cancel_requested())
+        });
+        assert!(panicked, "the failing fiber's handle reports its panic");
+        assert_eq!(
+            sibling.kind,
+            CancelKind::FailFast,
+            "fail-fast sibling cancel"
+        );
+        assert!(!task_cancelled, "the task is not cancelled");
+    }
+
+    #[test]
+    fn without_a_task_context_fibers_run_without_one() {
+        let ran = futures_lite::future::block_on(scope(|s| async move {
+            let handle = s.spawn(async { Cx::current().is_none() });
+            handle.cancel();
+            handle.await.expect("fiber")
+        }));
+        assert!(ran, "no ambient context, and cancel() is a no-op");
     }
 }
