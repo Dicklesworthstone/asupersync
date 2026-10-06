@@ -760,15 +760,18 @@ impl OwnedReadHalf {
             other.last_waiter = None;
             other.shutdown_on_drop = false;
 
-            let (registration, waiters) = {
+            // The fallback flag travels with the registration, so one the halves
+            // made on the fallback driver still migrates (br-asupersync-8vrx8q).
+            let (registration, on_fallback, waiters) = {
                 let mut state = self.inner.state.lock();
                 let waiters = take_all_waiters(&mut state);
-                (state.registration.take(), waiters)
+                let on_fallback = std::mem::replace(&mut state.registration_on_fallback, false);
+                (state.registration.take(), on_fallback, waiters)
             };
             drop(waiters);
             Ok(super::UnixStream::from_parts(
                 self.inner.stream.clone(),
-                registration,
+                (registration, on_fallback),
             ))
         } else {
             Err(ReuniteError(self, other))
@@ -1098,6 +1101,50 @@ mod tests {
                 driver.waker_count(),
                 1,
                 "the ambient driver now owns the halves' combined waker"
+            );
+        }
+
+        /// Reuniting halves parked on the fallback driver keeps that fact, so
+        /// the reunited stream still hands its registration to the ambient
+        /// driver once polled under a `Cx` that has one. reunite dropped the
+        /// flag, and the stream stayed on the fallback driver for good
+        /// (br-asupersync-8vrx8q).
+        #[test]
+        fn reunited_stream_migrates_a_fallback_registration_to_the_ambient_driver() {
+            assert!(Cx::current().is_none());
+            let (mut read_half, write_half, _peer) = split_pair();
+            let (_signal, waker, _rx) = signal_waker();
+            let mut task_cx = Context::from_waker(&waker);
+            let mut buf = [0u8; 8];
+            assert!(matches!(
+                poll_read_once(&mut read_half, &mut task_cx, &mut buf),
+                Poll::Pending
+            ));
+            assert!(read_half.inner.state.lock().registration_on_fallback);
+            let mut stream = read_half
+                .reunite(write_half)
+                .expect("halves of one stream reunite");
+
+            let driver = IoDriverHandle::new(Arc::new(LabReactor::new()));
+            let ambient = Cx::new_with_observability(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(0, 0),
+                Budget::INFINITE,
+                None,
+                Some(driver.clone()),
+                None,
+            );
+            let _guard = Cx::set_current(Some(ambient));
+            let mut read_buf = ReadBuf::new(&mut buf);
+            assert!(
+                Pin::new(&mut stream)
+                    .poll_read(&mut task_cx, &mut read_buf)
+                    .is_pending()
+            );
+            assert_eq!(
+                driver.waker_count(),
+                1,
+                "the ambient driver takes over the reunited stream's registration"
             );
         }
 

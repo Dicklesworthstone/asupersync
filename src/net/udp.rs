@@ -1808,13 +1808,28 @@ impl ReactorRegistration {
         }
     }
 
-    /// Adopts a registration handed over by another owner of the same fd
-    /// (split halves reuniting, a completed connect). It is treated as living
-    /// on an ambient driver: it is re-armed in place and never migrated.
+    /// Adopts a registration handed over by another owner of the same fd (a
+    /// completed connect). It is treated as living on an ambient driver: it is
+    /// re-armed in place and never migrated.
     pub(crate) const fn from_registration(registration: Option<IoRegistration>) -> Self {
         Self {
             registration,
             on_fallback: false,
+            #[cfg(unix)]
+            shared_waiters: None,
+        }
+    }
+
+    /// Adopts a registration and its fallback flag, as
+    /// [`take_parts`](Self::take_parts) hands them over (split halves
+    /// reuniting). A registration on the fallback driver still migrates to an
+    /// ambient driver later. Through `from_registration` it stayed on the
+    /// fallback driver for good (br-asupersync-8vrx8q).
+    pub(crate) fn from_parts(parts: (Option<IoRegistration>, bool)) -> Self {
+        let (registration, on_fallback) = parts;
+        Self {
+            registration,
+            on_fallback,
             #[cfg(unix)]
             shared_waiters: None,
         }

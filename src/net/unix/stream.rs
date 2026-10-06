@@ -203,11 +203,11 @@ impl UnixStream {
     #[must_use]
     pub(crate) fn from_parts(
         inner: Arc<net::UnixStream>,
-        registration: Option<IoRegistration>,
+        registration: (Option<IoRegistration>, bool),
     ) -> Self {
         Self {
             inner,
-            registration: Mutex::new(ReactorRegistration::from_registration(registration)),
+            registration: Mutex::new(ReactorRegistration::from_parts(registration)),
         }
     }
 
