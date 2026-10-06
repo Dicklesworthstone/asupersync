@@ -1641,6 +1641,11 @@ fn evaluate_consumer_decision(
     }
 }
 
+/// Committed and aborted delivery obligations a consumer's ledger keeps
+/// queryable. Older ones are dropped, so the ledger stays bounded however many
+/// deliveries the consumer makes (br-asupersync-rrtgoy).
+const FABRIC_CONSUMER_RESOLVED_OBLIGATIONS: usize = 4096;
+
 /// High-level policy-driven consumer engine layered on top of cursor leases.
 #[derive(Debug)]
 pub struct FabricConsumer {
@@ -1680,7 +1685,7 @@ impl FabricConsumer {
             cursor: FabricConsumerCursor::new(cell)?,
             config,
             owner,
-            ledger: ObligationLedger::new(),
+            ledger: ObligationLedger::with_resolved_retention(FABRIC_CONSUMER_RESOLVED_OBLIGATIONS),
             policy: FabricConsumerDeliveryPolicy::default(),
             state: FabricConsumerState::default(),
             pending_ack_tokens: BTreeMap::new(),
@@ -5115,6 +5120,41 @@ mod tests {
         assert_eq!(committed.state, crate::record::ObligationState::Committed);
         assert_eq!(consumer.obligation_stats().pending, 0);
         assert_eq!(consumer.obligation_stats().total_committed, 1);
+    }
+
+    /// A long-running consumer's ledger stays bounded. It used to keep one
+    /// record per delivery forever, and its index space ran out after
+    /// u32::MAX deliveries. Committed records past the retention are dropped,
+    /// and the counters still count every delivery (br-asupersync-rrtgoy).
+    #[test]
+    fn fabric_consumer_ledger_stays_bounded_across_many_deliveries() {
+        let cell = test_cell();
+        let mut consumer =
+            FabricConsumer::new(&cell, FabricConsumerConfig::default()).expect("consumer");
+        let deliveries = u64::try_from(FABRIC_CONSUMER_RESOLVED_OBLIGATIONS).unwrap() + 8;
+        let mut first = None;
+        for sequence in 1..=deliveries {
+            let window = SequenceWindow::new(sequence, sequence).expect("window");
+            let capsule = RecoverableCapsule::default().with_window(NodeId::new("node-a"), window);
+            let delivery = consumer
+                .dispatch_push(window, &capsule, None)
+                .expect("dispatch");
+            first.get_or_insert(delivery.attempt.obligation_id);
+            assert!(matches!(
+                consumer.acknowledge_delivery(&delivery.attempt),
+                Ok(AckResolution::Committed { .. })
+            ));
+        }
+        assert_eq!(consumer.ledger.len(), FABRIC_CONSUMER_RESOLVED_OBLIGATIONS);
+        assert!(
+            consumer.ledger.get(first.expect("a delivery")).is_none(),
+            "the oldest delivery's record is dropped"
+        );
+        let stats = consumer.obligation_stats();
+        assert_eq!(
+            (stats.total_acquired, stats.total_committed, stats.pending),
+            (deliveries, deliveries, 0)
+        );
     }
 
     #[test]

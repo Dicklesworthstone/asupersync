@@ -25,7 +25,7 @@ use crate::record::{
 };
 use crate::types::{ObligationId, RegionId, TaskId, Time};
 use crate::util::ArenaIndex;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Error returned when a fallible ledger transition arrives after region finalization.
 ///
@@ -455,6 +455,12 @@ pub struct ObligationLedger {
     /// `BTreeSet<RegionId>` keeps iteration deterministic for the
     /// audit/snapshot paths.
     finalized_regions: BTreeSet<RegionId>,
+    /// How many committed or aborted records stay queryable; `None` keeps
+    /// every record (see [`Self::with_resolved_retention`]).
+    resolved_retention: Option<usize>,
+    /// Committed and aborted ids in resolution order, oldest first. Only a
+    /// ledger with a bounded retention records them.
+    resolved_order: VecDeque<ObligationId>,
 }
 
 impl Default for ObligationLedger {
@@ -548,6 +554,7 @@ impl ObligationLedger {
             record.resolve_with(now, resolution)
         };
         self.finish_resolution(operation, resolution)?;
+        self.retain_resolved(token.id, resolution);
         Ok(duration)
     }
 
@@ -563,7 +570,26 @@ impl ObligationLedger {
             record.resolve_with(now, resolution)
         };
         self.finish_resolution(operation, resolution)?;
+        self.retain_resolved(id, resolution);
         Ok(duration)
+    }
+
+    /// Under a bounded retention, records a commit or abort and drops the
+    /// oldest committed or aborted records past the bound. Leaked records are
+    /// never dropped: leak diagnostics read them.
+    fn retain_resolved(&mut self, id: ObligationId, resolution: ObligationResolution) {
+        let Some(limit) = self.resolved_retention else {
+            return;
+        };
+        if matches!(resolution, ObligationResolution::Leak) {
+            return;
+        }
+        self.resolved_order.push_back(id);
+        while self.resolved_order.len() > limit {
+            if let Some(oldest) = self.resolved_order.pop_front() {
+                self.obligations.remove(&oldest);
+            }
+        }
     }
 
     /// Creates an empty ledger.
@@ -575,6 +601,36 @@ impl ObligationLedger {
             generation: 0,
             stats: LedgerStats::default(),
             finalized_regions: BTreeSet::new(),
+            resolved_retention: None,
+            resolved_order: VecDeque::new(),
+        }
+    }
+
+    /// Creates an empty ledger that keeps at most `limit` committed or aborted
+    /// records (br-asupersync-rrtgoy).
+    ///
+    /// A ledger from [`Self::new`] keeps every record it ever created, so a
+    /// long-lived owner that acquires one obligation per operation (a
+    /// messaging consumer, one per delivery) grows without bound, and every
+    /// full scan grows with it. This ledger instead drops the oldest committed
+    /// or aborted record once more than `limit` of them exist:
+    ///
+    /// - Pending and leaked records are always kept. Region drains and leak
+    ///   diagnostics read them.
+    /// - [`Self::stats`] counts every obligation ever acquired, committed,
+    ///   aborted or leaked, as before. Record queries ([`Self::get`],
+    ///   [`Self::obligation_state`], [`Self::counts`], [`Self::audit`],
+    ///   [`Self::iter`]) see only the retained records, and a dropped id reads
+    ///   as absent.
+    /// - When a generation's index space is exhausted, the ledger moves to the
+    ///   next generation instead of failing with
+    ///   [`LedgerError::IndexOverflow`]. Ids stay unique because they carry
+    ///   the generation.
+    #[must_use]
+    pub fn with_resolved_retention(limit: usize) -> Self {
+        Self {
+            resolved_retention: Some(limit),
+            ..Self::new()
         }
     }
 
@@ -713,6 +769,17 @@ impl ObligationLedger {
                 kind,
                 holder,
             });
+        }
+
+        // A bounded ledger moves to the next generation when this one's index
+        // space runs out; it no longer holds every id it issued, so it must not
+        // stop working after u32::MAX acquisitions (br-asupersync-rrtgoy).
+        if self.next_index == u32::MAX && self.resolved_retention.is_some() {
+            self.generation = self
+                .generation
+                .checked_add(1)
+                .ok_or(LedgerError::GenerationOverflow)?;
+            self.next_index = 0;
         }
 
         // Check for index overflow
@@ -1349,6 +1416,7 @@ impl ObligationLedger {
             "cannot reset obligation ledger with leaked obligations"
         );
         self.obligations.clear();
+        self.resolved_order.clear();
         self.finalized_regions.clear();
         self.stats = LedgerStats::default();
         self.next_index = 0;
@@ -4252,5 +4320,115 @@ mod tests {
 
         assert_eq!(ledger.stats().total_aborted, 0);
         assert_eq!(ledger.stats().pending, 1);
+    }
+
+    /// A bounded ledger drops its oldest committed and aborted records and
+    /// keeps counting every obligation (br-asupersync-rrtgoy).
+    #[test]
+    fn bounded_ledger_drops_the_oldest_resolved_records() {
+        init_test("bounded_ledger_drops_the_oldest_resolved_records");
+        let mut ledger = ObligationLedger::with_resolved_retention(4);
+        let task = make_task();
+        let region = make_region();
+        let mut ids = Vec::new();
+        for i in 0..10_u64 {
+            let token = ledger.acquire(ObligationKind::Ack, task, region, Time::from_nanos(i));
+            ids.push(token.id());
+            if i % 2 == 0 {
+                ledger.commit(token, Time::from_nanos(i));
+            } else {
+                ledger.abort(token, Time::from_nanos(i), ObligationAbortReason::Cancel);
+            }
+        }
+        assert_eq!(
+            ledger.len(),
+            4,
+            "the retention's worth of resolved records stays"
+        );
+        assert!(ledger.get(ids[5]).is_none(), "older records are dropped");
+        assert_eq!(
+            ledger.obligation_state(ids[6]),
+            Some(ObligationState::Committed)
+        );
+        assert_eq!(
+            ledger.obligation_state(ids[9]),
+            Some(ObligationState::Aborted)
+        );
+        let stats = ledger.stats();
+        assert_eq!(
+            (
+                stats.total_acquired,
+                stats.total_committed,
+                stats.total_aborted,
+                stats.pending
+            ),
+            (10, 5, 5, 0)
+        );
+        assert_eq!(ledger.counts().total(), 4);
+        crate::test_complete!("bounded_ledger_drops_the_oldest_resolved_records");
+    }
+
+    /// Pending and leaked records stay in a bounded ledger whatever its
+    /// retention; a region drain still finds the pending ones.
+    #[test]
+    fn bounded_ledger_keeps_pending_and_leaked_records() {
+        init_test("bounded_ledger_keeps_pending_and_leaked_records");
+        let mut ledger = ObligationLedger::with_resolved_retention(0);
+        let task = make_task();
+        let region = make_region();
+        let pending = ledger.acquire(ObligationKind::Lease, task, region, Time::ZERO);
+        let pending_id = pending.id();
+        let leaked = ledger.acquire(ObligationKind::Ack, task, region, Time::ZERO);
+        let leaked_id = leaked.id();
+        let committed = ledger.acquire(ObligationKind::Ack, task, region, Time::ZERO);
+        let committed_id = committed.id();
+        ledger.commit(committed, Time::from_nanos(1));
+        ledger.mark_leaked(leaked_id, Time::from_nanos(2));
+        assert!(
+            ledger.get(committed_id).is_none(),
+            "a zero retention drops a commit at once"
+        );
+        assert_eq!(
+            ledger.obligation_state(leaked_id),
+            Some(ObligationState::Leaked)
+        );
+        assert_eq!(
+            ledger.obligation_state(pending_id),
+            Some(ObligationState::Reserved)
+        );
+        let drained = ledger.abort_pending_for_region(
+            region,
+            Time::from_nanos(3),
+            ObligationAbortReason::Cancel,
+        );
+        assert_eq!(drained.aborted, 1, "the drain finds the pending record");
+        assert!(ledger.get(pending_id).is_none());
+        assert_eq!(ledger.len(), 1, "only the leaked record remains");
+        crate::test_complete!("bounded_ledger_keeps_pending_and_leaked_records");
+    }
+
+    /// A bounded ledger moves to the next generation when its index space is
+    /// exhausted; a ledger from new() still reports IndexOverflow.
+    #[test]
+    fn bounded_ledger_moves_to_the_next_generation_when_its_index_space_runs_out() {
+        init_test("bounded_ledger_moves_to_the_next_generation_when_its_index_space_runs_out");
+        let task = make_task();
+        let region = make_region();
+        let mut bounded = ObligationLedger::with_resolved_retention(8);
+        bounded.next_index = u32::MAX;
+        let token = bounded.acquire(ObligationKind::Ack, task, region, Time::ZERO);
+        let idx = token.id().arena_index();
+        assert_eq!((idx.index(), idx.generation()), (0, 1));
+        bounded.commit(token, Time::from_nanos(1));
+
+        let mut unbounded = ObligationLedger::new();
+        unbounded.next_index = u32::MAX;
+        assert!(matches!(
+            unbounded.try_acquire(ObligationKind::Ack, task, region, Time::ZERO),
+            Err(LedgerError::IndexOverflow { generation: 0 })
+        ));
+        crate::test_complete!(
+            "bounded_ledger_moves_to_the_next_generation_when_its_index_space_runs_out"
+        );
     }
 }
