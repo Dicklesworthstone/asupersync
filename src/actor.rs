@@ -584,7 +584,7 @@ impl<M: Send + 'static> ActorRef<M> {
 pub struct MailboxConfig {
     /// Maximum number of messages the mailbox can hold.
     pub capacity: usize,
-    /// Whether to use backpressure (block senders) or drop oldest messages.
+    /// Reserved: no spawn API reads it. Actor mailboxes never drop a message.
     pub backpressure: bool,
 }
 
@@ -627,7 +627,7 @@ pub enum SupervisorMessage {
 
 /// Actor-specific capability context extending [`Cx`].
 ///
-/// Provides actors with access to:
+/// No spawn API hands one to an actor yet (handlers get `&Cx`). It offers:
 /// - Self-reference for tell() patterns
 /// - Child management for supervision
 /// - Self-termination controls
@@ -748,8 +748,8 @@ impl<'a, M: Send + 'static> ActorContext<'a, M> {
 
     /// Request this actor to stop gracefully.
     ///
-    /// Sets the stopping flag. The actor loop will exit after the current
-    /// message is processed and the mailbox is drained.
+    /// Sets the stopping flag that this context's `checkpoint` and `is_stopping`
+    /// report. No actor loop reads it: spawned actors get `&Cx`, not a context.
     pub fn stop_self(&mut self) {
         self.stopping = true;
     }
