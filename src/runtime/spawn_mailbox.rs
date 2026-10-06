@@ -867,10 +867,11 @@ impl LocalSpawnRequest {
             admitted_slot,
             ..
         } = self;
-        drop(factory);
+        contain_denied_cleanup(move || drop(factory));
         let requested = admitted_slot.as_ref().and_then(unadmitted_cancel_reason);
         if let Some(slot) = on_unadmitted_cancel {
-            slot(strengthen_with_requested_reason(reason, requested.as_ref()));
+            let reason = strengthen_with_requested_reason(reason, requested.as_ref());
+            contain_denied_cleanup(move || slot(reason));
         }
         drop(pending_reservation);
     }
@@ -889,16 +890,16 @@ impl LocalSpawnRequest {
             admitted_slot,
             ..
         } = self;
-        drop(factory);
+        contain_denied_cleanup(move || drop(factory));
         let requested = admitted_slot.as_ref().and_then(unadmitted_cancel_reason);
         let requested_failure = requested_admission_failure_reason(&error, requested.as_ref());
         match (requested_failure, on_unadmitted_cancel, on_admission_error) {
-            (Some(reason), Some(slot), _) => slot(reason),
-            (_, _, Some(slot)) => slot(error),
+            (Some(reason), Some(slot), _) => contain_denied_cleanup(move || slot(reason)),
+            (_, _, Some(slot)) => contain_denied_cleanup(move || slot(error)),
             (None, Some(slot), None) => {
                 let mut reason = CancelReason::user("spawn admission failed");
                 reason.message = Some(error.to_string());
-                slot(reason);
+                contain_denied_cleanup(move || slot(reason));
             }
             (_, None, None) => {}
         }
@@ -1301,10 +1302,11 @@ impl SpawnRequestParts {
             admitted_slot,
             ..
         } = self;
-        drop(payload);
+        contain_denied_cleanup(move || drop(payload));
         let requested = admitted_slot.as_ref().and_then(unadmitted_cancel_reason);
         if let Some(slot) = on_unadmitted_cancel {
-            slot(strengthen_with_requested_reason(reason, requested.as_ref()));
+            let reason = strengthen_with_requested_reason(reason, requested.as_ref());
+            contain_denied_cleanup(move || slot(reason));
         }
         drop(pending_reservation);
     }
@@ -1324,16 +1326,31 @@ impl SpawnRequestParts {
             admitted_slot,
             ..
         } = self;
-        drop(payload);
+        contain_denied_cleanup(move || drop(payload));
         let requested = admitted_slot.as_ref().and_then(unadmitted_cancel_reason);
         let requested_failure = requested_admission_failure_reason(&error, requested.as_ref());
         match (requested_failure, on_unadmitted_cancel, on_admission_error) {
-            (Some(reason), Some(slot), _) => slot(reason),
-            (_, _, Some(slot)) => slot(error),
-            (None, Some(slot), None) => slot(CancelReason::user("spawn admission failed")),
+            (Some(reason), Some(slot), _) => contain_denied_cleanup(move || slot(reason)),
+            (_, _, Some(slot)) => contain_denied_cleanup(move || slot(error)),
+            (None, Some(slot), None) => contain_denied_cleanup(move || {
+                slot(CancelReason::user("spawn admission failed"));
+            }),
             (_, None, None) => {}
         }
         drop(pending_reservation);
+    }
+}
+
+/// Runs one step of a denied request's resolution that can reach user code:
+/// dropping the captured future (a capture's `Drop`, such as an unconsumed
+/// `ObligationToken`, may panic) or invoking its completion slot (which wakes
+/// joiners). A panic there used to skip the completion slot, so the handle's
+/// join never resolved, and to unwind out of the worker's admission drain,
+/// killing the worker. The panic payload is forgotten: it may itself panic on
+/// destruction (br-asupersync-01oghn).
+fn contain_denied_cleanup(cleanup: impl FnOnce()) {
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(cleanup)) {
+        std::mem::forget(payload);
     }
 }
 
@@ -2539,6 +2556,59 @@ mod tests {
             reason.message,
             Some("region closed before admission".into())
         );
+    }
+
+    /// A denied request whose captured state panics on drop still fires
+    /// its completion slot and releases its region credit, and the panic
+    /// does not escape into the admission drain.
+    #[test]
+    fn a_denied_request_with_a_panicking_capture_still_resolves() {
+        struct PanicsOnDrop;
+        impl Drop for PanicsOnDrop {
+            fn drop(&mut self) {
+                panic!("captured state panics on drop");
+            }
+        }
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let handle = state
+            .region(root)
+            .expect("root region exists")
+            .pending_spawn_handle();
+        let mailbox = SpawnMailbox::new();
+        for failed in [false, true] {
+            let id = mailbox.allocate_task_id();
+            let capture = PanicsOnDrop;
+            let fired = Arc::new(AtomicUsize::new(0));
+            let in_slot = Arc::clone(&fired);
+            let req = SpawnRequest::new(
+                id,
+                root,
+                Budget::new(),
+                StoredTask::new_with_id(
+                    async move {
+                        let _capture = capture;
+                        Outcome::Ok(())
+                    },
+                    id,
+                ),
+            )
+            .with_pending_reservation(handle.reserve())
+            .with_unadmitted_cancel(Box::new(move |_reason| {
+                in_slot.fetch_add(1, Ordering::SeqCst);
+            }));
+            let resolved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if failed {
+                    req.into_parts()
+                        .resolve_failed(crate::runtime::state::SpawnError::RegionClosed(root));
+                } else {
+                    req.resolve_cancelled(CancelReason::new(CancelKind::ParentCancelled));
+                }
+            }));
+            assert!(resolved.is_ok(), "the capture's panic is contained");
+            assert_eq!(fired.load(Ordering::SeqCst), 1, "the completion slot fired");
+            assert_eq!(handle.count(), 0, "the region credit is released");
+        }
     }
 
     #[test]
