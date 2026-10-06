@@ -59,6 +59,7 @@ pub struct BulkheadPolicy {
     pub queue_timeout: Duration,
 
     /// Enable weighted permits (operations can require multiple permits).
+    /// Not read: `call_weighted` takes any weight whether or not this is set.
     pub weighted: bool,
 
     /// Callback when permits exhausted.

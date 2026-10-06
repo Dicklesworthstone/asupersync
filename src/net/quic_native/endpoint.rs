@@ -45,7 +45,8 @@ pub struct QuicUdpEndpointConfig {
     pub socket_send_buffer_size: Option<usize>,
     /// Maximum batch size for packet operations.
     pub max_batch_size: usize,
-    /// Whether to enable packet timestamping if supported.
+    /// Whether to enable packet timestamping if supported. Not applied yet:
+    /// the endpoint requests no timestamps whatever the value.
     pub enable_timestamping: bool,
 }
 

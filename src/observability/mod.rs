@@ -774,7 +774,7 @@ impl ObservabilityConfig {
         self
     }
 
-    /// Sets whether to trace all symbols.
+    /// Sets whether to trace all symbols. Not read by the runtime.
     #[must_use]
     pub fn with_trace_all_symbols(mut self, trace: bool) -> Self {
         self.trace_all_symbols = trace;
@@ -782,6 +782,9 @@ impl ObservabilityConfig {
     }
 
     /// Sets the sampling rate for traces.
+    ///
+    /// The runtime does not sample: the rate applies only where your code
+    /// calls [`Self::should_sample`].
     ///
     /// # Panics
     ///
@@ -817,7 +820,8 @@ impl ObservabilityConfig {
         self
     }
 
-    /// Sets whether to enable metrics collection.
+    /// Sets whether to enable metrics collection. The runtime does not read
+    /// it; it only decides what [`Self::create_metrics`] returns.
     #[must_use]
     pub fn with_metrics_enabled(mut self, enabled: bool) -> Self {
         self.metrics_enabled = enabled;
@@ -916,7 +920,9 @@ impl ObservabilityConfig {
 
     /// Returns a production-oriented configuration.
     ///
-    /// Minimal logging, sampled tracing, metrics enabled.
+    /// Minimal logging, sampled tracing, metrics enabled. The 1% sample rate
+    /// takes effect only where your code calls [`Self::should_sample`]; the
+    /// runtime itself samples nothing.
     #[must_use]
     pub fn production() -> Self {
         Self::new()
