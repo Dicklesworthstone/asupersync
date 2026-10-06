@@ -855,8 +855,8 @@ impl<T> Sender<T> {
     /// Returns `Ok(None)` if the value was sent without eviction,
     /// `Ok(Some(evicted))` if the oldest message was evicted to make room,
     /// `Err(SendError::Full(value))` if all capacity is consumed by reserved
-    /// slots, or if a queued waiter already owns the next free slot and there
-    /// is nothing evictable to displace, or
+    /// slots, or if a queued waiter owns the next free slot (the slot stays
+    /// the waiter's and nothing is evicted, even when messages are queued), or
     /// `Err(SendError::Disconnected(value))` if the receiver has dropped.
     ///
     /// This is used by the `DropOldest` backpressure policy. The evicted
@@ -871,10 +871,10 @@ impl<T> Sender<T> {
     ///
     /// Returns `Ok(None)` if the value was sent without eviction,
     /// `Ok(Some(evicted))` if a matching queued message was evicted to make room,
-    /// `Err(SendError::Full(value))` if the channel is physically full, or
-    /// logically full because a queued waiter owns the next free slot, and no
-    /// matching queued message is evictable, or `Err(SendError::Disconnected(value))`
-    /// if the receiver has dropped.
+    /// `Err(SendError::Full(value))` if a queued waiter owns the next free slot
+    /// (the slot stays the waiter's and nothing is evicted), or if the channel
+    /// is physically full and no matching queued message is evictable, or
+    /// `Err(SendError::Disconnected(value))` if the receiver has dropped.
     ///
     /// `predicate` runs while the channel's lock is held: it must not use this
     /// channel (that deadlocks), and a slow predicate stalls every sender and
