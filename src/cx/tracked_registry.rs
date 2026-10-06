@@ -24,6 +24,8 @@ use crate::runtime::obligation_mailbox::{
 };
 use crate::types::{RegionId, TaskId, Time};
 use parking_lot::Mutex;
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 /// Refusal of a runtime-accounted name operation.
@@ -40,6 +42,8 @@ pub enum TrackedNameError {
     Admission(ObligationAdmissionError),
     /// This registry already belongs to a different runtime's identity domain.
     DifferentRuntime,
+    /// A deadline-bearing wait requires the admitting context's timer driver.
+    TimerRequired,
     /// The canonical registry refused the operation.
     Registry(NameLeaseError),
     /// Cleanup freed the name, but the runtime did not accept settlement.
@@ -55,6 +59,7 @@ impl std::fmt::Display for TrackedNameError {
             Self::UnscopedRegion => f.write_str("a name lease requires a non-sentinel region"),
             Self::Admission(error) => write!(f, "name obligation admission: {error}"),
             Self::DifferentRuntime => f.write_str("name registry belongs to a different runtime"),
+            Self::TimerRequired => f.write_str("name wait deadline requires an explicit timer driver"),
             Self::Registry(error) => std::fmt::Display::fmt(error, f),
             Self::SettlementRejected => f.write_str("name removed but runtime settlement refused"),
         }
@@ -83,6 +88,7 @@ pub struct TrackedNameRegistry {
     // Preserve the identity allocation, not the runtime or its queued resources.
     // An expired binding is NOT vacant: rebinding would alias reused task IDs.
     runtime: Arc<Mutex<Option<Weak<ObligationMailbox>>>>,
+    waiters: Arc<Mutex<BTreeMap<String, NameWaitEntry>>>,
 }
 
 impl Default for TrackedNameRegistry {
@@ -100,6 +106,7 @@ impl TrackedNameRegistry {
         Self {
             inner: Arc::new(Mutex::new(NameRegistry::new())),
             runtime: Arc::new(Mutex::new(None)),
+            waiters: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -121,7 +128,7 @@ impl TrackedNameRegistry {
     /// mutation. Cancellation or holder retirement during an admission callback
     /// refuses publication. On collision the unused quota is returned synchronously.
     /// All admission and settlement notifications run outside the registry lock.
-    /// The first admitted operation binds every clone to that runtime; a later
+    /// The first live acquisition attempt binds every clone to that runtime; a later
     /// runtime cannot reuse this registry even after all names have been removed.
     pub fn register(
         &self,
@@ -162,6 +169,104 @@ impl TrackedNameRegistry {
             None => {
                 *binding = Some(identity);
                 Ok(())
+            }
+        }
+    }
+
+    /// Waits for a name, then publishes it with checked runtime accounting.
+    ///
+    /// This is [`Self::reserve_wait`] followed by [`TrackedNamePermit::commit`].
+    /// Contenders compete on wake; this does not promise FIFO acquisition.
+    pub async fn register_wait(
+        &self,
+        cx: &Cx,
+        name: impl Into<String>,
+    ) -> Result<TrackedNameLease, TrackedNameError> {
+        self.reserve_wait(cx, name).await?.commit()
+    }
+
+    fn subscribe<'a>(&'a self, name: &'a str) -> NameInterest<'a> {
+        let mut waiters = self.waiters.lock();
+        let entry = waiters.entry(name.to_owned()).or_insert_with(|| NameWaitEntry {
+            users: 0,
+            signal: Arc::new(NameAvailability::default()),
+        });
+        entry.users = entry.users.checked_add(1).expect("name waiter count overflow");
+        NameInterest {
+            waiters: &self.waiters,
+            name,
+            signal: Arc::clone(&entry.signal),
+        }
+    }
+
+    // Call only AFTER removing ownership, with no registry lock held. The
+    // returned guard signals after quota settlement, including notifier unwind.
+    fn publish_availability(&self, name: &str) -> Option<NameChanged> {
+        self.waiters.lock().get(name).map(|entry| NameChanged(Arc::clone(&entry.signal)))
+    }
+}
+
+#[derive(Debug)]
+struct NameWaitEntry {
+    users: usize,
+    signal: Arc<NameAvailability>,
+}
+
+#[derive(Debug, Default)]
+struct NameAvailability {
+    epoch: AtomicU64,
+    notify: crate::sync::Notify,
+}
+
+// Subscription state is per NAME, not per release across the entire registry.
+// Dropping the last interested future removes the entry, even if a detached
+// notifier still holds a signal Arc. No cancelled-name tombstones accumulate.
+struct NameInterest<'a> {
+    waiters: &'a Mutex<BTreeMap<String, NameWaitEntry>>,
+    name: &'a str,
+    signal: Arc<NameAvailability>,
+}
+
+impl NameInterest<'_> {
+    fn changed(&self, epoch: u64) -> impl std::future::Future<Output = ()> + '_ {
+        self.signal.notify.wait_until(move || self.signal.epoch.load(Ordering::Acquire) != epoch)
+    }
+}
+
+impl Drop for NameInterest<'_> {
+    fn drop(&mut self) {
+        let retired = {
+            let mut waiters = self.waiters.lock();
+            let remove = if let Some(entry) = waiters.get_mut(self.name) {
+                if Arc::ptr_eq(&entry.signal, &self.signal) {
+                    entry.users -= 1;
+                    entry.users == 0
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if remove { waiters.remove(self.name) } else { None }
+        };
+        drop(retired);
+    }
+}
+
+struct NameChanged(Arc<NameAvailability>);
+
+impl Drop for NameChanged {
+    fn drop(&mut self) {
+        self.0.epoch.fetch_add(1, Ordering::Release);
+        let unwinding = std::thread::panicking();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.0.notify.notify_waiters();
+        }));
+        if let Err(payload) = result {
+            if unwinding {
+                std::mem::forget(payload);
+            } else {
+                std::panic::resume_unwind(payload);
             }
         }
     }
@@ -241,6 +346,11 @@ impl TrackedNameLease {
         // There are no raw waiters in this private registry, so removal needs
         // no fresh clock callback. Never run user/runtime callbacks under it.
         let result = grade.and(removed).map_err(TrackedNameError::Registry);
+        let _changed = if result.is_ok() {
+            self.registry.publish_availability(lease.name())
+        } else {
+            None
+        };
         let token = self.obligation.take().expect("name guard owns runtime credit");
         let accepted = match (abort, result.is_ok()) {
             (None, true) => token.commit(),
