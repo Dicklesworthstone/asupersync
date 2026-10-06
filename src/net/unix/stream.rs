@@ -877,16 +877,24 @@ fn recvmsg_with_raw_ancillary(
         };
 
         let mut received_fds = Vec::new();
+        // End of the control bytes the kernel actually wrote.
+        let control_end = msg
+            .msg_control
+            .addr()
+            .saturating_add(usize::try_from(msg.msg_controllen).unwrap_or(0));
         let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
         while !cmsg.is_null() {
-            let header = &*cmsg;
+            // The control buffer is a byte buffer: read the header unaligned.
+            let header = std::ptr::read_unaligned(cmsg);
             if header.cmsg_level == libc::SOL_SOCKET && header.cmsg_type == libc::SCM_RIGHTS {
                 let header_len = libc::CMSG_LEN(0) as usize;
                 let cmsg_len = header.cmsg_len as usize;
                 if cmsg_len >= header_len {
-                    let payload_len = cmsg_len - header_len;
-                    let fd_count = payload_len / std::mem::size_of::<RawFd>();
                     let data = libc::CMSG_DATA(cmsg).cast::<RawFd>();
+                    let fd_count = scm_rights_fd_count(
+                        cmsg_len - header_len,
+                        control_end.saturating_sub(data.addr()),
+                    );
                     for index in 0..fd_count {
                         let received_fd = std::ptr::read_unaligned(data.add(index));
                         if received_fd >= 0 {
@@ -914,6 +922,16 @@ fn recvmsg_with_raw_ancillary(
     };
 
     Ok((bytes, received_fds, truncated))
+}
+
+/// Descriptors an SCM_RIGHTS message carries within the control bytes the
+/// kernel copied: `payload_len` is what its header claims, `available` the
+/// bytes from its payload to the kernel-written end of the control buffer.
+/// XNU and FreeBSD keep the sender's `cmsg_len` when MSG_CTRUNC cut the
+/// payload, so counting from the header alone read past the buffer and
+/// returned garbage as descriptors (br-asupersync-8vrx8q).
+fn scm_rights_fd_count(payload_len: usize, available: usize) -> usize {
+    payload_len.min(available) / std::mem::size_of::<RawFd>()
 }
 
 impl UnixStream {
@@ -1642,6 +1660,20 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("connect must return rather than wait for a connection that never comes");
         assert_eq!(result, Err(io::ErrorKind::WouldBlock));
+    }
+
+    /// A truncated SCM_RIGHTS message whose header still claims the sender's
+    /// length (XNU, FreeBSD) yields only the descriptors the kernel copied
+    /// (br-asupersync-8vrx8q).
+    #[test]
+    fn scm_rights_fd_count_is_bounded_by_the_copied_control_bytes() {
+        let fd = std::mem::size_of::<RawFd>();
+        // The header claims eight descriptors; the buffer holds one.
+        assert_eq!(scm_rights_fd_count(8 * fd, fd), 1);
+        assert_eq!(scm_rights_fd_count(8 * fd, fd + 3), 1);
+        assert_eq!(scm_rights_fd_count(8 * fd, 0), 0);
+        // An intact message is counted from its header.
+        assert_eq!(scm_rights_fd_count(2 * fd, 64), 2);
     }
 
     #[test]
