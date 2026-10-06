@@ -485,8 +485,10 @@ pub struct TaskRecord {
     /// Position in the intrusive priority heap (`None` if not in any heap).
     /// Enables O(1) lookup and O(log n) removal by task ID.
     pub heap_index: Option<u32>,
-    /// Cached scheduling priority for intrusive heap comparison.
-    /// Set when the task is inserted into an `IntrusivePriorityHeap`.
+    /// Cached scheduling priority: the linked context's budget priority, set
+    /// with the context (the three-lane scheduler gives it to every waker it
+    /// builds for the task), and rewritten by an `IntrusivePriorityHeap` that
+    /// holds the task.
     pub sched_priority: u8,
     /// FIFO generation counter for tie-breaking within equal priorities.
     /// Lower generation = earlier insertion = higher scheduling priority.
@@ -586,7 +588,11 @@ impl TaskRecord {
     /// Sets the shared CxInner.
     #[inline]
     pub fn set_cx_inner(&mut self, inner: Arc<RwLock<CxInner>>) {
-        self.deadline = inner.read().budget.deadline;
+        let budget = inner.read().budget;
+        self.deadline = budget.deadline;
+        // Nothing else fills this field on the production path, so every
+        // re-wake used to carry priority 0 (br-asupersync-5khftq).
+        self.sched_priority = budget.priority;
         self.cx_inner = Some(inner);
     }
 
@@ -2497,6 +2503,22 @@ mod tests {
         crate::assert_with_log!(err.is_some(), "out of order rejected", true, err.is_some());
 
         crate::test_complete!("cancellation_witness_rejects_out_of_order");
+    }
+
+    #[test]
+    fn linking_a_context_caches_its_budget_priority() {
+        init_test("linking_a_context_caches_its_budget_priority");
+        let budget = Budget::INFINITE.with_priority(200);
+        let mut t = TaskRecord::new(task(), region(), budget);
+        let inner = Arc::new(RwLock::new(CxInner::new(region(), task(), budget)));
+        t.set_cx_inner(inner);
+        crate::assert_with_log!(
+            t.sched_priority == 200,
+            "sched_priority",
+            200,
+            t.sched_priority
+        );
+        crate::test_complete!("linking_a_context_caches_its_budget_priority");
     }
 
     #[test]
