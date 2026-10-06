@@ -254,6 +254,32 @@ The owner's delegated rule (keep it on only if it wins on cancel-heavy work
 and loses nowhere else) therefore makes the fixed limit the default
 (`asupersync-issue65-criticisms-kpmoy5.1.12`).
 
+### Behavior change — budget deadlines are enforced when they pass
+
+A task's budget deadline (a region or task deadline in its `Budget`) used to
+be checked only at checkpoints, so a task parked in a cancel-aware wait (a
+channel receive, a lock, a semaphore) outlived it indefinitely, and so did
+anything that closed or joined its region. The runtime now arms one timer per
+task that has a deadline. At the deadline the task's context is cancelled with
+`CancelKind::Deadline` and its parked wait is woken. Tasks without a deadline
+pay nothing. Consequences:
+
+- A task that runs past its deadline without checkpointing is cancelled at
+  the deadline. If it then returns a value without acknowledging the
+  cancellation (a failed `checkpoint`), the value is reported as task-level
+  cancellation, the existing rule for cancellation-blind late values.
+- A task spawned under a deadline that has already passed is cancelled at
+  the runtime's next timer turn, which can come before its first poll. Before,
+  it ran until its first checkpoint, or to completion if it never checked.
+  Budget deadlines are instants on the runtime clock, whose zero is the first
+  time the process reads it: `Budget::with_deadline_at_secs(30)` means 30 s
+  after that, not 30 s from now. For a timeout, use
+  `Budget::tightened_by_timeout` with the current time.
+- Async finalizers are not armed (their masked infrastructure deadline is
+  unchanged).
+
+(asupersync-pev2xi)
+
 ### Native GenServers and actors
 
 `Cx::spawn_gen_server`, `Cx::spawn_actor` and `Cx::spawn_supervised_actor`
@@ -454,6 +480,268 @@ Resource use:
   registration.
 - `BlockingTaskHandle::wait_timeout` and `BlockingPool::shutdown_and_wait`
   accept any timeout (`Duration::MAX` used to panic).
+
+### Fixed by the 2026-10-05 audits
+
+Two more rounds of read-only audits found the defects below. The first covered
+QUIC, HTTP/3, WebSocket, cancellation, combinators, channels, messaging, web,
+the filesystem and the lab. The second covered the runtime tables, scheduler
+queues, deadlines, the obligation mailbox, region close, the channel and
+blocking paths, and server request regions. Each fix landed with a regression
+test that fails on the old code, and the commit messages carry the details and
+receipts.
+
+QUIC, HTTP/3 and WebSocket:
+
+- The standalone QUIC server handshake (`NativeQuicUdpConnection::accept`)
+  sends an unvalidated client address at most three times what it received,
+  drops a first Initial under 1200 bytes and ignores other addresses once its
+  peer is known. One forged ClientHello used to trigger up to 64 full flights
+  at the forged address.
+- A QUIC handshake whose certificate chain is larger than one datagram
+  completes: its Handshake-level CRYPTO is split into packet-sized datagrams
+  (it failed with a send error).
+- An atpd QUIC accept discards a garbage or forged long-header datagram
+  instead of failing, and ignores other addresses once its client is known.
+- QUIC ACK processing costs time in proportion to the packets an ACK touches;
+  many-range ACKs used to cost packets in flight times ranges each.
+- `MAX_STREAMS` never advertises more than 2^60 streams, the RFC 9000 limit a
+  peer must enforce by closing the connection.
+- A produced HTTP/3 response whose DATA frame is larger than the client's
+  stream window is sent in pieces instead of stalling after HEADERS.
+- A WebSocket closed by cancellation sends the configured
+  `CloseConfig::cancellation_code` (it always sent 1001).
+
+Cancellation and obligations:
+
+- A cancel broadcast forwards a message once when two copies arrive at the
+  same time, and a broadcast whose retry fails stays at the front of the
+  retry queue.
+- `Cx::cancel_with` stamps its reason with the current time, so it no longer
+  replaces an older reason of the same severity.
+- An `ObligationToken` dropped during a panic counts in `panic_leak_count`.
+- Release builds no longer take the global cancel-protocol validator lock on
+  spawn, completion, obligations and region lifecycle, and no longer record
+  every region close as a protocol violation (an unreleased regression).
+
+Combinators and channels:
+
+- A `reset()` racing a queued acquire no longer wraps the rate limiter's or
+  bulkhead's pending count, which rejected every later request until the next
+  reset; `Bulkhead::reset` no longer loses capacity to a concurrent grant.
+- `Retry` starts no new attempt once its backoff sleep has observed
+  cancellation; `RetryTokenBucket::time_to_tokens` no longer panics for tiny
+  refill rates; `RateLimiter::retry_after` counts the tokens queued waiters
+  take first.
+- A bounded `mpsc` channel reserves at most 64 queue slots up front and grows
+  to its bound (a large bound allocated it all, or panicked).
+
+Messaging and web:
+
+- A Kafka record buffered by a dropped `poll` is delivered by the next poll
+  instead of being overwritten.
+- Pooled Redis commands refuse the `UNSUBSCRIBE` family before taking a
+  connection, and a cancelled pub/sub `PING` counts the messages it buffered
+  as dropped events.
+- NATS `INFO` fields are read from the top-level JSON object whatever its
+  spacing (a field name inside a string value could be read instead).
+- A JetStream message refused at `max_ack_pending` no longer frees another
+  message's ack slot.
+- Compression gives a compressed body a weak `ETag`, adds `Vary` to a
+  `304 Not Modified`, and leaves empty bodies unencoded.
+- Multipart `Content-Disposition` parameters are found outside quoted values
+  only (`filename="a; name=x"` no longer sets the field name).
+
+Filesystem and I/O:
+
+- An `fs::File` write settled by an interleaved read or flush is not written a
+  second time when its caller retries.
+- `read_line` and `LineReader::read_line` leave the caller's buffer as they
+  found it when a line is not valid UTF-8, as std and tokio do.
+
+HTTP/2 and HTTP/3:
+
+- `Http2Listener` reads frames up to the `SETTINGS_MAX_FRAME_SIZE` it
+  advertises; past 8 MiB it used to drop the connection.
+- `NativeH3Session::send_request` refuses a request larger than a new
+  stream's send credit before opening the stream; the failed call used to
+  leave the stream open, using up one of the peer's stream slots.
+- A pushed HTTP/2 response whose stream the client never grants window
+  times out and is reset like any other response; it used to keep the
+  connection from idling or closing.
+
+Performance:
+
+- A `Cx::spawn` + join makes six fewer heap allocations (about 30 down to
+  24 in the allocation audit): one shared OS entropy source, no throwaway
+  logical clock, checkpoint history allocated on first use, and epoch
+  telemetry receipts batched inline.
+
+Documentation:
+
+- Settings that are accepted but not applied yet now say so:
+  `RateLimitPolicy::algorithm` (always a token bucket),
+  `sync::PoolConfig::health_check_interval` / `evict_unhealthy` (and
+  `min_size` is warm-up only), `RegionLimits::curve_budget`,
+  `ObligationTrackerConfig` periodic checks, the gRPC server keepalive
+  settings (the client applies its keepalive to native streaming and
+  duplex calls only), and the ATP SDK's transfer timeout, automatic retry
+  (never performed, though on by default), progress interval, session
+  timeout and stream buffer size.
+
+Lab runtime:
+
+- The task-leak and quiescence oracles check regions the runtime closed and
+  removed; they used to see only regions still in the table, so a real close
+  never reached them.
+- `LabConfig::with_auto_advance()` moves virtual time in
+  `run_until_quiescent` (and so `run_async_under_lab` and async
+  `#[lab_test]`), and `run_with_auto_advance` under a paused clock ends with
+  `StuckBailout` instead of spinning forever.
+- `TraceMinimizer` caches a candidate by its events rather than its length,
+  so delta debugging no longer stops early, and reports essential events by
+  their index in the original trace.
+
+Runtime, deadlines and obligations:
+
+- The runtime no longer keeps a record of every obligation ever resolved. Each
+  mpsc send, oneshot, permit and lease left a record behind for the life of the
+  runtime. So did an index entry for every task that ever held one, and an
+  entry for every region ever closed. Memory grew with the number of messages
+  sent, and task completion slowed down as the index grew. The most recent 4096
+  resolved obligations and 4096 closed regions stay queryable. Pending and
+  leaked obligations are always kept. (asupersync-fu6cr0)
+- A task's priority now applies to every wake, not only the first one. Re-wakes
+  of a task, and of tasks woken when another completes, used to run at
+  priority 0. (asupersync-5khftq)
+- A local task stored while its runtime's key was being retired is dropped
+  instead of being kept in a revived store until the thread exits.
+  (asupersync-kopidb)
+- `watch::Receiver::changed` reports a final value sent just before the sender
+  dropped, instead of returning `Closed` without it. (asupersync-lh4z78)
+- Replacing a `BroadcastStream`'s receiver through `get_mut` no longer evicts
+  the waker of a receiver parked on another channel, which then hung.
+  (asupersync-lh4z78)
+- Without a blocking pool, `spawn_blocking` callers over the 256-thread
+  fallback cap park until a thread exits, instead of re-polling at 100 % CPU.
+  (asupersync-yr34lg)
+- The obligation mailbox applies posts one at a time, so a post that panics
+  (a leak under the `Panic` policy) no longer drops the posts queued behind
+  it. A dropped reserve used to leave its region unable to close.
+  (asupersync-e6igie)
+- Lab runtime: a spawn denied because its region began closing re-advances the
+  region, as the native scheduler does; the region's close used to hang.
+  (asupersync-6edxi7)
+- A pipeline sink effect that completes after the pipeline was cancelled is
+  acknowledged and counted as consumed. It was counted as not done, so a
+  caller resuming from `consumed` repeated the write. (asupersync-zn11mm)
+- A spawn denied by a closing region whose captured future panics on drop
+  still resolves its handle and re-advances the region, and the worker thread
+  survives. (asupersync-01oghn)
+- A blocking-pool `on_thread_start` hook that panics no longer kills every
+  worker before its first job; it is contained like the stop hook.
+  (asupersync-mopkmt)
+- `AppSpecV1::bind_managed` refuses routes that the router would merge or
+  shadow (`/users` and `/users/`, or `GET /users/:id` with `DELETE
+  /users/:uid` registered as different routes). One of the handlers used to
+  be unreachable while `bind_managed` returned `Ok`. (asupersync-mopkmt)
+- A server's shutdown drain, and the HTTP/2 listener's drain supervision,
+  wait for their deadlines instead of spinning a worker at 100 % CPU when the
+  listener task is cancelled, and the drain no longer misses a last
+  connection closing just before it starts waiting. (asupersync-m8xsjx)
+- A server request whose deadline has passed is answered as a deadline
+  (503 with ASUP-E501) instead of being reported as cancelled before the
+  handler starts, or as a lost connection when the request's own context
+  serves as its connection context (the HTTP/2 owned request path).
+  (asupersync-m8xsjx)
+
+Runtime performance:
+
+- Opening and closing a child region costs O(1) instead of O(siblings) under
+  the runtime lock, so per-request child regions no longer make each request
+  pay for every concurrent request, and draining N of them on shutdown is no
+  longer O(N^2). (asupersync-exeimj)
+
+Later fixes from the same audits:
+
+- A messaging-fabric `FabricConsumer` no longer keeps a record of every
+  delivery it ever made, and no longer panics after `u32::MAX` deliveries. Its
+  obligation ledger keeps the most recent 4096 resolved obligations; pending
+  and leaked ones are always kept. The new
+  `ObligationLedger::with_resolved_retention` offers the same to other
+  ledgers; `ObligationLedger::new` is unchanged. (asupersync-rrtgoy)
+- A circuit breaker's sliding window ignores the outcomes of half-open probes
+  from an episode that has already ended, so a successful recovery no longer
+  re-opens the breaker at once. (asupersync-e9gn8y)
+- A quorum whose caller is cancelled as a race loser before the quorum is met
+  returns `QuorumError::Cancelled`, and reports the strongest of the
+  branches' cancellation reasons. (asupersync-1sngsf)
+- `UnixStream::recv_with_ancillary` counts received descriptors within the
+  control bytes the kernel copied. On macOS and BSD a truncated `SCM_RIGHTS`
+  message made it read past its buffer and return garbage descriptors.
+  (asupersync-8vrx8q)
+- `VirtualTcpListener::accept` no longer misses a connection or close that
+  arrives while it registers its waker, and observes cancellation.
+  (asupersync-8vrx8q)
+- Split TCP and Unix halves deregister from the reactor before their socket
+  closes, and reuniting them keeps a registration on the fallback I/O driver
+  movable to the runtime's driver. (asupersync-8vrx8q)
+- `TcpStream::set_user_timeout` and `TcpSocket::set_user_timeout` round a
+  non-zero timeout under 1 ms up to 1 ms. It used to become 0, which the
+  kernel reads as its default. (asupersync-8vrx8q)
+- `SporkAppHarness::oracles_pass` checks the oracles against the runtime's
+  state. It read a suite nothing fed, so it always passed. (asupersync-vcu2oz)
+- WebSocket `close()` and `send(Message::Close)` on the client and server
+  end when their explicit `Cx` is cancelled, even after the close handshake
+  has started. A close writing to a peer that stopped reading hung forever.
+  (asupersync-fmw87f)
+- A cancelled `Http1Listener` waits between drain checks instead of spinning
+  while requests are still in flight. (asupersync-m8xsjx)
+- A panicking `Waker` no longer strands the other senders woken when an
+  `mpsc` channel closes or frees several slots. Waking a waiter from a drop
+  that runs during a panic no longer aborts the process; this also covers
+  `Notify`'s `notify_one` baton. (asupersync-9siwk7)
+- `RateLimiter` and `SlidingWindowRateLimiter` round a fractional-millisecond
+  period up to whole milliseconds. A period under 1 ms never refilled, and the
+  sliding window then refused every request for good; 1.9 ms admitted 1.9
+  times the rate. (asupersync-e9gn8y)
+- A retry policy with a zero initial delay stays at zero for every attempt,
+  instead of jumping to `max_delay` after about a thousand attempts.
+  (asupersync-e9gn8y)
+- `fs::write_atomic` creates the temp file for an existing target with the
+  target's permission bits, so a private file's new contents are never
+  readable more widely while they are written. (asupersync-pxg07b)
+- The ATP QUIC receiver's accept no longer keeps short-header datagrams from
+  anyone before the client is known, and keeps at most 4096 packets / 4 MiB
+  of early 1-RTT data. An unauthenticated sender could fill its memory for
+  the whole accept timeout. (asupersync-8vrx8q)
+- The web router joins an HTTP/2 or HTTP/3 request's split `Cookie` fields
+  with "; " (RFC 9113 §8.2.3, RFC 9114 §4.2.1). Only the last piece used to
+  reach the application, so a session cookie in an earlier piece was lost and
+  the user looked logged out. (asupersync-a1q12q)
+- `SessionData::clear` keeps a pending `regenerate()` request. After the
+  documented logout, `regenerate()` then `clear()`, a handler that panicked or
+  was cancelled left the logged-in session valid, and data stored after the
+  clear was saved under the old ID. The plain logout still deletes the session
+  and expires its cookie. (asupersync-a1q12q)
+- The lab's `cancellation_protocol` oracle checks that a cancelled region's
+  live child regions are cancelled too in every run. Once a task had been
+  polled, it used to see no region tree at all and pass. (asupersync-vcu2oz)
+- The lab determinism oracle (`DeterminismOracle::verify`,
+  `assert_deterministic*`) compares whole traces. When a run records more
+  events than its trace buffer keeps, it runs once more with a buffer that
+  holds them all, so a divergence among evicted events is reported; it
+  compared only the newest 4096. Message events are compared whole; a
+  100-byte prefix missed later differences and could panic inside a
+  multi-byte character. (asupersync-vcu2oz)
+- The lab loser-drain oracle replays the runtime's race history on every
+  report, not only the first: a race in flight at one report was reported as
+  never completed in every later one, later races were never checked, and a
+  reset suite stayed empty. (asupersync-vcu2oz)
+- `Router::route` with the same pattern and method registered twice answers
+  with the first registration again, as in v0.4.3; merging repeated patterns
+  (so GET and POST registered separately both answer) had let the later
+  registration replace it. (asupersync-pblpeg)
 
 ### UDP launch-time sends and the socket error queue (Linux, GH #73)
 
