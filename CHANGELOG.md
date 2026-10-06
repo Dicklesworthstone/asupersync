@@ -280,6 +280,32 @@ pay nothing. Consequences:
 
 (asupersync-pev2xi)
 
+### Behavior change — a race drains what its losing branches spawned
+
+`race!`, blocking `select!`, `Cx::race_drained*`, `Cx::race_drained_with*` and
+`Cx::hedge_drained_with*` cancelled and drained each losing branch task, but a
+task that a branch spawned through its own `Cx` lived in the caller's region
+and kept running after the race returned, until that region closed. Each
+branch now runs in its own child region of the caller's region:
+
+- When the race resolves, every losing branch's region is cancelled and
+  awaited before the race returns, so nothing a loser started is still
+  running. The loser task's own cancellation and its `RaceLost` attribution
+  are unchanged; its descendants see `RaceLost` (or `ParentCancelled` in
+  nested regions). A failed race (owner cancellation, admission failure)
+  treats every branch as a loser and drains with the race's reason.
+- Tasks the winner spawned keep running after the race returns and can still
+  spawn. The winner's region closes by itself once its last task finishes; it
+  stays owned by the caller's region.
+- Inside a caller region with admission limits (`RegionLimits`), branches stay
+  in that region as before, so the limits still count every branch.
+- Dropping a race future keeps its documented behavior: the branch regions
+  stay owned by the caller's region, which remains the cleanup boundary.
+
+`Scope::race`, `Scope::race_all` and the other `Scope` combinators take
+handles the caller already spawned and are unchanged.
+(asupersync-issue65-criticisms-kpmoy5.2.2)
+
 ### Native GenServers and actors
 
 `Cx::spawn_gen_server`, `Cx::spawn_actor` and `Cx::spawn_supervised_actor`

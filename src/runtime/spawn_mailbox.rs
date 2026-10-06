@@ -277,6 +277,11 @@ pub struct AdmittedTaskSlot {
     /// is still pending. The cache is initialized per slot, so unrelated
     /// spawn producers never serialize through process-global state.
     pending_cancel_reason: OnceLock<PendingCancelReason>,
+    /// Set by race-branch producers: admission mints a sealed child region of
+    /// the requested region and admits the task into it, so the branch's own
+    /// spawns stay inside a subtree the race can cancel and drain
+    /// (br-asupersync-issue65-criticisms-kpmoy5.2.2).
+    branch_region: Option<Arc<BranchRegionSlot>>,
     /// Authoritative one-shot observer receipt for managed pre-admission
     /// aborts. Every repeat abort command carries this slot, so whichever
     /// consumer wins first-lane publication also wins this receipt.
@@ -308,6 +313,7 @@ impl AdmittedTaskSlot {
             runtime_mask: crate::cx::cap::CapMask::all(),
             retirement_barrier: None,
             pending_cancel_reason: OnceLock::new(),
+            branch_region: None,
             spawn_effects: Mutex::new(SpawnEffectHandoff::new()),
         }
     }
@@ -322,6 +328,7 @@ impl AdmittedTaskSlot {
             runtime_mask: crate::cx::cap::CapMask::all(),
             retirement_barrier: None,
             pending_cancel_reason: OnceLock::new(),
+            branch_region: None,
             spawn_effects: Mutex::new(SpawnEffectHandoff::new()),
         }
     }
@@ -329,6 +336,18 @@ impl AdmittedTaskSlot {
     pub(crate) fn with_runtime_mask(mut self, mask: crate::cx::cap::CapMask) -> Self {
         self.runtime_mask = mask;
         self
+    }
+
+    /// Requests that admission run this task in a fresh sealed child region
+    /// of the requested region, published through `slot`.
+    pub(crate) fn with_branch_region(mut self, slot: Arc<BranchRegionSlot>) -> Self {
+        self.branch_region = Some(slot);
+        self
+    }
+
+    /// The branch-region request, when the producer made one.
+    pub(crate) fn branch_region(&self) -> Option<&Arc<BranchRegionSlot>> {
+        self.branch_region.as_ref()
     }
 
     pub(crate) fn runtime_mask(&self) -> crate::cx::cap::CapMask {
@@ -1608,6 +1627,64 @@ pub struct AdmittedRegion {
     pub(crate) cx: crate::cx::Cx,
     pub(crate) close_notify: Arc<Mutex<crate::record::region::RegionCloseState>>,
     pub(crate) close_receipt: Arc<Mutex<Option<crate::record::region::RegionCloseOutcome>>>,
+}
+
+/// The sealed child region admission minted for one race branch
+/// (br-asupersync-issue65-criticisms-kpmoy5.2.2).
+pub(crate) struct MintedBranchRegion {
+    pub(crate) region_id: RegionId,
+    close_notify: Arc<Mutex<crate::record::region::RegionCloseState>>,
+}
+
+impl MintedBranchRegion {
+    /// True once the region reached `Closed`.
+    pub(crate) fn is_closed(&self) -> bool {
+        self.close_notify.lock().closed
+    }
+
+    pub(crate) fn close_notify(&self) -> &Arc<Mutex<crate::record::region::RegionCloseState>> {
+        &self.close_notify
+    }
+}
+
+impl fmt::Debug for MintedBranchRegion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MintedBranchRegion")
+            .field("region_id", &self.region_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One-shot slot through which spawn admission publishes the sealed region it
+/// minted for a race branch. It stays empty when admission denied the spawn
+/// or could not mint a region (the task then runs in the requested region, as
+/// before branch regions existed).
+#[derive(Debug, Default)]
+pub(crate) struct BranchRegionSlot {
+    minted: OnceLock<MintedBranchRegion>,
+}
+
+impl BranchRegionSlot {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn get(&self) -> Option<&MintedBranchRegion> {
+        self.minted.get()
+    }
+
+    /// Publishes the minted region. Called once, by admission, under the
+    /// runtime state lock; it wakes nobody.
+    pub(crate) fn publish(
+        &self,
+        region_id: RegionId,
+        close_notify: Arc<Mutex<crate::record::region::RegionCloseState>>,
+    ) {
+        let _ = self.minted.set(MintedBranchRegion {
+            region_id,
+            close_notify,
+        });
+    }
 }
 
 /// One-shot slot the worker fills when a [`RegionCommand::Create`] resolves.

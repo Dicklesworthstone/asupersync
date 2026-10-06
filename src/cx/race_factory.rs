@@ -4,7 +4,9 @@
 //! branch does not cancel that caller. Factories instead receive the actual
 //! admitted child context, so a parked operation observes loser cancellation.
 
+use super::child_region::RegionQuiescence;
 use super::{Cx, cap};
+use crate::runtime::spawn_mailbox::{BranchRegionSlot, RegionCommand, SpawnGateway};
 use crate::runtime::{JoinError, TaskHandle};
 use crate::time::{Sleep, TimerDriverHandle};
 use crate::types::{CancelReason, Time};
@@ -62,6 +64,75 @@ impl<T> Drop for Admitted<T> {
     }
 }
 
+/// The sealed regions admission minted for one race's branches
+/// (br-asupersync-issue65-criticisms-kpmoy5.2.2).
+///
+/// A branch spawns into its own region, so a losing branch's descendants are
+/// cancelled and drained once the race has resolved, before it returns,
+/// instead of running on until the caller's region closes. The branch tasks
+/// themselves keep the race engine's own cancellation and attribution; only
+/// what is still running in a loser's region after its task drained is
+/// cancelled here. The winner's region is left alone: it closes by itself
+/// once the winner's descendants finish. An abandoned race (its future
+/// dropped) keeps the documented drop behavior: the sealed regions stay owned
+/// by the caller's region, which remains the asynchronous cleanup boundary.
+pub struct BranchRegions {
+    slots: Vec<Arc<BranchRegionSlot>>,
+    gateway: Option<Arc<SpawnGateway>>,
+}
+
+impl BranchRegions {
+    pub(crate) fn new(gateway: Option<Arc<SpawnGateway>>, capacity: usize) -> Self {
+        Self {
+            slots: Vec::with_capacity(capacity),
+            gateway,
+        }
+    }
+
+    pub(crate) fn push(&mut self, slot: Arc<BranchRegionSlot>) {
+        self.slots.push(slot);
+    }
+
+    fn cancel(&self, index: usize, reason: &CancelReason) -> bool {
+        let Some(minted) = self.slots[index].get() else {
+            return false;
+        };
+        if minted.is_closed() {
+            return false;
+        }
+        if let Some(gateway) = &self.gateway {
+            let _ = gateway.enqueue_region_command(RegionCommand::Cancel {
+                region_id: minted.region_id,
+                reason: reason.clone(),
+            });
+        }
+        true
+    }
+
+    /// Cancels every branch region except `winner`'s and, when `drain` is
+    /// set, waits until each of them has closed. A region that admission
+    /// never minted, or that already closed, costs nothing.
+    pub(crate) async fn settle(self, winner: Option<usize>, reason: CancelReason, drain: bool) {
+        let mut open = Vec::new();
+        for index in 0..self.slots.len() {
+            if Some(index) != winner && self.cancel(index, &reason) {
+                open.push(index);
+            }
+        }
+        if !drain {
+            return;
+        }
+        for index in open {
+            let minted = self.slots[index]
+                .get()
+                .expect("only minted regions are awaited");
+            // A runtime torn down mid-drain fails the wait closed: nothing is
+            // left to drain then.
+            let _ = RegionQuiescence::watch(minted.close_notify(), self.gateway.clone()).await;
+        }
+    }
+}
+
 enum Timed<T> {
     Value(T),
     Expired,
@@ -75,6 +146,34 @@ struct HedgePrimaryCompletion(Arc<AtomicBool>);
 impl Drop for HedgePrimaryCompletion {
     fn drop(&mut self) {
         self.0.store(true, Ordering::Release);
+    }
+}
+
+/// Settles a finished race's branch regions: every loser's region is
+/// cancelled and drained, so nothing a losing branch started outlives the
+/// race (br-asupersync-issue65-criticisms-kpmoy5.2.2). On a failed race every
+/// branch lost. The one exception mirrors `race_all`: a winner panic that no
+/// scheduler drives past cannot wait for drains, so their cancellation is
+/// requested without waiting.
+pub async fn settle_branch_regions<T>(
+    regions: BranchRegions,
+    result: &Result<(T, usize), JoinError>,
+) {
+    match result {
+        Ok((_, winner)) => {
+            regions
+                .settle(Some(*winner), CancelReason::race_loser(), true)
+                .await;
+        }
+        Err(error) => {
+            let reason = match error {
+                JoinError::Cancelled(reason) => reason.clone(),
+                _ => CancelReason::race_loser(),
+            };
+            let drain = !matches!(error, JoinError::Panicked(_))
+                || crate::runtime::scheduler::three_lane::scheduler_drives_current_task();
+            regions.settle(None, reason, drain).await;
+        }
     }
 }
 
@@ -278,7 +377,11 @@ impl Cx<cap::All> {
     /// this API cannot rewrite capabilities hidden in user code.
     ///
     /// Uses the existing [`super::Scope::race_all`] selection and drain engine,
-    /// preserving winner selection and loser-panic precedence. Synchronous
+    /// preserving winner selection and loser-panic precedence. Each branch
+    /// runs in its own child region, so a losing branch's descendants (tasks it
+    /// spawned through its `Cx`) are cancelled and drained before this returns;
+    /// the winner's descendants keep running and its region closes once they
+    /// finish (br-asupersync-issue65-criticisms-kpmoy5.2.2). Synchronous
     /// admission failure cancels every admitted sibling and awaits its actual
     /// terminal before returning. Dropping this future requests cancellation;
     /// the owning region remains the asynchronous cleanup boundary on drop.
@@ -302,23 +405,33 @@ impl Cx<cap::All> {
         }
         let scope = self.scope();
         let mut admitted = Admitted { handles: Vec::with_capacity(factories.len()) };
+        let mut regions = BranchRegions::new(self.spawn_gateway_handle(), factories.len());
         for factory in factories {
             if self.checkpoint().is_err() {
                 let reason = self.cancel_reason().unwrap_or_else(|| CancelReason::user("race cancelled"));
-                return Err(admitted.refuse(reason).await);
+                let refusal = admitted.refuse(reason.clone()).await;
+                regions.settle(None, reason, true).await;
+                return Err(refusal);
             }
-            match self.spawn_in(&scope, factory) {
-                Ok(handle) => admitted.handles.push(handle),
+            match self.spawn_race_branch_in(&scope, factory) {
+                Ok((handle, region)) => {
+                    admitted.handles.push(handle);
+                    regions.push(region);
+                }
                 Err(_) => {
                     let reason = CancelReason::resource_unavailable()
                         .with_message("factory race branch admission failed");
-                    return Err(admitted.refuse(reason).await);
+                    let refusal = admitted.refuse(reason.clone()).await;
+                    regions.settle(None, reason, true).await;
+                    return Err(refusal);
                 }
             }
         }
         // Ownership passes directly to race_all's existing join/drain guards.
         let handles = std::mem::take(&mut admitted.handles);
-        scope.race_all(self, handles).await.map(|(value, _)| value)
+        let result = scope.race_all(self, handles).await;
+        settle_branch_regions(regions, &result).await;
+        result.map(|(value, _)| value)
     }
 
     /// Named counterpart of [`Self::race_drained_with`]. Names retain the

@@ -1428,6 +1428,14 @@ pub(crate) enum RegionLifecycleEffect {
     },
     /// Close-completion finalized-accounting check.
     CloseValidation { region_id: RegionId },
+    /// `RegionCloseBegin` trace event for a sealed region that began its
+    /// non-cancelling close because its work finished
+    /// (br-asupersync-issue65-criticisms-kpmoy5.2.2).
+    SealedCloseBegin {
+        region_id: RegionId,
+        parent: Option<RegionId>,
+        now: Time,
+    },
     /// `RegionCloseComplete` trace event + `region_closed` lifetime metric
     /// for a completed close; `created_at` was captured before the arena
     /// removal.
@@ -4408,7 +4416,7 @@ impl RuntimeState {
     /// the acquisition order is the canonical B → A.
     pub(crate) fn admit_spawn_request_in(
         &mut self,
-        parts: crate::runtime::spawn_mailbox::SpawnRequestParts,
+        mut parts: crate::runtime::spawn_mailbox::SpawnRequestParts,
         tasks: &mut AdmissionTaskTarget<'_>,
         regions: &AdmissionRegionTarget<'_>,
     ) -> SpawnAdmission {
@@ -4422,7 +4430,6 @@ impl RuntimeState {
             };
             return SpawnAdmission::Denied { parts, error };
         }
-        let region = parts.region;
         let budget = parts.budget;
         let runtime_mask = parts
             .admitted_slot
@@ -4432,6 +4439,14 @@ impl RuntimeState {
             .admitted_slot
             .as_ref()
             .and_then(|slot| slot.retirement_barrier());
+        let branch = self.mint_branch_region_in(&parts, regions);
+        if let Some((child, _)) = &branch {
+            // From here on the request belongs to the branch region: spawn
+            // observers, the trace and a denial's region re-advance all name
+            // the region that owns (or would have owned) the task.
+            parts.region = *child;
+        }
+        let region = parts.region;
         let (task_id, cx, now) = match self.admit_spawn_record_in(
             region,
             budget,
@@ -4441,9 +4456,68 @@ impl RuntimeState {
             regions,
         ) {
             Ok(admitted) => admitted,
+            // A minted branch region is sealed and still empty here. Every
+            // scheduler re-advances a denied request's region, which closes
+            // it and then re-advances the requested parent.
             Err(error) => return SpawnAdmission::Denied { parts, error },
         };
+        if let Some((child, slot)) = branch {
+            let close_notify = regions
+                .resolve_ref(&self.regions)
+                .get(child.arena_index())
+                .map(|record| Arc::clone(&record.close_notify))
+                .expect("the branch region holds the task just admitted");
+            slot.publish(child, close_notify);
+        }
         self.finish_send_spawn_admission_in(parts, task_id, &cx, now, tasks)
+    }
+
+    /// Mints the sealed child region a race-branch spawn requested, under the
+    /// requested region (br-asupersync-issue65-criticisms-kpmoy5.2.2).
+    ///
+    /// Returns `None` when no branch region was requested, when the requested
+    /// region carries admission limits, or when the mint is refused (parent
+    /// closed, resource pressure, or an external region table). The task is
+    /// then admitted into the requested region exactly as before, so a
+    /// refusal never changes whether the spawn itself is admitted. A region
+    /// with limits keeps the branch in the region so the branch and its work
+    /// still count against those limits; limits are per region and a child
+    /// region would not inherit them.
+    fn mint_branch_region_in(
+        &mut self,
+        parts: &crate::runtime::spawn_mailbox::SpawnRequestParts,
+        regions: &AdmissionRegionTarget<'_>,
+    ) -> Option<(
+        RegionId,
+        Arc<crate::runtime::spawn_mailbox::BranchRegionSlot>,
+    )> {
+        let slot = Arc::clone(parts.admitted_slot.as_ref()?.branch_region()?);
+        if !matches!(regions, AdmissionRegionTarget::Embedded) {
+            return None;
+        }
+        let limits = self.regions.limits(parts.region)?;
+        if limits.max_children.is_some()
+            || limits.max_tasks.is_some()
+            || limits.max_obligations.is_some()
+            || limits.max_heap_bytes.is_some()
+            || limits.curve_budget.is_some()
+        {
+            return None;
+        }
+        let child = self
+            .create_child_region_with_capability_budget_and_priority(
+                parts.region,
+                Budget::INFINITE,
+                CapabilityBudget::UNSPECIFIED,
+                CapabilityBudgetRequirements::NONE,
+                RegionPriority::Normal,
+            )
+            .ok()?;
+        self.regions
+            .get(child.arena_index())
+            .expect("the branch region was minted above")
+            .seal();
+        Some((child, slot))
     }
 
     /// Payload-agnostic core of mailbox spawn admission, shared by the
@@ -9653,6 +9727,23 @@ impl RuntimeState {
             RegionLifecycleEffect::CloseValidation { region_id } => {
                 self.dispatch_region_close_validation(region_id);
             }
+            RegionLifecycleEffect::SealedCloseBegin {
+                region_id,
+                parent,
+                now,
+            } => {
+                self.record_trace_event(|seq| {
+                    TraceEvent::new(
+                        seq,
+                        now,
+                        TraceEventKind::RegionCloseBegin,
+                        TraceData::Region {
+                            region: region_id,
+                            parent,
+                        },
+                    )
+                });
+            }
             RegionLifecycleEffect::RegionClosed {
                 region_id,
                 parent,
@@ -10038,7 +10129,44 @@ impl RuntimeState {
                         }
                     }
                 }
-                _ => {}
+                crate::record::region::RegionState::Open => {
+                    // A sealed region closes itself once its work is done,
+                    // without cancelling anything: nothing is left to cancel
+                    // (br-asupersync-issue65-criticisms-kpmoy5.2.2). Every task
+                    // completion and child close re-drives this walk, so the
+                    // check runs at the moment the last piece of work retires.
+                    let sealed_and_idle = regions
+                        .resolve_ref(&self.regions)
+                        .get(region_id.arena_index())
+                        .is_some_and(|region| {
+                            region.is_sealed() && region.pending_obligation_post_count() == 0
+                        })
+                        && self.can_region_finalize_in(&*regions, tasks, region_id);
+                    if !sealed_and_idle {
+                        break;
+                    }
+                    let began = regions
+                        .resolve_ref(&self.regions)
+                        .get(region_id.arena_index())
+                        .is_some_and(|region| region.begin_close_without_subscriber(None));
+                    if !began {
+                        break;
+                    }
+                    let now = self.current_runtime_time();
+                    self.emit_region_lifecycle_effect(
+                        effects,
+                        RegionLifecycleEffect::SealedCloseBegin {
+                            region_id,
+                            parent,
+                            now,
+                        },
+                    );
+                    self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::RegionTable);
+                    // Re-process as Closing: with no live work it finalizes
+                    // and closes in the following iterations.
+                    current = Some(region_id);
+                }
+                crate::record::region::RegionState::Closed => {}
             }
         }
     }

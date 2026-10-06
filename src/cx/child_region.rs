@@ -529,9 +529,29 @@ impl<Caps> Drop for ChildRegion<Caps> {
 
 /// Resolves once the observed region reaches terminal `Closed`, or fails
 /// closed once the runtime that owns it is gone.
-struct RegionQuiescence {
+pub(crate) struct RegionQuiescence {
     state: Arc<Mutex<RegionCloseState>>,
     gateway: Option<Arc<SpawnGateway>>,
+}
+
+impl RegionQuiescence {
+    /// Waits for the region whose close state is `state`, registered for the
+    /// runtime teardown wake like [`ChildRegion::close`]'s wait. Used by the
+    /// race engine to drain a losing branch's region
+    /// (br-asupersync-issue65-criticisms-kpmoy5.2.2).
+    pub(crate) fn watch(
+        state: &Arc<Mutex<RegionCloseState>>,
+        gateway: Option<Arc<SpawnGateway>>,
+    ) -> Self {
+        if let Some(gateway) = &gateway {
+            let watch = Arc::downgrade(state);
+            gateway.mailbox().register_teardown_wake(watch);
+        }
+        Self {
+            state: Arc::clone(state),
+            gateway,
+        }
+    }
 }
 
 impl Future for RegionQuiescence {
