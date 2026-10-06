@@ -58,6 +58,8 @@ const CREATED_AT_KEY: &str = "__asupersync.created_at_unix_secs";
 /// with a known session ID and then waits for the victim to authenticate,
 /// rotating on auth boundary makes the captured ID worthless.
 const REGENERATE_FLAG_KEY: &str = "__asupersync.regenerate";
+/// The `REGENERATE_FLAG_KEY` value `SessionData::clear` leaves behind.
+const REGENERATE_AFTER_CLEAR: &str = "cleared";
 
 /// br-asupersync-qokau8 / br-asupersync-z74jcy — fail-closed finalizer
 /// for session-ID rotation that runs on the cancel/panic path.
@@ -243,9 +245,24 @@ impl SessionData {
     }
 
     /// Clear all data.
+    ///
+    /// A pending [`Session::regenerate`] request survives, marked as
+    /// followed by a clear: it is the middleware's rotation state, not
+    /// session data. `regenerate()` followed by `clear()`, the documented
+    /// logout sequence, used to drop it, so a handler that then panicked or
+    /// was cancelled left the old, logged-in entry valid in the store
+    /// (br-asupersync-a1q12q). On the normal path such a session still ends
+    /// like any cleared one: its entry is deleted and its cookie expired.
     pub fn clear(&mut self) {
         self.modified = true;
+        let regenerate = self.values.remove(REGENERATE_FLAG_KEY).is_some();
         self.values.clear();
+        if regenerate {
+            self.values.insert(
+                REGENERATE_FLAG_KEY.to_string(),
+                REGENERATE_AFTER_CLEAR.to_string(),
+            );
+        }
     }
 }
 
@@ -958,9 +975,20 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
             //     for the save+cookie steps below. The CSRF token was already
             //     rotated inside Session::regenerate(); we strip the marker
             //     here so it doesn't persist into the saved data.
-            let regenerate_requested = session_data.get(REGENERATE_FLAG_KEY).is_some();
+            let marker = session_data.get(REGENERATE_FLAG_KEY).map(str::to_owned);
+            let regenerate_requested = marker.is_some();
             if regenerate_requested {
+                // remove() marks the data modified; only a marked session is.
                 session_data.remove(REGENERATE_FLAG_KEY);
+            }
+            // regenerate() then clear(), the documented logout, leaves the
+            // marker as REGENERATE_AFTER_CLEAR so the failure guard can still
+            // delete the old entry. With nothing stored after the clear, the
+            // session ends like any cleared one below (entry deleted, cookie
+            // expired) instead of rotating into a fresh, empty session.
+            let logout =
+                marker.as_deref() == Some(REGENERATE_AFTER_CLEAR) && session_data.is_empty();
+            if regenerate_requested && !logout {
                 if !is_new {
                     self.store.delete(&session_id);
                 }
@@ -2226,6 +2254,132 @@ mod tests {
                 Response::new(StatusCode::OK, b"ok".to_vec())
             })
         }
+    }
+
+    /// Logout as documented: regenerate() then clear(), then return or
+    /// panic depending on `panic_after`.
+    struct LogoutHandler {
+        panic_after: bool,
+        note_after: bool,
+    }
+    impl Handler for LogoutHandler {
+        fn call(
+            &self,
+            _cx: &crate::Cx,
+            req: Request,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+            let panic_after = self.panic_after;
+            let note_after = self.note_after;
+            Box::pin(async move {
+                let session = req
+                    .extensions
+                    .get_typed::<Session>()
+                    .expect("middleware injects Session");
+                session.regenerate();
+                session.clear();
+                if note_after {
+                    session.insert("flash", "signed out");
+                }
+                assert!(!panic_after, "simulated failure after logout");
+                Response::new(StatusCode::OK, String::new())
+            })
+        }
+    }
+
+    fn seeded_logged_in_session(store: &MemoryStore) -> String {
+        let id = "5555666677778888eeeeffff00001111".to_string();
+        let mut seeded = SessionData::new();
+        seeded.insert("authed_user", "carol");
+        store.save(&id, &seeded);
+        id
+    }
+
+    /// regenerate() followed by clear(), the documented logout, ends the
+    /// session on the normal path: the old entry is deleted and the cookie
+    /// expired, with no fresh session stored. clear() keeping the
+    /// regenerate marker for the failure guard must not change that.
+    #[test]
+    fn logout_regenerate_then_clear_deletes_the_session_and_expires_the_cookie() {
+        let store = MemoryStore::new();
+        let layer = SessionLayer::new(store.clone()).csrf_protection(false);
+        let original_id = seeded_logged_in_session(&store);
+
+        let handler = layer.wrap(LogoutHandler {
+            panic_after: false,
+            note_after: false,
+        });
+        let mut req = Request::new("POST", "/logout");
+        req.headers
+            .insert("cookie".to_string(), format!("session_id={original_id}"));
+        let resp = handler.call(req);
+        assert_eq!(resp.status, StatusCode::OK);
+
+        assert!(
+            store.load(&original_id).is_none(),
+            "the logged-in session must be gone after logout"
+        );
+        assert!(store.is_empty(), "logout stores no fresh session");
+        let cookie_header = resp.set_cookies.first().expect("Set-Cookie present");
+        assert_eq!(extract_set_cookie_id(cookie_header), "");
+        assert!(cookie_header.contains("Max-Age=0"), "{cookie_header}");
+    }
+
+    /// regenerate(), clear(), then new data: the regenerate request still
+    /// applies, so the new data lives under a new ID and the old entry is
+    /// gone. clear() used to drop the request, and the data was saved under
+    /// the old, logged-in ID (br-asupersync-a1q12q).
+    #[test]
+    fn regenerate_then_clear_then_insert_rotates_into_a_new_session() {
+        let store = MemoryStore::new();
+        let layer = SessionLayer::new(store.clone()).csrf_protection(false);
+        let original_id = seeded_logged_in_session(&store);
+
+        let handler = layer.wrap(LogoutHandler {
+            panic_after: false,
+            note_after: true,
+        });
+        let mut req = Request::new("POST", "/logout");
+        req.headers
+            .insert("cookie".to_string(), format!("session_id={original_id}"));
+        let resp = handler.call(req);
+        assert_eq!(resp.status, StatusCode::OK);
+
+        assert!(store.load(&original_id).is_none(), "the old entry is gone");
+        let cookie_header = resp.set_cookies.first().expect("Set-Cookie present");
+        let new_id = extract_set_cookie_id(cookie_header);
+        assert!(
+            !new_id.is_empty() && new_id != original_id,
+            "{cookie_header}"
+        );
+        let saved = store.load(new_id).expect("the new session is stored");
+        assert_eq!(saved.get("flash"), Some("signed out"));
+        assert_eq!(saved.get("authed_user"), None);
+    }
+
+    /// regenerate() then clear(), then a panic: the guard must still delete
+    /// the old, logged-in entry. clear() used to erase the flag the guard
+    /// checks, so a stolen cookie outlived the logout (br-asupersync-a1q12q).
+    #[test]
+    fn logout_regenerate_then_clear_then_panic_invalidates_the_old_session() {
+        let store = MemoryStore::new();
+        let layer = SessionLayer::new(store.clone()).csrf_protection(false);
+        let original_id = seeded_logged_in_session(&store);
+
+        let handler = layer.wrap(LogoutHandler {
+            panic_after: true,
+            note_after: false,
+        });
+        let mut req = Request::new("POST", "/logout");
+        req.headers
+            .insert("cookie".to_string(), format!("session_id={original_id}"));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            handler.call(req);
+        }));
+        assert!(outcome.is_err(), "the handler panics after logging out");
+        assert!(
+            store.load(&original_id).is_none(),
+            "the old, logged-in session must be invalidated on the panic path"
+        );
     }
 
     #[test]
