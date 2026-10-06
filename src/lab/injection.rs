@@ -73,6 +73,10 @@ impl LabInjectionConfig {
     }
 
     /// Enables all oracles for verification.
+    ///
+    /// After each injection run, the runner runs the lab runtime until it is
+    /// idle, then checks both the suite passed to the test and the runtime's
+    /// own oracles, hydrated from the state the test left behind.
     #[must_use]
     pub const fn with_all_oracles(mut self) -> Self {
         self.use_all_oracles = true;
@@ -575,7 +579,7 @@ impl LabInjectionRunner {
 
             // Check oracles
             let oracle_violations = if self.config.use_all_oracles {
-                oracles.check_all(runtime.now())
+                Self::check_oracles(&mut runtime, &mut oracles)
             } else {
                 Vec::new()
             };
@@ -624,6 +628,23 @@ impl LabInjectionRunner {
     {
         // Wrap with Lab runtime and oracles
         self.run_with_lab(|injector, _runtime, _oracles| test_fn(injector))
+    }
+
+    /// Checks the oracles after one injection run.
+    ///
+    /// The caller's suite holds only what the test fed it by hand. The lab
+    /// runtime's own suite also sees the runtime: it is fed while the lab
+    /// runs, and hydrated here from the state the test left behind. Runnable
+    /// work runs first, until the lab is idle (br-asupersync-vcu2oz H2).
+    fn check_oracles(runtime: &mut LabRuntime, oracles: &mut OracleSuite) -> Vec<OracleViolation> {
+        runtime.run_until_idle();
+        let now = runtime.now();
+        let mut violations = oracles.check_all(now);
+        runtime
+            .oracles
+            .hydrate_temporal_from_state(&runtime.state, now);
+        violations.extend(runtime.oracles.check_all(now));
+        violations
     }
 
     /// Polls an instrumented future to completion with panic catching.
@@ -906,6 +927,60 @@ mod tests {
         for result in &report.results {
             assert!(result.oracle_violations.is_empty());
         }
+    }
+
+    /// br-asupersync-vcu2oz H2: with_all_oracles checked only the suite passed
+    /// to the test, which nothing feeds, so a run that left the lab runtime in
+    /// violation passed. Here the test closes a region around a live task.
+    #[test]
+    fn lab_injection_with_all_oracles_checks_the_runtime_state() {
+        let close_a_region_around_a_live_task =
+            |injector: Arc<CancellationInjector>,
+             runtime: &mut LabRuntime,
+             _oracles: &mut OracleSuite| {
+                let root = runtime
+                    .state
+                    .create_root_region(crate::types::Budget::INFINITE);
+                let _task = runtime
+                    .state
+                    .create_task(root, crate::types::Budget::INFINITE, async {})
+                    .expect("create task");
+                runtime
+                    .state
+                    .region(root)
+                    .expect("region exists")
+                    .set_state(crate::record::region::RegionState::Closed);
+                InstrumentedFuture::new(YieldingFuture::new(2, 42), injector)
+            };
+
+        let mut checked = LabInjectionRunner::new(
+            LabInjectionConfig::new(42)
+                .with_strategy(InjectionStrategy::AllPoints)
+                .with_all_oracles(),
+        );
+        let report = checked.run_with_lab(close_a_region_around_a_live_task);
+        assert_eq!(report.tests_run, 3);
+        for result in &report.results {
+            assert!(result.injection.is_success(), "{result:?}");
+            assert!(
+                result
+                    .oracle_violations
+                    .iter()
+                    .any(|violation| matches!(violation, OracleViolation::Quiescence(_))),
+                "the region closed around a live task is reported: {result:?}"
+            );
+        }
+        assert!(!report.all_passed());
+
+        let mut unchecked = LabInjectionRunner::new(
+            LabInjectionConfig::new(42).with_strategy(InjectionStrategy::AllPoints),
+        );
+        let report = unchecked.run_with_lab(close_a_region_around_a_live_task);
+        assert_eq!(report.tests_run, 3);
+        assert!(
+            report.all_passed(),
+            "without with_all_oracles only the injection is checked"
+        );
     }
 
     #[test]
