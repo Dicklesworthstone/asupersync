@@ -4,7 +4,7 @@
 //! own the cancellation request for all supplied handles, including before the
 //! returned future's first poll. They do not create or adopt tasks/regions.
 
-use super::{Cx, Scope};
+use super::{Cx, Scope, cap};
 use crate::runtime::{JoinError, TaskHandle};
 use crate::types::{CancelReason, Policy};
 use std::any::Any;
@@ -37,15 +37,19 @@ impl<P: Policy> Scope<'_, P> {
     /// its drop path spawns cleanup work or moves a task into this scope's region.
     /// The returned future owns a context clone and does not borrow the scope
     /// or `cx`. No `Clone` or `Unpin` bound is imposed on the results.
-    pub fn join_owned<T1, T2>(
+    ///
+    /// The owner needs no runtime capabilities: a task's own context or a
+    /// [`Cx::detached_cancel_context`] both work. The retained clone carries
+    /// none, whatever `cx` carries.
+    pub fn join_owned<T1, T2, Caps>(
         &self,
-        cx: &Cx,
+        cx: &Cx<Caps>,
         first: TaskHandle<T1>,
         second: TaskHandle<T2>,
-    ) -> impl Future<Output = (Result<T1, JoinError>, Result<T2, JoinError>)> + use<P, T1, T2>
+    ) -> impl Future<Output = (Result<T1, JoinError>, Result<T2, JoinError>)> + use<P, T1, T2, Caps>
     {
         collect(Owned {
-            owner: cx.clone(),
+            owner: cx.retype(),
             tasks: Pair {
                 first: Some(first),
                 second: Some(second),
@@ -68,13 +72,13 @@ impl<P: Policy> Scope<'_, P> {
     /// Results remain in input order, even when children finish out of order.
     /// Cancellation does not erase completed values, application errors or
     /// panics; the actual `TaskHandle` outcomes and retirement barriers govern.
-    pub fn join_all_owned<T>(
+    pub fn join_all_owned<T, Caps>(
         &self,
-        cx: &Cx,
+        cx: &Cx<Caps>,
         handles: Vec<TaskHandle<T>>,
-    ) -> impl Future<Output = Vec<Result<T, JoinError>>> + use<P, T> {
+    ) -> impl Future<Output = Vec<Result<T, JoinError>>> + use<P, T, Caps> {
         let mut owned = Owned {
-            owner: cx.clone(),
+            owner: cx.retype(),
             tasks: Many {
                 results: Vec::new(),
                 handles,
@@ -97,7 +101,7 @@ trait Collection {
 // This guard is an async function argument, so it is captured immediately even
 // if collect's body never starts. Raw TaskHandle drop alone does not cancel.
 struct Owned<C: Collection> {
-    owner: Cx,
+    owner: Cx<cap::None>,
     tasks: C,
 }
 

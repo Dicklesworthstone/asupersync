@@ -125,7 +125,7 @@ where
     /// The original regions remain the drain backstop. This does not create a
     /// region, detach tasks, forcibly preempt a non-cooperative member, or change
     /// the existing observation-only join APIs.
-    pub async fn try_join_all(mut self, cx: &Cx) -> Outcome<Vec<T>, E> {
+    pub async fn try_join_all<Caps>(mut self, cx: &Cx<Caps>) -> Outcome<Vec<T>, E> {
         let mut collected = Collected::new();
         let mut cancelled = pin!(cx.cancelled());
         let mut owner_observed = false;
@@ -258,7 +258,7 @@ mod tests {
                     assert_eq!(index, 0);
                     assert_eq!(values, [0, 1, 2, 3]);
                 }
-                other => panic!("unexpected collection result: {other:?}"),
+                other @ Poll::Ready(_) => panic!("unexpected collection result: {other:?}"),
             }
         }
     }

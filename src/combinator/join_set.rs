@@ -314,6 +314,12 @@ where
     /// terminal outcome is what upholds the no-orphan accounting, so a
     /// cancelled caller still drains rather than abandoning members.
     pub async fn join_next(&mut self, _cx: &Cx) -> Option<Outcome<T, E>> {
+        self.next_outcome().await
+    }
+
+    /// [`Self::join_next`] without the unused context, for owner collectors
+    /// whose context may carry no runtime capabilities.
+    async fn next_outcome(&mut self) -> Option<Outcome<T, E>> {
         if let Some(outcome) = self.try_join_next() {
             return Some(outcome);
         }
