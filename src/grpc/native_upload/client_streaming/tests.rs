@@ -565,11 +565,11 @@ fn owner_cancel_after_first_message_discards_it_and_retires_the_call() {
                 let cx = Cx::current().unwrap();
                 let region = cx.open_child_region(crate::cx::ChildRegionSpec::inherit()).await.unwrap();
                 let owner = region.cx();
-                let (source, _gate, stats) = source("cancelled owner", &owner, parked, VecDeque::new());
+                let (source, _gate, stats) = source("cancelled owner", owner, parked, VecDeque::new());
                 let channel = Channel::builder(format!("http://{}", peer.address))
                     .timeout(LIMIT).connect().await.unwrap();
                 let mut call = GrpcClient::new(channel).into_native_client_streaming(
-                    &owner, "/test.Upload/Collect", Request::new(source),
+                    owner, "/test.Upload/Collect", Request::new(source),
                 ).await.unwrap();
                 retain_first(&mut call).await;
                 owner.cancel_with(CancelKind::User, Some("stop upload"));
@@ -622,10 +622,10 @@ fn setup_refusal_never_polls_source_and_retires_captures_under_the_owner() {
             let region = cx.open_child_region(crate::cx::ChildRegionSpec::inherit()).await.unwrap();
             let owner = region.cx();
             let (parked, _witness) = mpsc::channel();
-            let (source, _gate, stats) = source("setup refused", &owner, parked, VecDeque::new());
+            let (source, _gate, stats) = source("setup refused", owner, parked, VecDeque::new());
             let channel = Channel::connect("http://loopback:50051").await.unwrap();
             let error = GrpcClient::new(channel).into_native_client_streaming(
-                &owner, "/test.Upload/Collect", Request::new(source),
+                owner, "/test.Upload/Collect", Request::new(source),
             ).await.unwrap_err();
             assert_eq!(error.code(), Code::FailedPrecondition);
             assert_eq!(stats.produced.load(Ordering::SeqCst), 0);

@@ -434,12 +434,12 @@ fn owner_cancellation_wakes_a_call_with_a_never_ready_source() {
                 let cx = Cx::current().unwrap();
                 let region = cx.open_child_region(crate::cx::ChildRegionSpec::inherit()).await.unwrap();
                 let owner = region.cx();
-                let (source, _gate, stats) = source("cancel parked producer", &owner, witness,
+                let (source, _gate, stats) = source("cancel parked producer", owner, witness,
                     VecDeque::new());
                 let channel = Channel::builder(format!("http://{}", peer.address))
                     .timeout(LIMIT).connect().await.unwrap();
                 let mut call = GrpcClient::new(channel)
-                    .into_native_bidi_streaming(&owner, "/test.Upload/Exchange", Request::new(source))
+                    .into_native_bidi_streaming(owner, "/test.Upload/Exchange", Request::new(source))
                     .await.unwrap();
                 peer.respond.send(()).unwrap();
                 {

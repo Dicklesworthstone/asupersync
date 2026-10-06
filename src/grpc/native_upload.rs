@@ -234,7 +234,8 @@ where
                     // read wakeup. Poll the network again before parking on a
                     // producer alone, or an early response could remain unread.
                     Poll::Pending if network_pending => return Poll::Pending,
-                    Poll::Pending => continue,
+                    // The loop polls the network again.
+                    Poll::Pending => {}
                     Poll::Ready(Some(Ok(message))) => {
                         if let Err(status) = call.queue_message(&message) {
                             return Poll::Ready(Some(Err(self.finish(status))));
