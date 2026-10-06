@@ -126,7 +126,21 @@ fn write_pending(socket: &mut std::net::TcpStream, connection: &mut Connection) 
     while let Some(frame) = connection.next_frame() {
         let mut bytes = BytesMut::new();
         frame.encode(&mut bytes).unwrap();
-        socket.write_all(&bytes).unwrap();
+        match socket.write_all(&bytes) {
+            Ok(()) => {}
+            // A cancelled call closes its connection, possibly while the peer
+            // is still answering. Stop writing; the next read sees the close
+            // and ends the exchange (closed_read).
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+                ) =>
+            {
+                return;
+            }
+            Err(error) => panic!("native upload peer write: {error}"),
+        }
     }
 }
 
