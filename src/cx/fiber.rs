@@ -63,6 +63,62 @@
 //!   fine-grained concurrency (I/O fan-out, timeouts on parts of the work,
 //!   pipelines over borrowed data).
 //!
+//! # What the compiler enforces
+//!
+//! Fibers borrow under the ordinary borrow rules. The scope future cannot
+//! outlive the data its fibers borrow:
+//!
+//! ```compile_fail,E0597
+//! use asupersync::cx::fiber;
+//!
+//! let pending = {
+//!     let words = vec!["short-lived"];
+//!     let words = &words;
+//!     fiber::scope(move |scope| async move {
+//!         scope.spawn(async move { words.len() }).await.unwrap()
+//!     })
+//! };
+//! drop(pending);
+//! ```
+//!
+//! Two fibers cannot hold the same `&mut`. Split the data instead, for
+//! example with `split_at_mut`:
+//!
+//! ```compile_fail,E0382
+//! use asupersync::cx::fiber;
+//!
+//! let mut total = 0;
+//! let total = &mut total;
+//! drop(fiber::scope(|scope| async move {
+//!     let first = scope.spawn(async move { *total += 1 });
+//!     let second = scope.spawn(async move { *total += 1 });
+//!     first.await.unwrap();
+//!     second.await.unwrap();
+//! }));
+//! ```
+//!
+//! A fiber's future must be `Send`, so that a scope can run inside a spawned
+//! task. A `!Send` value such as an `Rc` may be used between awaits, but not
+//! held across one:
+//!
+//! ```compile_fail
+//! use asupersync::cx::fiber;
+//!
+//! drop(fiber::scope(|scope| async move {
+//!     let fiber = scope.spawn(async {
+//!         let shared = std::rc::Rc::new(1);
+//!         asupersync::runtime::yield_now().await;
+//!         *shared
+//!     });
+//!     fiber.await.unwrap()
+//! }));
+//! ```
+//!
+//! A [`FiberHandle`] has no lifetime, so it may leave the body. Awaiting it
+//! after the scope finished still yields the fiber's result, because the
+//! scope waited for that fiber. Starting a fiber through an escaped
+//! [`FiberScope`] after the scope finished panics instead.
+//!
 //! # Cost
 //!
 //! Starting a fiber costs one boxed future and one shared completion cell,
@@ -1343,5 +1399,214 @@ mod tests {
             vec![CancelKind::Shutdown; 2],
             "both fibers see the task's reason"
         );
+    }
+
+    // --- Borrowing, forgetting and lab determinism (kpmoy5.3.3) ---
+
+    #[test]
+    fn fibers_mutate_disjoint_borrows_and_use_non_send_values_between_awaits() {
+        let mut data = vec![0_u32; 4];
+        let mut total = 0_usize;
+        {
+            let (left, right) = data.split_at_mut(2);
+            let total = &mut total;
+            block_on(scope(|s| async move {
+                let a = s.spawn(async move {
+                    for value in left.iter_mut() {
+                        *value += 1;
+                        crate::runtime::yield_now().await;
+                    }
+                });
+                let b = s.spawn(async move {
+                    for value in right.iter_mut() {
+                        *value += 2;
+                        crate::runtime::yield_now().await;
+                    }
+                    // A !Send value is fine while no await holds it.
+                    let local = std::rc::Rc::new(5_usize);
+                    *local
+                });
+                a.await.expect("left half");
+                *total += b.await.expect("right half");
+            }));
+        }
+        assert_eq!(data, [1, 1, 2, 2]);
+        assert_eq!(total, 5);
+    }
+
+    #[test]
+    fn forgetting_a_started_scope_future_is_sound_and_ends_its_borrow() {
+        let mut data = vec![1, 2, 3];
+        {
+            let borrowed = &data;
+            let mut started = Box::pin(scope(|s| async move {
+                s.spawn(async move {
+                    std::future::pending::<()>().await;
+                    borrowed.len()
+                })
+                .await
+                .expect("never resolves")
+            }));
+            let mut task = Context::from_waker(Waker::noop());
+            assert!(
+                started.as_mut().poll(&mut task).is_pending(),
+                "the fiber is parked"
+            );
+            // Leaks the scope and its parked fiber: nothing runs again, and
+            // nothing panics.
+            std::mem::forget(started);
+        }
+        // The borrow ended with the forgotten future.
+        data.push(4);
+        assert_eq!(data, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    // The body returns the fiber's handle on purpose: the test is about a
+    // handle that leaves the scope body.
+    #[allow(clippy::async_yields_async)]
+    fn a_handle_that_leaves_the_body_still_yields_its_result() {
+        let handle = block_on(scope(|s| async move { s.spawn(async { 7_u8 }) }));
+        assert_eq!(block_on(handle).expect("the scope waited for the fiber"), 7);
+    }
+
+    /// Logs each name, yielding after each one.
+    async fn logged_steps(log: Arc<Mutex<Vec<&'static str>>>, names: &'static [&'static str]) {
+        for &name in names {
+            log.lock().push(name);
+            crate::runtime::yield_now().await;
+        }
+    }
+
+    /// One lab run: a task runs a scope whose fibers interleave while a third
+    /// parks until cancelled, and the owner aborts the task once that fiber
+    /// is parked. Returns the trace fingerprint, the fibers' step log and the
+    /// cancellation kind the parked fiber saw.
+    fn lab_fiber_run(seed: u64) -> (u64, Vec<&'static str>, Vec<CancelKind>) {
+        use crate::lab::{LabConfig, LabRuntime};
+        use crate::types::Budget;
+
+        let mut lab = LabRuntime::new(LabConfig::new(seed).max_steps(100_000));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let parked = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (log_in_task, parked_in_task, seen_in_task) =
+            (Arc::clone(&log), Arc::clone(&parked), Arc::clone(&seen));
+        let (owner, _join) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("lab task context");
+                let (log_in_scope, parked_in_scope) =
+                    (Arc::clone(&log_in_task), Arc::clone(&parked_in_task));
+                let mut worker = cx
+                    .spawn(move |task_cx| async move {
+                        scope(|s| async move {
+                            let a = s.spawn(logged_steps(
+                                Arc::clone(&log_in_scope),
+                                &["a0", "a1", "a2"],
+                            ));
+                            let b = s.spawn(logged_steps(Arc::clone(&log_in_scope), &["b0", "b1"]));
+                            let c = s.spawn(parked_until_cancelled(parked_in_scope, seen_in_task));
+                            for handle in [a, b, c] {
+                                handle.await.expect("fiber");
+                            }
+                        })
+                        .await;
+                        // Acknowledge the abort, as a cooperative task does.
+                        let _ = task_cx.checkpoint();
+                    })
+                    .expect("spawn the worker");
+                while parked_in_task.load(Ordering::SeqCst) < 1 || log_in_task.lock().len() < 5 {
+                    crate::runtime::yield_now().await;
+                }
+                worker.abort_with_reason(CancelReason::new(CancelKind::Shutdown));
+                let _ = worker.join(&cx).await;
+            })
+            .expect("create the owner");
+        lab.scheduler.lock().schedule(owner, 0);
+        let report = lab.run_until_quiescent_with_report();
+        assert!(report.lab_test_passed(), "seed {seed:#x}: {report:?}");
+        assert_eq!(lab.state.live_task_count(), 0, "seed {seed:#x}");
+        let steps = log.lock().clone();
+        let kinds = seen.lock().clone();
+        (report.trace_fingerprint, steps, kinds)
+    }
+
+    #[test]
+    fn lab_fiber_runs_replay_identically_per_seed() {
+        let mut step_logs = Vec::new();
+        for seed in [0xF1BE_0001_u64, 0xF1BE_0002] {
+            let first = lab_fiber_run(seed);
+            let second = lab_fiber_run(seed);
+            assert_eq!(first, second, "seed {seed:#x} replays identically");
+            assert_eq!(first.2, [CancelKind::Shutdown], "seed {seed:#x}");
+            step_logs.push(first.1);
+        }
+        // The interleaving inside one task belongs to the scope, not to the
+        // scheduler: it is the same under every seed.
+        assert_eq!(step_logs[0], ["a0", "b0", "a1", "b1", "a2"]);
+        assert_eq!(step_logs[0], step_logs[1]);
+    }
+
+    #[test]
+    fn an_obligation_held_by_a_parked_fiber_is_a_futurelock_of_its_task() {
+        use crate::lab::runtime::InvariantViolation;
+        use crate::lab::{LabConfig, LabRuntime};
+        use crate::types::Budget;
+
+        let mut lab = LabRuntime::new(
+            LabConfig::new(0xF1BE_0F17)
+                .futurelock_max_idle_steps(64)
+                .panic_on_futurelock(false)
+                .max_steps(100_000),
+        );
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let (release, mut released) = crate::channel::oneshot::channel::<()>();
+        let (holder, _holder_join) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let (tx, _rx) = crate::channel::mpsc::channel::<u8>(1);
+                scope(|s| async move {
+                    s.spawn(async move {
+                        let cx = Cx::current().expect("the fiber's context");
+                        let permit = tx.reserve(&cx).await.expect("capacity");
+                        // Parked while the permit's obligation is pending.
+                        released.recv(&cx).await.expect("released");
+                        permit.try_send(7).expect("the receiver is alive");
+                    })
+                    .await
+                    .expect("fiber");
+                })
+                .await;
+            })
+            .expect("create the holder");
+        let (ticker, _ticker_join) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async {
+                for _ in 0..256 {
+                    crate::runtime::yield_now().await;
+                }
+            })
+            .expect("create the ticker");
+        lab.scheduler.lock().schedule(holder, 0);
+        lab.scheduler.lock().schedule(ticker, 0);
+        lab.run_until_idle();
+        let futurelocks: Vec<_> = lab
+            .check_invariants()
+            .into_iter()
+            .filter_map(|violation| match violation {
+                InvariantViolation::Futurelock { task, held, .. } => Some((task, held.len())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            futurelocks,
+            [(holder, 1)],
+            "the fiber's obligation is held by its task, which the detector names"
+        );
+        release.send_blocking(()).expect("the fiber still waits");
+        let report = lab.run_until_quiescent_with_report();
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 }
