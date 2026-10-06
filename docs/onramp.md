@@ -8,7 +8,7 @@ and run those exact files.
 | --- | --- | --- |
 | 0 | Attribute entry point; no runtime concepts yet | [`onramp_level0.rs`](../examples/onramp_level0.rs) |
 | 1 | Prelude, `Cx`, `Outcome`, and `Budget` | [`onramp_level1.rs`](../examples/onramp_level1.rs) |
-| 2 | Scope, region ownership, policy, and `JoinSet` | [`onramp_level2.rs`](../examples/onramp_level2.rs) |
+| 2 | Scope, region ownership, policy, `JoinSet`, and fibers | [`onramp_level2.rs`](../examples/onramp_level2.rs), [`fibers_borrowing.rs`](../examples/fibers_borrowing.rs) |
 | 3 | Obligations, two-phase effects, and deterministic lab oracles | [`onramp_level3.rs`](../examples/onramp_level3.rs) |
 
 ## Level 0: enter the runtime
@@ -71,6 +71,20 @@ region close is the quiescence backstop.
 Use `JoinSet::join_next` for completion order, `join_all` for spawn order, and
 `cancel_all` when you want to request cancellation and drain the remaining
 members explicitly.
+
+When the fan-out needs concurrency but not parallelism, or the children should
+borrow the caller's data, use `fiber::scope` instead of tasks:
+
+```bash
+cargo run --example fibers_borrowing
+```
+
+Fibers run inside the calling task. They need no `'static` bound and no spawn
+authority, and the scope returns only after every fiber has finished. Each
+fiber has its own cancellation:
+- the task's cancellation reaches every fiber;
+- `FiberHandle::cancel` stops one fiber;
+- a panicking fiber cancels its siblings.
 
 ## Level 3: prove the cleanup contract
 

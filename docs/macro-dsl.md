@@ -404,6 +404,39 @@ scope!(cx, state: &mut state, {
 })
 ```
 
+### Fan-out over borrowed data: fibers
+
+There is no fiber macro; `cx::fiber::scope` is a plain function. Use it when
+the number of children is dynamic, when they borrow the caller's data, or when
+each child needs its own cancellation:
+
+```rust,ignore
+let words = &words;
+let letters = fiber::scope(|scope| async move {
+    let handles: Vec<_> = words
+        .iter()
+        .map(|word| scope.spawn(async move { word.len() }))
+        .collect();
+    let mut letters = 0;
+    for handle in handles {
+        letters += handle.await.expect("fiber finished");
+    }
+    letters
+})
+.await;
+```
+
+Fibers run inside the calling task, like the branches of `join!`, so they are
+concurrent but not parallel. Unlike the branches of `race!`, they are not
+region tasks: they need no `'static` bound and no spawn authority. The scope
+returns only after every fiber has finished:
+- the task's cancellation reaches every fiber;
+- `FiberHandle::cancel` stops one fiber;
+- a panicking fiber cancels its siblings.
+
+The complete program is
+[`examples/fibers_borrowing.rs`](../examples/fibers_borrowing.rs).
+
 ## Migration Guide
 
 Manual API usage (today):
