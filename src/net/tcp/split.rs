@@ -526,6 +526,18 @@ pub(crate) struct TcpStreamInner {
     unsupported: (),
 }
 
+impl Drop for TcpStreamInner {
+    fn drop(&mut self) {
+        // Deregister before the `stream` field closes the fd. The reactor may
+        // still hold the shared state while it dispatches a wake; dropping the
+        // registration with the last state Arc then ran after the close, and
+        // an accept that reused the fd number hit AlreadyExists on its first
+        // registration (br-asupersync-8vrx8q).
+        let registration = self.state.lock().registration.take();
+        drop(registration);
+    }
+}
+
 impl std::fmt::Debug for TcpStreamInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut debug = f.debug_struct("TcpStreamInner");
@@ -2294,6 +2306,52 @@ mod tests {
         let state = read_half.inner.state.lock();
         assert!(state.read_waiter.is_none());
         assert!(state.registration.is_none());
+    }
+
+    /// When both halves drop, the reactor registration goes before the fd
+    /// closes, even while the reactor (dispatching a wake) still holds the
+    /// shared state. It used to go with the last state Arc, after the close
+    /// (br-asupersync-8vrx8q).
+    #[cfg(unix)]
+    #[test]
+    fn dropping_both_halves_deregisters_before_the_fd_closes() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let client = std::net::TcpStream::connect(addr).expect("connect");
+        let (_server, _) = listener.accept().expect("accept");
+        client.set_nonblocking(true).expect("nonblocking");
+        let (mut read_half, write_half) = OwnedReadHalf::new_pair(Arc::new(client), None);
+
+        let driver = IoDriverHandle::new(Arc::new(SourceExclusiveReactor::new()));
+        let cx = Cx::new_with_observability(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            Some(driver.clone()),
+            None,
+        );
+        let _current = Cx::set_current(Some(cx));
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+        let mut bytes = [0_u8; 1];
+        let mut read_buf = ReadBuf::new(&mut bytes);
+        let pending = Pin::new(&mut read_half).poll_read(&mut task_cx, &mut read_buf);
+        assert!(pending.is_pending());
+        assert_eq!(driver.waker_count(), 1);
+
+        // No waiter is left to retire, and the reactor is dispatching a wake:
+        // it holds the shared state.
+        read_half.last_waiter = None;
+        let dispatching = Arc::clone(&read_half.inner.state);
+        drop(read_half);
+        drop(write_half);
+        assert_eq!(
+            driver.waker_count(),
+            0,
+            "the registration goes with the stream, not with the last state Arc"
+        );
+        drop(dispatching);
     }
 
     #[cfg(unix)]

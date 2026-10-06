@@ -419,6 +419,18 @@ pub(crate) struct UnixStreamInner {
     stream: Arc<net::UnixStream>,
 }
 
+impl Drop for UnixStreamInner {
+    fn drop(&mut self) {
+        // Deregister before the `stream` field closes the fd. The reactor may
+        // still hold the shared state while it dispatches a wake; dropping the
+        // registration with the last state Arc then ran after the close, and
+        // a socket that reused the fd number hit AlreadyExists on its first
+        // registration (br-asupersync-8vrx8q).
+        let registration = self.state.lock().registration.take();
+        drop(registration);
+    }
+}
+
 impl std::fmt::Debug for UnixStreamInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UnixStreamInner")
@@ -1087,6 +1099,45 @@ mod tests {
                 1,
                 "the ambient driver now owns the halves' combined waker"
             );
+        }
+
+        /// When both halves drop, the reactor registration goes before the fd
+        /// closes, even while the reactor (dispatching a wake) still holds the
+        /// shared state (br-asupersync-8vrx8q).
+        #[test]
+        fn dropping_both_halves_deregisters_before_the_fd_closes() {
+            let driver = IoDriverHandle::new(Arc::new(LabReactor::new()));
+            let ambient = Cx::new_with_observability(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(0, 0),
+                Budget::INFINITE,
+                None,
+                Some(driver.clone()),
+                None,
+            );
+            let _guard = Cx::set_current(Some(ambient));
+            let (mut read_half, write_half, _peer) = split_pair();
+            let (_signal, waker, _rx) = signal_waker();
+            let mut task_cx = Context::from_waker(&waker);
+            let mut buf = [0u8; 8];
+            assert!(matches!(
+                poll_read_once(&mut read_half, &mut task_cx, &mut buf),
+                Poll::Pending
+            ));
+            assert_eq!(driver.waker_count(), 1);
+
+            // No waiter is left to retire, and the reactor is dispatching a
+            // wake: it holds the shared state.
+            read_half.last_waiter = None;
+            let dispatching = Arc::clone(&read_half.inner.state);
+            drop(read_half);
+            drop(write_half);
+            assert_eq!(
+                driver.waker_count(),
+                0,
+                "the registration goes with the stream, not with the last state Arc"
+            );
+            drop(dispatching);
         }
     }
     use crate::runtime::{Event, IoDriverHandle, LabReactor};
