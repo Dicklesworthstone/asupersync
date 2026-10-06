@@ -75,6 +75,8 @@ pub fn require_ambient_io(operation: &'static str) -> io::Result<()> {
 /// [`crate::runtime::spawn_blocking_io`] for the path-based filesystem entry
 /// points (`fs::read`, `fs::create_dir_all`, `fs::read_dir`, ...): the gate
 /// runs first, on the calling task's thread, where its context is current.
+/// Its only callers are in `fs`, which wasm32 builds leave out.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn spawn_blocking_io<F, T>(f: F) -> io::Result<T>
 where
     F: FnOnce() -> io::Result<T> + Send + 'static,
