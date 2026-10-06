@@ -905,7 +905,9 @@ impl TimerWheel {
         let max_range = self.max_range_ns();
         while let Some(entry) = self.overflow.peek() {
             let delta = entry.deadline.as_nanos().saturating_sub(current.as_nanos());
-            if delta < max_range {
+            // A due entry always leaves overflow, even with a zero
+            // max_wheel_duration (fqdvqn): insert_entry sends it to `ready`.
+            if delta < max_range || delta == 0 {
                 let entry = self.overflow.pop().expect("peeked entry missing");
                 if self.is_live(&entry.entry) {
                     self.insert_entry(entry.entry);
@@ -1972,6 +1974,43 @@ mod tests {
             counter.load(Ordering::SeqCst)
         );
         crate::test_complete!("overflow_promotion_terminates_with_oversized_wheel_duration");
+    }
+
+    /// br-asupersync-combinator-time-audit-fqdvqn LOW: with a zero
+    /// `max_wheel_duration` every pending timer goes to overflow, and
+    /// refill_overflow promoted only entries with `delta < 0`, which no
+    /// unsigned delta is. No timer ever fired.
+    #[test]
+    fn a_zero_max_wheel_duration_still_fires_due_timers() {
+        init_test("a_zero_max_wheel_duration_still_fires_due_timers");
+        let config = TimerWheelConfig::new().max_wheel_duration(Duration::ZERO);
+        let mut wheel = TimerWheel::with_config(Time::ZERO, config, CoalescingConfig::default());
+        let counter = Arc::new(AtomicU64::new(0));
+        let _handle = wheel.register(Time::from_millis(10), counter_waker(counter.clone()));
+        crate::assert_with_log!(
+            wheel.overflow_count() == 1,
+            "the pending timer is parked in overflow",
+            1usize,
+            wheel.overflow_count()
+        );
+
+        let expired = wheel.collect_expired(Time::from_millis(20));
+        crate::assert_with_log!(
+            expired.len() == 1,
+            "the due timer fires",
+            1usize,
+            expired.len()
+        );
+        for waker in expired {
+            waker.wake();
+        }
+        crate::assert_with_log!(
+            counter.load(Ordering::SeqCst) == 1,
+            "its waker ran",
+            1u64,
+            counter.load(Ordering::SeqCst)
+        );
+        crate::test_complete!("a_zero_max_wheel_duration_still_fires_due_timers");
     }
 
     // =========================================================================
