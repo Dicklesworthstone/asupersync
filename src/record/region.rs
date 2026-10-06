@@ -214,7 +214,8 @@ pub struct RegionLimits {
     pub max_obligations: Option<usize>,
     /// Maximum live bytes allocated in the region heap.
     pub max_heap_bytes: Option<usize>,
-    /// Optional min-plus curve budget for hard admission bounds.
+    /// Optional min-plus curve budget for hard admission bounds. Not
+    /// consulted yet: admission checks the counts above, not this budget.
     pub curve_budget: Option<CurveBudget>,
 }
 
@@ -234,7 +235,8 @@ impl RegionLimits {
         Self::UNLIMITED
     }
 
-    /// Attaches a curve budget for admission control bounds.
+    /// Attaches a curve budget for admission control bounds. Admission does
+    /// not consult it yet (see [`RegionLimits::curve_budget`]).
     #[must_use]
     pub fn with_curve_budget(mut self, curve_budget: CurveBudget) -> Self {
         self.curve_budget = Some(curve_budget);
@@ -321,9 +323,12 @@ impl AtomicRegionState {
 /// linear scan beats hashing and needs no index allocation.
 const TASK_MEMBERSHIP_INDEX_THRESHOLD: usize = 16;
 
-/// A region's member tasks: insertion-ordered, duplicate-free, with O(1)
-/// insert, remove, and membership test once the region grows past
-/// [`TASK_MEMBERSHIP_INDEX_THRESHOLD`] (br-asupersync-issue65-criticisms-kpmoy5.1.4).
+/// A region's member tasks or child regions: insertion-ordered,
+/// duplicate-free, with O(1) insert, remove, and membership test once the
+/// region grows past [`TASK_MEMBERSHIP_INDEX_THRESHOLD`]
+/// (br-asupersync-issue65-criticisms-kpmoy5.1.4; child regions since
+/// br-asupersync-exeimj: a parent with one child region per request paid
+/// O(siblings) per open and close under the runtime lock).
 ///
 /// Iteration order is insertion order of the live members, exactly what the
 /// previous `Vec<TaskId>` + `contains` + `retain` representation produced.
@@ -333,19 +338,31 @@ const TASK_MEMBERSHIP_INDEX_THRESHOLD: usize = 16;
 /// tombstoned slots plus a position index and compact, order-preserving, when
 /// tombstones dominate, so a server keeping thousands of connection tasks in
 /// one region pays O(1) per spawn and per exit instead of O(N).
-#[derive(Default)]
-struct TaskMembership {
+struct Membership<Id> {
     /// Members in insertion order; `None` marks a removed member and only
     /// appears while `index` is built.
-    slots: Vec<Option<TaskId>>,
+    slots: Vec<Option<Id>>,
     /// Slot position of every live member, present once the region grew past
     /// the threshold.
-    index: Option<crate::util::DetHashMap<TaskId, usize>>,
+    index: Option<crate::util::DetHashMap<Id, usize>>,
     /// Number of live members.
     live: usize,
 }
 
-impl TaskMembership {
+/// A region's member tasks.
+type TaskMembership = Membership<TaskId>;
+
+impl<Id> Default for Membership<Id> {
+    fn default() -> Self {
+        Self {
+            slots: Vec::new(),
+            index: None,
+            live: 0,
+        }
+    }
+}
+
+impl<Id: Copy + Eq + std::hash::Hash + std::fmt::Debug> Membership<Id> {
     #[inline]
     fn len(&self) -> usize {
         self.live
@@ -357,7 +374,7 @@ impl TaskMembership {
     }
 
     #[inline]
-    fn position(&self, task: TaskId) -> Option<usize> {
+    fn position(&self, task: Id) -> Option<usize> {
         match &self.index {
             Some(index) => index.get(&task).copied(),
             None => self.slots.iter().position(|slot| *slot == Some(task)),
@@ -365,12 +382,12 @@ impl TaskMembership {
     }
 
     #[inline]
-    fn contains(&self, task: TaskId) -> bool {
+    fn contains(&self, task: Id) -> bool {
         self.position(task).is_some()
     }
 
     /// Appends `task` unless it is already a member. Returns whether it was added.
-    fn insert(&mut self, task: TaskId) -> bool {
+    fn insert(&mut self, task: Id) -> bool {
         if self.contains(task) {
             return false;
         }
@@ -379,7 +396,7 @@ impl TaskMembership {
     }
 
     /// Appends `task`, which the caller has just checked is not a member.
-    fn push_absent(&mut self, task: TaskId) {
+    fn push_absent(&mut self, task: Id) {
         debug_assert!(
             !self.contains(task),
             "task {task:?} is already a region member"
@@ -397,7 +414,7 @@ impl TaskMembership {
     }
 
     /// Removes `task` if it is a member. Returns whether it was removed.
-    fn remove(&mut self, task: TaskId) -> bool {
+    fn remove(&mut self, task: Id) -> bool {
         let Some(index) = self.index.as_mut() else {
             // Dense mode: preserve order by shifting the (short) tail.
             let Some(position) = self.slots.iter().position(|slot| *slot == Some(task)) else {
@@ -456,18 +473,18 @@ impl TaskMembership {
 
     /// Live members in insertion order.
     #[inline]
-    fn iter(&self) -> impl Iterator<Item = TaskId> + '_ {
+    fn iter(&self) -> impl Iterator<Item = Id> + '_ {
         self.slots.iter().filter_map(|slot| *slot)
     }
 
-    fn to_vec(&self) -> Vec<TaskId> {
+    fn to_vec(&self) -> Vec<Id> {
         let mut out = Vec::with_capacity(self.live);
         out.extend(self.iter());
         out
     }
 }
 
-impl std::fmt::Debug for TaskMembership {
+impl<Id: Copy + Eq + std::hash::Hash + std::fmt::Debug> std::fmt::Debug for Membership<Id> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Same rendering as the `Vec<TaskId>` this replaced.
         f.debug_list().entries(self.iter()).finish()
@@ -478,7 +495,7 @@ impl std::fmt::Debug for TaskMembership {
 struct RegionInner {
     budget: Budget,
     capability_budget: CapabilityBudget,
-    children: Vec<RegionId>,
+    children: Membership<RegionId>,
     tasks: TaskMembership,
     cancel_reason: Option<CancelReason>,
     close_outcome: Option<TaskOutcome>,
@@ -950,7 +967,7 @@ impl RegionRecord {
             inner: Arc::new(RwLock::new(RegionInner {
                 budget,
                 capability_budget,
-                children: Vec::new(),
+                children: Membership::default(),
                 tasks: TaskMembership::default(),
                 cancel_reason: None,
                 close_outcome: None,
@@ -1143,14 +1160,14 @@ impl RegionRecord {
     /// Returns a snapshot of child region IDs.
     #[must_use]
     pub fn child_ids(&self) -> Vec<RegionId> {
-        self.inner.read().children.clone()
+        self.inner.read().children.to_vec()
     }
 
     /// Copies child region IDs into the provided buffer (avoids fresh allocation).
     #[inline]
     pub fn copy_child_ids_into(&self, buf: &mut Vec<RegionId>) {
         let inner = self.inner.read();
-        buf.extend_from_slice(&inner.children);
+        buf.extend(inner.children.iter());
     }
 
     /// Returns the number of tracked tasks without cloning the list.
@@ -1257,7 +1274,7 @@ impl RegionRecord {
             return Err(AdmissionError::Closed);
         }
 
-        if inner.children.contains(&child) {
+        if inner.children.contains(child) {
             return Ok(());
         }
 
@@ -1271,7 +1288,7 @@ impl RegionRecord {
             }
         }
 
-        inner.children.push(child);
+        inner.children.push_absent(child);
         drop(inner);
         Ok(())
     }
@@ -1279,7 +1296,7 @@ impl RegionRecord {
     /// Removes a child region.
     pub fn remove_child(&self, child: RegionId) {
         let mut inner = self.inner.write();
-        inner.children.retain(|&c| c != child);
+        inner.children.remove(child);
     }
 
     fn add_task_internal(&self, task: TaskId, cleanup_task: bool) -> Result<(), AdmissionError> {
@@ -1936,7 +1953,7 @@ impl RegionRecord {
     #[must_use]
     pub fn children_closed(&self, closed: &dyn Fn(RegionId) -> bool) -> bool {
         let inner = self.inner.read();
-        inner.children.iter().all(|child| closed(*child))
+        inner.children.iter().all(closed)
     }
 
     /// Returns true if all tasks are completed.
@@ -2027,12 +2044,8 @@ impl RegionRecord {
         let mut inner = self.inner.write();
         inner.budget = budget;
         // br-asupersync-g4mv9b: G-set union for children + tasks.
-        // O(n*m) contains() is acceptable here — region children and
-        // tasks lists are small (typical region holds 1-10s of each).
         for child_id in children {
-            if !inner.children.contains(&child_id) {
-                inner.children.push(child_id);
-            }
+            inner.children.insert(child_id);
         }
         for task_id in tasks {
             inner.tasks.insert(task_id);
@@ -4250,6 +4263,41 @@ mod tests {
             }
         }
         assert_eq!(membership.to_vec(), model);
+    }
+
+    /// Child regions use the indexed membership too (br-asupersync-exeimj):
+    /// insertion order of the live children is kept, re-adding is a no-op,
+    /// and a parent with many children is indexed (O(1) open and close).
+    #[test]
+    fn child_membership_keeps_order_and_indexes_large_parents() {
+        let parent = RegionRecord::new(test_region_id(), None, Budget::INFINITE);
+        let child = |n: u32| RegionId::from_arena(ArenaIndex::new(n + 2, n % 3));
+        let mut model = Vec::new();
+        for n in 0..1_000 {
+            assert!(parent.add_child(child(n)).is_ok());
+            model.push(child(n));
+        }
+        assert!(parent.add_child(child(7)).is_ok(), "re-adding is a no-op");
+        assert_eq!(parent.child_count(), 1_000);
+        assert!(
+            parent.inner.read().children.index.is_some(),
+            "a parent with many children is indexed"
+        );
+        for n in (0..1_000).step_by(3) {
+            parent.remove_child(child(n));
+            model.retain(|&c| c != child(n));
+        }
+        assert_eq!(
+            parent.child_ids(),
+            model,
+            "live children in insertion order"
+        );
+        assert!(!parent.children_closed(&|c| c != child(1)));
+        for c in model {
+            parent.remove_child(c);
+        }
+        assert_eq!(parent.child_count(), 0);
+        assert!(parent.children_closed(&|_| false), "no children left");
     }
 
     #[test]
