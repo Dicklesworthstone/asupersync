@@ -445,7 +445,7 @@ where
                 let _ = crate::time::timeout(
                     current_time(),
                     timeout_duration,
-                    self.initiate_close(CloseReason::going_away()),
+                    self.initiate_close(self.close_handshake.cancellation_reason()),
                 )
                 .await;
                 return Err(WsError::Io(io::Error::new(
@@ -704,7 +704,7 @@ where
             let _ = crate::time::timeout(
                 current_time(),
                 timeout_duration,
-                self.initiate_close(CloseReason::going_away()),
+                self.initiate_close(self.close_handshake.cancellation_reason()),
             )
             .await;
             return Err(WsError::Io(std::io::Error::new(
@@ -728,7 +728,7 @@ where
                 let _ = crate::time::timeout(
                     current_time(),
                     timeout_duration,
-                    self.initiate_close(CloseReason::going_away()),
+                    self.initiate_close(self.close_handshake.cancellation_reason()),
                 )
                 .await;
                 Err(WsError::Io(std::io::Error::new(
@@ -747,7 +747,8 @@ where
 
     async fn close_after_cancelled_send(&mut self, cx: &Cx, close_when_uncommitted: bool) {
         if self.write_buf.is_empty() && !close_when_uncommitted {
-            self.close_handshake.force_close(CloseReason::going_away());
+            let reason = self.close_handshake.cancellation_reason();
+            self.close_handshake.force_close(reason);
             return;
         }
 
@@ -759,7 +760,7 @@ where
         let _ = crate::time::timeout(
             current_time(),
             timeout_duration,
-            self.initiate_close(CloseReason::going_away()),
+            self.initiate_close(self.close_handshake.cancellation_reason()),
         )
         .await;
     }
@@ -1713,6 +1714,33 @@ mod tests {
                 ws.io.written,
                 encode_server_frame(Frame::close(Some(1001), None)),
                 "pre-cancelled server send should emit exactly one going-away close frame"
+            );
+        });
+    }
+
+    #[test]
+    fn cancellation_closes_with_the_configured_code() {
+        // br-asupersync-y6naky: CloseConfig::with_cancellation_code was
+        // accepted but cancellation always sent GoingAway (1001).
+        future::block_on(async {
+            let accept = AcceptResponse {
+                accept_key: String::new(),
+                protocol: None,
+                extensions: Vec::new(),
+            };
+            let config = WebSocketConfig {
+                close_config: super::super::CloseConfig::new()
+                    .with_cancellation_code(super::super::CloseCode::ServiceRestart),
+                ..WebSocketConfig::default()
+            };
+            let mut ws = ServerWebSocket::from_upgraded(TestIo::new(), config, accept, &[]);
+            let cx = Cx::for_testing();
+            cx.set_cancel_requested(true);
+            let _ = ws.send(&cx, Message::text("cancelled")).await;
+            assert_eq!(
+                ws.io.written,
+                encode_server_frame(Frame::close(Some(1012), None)),
+                "the cancellation close frame carries the configured code"
             );
         });
     }
