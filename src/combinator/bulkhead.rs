@@ -571,6 +571,12 @@ impl Bulkhead {
         if let Some(idx) = queue.iter().position(|e| e.id == entry_id) {
             let entry = queue.remove(idx).expect("entry must exist");
             let previous_result = entry.result;
+            // Every change to the count happens under the queue lock: a
+            // concurrent reset() zeroing it between the removal and this
+            // decrement wrapped it to u32::MAX, closing the fast path for good.
+            if previous_result.is_none() {
+                self.pending_queue_count.fetch_sub(1, Ordering::Release);
+            }
             drop(queue);
 
             if matches!(previous_result, Some(Ok(()))) {
@@ -586,7 +592,6 @@ impl Bulkhead {
                 self.max_queue_wait_ms_atomic
                     .fetch_max(wait_ms, Ordering::Relaxed);
 
-                self.pending_queue_count.fetch_sub(1, Ordering::Release);
                 self.total_cancelled_atomic.fetch_add(1, Ordering::Relaxed);
                 let _ = self.process_queue(now);
             }
@@ -653,12 +658,14 @@ impl Bulkhead {
 
     /// Manually reset the bulkhead to full capacity.
     pub fn reset(&self) {
-        self.available_permits
-            .store(self.policy.max_concurrent, Ordering::Release);
-
+        // Restore the permits under the queue lock: restored first, a grant
+        // could take permits for an entry this then clears, and that entry's
+        // weight never came back.
         let mut queue = self.queue.write();
         queue.clear();
         self.pending_queue_count.store(0, Ordering::Release);
+        self.available_permits
+            .store(self.policy.max_concurrent, Ordering::Release);
         drop(queue);
     }
 }
@@ -1828,6 +1835,42 @@ mod tests {
         for p in permits {
             p.release();
         }
+    }
+
+    #[test]
+    fn reset_racing_cancel_never_wraps_the_pending_count() {
+        // br-asupersync-r0x5ho: cancel_entry decremented the pending count after
+        // releasing the queue lock, so a reset() zeroing it in between wrapped
+        // it to u32::MAX and every later try_acquire failed. The window is a
+        // few instructions wide, so this loops; a wrapped count is never a
+        // legitimate value, whatever reset runs afterwards.
+        let now = Time::from_millis(0);
+        let bh = Arc::new(Bulkhead::new(BulkheadPolicy {
+            max_concurrent: 1,
+            max_queue: 10,
+            ..Default::default()
+        }));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let resetter = {
+            let bh = Arc::clone(&bh);
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    bh.reset();
+                }
+            })
+        };
+        for _ in 0..50_000 {
+            if let Ok(entry_id) = bh.enqueue(1, now) {
+                bh.cancel_entry(entry_id, now);
+            }
+            let pending = bh.pending_queue_count.load(Ordering::Relaxed);
+            assert!(pending < 1 << 16, "pending count wrapped to {pending}");
+        }
+        stop.store(true, Ordering::Relaxed);
+        resetter.join().expect("resetter thread");
+        bh.reset();
+        assert!(bh.try_acquire(1, now).is_some(), "the fast path stays open");
     }
 
     #[test]

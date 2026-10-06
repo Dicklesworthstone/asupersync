@@ -843,6 +843,12 @@ impl RateLimiter {
             let previous_result = entry.result;
             let cost = entry.cost;
             let enqueued_at_millis = entry.enqueued_at_millis;
+            // Every change to the count happens under the queue lock: a
+            // concurrent reset() zeroing it between the removal and this
+            // decrement wrapped it to u32::MAX, closing the fast path for good.
+            if previous_result.is_none() {
+                self.pending_queue_count.fetch_sub(1, Ordering::Relaxed);
+            }
             drop(queue);
 
             if previous_result == Some(Ok(())) {
@@ -854,7 +860,6 @@ impl RateLimiter {
                 drop(state);
                 let _ = self.process_queue(now);
             } else if previous_result.is_none() {
-                self.pending_queue_count.fetch_sub(1, Ordering::Relaxed);
                 let wait_ms = now.as_millis().saturating_sub(enqueued_at_millis);
                 self.total_wait_time_ms
                     .fetch_add(wait_ms, Ordering::Relaxed);
@@ -874,8 +879,12 @@ impl RateLimiter {
             state.last_refill = 0;
         }
 
-        self.wait_queue.write().clear();
+        // Clear and zero under one lock so no enqueue, grant or cancel lands
+        // between them.
+        let mut queue = self.wait_queue.write();
+        queue.clear();
         self.pending_queue_count.store(0, Ordering::Relaxed);
+        drop(queue);
     }
 }
 
@@ -1458,6 +1467,46 @@ mod tests {
             rl.available_tokens() == 1,
             "reset must restore full burst capacity"
         );
+    }
+
+    #[test]
+    fn reset_racing_cancel_never_wraps_the_pending_count() {
+        // br-asupersync-r0x5ho: cancel_entry decremented the pending count after
+        // releasing the queue lock, so a reset() zeroing it in between wrapped
+        // it to u32::MAX and every later try_acquire failed. The window is a
+        // few instructions wide, so this loops; a wrapped count is never a
+        // legitimate value, whatever reset runs afterwards.
+        let rl = Arc::new(RateLimiter::new(RateLimitPolicy {
+            rate: 1,
+            burst: 1,
+            wait_strategy: WaitStrategy::Block,
+            ..Default::default()
+        }));
+        let now = Time::from_millis(0);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let resetter = {
+            let rl = Arc::clone(&rl);
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    rl.reset();
+                }
+            })
+        };
+        for _ in 0..50_000 {
+            let _ = rl.try_acquire(1, now);
+            if let Ok(entry_id) = rl.enqueue(1, now) {
+                rl.cancel_entry(entry_id, now);
+            }
+            let pending = rl
+                .pending_queue_count
+                .load(std::sync::atomic::Ordering::Relaxed);
+            assert!(pending < 1 << 16, "pending count wrapped to {pending}");
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        resetter.join().expect("resetter thread");
+        rl.reset();
+        assert!(rl.try_acquire(1, now), "the fast path stays open");
     }
 
     #[test]
