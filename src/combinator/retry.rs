@@ -453,9 +453,10 @@ impl RetryTokenBucket {
         // for `rate == 0`. (`NaN > 0.0` is `false`, so NaN falls through too.)
         if self.refill_rate > 0.0 {
             let tokens_needed = cost as f64 - self.tokens;
-            let time_needed_secs = tokens_needed / self.refill_rate;
-            if time_needed_secs.is_finite() {
-                return Duration::from_secs_f64(time_needed_secs);
+            // A finite quotient can still exceed Duration's range (a refill rate
+            // of 1e-30 gives 1e30 s), where from_secs_f64 panics.
+            if let Ok(wait) = Duration::try_from_secs_f64(tokens_needed / self.refill_rate) {
+                return wait;
             }
         }
         Duration::MAX
@@ -893,6 +894,16 @@ where
                     }
                     match sleep.poll(cx) {
                         Poll::Ready(()) => {
+                            // A Sleep also completes early when its task is
+                            // cancelled; that must not start another attempt.
+                            if let Some(r) = Cx::current().and_then(|c| {
+                                c.checkpoint()
+                                    .is_err()
+                                    .then(|| c.cancel_reason().unwrap_or_default())
+                            }) {
+                                this.inner.set(RetryInner::Completed);
+                                return Poll::Ready(RetryResult::Cancelled(r));
+                            }
                             // Sleep done, start factory
                             let fut = (this.factory)();
                             this.inner.set(RetryInner::Polling(fut));
@@ -1110,6 +1121,15 @@ mod tests {
             4,
             "the 102-105 s interval must not be credited twice"
         );
+    }
+
+    /// br-asupersync-r0x5ho: a tiny refill rate gives a finite wait beyond
+    /// Duration's range, where Duration::from_secs_f64 panicked.
+    #[test]
+    fn token_bucket_wait_beyond_duration_range_is_duration_max() {
+        let mut bucket = RetryTokenBucket::new(1, 1e-30, Time::from_secs(1));
+        assert!(bucket.try_consume(1, Time::from_secs(1)));
+        assert_eq!(bucket.time_to_tokens(1), Duration::MAX);
     }
 
     #[test]
