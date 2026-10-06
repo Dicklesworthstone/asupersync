@@ -579,6 +579,17 @@ mod tests {
     use crate::runtime::RuntimeBuilder;
     use crate::types::Budget;
 
+    /// A budget whose deadline is `secs` seconds from now on the runtime
+    /// clock. That clock's zero is the first time the process reads it, so an
+    /// absolute deadline such as `with_deadline_at_secs(10)` has usually
+    /// passed by the time a test in a full lib run gets here, and budget
+    /// deadlines are enforced by a timer (br-asupersync-pev2xi): work spawned
+    /// under a passed deadline is cancelled (br-asupersync-r7vhmw).
+    fn deadline_budget_in(secs: u64) -> Budget {
+        let deadline = crate::time::wall_now() + std::time::Duration::from_secs(secs);
+        Budget::with_deadline_at_ns(deadline.as_nanos())
+    }
+
     #[test]
     fn inherit_spec_has_no_budget_override() {
         let spec = ChildRegionSpec::inherit();
@@ -622,7 +633,7 @@ mod tests {
         let runtime = RuntimeBuilder::current_thread()
             .build()
             .expect("current-thread runtime builds");
-        let parent = runtime.request_cx_with_budget(Budget::with_deadline_at_secs(10));
+        let parent = runtime.request_cx_with_budget(deadline_budget_in(600));
         let restricted: Cx<cap::None> = parent.restrict();
         runtime.block_on_with_cx(parent.clone(), async move {
             let opening: ChildRegionOpening<cap::None> =
@@ -663,7 +674,7 @@ mod tests {
             let runtime = RuntimeBuilder::current_thread()
                 .build()
                 .expect("current-thread runtime builds");
-            let parent = runtime.request_cx_with_budget(Budget::with_deadline_at_secs(60));
+            let parent = runtime.request_cx_with_budget(deadline_budget_in(600));
             runtime.block_on_with_cx(parent.clone(), async move {
                 let owner = parent
                     .open_child_region(ChildRegionSpec::inherit())
@@ -693,7 +704,7 @@ mod tests {
         let runtime = RuntimeBuilder::current_thread()
             .build()
             .expect("current-thread runtime builds");
-        let parent = runtime.request_cx_with_budget(Budget::with_deadline_at_secs(10));
+        let parent = runtime.request_cx_with_budget(deadline_budget_in(600));
         let parent_region = parent.region_id();
         runtime.block_on_with_cx(parent.clone(), async move {
             let child = parent
@@ -729,7 +740,7 @@ mod tests {
                     .build()
                     .unwrap()
             };
-            let parent_budget = Budget::with_deadline_at_secs(60)
+            let parent_budget = deadline_budget_in(600)
                 .with_poll_quota(4096)
                 .with_cost_quota(512);
             // Request contexts share the runtime root region. Their private
@@ -777,17 +788,14 @@ mod tests {
                     assert_eq!(parent.capability_budget(), envelope);
                     assert_eq!(parent.budget(), parent_budget);
                 }
-                let mut tighter = ChildRegionSpec::inherit().with_budget(
-                    Budget::with_deadline_at_secs(30)
-                        .with_poll_quota(2048)
-                        .with_cost_quota(256),
-                );
+                let tighter_budget = deadline_budget_in(300)
+                    .with_poll_quota(2048)
+                    .with_cost_quota(256);
+                assert!(tighter_budget.deadline < parent_budget.deadline);
+                let mut tighter = ChildRegionSpec::inherit().with_budget(tighter_budget);
                 tighter.capability_budget = Some(CapabilityBudget::new().with_io_bytes(64));
                 let child = parent.open_child_region(tighter).await.unwrap();
-                assert_eq!(
-                    child.cx().budget().deadline,
-                    Some(crate::types::Time::from_secs(30))
-                );
+                assert_eq!(child.cx().budget().deadline, tighter_budget.deadline);
                 assert_eq!(child.cx().budget().poll_quota, 2048);
                 assert_eq!(child.cx().budget().cost_quota, Some(256));
                 assert_eq!(child.cx().capability_budget(), envelope.with_io_bytes(64));
@@ -842,7 +850,7 @@ mod tests {
         let runtime = RuntimeBuilder::current_thread()
             .build()
             .expect("current-thread runtime builds");
-        let parent = runtime.request_cx_with_budget(Budget::with_deadline_at_secs(10));
+        let parent = runtime.request_cx_with_budget(deadline_budget_in(600));
         runtime.block_on_with_cx(parent.clone(), async move {
             let mut planned = CapabilityBudget::UNSPECIFIED;
             planned.io_bytes = Some(128);
@@ -894,7 +902,7 @@ mod tests {
         let runtime = RuntimeBuilder::current_thread()
             .build()
             .expect("current-thread runtime builds");
-        let parent = runtime.request_cx_with_budget(Budget::with_deadline_at_secs(10));
+        let parent = runtime.request_cx_with_budget(deadline_budget_in(600));
         runtime.block_on_with_cx(parent.clone(), async move {
             let child = parent
                 .open_child_region(ChildRegionSpec::inherit())
@@ -931,7 +939,7 @@ mod tests {
         let runtime = RuntimeBuilder::current_thread()
             .build()
             .expect("current-thread runtime builds");
-        let parent = runtime.request_cx_with_budget(Budget::with_deadline_at_secs(10));
+        let parent = runtime.request_cx_with_budget(deadline_budget_in(600));
         runtime.block_on_with_cx(parent.clone(), async move {
             let child = parent
                 .open_child_region(ChildRegionSpec::inherit())
@@ -970,7 +978,7 @@ mod tests {
         let runtime = RuntimeBuilder::current_thread()
             .build()
             .expect("current-thread runtime builds");
-        let parent = runtime.request_cx_with_budget(Budget::with_deadline_at_secs(10));
+        let parent = runtime.request_cx_with_budget(deadline_budget_in(600));
         runtime.block_on_with_cx(parent.clone(), async move {
             let child = parent
                 .open_child_region(ChildRegionSpec::inherit())
