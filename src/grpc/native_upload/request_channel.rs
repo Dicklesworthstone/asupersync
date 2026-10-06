@@ -360,7 +360,9 @@ impl<T: Send> Streaming for NativeRequestStream<T> {
         }
         match this.receiver.as_mut().expect("live request receiver").poll_recv(&this.cx, task) {
             Poll::Ready(Ok(message)) => Poll::Ready(Some(Ok(message))),
-            Poll::Ready(Err(mpsc::RecvError::Cancelled)) => {
+            // `Empty` is only produced by `try_recv`; it is unreachable from
+            // `poll_recv` and is handled as cancellation for exhaustiveness.
+            Poll::Ready(Err(mpsc::RecvError::Cancelled | mpsc::RecvError::Empty)) => {
                 this.retire();
                 Poll::Ready(Some(Err(Status::cancelled("native request receive cancelled"))))
             }
