@@ -10,6 +10,8 @@ use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
+mod native;
+
 #[derive(Default)]
 enum State {
     #[default]
@@ -166,7 +168,29 @@ impl<T> NativeRequestSender<T> {
     /// explicit context supplies cancellation and checkpoint budgets, even if
     /// a different task is polling this wait. Owner cancellation interrupts a
     /// full queue without depending on network progress or a timer.
+    /// A separately spawned producer should use [`Self::send_with_cx`] so its
+    /// own cancellation and checkpoint budget participate as well.
     pub fn send(&mut self, message: T) -> impl Future<Output = Result<(), Status>> + '_ {
+        self.send_owned_context(self.cx.clone(), message)
+    }
+
+    /// Enqueue while observing both the RPC owner and an explicit producer.
+    ///
+    /// Use the spawn-supplied context of a producer task. Either cancellation
+    /// wakes a capacity-blocked send; acknowledgement is performed on the
+    /// context that was cancelled. Only the producer's checkpoint budget is
+    /// charged for channel admission. Dropping this borrowing wait does not
+    /// abort the source, but dropping an open sender when its task exits does.
+    /// The returned future owns a context clone and does not borrow `caller`.
+    pub fn send_with_cx<'a>(
+        &'a mut self,
+        caller: &Cx,
+        message: T,
+    ) -> impl Future<Output = Result<(), Status>> + 'a + use<'a, T> {
+        self.send_owned_context(caller.clone(), message)
+    }
+
+    fn send_owned_context(&mut self, caller: Cx, message: T) -> impl Future<Output = Result<(), Status>> + '_ {
         let cx = self.cx.clone();
         let owner = cx.clone();
         let sender = self.sender.as_ref();
@@ -176,12 +200,17 @@ impl<T> NativeRequestSender<T> {
                 return Err(error);
             }
             let sender = sender.ok_or_else(|| Status::failed_precondition("native request sender is closed"))?;
-            let mut sending = pin!(sender.send(&owner, message));
+            let mut sending = pin!(sender.send(&caller, message));
             let mut cancelled = pin!(owner.cancelled());
+            let mut caller_cancelled = pin!(caller.cancelled());
             poll_fn(|task| {
                 if cancelled.as_mut().poll(task).is_ready() {
                     let _ = owner.checkpoint();
                     return Poll::Ready(Err(Status::cancelled("native request channel owner cancelled")));
+                }
+                if caller_cancelled.as_mut().poll(task).is_ready() {
+                    let _ = caller.checkpoint();
+                    return Poll::Ready(Err(Status::cancelled("native request producer cancelled")));
                 }
                 match sending.as_mut().poll(task) {
                     Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
@@ -541,6 +570,28 @@ mod tests {
             assert!(matches!(next(&mut stream), Poll::Ready(Some(Err(status))) if status.code() == Code::Cancelled));
             assert!(matches!(next(&mut stream), Poll::Ready(None)));
         }
+    }
+
+    #[test]
+    fn producer_cancellation_is_separate_from_rpc_owner_cancellation() {
+        let owner = Cx::for_testing();
+        let caller = Cx::for_testing();
+        let (mut sender, mut stream) = native_request_channel(&owner, 1).unwrap();
+        sender.try_send(1).unwrap();
+        let (wakes, waker) = counter();
+        let mut sending = Box::pin(sender.send_with_cx(&caller, 2));
+        assert!(sending.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+        caller.cancel_with(CancelKind::User, Some("producer only"));
+        assert!(wakes.0.load(Ordering::SeqCst) > 0);
+        assert!(matches!(sending.as_mut().poll(&mut Context::from_waker(&waker)),
+            Poll::Ready(Err(status)) if status.code() == Code::Cancelled));
+        drop(sending);
+        assert!(!owner.is_cancel_requested());
+        assert!(matches!(next(&mut stream), Poll::Ready(Some(Ok(1)))));
+        sender.try_send(3).unwrap();
+        sender.close().unwrap();
+        assert!(matches!(next(&mut stream), Poll::Ready(Some(Ok(3)))));
+        assert!(matches!(next(&mut stream), Poll::Ready(None)));
     }
 
     #[test]

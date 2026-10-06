@@ -86,6 +86,14 @@ where
     C: Codec,
     S: Streaming<Message = C::Encode>,
 {
+    pub(super) fn with_request_control(
+        mut self,
+        control: std::sync::Arc<super::request_channel::RequestControl>,
+    ) -> Self {
+        self.stream.request_control = Some(control);
+        self
+    }
+
     /// Upload requests and collect the single complete, successful response.
     ///
     /// A first response message alone is not success: polling continues until
