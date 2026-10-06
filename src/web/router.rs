@@ -4262,6 +4262,31 @@ fn join_route_pattern(prefix: &str, pattern: &str) -> String {
     )
 }
 
+/// Copies validated wire header fields into the extractor request's
+/// single-valued header map.
+///
+/// A repeated field keeps its last value, the builder's existing rule, except
+/// `cookie`: HTTP/2 and HTTP/3 clients may send each cookie as its own field
+/// (RFC 9113 §8.2.3, RFC 9114 §4.2.1), and those sections require the pieces
+/// to be joined with "; " before the request reaches an application. Keeping
+/// only the last piece dropped every other cookie, the session cookie
+/// included, so a logged-in user looked logged out (br-asupersync-a1q12q).
+/// Protocol validation (Host, Content-Length, transfer coding, etc.) remains
+/// the listener's job and runs before this.
+fn insert_wire_headers(request: &mut Request, headers: Vec<(String, String)>) {
+    for (name, value) in headers {
+        let name = name.to_ascii_lowercase();
+        if name == "cookie"
+            && let Some(joined) = request.headers.get_mut("cookie")
+        {
+            joined.push_str("; ");
+            joined.push_str(&value);
+            continue;
+        }
+        request.headers.insert(name, value);
+    }
+}
+
 /// Translate the completed wire request shared by the HTTP/1.1 and HTTP/2
 /// listeners into the web framework's extractor request.
 fn web_request_from_http(request: HttpRequest) -> Request {
@@ -4269,15 +4294,7 @@ fn web_request_from_http(request: HttpRequest) -> Request {
     let mut web_request = Request::new(request.method.as_str(), path);
     web_request.query = query;
     web_request.body = request.body.into();
-
-    // The web extractor surface intentionally exposes a single value per
-    // header. Preserve its existing builder semantics: when validated wire
-    // input repeats a field, the last value wins. Protocol validation (Host,
-    // Content-Length, transfer coding, etc.) remains the listener's job and
-    // runs before this adapter.
-    for (name, value) in request.headers {
-        web_request.headers.insert(name.to_ascii_lowercase(), value);
-    }
+    insert_wire_headers(&mut web_request, request.headers);
     web_request
 }
 
@@ -4288,10 +4305,7 @@ fn web_request_from_streaming_http(
     let (path, query) = split_http_request_target(&request.head.uri);
     let mut web_request = Request::new(request.head.method.as_str(), path);
     web_request.query = query;
-
-    for (name, value) in request.head.headers {
-        web_request.headers.insert(name.to_ascii_lowercase(), value);
-    }
+    insert_wire_headers(&mut web_request, request.head.headers);
 
     let control = insert_streaming_raw_body(&mut web_request, request.body).ok()?;
     Some((web_request, control))
@@ -4316,8 +4330,8 @@ fn web_request_from_h3(head: H3RequestHead, body: Vec<u8>) -> Request {
     request.body = body.into();
 
     // Match the h2 listener: expose :authority as Host only when the peer did
-    // not send an explicit Host field. The extractor surface is single-valued,
-    // so repeated ordinary fields retain the existing last-value-wins rule.
+    // not send an explicit Host field. Repeated fields follow
+    // insert_wire_headers (last value wins, Cookie pieces are joined).
     if let Some(authority) = head.pseudo.authority
         && !head
             .headers
@@ -4326,9 +4340,7 @@ fn web_request_from_h3(head: H3RequestHead, body: Vec<u8>) -> Request {
     {
         request.headers.insert("host".to_string(), authority);
     }
-    for (name, value) in head.headers {
-        request.headers.insert(name.to_ascii_lowercase(), value);
-    }
+    insert_wire_headers(&mut request, head.headers);
     request
 }
 
@@ -5188,6 +5200,74 @@ mod tests {
         );
         assert_eq!(request.header("x-mode"), Some("last"));
         assert_eq!(request.body.as_ref(), b"payload");
+    }
+
+    /// An HTTP/2 client may send each cookie as its own field (RFC 9113
+    /// §8.2.3). Only the last piece used to survive the conversion, so a
+    /// session cookie in an earlier piece was lost (br-asupersync-a1q12q).
+    #[test]
+    fn listener_request_conversion_joins_split_cookie_fields() {
+        use crate::http::h1::types::{Method, Version};
+        use crate::web::extract::{CookieJar, FromRequestParts};
+
+        let request = HttpRequest {
+            method: Method::Get,
+            uri: "/account".to_string(),
+            version: Version::Http2,
+            headers: vec![
+                ("cookie".to_string(), "_ga=1".to_string()),
+                ("cookie".to_string(), "session_id=abc123".to_string()),
+                ("x-mode".to_string(), "first".to_string()),
+                ("Cookie".to_string(), "theme=dark".to_string()),
+                ("x-mode".to_string(), "last".to_string()),
+            ],
+            body: Vec::new(),
+            trailers: Vec::new(),
+            peer_addr: None,
+        };
+
+        let request = web_request_from_http(request);
+        assert_eq!(
+            request.header("cookie"),
+            Some("_ga=1; session_id=abc123; theme=dark")
+        );
+        let jar = CookieJar::from_request_parts(&request).expect("cookie jar");
+        assert_eq!(jar.get("session_id"), Some("abc123"));
+        assert_eq!(jar.len(), 3);
+        assert_eq!(
+            request.header("x-mode"),
+            Some("last"),
+            "other fields: last wins"
+        );
+    }
+
+    /// The same for HTTP/3 (RFC 9114 §4.2.1).
+    #[test]
+    #[cfg(feature = "http3")]
+    fn h3_request_conversion_joins_split_cookie_fields() {
+        use crate::http::h3::H3PseudoHeaders;
+        use crate::web::extract::{CookieJar, FromRequestParts};
+
+        let head = H3RequestHead::new(
+            H3PseudoHeaders {
+                method: Some("GET".to_string()),
+                scheme: Some("https".to_string()),
+                authority: Some("example.test".to_string()),
+                path: Some("/account".to_string()),
+                ..H3PseudoHeaders::default()
+            },
+            vec![
+                ("cookie".to_string(), "session_id=abc123".to_string()),
+                ("cookie".to_string(), "theme=dark".to_string()),
+            ],
+        )
+        .expect("syntactically valid H3 request");
+
+        let request = web_request_from_h3(head, Vec::new());
+        let jar = CookieJar::from_request_parts(&request).expect("cookie jar");
+        assert_eq!(jar.get("session_id"), Some("abc123"));
+        assert_eq!(jar.get("theme"), Some("dark"));
+        assert_eq!(request.header("host"), Some("example.test"));
     }
 
     #[test]
