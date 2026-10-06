@@ -522,6 +522,9 @@ impl ConnectionManager {
                 .shutdown_signal
                 .wait_for_phase(ShutdownPhase::ForceClosing);
             let mut notified = std::pin::pin!(notified);
+            // Register now: the re-checks below must not miss a close that
+            // lands before the first poll of `notified` (br-asupersync-m8xsjx).
+            let _ = notified.as_mut().enable();
             let mut force_close = std::pin::pin!(force_close);
 
             // Re-check state after registration to avoid missing close/timeout
