@@ -588,33 +588,39 @@ impl ServerInfo {
 
         let mut info = Self::default();
 
-        // Simple JSON field extraction (no nested objects)
-        if let Some(v) = extract_json_string(json, "server_id") {
-            info.server_id = v;
+        // Top-level fields from the parsed object. Matching `"key":` in the
+        // text read `"tls_required" : true` (valid JSON) as absent, skipping
+        // the TLS upgrade, and let a nested key shadow a top-level one
+        // (br-asupersync-pm29wb).
+        let string = |key: &str| value.get(key).and_then(serde_json::Value::as_str);
+        let integer = |key: &str| value.get(key).and_then(serde_json::Value::as_i64);
+        let flag = |key: &str| value.get(key).and_then(serde_json::Value::as_bool);
+        if let Some(v) = string("server_id") {
+            info.server_id = v.to_string();
         }
-        if let Some(v) = extract_json_string(json, "server_name") {
-            info.server_name = v;
+        if let Some(v) = string("server_name") {
+            info.server_name = v.to_string();
         }
-        if let Some(v) = extract_json_string(json, "version") {
-            info.version = v;
+        if let Some(v) = string("version") {
+            info.version = v.to_string();
         }
-        if let Some(v) = extract_json_i64(json, "proto") {
+        if let Some(v) = integer("proto") {
             info.proto = v as i32;
         }
-        if let Some(v) = extract_json_i64(json, "max_payload") {
+        if let Some(v) = integer("max_payload") {
             info.max_payload = usize::try_from(v).unwrap_or(0);
         }
-        if let Some(v) = extract_json_bool(json, "tls_required") {
+        if let Some(v) = flag("tls_required") {
             info.tls_required = v;
         }
-        if let Some(v) = extract_json_bool(json, "tls_available") {
+        if let Some(v) = flag("tls_available") {
             info.tls_available = v;
         }
-        if let Some(v) = extract_json_bool(json, "headers") {
+        if let Some(v) = flag("headers") {
             info.headers = v;
         }
-        if let Some(v) = extract_json_string(json, "nonce") {
-            info.nonce = Some(v);
+        if let Some(v) = string("nonce") {
+            info.nonce = Some(v.to_string());
         }
 
         Ok(info)
@@ -960,42 +966,6 @@ fn parse_nats_creds(creds: &str) -> Result<(String, String), NatsError> {
     Ok((user_jwt, nkey_seed))
 }
 
-fn extract_json_string(json: &str, key: &str) -> Option<String> {
-    let pattern = format!("\"{key}\":\"");
-    let start = json.find(&pattern)? + pattern.len();
-    let slice = &json[start..];
-    let mut out = String::with_capacity(slice.len());
-    let mut chars = slice.chars();
-    loop {
-        match chars.next()? {
-            '"' => return Some(out),
-            '\\' => {
-                let next = chars.next()?;
-                match next {
-                    'b' => out.push('\x08'),
-                    'f' => out.push('\x0C'),
-                    'n' => out.push('\n'),
-                    'r' => out.push('\r'),
-                    't' => out.push('\t'),
-                    'u' => {
-                        let mut hex = String::with_capacity(4);
-                        for _ in 0..4 {
-                            hex.push(chars.next()?);
-                        }
-                        if let Ok(val) = u32::from_str_radix(&hex, 16) {
-                            if let Some(c) = char::from_u32(val) {
-                                out.push(c);
-                            }
-                        }
-                    }
-                    other => out.push(other),
-                }
-            }
-            c => out.push(c),
-        }
-    }
-}
-
 /// Encode a NATS v1 message-header block per
 /// `https://docs.nats.io/reference/reference-protocols/nats-protocol#hpub`:
 ///
@@ -1077,29 +1047,6 @@ fn nats_json_escape(s: &str) -> String {
         }
     }
     out
-}
-
-fn extract_json_i64(json: &str, key: &str) -> Option<i64> {
-    let pattern = format!("\"{key}\":");
-    let start = json.find(&pattern)? + pattern.len();
-    let rest = json[start..].trim_start();
-    let end = rest
-        .find(|c: char| !c.is_ascii_digit() && c != '-')
-        .unwrap_or(rest.len());
-    rest[..end].parse().ok()
-}
-
-fn extract_json_bool(json: &str, key: &str) -> Option<bool> {
-    let pattern = format!("\"{key}\":");
-    let start = json.find(&pattern)? + pattern.len();
-    let rest = json[start..].trim_start();
-    if rest.starts_with("true") {
-        Some(true)
-    } else if rest.starts_with("false") {
-        Some(false)
-    } else {
-        None
-    }
 }
 
 fn validate_nats_token(value: &str, field: &str) -> Result<(), NatsError> {
@@ -5771,26 +5718,21 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_json_string() {
-        let json = r#"{"name":"value","other":123}"#;
-        assert_eq!(extract_json_string(json, "name"), Some("value".to_string()));
-        assert_eq!(extract_json_string(json, "missing"), None);
-    }
-
-    #[test]
-    fn test_extract_json_i64() {
-        let json = r#"{"count":42,"neg":-5}"#;
-        assert_eq!(extract_json_i64(json, "count"), Some(42));
-        assert_eq!(extract_json_i64(json, "neg"), Some(-5));
-        assert_eq!(extract_json_i64(json, "missing"), None);
-    }
-
-    #[test]
-    fn test_extract_json_bool() {
-        let json = r#"{"enabled":true,"disabled":false}"#;
-        assert_eq!(extract_json_bool(json, "enabled"), Some(true));
-        assert_eq!(extract_json_bool(json, "disabled"), Some(false));
-        assert_eq!(extract_json_bool(json, "missing"), None);
+    fn server_info_reads_top_level_fields_whatever_the_json_spacing() {
+        // br-asupersync-pm29wb: fields were found by the text `"key":`, so
+        // valid JSON with a space before the colon read tls_required as false
+        // (the TLS upgrade was skipped) and a nested key shadowed the real one.
+        let info = ServerInfo::parse(
+            r#"{"cluster": {"tls_required": false, "max_payload": 7},
+                "tls_required" : true, "max_payload" : 1048576,
+                "server_id" : "S1", "proto" : 1, "headers" : true}"#,
+        )
+        .expect("valid INFO");
+        assert!(info.tls_required);
+        assert_eq!(info.max_payload, 1_048_576);
+        assert_eq!(info.server_id, "S1");
+        assert_eq!(info.proto, 1);
+        assert!(info.headers);
     }
 
     #[test]
@@ -6990,24 +6932,14 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_json_string_with_escape() {
-        let json = r#"{"key":"val\"ue"}"#;
-        assert_eq!(
-            extract_json_string(json, "key"),
-            Some("val\"ue".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_json_i64_negative() {
-        let json = r#"{"val":-42}"#;
-        assert_eq!(extract_json_i64(json, "val"), Some(-42));
-    }
-
-    #[test]
-    fn test_extract_json_bool_missing() {
-        let json = r#"{"other":42}"#;
-        assert_eq!(extract_json_bool(json, "missing"), None);
+    fn test_server_info_escapes_negatives_and_missing_flags() {
+        let info = ServerInfo::parse(r#"{"server_name":"val\"ue","max_payload":-42,"proto":-1}"#)
+            .expect("valid INFO");
+        assert_eq!(info.server_name, "val\"ue");
+        assert_eq!(info.max_payload, 0, "a negative max_payload is not a size");
+        assert_eq!(info.proto, -1);
+        assert!(!info.tls_required, "a missing flag stays false");
+        assert!(!info.headers);
     }
 
     #[test]
