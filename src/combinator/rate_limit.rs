@@ -565,7 +565,21 @@ impl RateLimiter {
             (state.tokens, state.fractional)
         };
 
-        if current_tokens >= cost {
+        // Queued waiters are served first, so a new request also waits for
+        // their tokens: free tokens the head waiter cannot use yet do not make
+        // a try_acquire succeed now (br-asupersync-r0x5ho).
+        let queued_cost: u64 = if self.pending_queue_count.load(Ordering::Relaxed) > 0 {
+            self.wait_queue
+                .read()
+                .iter()
+                .filter(|entry| entry.result.is_none())
+                .map(|entry| u64::from(entry.cost))
+                .sum()
+        } else {
+            0
+        };
+        let demand = queued_cost.saturating_add(u64::from(cost));
+        if u64::from(current_tokens) >= demand {
             return Duration::ZERO;
         }
 
@@ -575,7 +589,7 @@ impl RateLimiter {
 
         let period_ms = duration_to_millis_saturating(self.policy.period);
 
-        let tokens_needed = cost - current_tokens;
+        let tokens_needed = demand - u64::from(current_tokens);
         let fractional_needed = u128::from(tokens_needed) * u128::from(period_ms);
         let additional_fractional =
             fractional_needed.saturating_sub(u128::from(current_fractional));
@@ -1507,6 +1521,30 @@ mod tests {
         resetter.join().expect("resetter thread");
         rl.reset();
         assert!(rl.try_acquire(1, now), "the fast path stays open");
+    }
+
+    #[test]
+    fn retry_after_counts_the_tokens_queued_waiters_take_first() {
+        // br-asupersync-r0x5ho: with tokens free but a queued waiter needing
+        // more, try_acquire refuses (FIFO) yet retry_after said ZERO, so a
+        // caller backing off on it spun.
+        let rl = RateLimiter::new(RateLimitPolicy {
+            rate: 5,
+            period: Duration::from_secs(1),
+            burst: 5,
+            wait_strategy: WaitStrategy::Block,
+            ..Default::default()
+        });
+        let now = Time::from_millis(0);
+        assert!(rl.try_acquire(2, now));
+        let waiter = rl.enqueue(5, now).expect("enqueue the waiter");
+        assert_ne!(
+            waiter, IMMEDIATE_ACQUIRE_SENTINEL,
+            "3 tokens cannot serve 5"
+        );
+        assert!(!rl.try_acquire(1, now), "the queued waiter goes first");
+        // 5 queued + 1 requested - 3 free = 3 tokens at 5 per second.
+        assert_eq!(rl.retry_after(1, now), Duration::from_millis(600));
     }
 
     #[test]
