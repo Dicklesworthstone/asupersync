@@ -106,12 +106,12 @@
 //!
 //! # Configuration Precedence
 //!
-//! When multiple sources set the same field, the highest-priority source wins:
+//! When several sources set the same field, the one applied last wins, so order the calls:
 //!
-//! 1. **Programmatic** — `builder.worker_threads(4)` (highest)
-//! 2. **Environment** — `ASUPERSYNC_WORKER_THREADS=8`
-//! 3. **Config file** — the shared typed layer loaded from TOML or JSON
-//! 4. **Defaults** — `RuntimeConfig::default()` (lowest)
+//! 1. **Config file** — `from_toml`/`from_json` start the builder from the shared typed layer
+//! 2. **Environment** — `with_env_overrides()` replaces what was set before it, presets included
+//! 3. **Programmatic** — `builder.worker_threads(4)` after it, as in the example above
+//! 4. **Defaults** — `RuntimeConfig::default()` fills every field nothing set
 //!
 //! # Configuration Reference
 //!
@@ -125,7 +125,7 @@
 //! | [`adaptive_ready_batch`](RuntimeBuilder::adaptive_ready_batch) | disabled | Observe-first adaptive ready-lane batch sizing |
 //! | [`blocking_threads`](RuntimeBuilder::blocking_threads) | 0, 0 | Blocking pool min/max |
 //! | [`enable_parking`](RuntimeBuilder::enable_parking) | true | Park idle workers |
-//! | [`poll_budget`](RuntimeBuilder::poll_budget) | 128 | Polls before cooperative yield |
+//! | [`poll_budget`](RuntimeBuilder::poll_budget) | 128 | Self-woken `block_on` root polls before a backoff sleep |
 //! | [`capacity_hints`](RuntimeBuilder::capacity_hints) | auto from `worker_threads` | Initial task/region/obligation table sizing |
 //! | [`expected_concurrent_tasks`](RuntimeBuilder::expected_concurrent_tasks) | unset | Burst-tolerant task-capacity shortcut with 50% headroom |
 //! | [`browser_ready_handoff_limit`](RuntimeBuilder::browser_ready_handoff_limit) | 0 (disabled) | Max ready dispatch burst before host-turn handoff |
@@ -2825,7 +2825,7 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Set the poll budget before yielding.
+    /// Set the `block_on` root's backoff threshold; see [`RuntimeConfig::poll_budget`].
     #[must_use]
     pub fn poll_budget(mut self, budget: u32) -> Self {
         self.config.poll_budget = budget;
@@ -3694,8 +3694,8 @@ impl RuntimeBuilder {
 
     /// Preset: low-latency interactive application.
     ///
-    /// Uses smaller steal batches (4) and tighter poll budgets (32)
-    /// to reduce tail latency at the cost of throughput.
+    /// Uses smaller steal batches (4) to reduce tail latency at the cost of
+    /// throughput. Its `poll_budget` of 32 only makes a self-waking root back off sooner.
     ///
     /// ```ignore
     /// let rt = RuntimeBuilder::low_latency()

@@ -1916,7 +1916,7 @@ pub enum SpawnAdmissionMode {
 /// Concrete scheduler, blocking-pool, tracing, and policy settings for a runtime.
 #[derive(Clone)]
 pub struct RuntimeConfig {
-    /// Number of worker threads (default: available parallelism).
+    /// Number of worker threads (default: [`RuntimeConfig::DEFAULT_WORKER_THREADS`], 4).
     pub worker_threads: usize,
     /// Spawn admission mode: synchronous direct path or lock-free mailbox.
     pub spawn_admission: SpawnAdmissionMode,
@@ -1938,7 +1938,11 @@ pub struct RuntimeConfig {
     pub blocking: BlockingPoolConfig,
     /// Enable parking for idle workers.
     pub enable_parking: bool,
-    /// Time slice for cooperative yielding (polls).
+    /// Self-woken polls a `block_on` root future may make before it backs off.
+    ///
+    /// After this many consecutive polls that return `Pending` and wake
+    /// themselves, the thread running `block_on` sleeps 1 ms, then 5 ms, then
+    /// 25 ms on later exhaustions. Spawned tasks never read it.
     pub poll_budget: u32,
     /// Initial arena capacities for the runtime's task, region, and obligation tables.
     ///
