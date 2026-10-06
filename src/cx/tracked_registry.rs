@@ -9,20 +9,22 @@
 //!
 //! The backing registry is private: raw force-removal/replacement could bypass
 //! the guard's ownership and create an ABA collision at the same virtual time.
-//! Clones share one canonical registry. Use one instance per runtime, and keep
-//! guards within the lifetime of the task named by the admitting context. A
-//! Rust move does not transfer the obligation to another task or region.
+//! Clones share one canonical registry, permanently bound to the first admitted
+//! runtime. Keep guards within the lifetime of the admitting task. A Rust move
+//! does not transfer the obligation to another task or region.
 
 mod permit;
 pub use permit::TrackedNamePermit;
 
-use super::registry::{NameLease, NameLeaseError, NameRegistry, RegistryCap, RegistryHandle};
 use super::Cx;
+use super::registry::{NameLease, NameLeaseError, NameRegistry, RegistryCap, RegistryHandle};
 use crate::record::{ObligationAbortReason, ObligationKind};
-use crate::runtime::obligation_mailbox::{ObligationAdmissionError, ObligationToken};
+use crate::runtime::obligation_mailbox::{
+    ObligationAdmissionError, ObligationMailbox, ObligationToken,
+};
 use crate::types::{RegionId, TaskId, Time};
 use parking_lot::Mutex;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 /// Refusal of a runtime-accounted name operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,8 +36,10 @@ pub enum TrackedNameError {
     RuntimeRequired,
     /// The sentinel region cannot own a graded name lease.
     UnscopedRegion,
-    /// Authoritative runtime admission refused the lease.
+    /// Authoritative runtime admission or pre-publication validation refused.
     Admission(ObligationAdmissionError),
+    /// This registry already belongs to a different runtime's identity domain.
+    DifferentRuntime,
     /// The canonical registry refused the operation.
     Registry(NameLeaseError),
     /// Cleanup freed the name, but the runtime did not accept settlement.
@@ -50,6 +54,7 @@ impl std::fmt::Display for TrackedNameError {
             Self::RuntimeRequired => f.write_str("tracked names require a runtime-wired context"),
             Self::UnscopedRegion => f.write_str("a name lease requires a non-sentinel region"),
             Self::Admission(error) => write!(f, "name obligation admission: {error}"),
+            Self::DifferentRuntime => f.write_str("name registry belongs to a different runtime"),
             Self::Registry(error) => std::fmt::Display::fmt(error, f),
             Self::SettlementRejected => f.write_str("name removed but runtime settlement refused"),
         }
@@ -75,6 +80,9 @@ impl std::error::Error for TrackedNameError {
 #[derive(Debug, Clone)]
 pub struct TrackedNameRegistry {
     inner: Arc<Mutex<NameRegistry>>,
+    // Preserve the identity allocation, not the runtime or its queued resources.
+    // An expired binding is NOT vacant: rebinding would alias reused task IDs.
+    runtime: Arc<Mutex<Option<Weak<ObligationMailbox>>>>,
 }
 
 impl Default for TrackedNameRegistry {
@@ -86,11 +94,12 @@ impl Default for TrackedNameRegistry {
 impl RegistryCap for TrackedNameRegistry {}
 
 impl TrackedNameRegistry {
-    /// Creates an empty, independently owned registry.
+    /// Creates an empty registry, initially unbound to a runtime.
     #[must_use]
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(NameRegistry::new())),
+            runtime: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -109,9 +118,11 @@ impl TrackedNameRegistry {
     /// Publishes a name owned by `cx` and returns its runtime-accounted guard.
     ///
     /// Quota, holder liveness, and region admission are checked before registry
-    /// mutation. Cancellation during an admission notification also refuses
-    /// publication. On collision the unused quota is returned synchronously.
+    /// mutation. Cancellation or holder retirement during an admission callback
+    /// refuses publication. On collision the unused quota is returned synchronously.
     /// All admission and settlement notifications run outside the registry lock.
+    /// The first admitted operation binds every clone to that runtime; a later
+    /// runtime cannot reuse this registry even after all names have been removed.
     pub fn register(
         &self,
         cx: &Cx,
@@ -121,10 +132,13 @@ impl TrackedNameRegistry {
         let mut admission = Admission::new(cx)?;
         let now = cx.now();
         cx.checkpoint().map_err(|_| TrackedNameError::Cancelled)?;
+        let token = admission.token.as_ref().expect("admitted name credit");
+        validate_owner(cx, token)?;
+        self.bind_runtime(cx)?;
         let result = {
             self.inner
                 .lock()
-                .register(name, cx.task_id(), cx.region_id(), now)
+                .register(name, token.holder(), token.region(), now)
         };
         let lease = result.map_err(TrackedNameError::Registry)?;
         Ok(TrackedNameLease {
@@ -132,6 +146,24 @@ impl TrackedNameRegistry {
             lease: Some(lease),
             obligation: admission.token.take(),
         })
+    }
+
+    fn bind_runtime(&self, cx: &Cx) -> Result<(), TrackedNameError> {
+        let (gateway, _) = cx
+            .obligation_transfer_destination()
+            .map_err(TrackedNameError::Admission)?;
+        let identity = Arc::downgrade(gateway.mailbox());
+        let mut binding = self.runtime.lock();
+        match binding.as_ref() {
+            Some(previous) if !Weak::ptr_eq(previous, &identity) => {
+                Err(TrackedNameError::DifferentRuntime)
+            }
+            Some(_) => Ok(()),
+            None => {
+                *binding = Some(identity);
+                Ok(())
+            }
+        }
     }
 }
 
@@ -226,6 +258,30 @@ impl Drop for TrackedNameLease {
     }
 }
 
+// Revalidate after arbitrary admission/clock/checkpoint callbacks and before
+// publication. This is not a new admission: a permit at quota one can commit
+// without taking a second credit. Holding a guard still does not extend the
+// original task's lifetime or transfer liability to the thread using it.
+fn validate_owner(cx: &Cx, token: &ObligationToken) -> Result<(), TrackedNameError> {
+    let (gateway, holder) = cx
+        .obligation_transfer_destination()
+        .map_err(TrackedNameError::Admission)?;
+    let refusal = if !gateway.is_runtime_available() {
+        Some(ObligationAdmissionError::RuntimeUnavailable)
+    } else if !holder.is_live() {
+        Some(ObligationAdmissionError::HolderNotLive)
+    } else if token.holder() != holder.holder()
+        || token.region() != holder.region()
+        || token.holder() != cx.task_id()
+        || token.region() != cx.region_id()
+    {
+        Some(ObligationAdmissionError::HolderMismatch)
+    } else {
+        None
+    };
+    refusal.map_or(Ok(()), |error| Err(TrackedNameError::Admission(error)))
+}
+
 // A refused or panicking acquisition must abort an admitted credit, not report
 // a leaked resource that the caller never received. Checked-token settlement
 // suppresses arbitrary notification callbacks during an existing unwind.
@@ -240,8 +296,9 @@ impl Admission {
             .try_register_obligation_checked(ObligationKind::Lease, cx.task_id())
             .map_err(TrackedNameError::Admission)?
             .ok_or(TrackedNameError::RuntimeRequired)?;
+        let unscoped = token.region().as_u64() == 0;
         let admission = Self { token: Some(token) };
-        if cx.region_id().as_u64() == 0 {
+        if unscoped {
             return Err(TrackedNameError::UnscopedRegion);
         }
         Ok(admission)
@@ -259,3 +316,114 @@ impl Drop for Admission {
 #[cfg(test)]
 #[path = "tracked_registry_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod authority_tests {
+    #![allow(clippy::pedantic, clippy::nursery)]
+
+    use super::*;
+    use super::tests::{finish, fixture, flush};
+    use crate::runtime::obligation_mailbox::ObligationGateway;
+
+    #[test]
+    fn independent_runtime_ids_cannot_alias_shared_discovery() {
+        let (first_lab, first, first_handle) = fixture(1);
+        let (second_lab, second, second_handle) = fixture(1);
+        assert_eq!(first.task_id(), second.task_id());
+        assert_eq!(first.region_id(), second.region_id());
+        let names = TrackedNameRegistry::new();
+        names.register(&first, "worker").unwrap().release().unwrap();
+        let clone = names.clone();
+        assert!(matches!(clone.register(&second, "worker"), Err(TrackedNameError::DifferentRuntime)));
+        assert!(matches!(clone.reserve(&second, "startup"), Err(TrackedNameError::DifferentRuntime)));
+        assert_eq!(clone.whereis("worker"), None);
+        assert_eq!(clone.whereis("startup"), None);
+        // Failed cross-runtime attempts must not retain the second runtime's quota.
+        TrackedNameRegistry::new().register(&second, "worker").unwrap().release().unwrap();
+        names.register(&first, "worker").unwrap().release().unwrap();
+        finish(first_lab, &first, first_handle, 2);
+        finish(second_lab, &second, second_handle, 3);
+    }
+
+    #[test]
+    fn dead_runtime_binding_is_not_reusable_or_a_strong_runtime_owner() {
+        let (lab, cx, handle) = fixture(1);
+        let names = TrackedNameRegistry::new();
+        names.register(&cx, "worker").unwrap().release().unwrap();
+        let weak = Arc::downgrade(lab.state.obligation_gateway().unwrap().mailbox());
+        finish(lab, &cx, handle, 1);
+        drop(cx);
+        assert!(weak.upgrade().is_none(), "registry retained runtime mailbox resources");
+        let (lab, cx, handle) = fixture(1);
+        assert!(matches!(names.register(&cx, "worker"), Err(TrackedNameError::DifferentRuntime)));
+        finish(lab, &cx, handle, 1);
+    }
+
+    #[test]
+    fn gateway_wrappers_in_one_runtime_share_the_identity_binding() {
+        let (lab, cx, handle) = fixture(1);
+        let names = TrackedNameRegistry::new();
+        names.register(&cx, "worker").unwrap().release().unwrap();
+        let liveness = Arc::new(());
+        let gateway = Arc::new(ObligationGateway::new(
+            Arc::clone(lab.state.obligation_gateway().unwrap().mailbox()),
+            Arc::new(|| {}),
+            Arc::downgrade(&liveness),
+        ));
+        let wrapped = cx.clone().with_obligation_gateway(Some(gateway), None);
+        names.reserve(&wrapped, "worker").unwrap().commit().unwrap().release().unwrap();
+        finish(lab, &cx, handle, 2);
+    }
+
+    #[test]
+    fn admission_callback_cannot_publish_for_a_retired_holder() {
+        let (mut lab, cx, handle) = fixture(1);
+        let names = TrackedNameRegistry::new();
+        let retired = cx.clone();
+        let liveness = Arc::new(());
+        let gateway = Arc::new(ObligationGateway::new(
+            Arc::clone(lab.state.obligation_gateway().unwrap().mailbox()),
+            Arc::new(move || retired.revoke_obligation_admission()),
+            Arc::downgrade(&liveness),
+        ));
+        let cx = cx.with_obligation_gateway(Some(gateway), None);
+        assert!(matches!(names.register(&cx, "worker"),
+            Err(TrackedNameError::Admission(ObligationAdmissionError::HolderNotLive))));
+        assert!(!cx.is_cancel_requested());
+        assert_eq!(names.whereis("worker"), None);
+        flush(&mut lab);
+        assert_eq!(lab.state.pending_obligation_count(), 0);
+        assert_eq!(lab.state.leak_count(), 0);
+        drop(handle);
+    }
+
+    #[test]
+    fn retired_holder_cannot_commit_an_unpublished_name() {
+        let (mut lab, cx, mut handle) = fixture(1);
+        lab.state.set_obligation_leak_response(crate::runtime::config::ObligationLeakResponse::Silent);
+        let names = TrackedNameRegistry::new();
+        let permit = names.reserve(&cx, "worker").unwrap();
+        flush(&mut lab);
+        assert_eq!(lab.state.pending_obligation_count(), 1);
+        lab.scheduler.lock().schedule(cx.task_id(), 0);
+        let _report = lab.run_until_quiescent_with_report();
+        assert!(!matches!(handle.try_join(), Ok(None)));
+        assert_eq!(lab.state.leak_count(), 1);
+        assert!(matches!(permit.commit(),
+            Err(TrackedNameError::Admission(ObligationAdmissionError::HolderNotLive))));
+        assert_eq!(names.whereis("worker"), None);
+        assert_eq!(lab.state.leak_count(), 1, "late cleanup changed the audit outcome");
+    }
+
+    #[test]
+    fn runtime_teardown_cannot_be_followed_by_name_publication() {
+        let (lab, cx, handle) = fixture(1);
+        let names = TrackedNameRegistry::new();
+        let permit = names.reserve(&cx, "worker").unwrap();
+        drop(handle);
+        drop(lab);
+        assert!(matches!(permit.commit(),
+            Err(TrackedNameError::Admission(ObligationAdmissionError::RuntimeUnavailable))));
+        assert_eq!(names.whereis("worker"), None);
+    }
+}

@@ -1,6 +1,6 @@
 //! Two-phase, runtime-accounted name publication.
 
-use super::{Admission, TrackedNameError, TrackedNameLease, TrackedNameRegistry};
+use super::{Admission, TrackedNameError, TrackedNameLease, TrackedNameRegistry, validate_owner};
 use crate::cx::Cx;
 use crate::cx::registry::NamePermit;
 use crate::record::ObligationAbortReason;
@@ -25,10 +25,13 @@ impl TrackedNameRegistry {
         let mut admission = Admission::new(cx)?;
         let now = cx.now();
         cx.checkpoint().map_err(|_| TrackedNameError::Cancelled)?;
+        let token = admission.token.as_ref().expect("admitted name credit");
+        validate_owner(cx, token)?;
+        self.bind_runtime(cx)?;
         let result = {
             self.inner
                 .lock()
-                .reserve(name, cx.task_id(), cx.region_id(), now)
+                .reserve(name, token.holder(), token.region(), now)
         };
         let permit = result.map_err(TrackedNameError::Registry)?;
         Ok(TrackedNamePermit {
@@ -42,11 +45,11 @@ impl TrackedNameRegistry {
 
 /// Invisible name reservation that remains accountable during async setup.
 ///
-/// `commit` checks the original context's cancellation checkpoint before
-/// publishing. A move is not a transfer of holder liability. As with a checked
-/// channel permit, callers must not let the original holder complete before
-/// resolving its obligation. Forgetting a permit is ledger-visible but cannot
-/// reclaim the name. No raw permit or registry mutation handle is exposed.
+/// `commit` checks cancellation and rejects a retired original holder or
+/// unavailable runtime before publishing. A move is not a transfer of holder
+/// liability. Validation does not extend the original task's lifetime; callers
+/// must still resolve the guard within that lifetime. Forgetting a permit is
+/// ledger-visible but cannot reclaim the name. No raw mutation handle is exposed.
 #[derive(Debug)]
 #[must_use = "dropping the permit cancels the invisible name reservation"]
 pub struct TrackedNamePermit<'a> {
@@ -94,6 +97,7 @@ impl TrackedNamePermit<'_> {
     /// after that checkpoint does not undo an already committed publication.
     pub fn commit(mut self) -> Result<TrackedNameLease, TrackedNameError> {
         self.cx.checkpoint().map_err(|_| TrackedNameError::Cancelled)?;
+        validate_owner(self.cx, self.obligation.as_ref().expect("live name obligation"))?;
         let permit = self.permit.take().expect("live name permit");
         let result = { self.registry.inner.lock().commit_permit(permit) };
         match result {
