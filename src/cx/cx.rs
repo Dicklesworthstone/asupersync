@@ -224,6 +224,77 @@ pub(crate) struct CancelWakerToken {
     id: u64,
 }
 
+/// Timer waker armed by [`Cx::arm_budget_deadline`] (br-asupersync-pev2xi).
+///
+/// It holds the context weakly: the wheel never keeps a finished task's
+/// context alive, and the context's [`BudgetDeadlineTimer`] guard removes the
+/// timer when the context drops.
+///
+/// [`BudgetDeadlineTimer`]: crate::types::task_context::BudgetDeadlineTimer
+struct BudgetDeadlineWake {
+    inner: std::sync::Weak<parking_lot::RwLock<CxInner>>,
+    deadline: Time,
+}
+
+impl std::task::Wake for BudgetDeadlineWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        let Some(inner) = self.inner.upgrade() else {
+            return;
+        };
+        let mut guard = inner.write();
+        if guard.cancel_waker_registry_closed || guard.is_cancel_requested() {
+            return;
+        }
+        let Some(timer) = guard
+            .budget_deadline_timer
+            .as_ref()
+            .map(|armed| armed.timer.clone())
+        else {
+            return;
+        };
+        if timer.now() < self.deadline {
+            // A deadline past the wheel's horizon fires early at the horizon
+            // (and a coalescing wheel fires within its window): re-arm for the
+            // real deadline, as Sleep does.
+            drop(guard);
+            let handle = timer.register(self.deadline, Waker::from(Arc::clone(self)));
+            let mut guard = inner.write();
+            if guard.cancel_waker_registry_closed {
+                drop(guard);
+                let _ = timer.cancel(&handle);
+            } else if let Some(armed) = guard.budget_deadline_timer.as_mut() {
+                armed.handle = handle;
+            }
+            return;
+        }
+        // The budget may have been replaced since the timer was armed; only a
+        // deadline at or before this one has passed.
+        if guard
+            .budget
+            .deadline
+            .is_none_or(|deadline| deadline > self.deadline)
+        {
+            return;
+        }
+        let reason = CancelReason::with_origin(CancelKind::Deadline, guard.region, self.deadline)
+            .with_task(guard.task);
+        guard.set_cancel_requested(true);
+        if let Some(existing) = guard.cancel_reason.as_mut() {
+            existing.strengthen(&reason);
+        } else {
+            guard.cancel_reason = Some(reason);
+        }
+        let wakers = guard.cancel_waker_snapshot();
+        guard.cancel_wakers_pending = false;
+        drop(guard);
+        crate::types::task_context::CancelWakeEffects::new(wakers).dispatch();
+    }
+}
+
 /// The capability context for a task.
 ///
 /// `Cx` provides access to runtime capabilities within Asupersync.
@@ -1069,6 +1140,34 @@ impl<Caps> Cx<Caps> {
         timer_driver: Option<TimerDriverHandle>,
         entropy: Option<Arc<dyn EntropySource>>,
     ) -> Self {
+        Self::new_with_drivers_and_clock(
+            region,
+            task,
+            budget,
+            observability,
+            io_driver,
+            io_cap,
+            timer_driver,
+            entropy,
+            LogicalClockHandle::default(),
+        )
+    }
+
+    /// [`Self::new_with_drivers`] with its final logical clock, so the runtime
+    /// does not build a default clock for every task only to replace it.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_drivers_and_clock(
+        region: RegionId,
+        task: TaskId,
+        budget: Budget,
+        observability: Option<ObservabilityState>,
+        io_driver: Option<IoDriverHandle>,
+        io_cap: Option<Arc<dyn crate::io::IoCap>>,
+        timer_driver: Option<TimerDriverHandle>,
+        entropy: Option<Arc<dyn EntropySource>>,
+        logical_clock: LogicalClockHandle,
+    ) -> Self {
         let inner = Arc::new(parking_lot::RwLock::new(CxInner::new(region, task, budget)));
         let cancellation = inner.read().cancellation_state();
         let observability_state =
@@ -1097,7 +1196,7 @@ impl<Caps> Cx<Caps> {
                 timer_driver,
                 blocking_pool: None,
                 entropy,
-                logical_clock: LogicalClockHandle::default(),
+                logical_clock,
                 remote_cap: None,
                 registry: None,
                 pressure: None,
@@ -3626,6 +3725,47 @@ impl<Caps> Cx<Caps> {
         drop(retired_waker);
     }
 
+    /// Arms a timer at this context's budget deadline that cancels it with
+    /// [`CancelKind::Deadline`] and wakes its cancellation targets, so a task
+    /// parked in a cancel-aware wait (channel receive, lock, semaphore) ends at
+    /// its deadline instead of at its next checkpoint, which a parked task never
+    /// reaches (br-asupersync-pev2xi). The runtime arms it once per task
+    /// context; contexts without a deadline or a timer driver arm nothing.
+    pub(crate) fn arm_budget_deadline(&self) {
+        let Some(timer) = self.handles.timer_driver.as_ref() else {
+            return;
+        };
+        let deadline = {
+            let inner = self.inner.read();
+            match inner.budget.deadline {
+                Some(deadline)
+                    if deadline < Time::MAX
+                        && inner.budget_deadline_timer.is_none()
+                        && !inner.cancel_waker_registry_closed =>
+                {
+                    deadline
+                }
+                _ => return,
+            }
+        };
+        let wake = Arc::new(BudgetDeadlineWake {
+            inner: Arc::downgrade(&self.inner),
+            deadline,
+        });
+        let handle = timer.register(deadline, Waker::from(wake));
+        let armed = crate::types::task_context::BudgetDeadlineTimer {
+            timer: timer.clone(),
+            handle,
+        };
+        let mut inner = self.inner.write();
+        if inner.budget_deadline_timer.is_none() {
+            inner.budget_deadline_timer = Some(armed);
+        } else {
+            drop(inner);
+            drop(armed);
+        }
+    }
+
     // ========================================================================
     // Cancel Attribution API
     // ========================================================================
@@ -3662,12 +3802,16 @@ impl<Caps> Cx<Caps> {
     /// This method only sets the local cancellation flag. In a real runtime,
     /// cancellation propagates through the region tree via `cancel_request()`.
     pub fn cancel_with(&self, kind: CancelKind, message: Option<&'static str>) {
+        // Stamp the reason with the real time: an equal-severity reason
+        // already recorded keeps priority only if it is older
+        // (br-asupersync-27bbrg; CancelReason::new is fixed at 1 s).
+        let now = self.current_checkpoint_time();
         let (region, task, wakers) = {
             let mut inner = self.inner.write();
             let region = inner.region;
             let task = inner.task;
 
-            let mut reason = CancelReason::new(kind).with_region(region).with_task(task);
+            let mut reason = CancelReason::with_origin(kind, region, now).with_task(task);
             if let Some(msg) = message {
                 reason = reason.with_message(msg);
             }
@@ -6714,6 +6858,28 @@ mod tests {
     }
 
     #[test]
+    fn a_later_cancel_with_keeps_an_older_reason_of_equal_severity() {
+        // br-asupersync-27bbrg: cancel_with stamped its reason at a fixed 1 s,
+        // so at any later time it looked older than a real Deadline reason and
+        // replaced it, losing that reason's origin and message.
+        let cx = test_cx_with_virtual_time(Budget::INFINITE, Time::from_secs(10));
+        let deadline =
+            CancelReason::with_origin(CancelKind::Deadline, cx.region_id(), Time::from_secs(5))
+                .with_task(cx.task_id())
+                .with_message("deadline passed");
+        cx.cancel_with_reason(deadline.clone());
+
+        cx.cancel_with(CancelKind::Timeout, Some("later timeout"));
+
+        assert_eq!(cx.cancel_reason(), Some(deadline));
+        let fresh = test_cx_with_virtual_time(Budget::INFINITE, Time::from_secs(10));
+        fresh.cancel_with(CancelKind::Timeout, None);
+        let stamped = fresh.cancel_reason().expect("reason");
+        assert_eq!(stamped.timestamp, Time::from_secs(10));
+        assert_eq!(stamped.origin_region, fresh.region_id());
+    }
+
+    #[test]
     fn cancel_with_reason_preserves_causes_and_stronger_cancellation() {
         let cx = test_cx();
         let deadline =
@@ -8523,6 +8689,175 @@ mod tests {
         }
         // l2 dropped — back to ALL
         assert_eq!(Cx::current().unwrap().runtime_mask, cap::CapMask::all());
+    }
+
+    /// A context with a virtual timer, armed at its budget deadline the way
+    /// the runtime arms a task's context (br-asupersync-pev2xi).
+    fn deadline_cx(
+        deadline: Option<Time>,
+    ) -> (Arc<crate::time::VirtualClock>, TimerDriverHandle, Cx) {
+        let clock = Arc::new(crate::time::VirtualClock::new());
+        let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let budget = deadline.map_or(Budget::INFINITE, |deadline| {
+            Budget::new().with_deadline(deadline)
+        });
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 0),
+            budget,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        cx.arm_budget_deadline();
+        (clock, timer, cx)
+    }
+
+    struct DeadlineWakeCount(AtomicUsize);
+
+    impl std::task::Wake for DeadlineWakeCount {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn budget_deadline_cancels_and_wakes_a_parked_context() {
+        let (clock, timer, cx) = deadline_cx(Some(Time::from_millis(50)));
+        let wakes = Arc::new(DeadlineWakeCount(AtomicUsize::new(0)));
+        let token = cx.refresh_cancel_waker(None, &Waker::from(Arc::clone(&wakes)));
+        assert_eq!(timer.pending_count(), 1, "the deadline is armed");
+
+        clock.advance_to(Time::from_millis(49));
+        assert_eq!(timer.process_timers(), 0);
+        assert!(!cx.is_cancel_requested(), "not before the deadline");
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+
+        clock.advance_to(Time::from_millis(50));
+        assert_eq!(timer.process_timers(), 1);
+        assert!(cx.is_cancel_requested(), "cancelled at the deadline");
+        assert_eq!(
+            cx.cancel_reason().map(|reason| reason.kind),
+            Some(CancelKind::Deadline)
+        );
+        assert_eq!(
+            wakes.0.load(Ordering::SeqCst),
+            1,
+            "the parked wait is woken without a checkpoint"
+        );
+        cx.clear_cancel_waker(token);
+    }
+
+    #[test]
+    fn budget_deadline_arms_nothing_without_a_deadline() {
+        let (_clock, timer, cx) = deadline_cx(None);
+        assert_eq!(timer.pending_count(), 0);
+        assert!(!cx.is_cancel_requested());
+    }
+
+    #[test]
+    fn budget_deadline_timer_is_removed_with_its_context() {
+        let (clock, timer, cx) = deadline_cx(Some(Time::from_millis(50)));
+        drop(cx);
+        clock.advance_to(Time::from_millis(60));
+        assert_eq!(
+            timer.process_timers(),
+            0,
+            "a dropped context's deadline timer must not fire"
+        );
+    }
+
+    #[test]
+    fn budget_deadline_timer_is_removed_when_the_task_completes() {
+        let (clock, timer, cx) = deadline_cx(Some(Time::from_millis(50)));
+        let retired = cx.inner.write().take_cancel_wakers();
+        drop(retired);
+        clock.advance_to(Time::from_millis(60));
+        assert_eq!(
+            timer.process_timers(),
+            0,
+            "a finished task's deadline timer must not fire, though its context lives on"
+        );
+        assert!(!cx.is_cancel_requested());
+    }
+
+    /// Async finalizer tasks carry a 5 s infrastructure deadline under a
+    /// cancellation mask; that legacy handling is unchanged, so a parked
+    /// finalizer arms no deadline timer.
+    #[test]
+    fn budget_deadline_arms_no_timer_for_a_parked_async_finalizer() {
+        use crate::lab::{LabConfig, LabRuntime};
+
+        let mut lab = LabRuntime::new(LabConfig::new(0x5EED).max_steps(4096));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let (child_tx, child_rx) = std::sync::mpsc::channel();
+        let (release, mut gate) = crate::channel::oneshot::channel::<()>();
+        let (owner, _join) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("lab task Cx");
+                let child = cx
+                    .open_child_region(crate::cx::ChildRegionSpec::inherit())
+                    .await
+                    .expect("open child region");
+                child_tx.send(child.region_id()).expect("publish child");
+                gate.recv_uninterruptible().await.expect("release");
+                drop(child);
+            })
+            .expect("create owner");
+        lab.scheduler.lock().schedule(owner, 0);
+        lab.run_until_idle();
+        let child = child_rx.try_recv().expect("child region opened");
+        assert!(
+            lab.state
+                .register_async_finalizer(child, std::future::pending::<()>())
+        );
+        release.send_blocking(()).expect("release the owner");
+        lab.run_until_idle();
+        assert_eq!(
+            lab.pending_timer_count(),
+            0,
+            "a parked async finalizer arms no deadline timer"
+        );
+    }
+
+    #[test]
+    fn budget_deadline_leaves_an_earlier_cancellation_alone() {
+        let (clock, timer, cx) = deadline_cx(Some(Time::from_millis(50)));
+        cx.cancel_with(CancelKind::User, None);
+        clock.advance_to(Time::from_millis(50));
+        let _ = timer.process_timers();
+        assert_eq!(
+            cx.cancel_reason().map(|reason| reason.kind),
+            Some(CancelKind::User)
+        );
+    }
+
+    #[test]
+    fn budget_deadline_past_the_wheel_horizon_rearms_instead_of_cancelling_early() {
+        let probe =
+            TimerDriverHandle::with_virtual_clock(Arc::new(crate::time::VirtualClock::new()));
+        let horizon = u64::try_from(probe.max_timer_duration().as_nanos()).expect("horizon fits");
+        let deadline = Time::from_nanos(horizon + 1_000_000_000);
+        let (clock, timer, cx) = deadline_cx(Some(deadline));
+
+        clock.advance_to(Time::from_nanos(horizon));
+        assert_eq!(
+            timer.process_timers(),
+            1,
+            "the clamped timer fires at the horizon"
+        );
+        assert!(!cx.is_cancel_requested(), "the horizon is not the deadline");
+        assert_eq!(timer.pending_count(), 1, "re-armed for the real deadline");
+
+        clock.advance_to(deadline);
+        assert_eq!(timer.process_timers(), 1);
+        assert_eq!(
+            cx.cancel_reason().map(|reason| reason.kind),
+            Some(CancelKind::Deadline)
+        );
     }
 
     /// br-asupersync-ovztin: `Cx::for_request_with_budget` is now
