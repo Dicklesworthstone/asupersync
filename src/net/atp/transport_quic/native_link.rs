@@ -81,7 +81,7 @@ use crate::net::atp::transport_rq::erase_send;
 use crate::net::quic_core::ConnectionId;
 use crate::net::quic_native::handshake_driver::{
     ATP_QUIC_ALPN, HandshakeLevel, QuicHandshakeDriver, client_handshake_over_udp,
-    is_stale_handshake_packet_error,
+    is_stale_handshake_packet_error, is_unauthenticated_handshake_packet_error,
 };
 use crate::net::quic_native::tls::{
     PacketProtectionRequest, PacketProtectionSpace, RustlsQuicCryptoProvider,
@@ -6725,6 +6725,12 @@ async fn accept(
             }
         };
         for packet in received {
+            // Once the client is known, datagrams from any other address are
+            // not part of this accept: neither its handshake nor its early
+            // data (br-asupersync-5f1fcj).
+            if peer.is_some_and(|(addr, _)| addr != packet.src_addr) {
+                continue;
+            }
             if is_long_header(&packet.data) {
                 let client_cid = match driver.recv_handshake_packet(&packet.data) {
                     Ok(client_cid) => client_cid,
@@ -6740,6 +6746,11 @@ async fn accept(
                         }
                         continue;
                     }
+                    // A forged, corrupted or stray long-header datagram (ATP's
+                    // Initial DCID is a protocol constant, so anyone can aim one
+                    // here) is discarded, RFC 9000 section 12.2. It used to end
+                    // the accept of the client still driving it.
+                    Err(err) if is_unauthenticated_handshake_packet_error(&err) => continue,
                     Err(err) => return Err(map_tls_error(err)),
                 };
                 if peer.is_none() {
@@ -6760,10 +6771,18 @@ async fn accept(
                     if !sent.is_empty() {
                         last_flight = sent;
                     } else if !driver.is_complete() && !last_flight.is_empty() {
-                        endpoint
-                            .send_batch(cx, &last_flight)
-                            .await
-                            .map_err(map_udp_error)?;
+                        // A packet that produced no new output (a client
+                        // retransmission, or a replayed or forged Initial)
+                        // re-offers the flight at most once per recovery PTO,
+                        // like a stale-key packet, instead of on demand.
+                        let now = cx.now();
+                        if stale_resend_at.is_none_or(|at| now >= at) {
+                            stale_resend_at = Some(now + HANDSHAKE_RECOVERY_RESEND_PTO);
+                            endpoint
+                                .send_batch(cx, &last_flight)
+                                .await
+                                .map_err(map_udp_error)?;
+                        }
                     }
                 }
             } else {
@@ -11843,6 +11862,55 @@ mod gh67_liveness_tests {
         let (mut server, early) = server.expect("server link");
         server.ingest_packets(cx, early).expect("early packets");
         (client, server)
+    }
+
+    // br-asupersync-5f1fcj: a long-header datagram that fails to authenticate
+    // made the server's accept return an error, so anyone who could reach the
+    // port could end an accept with one garbage packet (ATP's Initial DCID is
+    // a protocol constant). It must be discarded and the handshake complete.
+    #[test]
+    fn a_garbage_long_header_datagram_does_not_end_an_accept() {
+        let cx = Cx::for_testing();
+        let config = QuicConfig::default();
+        block_on(async {
+            let endpoint = bind_endpoint(&cx, "127.0.0.1:0".parse().unwrap())
+                .await
+                .expect("bind endpoint");
+            let address = endpoint.local_addr();
+            // An Initial-typed long header with ATP's Initial DCID and a body
+            // that cannot authenticate, queued before the real client.
+            let mut garbage = vec![0xc0, 0x00, 0x00, 0x00, 0x01];
+            garbage.push(u8::try_from(ATP_QUIC_INITIAL_DCID.len()).expect("dcid length"));
+            garbage.extend_from_slice(ATP_QUIC_INITIAL_DCID);
+            garbage.extend_from_slice(&[8, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0x44, 0x00]);
+            garbage.resize(1_200, 0xa5);
+            let forger = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind forger");
+            forger.send_to(&garbage, address).expect("send garbage");
+
+            let client_tls = QuicClientTls {
+                server_name: ServerName::try_from("localhost").unwrap(),
+                config: client_config(
+                    vec![parse_one_cert(CA_CERT_PEM)],
+                    vec![ATP_QUIC_ALPN.to_vec()],
+                )
+                .unwrap(),
+            };
+            let server_tls = QuicServerTls {
+                config: server_config(
+                    vec![parse_one_cert(LEAF_CERT_PEM)],
+                    leaf_key(),
+                    vec![ATP_QUIC_ALPN.to_vec()],
+                )
+                .unwrap(),
+            };
+            let (client, server) = zip(
+                connect(&cx, address, &client_tls, &config),
+                accept(&cx, endpoint, &server_tls, &config),
+            )
+            .await;
+            client.expect("client link");
+            server.expect("the accept survives the garbage datagram");
+        });
     }
 
     // asupersync-18hhdp: the client's handshake source CID is per connection,
