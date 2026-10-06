@@ -153,7 +153,12 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
             let mut resp = self.inner.call(&cx, req).await;
 
             // Skip compression for special status codes.
-            if resp.status == StatusCode::NO_CONTENT || resp.status == StatusCode::NOT_MODIFIED {
+            if resp.status == StatusCode::NO_CONTENT {
+                return resp;
+            }
+            if resp.status == StatusCode::NOT_MODIFIED {
+                // A 304 carries the Vary of the response it validates.
+                append_vary_token(&mut resp, "accept-encoding");
                 return resp;
             }
             if is_partial_content(&resp) {
@@ -163,6 +168,12 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
             // Skip if the response already has content-encoding.
             if let Some(existing_encoding) = resp.remove_header("content-encoding") {
                 resp.set_header("content-encoding", existing_encoding);
+                return resp;
+            }
+
+            // Nothing to encode: gzipping an empty body broke streamed routes
+            // (their head may not carry bytes) and HEAD's Content-Length.
+            if resp.body.is_empty() {
                 return resp;
             }
 
@@ -273,6 +284,7 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
             resp.body = compressed.into();
             resp.remove_header("content-length");
             resp.set_header("content-encoding", encoding.as_token().to_string());
+            weaken_etag(&mut resp);
             append_vary_token(&mut resp, "accept-encoding");
 
             resp
@@ -333,6 +345,20 @@ impl RequestCompressionSensitivity {
 /// the body would leave both describing bytes the client never receives.
 pub(super) fn is_partial_content(resp: &Response) -> bool {
     resp.status == StatusCode::PARTIAL_CONTENT || resp.has_header("content-range")
+}
+
+/// A strong ETag names exact bytes, and the compressed body is other bytes:
+/// it may only carry a weak validator (RFC 9110 section 8.8.3). Kept strong,
+/// a resumed download whose If-Range matched spliced identity bytes from the
+/// 206 onto its compressed prefix (br-asupersync-a1q12q).
+pub(super) fn weaken_etag(resp: &mut Response) {
+    if let Some(etag) = resp.remove_header("etag") {
+        if etag.starts_with("W/") {
+            resp.set_header("etag", etag);
+        } else {
+            resp.set_header("etag", format!("W/{etag}"));
+        }
+    }
 }
 
 pub(super) fn compression_oracle_sensitive(
@@ -451,6 +477,71 @@ mod tests {
         resp.headers
             .get("vary")
             .is_some_and(|vary| vary.split(',').any(|value| value.trim() == token))
+    }
+
+    #[cfg(feature = "compression")]
+    fn etag_handler() -> Response {
+        Response::new(StatusCode::OK, "Hello, World! ".repeat(100).into_bytes())
+            .header("etag", "\"v1\"")
+    }
+
+    fn not_modified_handler() -> Response {
+        Response::empty(StatusCode::NOT_MODIFIED)
+    }
+
+    fn empty_body_handler() -> Response {
+        Response::new(StatusCode::OK, Vec::new())
+    }
+
+    // --- Validators and empty bodies (br-asupersync-a1q12q) ---
+
+    /// A compressed body kept the strong ETag of the identity bytes, so a
+    /// resumed download's If-Range matched and spliced identity bytes from a
+    /// 206 onto the compressed prefix.
+    #[cfg(feature = "compression")]
+    #[test]
+    fn a_compressed_body_carries_a_weak_etag() {
+        let mw =
+            CompressionMiddleware::new(FnHandler::new(etag_handler), CompressionPolicy::default());
+        let resp = mw.call(make_request_with_encoding("gzip"));
+        assert_eq!(
+            resp.headers.get("content-encoding").map(String::as_str),
+            Some("gzip")
+        );
+        assert_eq!(
+            resp.headers.get("etag").map(String::as_str),
+            Some("W/\"v1\"")
+        );
+        let identity = mw.call(make_request_with_encoding("identity"));
+        assert_eq!(
+            identity.headers.get("etag").map(String::as_str),
+            Some("\"v1\""),
+            "an identity response keeps its strong ETag"
+        );
+    }
+
+    #[test]
+    fn not_modified_varies_and_an_empty_body_is_not_encoded() {
+        let mw = CompressionMiddleware::new(
+            FnHandler::new(not_modified_handler),
+            CompressionPolicy::default(),
+        );
+        let resp = mw.call(make_request_with_encoding("gzip"));
+        assert!(
+            resp.headers
+                .get("vary")
+                .is_some_and(|vary| vary.contains("accept-encoding")),
+            "a 304 carries the Vary of the response it validates"
+        );
+
+        let mw = CompressionMiddleware::new(
+            FnHandler::new(empty_body_handler),
+            CompressionPolicy::default().with_min_body_size(0),
+        );
+        let resp = mw.call(make_request_with_encoding("gzip, identity;q=0"));
+        assert_eq!(resp.status, StatusCode::OK);
+        assert!(!resp.headers.contains_key("content-encoding"));
+        assert!(resp.body.is_empty());
     }
 
     // --- Basic behavior ---
