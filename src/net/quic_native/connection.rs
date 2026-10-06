@@ -9,7 +9,7 @@
 
 use crate::bytes::{Buf, Bytes, BytesMut};
 use crate::cx::Cx;
-use crate::net::atp::protocol::quic_frames::{QuicFrame, QuicFrameError};
+use crate::net::atp::protocol::quic_frames::{QuicFrame, QuicFrameError, QuicFrameType};
 use crate::net::atp::protocol::varint::{VARINT_MAX, VarInt};
 use crate::net::quic_core::TransportParameters;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -321,6 +321,10 @@ pub struct NativeQuicConnection {
     /// draining/closed state. Local shutdown paths leave this false so upper
     /// protocol adapters never misreport operator cleanup as a client abort.
     peer_close_observed: bool,
+    /// Frame type of the peer frame that broke a transport rule, when that
+    /// violation started the current close. The local CONNECTION_CLOSE is then
+    /// the transport variant (0x1c) carrying it (RFC 9000 section 19.19).
+    local_close_frame_type: Option<u64>,
     peer_address_validated: bool,
     /// Whether a verifying TLS handshake has validated the server's certificate
     /// chain against configured roots. Defaults to `false`; a client connection
@@ -511,6 +515,7 @@ impl NativeQuicConnection {
             drain_timeout_micros: config.drain_timeout_micros,
             negotiated_idle_timeout_micros: None,
             peer_close_observed: false,
+            local_close_frame_type: None,
             peer_address_validated: config.role == StreamRole::Client,
             server_identity_verified: false,
             anti_amplification_bytes_received: 0,
@@ -600,6 +605,13 @@ impl NativeQuicConnection {
                 self.transport.state(),
                 QuicConnectionState::Draining | QuicConnectionState::Closed
             )
+    }
+
+    /// The frame type the local CONNECTION_CLOSE reports. `Some` when a peer
+    /// frame that broke a transport rule started the close, which makes it a
+    /// transport close (0x1c); `None` for an application close (0x1d).
+    pub(crate) fn local_close_frame_type(&self) -> Option<VarInt> {
+        self.local_close_frame_type.map(VarInt::from_u64_unchecked)
     }
 
     /// Whether application (1-RTT) data can be sent.
@@ -1549,6 +1561,35 @@ impl NativeQuicConnection {
         Ok(())
     }
 
+    /// RFC 9000 section 10.2: a peer frame that breaks a transport rule closes
+    /// the connection at once with the matching transport error. Errors with
+    /// no peer cause, such as cancellation or reassembly backpressure, leave
+    /// the connection open, and so does a state that cannot start draining.
+    fn close_on_peer_violation(
+        &mut self,
+        error: &NativeQuicConnectionError,
+        frame_type: u64,
+        now_micros: u64,
+    ) {
+        let Some(code) = peer_violation_code(error) else {
+            return;
+        };
+        if matches!(
+            self.transport.state(),
+            QuicConnectionState::Draining | QuicConnectionState::Closed
+        ) {
+            return;
+        }
+        if self
+            .transport
+            .start_draining_with_code(now_micros, self.drain_timeout_micros, code)
+            .is_ok()
+        {
+            self.peer_close_observed = false;
+            self.local_close_frame_type = Some(frame_type);
+        }
+    }
+
     /// Only the locally initiated close may bypass the ordinary draining send
     /// gate. No application, ACK, probe, or peer-close response is admitted here.
     pub(crate) fn is_local_close_frame(&self, frames: &[QuicFrame]) -> bool {
@@ -1556,8 +1597,9 @@ impl NativeQuicConnection {
             && !self.peer_close_observed
             && self.tls.can_send_1rtt()
             && matches!(frames, [QuicFrame::ConnectionClose {
-                error_code, frame_type: None, reason_phrase,
+                error_code, frame_type, reason_phrase,
             }] if Some(error_code.value()) == self.transport.close_code()
+                && *frame_type == self.local_close_frame_type()
                 && reason_phrase.is_empty())
     }
 
@@ -2384,6 +2426,103 @@ fn map_stream_table_error(err: StreamTableError) -> NativeQuicConnectionError {
     }
 }
 
+/// RFC 9000 section 20.1 transport error codes for peer stream and frame
+/// violations.
+const FLOW_CONTROL_ERROR: u64 = 0x03;
+const STREAM_LIMIT_ERROR: u64 = 0x04;
+const STREAM_STATE_ERROR: u64 = 0x05;
+const FINAL_SIZE_ERROR: u64 = 0x06;
+const FRAME_ENCODING_ERROR: u64 = 0x07;
+
+/// The transport error code for an error raised while applying a peer's frame,
+/// or `None` when the error has no peer cause (it fails closed: an unmapped
+/// error never closes the connection).
+fn peer_violation_code(error: &NativeQuicConnectionError) -> Option<u64> {
+    let stream_error = match error {
+        NativeQuicConnectionError::Frame(_) => return Some(FRAME_ENCODING_ERROR),
+        NativeQuicConnectionError::Stream(stream_error) => stream_error,
+        NativeQuicConnectionError::StreamTable(table_error) => match table_error {
+            StreamTableError::StreamLimitExceeded { .. } => return Some(STREAM_LIMIT_ERROR),
+            // Frames for a locally initiated stream not yet opened, or for the
+            // direction a stream does not have (sections 19.4 to 19.13).
+            StreamTableError::UnknownStream(_)
+            | StreamTableError::InvalidRemoteStream(_)
+            | StreamTableError::StreamNotWritable(_)
+            | StreamTableError::StreamNotReadable(_) => return Some(STREAM_STATE_ERROR),
+            StreamTableError::Stream(stream_error) => stream_error,
+            StreamTableError::DuplicateStream(_) => return None,
+        },
+        _ => return None,
+    };
+    match stream_error {
+        QuicStreamError::Flow(FlowControlError::Exhausted { .. }) => Some(FLOW_CONTROL_ERROR),
+        QuicStreamError::InvalidFinalSize { .. } | QuicStreamError::InconsistentReset { .. } => {
+            Some(FINAL_SIZE_ERROR)
+        }
+        // Section 19.8: an offset plus length above 2^62 - 1.
+        QuicStreamError::OffsetOverflow { .. } => Some(FRAME_ENCODING_ERROR),
+        _ => None,
+    }
+}
+
+/// The wire type of a decoded frame, for the Frame Type field of a transport
+/// CONNECTION_CLOSE. STREAM reports its OFF and FIN bits; the decoded frame
+/// does not keep the LEN bit.
+fn received_frame_type(frame: &QuicFrame) -> u64 {
+    let frame_type = match frame {
+        QuicFrame::Padding { .. } => QuicFrameType::Padding,
+        QuicFrame::Ping => QuicFrameType::Ping,
+        QuicFrame::Ack { ecn_counts, .. } => {
+            if ecn_counts.is_some() {
+                QuicFrameType::AckEcn
+            } else {
+                QuicFrameType::Ack
+            }
+        }
+        QuicFrame::ResetStream { .. } => QuicFrameType::ResetStream,
+        QuicFrame::StopSending { .. } => QuicFrameType::StopSending,
+        QuicFrame::Crypto { .. } => QuicFrameType::Crypto,
+        QuicFrame::NewToken { .. } => QuicFrameType::NewToken,
+        QuicFrame::Stream { offset, fin, .. } => {
+            return QuicFrameType::StreamBase as u64
+                | if offset.is_some() { 0x04 } else { 0 }
+                | u64::from(*fin);
+        }
+        QuicFrame::MaxData { .. } => QuicFrameType::MaxData,
+        QuicFrame::MaxStreamData { .. } => QuicFrameType::MaxStreamData,
+        QuicFrame::MaxStreams { bidirectional, .. } => {
+            if *bidirectional {
+                QuicFrameType::MaxStreamsBidi
+            } else {
+                QuicFrameType::MaxStreamsUni
+            }
+        }
+        QuicFrame::DataBlocked { .. } => QuicFrameType::DataBlocked,
+        QuicFrame::StreamDataBlocked { .. } => QuicFrameType::StreamDataBlocked,
+        QuicFrame::StreamsBlocked { bidirectional, .. } => {
+            if *bidirectional {
+                QuicFrameType::StreamsBlockedBidi
+            } else {
+                QuicFrameType::StreamsBlockedUni
+            }
+        }
+        QuicFrame::NewConnectionId { .. } => QuicFrameType::NewConnectionId,
+        QuicFrame::RetireConnectionId { .. } => QuicFrameType::RetireConnectionId,
+        QuicFrame::PathChallenge { .. } => QuicFrameType::PathChallenge,
+        QuicFrame::PathResponse { .. } => QuicFrameType::PathResponse,
+        QuicFrame::ConnectionClose { frame_type, .. } => {
+            if frame_type.is_some() {
+                QuicFrameType::ConnectionCloseQuic
+            } else {
+                QuicFrameType::ConnectionCloseApp
+            }
+        }
+        QuicFrame::HandshakeDone => QuicFrameType::HandshakeDone,
+        QuicFrame::Datagram { .. } => QuicFrameType::Datagram,
+    };
+    frame_type as u64
+}
+
 fn quic_trace(cx: &Cx, event: &str, fields: &[(&str, &str)]) {
     if std::env::var_os("ATP_QUIC_TRACE").is_some() {
         cx.trace_with_fields(event, fields);
@@ -2400,7 +2539,21 @@ impl NativeQuicConnection {
         payload: &[u8],
         now_micros: u64,
     ) -> Result<(), NativeQuicConnectionError> {
-        let frames = Self::decode_frames(payload)?;
+        let frames = match Self::decode_frames(payload) {
+            Ok(frames) => frames,
+            Err(error) => {
+                // RFC 9000 section 12.4: a frame that does not parse, an
+                // unknown type included, is a FRAME_ENCODING_ERROR.
+                let frame_type = match &error {
+                    NativeQuicConnectionError::Frame(QuicFrameError::UnknownFrameType(
+                        frame_type,
+                    )) => *frame_type,
+                    _ => 0,
+                };
+                self.close_on_peer_violation(&error, frame_type, now_micros);
+                return Err(error);
+            }
+        };
         self.process_packet_frames(cx, space, packet_number, &frames, now_micros)
     }
 
@@ -2420,6 +2573,11 @@ impl NativeQuicConnection {
     /// A peer close ends packet processing immediately: preceding effects remain,
     /// but trailing frames and subsequent packets cannot mutate the draining
     /// connection or queue acknowledgements.
+    ///
+    /// A frame that breaks a stream, flow-control or frame-encoding rule closes
+    /// the connection with the matching RFC 9000 transport error before the
+    /// error returns: the connection drains, and its local CONNECTION_CLOSE is
+    /// the transport variant naming the offending frame type.
     pub fn process_packet_frames(
         &mut self,
         cx: &Cx,
@@ -2455,7 +2613,11 @@ impl NativeQuicConnection {
                 }
                 self.process_datagram_frame_run(cx, &frames[start..index], space)?;
             } else {
-                self.process_frame_at(cx, &frames[index], space, now_micros)?;
+                if let Err(error) = self.process_frame_at(cx, &frames[index], space, now_micros) {
+                    let frame_type = received_frame_type(&frames[index]);
+                    self.close_on_peer_violation(&error, frame_type, now_micros);
+                    return Err(error);
+                }
                 if matches!(frames[index], QuicFrame::ConnectionClose { .. }) {
                     // The peer has ended this connection. In particular, do
                     // not let a trailing frame turn the close into an error
@@ -2560,6 +2722,10 @@ impl NativeQuicConnection {
                 final_size,
             } => {
                 let id = StreamId(stream_id.value());
+                // RFC 9000 19.4: a send-only stream has no receive side to reset.
+                if id.direction() == StreamDirection::Unidirectional && id.is_local_for(self.role) {
+                    return Err(StreamTableError::StreamNotReadable(id).into());
+                }
                 if self.streams.stream(id).is_err() {
                     self.accept_remote_stream(cx, id)?;
                 }
@@ -2588,6 +2754,11 @@ impl NativeQuicConnection {
                 maximum_stream_data,
             } => {
                 let id = StreamId(stream_id.value());
+                // RFC 9000 19.10: a receive-only stream takes no send credit.
+                if id.direction() == StreamDirection::Unidirectional && !id.is_local_for(self.role)
+                {
+                    return Err(StreamTableError::StreamNotWritable(id).into());
+                }
                 // RFC 9000 3.2: credit for the sending part of a peer's
                 // bidirectional stream also opens it. It can overtake the
                 // peer's first STREAM frame when that packet is lost.
@@ -2688,6 +2859,10 @@ impl NativeQuicConnection {
                 // hysteresis, one full window consumed since the last growth)
                 // and returns the advertisement to put on the wire.
                 let id = StreamId(stream_id.value());
+                // RFC 9000 19.13: a send-only stream has no receive window.
+                if id.direction() == StreamDirection::Unidirectional && id.is_local_for(self.role) {
+                    return Err(StreamTableError::StreamNotReadable(id).into());
+                }
                 // RFC 9000 3.2: STREAM_DATA_BLOCKED opens a peer's stream,
                 // as STREAM and RESET_STREAM do.
                 if self.streams.stream(id).is_err() {
@@ -2702,6 +2877,14 @@ impl NativeQuicConnection {
                 }
                 Ok(())
             }
+            // RFC 9000 19.14: as with MAX_STREAMS, a count above 2^60 cannot
+            // name an encodable stream ID.
+            QuicFrame::StreamsBlocked {
+                maximum_streams, ..
+            } if maximum_streams.value() > (1u64 << 60) => Err(QuicFrameError::InvalidFormat(
+                "STREAMS_BLOCKED exceeds the 2^60 stream limit".to_owned(),
+            )
+            .into()),
             QuicFrame::NewToken { .. }
             | QuicFrame::NewConnectionId { .. }
             | QuicFrame::RetireConnectionId { .. }
@@ -6795,15 +6978,25 @@ mod tests {
                 !conn.has_pending_control_frames(),
                 "rejected packet is not ACKed"
             );
+            // The error closes the connection (br-asupersync-tzjbn9 F3), so
+            // the unchanged credit is read from the stream table.
+            assert_eq!(conn.transport().close_code(), Some(FRAME_ENCODING_ERROR));
             for _ in 0..128 {
-                conn.open_local_bidi(&cx)
+                conn.streams
+                    .open_local_bidi()
                     .expect("original bidi credit unchanged");
-                conn.open_local_uni(&cx)
+                conn.streams
+                    .open_local_uni()
                     .expect("original uni credit unchanged");
             }
-            assert!(conn.open_local_bidi(&cx).is_err());
-            assert!(conn.open_local_uni(&cx).is_err());
+            assert!(conn.streams.open_local_bidi().is_err());
+            assert!(conn.streams.open_local_uni().is_err());
 
+            let mut conn = established_conn();
+            for _ in 0..128 {
+                conn.open_local_bidi(&cx).expect("initial bidi credit");
+                conn.open_local_uni(&cx).expect("initial uni credit");
+            }
             conn.process_packet_payload(
                 &cx,
                 PacketNumberSpace::ApplicationData,
@@ -6841,6 +7034,174 @@ mod tests {
             }
             assert!(conn.open_local_bidi(&cx).is_err());
         }
+    }
+
+    /// br-asupersync-tzjbn9 F3, F5 and F9: a peer frame that breaks a stream,
+    /// flow-control or frame-encoding rule closes the connection with the RFC
+    /// 9000 transport code, and its local CONNECTION_CLOSE is the transport
+    /// variant naming the frame type. The error used to return with the
+    /// connection still open and no close to send. RESET_STREAM and
+    /// STREAM_DATA_BLOCKED on a send-only stream, MAX_STREAM_DATA on a
+    /// receive-only stream and STREAMS_BLOCKED above 2^60 were accepted.
+    #[test]
+    fn peer_stream_violations_close_with_the_transport_error_code() {
+        let cx = test_cx();
+        let window = NativeQuicConnectionConfig::default().recv_window;
+        let stream = |id: u64, offset: Option<u64>, data: &'static [u8]| QuicFrame::Stream {
+            stream_id: VarInt(id),
+            offset: offset.map(VarInt),
+            data: Bytes::from_static(data),
+            fin: false,
+        };
+        // A server: stream 0 is the peer's bidirectional stream, 2 the peer's
+        // receive-only stream, 1 a local stream never opened, and 3 the local
+        // send-only stream each case opens.
+        let send_only = 3;
+        let remote_bidi_limit = established_server_conn().streams().remote_stream_limits().0;
+        let cases = [
+            (
+                "STREAM past the stream window",
+                vec![stream(0, Some(window), b"x")],
+                FLOW_CONTROL_ERROR,
+                0x0c,
+            ),
+            (
+                "STREAM past the peer's stream limit",
+                vec![stream(remote_bidi_limit << 2, None, b"x")],
+                STREAM_LIMIT_ERROR,
+                0x08,
+            ),
+            (
+                "STREAM for a local stream never opened",
+                vec![stream(1, None, b"x")],
+                STREAM_STATE_ERROR,
+                0x08,
+            ),
+            (
+                "RESET_STREAM on a send-only stream",
+                vec![QuicFrame::ResetStream {
+                    stream_id: VarInt(send_only),
+                    error_code: VarInt(9),
+                    final_size: VarInt(0),
+                }],
+                STREAM_STATE_ERROR,
+                0x04,
+            ),
+            (
+                "MAX_STREAM_DATA on a receive-only stream",
+                vec![
+                    stream(2, Some(0), b"up"),
+                    QuicFrame::MaxStreamData {
+                        stream_id: VarInt(2),
+                        maximum_stream_data: VarInt(1 << 20),
+                    },
+                ],
+                STREAM_STATE_ERROR,
+                0x11,
+            ),
+            (
+                "STREAM_DATA_BLOCKED on a send-only stream",
+                vec![QuicFrame::StreamDataBlocked {
+                    stream_id: VarInt(send_only),
+                    maximum_stream_data: VarInt(0),
+                }],
+                STREAM_STATE_ERROR,
+                0x15,
+            ),
+            (
+                "RESET_STREAM below the bytes received",
+                vec![
+                    stream(0, Some(0), b"abcd"),
+                    QuicFrame::ResetStream {
+                        stream_id: VarInt(0),
+                        error_code: VarInt(9),
+                        final_size: VarInt(2),
+                    },
+                ],
+                FINAL_SIZE_ERROR,
+                0x04,
+            ),
+            (
+                "STREAMS_BLOCKED above 2^60",
+                vec![QuicFrame::StreamsBlocked {
+                    maximum_streams: VarInt((1 << 60) + 1),
+                    bidirectional: true,
+                }],
+                FRAME_ENCODING_ERROR,
+                0x16,
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (case, frames, code, frame_type) in cases {
+            let mut conn = established_server_conn();
+            assert_eq!(conn.open_local_uni(&cx).expect("open"), StreamId(send_only));
+            let result = conn.process_packet_frames(
+                &cx,
+                PacketNumberSpace::ApplicationData,
+                1,
+                &frames,
+                100,
+            );
+            let close = |frame_type| {
+                [QuicFrame::ConnectionClose {
+                    error_code: VarInt(code),
+                    frame_type,
+                    reason_phrase: Bytes::new(),
+                }]
+            };
+            let observed = (
+                result.is_err(),
+                conn.state(),
+                conn.transport().close_code(),
+                conn.close_was_peer_initiated(),
+                conn.is_local_close_frame(&close(Some(VarInt(frame_type)))),
+                conn.is_local_close_frame(&close(None)),
+            );
+            let expected = (
+                true,
+                QuicConnectionState::Draining,
+                Some(code),
+                false,
+                true,
+                false,
+            );
+            if observed != expected {
+                failures.push(format!("{case}: {observed:?}, result {result:?}"));
+            }
+        }
+        // (error, state, close code, peer-initiated, transport close with the
+        // frame type, application close)
+        assert!(failures.is_empty(), "{failures:#?}");
+
+        // RFC 9000 12.4: a frame type this endpoint does not know is a
+        // FRAME_ENCODING_ERROR that names it.
+        let mut conn = established_server_conn();
+        conn.process_packet_payload(&cx, PacketNumberSpace::ApplicationData, 1, &[0x21], 100)
+            .expect_err("unknown frame type");
+        assert_eq!(conn.transport().close_code(), Some(FRAME_ENCODING_ERROR));
+        assert_eq!(conn.local_close_frame_type(), Some(VarInt(0x21)));
+    }
+
+    /// A local close stays the application variant (0x1d), and a later peer
+    /// violation cannot turn the draining close into a transport close.
+    #[test]
+    fn a_local_close_stays_the_application_variant() {
+        let cx = test_cx();
+        let mut conn = established_server_conn();
+        conn.begin_close(&cx, 200, 0x42).expect("close");
+        assert_eq!(conn.local_close_frame_type(), None);
+        let frames = [QuicFrame::StreamsBlocked {
+            maximum_streams: VarInt((1 << 60) + 1),
+            bidirectional: true,
+        }];
+        conn.process_packet_frames(&cx, PacketNumberSpace::ApplicationData, 1, &frames, 300)
+            .expect("a draining connection ignores further frames");
+        assert_eq!(conn.transport().close_code(), Some(0x42));
+        assert!(conn.is_local_close_frame(&[QuicFrame::ConnectionClose {
+            error_code: VarInt(0x42),
+            frame_type: None,
+            reason_phrase: Bytes::new(),
+        }]));
     }
 
     #[test]
