@@ -12,7 +12,7 @@ use crate::cx::Cx;
 use crate::net::atp::protocol::quic_frames::{QuicFrame, QuicFrameError};
 use crate::net::atp::protocol::varint::{VARINT_MAX, VarInt};
 use crate::net::quic_core::TransportParameters;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::task::{Context as TaskContext, Poll, Waker};
 
@@ -24,7 +24,7 @@ use super::tls::{CryptoLevel, KeyUpdateEvent, QuicTlsError, QuicTlsMachine};
 #[cfg(feature = "tls")]
 use super::tls::{QuicServerIdentityVerification, QuicServerIdentityVerifier};
 use super::transport::{
-    AckEvent, AckRange, PacketNumberSpace, QuicConnectionState, QuicTransportMachine,
+    AckEvent, AckRange, AckRangeSet, PacketNumberSpace, QuicConnectionState, QuicTransportMachine,
     SentPacketMeta, TransportError,
 };
 
@@ -196,7 +196,7 @@ pub struct NativeQuicConnectionConfig {
 ///
 /// STREAM payload bytes themselves remain in `StreamTable`; this ledger only
 /// remembers the stream/offset key needed to release or requeue that copy.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum RetransmittableFrameRef {
     HandshakeDone,
     Stream {
@@ -1855,8 +1855,10 @@ impl NativeQuicConnection {
             ack_delay_micros,
             now_micros,
         );
+        let mut acked = acked_packet_numbers.to_vec();
+        acked.sort_unstable();
         self.acknowledge_retransmittable_packets(space, |packet_number| {
-            acked_packet_numbers.contains(&packet_number)
+            acked.binary_search(&packet_number).is_ok()
         })?;
         let lost_packet_numbers = self.transport.take_newly_lost_packet_numbers(space);
         self.requeue_lost_retransmittable_packets(space, &lost_packet_numbers)?;
@@ -1876,10 +1878,9 @@ impl NativeQuicConnection {
         let event = self
             .transport
             .on_ack_ranges(space, ack_ranges, ack_delay_micros, now_micros);
+        let acked = AckRangeSet::new(ack_ranges);
         self.acknowledge_retransmittable_packets(space, |packet_number| {
-            ack_ranges
-                .iter()
-                .any(|range| packet_number >= range.smallest && packet_number <= range.largest)
+            acked.contains(packet_number)
         })?;
         let lost_packet_numbers = self.transport.take_newly_lost_packet_numbers(space);
         self.requeue_lost_retransmittable_packets(space, &lost_packet_numbers)?;
@@ -2060,6 +2061,11 @@ impl NativeQuicConnection {
         &mut self,
         acknowledged: &[RetransmittableFrameRef],
     ) -> Result<(), NativeQuicConnectionError> {
+        // Other in-flight copies of the acknowledged frames leave the ledgers
+        // in one pass; a pass per frame made one large ACK cost (frames
+        // acknowledged x frames in flight) (br-asupersync-5f1fcj).
+        let mut released = BTreeSet::new();
+        let mut result = Ok(());
         for frame_ref in acknowledged {
             if let RetransmittableFrameRef::Stream {
                 stream_id,
@@ -2067,23 +2073,28 @@ impl NativeQuicConnection {
                 data_len,
                 fin,
             } = frame_ref
-            {
-                self.streams
+                && let Err(error) = self
+                    .streams
                     .release_sent_stream_frame_if_matches(*stream_id, *offset, *data_len, *fin)
-                    .map_err(map_stream_table_error)?;
-            }
-            for ledger in &mut self.in_flight_retransmittable_frames {
-                ledger.retain(|_, refs| {
-                    refs.retain(|candidate| candidate != frame_ref);
-                    !refs.is_empty()
-                });
+            {
+                result = Err(map_stream_table_error(error));
+                break;
             }
             if let Some(control) = frame_ref.control_frame() {
                 self.pending_control_frames
                     .retain(|candidate| candidate != &control);
             }
+            released.insert(frame_ref);
         }
-        Ok(())
+        if !released.is_empty() {
+            for ledger in &mut self.in_flight_retransmittable_frames {
+                ledger.retain(|_, refs| {
+                    refs.retain(|candidate| !released.contains(candidate));
+                    !refs.is_empty()
+                });
+            }
+        }
+        result
     }
 
     fn discard_retransmittable_stream_refs(&mut self, stream_id: StreamId) {
@@ -5492,6 +5503,43 @@ mod tests {
                     && offset.map_or(0, VarInt::value) == 0
                     && data.as_ref() == b"recover-me"
         )));
+    }
+
+    #[test]
+    fn acknowledging_one_copy_of_a_frame_forgets_its_other_in_flight_copies() {
+        // br-asupersync-5f1fcj: acknowledged frames now leave the ledgers in
+        // one pass per ACK; a copy in another packet must still go with them.
+        let cx = test_cx();
+        let mut conn = established_conn();
+        let stream = conn.open_local_bidi(&cx).expect("open stream");
+        conn.write_stream_bytes(&cx, stream, Bytes::from_static(b"copied"), true)
+            .expect("queue reliable data");
+        let frames = conn
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 128)
+            .expect("frames");
+        let mut send = |time_sent_micros| {
+            conn.on_packet_sent_with_frames(
+                &cx,
+                PacketNumberSpace::ApplicationData,
+                1_200,
+                true,
+                true,
+                time_sent_micros,
+                &frames,
+            )
+            .expect("packet carrying the frame")
+        };
+        let first = send(10_000);
+        let second = send(10_100);
+        let ledger = packet_number_space_idx(PacketNumberSpace::ApplicationData);
+        assert!(conn.in_flight_retransmittable_frames[ledger].contains_key(&second));
+        let ack = [AckRange::new(first, first).expect("range")];
+        conn.on_ack_ranges(&cx, PacketNumberSpace::ApplicationData, &ack, 0, 20_000)
+            .expect("ACK of the first copy");
+        assert!(
+            conn.in_flight_retransmittable_frames[ledger].is_empty(),
+            "the copy in packet {second} was acknowledged with packet {first}"
+        );
     }
 
     #[test]

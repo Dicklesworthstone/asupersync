@@ -3,6 +3,7 @@
 //! This module keeps deterministic, runtime-agnostic transport logic:
 //! packet accounting, RTT estimation, loss detection, and PTO scheduling.
 
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::fmt;
 
@@ -85,6 +86,56 @@ impl AckRange {
 
     fn contains(self, packet_number: u64) -> bool {
         packet_number >= self.smallest && packet_number <= self.largest
+    }
+}
+
+/// ACK ranges in disjoint descending order, so a packet-number lookup is a
+/// binary search. A peer can put hundreds of ranges in one ACK frame; testing
+/// every packet in flight against every range made each such ACK cost their
+/// product (br-asupersync-5f1fcj). Ranges decoded from an ACK frame are
+/// already disjoint and descending and are used in place; anything else is
+/// sorted and merged once.
+#[derive(Debug, Clone)]
+pub(crate) struct AckRangeSet<'a> {
+    ranges: Cow<'a, [AckRange]>,
+}
+
+impl<'a> AckRangeSet<'a> {
+    pub(crate) fn new(ranges: &'a [AckRange]) -> Self {
+        if ranges
+            .windows(2)
+            .all(|pair| pair[1].largest < pair[0].smallest)
+        {
+            return Self {
+                ranges: Cow::Borrowed(ranges),
+            };
+        }
+        let mut sorted = ranges.to_vec();
+        sorted.sort_unstable_by_key(|range| range.smallest);
+        let mut merged: Vec<AckRange> = Vec::with_capacity(sorted.len());
+        for range in sorted {
+            match merged.last_mut() {
+                Some(last) if range.smallest <= last.largest.saturating_add(1) => {
+                    last.largest = last.largest.max(range.largest);
+                }
+                _ => merged.push(range),
+            }
+        }
+        merged.reverse();
+        Self {
+            ranges: Cow::Owned(merged),
+        }
+    }
+
+    pub(crate) fn contains(&self, packet_number: u64) -> bool {
+        // The first range starting at or below the packet is the only one
+        // that can hold it.
+        let candidate = self
+            .ranges
+            .partition_point(|range| range.smallest > packet_number);
+        self.ranges
+            .get(candidate)
+            .is_some_and(|range| range.contains(packet_number))
     }
 }
 
@@ -382,13 +433,10 @@ impl LossRecovery {
         // record every newly-acknowledged send time in this space.
         let mut acked_sent_times: Vec<u64> = Vec::new();
 
+        let acked_set = AckRangeSet::new(ack_ranges);
         let mut retained = VecDeque::with_capacity(self.sent_packets.len());
         while let Some(pkt) = self.sent_packets.pop_front() {
-            let acked = pkt.space == space
-                && ack_ranges
-                    .iter()
-                    .copied()
-                    .any(|range| range.contains(pkt.packet_number));
+            let acked = pkt.space == space && acked_set.contains(pkt.packet_number);
             if acked {
                 event.acked_packets += 1;
                 acked_sent_times.push(pkt.time_sent_micros);
@@ -644,13 +692,17 @@ impl LossRecovery {
             return false;
         }
         lost.sort_unstable();
+        let mut acked = acked_sent.to_vec();
+        acked.sort_unstable();
         // Walk lost packets oldest-to-newest. A run is broken when a packet was
         // acknowledged strictly between two consecutive lost send times; then a
-        // fresh run starts at the later packet.
+        // fresh run starts at the later packet. The earliest acknowledged send
+        // time after `prev` decides that, found by binary search.
         let mut run_start = lost[0];
         let mut prev = lost[0];
         for &t in &lost[1..] {
-            let broken = acked_sent.iter().any(|&a| a > prev && a < t);
+            let first_after_prev = acked.partition_point(|&a| a <= prev);
+            let broken = acked.get(first_after_prev).is_some_and(|&a| a < t);
             if broken {
                 run_start = t;
             } else if t.saturating_sub(run_start) > duration {
@@ -1183,6 +1235,95 @@ mod tests {
                 AckRange::new(12, 10).expect("range"),
             ]
         );
+    }
+
+    // br-asupersync-5f1fcj: ACK membership and the persistent-congestion check
+    // are binary searches over sorted data; these compare them with the direct
+    // scans they replaced, on unsorted, overlapping and adjacent inputs.
+    fn xorshift(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    #[test]
+    fn ack_range_set_matches_a_scan_of_every_range() {
+        let mut state = 0x9e37_79b9_7f4a_7c15;
+        for _ in 0..500 {
+            // Arbitrary ranges: unsorted, overlapping, adjacent.
+            let count = xorshift(&mut state) % 12;
+            let arbitrary: Vec<AckRange> = (0..count)
+                .map(|_| {
+                    let smallest = xorshift(&mut state) % 64;
+                    let largest = smallest + xorshift(&mut state) % 8;
+                    AckRange::new(largest, smallest).expect("range")
+                })
+                .collect();
+            // Ranges as an ACK frame carries them: disjoint, descending.
+            let mut decoded = Vec::new();
+            let mut largest = 64 + xorshift(&mut state) % 16;
+            for _ in 0..xorshift(&mut state) % 12 {
+                let smallest = largest.saturating_sub(xorshift(&mut state) % 6);
+                decoded.push(AckRange::new(largest, smallest).expect("range"));
+                let gap = 2 + xorshift(&mut state) % 4;
+                let Some(next) = smallest.checked_sub(gap) else {
+                    break;
+                };
+                largest = next;
+            }
+            for ranges in [&arbitrary, &decoded] {
+                let set = AckRangeSet::new(ranges);
+                for packet_number in 0..96 {
+                    assert_eq!(
+                        set.contains(packet_number),
+                        ranges.iter().any(|range| range.contains(packet_number)),
+                        "packet {packet_number} in {ranges:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn persistent_congestion_matches_a_scan_of_every_acked_packet() {
+        fn scanned(lost: &[u64], acked: &[u64], first_rtt_sample: u64, duration: u64) -> bool {
+            let mut lost: Vec<u64> = lost
+                .iter()
+                .copied()
+                .filter(|&t| t > first_rtt_sample)
+                .collect();
+            if lost.len() < 2 {
+                return false;
+            }
+            lost.sort_unstable();
+            let (mut run_start, mut prev) = (lost[0], lost[0]);
+            for &t in &lost[1..] {
+                if acked.iter().any(|&a| a > prev && a < t) {
+                    run_start = t;
+                } else if t.saturating_sub(run_start) > duration {
+                    return true;
+                }
+                prev = t;
+            }
+            false
+        }
+        let mut state = 0x2545_f491_4f6c_dd1d;
+        for _ in 0..2_000 {
+            let lost: Vec<u64> = (0..xorshift(&mut state) % 8)
+                .map(|_| xorshift(&mut state) % 100)
+                .collect();
+            let acked: Vec<u64> = (0..xorshift(&mut state) % 8)
+                .map(|_| xorshift(&mut state) % 100)
+                .collect();
+            let first_rtt_sample = xorshift(&mut state) % 20;
+            let duration = xorshift(&mut state) % 60;
+            assert_eq!(
+                LossRecovery::is_persistent_congestion(&lost, &acked, first_rtt_sample, duration),
+                scanned(&lost, &acked, first_rtt_sample, duration),
+                "lost {lost:?} acked {acked:?} first sample {first_rtt_sample} duration {duration}"
+            );
+        }
     }
 
     #[test]
