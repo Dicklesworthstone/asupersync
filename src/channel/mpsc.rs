@@ -302,13 +302,20 @@ impl<T: std::fmt::Debug> std::fmt::Debug for ChannelShared<T> {
     }
 }
 
+/// Queue slots a bounded channel reserves when created. The queue grows on
+/// demand up to the bound: reserving the whole bound made memory scale with
+/// the declared limit, not with the messages queued (4 GiB for an empty
+/// `channel::<[u8; 4096]>(1 << 20)`), and a large bound panicked with a
+/// capacity overflow (br-asupersync-9ngu0p).
+const INITIAL_QUEUE_SLOTS: usize = 64;
+
 impl<T> ChannelInner<T> {
     #[inline]
     fn new(capacity: usize) -> Self {
         let queue = if capacity == usize::MAX {
             VecDeque::new()
         } else {
-            VecDeque::with_capacity(capacity)
+            VecDeque::with_capacity(capacity.min(INITIAL_QUEUE_SLOTS))
         };
 
         Self {

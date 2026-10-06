@@ -313,6 +313,26 @@ mod tests {
     }
 
     #[test]
+    fn a_large_bound_reserves_a_small_queue_and_grows_to_it() {
+        // br-asupersync-9ngu0p: the queue reserved the whole bound, so a large
+        // bound panicked with a capacity overflow or allocated it all up front.
+        init_test("a_large_bound_reserves_a_small_queue_and_grows_to_it");
+        let huge = std::panic::catch_unwind(|| channel::<u64>(usize::MAX / 4));
+        assert!(huge.is_ok(), "a large bound must not overflow the queue");
+
+        let (tx, mut rx) = channel::<[u8; 4096]>(1 << 20);
+        assert!(tx.shared.inner.lock().queue.capacity() <= 64);
+        for _ in 0..100 {
+            tx.try_send([7; 4096]).expect("below the bound");
+        }
+        assert_eq!(tx.shared.inner.lock().queue.len(), 100, "the queue grows");
+        let cx = test_cx();
+        let first = block_on(rx.recv(&cx)).expect("first message");
+        assert_eq!(first[0], 7);
+        crate::test_complete!("a_large_bound_reserves_a_small_queue_and_grows_to_it");
+    }
+
+    #[test]
     fn recv_cancelled_display_has_asup_e203() {
         init_test("recv_cancelled_display_has_asup_e203");
         let text = RecvError::Cancelled.to_string();
