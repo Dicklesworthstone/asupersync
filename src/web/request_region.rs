@@ -1106,7 +1106,9 @@ impl ServerRequestRegion {
     /// 1. **Install**: the request Cx becomes the ambient context for every
     ///    poll of the handler ([`AmbientCxScope`]).
     /// 2. **Pre-gate**: a region or connection that is already cancelled
-    ///    rejects the handler entirely ([`ServerHopOutcome::Cancelled`]).
+    ///    rejects the handler entirely ([`ServerHopOutcome::Cancelled`], or
+    ///    [`ServerHopOutcome::DeadlineExceeded`] when the request's own
+    ///    deadline has passed).
     /// 3. **Race**: the handler races the budget deadline and the
     ///    connection's cancel signal (`conn_cx`).
     /// 4. **Drain**: when the deadline fires or the connection cancels, the
@@ -1118,7 +1120,10 @@ impl ServerRequestRegion {
     /// 5. **Backstop**: a handler still pending after the grace is dropped
     ///    (drop-based cancel) and the hop resolves
     ///    [`ServerHopOutcome::DeadlineExceeded`] /
-    ///    [`ServerHopOutcome::ConnectionLost`].
+    ///    [`ServerHopOutcome::ConnectionLost`]. A connection cancel that is the
+    ///    request's own deadline (the request Cx cancelled with
+    ///    [`CancelKind::Deadline`], as when `conn_cx` is the request Cx itself)
+    ///    takes the deadline path.
     ///
     /// Budget trace events (`server.budget_installed`,
     /// `server.budget_consumed`) are emitted on every path.
@@ -1134,8 +1139,15 @@ impl ServerRequestRegion {
     {
         self.emit_installed(source);
 
-        // Pre-handler gate: a cancelled region must not start new work.
+        // Pre-handler gate: a cancelled region must not start new work. A
+        // checkpoint past the request's deadline cancels it with Deadline;
+        // that is the deadline outcome, not a cancellation
+        // (br-asupersync-m8xsjx).
         if self.cx.checkpoint().is_err() {
+            if self.cx.cancelled_by(CancelKind::Deadline) {
+                self.finish("deadline_exceeded");
+                return ServerHopOutcome::DeadlineExceeded;
+            }
             self.finish("cancelled");
             return ServerHopOutcome::Cancelled;
         }
@@ -1187,6 +1199,13 @@ impl ServerRequestRegion {
             registration.clear();
         }
 
+        // The request's own deadline can reach this point as a connection
+        // cancel: when `conn_cx` is the request Cx (the owned h2 hop), the
+        // budget-deadline timer, or a checkpoint past the deadline, cancels it
+        // with Deadline before the timeout observes the elapsed deadline
+        // (br-asupersync-m8xsjx).
+        let own_deadline = matches!(phase_a, Ok(PhaseA::ConnCancelled))
+            && self.cx.cancelled_by(CancelKind::Deadline);
         match phase_a {
             Ok(PhaseA::Done(Ok(response))) => {
                 self.finish("ok");
@@ -1197,7 +1216,7 @@ impl ServerRequestRegion {
                 self.finish("panicked");
                 ServerHopOutcome::Panicked(message)
             }
-            Ok(PhaseA::ConnCancelled) => {
+            Ok(PhaseA::ConnCancelled) if !own_deadline => {
                 self.cx.cancel_with(
                     CancelKind::ParentCancelled,
                     Some("connection cancelled while request in flight"),
@@ -1220,7 +1239,7 @@ impl ServerRequestRegion {
                     }
                 }
             }
-            Err(_elapsed) => {
+            Ok(PhaseA::ConnCancelled) | Err(_) => {
                 self.cx.cancel_with(
                     CancelKind::Timeout,
                     Some(HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC),
@@ -2739,6 +2758,74 @@ mod tests {
             });
         }
 
+        /// A request whose deadline passed before the handler started is
+        /// refused as DeadlineExceeded (a 503 with ASUP-E501), not as
+        /// Cancelled (br-asupersync-m8xsjx).
+        #[test]
+        fn hop_deadline_passed_before_start_is_deadline_exceeded() {
+            block_on(async {
+                let started = Arc::new(AtomicBool::new(false));
+                let started_probe = Arc::clone(&started);
+                let region = ServerRequestRegion::mint("test", Budget::with_deadline_at_ns(1), NOW)
+                    .expect("runtime installed");
+                let outcome = region
+                    .run_with_protocol_drain(
+                        RequestBudgetSource::ServerConfig,
+                        None,
+                        Duration::from_millis(10),
+                        async move {
+                            started_probe.store(true, Ordering::SeqCst);
+                            0_u32
+                        },
+                    )
+                    .await;
+                assert!(
+                    matches!(outcome, ServerHopOutcome::DeadlineExceeded),
+                    "a request past its deadline is a deadline outcome, got {outcome:?}"
+                );
+                assert!(
+                    !started.load(Ordering::SeqCst),
+                    "a request past its deadline must not start the handler"
+                );
+            });
+        }
+
+        /// When the connection Cx is the request Cx itself (the owned h2
+        /// hop) and the request's deadline cancels it, the hop resolves
+        /// DeadlineExceeded, not ConnectionLost (br-asupersync-m8xsjx).
+        #[test]
+        fn hop_own_deadline_cancel_is_not_a_lost_connection() {
+            block_on(async {
+                let region = ServerRequestRegion::mint("test", Budget::INFINITE, NOW)
+                    .expect("runtime installed");
+                let request_cx = region.cx().clone();
+                let deadline_cx = request_cx.clone();
+                // First poll: the request's deadline cancels its Cx (as the
+                // budget-deadline timer or a checkpoint past the deadline
+                // does); then the handler hangs.
+                let mut expired = false;
+                let handler = std::future::poll_fn(move |_task_cx| {
+                    if !expired {
+                        expired = true;
+                        deadline_cx.cancel_with(CancelKind::Deadline, Some("request deadline"));
+                    }
+                    std::task::Poll::<u32>::Pending
+                });
+                let outcome = region
+                    .run_with_protocol_drain(
+                        RequestBudgetSource::ServerConfig,
+                        Some(request_cx),
+                        Duration::from_millis(10),
+                        handler,
+                    )
+                    .await;
+                assert!(
+                    matches!(outcome, ServerHopOutcome::DeadlineExceeded),
+                    "the request's own deadline is not a lost connection, got {outcome:?}"
+                );
+            });
+        }
+
         // --- AC2 lab matrix: normal / timeout / disconnect cells run as ---
         // --- LabRuntime tasks under virtual time, oracle-clean each.    ---
 
@@ -2785,12 +2872,21 @@ mod tests {
                 seed: u64,
                 cell: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
             ) {
+                run_lab_cell_with_budget(seed, Budget::new(), cell);
+            }
+
+            /// [`run_lab_cell`] with the cell task's own budget.
+            fn run_lab_cell_with_budget(
+                seed: u64,
+                task_budget: Budget,
+                cell: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+            ) {
                 let mut lab = LabRuntime::new(LabConfig::new(seed));
                 let root = lab.state.create_root_region(Budget::INFINITE);
                 let system_cx = lab.state.create_system_cx();
                 let (tid, _handle, _task_cx, _result_tx, spawn_effects) = lab
                     .state
-                    .create_task_infrastructure::<()>(&system_cx, root, Budget::new(), false)
+                    .create_task_infrastructure::<()>(&system_cx, root, task_budget, false)
                     .expect("create lab task infrastructure");
                 lab.state.store_spawned_task(
                     tid,
@@ -2936,6 +3032,46 @@ mod tests {
                     *got.lock().unwrap(),
                     Some(CellOutcome::ConnectionLost),
                     "disconnect must cancel the region and drain deterministically"
+                );
+            }
+
+            /// The owned h2 hop's shape: the handler runs in a task whose own
+            /// Cx is the connection Cx and whose budget carries the request
+            /// deadline. The budget-deadline timer cancels that Cx at the
+            /// deadline, at the same virtual instant the hop's timeout
+            /// expires; the hop still reports DeadlineExceeded (a 503), not
+            /// a lost connection (br-asupersync-m8xsjx, br-asupersync-pev2xi).
+            #[cfg(not(target_arch = "wasm32"))]
+            #[test]
+            fn lab_cell_task_deadline_on_the_shared_connection_cx_is_deadline_exceeded() {
+                let got: Arc<Mutex<Option<CellOutcome>>> = Arc::new(Mutex::new(None));
+                let slot = Arc::clone(&got);
+                run_lab_cell_with_budget(
+                    41,
+                    Budget::with_deadline_at_ns(10_000_000),
+                    Box::pin(async move {
+                        let cx = Cx::current().expect("lab task context");
+                        let region =
+                            ServerRequestRegion::from_body_cx("lab", cx.clone(), ambient_now());
+                        let outcome = region
+                            .run_with_protocol_drain(
+                                RequestBudgetSource::ServerConfig,
+                                Some(cx),
+                                Duration::from_millis(5),
+                                async {
+                                    let handler_now = ambient_now();
+                                    crate::time::sleep(handler_now, Duration::from_secs(600)).await;
+                                    9_u8
+                                },
+                            )
+                            .await;
+                        *slot.lock().unwrap() = Some(tag(&outcome));
+                    }),
+                );
+                assert_eq!(
+                    *got.lock().unwrap(),
+                    Some(CellOutcome::DeadlineExceeded),
+                    "the task's own deadline must resolve as the request deadline"
                 );
             }
         }
