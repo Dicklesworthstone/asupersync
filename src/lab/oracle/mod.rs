@@ -386,7 +386,13 @@ impl OracleSuite {
         self.finalizer.reset();
         self.region_tree.reset();
         self.deadline_monotone.reset();
-        if !self.cancellation_protocol.has_observed_events() {
+        if self.cancellation_protocol.has_observed_events() {
+            // Live task history stays; the region tree and region
+            // cancellations, which the lab does not feed live, come from the
+            // state (br-asupersync-vcu2oz).
+            self.cancellation_protocol
+                .refresh_region_topology_from_state(state);
+        } else {
             self.cancellation_protocol.snapshot_from_state(state, now);
         }
         self.cancel_correctness.reset();

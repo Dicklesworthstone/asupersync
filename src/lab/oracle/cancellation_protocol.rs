@@ -84,7 +84,7 @@ use crate::types::{
     CancelKind, CancelPhase, CancelReason, CancelWitness, CancelWitnessError, RegionId, TaskId,
     Time,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -625,6 +625,10 @@ pub struct CancellationProtocolOracle {
     cancelled_regions: BTreeMap<RegionId, CancelReason>,
     /// Map from task to owning region.
     task_regions: BTreeMap<TaskId, RegionId>,
+    /// Regions the topology above holds because a runtime snapshot reported
+    /// them (rather than a caller feeding `on_region_create`), so a later
+    /// snapshot can retire the ones that have since closed.
+    state_regions: BTreeSet<RegionId>,
     /// Detected violations (legacy format).
     violations: Vec<CancellationProtocolViolation>,
     /// Enhanced violation records with diagnostics and tracing.
@@ -649,6 +653,7 @@ impl CancellationProtocolOracle {
             region_children: BTreeMap::new(),
             cancelled_regions: BTreeMap::new(),
             task_regions: BTreeMap::new(),
+            state_regions: BTreeSet::new(),
             violations: Vec::new(),
             violation_records: Vec::new(),
             config,
@@ -977,6 +982,7 @@ impl CancellationProtocolOracle {
         for (region, parent, _) in &regions {
             self.region_parents.insert(*region, *parent);
             self.region_children.entry(*region).or_default();
+            self.state_regions.insert(*region);
         }
         for (region, parent, _) in &regions {
             if let Some(parent_id) = parent {
@@ -1032,6 +1038,64 @@ impl CancellationProtocolOracle {
                 },
             );
             self.task_regions.insert(task, region);
+        }
+    }
+
+    /// Refreshes the region topology, the region cancellations and the
+    /// task-to-region map from a runtime snapshot, keeping every live task
+    /// record and anything a caller fed by hand.
+    ///
+    /// The lab runtime feeds this oracle task transitions, polls, cancel
+    /// requests and acknowledgements as they happen, but region creation and
+    /// region cancellation happen inside the runtime state. Only
+    /// [`Self::snapshot_from_state`] captured them, and the lab ran it only
+    /// while the oracle had seen no live event. Once any task had been polled,
+    /// the propagation check therefore ran on an empty region tree, and a
+    /// cancelled region with an uncancelled live child passed
+    /// (br-asupersync-vcu2oz). Closed regions leave the runtime's table, so
+    /// regions an earlier snapshot reported and that are gone now are retired
+    /// here instead of being compared against a later cancellation.
+    pub fn refresh_region_topology_from_state(&mut self, state: &RuntimeState) {
+        let retired: Vec<RegionId> = std::mem::take(&mut self.state_regions)
+            .into_iter()
+            .collect();
+        for region in &retired {
+            self.region_parents.remove(region);
+            self.region_children.remove(region);
+            self.cancelled_regions.remove(region);
+        }
+        for children in self.region_children.values_mut() {
+            children.retain(|child| !retired.contains(child));
+        }
+
+        let mut regions = Vec::new();
+        for (_, region) in state.regions_iter() {
+            regions.push((region.id, region.parent, region.cancel_reason()));
+        }
+        regions.sort_by_key(|(id, _, _)| *id);
+        for (region, parent, _) in &regions {
+            self.region_parents.insert(*region, *parent);
+            self.region_children.entry(*region).or_default();
+            self.state_regions.insert(*region);
+        }
+        for (region, parent, _) in &regions {
+            if let Some(parent_id) = parent {
+                let children = self.region_children.entry(*parent_id).or_default();
+                if !children.contains(region) {
+                    children.push(*region);
+                }
+            }
+        }
+        for children in self.region_children.values_mut() {
+            children.sort();
+        }
+        for (region, _, reason) in regions {
+            if let Some(cancel_reason) = reason {
+                self.cancelled_regions.insert(region, cancel_reason);
+            }
+        }
+        for (_, task) in state.tasks_iter() {
+            self.task_regions.entry(task.id).or_insert(task.owner);
         }
     }
 
@@ -1327,6 +1391,7 @@ impl CancellationProtocolOracle {
         self.region_children.clear();
         self.cancelled_regions.clear();
         self.task_regions.clear();
+        self.state_regions.clear();
         self.violations.clear();
         self.violation_records.clear();
     }

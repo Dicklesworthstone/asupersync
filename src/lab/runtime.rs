@@ -8828,6 +8828,54 @@ mod tests {
         crate::test_complete!("report_hydrates_cancellation_propagation_from_state_snapshot");
     }
 
+    /// The same propagation failure after a task has run. The lab feeds the
+    /// cancellation_protocol oracle live task events, and once it had any,
+    /// report() no longer read the region tree from the state, so the
+    /// uncancelled child passed (br-asupersync-vcu2oz).
+    #[test]
+    fn report_checks_cancellation_propagation_after_a_task_has_run() {
+        init_test("report_checks_cancellation_propagation_after_a_task_has_run");
+        let config = LabConfig::new(32).panic_on_cancellation_violation(false);
+        let mut runtime = LabRuntime::new(config);
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let (task, _handle) = runtime
+            .state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create task");
+        runtime.scheduler.lock().schedule(task, 0);
+        runtime.run_until_idle();
+        let fed_live = runtime.oracles.cancellation_protocol.has_observed_events();
+        crate::assert_with_log!(
+            fed_live,
+            "the polled task fed the oracle live",
+            true,
+            fed_live
+        );
+
+        let _child = runtime
+            .state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("create child");
+        runtime
+            .state
+            .region(root)
+            .expect("root exists")
+            .cancel_request(crate::types::CancelReason::shutdown());
+
+        let report = runtime.report();
+        let cancellation = report
+            .oracle_report
+            .entry("cancellation_protocol")
+            .expect("cancellation_protocol entry");
+        crate::assert_with_log!(
+            !cancellation.passed,
+            "a cancelled region with an uncancelled child fails after live events",
+            false,
+            cancellation.passed
+        );
+        crate::test_complete!("report_checks_cancellation_propagation_after_a_task_has_run");
+    }
+
     #[test]
     fn report_surfaces_refinement_firewall_violation_from_trace_snapshot() {
         init_test("report_surfaces_refinement_firewall_violation_from_trace_snapshot");
