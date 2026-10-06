@@ -44,6 +44,17 @@ const TRANSIENT_ACCEPT_BACKOFF_CAP: Duration = Duration::from_millis(64);
 /// [`GracefulDrainSupervisor`] decision state machine.
 const DRAIN_SUPERVISION_TICK: Duration = Duration::from_millis(10);
 
+/// Waits one drain supervision tick from `now`, whether or not the listener
+/// task is cancelled. A region-owned listener is shut down by cancelling its
+/// task; a cancel-aware sleep then completed after one scheduler round trip,
+/// and the supervision loop spun until the drain deadline
+/// (br-asupersync-m8xsjx).
+async fn drain_supervision_tick(now: Time) {
+    let tick = crate::time::sleep(now, DRAIN_SUPERVISION_TICK);
+    let mut tick = std::pin::pin!(tick);
+    std::future::poll_fn(|cx| tick.as_mut().poll_deadline(cx)).await;
+}
+
 /// Low-overhead listener counters for diagnosing accept-path stalls and
 /// observing graceful drains
 /// (br-asupersync-server-stack-hardening-eeexl1.2, D2.4 AC6).
@@ -1026,7 +1037,7 @@ impl<F> Http1Listener<F> {
                         let sleep_now = Cx::current()
                             .and_then(|cx| cx.timer_driver())
                             .map_or_else(crate::time::wall_now, |timer| timer.now());
-                        crate::time::sleep(sleep_now, DRAIN_SUPERVISION_TICK).await;
+                        drain_supervision_tick(sleep_now).await;
                     }
                     DrainStep::Escalate => {
                         self.stats.record_drain_escalated();
@@ -2067,5 +2078,37 @@ mod tests {
         assert_eq!(cloned.drain_timeout, Duration::from_secs(30));
         let dbg = format!("{cfg:?}");
         assert!(dbg.contains("Http1ListenerConfig"));
+    }
+
+    /// The drain supervision tick waits its interval when the listener task
+    /// is cancelled; it used to complete at once, so the drain loop spun.
+    #[test]
+    fn drain_supervision_tick_ignores_the_listener_tasks_cancellation() {
+        init_test_logging();
+        let virtual_clock = Arc::new(VirtualClock::starting_at(Time::from_secs(10)));
+        let timer_driver = TimerDriverHandle::with_virtual_clock(Arc::clone(&virtual_clock));
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(7, 2),
+            TaskId::new_for_test(9, 2),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer_driver.clone()),
+            None,
+        );
+        cx.set_cancel_requested(true);
+        let _guard = Cx::set_current(Some(cx));
+        let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let mut tick = std::pin::pin!(drain_supervision_tick(Time::from_secs(10)));
+        for _ in 0..2 {
+            assert!(
+                tick.as_mut().poll(&mut task_cx).is_pending(),
+                "a cancelled listener still waits for the tick"
+            );
+        }
+        virtual_clock.advance_to(Time::from_secs(10) + DRAIN_SUPERVISION_TICK);
+        let _ = timer_driver.process_timers();
+        assert!(tick.as_mut().poll(&mut task_cx).is_ready());
     }
 }
