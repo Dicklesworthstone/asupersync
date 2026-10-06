@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 
 const WRITE_CHUNK_BYTES: usize = 16 * 1024;
 
+mod copy;
+
 impl<Caps> ScopedFs<Caps>
 where
     Caps: HasIo + HasSpawn + CapSetRuntimeMask + Send + Sync + 'static,
