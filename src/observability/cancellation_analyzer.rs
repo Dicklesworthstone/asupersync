@@ -2,6 +2,10 @@
 //!
 //! Advanced analysis capabilities for cancellation behavior including bottleneck identification,
 //! resource cleanup timing analysis, and performance optimization recommendations.
+//!
+//! It is opt-in: it analyzes the traces the caller collected with a
+//! [`CancellationTracer`](crate::observability::cancellation_tracer::CancellationTracer), and the
+//! runtime records nothing into either (asupersync-7yq1pv).
 
 use crate::observability::cancellation_tracer::{
     CancellationTrace, EntityType, PropagationAnomaly,

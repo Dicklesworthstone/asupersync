@@ -2,9 +2,11 @@
 //!
 //! Provides deterministic, monotone counters for tracking resource usage across
 //! the obligation lifecycle, budget consumption, and region admission control.
-//! Integrates with the existing [`crate::observability::metrics::MetricsProvider`]
-//! trait for zero-cost when disabled and with the
-//! [`franken_evidence::EvidenceLedger`] for decision auditing.
+//!
+//! It is opt-in: nothing in the runtime records into it, and it has no
+//! [`crate::observability::metrics::MetricsProvider`] or
+//! [`franken_evidence::EvidenceLedger`] hook. The caller feeds the counters and
+//! reads the snapshot (asupersync-7yq1pv).
 //!
 //! # Design Principles
 //!

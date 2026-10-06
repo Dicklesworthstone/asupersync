@@ -2,6 +2,10 @@
 //!
 //! Real-time visualization tools for cancellation propagation trees and analysis.
 //! Provides multiple output formats for different debugging scenarios.
+//!
+//! It is opt-in: it renders the traces the caller collected with a
+//! [`CancellationTracer`](crate::observability::cancellation_tracer::CancellationTracer), and the
+//! runtime records nothing into either (asupersync-7yq1pv).
 
 use crate::observability::cancellation_tracer::{
     CancellationTrace, CancellationTraceId, CancellationTraceStep, EntityType, PropagationAnomaly,

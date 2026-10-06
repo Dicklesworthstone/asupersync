@@ -7,6 +7,9 @@
 //! This module provides real-time cancellation monitoring with minimal overhead, building
 //! on the existing observability infrastructure to provide comprehensive insights into
 //! cancellation behavior across complex structured concurrency applications.
+//!
+//! It is opt-in: the runtime does not record into a tracer. The caller reports each
+//! cancellation step itself (asupersync-7yq1pv).
 
 use crate::runtime::TraceStorageProfile;
 use crate::types::{CancelKind, CancelReason};
