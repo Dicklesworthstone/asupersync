@@ -85,8 +85,9 @@ where
 /// ```
 ///
 /// # Panics
-/// Panics if `limit` is zero. As with the underlying stream driver, a panic in
-/// source polling or factory cloning is not an item-task result.
+/// Panics if `limit` is zero. Unwinding panics from source polling or factory
+/// cloning are instead reported as `Panicked` after draining owned tasks.
+/// Panicking destructors and abort-on-panic builds remain outside that guarantee.
 pub async fn try_map_collect_concurrent<S, F, Fut, T, E>(
     cx: &Cx,
     stream: S,
