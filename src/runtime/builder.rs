@@ -4341,6 +4341,13 @@ impl Runtime {
     /// the bound, this method can still return `true`. A successful `true`
     /// result therefore always means that final teardown actually completed.
     ///
+    /// On a multi-thread runtime the reaper does not wait for those owners to
+    /// retire the tasks. Once the workers have exited, it drops the task
+    /// futures as ordinary drop would. So a `block_on` caller on a clone that
+    /// waits for a task sees that join end, and a task that holds a strong
+    /// `RuntimeHandle` releases it. A current-thread runtime's tasks are retired
+    /// by the final drop.
+    ///
     /// [#60]: https://github.com/Dicklesworthstone/asupersync/issues/60
     #[must_use = "the return value reports whether teardown completed within the bound"]
     pub fn shutdown_timeout(self, timeout: Duration) -> bool {
@@ -4407,6 +4414,7 @@ impl Runtime {
             };
             RuntimeInner::wait_for_spawn_publishers(spawn_publishers.as_ref());
             inner.signal_shutdown();
+            inner.retire_stopped_tasks_after_shutdown();
             loop {
                 match Arc::try_unwrap(inner) {
                     Ok(inner) => {
@@ -5826,6 +5834,56 @@ impl RuntimeInner {
         }
     }
 
+    /// After [`Self::signal_shutdown`], retires a multi-thread runtime's
+    /// stopped tasks while other owners may still hold the runtime
+    /// (br-asupersync-1pi7ne H1).
+    ///
+    /// Tasks are otherwise dropped only by `RuntimeInner::drop`, which needs
+    /// the last strong reference. Two common owners never let it go:
+    /// - a `block_on` caller on a cloned `Runtime` that waits for one of
+    ///   those tasks;
+    /// - a task that holds a strong `RuntimeHandle`, such as an accept loop
+    ///   that spawns through a handle.
+    /// Joins then hang, task-owned sockets and files stay open, and the
+    /// reaper polls `Arc::try_unwrap` every millisecond forever.
+    ///
+    /// Once the workers have exited, dropping the task tables is the same
+    /// abort-by-drop `RuntimeInner::drop` performs: joins observe
+    /// cancellation, and a dropped future releases what it held. A
+    /// current-thread runtime's worker is on loan to a `block_on` caller and
+    /// cannot be joined here, so its tasks wait for the final drop as before.
+    fn retire_stopped_tasks_after_shutdown(&self) {
+        if self.current_thread_driver.get().is_some() || self.browser_pump.get().is_some() {
+            return;
+        }
+        let handles = {
+            let mut workers = self.worker_threads.lock();
+            let current = std::thread::current().id();
+            if workers.iter().any(|handle| handle.thread().id() == current) {
+                // A worker cannot join itself; the final drop retires these.
+                return;
+            }
+            std::mem::take(&mut *workers)
+        };
+        for handle in handles {
+            let _ = handle.join();
+        }
+        let gateway_mailbox = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state
+                .spawn_gateway()
+                .map(|gateway| Arc::clone(gateway.mailbox()))
+        };
+        retire_stopped_tasks(
+            &self.state,
+            self.sharded_state.as_ref(),
+            gateway_mailbox.as_deref(),
+        );
+    }
+
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     fn initialize_runtime_state(
         config: &RuntimeConfig,
@@ -6536,77 +6594,7 @@ impl Drop for RuntimeInner {
             for handle in handles {
                 let _ = handle.join();
             }
-            // Diagnostics and retained contexts can keep state alive after the
-            // runtime dies. Explicitly detach stopped task ownership, then let
-            // TaskTable retire futures/records and release join barriers outside
-            // every runtime and shard lock. Keep the tables owned through mailbox
-            // denial dispatch, including if that dispatch unwinds.
-            let retired_tasks = {
-                let mut state = state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let unified = std::mem::take(&mut state.tasks);
-                let sharded = sharded_state.as_ref().map(|sharded| {
-                    let mut tasks = sharded
-                        .tasks
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    std::mem::take(&mut *tasks)
-                });
-                (unified, sharded)
-            };
-            // Finalizers admitted into regions that never closed can no longer
-            // run. A retained value that holds this state (a registration, a
-            // Cx) forms a cycle nothing else breaks, so take them out under
-            // the lock and drop them outside it (asupersync-bi2462.147.11).
-            let retired_finalizers = {
-                let state = state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let mut finalizers: Vec<_> = state
-                    .regions
-                    .iter()
-                    .flat_map(|(_, region)| region.take_finalizers_for_teardown())
-                    .collect();
-                if let Some(sharded) = sharded_state.as_ref() {
-                    let regions = sharded
-                        .regions
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    finalizers.extend(
-                        regions
-                            .iter()
-                            .flat_map(|(_, region)| region.take_finalizers_for_teardown()),
-                    );
-                }
-                finalizers
-            };
-            if let Some(mailbox) = gateway_mailbox {
-                mailbox.retire_region_commands();
-                let mut cancelled = Vec::new();
-                while mailbox.dequeue_handle_cancels_into(64, &mut cancelled) > 0 {
-                    for request in cancelled.drain(..) {
-                        if let Some(slot) = request.admitted_slot {
-                            slot.abandon_unpublished_spawn_effects();
-                        }
-                    }
-                }
-                while let Some(request) = mailbox.dequeue() {
-                    request
-                        .into_parts()
-                        .resolve_failed(SpawnError::RuntimeUnavailable);
-                }
-            }
-            drop(retired_tasks);
-            for finalizer in retired_finalizers {
-                if let Err(payload) =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(finalizer)))
-                {
-                    // Retained values can have arbitrary destructors; one
-                    // failure cannot strand the rest (as for queued commands).
-                    std::mem::forget(payload);
-                }
-            }
+            retire_stopped_tasks(&state, sharded_state.as_ref(), gateway_mailbox.as_deref());
             drop(sharded_state);
             drop(state);
             drop(blocking_pool); // Joined last: its jobs may wait on retired values.
@@ -6615,6 +6603,87 @@ impl Drop for RuntimeInner {
             Self::finish_teardown_off_worker(teardown);
         } else {
             teardown();
+        }
+    }
+}
+
+/// Retires the tasks, region finalizers and pending spawn requests of a
+/// runtime whose workers have exited: the abort-by-drop part of teardown,
+/// shared by `RuntimeInner::drop` and the `shutdown_timeout` reaper.
+fn retire_stopped_tasks(
+    state: &Arc<crate::sync::ContendedMutex<RuntimeState>>,
+    sharded_state: Option<&Arc<crate::runtime::ShardedState>>,
+    gateway_mailbox: Option<&crate::runtime::spawn_mailbox::SpawnMailbox>,
+) {
+    // Diagnostics and retained contexts can keep state alive after the
+    // runtime dies. Explicitly detach stopped task ownership, then let
+    // TaskTable retire futures/records and release join barriers outside
+    // every runtime and shard lock. Keep the tables owned through mailbox
+    // denial dispatch, including if that dispatch unwinds.
+    let retired_tasks = {
+        let mut state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let unified = std::mem::take(&mut state.tasks);
+        let sharded = sharded_state.map(|sharded| {
+            let mut tasks = sharded
+                .tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::take(&mut *tasks)
+        });
+        (unified, sharded)
+    };
+    // Finalizers admitted into regions that never closed can no longer
+    // run. A retained value that holds this state (a registration, a
+    // Cx) forms a cycle nothing else breaks, so take them out under
+    // the lock and drop them outside it (asupersync-bi2462.147.11).
+    let retired_finalizers = {
+        let state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut finalizers: Vec<_> = state
+            .regions
+            .iter()
+            .flat_map(|(_, region)| region.take_finalizers_for_teardown())
+            .collect();
+        if let Some(sharded) = sharded_state {
+            let regions = sharded
+                .regions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            finalizers.extend(
+                regions
+                    .iter()
+                    .flat_map(|(_, region)| region.take_finalizers_for_teardown()),
+            );
+        }
+        finalizers
+    };
+    if let Some(mailbox) = gateway_mailbox {
+        mailbox.retire_region_commands();
+        let mut cancelled = Vec::new();
+        while mailbox.dequeue_handle_cancels_into(64, &mut cancelled) > 0 {
+            for request in cancelled.drain(..) {
+                if let Some(slot) = request.admitted_slot {
+                    slot.abandon_unpublished_spawn_effects();
+                }
+            }
+        }
+        while let Some(request) = mailbox.dequeue() {
+            request
+                .into_parts()
+                .resolve_failed(SpawnError::RuntimeUnavailable);
+        }
+    }
+    drop(retired_tasks);
+    for finalizer in retired_finalizers {
+        if let Err(payload) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(finalizer)))
+        {
+            // Retained values can have arbitrary destructors; one
+            // failure cannot strand the rest (as for queued commands).
+            std::mem::forget(payload);
         }
     }
 }
@@ -13281,6 +13350,84 @@ worker_threads = 16
         assert_eq!(
             Pin::new(&mut cancelled_handle).poll(&mut cx2),
             Poll::Ready(Err(crate::runtime::JoinError::PolledAfterCompletion))
+        );
+    }
+
+    /// br-asupersync-1pi7ne H1, trigger (b): a task that holds a strong
+    /// `RuntimeHandle` (an accept loop spawning through a handle) used to keep
+    /// the runtime alive forever. shutdown_timeout signalled the workers, but
+    /// the task was never dropped, so its handle was never released, teardown
+    /// never ran and the reaper spun. Now the reaper drops the stopped task
+    /// and teardown completes within the bound.
+    #[test]
+    fn shutdown_timeout_retires_a_task_that_holds_a_strong_runtime_handle() {
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(2)
+            .build()
+            .expect("build runtime");
+        let runtime_inner = Arc::downgrade(&runtime.inner);
+        let held = runtime.handle();
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        let _join = runtime.handle().spawn(async move {
+            let _held = held;
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the task that holds the handle started");
+
+        assert!(
+            runtime.shutdown_timeout(Duration::from_secs(10)),
+            "teardown never completed: the stopped task kept its strong RuntimeHandle"
+        );
+        assert!(
+            runtime_inner.upgrade().is_none(),
+            "the runtime state was released"
+        );
+    }
+
+    /// br-asupersync-1pi7ne H1, trigger (a): a `block_on` caller on a cloned
+    /// `Runtime` that waits for a task used to wait forever after
+    /// shutdown_timeout. The task was frozen, never polled or dropped, and the
+    /// caller's clone kept teardown from running. Now the reaper drops the
+    /// task, the join observes it ("task was dropped or cancelled before
+    /// completion"), the caller returns and releases its clone, and teardown
+    /// completes.
+    #[test]
+    fn shutdown_timeout_ends_a_block_on_caller_waiting_on_a_clone() {
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(2)
+            .build()
+            .expect("build runtime");
+        let clone = runtime.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        let (returned_tx, returned_rx) = std::sync::mpsc::channel::<bool>();
+        std::thread::spawn(move || {
+            let waited = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                clone.block_on(async move {
+                    let task = Runtime::current_handle()
+                        .expect("block_on installs a handle")
+                        .spawn(std::future::pending::<()>());
+                    let _ = started_tx.send(());
+                    task.await;
+                });
+            }));
+            drop(clone);
+            let _ = returned_tx.send(waited.is_err());
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the block_on caller spawned its task");
+
+        let completed = runtime.shutdown_timeout(Duration::from_secs(10));
+        let join_failed = returned_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the block_on caller never returned: its task was not retired");
+        assert!(join_failed, "the join observed the task's cancellation");
+        assert!(
+            completed,
+            "teardown completed once the caller released its clone"
         );
     }
 }
