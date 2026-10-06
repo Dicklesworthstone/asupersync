@@ -4339,7 +4339,10 @@ impl Runtime {
     /// Cloned `Runtime`s and strong [`RuntimeHandle`]s keep the runtime alive as
     /// usual. The reaper waits until they are released; if that happens within
     /// the bound, this method can still return `true`. A successful `true`
-    /// result therefore always means that final teardown actually completed.
+    /// result therefore always means that final teardown actually completed,
+    /// including the exit of every blocking-pool thread. Ordinary drop waits
+    /// for those threads at most five seconds; this method waits for them up
+    /// to its bound, so a blocking job that is still running yields `false`.
     ///
     /// On a multi-thread runtime the reaper does not wait for those owners to
     /// retire the tasks. Once the workers have exited, it drops the task
@@ -4417,8 +4420,17 @@ impl Runtime {
             inner.retire_stopped_tasks_after_shutdown();
             loop {
                 match Arc::try_unwrap(inner) {
-                    Ok(inner) => {
+                    Ok(mut inner) => {
+                        // The final drop waits at most 5 s for blocking-pool
+                        // threads and discards the result. Wait for all of them
+                        // here, after that drop has retired the tasks their jobs
+                        // may wait on, so that completion means teardown
+                        // completed (br-asupersync-1pi7ne M1).
+                        let blocking_pool = inner.blocking_pool.take();
                         drop(inner);
+                        if let Some(pool) = blocking_pool {
+                            let _ = pool.shutdown_and_wait(Duration::MAX);
+                        }
                         reaper_completion.signal();
                         break;
                     }
@@ -13428,6 +13440,73 @@ worker_threads = 16
         assert!(
             completed,
             "teardown completed once the caller released its clone"
+        );
+    }
+
+    /// br-asupersync-1pi7ne M1: shutdown_timeout returned `true` while a
+    /// blocking-pool job was still running. The final drop waits for the
+    /// pool's threads at most 5 s and discards the result, and the reaper then
+    /// reported a completed teardown. The bound here is well past those 5 s.
+    #[test]
+    fn shutdown_timeout_is_incomplete_while_a_blocking_job_still_runs() {
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(1)
+            .blocking_threads(1, 1)
+            .build()
+            .expect("build runtime");
+        let shutdown_complete = Arc::clone(&runtime.inner.shutdown_completion);
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let job = runtime
+            .spawn_blocking(move || {
+                let _ = started_tx.send(());
+                let _ = release_rx.recv_timeout(Duration::from_secs(120));
+            })
+            .expect("the runtime has a blocking pool");
+        started_rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the blocking job started");
+
+        assert!(
+            !runtime.shutdown_timeout(Duration::from_secs(8)),
+            "teardown reported complete while a blocking job still runs"
+        );
+        assert!(!job.is_done(), "the blocking job is still running");
+        release_tx.send(()).expect("the blocking job still waits");
+        assert!(job.wait_timeout(Duration::from_secs(10)));
+        assert!(
+            shutdown_complete.wait_timeout(Duration::from_secs(10)),
+            "the reaper finishes teardown once the job ends"
+        );
+    }
+
+    /// br-asupersync-1pi7ne M1, the positive side: a blocking job that ends
+    /// within the bound has ended when shutdown_timeout returns `true`.
+    #[test]
+    fn shutdown_timeout_waits_for_a_blocking_job_that_ends_within_the_bound() {
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(1)
+            .blocking_threads(1, 1)
+            .build()
+            .expect("build runtime");
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        let ended = Arc::new(AtomicBool::new(false));
+        let job_ended = Arc::clone(&ended);
+        let _job = runtime
+            .spawn_blocking(move || {
+                let _ = started_tx.send(());
+                std::thread::sleep(Duration::from_millis(300));
+                job_ended.store(true, Ordering::SeqCst);
+            })
+            .expect("the runtime has a blocking pool");
+        started_rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the blocking job started");
+
+        assert!(runtime.shutdown_timeout(Duration::from_secs(30)));
+        assert!(
+            ended.load(Ordering::SeqCst),
+            "teardown completed before the blocking job ended"
         );
     }
 }
