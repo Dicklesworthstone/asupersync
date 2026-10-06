@@ -1698,6 +1698,28 @@ impl Consumer {
         self.pending_acks.load(Ordering::Relaxed) < self.max_ack_pending
     }
 
+    /// Admits a pulled message under `max_ack_pending`, or drops it.
+    ///
+    /// A refused message is dropped with its counter handle detached:
+    /// `increment_pending` already rolled back its own increment, and the
+    /// message's `Drop` decrementing again freed a slot held by another
+    /// outstanding message (br-asupersync-pm29wb).
+    fn admit_pulled_message(&self, mut js_msg: JsMessage) -> Option<JsMessage> {
+        if self.increment_pending() {
+            return Some(js_msg);
+        }
+        warn!(
+            stream = %self.stream,
+            consumer = %self.name,
+            pending = self.pending_acks(),
+            max_ack_pending = self.max_ack_pending,
+            sequence = js_msg.sequence,
+            "JetStream flow control: dropping message - max_ack_pending exceeded"
+        );
+        js_msg.pending_acks = None;
+        None
+    }
+
     /// Increment pending ack count (called when receiving a message).
     fn increment_pending(&self) -> bool {
         let current = self.pending_acks.fetch_add(1, Ordering::Relaxed);
@@ -1883,19 +1905,10 @@ impl Consumer {
                 }
                 if let Some(js_msg) = Self::parse_js_message(msg, Some(self.pending_acks.clone())) {
                     // Flow control: check if we can accept this message
-                    if self.increment_pending() {
+                    if let Some(js_msg) = self.admit_pulled_message(js_msg) {
                         messages.push(js_msg);
                         pull_state.observe_parsed_message();
                     } else {
-                        // Exceeded max_ack_pending - drop the message and log warning
-                        warn!(
-                            stream = %self.stream,
-                            consumer = %self.name,
-                            pending = self.pending_acks(),
-                            max_ack_pending = self.max_ack_pending,
-                            sequence = js_msg.sequence,
-                            "JetStream flow control: dropping message - max_ack_pending exceeded"
-                        );
                         pull_state.observe_ignored_message();
                     }
                 } else {
@@ -5293,6 +5306,40 @@ mod tests {
         };
         assert!(consumer.increment_pending());
         assert!(consumer.increment_pending());
+    }
+
+    /// br-asupersync-pm29wb: a message refused at max_ack_pending rolled back
+    /// its own increment and then decremented again when dropped, freeing a
+    /// slot held by the message still outstanding.
+    #[test]
+    fn a_message_refused_at_max_ack_pending_does_not_free_another_slot() {
+        let consumer = Consumer {
+            stream: "ORDERS".to_string(),
+            name: "processor".to_string(),
+            prefix: "$JS.API".to_string(),
+            pending_acks: Arc::new(AtomicUsize::new(0)),
+            max_ack_pending: 1,
+            pull_rate_limiter: PullRateLimiter::new(),
+        };
+        let message = |sequence| JsMessage {
+            subject: "orders".to_string(),
+            payload: Vec::new(),
+            sequence,
+            delivered: 1,
+            reply_subject: format!("$JS.ACK.ORDERS.processor.1.{sequence}.{sequence}.0.0"),
+            ack_state: AtomicU8::new(ACK_STATE_PENDING),
+            pending_acks: Some(Arc::clone(&consumer.pending_acks)),
+        };
+        let admitted = consumer.admit_pulled_message(message(1));
+        assert!(admitted.is_some());
+        assert!(consumer.admit_pulled_message(message(2)).is_none());
+        assert_eq!(
+            consumer.pending_acks(),
+            1,
+            "the outstanding message keeps its slot"
+        );
+        drop(admitted);
+        assert_eq!(consumer.pending_acks(), 0);
     }
 
     #[test]
