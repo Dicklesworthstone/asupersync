@@ -66,7 +66,8 @@ pub struct RateLimitPolicy {
     /// Cost per operation (default 1, allows weighted operations).
     pub default_cost: u32,
 
-    /// Algorithm variant.
+    /// Algorithm variant. [`RateLimiter`] runs a token bucket whichever
+    /// variant is set; see [`RateLimitAlgorithm`].
     pub algorithm: RateLimitAlgorithm,
 }
 
@@ -85,19 +86,25 @@ pub enum WaitStrategy {
 }
 
 /// Rate limiting algorithm.
+///
+/// [`RateLimiter`] implements only [`TokenBucket`](Self::TokenBucket) and
+/// runs a token bucket for the other variants too. For a sliding window use
+/// [`SlidingWindowRateLimiter`], whose window is the policy's `period`.
 #[derive(Clone, Debug, Default)]
 pub enum RateLimitAlgorithm {
     /// Classic token bucket.
     #[default]
     TokenBucket,
 
-    /// Sliding window log (more memory, smoother).
+    /// Sliding window log (more memory, smoother). Not implemented by
+    /// [`RateLimiter`]; see the type docs.
     SlidingWindowLog {
-        /// Window size for the sliding window.
+        /// Window size for the sliding window. Not read.
         window_size: Duration,
     },
 
-    /// Fixed window (simpler, allows bursts at boundaries).
+    /// Fixed window (simpler, allows bursts at boundaries). Not implemented
+    /// by [`RateLimiter`]; see the type docs.
     FixedWindow,
 }
 
@@ -1181,7 +1188,8 @@ impl RateLimitPolicyBuilder {
         self
     }
 
-    /// Set the algorithm.
+    /// Set the algorithm. [`RateLimiter`] runs a token bucket for every
+    /// variant; see [`RateLimitAlgorithm`].
     #[must_use]
     pub fn algorithm(mut self, algorithm: RateLimitAlgorithm) -> Self {
         self.policy.algorithm = algorithm;
