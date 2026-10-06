@@ -411,6 +411,39 @@ mod tests {
         crate::test_complete!("drop_wake_panic_still_wakes_peers_and_is_suppressed");
     }
 
+    /// br-asupersync-9siwk7: a `Notified` that `notify_one` woke but that is
+    /// dropped before it completes hands the baton to the next waiter. When
+    /// that drop runs during an unwind and the next waiter's safe Waker
+    /// panics, the second panic aborted the process. The payload is now
+    /// suppressed there: the unwind carries on with its own payload, and the
+    /// next waiter holds the notification.
+    #[test]
+    fn baton_wake_panic_during_an_unwind_is_suppressed() {
+        init_test("baton_wake_panic_during_an_unwind_is_suppressed");
+        let notify = Notify::new();
+        let mut fut_a = notify.notified();
+        let mut fut_b = notify.notified();
+        let panic_waker = Waker::from(Arc::new(PanickingWaker));
+        assert!(poll_once(&mut fut_a).is_pending(), "waiter A parks");
+        assert!(
+            poll_with_waker(&mut fut_b, &panic_waker).is_pending(),
+            "waiter B parks with a panicking Waker"
+        );
+        notify.notify_one();
+
+        // A was woken by notify_one and is dropped during an unwind: the baton
+        // goes to B, whose Waker panics inside that unwind.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let woken_but_unpolled = fut_a;
+            std::hint::black_box(&woken_but_unpolled);
+            panic!("unwind in progress");
+        }));
+        let payload = result.expect_err("the unwind's own panic propagates");
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&"unwind in progress"));
+        assert!(poll_once(&mut fut_b).is_ready(), "waiter B holds the baton");
+        crate::test_complete!("baton_wake_panic_during_an_unwind_is_suppressed");
+    }
+
     fn broadcast_with_middle_hole_signature(
         broadcasts: usize,
     ) -> ([bool; 2], usize, usize, usize, bool) {

@@ -827,12 +827,7 @@ impl<T> Sender<T> {
             (send_wakers, recv_waker)
         };
 
-        for waker in send_wakers {
-            waker.wake_by_ref();
-        }
-        if let Some(waker) = recv_waker {
-            waker.wake_by_ref();
-        }
+        wake_detached(send_wakers.into_iter().chain(recv_waker));
     }
 
     /// Returns the channel's capacity.
@@ -989,9 +984,9 @@ impl<T> Reserve<'_, T> {
             // A final Arc release can destroy the executor-provided Waker.
             // Retire it only after releasing the non-reentrant channel mutex.
             drop(retired_waker);
-            if let Some(w) = next_waker {
-                w.wake_by_ref();
-            }
+            // This runs from Reserve::drop, possibly during an unwind
+            // (br-asupersync-9siwk7).
+            wake_detached(next_waker);
         }
     }
 }
@@ -1248,9 +1243,7 @@ impl<T> Drop for Sender<T> {
                 let mut inner = self.shared.inner.lock();
                 inner.recv_waker.take()
             };
-            if let Some(waker) = recv_waker {
-                waker.wake_by_ref();
-            }
+            wake_detached(recv_waker);
         }
     }
 }
@@ -1522,6 +1515,39 @@ impl Drop for ReleasedCapacityWake {
     }
 }
 
+/// Wakes, then releases, each registration detached from the channel.
+///
+/// The registrations were removed under the lock, so a waiter skipped here is
+/// never woken. Each wake and each final Waker release is therefore isolated:
+/// one panicking safe Waker cannot strand the rest (br-asupersync-9siwk7, the
+/// class Notify fixed in br-asupersync-cnl0jn). After the whole fan-out the
+/// first payload is resumed, unless this thread is already unwinding, where a
+/// second panic would abort the process. Call without holding the channel
+/// mutex.
+fn wake_detached(wakers: impl IntoIterator<Item = Arc<RegisteredWaker>>) {
+    let already_unwinding = std::thread::panicking();
+    let mut first_panic = None;
+    for waker in wakers {
+        let woken = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.wake_by_ref()));
+        let retired = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(waker)));
+        for payload in [woken.err(), retired.err()].into_iter().flatten() {
+            if first_panic.is_none() {
+                first_panic = Some(payload);
+            } else {
+                // A payload may itself panic on drop; never risk a double unwind.
+                std::mem::forget(payload);
+            }
+        }
+    }
+    if let Some(payload) = first_panic {
+        if already_unwinding {
+            std::mem::forget(payload);
+        } else {
+            std::panic::resume_unwind(payload);
+        }
+    }
+}
+
 impl<T> SendPermit<'_, T> {
     /// Commits the reserved slot, enqueuing the value.
     ///
@@ -1673,9 +1699,7 @@ impl<T> Receiver<T> {
             drop(inner);
             wakers
         };
-        for waker in wakers {
-            waker.wake_by_ref();
-        }
+        wake_detached(wakers);
     }
 
     /// Creates a receive future for the next value.
@@ -1870,9 +1894,7 @@ impl<T> Receiver<T> {
                 drop(inner);
                 drop(retired_waker);
                 drop(prepared_waker);
-                for waker in sender_wakers {
-                    waker.wake_by_ref();
-                }
+                wake_detached(sender_wakers);
                 return Poll::Ready(Ok(target));
             }
 
@@ -2111,9 +2133,7 @@ impl<T> Drop for Receiver<T> {
         };
         drop(recv_waker);
         // Wake senders outside the lock to avoid wake-under-lock deadlocks.
-        for waker in wakers {
-            waker.wake_by_ref();
-        }
+        wake_detached(wakers);
     }
 }
 
