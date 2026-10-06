@@ -3214,6 +3214,29 @@ mod tests {
         });
     }
 
+    #[test]
+    fn pooled_cmd_refuses_the_unsubscribe_family_before_acquiring_a_connection() {
+        // br-asupersync-pm29wb: on RESP2, UNSUBSCRIBE a b answers once per
+        // channel; the pooled call read one reply and handed the connection,
+        // with the rest unread, to the next borrower.
+        let client = pooled_client_without_acquire();
+        run_test_with_cx(move |cx| async move {
+            let commands: &[&[&str]] = &[
+                &["UNSUBSCRIBE", "a", "b"],
+                &["punsubscribe"],
+                &["SUNSUBSCRIBE", "a"],
+            ];
+            for args in commands {
+                let result = client.cmd(&cx, args).await;
+                assert!(
+                    matches!(&result, Err(RedisError::Protocol(message))
+                        if message.contains("pooled RedisClient")),
+                    "{args:?} must be refused before a pooled connection is used: {result:?}"
+                );
+            }
+        });
+    }
+
     #[derive(Clone, Copy, Debug)]
     enum PooledStateChange {
         Command,
@@ -4999,6 +5022,77 @@ mod tests {
                 },
             )
             .await;
+        });
+
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn a_cancelled_pubsub_ping_counts_the_messages_it_buffered_as_dropped() {
+        // br-asupersync-pm29wb: a ping cancelled before its PONG poisoned the
+        // connection and cleared the messages it had buffered without counting
+        // them, so no SubscriberLag ever reported the loss.
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            write_hello3_ok(&mut stream);
+            assert_resp_command(read_resp_frame(&mut stream), &[b"SUBSCRIBE", b"chan"]);
+            stream
+                .write_all(
+                    &RespValue::Push(vec![
+                        RespValue::BulkString(Some(b"subscribe".to_vec())),
+                        RespValue::BulkString(Some(b"chan".to_vec())),
+                        RespValue::Integer(1),
+                    ])
+                    .encode(),
+                )
+                .expect("write subscribe ack");
+            assert_resp_command(read_resp_frame(&mut stream), &[b"PING"]);
+            let mut outbound = Vec::new();
+            for payload in [b"one".as_slice(), b"two", b"three"] {
+                RespValue::Push(vec![
+                    RespValue::BulkString(Some(b"message".to_vec())),
+                    RespValue::BulkString(Some(b"chan".to_vec())),
+                    RespValue::BulkString(Some(payload.to_vec())),
+                ])
+                .encode_into(&mut outbound);
+            }
+            // Three messages, and never a PONG.
+            stream.write_all(&outbound).expect("write messages");
+            stream.flush().expect("flush messages");
+            let mut rest = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut stream, &mut rest);
+        });
+
+        run_test_with_cx(|cx| async move {
+            let config = RedisConfig {
+                host: addr.ip().to_string(),
+                port: addr.port(),
+                ..Default::default()
+            };
+            let mut pubsub = RedisPubSub::connect(&cx, config)
+                .await
+                .expect("connect pubsub client");
+            pubsub
+                .subscribe(&cx, &["chan"])
+                .await
+                .expect("subscribe should succeed");
+            let ping = crate::time::timeout(
+                crate::time::wall_now(),
+                Duration::from_millis(500),
+                pubsub.ping(&cx, None),
+            )
+            .await;
+            assert!(ping.is_err(), "no PONG arrives, so the ping times out");
+            assert_eq!(
+                pubsub.pubsub_dropped_events(),
+                3,
+                "the three buffered messages are counted as dropped"
+            );
         });
 
         server.join().expect("server join");

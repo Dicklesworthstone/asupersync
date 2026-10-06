@@ -3382,14 +3382,17 @@ impl RedisClient {
     ///
     /// The pooled connection is shared with later calls. Commands that open
     /// connection-scoped protocol state (`MULTI`, `WATCH`, the `SUBSCRIBE`
-    /// family, `MONITOR`, `SYNC`/`PSYNC`, `QUIT`, `CLIENT REPLY`) are refused
+    /// family, `MONITOR`, `SYNC`/`PSYNC`, `QUIT`, `CLIENT REPLY`) or that
+    /// answer with other than one reply (the `UNSUBSCRIBE` family) are refused
     /// with [`RedisError::Protocol`] before a connection is acquired; use
     /// [`Self::transaction`], [`Self::session`] or [`Self::pubsub`]. After any
     /// other state-changing command (`SELECT`, `AUTH`, `HELLO`, `RESET`,
     /// `READONLY`/`READWRITE`, `ASKING` or a `CLIENT` attribute change) the
     /// connection is closed instead of being reused.
     pub async fn cmd_bytes(&self, cx: &Cx, args: &[&[u8]]) -> Result<RespValue, RedisError> {
-        if opens_connection_protocol_state(args) {
+        // UNSUBSCRIBE a b answers once per channel on RESP2: one reply read
+        // left the rest for the next borrower (br-asupersync-pm29wb).
+        if opens_connection_protocol_state(args) || changes_reply_count(args) {
             return Err(RedisError::Protocol(
                 POOLED_PROTOCOL_STATE_REFUSAL.to_string(),
             ));
@@ -4626,6 +4629,12 @@ impl Drop for PubSubControlGuard<'_> {
 
         self.pubsub.channels = std::mem::take(&mut self.snapshot_channels);
         self.pubsub.patterns = std::mem::take(&mut self.snapshot_patterns);
+        // Buffered events cannot be delivered from a poisoned connection: count
+        // them as dropped so the next read after reconnect reports
+        // SubscriberLag instead of losing them silently (br-asupersync-pm29wb).
+        let discarded = u64::try_from(self.pubsub.pending_events.len()).unwrap_or(u64::MAX);
+        self.pubsub.pubsub_dropped_events =
+            self.pubsub.pubsub_dropped_events.saturating_add(discarded);
         self.pubsub.pending_events.clear();
         self.pubsub.poisoned = true;
         let _ = self.pubsub.conn.stream.shutdown_transport();
