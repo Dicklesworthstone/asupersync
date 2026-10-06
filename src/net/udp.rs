@@ -1810,7 +1810,10 @@ impl ReactorRegistration {
 
     /// Adopts a registration handed over by another owner of the same fd (a
     /// completed connect). It is treated as living on an ambient driver: it is
-    /// re-armed in place and never migrated.
+    /// re-armed in place and never migrated. Only Unix stream sockets hand a
+    /// registration over this way since TCP reunite moved to `from_parts`, so
+    /// it is Unix-only (it was dead code that broke the wasm32 build).
+    #[cfg(unix)]
     pub(crate) const fn from_registration(registration: Option<IoRegistration>) -> Self {
         Self {
             registration,
