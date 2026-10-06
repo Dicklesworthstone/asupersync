@@ -33,6 +33,9 @@ use std::task::{Context, Poll};
 /// reaches EOF without a newline, the remaining bytes are still appended and
 /// counted. Returns `Ok(0)` only when the reader is at EOF and no bytes remain.
 ///
+/// A line that is not valid UTF-8 is skipped through its `\n` and returns an
+/// `InvalidData` error, leaving `buf` as it was, as std and tokio do.
+///
 /// `\r\n` line endings are normalised: the `\r` before `\n` is stripped from
 /// `buf`, but it **is** counted in the returned byte count (matching
 /// `std::io::BufRead::read_line` semantics for the return value).
@@ -68,6 +71,7 @@ where
 {
     ReadLine {
         reader,
+        start_len: buf.len(),
         buf,
         bytes_read: 0,
         pending: Vec::new(),
@@ -80,6 +84,9 @@ where
 pub struct ReadLine<'a, R: ?Sized> {
     reader: &'a mut R,
     buf: &'a mut String,
+    /// `buf`'s length when the call started; a line that is not UTF-8 leaves
+    /// `buf` at this length.
+    start_len: usize,
     bytes_read: usize,
     /// Holds incomplete UTF-8 bytes that were consumed from the reader
     /// but not yet appended to `buf`.
@@ -137,6 +144,20 @@ fn discard_line<R: AsyncBufRead + Unpin + ?Sized>(
             None
         }
     }
+}
+
+/// Only UTF-8 errors reach here (an I/O error from the reader returns earlier
+/// and keeps what was read): a line that is not UTF-8 leaves `buf` as the
+/// call found it, as std's and tokio's `read_line` do.
+fn restore_unless_ok(
+    buf: &mut String,
+    start_len: usize,
+    result: io::Result<usize>,
+) -> io::Result<usize> {
+    if result.is_err() {
+        buf.truncate(start_len);
+    }
+    result
 }
 
 fn append_utf8(buf: &mut String, bytes_read: &mut usize, bytes: &[u8]) -> io::Result<()> {
@@ -288,7 +309,7 @@ where
                     &mut this.discarding,
                 ) {
                     this.completed = true;
-                    return Poll::Ready(result);
+                    return Poll::Ready(restore_unless_ok(this.buf, this.start_len, result));
                 }
                 continue;
             }
@@ -297,7 +318,7 @@ where
                 if let Err(err) = append_utf8(this.buf, &mut this.bytes_read, &this.pending) {
                     this.pending.clear();
                     this.completed = true;
-                    return Poll::Ready(Err(err));
+                    return Poll::Ready(restore_unless_ok(this.buf, this.start_len, Err(err)));
                 }
                 this.pending.clear();
                 this.completed = true;
@@ -333,12 +354,12 @@ where
                 ChunkAction::Consume => Pin::new(&mut *this.reader).consume(consume_len),
                 ChunkAction::Finish(result) => {
                     this.completed = true;
-                    return Poll::Ready(result);
+                    return Poll::Ready(restore_unless_ok(this.buf, this.start_len, result));
                 }
                 ChunkAction::ConsumeAndFinish(result) => {
                     Pin::new(&mut *this.reader).consume(consume_len);
                     this.completed = true;
-                    return Poll::Ready(result);
+                    return Poll::Ready(restore_unless_ok(this.buf, this.start_len, result));
                 }
                 ChunkAction::ConsumeAndDiscardLine(error) => {
                     Pin::new(&mut *this.reader).consume(consume_len);
@@ -437,6 +458,7 @@ where
     pub fn read_line<'a>(&'a mut self, buf: &'a mut String) -> ReadLineCancelSafe<'a, R> {
         ReadLineCancelSafe {
             reader: &mut self.inner,
+            start_len: buf.len(),
             buf,
             bytes_read: 0,
             pending: &mut self.pending,
@@ -452,6 +474,8 @@ where
 pub struct ReadLineCancelSafe<'a, R: ?Sized> {
     reader: &'a mut R,
     buf: &'a mut String,
+    /// `buf`'s length when the call started, as on [`ReadLine`].
+    start_len: usize,
     bytes_read: usize,
     pending: &'a mut Vec<u8>,
     discarding: &'a mut Option<std::str::Utf8Error>,
@@ -496,7 +520,7 @@ where
                     discard_line(&mut *this.reader, available_len, newline, this.discarding)
                 {
                     this.completed = true;
-                    return Poll::Ready(result);
+                    return Poll::Ready(restore_unless_ok(this.buf, this.start_len, result));
                 }
                 continue;
             }
@@ -508,7 +532,7 @@ where
                     // again forever.
                     this.pending.clear();
                     this.completed = true;
-                    return Poll::Ready(Err(err));
+                    return Poll::Ready(restore_unless_ok(this.buf, this.start_len, Err(err)));
                 }
                 this.pending.clear();
                 this.completed = true;
@@ -544,12 +568,12 @@ where
                 ChunkAction::Consume => Pin::new(&mut *this.reader).consume(consume_len),
                 ChunkAction::Finish(result) => {
                     this.completed = true;
-                    return Poll::Ready(result);
+                    return Poll::Ready(restore_unless_ok(this.buf, this.start_len, result));
                 }
                 ChunkAction::ConsumeAndFinish(result) => {
                     Pin::new(&mut *this.reader).consume(consume_len);
                     this.completed = true;
-                    return Poll::Ready(result);
+                    return Poll::Ready(restore_unless_ok(this.buf, this.start_len, result));
                 }
                 ChunkAction::ConsumeAndDiscardLine(error) => {
                     Pin::new(&mut *this.reader).consume(consume_len);
@@ -966,6 +990,39 @@ mod tests {
             poll_ready(&mut fut).expect("resolves").expect("next line")
         };
         assert_eq!((n, line.as_str()), (5, "next\n"));
+    }
+
+    /// A line that is not UTF-8 leaves the caller's buffer as it was, whether
+    /// the bad byte arrives with the line's `\n`, before EOF, or as a code
+    /// point that EOF cuts off.
+    #[test]
+    fn an_invalid_line_leaves_the_buffer_as_it_was() {
+        init_test("an_invalid_line_leaves_the_buffer_as_it_was");
+        for input in [&b"ab\xFFcd\n"[..], &b"ab\xFF"[..], &b"ab\xF0\x9F"[..]] {
+            let mut reader = BufReader::new(input);
+            let mut line = String::from("kept ");
+            let err = {
+                let mut fut = read_line(&mut reader, &mut line);
+                let mut fut = Pin::new(&mut fut);
+                poll_ready(&mut fut)
+                    .expect("resolves")
+                    .expect_err("invalid line")
+            };
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(line, "kept ", "read_line on {input:?}");
+
+            let mut reader = LineReader::new(BufReader::new(input));
+            let mut line = String::from("kept ");
+            let err = {
+                let mut fut = reader.read_line(&mut line);
+                let mut fut = Pin::new(&mut fut);
+                poll_ready(&mut fut)
+                    .expect("resolves")
+                    .expect_err("invalid line")
+            };
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(line, "kept ", "LineReader::read_line on {input:?}");
+        }
     }
 
     /// A stream that ends inside a code point is an error once; the call
