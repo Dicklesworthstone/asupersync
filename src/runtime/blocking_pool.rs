@@ -1407,8 +1407,15 @@ fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
             retired_with_claim: false,
         };
 
+        // Contained like the stop hook: a start hook that panics on every
+        // thread used to kill each worker before its first job, and the exit
+        // guard then spawned a replacement that died the same way, so the pool
+        // churned threads at full speed, no job ever ran, and shutdown timed
+        // out (br-asupersync-mopkmt).
         if let Some(ref callback) = inner_clone.on_thread_start {
-            callback();
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                callback();
+            }));
         }
 
         guard.retired_with_claim = blocking_worker_loop(&inner_clone, assigned_cohort);
@@ -2505,6 +2512,38 @@ mod tests {
         pool.shutdown_and_wait(Duration::from_secs(5));
 
         assert_eq!(stopped.load(Ordering::Relaxed), 2);
+    }
+
+    /// A start hook that panics on every worker no longer prevents jobs from
+    /// running (it churned replacement threads forever).
+    #[test]
+    fn a_panicking_thread_start_hook_does_not_stop_jobs_from_running() {
+        let starts = Arc::new(AtomicI32::new(0));
+        let counted = Arc::clone(&starts);
+        let options = BlockingPoolOptions {
+            on_thread_start: Some(Arc::new(move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                panic!("thread start hook fails");
+            })),
+            ..Default::default()
+        };
+        let pool = BlockingPool::with_config(0, 1, options);
+        let ran = Arc::new(AtomicI32::new(0));
+        let job_ran = Arc::clone(&ran);
+        let handle = pool.spawn(move || {
+            job_ran.fetch_add(1, Ordering::SeqCst);
+        });
+        assert!(
+            handle.wait_timeout(Duration::from_secs(5)),
+            "the job runs despite the hook"
+        );
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+        assert!(
+            starts.load(Ordering::SeqCst) < 3,
+            "no thread churn: {} starts",
+            starts.load(Ordering::SeqCst)
+        );
+        assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
     }
 
     #[test]
