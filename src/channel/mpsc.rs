@@ -91,6 +91,18 @@ use crate::cx::Cx;
 use crate::runtime::reactor::token::{SlabToken, TokenSlab};
 use crate::types::outcome::Outcome;
 
+#[path = "mpsc_cancel_registration.rs"]
+mod cancel_registration;
+use cancel_registration::CancelRegistration;
+
+#[cfg(test)]
+#[path = "mpsc_cancel_wake_tests.rs"]
+mod cancel_wake_tests;
+
+#[cfg(test)]
+#[path = "mpsc_recv_cancel_wake_tests.rs"]
+mod recv_cancel_wake_tests;
+
 /// Error returned when sending fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendError<T> {
@@ -611,12 +623,16 @@ pub struct Sender<T> {
 
 impl<T> Sender<T> {
     /// Reserves a slot in the channel for sending.
+    ///
+    /// A waiting reservation subscribes to cancellation as well as capacity.
+    /// Completion and drop remove only this reservation's registrations.
     #[inline]
     #[must_use]
     pub fn reserve<'a>(&'a self, cx: &'a Cx) -> Reserve<'a, T> {
         Reserve {
             sender: self,
             cx,
+            cancel: CancelRegistration::new(cx),
             waiter_token: None,
             completed: false,
         }
@@ -933,6 +949,7 @@ impl<T> Sender<T> {
 pub struct Reserve<'a, T> {
     sender: &'a Sender<T>,
     cx: &'a Cx,
+    cancel: CancelRegistration<'a>,
     waiter_token: Option<SlabToken>,
     completed: bool,
 }
@@ -981,6 +998,44 @@ impl<T> Reserve<'_, T> {
 
 impl<'a, T> Reserve<'a, T> {
     fn poll_with_registration<E>(
+        mut self: Pin<&mut Self>,
+        ctx: &mut Context<'_>,
+        register: impl FnOnce(
+            &Cx,
+        )
+            -> Result<Option<crate::runtime::obligation_mailbox::ObligationToken>, E>,
+    ) -> Poll<Result<SendPermit<'a, T>, E>>
+    where
+        E: From<SendError<()>>,
+    {
+        match self.as_mut().poll_inner(ctx, register) {
+            Poll::Ready(result) => {
+                // A completed future may stay allocated. Do not retain its
+                // executor through an obsolete auxiliary cancellation slot.
+                self.cancel.clear();
+                Poll::Ready(result)
+            }
+            Poll::Pending => {
+                // The channel waker is already installed, and no channel lock
+                // is held while executor-Waker callbacks or the Cx registry run.
+                self.cancel.refresh(ctx.waker());
+                // Registration closes the check/park race. Avoid charging a
+                // second checkpoint on the ordinary, uncancelled slow path.
+                if self.cx.is_cancel_requested() && self.cx.checkpoint().is_err() {
+                    self.completed = true;
+                    self.cx.trace("mpsc::reserve cancelled");
+                    self.sender.shared.inner.lock().record_cancellation();
+                    self.cleanup_waiter();
+                    self.cancel.clear();
+                    Poll::Ready(Err(SendError::<()>::Cancelled(()).into()))
+                } else {
+                    Poll::Pending
+                }
+            }
+        }
+    }
+
+    fn poll_inner<E>(
         mut self: Pin<&mut Self>,
         ctx: &mut Context<'_>,
         register: impl FnOnce(
@@ -1624,12 +1679,16 @@ impl<T> Receiver<T> {
     }
 
     /// Creates a receive future for the next value.
+    ///
+    /// While pending, this future owns an independent cancellation-waker
+    /// registration. Cancellation does not need a producer or timer event.
     #[inline]
     #[must_use]
     pub fn recv<'a, Caps>(&'a mut self, cx: &'a Cx<Caps>) -> Recv<'a, T, Caps> {
         Recv {
             receiver: self,
             cx,
+            cancel: CancelRegistration::new(cx),
             polled: false,
         }
     }
@@ -1639,7 +1698,8 @@ impl<T> Receiver<T> {
     /// The future waits until at least one value is available unless `limit` is
     /// zero or the channel is closed and fully drained. It returns the number of
     /// appended values. A return value of zero means either `limit == 0` or no
-    /// more values can arrive.
+    /// more values can arrive. A pending batch owns the same cancellation
+    /// wakeup and drop cleanup as [`Self::recv`].
     ///
     /// # Example
     ///
@@ -1668,6 +1728,7 @@ impl<T> Receiver<T> {
         RecvMany {
             receiver: self,
             cx,
+            cancel: CancelRegistration::new(cx),
             buffer,
             limit,
             polled: false,
@@ -1678,6 +1739,9 @@ impl<T> Receiver<T> {
     ///
     /// This is useful in manual `poll_*` implementations that need to avoid
     /// creating-and-dropping transient `Recv` futures each poll cycle.
+    /// The caller must arrange cancellation wakeups (for example with
+    /// [`Cx::cancelled`]); this call retains a data waker, not the borrowed
+    /// context. [`Self::recv`] owns both subscriptions for an awaited receive.
     #[inline]
     pub fn poll_recv<Caps>(
         &mut self,
@@ -1764,7 +1828,9 @@ impl<T> Receiver<T> {
 
     /// Polls a batch receive operation directly.
     ///
-    /// See [`Receiver::recv_many`] for completion semantics.
+    /// See [`Receiver::recv_many`] for completion semantics. Like
+    /// [`Self::poll_recv`], this low-level method requires its caller to
+    /// arrange cancellation wakeups; [`Self::recv_many`] does so itself.
     #[inline]
     pub fn poll_recv_many<Caps>(
         &mut self,
@@ -1933,6 +1999,7 @@ impl<T> Receiver<T> {
 pub struct Recv<'a, T, Caps = crate::cx::cap::All> {
     receiver: &'a mut Receiver<T>,
     cx: &'a Cx<Caps>,
+    cancel: CancelRegistration<'a, Caps>,
     polled: bool,
 }
 
@@ -1943,7 +2010,23 @@ impl<T, Caps> Future for Recv<'_, T, Caps> {
     fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         this.polled = true;
-        this.receiver.poll_recv(this.cx, ctx)
+        let result = this.receiver.poll_recv(this.cx, ctx);
+        if result.is_ready() {
+            this.cancel.clear();
+            return result;
+        }
+        this.cancel.refresh(ctx.waker());
+        // Close cancellation during check/registration or executor callbacks
+        // without depending on a producer to change the channel again.
+        if this.cx.is_cancel_requested() && this.cx.checkpoint().is_err() {
+            this.cx.trace("mpsc::recv cancelled");
+            this.receiver.shared.inner.lock().record_cancellation();
+            this.receiver.clear_recv_waker();
+            this.cancel.clear();
+            Poll::Ready(Err(RecvError::Cancelled))
+        } else {
+            Poll::Pending
+        }
     }
 }
 
@@ -1964,6 +2047,7 @@ impl<T, Caps> Drop for Recv<'_, T, Caps> {
 pub struct RecvMany<'a, T, Caps = crate::cx::cap::All> {
     receiver: &'a mut Receiver<T>,
     cx: &'a Cx<Caps>,
+    cancel: CancelRegistration<'a, Caps>,
     buffer: &'a mut Vec<T>,
     limit: usize,
     polled: bool,
@@ -1976,8 +2060,23 @@ impl<T, Caps> Future for RecvMany<'_, T, Caps> {
     fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         this.polled = true;
-        this.receiver
-            .poll_recv_many(this.cx, this.buffer, this.limit, ctx)
+        let result = this
+            .receiver
+            .poll_recv_many(this.cx, this.buffer, this.limit, ctx);
+        if result.is_ready() {
+            this.cancel.clear();
+            return result;
+        }
+        this.cancel.refresh(ctx.waker());
+        if this.cx.is_cancel_requested() && this.cx.checkpoint().is_err() {
+            this.cx.trace("mpsc::recv_many cancelled");
+            this.receiver.shared.inner.lock().record_cancellation();
+            this.receiver.clear_recv_waker();
+            this.cancel.clear();
+            Poll::Ready(Err(RecvError::Cancelled))
+        } else {
+            Poll::Pending
+        }
     }
 }
 
