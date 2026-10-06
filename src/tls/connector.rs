@@ -293,12 +293,12 @@ pub struct TlsConnectorBuilder {
     /// and prevents accidental replay-vulnerable 0-RTT). See
     /// [`Self::enable_early_data`] for the explicit opt-in.
     early_data_enabled: bool,
-    /// br-asupersync-h41wya — operator acknowledgement that combining
-    /// session resumption with 0-RTT exposes the application to
-    /// replay attacks on the early-data payload. When `false`,
-    /// `build()` rejects the combination of `early_data_enabled =
-    /// true` + non-disabled session resumption so a misconfiguration
-    /// cannot ship by accident. The operator must call
+    /// br-asupersync-h41wya — operator acknowledgement that 0-RTT
+    /// exposes the application to replay attacks on the early-data
+    /// payload. When `false`, `build()` rejects
+    /// `early_data_enabled = true` whatever the session-resumption
+    /// setting (without resumption no 0-RTT is offered anyway), so a
+    /// misconfiguration cannot ship by accident. The operator must call
     /// [`Self::acknowledge_zero_rtt_replay_risk`] to opt in,
     /// signalling that the application layer enforces idempotency
     /// for every request that could carry early data.
@@ -342,7 +342,7 @@ impl TlsConnectorBuilder {
             // until the operator opts in via enable_early_data(true).
             early_data_enabled: false,
             // br-asupersync-h41wya: 0-RTT replay risk is unacknowledged
-            // by default; build() rejects 0-RTT + resumption until the
+            // by default; build() rejects early data until the
             // operator calls acknowledge_zero_rtt_replay_risk().
             acknowledge_zero_rtt_replay_risk: false,
             // br-asupersync-sx6j9y: BasicConstraints CA:TRUE gate is
@@ -497,9 +497,9 @@ impl TlsConnectorBuilder {
     /// carry early data (idempotency keys, per-request nonces, or
     /// restriction of 0-RTT to safe HTTP methods).
     ///
-    /// `build()` rejects the combination of `enable_early_data(true)`
-    /// plus non-disabled session resumption when this acknowledgement
-    /// has not been made — preventing a misconfiguration from
+    /// `build()` rejects `enable_early_data(true)` when this
+    /// acknowledgement has not been made, whatever the session-resumption
+    /// setting — preventing a misconfiguration from
     /// shipping silently. Call this only after wiring up the
     /// application-level idempotency layer.
     #[must_use]
@@ -950,8 +950,8 @@ impl TlsConnectorBuilder {
         self
     }
 
-    /// **DANGEROUS**: send TLS 1.3 0-RTT (early data) on resumed
-    /// handshakes when the server's resumption ticket allows it.
+    /// **DANGEROUS**: offer TLS 1.3 0-RTT (early data) on resumed
+    /// handshakes. No asupersync stream API writes early data yet.
     ///
     /// br-asupersync-y0gm5q: 0-RTT is OFF by default on the
     /// client side — rustls's `enable_early_data` defaults to
