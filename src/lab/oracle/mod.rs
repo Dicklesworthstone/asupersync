@@ -517,6 +517,19 @@ impl OracleSuite {
             }
         }
 
+        // A closed region leaves the runtime's table in the walk that closes
+        // it; its close survives only in the history (br-asupersync-iwbef2).
+        for event in state.finalizer_history() {
+            if let crate::runtime::state::FinalizerHistoryEvent::RegionClosed { region, time } =
+                *event
+                && regions
+                    .get(&region)
+                    .is_none_or(|snapshot| !snapshot.state.is_terminal())
+            {
+                self.task_leak.on_region_close(region, time);
+            }
+        }
+
         for region_id in post_order {
             let Some(snapshot) = regions.get(&region_id) else {
                 continue;
@@ -1473,6 +1486,81 @@ mod tests {
             violation.unrun_finalizers
         );
         crate::test_complete!("hydrate_temporal_from_state_replays_finalizer_history");
+    }
+
+    /// br-asupersync-iwbef2: the runtime removes a region from its table in the
+    /// walk that closes it, and hydration only looked at regions still there,
+    /// so the quiescence and task-leak oracles never checked a real close.
+    #[test]
+    fn hydration_checks_regions_the_runtime_closed_and_removed() {
+        init_test("hydration_checks_regions_the_runtime_closed_and_removed");
+        let budget = crate::types::Budget::INFINITE;
+        let mut state = crate::runtime::RuntimeState::new();
+        let root = state.create_root_region(budget);
+        let child = state
+            .create_child_region(root, budget)
+            .expect("create child region");
+        let (task, _handle) = state
+            .create_task(child, budget, async {})
+            .expect("create task");
+        let (_cancelled, wakes) = state
+            .cancel_request(child, &crate::types::CancelReason::user("done"), None)
+            .into_parts();
+        state
+            .task_mut(task)
+            .expect("task")
+            .complete(crate::types::Outcome::Cancelled(
+                crate::types::CancelReason::parent_cancelled(),
+            ));
+        let _waiters = state.task_completed(task).into_waiters_without_observers();
+        wakes.dispatch();
+        let child_removed = state.regions_iter().all(|(_, region)| region.id != child);
+        crate::assert_with_log!(
+            child_removed,
+            "closed child left the table",
+            true,
+            child_removed
+        );
+
+        let mut suite = OracleSuite::new();
+        suite.hydrate_temporal_from_state(&state, state.now);
+        let closed = suite.quiescence.closed_count();
+        crate::assert_with_log!(closed >= 1, "real close checked", ">= 1", closed);
+        crate::assert_with_log!(
+            suite.quiescence.check().is_ok(),
+            "a clean close passes",
+            true,
+            suite.quiescence.check().is_ok()
+        );
+        crate::assert_with_log!(
+            suite.task_leak.check(state.now).is_ok(),
+            "no task leaked",
+            true,
+            suite.task_leak.check(state.now).is_ok()
+        );
+
+        // A task still live in a region the runtime recorded as closed.
+        let mut state = crate::runtime::RuntimeState::new();
+        let region = state.create_root_region(budget);
+        let (live, _handle) = state
+            .create_task(region, budget, async {})
+            .expect("create task");
+        state.record_finalizer_close_for_test(region);
+        let mut suite = OracleSuite::new();
+        suite.hydrate_temporal_from_state(&state, state.now);
+        let violation = suite
+            .quiescence
+            .check()
+            .expect_err("a task outlived its region's close");
+        crate::assert_with_log!(
+            violation.region == region && violation.live_tasks == vec![live],
+            "violation names the region and task",
+            (region, vec![live]),
+            (violation.region, violation.live_tasks.clone())
+        );
+        let leaked = suite.task_leak.check(state.now).is_err();
+        crate::assert_with_log!(leaked, "task leak reported", true, leaked);
+        crate::test_complete!("hydration_checks_regions_the_runtime_closed_and_removed");
     }
 
     #[test]

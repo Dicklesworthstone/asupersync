@@ -392,6 +392,10 @@ impl QuiescenceOracle {
             self.on_obligation_resolve(id, obligation_state);
         }
 
+        // The runtime removes a region from its table in the same walk that
+        // closes it, so the history is the only record of a real close.
+        // Checked here, it was never checked at all (br-asupersync-iwbef2).
+        let mut closed_away = Vec::new();
         for event in state.finalizer_history() {
             match *event {
                 crate::runtime::state::FinalizerHistoryEvent::Registered { id, region, .. } => {
@@ -400,8 +404,18 @@ impl QuiescenceOracle {
                 crate::runtime::state::FinalizerHistoryEvent::Ran { id, .. } => {
                     self.on_finalizer_run(FinalizerId(id));
                 }
-                crate::runtime::state::FinalizerHistoryEvent::RegionClosed { .. } => {}
+                crate::runtime::state::FinalizerHistoryEvent::RegionClosed { region, time } => {
+                    if regions
+                        .get(&region)
+                        .is_none_or(|snapshot| !snapshot.state.is_terminal())
+                    {
+                        closed_away.push((region, time));
+                    }
+                }
             }
+        }
+        for (region, time) in closed_away {
+            self.on_region_close(region, time);
         }
 
         for region_id in post_order {
