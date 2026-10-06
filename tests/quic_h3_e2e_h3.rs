@@ -4625,6 +4625,169 @@ fn native_h3_router_produced_response_is_demand_driven_and_head_suppresses_facto
 }
 
 #[test]
+#[cfg(feature = "http3")]
+fn native_h3_router_produced_frame_larger_than_the_peer_stream_window_is_delivered() {
+    // br-asupersync-f82gek: the producer waited for room for its whole DATA
+    // frame before pulling it. A client whose stream window is smaller than
+    // that frame has nothing left to read, so it never grants more credit, and
+    // the response stalled after HEADERS until the request timed out.
+    use std::future::Future;
+    use std::num::NonZeroUsize;
+    use std::task::{Context, Poll, Waker};
+
+    use asupersync::web::{
+        AsyncCxFnHandler1, Http3StreamResponder, NativeH3ProducedEvent, NativeH3Router,
+        NativeH3RouterEvent, NativeH3RouterIngress, NativeH3RouterProducedDispatch, Router,
+        StatusCode, get,
+    };
+
+    const WINDOW: u64 = 128;
+    const BODY_LEN: usize = 400;
+    let cx = test_cx();
+    let config = NativeQuicConnectionConfig {
+        max_local_bidi: 8,
+        max_local_uni: 4,
+        send_window: WINDOW,
+        recv_window: WINDOW,
+        connection_send_limit: 4096,
+        connection_recv_limit: 4096,
+        ..NativeQuicConnectionConfig::default()
+    };
+    let mut client = QuicConnection::client(config);
+    let mut server = QuicConnection::server(config);
+    client.record_verified_server_identity();
+    establish_loopback(&cx, &mut client, &mut server).expect("establish native QUIC pair");
+    let mut client_h3 = NativeH3Session::client();
+    let mut server_h3 = NativeH3Session::server();
+    client_h3
+        .initialize(&cx, &mut client, H3Settings::default())
+        .expect("initialize client H3");
+    server_h3
+        .initialize(&cx, &mut server, H3Settings::default())
+        .expect("initialize server H3");
+    let _ = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    let _ = pump_h3_events(&cx, &mut server, &mut client, &mut client_h3);
+
+    let router = Router::new()
+        .route(
+            "/large",
+            get(AsyncCxFnHandler1::<_, Http3StreamResponder>::new(
+                |_handler_cx: Cx, responder: Http3StreamResponder| async move {
+                    responder.streaming(
+                        StatusCode::OK,
+                        NonZeroUsize::MIN,
+                        NonZeroUsize::new(BODY_LEN).expect("non-zero H3 frame limit"),
+                        |producer_cx, mut sender| async move {
+                            sender
+                                .send_bytes(&producer_cx, Bytes::from(vec![7u8; BODY_LEN]))
+                                .await?;
+                            sender.finish(&producer_cx)?;
+                            Ok(sender)
+                        },
+                    )
+                },
+            )),
+        )
+        .without_default_trace();
+    let mut bridge = NativeH3Router::new(router);
+    let head = H3RequestHead::new(
+        H3PseudoHeaders {
+            method: Some("GET".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("produced.example.test".to_string()),
+            path: Some("/large".to_string()),
+            ..H3PseudoHeaders::default()
+        },
+        vec![],
+    )
+    .expect("valid request head");
+    let stream = client_h3
+        .send_request(&cx, &mut client, &head, Bytes::new())
+        .expect("send request");
+    // A bounded receive window: the client grants credit as it reads, as a
+    // real peer does. Without one the native client never advertises more
+    // than its initial window, and nothing past it could arrive.
+    client
+        .configure_stream_receive_window(&cx, stream, WINDOW)
+        .expect("bounded client receive window");
+    let mut dispatch = None;
+    for event in pump_h3_events(&cx, &mut client, &mut server, &mut server_h3).0 {
+        if let NativeH3RouterIngress::Dispatch(next) = bridge
+            .ingest_event_with_cx(&cx, &mut server_h3, &mut server, event)
+            .expect("ingest request")
+        {
+            dispatch = Some(next);
+        }
+    }
+    let dispatch = dispatch.expect("request FIN detaches a Router dispatch");
+    let NativeH3RouterProducedDispatch::Produced(prepared) =
+        futures_lite::future::block_on(dispatch.run_produced(&cx))
+    else {
+        panic!("Http3StreamResponder registers a produced response");
+    };
+    assert_eq!(
+        bridge
+            .start_produced_dispatch_with_cx(&cx, &mut server_h3, &mut server, prepared)
+            .expect("install produced response"),
+        NativeH3RouterEvent::ResponseStarted {
+            stream_id: stream,
+            status: 200,
+        }
+    );
+
+    let mut task_cx = Context::from_waker(Waker::noop());
+    let mut producer = None;
+    let mut received = Vec::new();
+    let mut sent = false;
+    for _ in 0..64 {
+        for _ in 0..64 {
+            let Poll::Ready(event) = bridge.poll_produced_response_with_cx(
+                &cx,
+                &mut server_h3,
+                &mut server,
+                &mut task_cx,
+            ) else {
+                break;
+            };
+            match event.expect("produced response step") {
+                NativeH3ProducedEvent::ProducerReady { producer: next, .. } => {
+                    producer = Some(Box::pin(next));
+                }
+                NativeH3ProducedEvent::ResponseSent { .. } => sent = true,
+                _ => {}
+            }
+            if sent {
+                break;
+            }
+        }
+        // Poll the producer only until it completes: a completed future must
+        // not be polled again.
+        if let Some(mut running) = producer.take()
+            && running.as_mut().poll(&mut task_cx).is_pending()
+        {
+            producer = Some(running);
+        }
+        for event in pump_h3_events(&cx, &mut server, &mut client, &mut client_h3).0 {
+            if let NativeH3Event::Data { bytes, .. } = event {
+                received.extend_from_slice(&bytes);
+            }
+        }
+        // Carry the client's ACKs and stream window updates back.
+        let _ = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+        if sent {
+            break;
+        }
+    }
+    assert_eq!(
+        received.len(),
+        BODY_LEN,
+        "a {BODY_LEN}-byte frame must reach a client whose stream window is {WINDOW} bytes"
+    );
+    assert!(received.iter().all(|&byte| byte == 7));
+    assert!(sent, "the response must complete");
+}
+
+#[test]
 #[cfg(all(feature = "http3", feature = "test-internals"))]
 fn native_h3_router_produced_response_terminal_and_failure_matrix_is_stream_local() {
     use std::future::Future;
@@ -5710,4 +5873,65 @@ fn native_h3_router_produced_response_resumes_after_independent_live_credit_upda
         })) if stream_id == stream
     ));
     assert_eq!(bridge.in_flight_dispatch_count(), 0);
+}
+
+#[test]
+#[cfg(feature = "http3")]
+fn native_h3_request_larger_than_the_stream_window_opens_no_stream() {
+    use asupersync::net::quic_native::{
+        FlowControlError, NativeQuicConnectionError, QuicStreamError, StreamId,
+    };
+
+    let cx = test_cx();
+    let config = NativeQuicConnectionConfig {
+        max_local_bidi: 16,
+        max_local_uni: 8,
+        send_window: 256,
+        recv_window: 256,
+        connection_send_limit: 4 << 20,
+        connection_recv_limit: 4 << 20,
+        ..NativeQuicConnectionConfig::default()
+    };
+    let mut client = QuicConnection::client(config);
+    let mut server = QuicConnection::server(config);
+    client.record_verified_server_identity();
+    establish_loopback(&cx, &mut client, &mut server).expect("establish native QUIC pair");
+    let mut client_h3 = NativeH3Session::client();
+    let mut server_h3 = NativeH3Session::server();
+    client_h3
+        .initialize(&cx, &mut client, H3Settings::default())
+        .expect("initialize client H3 control stream");
+    server_h3
+        .initialize(&cx, &mut server, H3Settings::default())
+        .expect("initialize server H3 control stream");
+    pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    pump_h3_events(&cx, &mut server, &mut client, &mut client_h3);
+
+    let request = H3RequestHead::new(
+        H3PseudoHeaders {
+            method: Some("POST".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("api.example.test".to_string()),
+            path: Some("/upload".to_string()),
+            ..H3PseudoHeaders::default()
+        },
+        Vec::new(),
+    )
+    .expect("valid request");
+    let err = client_h3
+        .send_request(&cx, &mut client, &request, Bytes::from(vec![7u8; 1024]))
+        .expect_err("a request larger than the 256-byte stream window");
+    assert!(
+        matches!(
+            err,
+            NativeH3SessionError::Transport(NativeQuicConnectionError::Stream(
+                QuicStreamError::Flow(FlowControlError::Exhausted { .. })
+            ))
+        ),
+        "{err:?}"
+    );
+    let stream = client_h3
+        .send_request(&cx, &mut client, &request, Bytes::from_static(b"small"))
+        .expect("a request that fits");
+    assert_eq!(stream, StreamId(0), "the refused request opened no stream");
 }

@@ -1225,6 +1225,8 @@ struct ActiveNativeH3ProducedResponse {
     // retain their existing independently minted producer context.
     owned_request_cx: Option<Cx>,
     max_data_wire_bytes: u64,
+    // The unsent rest of the producer's latest DATA frame.
+    pending_data: Option<Bytes>,
     emitted_bytes: u64,
     terminal: Option<NativeH3BodyTerminal>,
     head_only: bool,
@@ -1896,6 +1898,7 @@ impl NativeH3Router {
                 producer_cx: None,
                 owned_request_cx: None,
                 max_data_wire_bytes,
+                pending_data: None,
                 emitted_bytes: 0,
                 terminal: None,
                 head_only: suppress_body_for_head,
@@ -2473,7 +2476,27 @@ fn mark_native_h3_produced_cancelled_with_reason(
     state.reset_queued = true;
     state.plan = None;
     state.body = None;
+    state.pending_data = None;
     state.terminal = None;
+}
+
+/// Wire length of a DATA frame carrying one byte: type, length, payload.
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+const SMALLEST_H3_DATA_FRAME_WIRE_BYTES: u64 = 3;
+
+/// Largest payload, at most `len`, whose DATA frame fits in `capacity` bytes.
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+fn h3_data_payload_within(capacity: u64, len: usize) -> usize {
+    let (mut low, mut high) = (0, len);
+    while low < high {
+        let middle = low + (high - low).div_ceil(2);
+        if h3_data_frame_wire_len(middle).is_ok_and(|wire| wire <= capacity) {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    low
 }
 
 #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
@@ -2725,6 +2748,67 @@ fn poll_one_native_h3_produced(
             continue;
         }
 
+        if let Some(mut data) = state.pending_data.take() {
+            // Send what the peer's credit admits now. Waiting for room for the
+            // whole frame stalls when the peer's window is smaller than the
+            // frame: it has nothing left to read, so it never grants more
+            // (br-asupersync-f82gek).
+            let capacity = match connection.poll_stream_write_ready(
+                cx,
+                stream_id,
+                SMALLEST_H3_DATA_FRAME_WIRE_BYTES,
+                task_cx,
+            ) {
+                Poll::Ready(Ok(capacity)) => capacity,
+                Poll::Ready(Err(error)) => {
+                    return Poll::Ready(Err(fail_native_h3_produced_poll(
+                        cx,
+                        session,
+                        connection,
+                        state,
+                        "HTTP/3 response DATA readiness failed",
+                        crate::http::h3::NativeH3SessionError::Transport(error),
+                    )));
+                }
+                Poll::Pending => {
+                    state.pending_data = Some(data);
+                    return Poll::Pending;
+                }
+            };
+            // An oversized frame goes to queue_data whole, which refuses it.
+            let admitted = if data.len() > state.writer.max_frame_payload_size() {
+                data.len()
+            } else {
+                h3_data_payload_within(capacity, data.len())
+            };
+            let chunk = data.split_to(admitted);
+            if !data.is_empty() {
+                state.pending_data = Some(data);
+            }
+            if let Err(error) = state.writer.queue_data(chunk) {
+                if let Some(diagnostic) = native_h3_produced_error_diagnostic(&error) {
+                    record_native_h3_body_diagnostic(
+                        stream_id,
+                        diagnostic,
+                        "response DATA frame could not be queued",
+                    );
+                }
+                if let Err(reset_error) = cancel_native_h3_produced(
+                    cx,
+                    session,
+                    connection,
+                    state,
+                    "HTTP/3 response DATA frame was invalid",
+                ) {
+                    return Poll::Ready(Err(reset_error));
+                }
+                if matches!(error, crate::http::h3::NativeH3SessionError::Transport(_)) {
+                    return Poll::Ready(Err(error));
+                }
+            }
+            continue;
+        }
+
         let terminal_only = matches!(
             producer_outcome,
             Some(NativeH3ProducerOutcome::Finished { total_bytes, .. })
@@ -2737,7 +2821,16 @@ fn poll_one_native_h3_produced(
                 Poll::Pending => Poll::Pending,
             }
         } else {
-            connection.poll_stream_write_ready(cx, stream_id, state.max_data_wire_bytes, task_cx)
+            // Pull the next frame once the smallest DATA frame fits; the
+            // frame is then sent in pieces as credit arrives.
+            connection.poll_stream_write_ready(
+                cx,
+                stream_id,
+                state
+                    .max_data_wire_bytes
+                    .min(SMALLEST_H3_DATA_FRAME_WIRE_BYTES),
+                task_cx,
+            )
         };
         match readiness {
             Poll::Ready(Ok(_)) => {}
@@ -2823,27 +2916,8 @@ fn poll_one_native_h3_produced(
                     continue;
                 }
                 state.emitted_bytes = new_total;
-                if let Err(error) = state.writer.queue_data(bytes) {
-                    if let Some(diagnostic) = native_h3_produced_error_diagnostic(&error) {
-                        record_native_h3_body_diagnostic(
-                            stream_id,
-                            diagnostic,
-                            "response DATA frame could not be queued",
-                        );
-                    }
-                    if let Err(reset_error) = cancel_native_h3_produced(
-                        cx,
-                        session,
-                        connection,
-                        state,
-                        "HTTP/3 response DATA frame was invalid",
-                    ) {
-                        return Poll::Ready(Err(reset_error));
-                    }
-                    if matches!(error, crate::http::h3::NativeH3SessionError::Transport(_)) {
-                        return Poll::Ready(Err(error));
-                    }
-                }
+                // Queued at the top of the loop, in pieces the peer's credit admits.
+                state.pending_data = Some(bytes);
             }
             Poll::Ready(Some(Ok(BodyFrame::Trailers(trailers)))) => {
                 match h3_trailers_from_body_map(trailers) {
@@ -5303,6 +5377,7 @@ mod tests {
                 producer_cx: Some(producer_cx.clone()),
                 owned_request_cx: None,
                 max_data_wire_bytes: 0,
+                pending_data: None,
                 emitted_bytes: 0,
                 terminal: None,
                 head_only: false,
@@ -5414,6 +5489,7 @@ mod tests {
             producer_cx: Some(cx.clone()),
             owned_request_cx: None,
             max_data_wire_bytes: 0,
+            pending_data: None,
             emitted_bytes: 0,
             terminal: None,
             head_only: false,
