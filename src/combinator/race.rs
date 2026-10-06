@@ -591,6 +591,11 @@ fn assert_losers_drained<T, E>(losers: &[&Outcome<T, E>]) -> LosersDrainedWitnes
 /// # Returns
 /// A tuple of (winner's outcome, winner indicator, loser's outcome).
 ///
+/// # Panics
+/// Panics with `[ASUP-E302]` if the loser is `Cancelled` with a reason weaker
+/// than [`CancelKind::RaceLost`](crate::types::CancelKind::RaceLost), such as
+/// a `Timeout` it reached on its own (see [`verify_losers_drained`]).
+///
 /// # Example
 /// ```
 /// use asupersync::combinator::race::{race2_outcomes, RaceWinner};
@@ -632,6 +637,10 @@ pub fn race2_outcomes<T, E>(
 /// If the winner failed (error or cancellation), returns `Err`.
 /// If either branch panicked, returns `Err` so drained loser panics are not
 /// silently swallowed.
+///
+/// # Panics
+/// Panics like [`race2_outcomes`] if the loser is `Cancelled` with a reason
+/// weaker than `RaceLost`.
 ///
 /// # Example
 /// ```
@@ -724,7 +733,9 @@ impl<T, E> RaceAllResult<T, E> {
 /// * `outcomes` - All outcomes in their original order
 ///
 /// # Panics
-/// Panics if `winner_index` is out of bounds.
+/// Panics if `winner_index` is out of bounds, or with `[ASUP-E302]` if a loser
+/// is `Cancelled` with a reason weaker than `RaceLost` (see
+/// [`verify_losers_drained`]).
 #[inline]
 #[must_use]
 pub fn race_all_outcomes<T, E>(
@@ -829,7 +840,9 @@ pub fn race_all_to_result<T, E>(result: RaceAllResult<T, E>) -> Result<T, RaceAl
 /// `Ok(value)` if the winner succeeded, `Err(RaceAllError)` otherwise.
 ///
 /// # Panics
-/// Panics if `winner_index` is out of bounds.
+/// Panics if `winner_index` is out of bounds, or with `[ASUP-E302]` if a loser
+/// is `Cancelled` with a reason weaker than `RaceLost` (see
+/// [`verify_losers_drained`]).
 ///
 /// # Example
 /// ```

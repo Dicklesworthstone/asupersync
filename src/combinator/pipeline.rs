@@ -1727,6 +1727,11 @@ pub fn pipeline_to_result<T, E>(result: PipelineResult<T, E>) -> Result<T, Pipel
 /// Each stage is invoked as `stage(cx, value)` and must return a future whose
 /// output becomes the next stage input.
 ///
+/// The macro does not check cancellation between stages: every stage takes
+/// and returns the same value type, which has no cancelled form. Stages that
+/// should stop when the task is cancelled check `cx` themselves (the
+/// cancellation rules in the module docs describe `PipelineResult`).
+///
 /// # Example (API shape)
 /// ```ignore
 /// let result = pipeline!(cx, input,
