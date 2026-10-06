@@ -874,6 +874,50 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_copies_of_one_message_are_forwarded_once() {
+        // br-asupersync-27bbrg: receive_message checked whether a message was
+        // seen and then marked it seen under a second lock, so two copies
+        // arriving at once from two peers could both pass the check and both
+        // be forwarded.
+        for round in 0..2_000_u64 {
+            let broadcaster = Arc::new(CancelBroadcaster::new(NullSink));
+            let msg = CancelMessage::new(
+                1,
+                ObjectId::new_for_test(1),
+                CancelKind::User,
+                Time::from_millis(100),
+                round,
+            );
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let receivers: Vec<_> = (0..2)
+                .map(|_| {
+                    let broadcaster = Arc::clone(&broadcaster);
+                    let barrier = Arc::clone(&barrier);
+                    let msg = msg.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        broadcaster
+                            .receive_message(&msg, Time::from_millis(100))
+                            .is_some()
+                    })
+                })
+                .collect();
+            let forwarded = receivers
+                .into_iter()
+                .map(|receiver| receiver.join().expect("receiver thread"))
+                .filter(|&forwarded| forwarded)
+                .count();
+            assert_eq!(forwarded, 1, "round {round}: one copy is forwarded");
+            let metrics = broadcaster.metrics();
+            assert_eq!(
+                (metrics.received, metrics.duplicates),
+                (1, 1),
+                "round {round}"
+            );
+        }
+    }
+
+    #[test]
     fn test_prepare_cancel_uses_token_id() {
         let mut rng = DetRng::new(7);
         let object_id = ObjectId::new_for_test(42);

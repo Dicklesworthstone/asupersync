@@ -1201,7 +1201,7 @@ impl<S: CancelSink> CancelBroadcaster<S> {
         let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
         let msg = CancelMessage::new(token_id, object_id, reason.kind(), now, sequence);
 
-        self.mark_seen(object_id, msg.token_id(), sequence);
+        let _ = self.mark_seen(object_id, msg.token_id(), sequence);
         self.initiated.fetch_add(1, Ordering::Relaxed);
 
         msg
@@ -1217,13 +1217,14 @@ impl<S: CancelSink> CancelBroadcaster<S> {
         msg: &CancelMessage,
         _received_at: Time,
     ) -> Option<CancelMessage> {
-        // Check for duplicate
-        if self.is_seen(msg.object_id(), msg.token_id(), msg.sequence()) {
+        // Check for a duplicate and record the message in one step: a check
+        // under one lock and a mark under another let two copies arriving at
+        // once from two peers both pass and both be forwarded, the fan-out
+        // amplification this exists to stop (br-asupersync-27bbrg).
+        if !self.mark_seen(msg.object_id(), msg.token_id(), msg.sequence()) {
             self.duplicates.fetch_add(1, Ordering::Relaxed);
             return None;
         }
-
-        self.mark_seen(msg.object_id(), msg.token_id(), msg.sequence());
         self.received.fetch_add(1, Ordering::Relaxed);
 
         // Cancel local token if present
@@ -1374,17 +1375,11 @@ impl<S: CancelSink> CancelBroadcaster<S> {
         }
     }
 
-    fn is_seen(&self, object_id: ObjectId, token_id: u64, sequence: u64) -> bool {
-        self.seen_sequences
-            .read()
-            .set
-            .contains(&(object_id, token_id, sequence))
-    }
-
-    fn mark_seen(&self, object_id: ObjectId, token_id: u64, sequence: u64) {
+    /// Records the message as seen; false if it already was.
+    fn mark_seen(&self, object_id: ObjectId, token_id: u64, sequence: u64) -> bool {
         let mut seen = self.seen_sequences.write();
         if seen.set.contains(&(object_id, token_id, sequence)) {
-            return;
+            return false;
         }
 
         // br-asupersync-as12cf — evict BEFORE insert, not after.
@@ -1404,6 +1399,7 @@ impl<S: CancelSink> CancelBroadcaster<S> {
         }
 
         seen.insert((object_id, token_id, sequence));
+        true
     }
 }
 
