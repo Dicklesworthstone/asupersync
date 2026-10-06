@@ -1450,7 +1450,19 @@ impl QuicHandshakeDriver {
                 )
                 .ok_or_else(|| handshake_failure("initial_token_too_large"))?
             } else {
-                segment.data.len().max(1)
+                // Handshake-level CRYPTO (a certificate chain) is split into
+                // datagram-sized packets, as managed admission does: leave
+                // room for full 20-byte CIDs, maximal CRYPTO varints, the
+                // long-header length, packet number and AEAD tag. One datagram
+                // per segment exceeded the endpoint's packet size for any chain
+                // over ~1.3 KB, and send_batch refused it
+                // (br-asupersync-5f1fcj).
+                endpoint
+                    .config()
+                    .max_packet_size
+                    .checked_sub(128)
+                    .filter(|size| *size != 0)
+                    .ok_or_else(|| handshake_failure("datagram_bound_too_small"))?
             };
             for chunk in segment.data.chunks(chunk_size) {
                 let chunk = HandshakeSegment {

@@ -630,6 +630,66 @@ fn real_tls13_handshake_completes_over_real_loopback_udp() {
     });
 }
 
+/// br-asupersync-5f1fcj: the server sent its whole Handshake-level CRYPTO (the
+/// certificate chain) in one datagram, so any chain larger than about 1.3 KB
+/// exceeded the default 1500-byte packet size and the handshake failed with
+/// `udp_send`. A leaf plus four copies of the CA (about 2.1 KB of DER) must
+/// complete at the default packet size.
+#[test]
+fn real_tls13_handshake_fits_a_long_certificate_chain_into_default_datagrams() {
+    block_on(async {
+        let cx = Cx::for_testing();
+        let udp_config = QuicUdpEndpointConfig::default();
+        let mut client_ep =
+            QuicUdpEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), udp_config.clone())
+                .await
+                .expect("bind client UDP");
+        let mut server_ep = QuicUdpEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), udp_config)
+            .await
+            .expect("bind server UDP");
+        let server_addr = server_ep.local_addr();
+
+        let alpn = vec![ATP_QUIC_ALPN.to_vec()];
+        let mut chain = vec![parse_one_cert(LEAF_CERT_PEM)];
+        chain.extend((0..4).map(|_| parse_one_cert(CA_CERT_PEM)));
+        let chain_bytes: usize = chain.iter().map(|cert| cert.len()).sum();
+        assert!(chain_bytes > 1_500, "the chain alone exceeds one datagram");
+        let server_cfg = server_config(chain, leaf_key(), alpn.clone()).expect("server config");
+        let client_cfg =
+            client_config(vec![parse_one_cert(CA_CERT_PEM)], alpn).expect("client config");
+        let mut client = QuicHandshakeDriver::client(
+            client_cfg,
+            ServerName::try_from("localhost").expect("server name"),
+            b"client-transport-params".to_vec(),
+        )
+        .expect("client driver");
+        let mut server =
+            QuicHandshakeDriver::server(server_cfg, b"server-transport-params".to_vec())
+                .expect("server driver");
+        let dcid =
+            ConnectionId::new(&[0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x19]).expect("dcid");
+        let client_scid = ConnectionId::new(&[0x11, 0x22, 0x33, 0x45]).expect("client scid");
+        let server_scid = ConnectionId::new(&[0x55, 0x66, 0x77, 0x89]).expect("server scid");
+
+        let (client_result, server_result) = zip(
+            client_handshake_over_udp(
+                &cx,
+                &mut client_ep,
+                server_addr,
+                &mut client,
+                dcid,
+                client_scid,
+            ),
+            server_handshake_over_udp(&cx, &mut server_ep, &mut server, dcid, server_scid),
+        )
+        .await;
+        client_result.expect("client handshake completed");
+        server_result.expect("server handshake completed");
+        assert!(client.is_complete() && server.is_complete());
+        assert!(client.one_rtt_keys_installed() && server.one_rtt_keys_installed());
+    });
+}
+
 // This test uses only small packet numbers (no truncated-number wraparound).
 // Decode the actual AEAD-protected UDP bytes independently of ACK generation.
 fn decode_test_handshake_packet(
