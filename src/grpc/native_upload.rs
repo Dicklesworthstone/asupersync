@@ -19,6 +19,10 @@ use std::task::{Context, Poll};
 
 mod client_streaming;
 pub use client_streaming::NativeClientStreamingCall;
+mod request_channel;
+pub use request_channel::{
+    NativeRequestSendError, NativeRequestSender, NativeRequestStream, native_request_channel,
+};
 
 const PROGRESS_BUDGET: usize = 32;
 
