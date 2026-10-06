@@ -564,6 +564,53 @@ impl VirtualConnectionInjector {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Runs between an accept's empty-queue check and its waker registration.
+    static BEFORE_ACCEPT_REGISTER: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// One accept attempt: a queued connection, the closed error, or Pending with
+/// the waker registered. The queue is checked again after registering: an
+/// inject or close between the first check and the registration woke an empty
+/// waiter list, and the acceptor slept with a connection queued or the
+/// listener closed (br-asupersync-8vrx8q).
+fn poll_accept_queue(
+    state: &Mutex<VirtualListenerState>,
+    accept_waiters: &AcceptWaiters,
+    cx: &Context<'_>,
+) -> Poll<io::Result<(VirtualTcpStream, SocketAddr)>> {
+    for registered in [false, true] {
+        let mut guard = state.lock();
+        if guard.closed {
+            drop(guard);
+            accept_waiters.wake_others(cx.waker());
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "virtual listener closed",
+            )));
+        }
+        if let Some(conn) = guard.connections.pop_front() {
+            drop(guard);
+            accept_waiters.wake_others(cx.waker());
+            return Poll::Ready(Ok(conn));
+        }
+        drop(guard);
+        if registered {
+            break;
+        }
+        #[cfg(test)]
+        BEFORE_ACCEPT_REGISTER.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().as_mut() {
+                hook();
+            }
+        });
+        accept_waiters.register(cx.waker());
+    }
+    Poll::Pending
+}
+
 #[allow(clippy::manual_async_fn)] // trait signature uses `impl Future`, not `async fn`
 impl TcpListenerApi for VirtualTcpListener {
     type Stream = VirtualTcpStream;
@@ -586,23 +633,14 @@ impl TcpListenerApi for VirtualTcpListener {
         let accept_waiters = Arc::clone(&self.accept_waiters);
         async move {
             std::future::poll_fn(|cx| {
-                let mut guard = state.lock();
-                if guard.closed {
-                    drop(guard);
-                    accept_waiters.wake_others(cx.waker());
+                // Cancellation-aware like poll_accept (br-asupersync-8vrx8q).
+                if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                     return Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::NotConnected,
-                        "virtual listener closed",
+                        io::ErrorKind::Interrupted,
+                        "cancelled",
                     )));
                 }
-                if let Some(conn) = guard.connections.pop_front() {
-                    drop(guard);
-                    accept_waiters.wake_others(cx.waker());
-                    return Poll::Ready(Ok(conn));
-                }
-                drop(guard);
-                accept_waiters.register(cx.waker());
-                Poll::Pending
+                poll_accept_queue(&state, &accept_waiters, cx)
             })
             .await
         }
@@ -612,23 +650,7 @@ impl TcpListenerApi for VirtualTcpListener {
         if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
-        let mut state = self.state.lock();
-        if state.closed {
-            drop(state);
-            self.accept_waiters.wake_others(cx.waker());
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::NotConnected,
-                "virtual listener closed",
-            )));
-        }
-        if let Some(conn) = state.connections.pop_front() {
-            drop(state);
-            self.accept_waiters.wake_others(cx.waker());
-            return Poll::Ready(Ok(conn));
-        }
-        drop(state);
-        self.accept_waiters.register(cx.waker());
-        Poll::Pending
+        poll_accept_queue(&self.state, &self.accept_waiters, cx)
     }
 
     fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -848,6 +870,53 @@ mod tests {
         listener.inject_connection(server2, addr("127.0.0.1:9001"));
 
         assert_eq!(hits1.0.load(Ordering::Relaxed), 2);
+    }
+
+    /// A connection injected between an accept's empty-queue check and its
+    /// waker registration is accepted (br-asupersync-8vrx8q). It used to wake
+    /// an empty waiter list, and the acceptor slept with it queued.
+    #[test]
+    fn a_connection_injected_before_the_accept_registers_is_not_lost() {
+        let listener = VirtualTcpListener::new(addr("127.0.0.1:8080"));
+        let injector = listener.injector();
+        let (_client, server) =
+            VirtualTcpStream::pair(addr("127.0.0.1:9000"), addr("127.0.0.1:8080"));
+        let mut server = Some(server);
+        BEFORE_ACCEPT_REGISTER.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                if let Some(server) = server.take() {
+                    injector.inject(server, addr("127.0.0.1:9000"));
+                }
+            }));
+        });
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let result = listener.poll_accept(&mut cx);
+        BEFORE_ACCEPT_REGISTER.with(|hook| hook.borrow_mut().take());
+        assert!(
+            matches!(result, Poll::Ready(Ok(_))),
+            "the connection injected before the registration is accepted"
+        );
+    }
+
+    /// accept() returns Interrupted once its task is cancelled, as
+    /// poll_accept does; it used to wait for a connection.
+    #[test]
+    fn accept_observes_cancellation() {
+        let listener = VirtualTcpListener::new(addr("127.0.0.1:8080"));
+        let cx = crate::cx::Cx::for_testing();
+        cx.set_cancel_requested(true);
+        let _guard = crate::cx::Cx::set_current(Some(cx));
+        let mut accept = std::pin::pin!(listener.accept());
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+        match std::future::Future::poll(accept.as_mut(), &mut task_cx) {
+            Poll::Ready(Err(error)) => assert_eq!(error.kind(), io::ErrorKind::Interrupted),
+            other => panic!(
+                "a cancelled accept must return Interrupted, got {:?}",
+                other.map(|r| r.map(|(_, a)| a))
+            ),
+        }
     }
 
     #[test]
