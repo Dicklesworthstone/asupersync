@@ -844,8 +844,11 @@ impl NativeQuicConnection {
     /// `MAX_STREAMS`). Bounds memory against a peer that opens unbounded
     /// streams; defaults to `DEFAULT_MAX_REMOTE_STREAMS` per direction.
     pub fn set_remote_stream_limits(&mut self, max_remote_bidi: u64, max_remote_uni: u64) {
-        let max_remote_bidi = max_remote_bidi.min(VARINT_MAX);
-        let max_remote_uni = max_remote_uni.min(VARINT_MAX);
+        // RFC 9000 section 4.6: a stream count above 2^60 cannot be encoded as
+        // a stream ID, and a peer must treat MAX_STREAMS above it as a
+        // FRAME_ENCODING_ERROR (br-asupersync-5f1fcj).
+        let max_remote_bidi = max_remote_bidi.min(1u64 << 60);
+        let max_remote_uni = max_remote_uni.min(1u64 << 60);
         let (old_bidi, old_uni) = self.streams.remote_stream_limits();
         self.streams
             .set_remote_stream_limits(max_remote_bidi, max_remote_uni);
@@ -6683,6 +6686,32 @@ mod tests {
             .generate_frames(&cx, PacketNumberSpace::ApplicationData, 128)
             .expect("lowering limits should not emit MAX_STREAMS");
         assert!(frames.is_empty());
+    }
+
+    #[test]
+    fn remote_stream_limits_never_advertise_more_than_two_to_the_sixty() {
+        // br-asupersync-5f1fcj: the clamp was VARINT_MAX (2^62 - 1), so a large
+        // limit sent a MAX_STREAMS that a conforming peer must reject with
+        // FRAME_ENCODING_ERROR (RFC 9000 section 4.6).
+        let cx = test_cx();
+        let mut conn = established_conn();
+        conn.set_remote_stream_limits(u64::MAX, (1u64 << 60) + 1);
+        let frames = conn
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 128)
+            .expect("control frames should generate");
+        assert_eq!(
+            frames,
+            vec![
+                QuicFrame::MaxStreams {
+                    maximum_streams: VarInt::from_u64_unchecked(1u64 << 60),
+                    bidirectional: true,
+                },
+                QuicFrame::MaxStreams {
+                    maximum_streams: VarInt::from_u64_unchecked(1u64 << 60),
+                    bidirectional: false,
+                },
+            ]
+        );
     }
 
     #[test]
