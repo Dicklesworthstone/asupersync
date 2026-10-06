@@ -412,8 +412,13 @@ impl OracleSuite {
             }
         }
 
-        if !self.loser_drain.has_observed_events() {
+        // Replayed on every hydration, not only the first: a race in flight
+        // at one report completes by the next (br-asupersync-vcu2oz). A suite
+        // fed by hand keeps its events; an empty history marks nothing, so
+        // events fed after it are still kept apart.
+        if self.loser_drain.accepts_state_history() {
             for event in state.loser_drain_history() {
+                self.loser_drain.mark_hydrated_from_state();
                 match event {
                     crate::runtime::state::LoserDrainHistoryEvent::RaceStarted {
                         race_id,
@@ -1765,6 +1770,75 @@ mod tests {
             }
         }
         crate::test_complete!("hydrate_temporal_from_state_replays_owner_cancelled_race_history");
+    }
+
+    /// Every hydration replays the loser-drain history, not only the first:
+    /// a race in flight at one report and drained by the next passes the
+    /// next, replaying a completed race again keeps it completed, and a
+    /// reset suite hydrates again. A suite fed by hand keeps its own events
+    /// (br-asupersync-vcu2oz M3).
+    #[test]
+    fn hydrate_temporal_from_state_replays_loser_drain_history_on_every_report() {
+        init_test("hydrate_temporal_from_state_replays_loser_drain_history_on_every_report");
+        let state = crate::runtime::RuntimeState::new();
+        let history = state.loser_drain_history_handle();
+        let region = crate::types::RegionId::new_for_test(4, 0);
+        let winner = crate::types::TaskId::new_for_test(10, 0);
+        let loser = crate::types::TaskId::new_for_test(11, 0);
+        let race_id = history.record_race_start(region, vec![winner, loser], Time::from_nanos(10));
+
+        let mut suite = OracleSuite::new();
+        suite.hydrate_temporal_from_state(&state, Time::from_nanos(20));
+        assert!(
+            matches!(
+                suite.loser_drain.check(),
+                Err(LoserDrainViolation::ActiveRaceNotCompleted { .. })
+            ),
+            "the race is in flight at the first report"
+        );
+
+        history.record_task_complete(winner, Time::from_nanos(50));
+        history.record_task_complete(loser, Time::from_nanos(60));
+        history.record_race_complete(race_id, winner, Time::from_nanos(100));
+        for now in [150, 160] {
+            suite.hydrate_temporal_from_state(&state, Time::from_nanos(now));
+            let result = suite.loser_drain.check();
+            assert!(result.is_ok(), "drained race at {now}: {result:?}");
+            assert_eq!(suite.loser_drain.completed_race_count(), 1);
+        }
+
+        suite.reset();
+        suite.hydrate_temporal_from_state(&state, Time::from_nanos(200));
+        assert_eq!(
+            suite.loser_drain.completed_race_count(),
+            1,
+            "a reset suite hydrates again"
+        );
+
+        // Hand-fed race 0 completes differently from the state's race 0.
+        let mut fed = OracleSuite::new();
+        let drain = &mut fed.loser_drain;
+        let own = drain.on_race_start(region, vec![winner], Time::from_nanos(1));
+        drain.on_task_complete(winner, Time::from_nanos(2));
+        drain.on_race_complete(own, winner, Time::from_nanos(3));
+        fed.hydrate_temporal_from_state(&state, Time::from_nanos(300));
+        let result = fed.loser_drain.check();
+        assert!(result.is_ok(), "hand-fed events only: {result:?}");
+
+        // A hydration that replayed nothing marks nothing: events fed after
+        // it are still kept apart from the state's.
+        let mut early = OracleSuite::new();
+        early.hydrate_temporal_from_state(&crate::runtime::RuntimeState::new(), Time::ZERO);
+        let drain = &mut early.loser_drain;
+        let own = drain.on_race_start(region, vec![winner], Time::from_nanos(1));
+        drain.on_task_complete(winner, Time::from_nanos(2));
+        drain.on_race_complete(own, winner, Time::from_nanos(3));
+        early.hydrate_temporal_from_state(&state, Time::from_nanos(300));
+        let result = early.loser_drain.check();
+        assert!(result.is_ok(), "fed after an empty hydration: {result:?}");
+        crate::test_complete!(
+            "hydrate_temporal_from_state_replays_loser_drain_history_on_every_report"
+        );
     }
 
     #[test]

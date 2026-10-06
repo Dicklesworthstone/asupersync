@@ -189,6 +189,9 @@ pub struct LoserDrainOracle {
     /// duplicate completions). Drained from `check()` ahead of the
     /// invariants computed at end-of-run (br-asupersync-htqzu1).
     runtime_violations: Vec<LoserDrainViolation>,
+    /// Whether the events came from replaying the runtime state's history,
+    /// which every later hydration replays again (br-asupersync-vcu2oz).
+    hydrated_from_state: bool,
 }
 
 impl LoserDrainOracle {
@@ -220,6 +223,12 @@ impl LoserDrainOracle {
         time: Time,
     ) {
         self.next_race_id = self.next_race_id.max(race_id.saturating_add(1));
+        // A replayed history starts races that already completed here.
+        if self.completed_races.contains_key(&race_id)
+            || self.unknown_completions.contains_key(&race_id)
+        {
+            return;
+        }
         self.active_races.entry(race_id).or_insert(RaceRecord {
             region,
             participants,
@@ -292,14 +301,25 @@ impl LoserDrainOracle {
         self.task_completions.insert(task, time);
     }
 
+    /// Whether a hydration may replay the runtime state's history into this
+    /// oracle: it replayed that history before, or it holds no events.
+    /// Events fed by hand are not mixed with the state's, whose race ids can
+    /// collide with theirs. An id allocated before a [`Self::reset`] is not
+    /// an event.
     #[must_use]
-    pub(crate) fn has_observed_events(&self) -> bool {
-        self.next_race_id > 0
-            || !self.active_races.is_empty()
-            || !self.completed_races.is_empty()
-            || !self.unknown_completions.is_empty()
-            || !self.task_completions.is_empty()
-            || !self.runtime_violations.is_empty()
+    pub(crate) fn accepts_state_history(&self) -> bool {
+        self.hydrated_from_state
+            || (self.active_races.is_empty()
+                && self.completed_races.is_empty()
+                && self.unknown_completions.is_empty()
+                && self.task_completions.is_empty()
+                && self.runtime_violations.is_empty())
+    }
+
+    /// Records that the events came from the runtime state's history, so the
+    /// next hydration replays it again (it is idempotent).
+    pub(crate) fn mark_hydrated_from_state(&mut self) {
+        self.hydrated_from_state = true;
     }
 
     /// Verifies the invariant holds.
@@ -402,6 +422,7 @@ impl LoserDrainOracle {
         self.unknown_completions.clear();
         self.task_completions.clear();
         self.runtime_violations.clear();
+        self.hydrated_from_state = false;
         // Don't reset next_race_id to avoid ID collisions across tests
     }
 
