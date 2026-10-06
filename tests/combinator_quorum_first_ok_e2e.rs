@@ -45,6 +45,7 @@ use asupersync::combinator::{FirstOkError, QuorumError};
 use asupersync::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
 use asupersync::cx::Cx;
 use asupersync::runtime::RuntimeBuilder;
+use asupersync::types::{CancelKind, CancelReason};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -269,6 +270,85 @@ fn production_quorum_three_of_four_fails_only_after_every_branch_terminated() {
 #[test]
 fn lab_quorum_three_of_four_fails_only_after_every_branch_terminated() {
     assert_quorum_three_of_four_impossible(run_on_lab(quorum_three_of_four_impossible));
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 2b: the caller is cancelled before the quorum is met
+// (br-asupersync-1sngsf).
+// ---------------------------------------------------------------------------
+
+/// Runs quorum(2 of 3) in a caller task whose branches park until cancelled
+/// and then fail, and aborts the caller with `reason` once every branch runs,
+/// as an outer race aborts its loser. Returns the caller's quorum result.
+async fn quorum_caller_cancelled(
+    cx: Cx,
+    reason: CancelReason,
+) -> Result<Vec<u32>, QuorumError<String>> {
+    let running = Arc::new(AtomicUsize::new(0));
+    let started = Arc::clone(&running);
+    let mut caller = cx
+        .spawn(move |caller_cx: Cx| async move {
+            let branches = (0..3_u32).map(|index| {
+                let started = Arc::clone(&started);
+                move |child: Cx| async move {
+                    started.fetch_add(1, Ordering::SeqCst);
+                    park_until_cancelled(&child).await;
+                    Err::<u32, String>(format!("branch {index} observed cancellation"))
+                }
+            });
+            caller_cx.scope().quorum(&caller_cx, 2, branches).await
+        })
+        .expect("the caller spawns");
+    std::future::poll_fn(|poll_cx| {
+        if running.load(Ordering::SeqCst) == 3 {
+            Poll::Ready(())
+        } else {
+            poll_cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    })
+    .await;
+    caller.abort_with_reason(reason);
+    caller
+        .join(&cx)
+        .await
+        .expect("the caller acknowledges its cancellation and returns its quorum result")
+}
+
+fn assert_caller_cancelled(result: Result<Vec<u32>, QuorumError<String>>, kind: CancelKind) {
+    match result {
+        Err(QuorumError::Cancelled(reason)) => assert_eq!(
+            reason.kind(),
+            kind,
+            "the caller's own cancellation is reported, got {reason}"
+        ),
+        Ok(values) => panic!("a cancelled caller's quorum must not succeed, got {values:?}"),
+        Err(other) => panic!("a cancelled caller must get QuorumError::Cancelled, got {other}"),
+    }
+}
+
+#[test]
+fn production_quorum_caller_cancelled_as_a_race_loser_reports_cancelled() {
+    assert_caller_cancelled(
+        run_on_production(|cx| quorum_caller_cancelled(cx, CancelReason::race_loser())),
+        CancelKind::RaceLost,
+    );
+}
+
+#[test]
+fn lab_quorum_caller_cancelled_as_a_race_loser_reports_cancelled() {
+    assert_caller_cancelled(
+        run_on_lab(|cx| quorum_caller_cancelled(cx, CancelReason::race_loser())),
+        CancelKind::RaceLost,
+    );
+}
+
+#[test]
+fn lab_quorum_caller_cancelled_by_the_user_reports_cancelled() {
+    assert_caller_cancelled(
+        run_on_lab(|cx| quorum_caller_cancelled(cx, CancelReason::user("caller cancelled"))),
+        CancelKind::User,
+    );
 }
 
 // ---------------------------------------------------------------------------
