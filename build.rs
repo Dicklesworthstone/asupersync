@@ -52,6 +52,14 @@ fn main() {
         println!("cargo:rustc-env={COMPILED_REVISION_ENV}={revision}");
     }
 
+    // `tls-core` compiles the TLS code without linking a crypto provider. That
+    // code is gated on `feature = "tls"`, and the `tls` feature also selects
+    // ring, so the cfg is set here instead of duplicating every gate. Code that
+    // names the ring provider is gated on `feature = "tls-ring"`.
+    if env::var_os("CARGO_FEATURE_TLS_CORE").is_some() {
+        println!("cargo:rustc-cfg=feature=\"tls\"");
+    }
+
     // `nightly-outcome-try` is a default feature, so a stable compiler must
     // still build the crate: the `Try` impls (and `?` on `Outcome`) are
     // compiled only when this compiler accepts them

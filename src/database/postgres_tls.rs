@@ -207,7 +207,8 @@ impl PgTlsOptions {
                     .into(),
             ));
         }
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let provider = crate::tls::resolve_crypto_provider(None)
+            .map_err(|err| PgError::Tls(err.to_string()))?;
         let algorithms = provider.signature_verification_algorithms;
         let builder = rustls::ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()

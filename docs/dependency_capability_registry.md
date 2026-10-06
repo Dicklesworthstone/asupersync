@@ -35,7 +35,7 @@ Every row names:
   stable scenario IDs;
 - the disposition, evidence state, cutover state, and no-claim boundary.
 
-The auxiliary inventories independently cover all 60 Cargo features, 15
+The auxiliary inventories independently cover all 62 Cargo features, 15
 binaries, 369 root exports, 19 API-map entry points, 19 format families, 51
 ASUP codes, 33 safety-taxonomy candidates, a curated live downstream
 portfolio, and every current `dep-plan` bead. New source or tracker surfaces
@@ -171,7 +171,7 @@ cycle and is forbidden.
 
 <!-- BEGIN GENERATED CAPABILITY SUMMARY -->
 - Artifact: `dependency-capability-registry-v1` (schema 1)
-- Inventories: 50 capabilities; 60 Cargo features; 15 binaries; 19 formats; 33 journeys; 33 taxonomy candidates; 16 downstream consumers; 109 bead mapping rules.
+- Inventories: 50 capabilities; 62 Cargo features; 15 binaries; 19 formats; 33 journeys; 33 taxonomy candidates; 16 downstream consumers; 109 bead mapping rules.
 - Categories: CLI=4, async-api=1, authentication=1, benchmark-tooling=1, codec=2, collection=2, compression=2, concurrency-hot-path=1, configuration=2, database=2, dependency-governance=1, downstream-interop=1, filesystem=2, interop=1, messaging=2, operator-ux=1, parser=1, pattern-matching=1, performance-experiment=1, performance-kernel=1, persisted-format=1, platform=3, platform-io=1, proc-macro=1, public-api=2, runtime-core=1, security=1, security-protocol=1, serialization=2, synchronization=1, telemetry=1, time=1, transport=1, verification=2, verification-runtime=1.
 - Dispositions: EXPERIMENT_ONLY=2, INTERNAL_ONLY=1, KEEP_UNTIL_PARITY=21, PRESERVE=8, PRESERVE_AND_REPLACE_IF_PARITY=18.
 - Evidence states: BASELINE_EXISTING=4, BASELINE_PLANNED=46.

@@ -1249,6 +1249,15 @@ for rustls. Cross-compiling TLS to `x86_64-pc-windows-gnu` from a Unix worker
 therefore requires the MinGW C toolchain (`x86_64-w64-mingw32-gcc`) even though
 the asupersync source is Windows-gated.
 
+`tls-ring` is another name for the same selection. `tls-core` compiles the TLS
+code without linking any crypto provider, for applications that must not link
+ring: pass a rustls `CryptoProvider` with `crypto_provider` on
+`TlsConnectorBuilder` or `TlsAcceptorBuilder`, or install a process default.
+Every builder resolves its provider in one order: the explicit one, then the
+linked ring provider, then the process default; with none of them, building
+fails with a configuration error. Asupersync's own TLS tests use ring and run
+with `tls`.
+
 ### DNS and UDP
 
 `src/net/dns/` provides async DNS resolution with address-family selection. `src/net/udp.rs` provides async UDP sockets with send/receive and cancellation safety.
@@ -2134,6 +2143,8 @@ Asupersync is feature-light by default; the lab runtime is available without fla
 | `lock-metrics` | Contended mutex wait/hold metrics | No |
 | `io-uring` | Linux io_uring reactor (kernel 5.1+) | No |
 | `tls` | TLS support via rustls | No |
+| `tls-ring` | The same as `tls`: TLS with the ring crypto provider | No |
+| `tls-core` | TLS code without a crypto provider; the application supplies one | No |
 | `tls-native-roots` | TLS with native root certs | No |
 | `tls-webpki-roots` | TLS with webpki root certs | No |
 | `remote-service` | Unix static RemoteRuntime V3 process host (`cli` + `tls`) | No |

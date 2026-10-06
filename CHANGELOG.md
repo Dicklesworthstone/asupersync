@@ -325,6 +325,27 @@ production (`asupersync-yvs9cx`).
 - Bounded clock observation windows can be captured and replayed, and replay
   tapes persist with bounded canonical decoding.
 
+### Selectable TLS crypto provider
+
+- New feature `tls-core` compiles the TLS code without linking a crypto
+  provider, for applications that must not link ring. New feature `tls-ring`
+  names the ring selection; `tls` is `tls-ring`, with the same dependencies
+  and behavior as before.
+- `TlsConnectorBuilder::crypto_provider` and `TlsAcceptorBuilder::crypto_provider`
+  take a rustls `CryptoProvider`. Every implicit provider choice (the TLS
+  builders, PostgreSQL TLS, native ATP authentication, native QUIC) resolves in
+  one order: the explicit provider, then the linked ring provider, then rustls's
+  process default; with none, it is a configuration error, not a panic.
+- `TlsStream::negotiated_cipher_suite` and
+  `TlsStream::negotiated_key_exchange_group` report what the handshake chose.
+- Fixed: with CRLs configured, the connector's certificate verifier, the
+  acceptor's client-certificate verifier and the native QUIC server-identity
+  verifier used rustls's process default (installing ring as that default
+  when none was set) instead of the connection's provider. They now use the
+  provider the connection uses.
+
+(asupersync-sdua27)
+
 ### Fixed
 
 - HTTP/1 answers a rejected request head with `400`/`413`/`431` instead of

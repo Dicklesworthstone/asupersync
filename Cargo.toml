@@ -261,7 +261,15 @@ io-uring = ["dep:io-uring"]
 # Enable TLS support via rustls. The rustls ring provider is selected here so
 # TLS remains fully functional out of the box; certificate pin hashing itself
 # uses the existing pure-Rust sha2 dependency and does not depend on ring.
-tls = ["dep:rustls", "dep:rustls-pki-types", "rustls/ring", "dep:x509-parser"]
+tls = ["tls-ring"]
+# TLS via rustls with the ring crypto provider linked (what `tls` selects).
+tls-ring = ["tls-core", "rustls/ring"]
+# The TLS code without a crypto provider, for consumers that link their own
+# (for example a pure-Rust provider). Pass one with `crypto_provider` on
+# `TlsConnectorBuilder` / `TlsAcceptorBuilder`, or install a rustls process
+# default; otherwise building a connector or acceptor returns an error.
+# build.rs sets the `tls` cfg for it, so every `feature = "tls"` gate compiles.
+tls-core = ["dep:rustls", "dep:rustls-pki-types", "dep:x509-parser"]
 # Enable native root certificates for TLS
 tls-native-roots = ["tls", "dep:rustls-native-certs"]
 # Enable webpki root certificates for TLS

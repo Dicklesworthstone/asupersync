@@ -162,6 +162,22 @@ impl TlsConnection {
         }
     }
 
+    fn negotiated_cipher_suite(&self) -> Option<rustls::CipherSuite> {
+        match self {
+            Self::Client(c) => c.negotiated_cipher_suite(),
+            Self::Server(s) => s.negotiated_cipher_suite(),
+        }
+        .map(|suite| suite.suite())
+    }
+
+    fn negotiated_key_exchange_group(&self) -> Option<rustls::NamedGroup> {
+        match self {
+            Self::Client(c) => c.negotiated_key_exchange_group(),
+            Self::Server(s) => s.negotiated_key_exchange_group(),
+        }
+        .map(|group| group.name())
+    }
+
     /// Leaf peer certificate (DER bytes), if the handshake produced one.
     /// Used by PostgreSQL SCRAM-SHA-256-PLUS channel binding
     /// (br-asupersync-7n2xsi).
@@ -172,6 +188,14 @@ impl TlsConnection {
         }?;
         let leaf = certs.first()?;
         Some(leaf.as_ref().to_vec())
+    }
+
+    fn peer_certificate_chain_der(&self) -> Option<Vec<Vec<u8>>> {
+        let certs = match self {
+            Self::Client(c) => c.peer_certificates(),
+            Self::Server(s) => s.peer_certificates(),
+        }?;
+        Some(certs.iter().map(|cert| cert.as_ref().to_vec()).collect())
     }
 
     fn alpn_protocol(&self) -> Option<&[u8]> {
@@ -223,6 +247,17 @@ impl<IO> TlsStream<IO> {
         self.conn.protocol_version()
     }
 
+    /// Get the negotiated cipher suite, once the handshake has chosen one.
+    pub fn negotiated_cipher_suite(&self) -> Option<rustls::CipherSuite> {
+        self.conn.negotiated_cipher_suite()
+    }
+
+    /// Get the negotiated key-exchange group, once the handshake has chosen
+    /// one. rustls reports `None` for a handshake without a key exchange.
+    pub fn negotiated_key_exchange_group(&self) -> Option<rustls::NamedGroup> {
+        self.conn.negotiated_key_exchange_group()
+    }
+
     /// Get the SNI hostname (server-side only).
     pub fn sni_hostname(&self) -> Option<&str> {
         self.conn.sni_hostname()
@@ -235,6 +270,13 @@ impl<IO> TlsStream<IO> {
     /// certificate. (br-asupersync-7n2xsi)
     pub fn peer_leaf_certificate_der(&self) -> Option<Vec<u8>> {
         self.conn.peer_leaf_certificate_der()
+    }
+
+    /// Returns the DER-encoded certificates the peer presented, leaf first,
+    /// in the order it sent them. `None` before the handshake is complete or
+    /// when the peer presented no certificate.
+    pub fn peer_certificate_chain_der(&self) -> Option<Vec<Vec<u8>>> {
+        self.conn.peer_certificate_chain_der()
     }
 
     /// Get a reference to the underlying IO.

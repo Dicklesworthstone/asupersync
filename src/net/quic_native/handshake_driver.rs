@@ -2186,7 +2186,8 @@ pub fn client_config(
             .add(cert)
             .map_err(|_| handshake_failure("client_root_add_failed"))?;
     }
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let provider = crate::tls::resolve_crypto_provider(None)
+        .map_err(|_| handshake_failure("client_crypto_provider_unavailable"))?;
     let builder = ClientConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|_| handshake_failure("client_protocol_versions"))?;
@@ -2218,7 +2219,8 @@ pub fn server_config(
     key: PrivateKeyDer<'static>,
     alpn: Vec<Vec<u8>>,
 ) -> Result<Arc<ServerConfig>, QuicTlsError> {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let provider = crate::tls::resolve_crypto_provider(None)
+        .map_err(|_| handshake_failure("server_crypto_provider_unavailable"))?;
     let mut config = ServerConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|_| handshake_failure("server_protocol_versions"))?

@@ -989,7 +989,7 @@ fn cargo_features_are_exhaustive_and_mapped() {
         artifact_features, source_features,
         "Cargo feature inventory drifted; update the capability registry before cutover work"
     );
-    assert_eq!(artifact_features.len(), 60);
+    assert_eq!(artifact_features.len(), 62);
 }
 
 #[test]

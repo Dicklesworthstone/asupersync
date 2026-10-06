@@ -525,6 +525,10 @@ pub struct TlsAcceptorBuilder {
     /// acknowledged. Production deployments MUST specify a replay
     /// protection strategy when enabling 0-RTT.
     early_data_replay_protection: EarlyDataReplayProtection,
+    /// The rustls crypto provider set with [`Self::crypto_provider`].
+    /// `None` resolves as the `tls` module documentation describes.
+    #[cfg(feature = "tls")]
+    crypto_provider: Option<Arc<rustls::crypto::CryptoProvider>>,
 }
 
 impl TlsAcceptorBuilder {
@@ -660,6 +664,8 @@ impl TlsAcceptorBuilder {
             // Operators must explicitly specify protection strategy
             // when enabling 0-RTT.
             early_data_replay_protection: EarlyDataReplayProtection::None,
+            #[cfg(feature = "tls")]
+            crypto_provider: None,
         }
     }
 
@@ -1023,6 +1029,19 @@ impl TlsAcceptorBuilder {
         self
     }
 
+    /// Use `provider` for this acceptor's cipher suites, key exchange,
+    /// signing and client-certificate verification.
+    ///
+    /// Mirrors `TlsConnectorBuilder::crypto_provider`: without it, the
+    /// acceptor uses the ring provider when `tls` links it, else rustls's
+    /// process default; a `tls-core` build with neither fails in
+    /// [`Self::build`].
+    #[cfg(feature = "tls")]
+    pub fn crypto_provider(mut self, provider: Arc<rustls::crypto::CryptoProvider>) -> Self {
+        self.crypto_provider = Some(provider);
+        self
+    }
+
     /// Build the `TlsAcceptor`.
     ///
     /// # Errors
@@ -1030,7 +1049,6 @@ impl TlsAcceptorBuilder {
     /// Returns an error if the configuration is invalid (e.g., invalid certificate/key pair).
     #[cfg(feature = "tls")]
     pub fn build(self) -> Result<TlsAcceptor, TlsError> {
-        use rustls::crypto::ring::default_provider;
         use rustls::server::WebPkiClientVerifier;
 
         if self.alpn_required && self.alpn_protocols.is_empty() {
@@ -1176,7 +1194,8 @@ impl TlsAcceptorBuilder {
         // narrower protocol range than the rustls safe defaults (e.g.,
         // TLS 1.3 only to eliminate downgrade-attack surface and TLS
         // 1.2 cipher-suite negotiation pitfalls).
-        let builder = ServerConfig::builder_with_provider(Arc::new(default_provider()));
+        let provider = super::resolve_crypto_provider(self.crypto_provider.as_ref())?;
+        let builder = ServerConfig::builder_with_provider(Arc::clone(&provider));
         let builder = if self.min_protocol.is_some() || self.max_protocol.is_some() {
             // Convert protocol versions to the wire ordinals so the
             // range comparison works regardless of the
@@ -1230,20 +1249,28 @@ impl TlsAcceptorBuilder {
                 .map_err(|e| TlsError::Configuration(e.to_string()))?
         };
 
-        // Configure client auth
+        // Configure client auth. `builder_with_provider` keeps the verifier on
+        // the connection's provider; plain `builder` would use rustls's
+        // process default.
         let builder = match self.client_auth {
             ClientAuth::None => builder.with_no_client_auth(),
             ClientAuth::Optional(roots) => {
-                let verifier = WebPkiClientVerifier::builder(Arc::new(roots.into_inner()))
-                    .allow_unauthenticated()
-                    .build()
-                    .map_err(|e| TlsError::Configuration(e.to_string()))?;
+                let verifier = WebPkiClientVerifier::builder_with_provider(
+                    Arc::new(roots.into_inner()),
+                    provider,
+                )
+                .allow_unauthenticated()
+                .build()
+                .map_err(|e| TlsError::Configuration(e.to_string()))?;
                 builder.with_client_cert_verifier(verifier)
             }
             ClientAuth::Required(roots) => {
-                let verifier = WebPkiClientVerifier::builder(Arc::new(roots.into_inner()))
-                    .build()
-                    .map_err(|e| TlsError::Configuration(e.to_string()))?;
+                let verifier = WebPkiClientVerifier::builder_with_provider(
+                    Arc::new(roots.into_inner()),
+                    provider,
+                )
+                .build()
+                .map_err(|e| TlsError::Configuration(e.to_string()))?;
                 builder.with_client_cert_verifier(verifier)
             }
         };
