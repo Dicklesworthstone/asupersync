@@ -59,8 +59,8 @@ pub enum SendError<T> {
     /// The receiver was dropped before the value could be sent.
     Disconnected(T),
     /// The sender's `Cx` was cancelled before the reservation could be taken.
-    /// Carries `()` because no value has been consumed (reserve is the
-    /// pre-commit phase).
+    /// [`Sender::reserve`] returns `Cancelled(())`; a send that takes a value
+    /// returns that value here.
     Cancelled(T),
 }
 
@@ -476,9 +476,10 @@ impl<T> Sender<T> {
     ///
     /// # Cancel Safety
     ///
-    /// This operation is cancel-safe: if dropped before returning,
-    /// the sender is still available. After returning, the permit
-    /// owns the obligation.
+    /// This operation is synchronous and consumes the sender. After it
+    /// returns `Ok`, the permit owns the obligation; if `cx` is already
+    /// cancelled it closes the channel instead (see Errors).
+    ///
     /// # Errors
     ///
     /// Returns `Err(SendError::Cancelled(()))` if the supplied `Cx` is

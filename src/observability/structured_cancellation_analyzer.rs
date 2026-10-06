@@ -3,6 +3,9 @@
 //! This module provides the complete implementation of the structured cancellation trace analyzer
 //! as specified in the bead requirements. It integrates tracing, visualization, and deep analysis
 //! capabilities to provide comprehensive insights into cancellation behavior.
+//!
+//! It is opt-in: the runtime does not feed the analyzer. The caller reports the
+//! cancellation events it wants analyzed (asupersync-7yq1pv).
 
 use crate::observability::{
     cancellation_analyzer::{CancellationAnalyzer, PerformanceAnalysis},

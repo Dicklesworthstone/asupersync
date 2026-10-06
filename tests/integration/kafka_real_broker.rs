@@ -4,7 +4,7 @@
 //! Run with:
 //! `rch exec -- env REAL_KAFKA_TESTS=true CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_kafka_real_broker cargo test --features kafka --test kafka_real_broker -- --nocapture`
 
-#![cfg(test)]
+#![cfg(all(test, debug_assertions))] // allow_insecure_transport_for_testing is debug-only
 
 use asupersync::{
     messaging::kafka::{

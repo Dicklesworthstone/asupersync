@@ -1111,7 +1111,11 @@ mod tests {
             max_entries: 2,
             ..Default::default()
         };
-        let cache = DnsCache::with_config(config);
+        // The cache's clock, not the wall clock: on the wall clock both entries
+        // had expired once the test process was 300 s old, and the eviction
+        // under test never ran.
+        set_test_time(42);
+        let cache = DnsCache::with_time_getter(config, test_time);
         let inserted_at = Time::from_nanos(42);
         let ttl = Duration::from_secs(300);
 

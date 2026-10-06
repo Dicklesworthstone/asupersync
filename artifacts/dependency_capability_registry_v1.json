@@ -1904,6 +1904,8 @@
       "features": [
         "default",
         "tls",
+        "tls-core",
+        "tls-ring",
         "kafka",
         "postgres",
         "mysql",
@@ -2407,6 +2409,8 @@
       ],
       "features": [
         "tls",
+        "tls-core",
+        "tls-ring",
         "tls-native-roots",
         "tls-webpki-roots",
         "atp-cli"
@@ -3920,9 +3924,31 @@
       ]
     },
     {
+      "feature_id": "tls-core",
+      "capability_ids": [
+        "CAP-TLS-X509",
+        "CAP-AUTH-CREDENTIALS"
+      ],
+      "support_class": "production-opt-in",
+      "platforms": [
+        "native"
+      ]
+    },
+    {
       "feature_id": "tls-native-roots",
       "capability_ids": [
         "CAP-TLS-X509"
+      ],
+      "support_class": "production-opt-in",
+      "platforms": [
+        "native"
+      ]
+    },
+    {
+      "feature_id": "tls-ring",
+      "capability_ids": [
+        "CAP-TLS-X509",
+        "CAP-AUTH-CREDENTIALS"
       ],
       "support_class": "production-opt-in",
       "platforms": [

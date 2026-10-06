@@ -77,7 +77,7 @@
 //!
 //! | Option | Default | Description |
 //! |--------|---------|-------------|
-//! | `min_size` | 1 | Minimum resources to keep in pool |
+//! | `min_size` | 1 | Resources `WarmupStrategy::RequireMinimum` requires warm-up to create |
 //! | `max_size` | 10 | Maximum total resources |
 //! | `acquire_timeout` | 30s | Timeout for acquire operations |
 //! | `idle_timeout` | 600s | Max time a resource can be idle |
@@ -949,7 +949,8 @@ pub enum WarmupStrategy {
 /// Configuration for a generic resource pool.
 #[derive(Debug, Clone)]
 pub struct PoolConfig {
-    /// Minimum resources to keep in pool.
+    /// Resources warm-up must create under [`WarmupStrategy::RequireMinimum`].
+    /// The pool does not keep this many alive or replace evicted ones.
     pub min_size: usize,
     /// Maximum resources in pool.
     pub max_size: usize,
@@ -963,10 +964,12 @@ pub struct PoolConfig {
     // --- Health check options ---
     /// Perform health check before returning idle resources.
     pub health_check_on_acquire: bool,
-    /// Periodic health check interval for idle resources.
-    /// If `None`, periodic health checks are disabled.
+    /// Periodic health check interval for idle resources. Not applied yet:
+    /// no periodic check runs whatever the value; use
+    /// `health_check_on_acquire`.
     pub health_check_interval: Option<Duration>,
-    /// Remove unhealthy resources immediately when detected.
+    /// Remove unhealthy resources immediately when detected. Not applied yet:
+    /// an unhealthy resource is always removed, even with `false`.
     pub evict_unhealthy: bool,
 
     // --- Warmup options ---
@@ -1008,7 +1011,8 @@ impl PoolConfig {
         }
     }
 
-    /// Sets the minimum pool size.
+    /// Sets how many resources `WarmupStrategy::RequireMinimum` requires
+    /// warm-up to create (see [`PoolConfig::min_size`]).
     #[must_use]
     pub fn min_size(mut self, min_size: usize) -> Self {
         self.min_size = min_size;
@@ -1050,14 +1054,16 @@ impl PoolConfig {
         self
     }
 
-    /// Sets the periodic health check interval for idle resources.
+    /// Sets the periodic health check interval for idle resources. Not
+    /// applied yet (see [`PoolConfig::health_check_interval`]).
     #[must_use]
     pub fn health_check_interval(mut self, interval: Option<Duration>) -> Self {
         self.health_check_interval = interval;
         self
     }
 
-    /// Sets whether to immediately evict unhealthy resources.
+    /// Sets whether to immediately evict unhealthy resources. Not applied
+    /// yet (see [`PoolConfig::evict_unhealthy`]).
     #[must_use]
     pub fn evict_unhealthy(mut self, evict: bool) -> Self {
         self.evict_unhealthy = evict;

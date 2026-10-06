@@ -65,7 +65,12 @@ pub struct HedgeConfig {
     pub delay: Duration,
     /// Maximum number of outstanding hedge requests.
     pub max_pending: u32,
-    time_getter: fn() -> Time,
+    /// A custom time source, or `None` for the runtime's clock. The runtime's
+    /// clock is `wall_now`, which reads the ambient timer driver, so the hedge
+    /// delay waits on that driver or, off the runtime, on the shared fallback
+    /// timer. A custom getter makes every request's `Sleep` poll that getter
+    /// from a thread of its own (br-asupersync-1sxucf).
+    time_getter: Option<fn() -> Time>,
 }
 
 impl HedgeConfig {
@@ -75,7 +80,7 @@ impl HedgeConfig {
         Self {
             delay,
             max_pending: 10,
-            time_getter: wall_clock_now,
+            time_getter: None,
         }
     }
 
@@ -89,14 +94,17 @@ impl HedgeConfig {
     /// Set the time source used for hedge deadlines.
     #[must_use]
     pub fn with_time_getter(mut self, time_getter: fn() -> Time) -> Self {
-        self.time_getter = time_getter;
+        self.time_getter = Some(time_getter);
         self
     }
 
     /// Returns the time source used for hedge deadlines.
     #[must_use]
     pub const fn time_getter(&self) -> fn() -> Time {
-        self.time_getter
+        match self.time_getter {
+            Some(time_getter) => time_getter,
+            None => wall_clock_now,
+        }
     }
 }
 
@@ -471,15 +479,20 @@ where
         config: &HedgeConfig,
         stats: Arc<HedgeStats>,
     ) -> Self {
-        let deadline = (config.time_getter)().saturating_add_nanos(duration_to_nanos(config.delay));
+        let time_getter = config.time_getter();
+        let deadline = time_getter().saturating_add_nanos(duration_to_nanos(config.delay));
+        let sleep = match config.time_getter {
+            Some(time_getter) => Sleep::with_time_getter(deadline, time_getter),
+            None => Sleep::new(deadline),
+        };
         Self {
             state: HedgeFutureState::Running {
                 primary: Some(primary),
                 hedge_service,
                 hedge_request: Some(request),
                 hedge_future: None,
-                sleep: Sleep::with_time_getter(deadline, config.time_getter),
-                time_getter: config.time_getter,
+                sleep,
+                time_getter,
                 max_pending: config.max_pending,
                 stats,
                 slot_held: false,
@@ -904,6 +917,35 @@ mod tests {
         set_test_time(55);
         let config = HedgeConfig::new(Duration::from_nanos(5)).with_time_getter(test_time);
         assert_eq!((config.time_getter())(), Time::from_nanos(55));
+    }
+
+    /// br-asupersync-1sxucf LOW: the default config passed the wall clock as a
+    /// custom time getter. A `Sleep` with a custom getter cannot use the shared
+    /// fallback timer, so off the runtime every request's hedge delay spawned
+    /// a thread that polled the clock every millisecond.
+    #[test]
+    fn default_config_waits_on_the_runtime_clock_not_a_custom_getter() {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        for (config, custom) in [
+            (HedgeConfig::new(Duration::from_secs(30)), false),
+            (
+                HedgeConfig::new(Duration::from_secs(30)).with_time_getter(test_time),
+                true,
+            ),
+        ] {
+            let plans = vec![TimedPlan::ok_at(u64::MAX, 1)];
+            let mut hedge = Hedge::new(
+                TimedService::new(plans, Arc::new(AtomicUsize::new(0))),
+                config,
+            );
+            assert!(matches!(hedge.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+            let future = hedge.call(1);
+            let HedgeFutureState::Running { sleep, .. } = &future.state else {
+                panic!("the call was authorized");
+            };
+            assert_eq!(sleep.has_custom_time_getter(), custom);
+        }
     }
 
     // ================================================================

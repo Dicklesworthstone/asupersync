@@ -36,11 +36,11 @@
 //! |------------|-------------------------|
 //! | `Alive`    | Leases to the node may be granted and held normally. |
 //! | `Suspect`  | The node's leases enter a *revocation-pending* state: no **new** grants are issued to it, but existing obligations are not yet discharged (a refutation can still rescue them). |
-//! | `Dead`     | Confirmed failure revokes the node's leases through the **normal** obligation protocol (commit/abort), which in turn triggers any attached saga compensation. |
+//! | `Dead`     | Confirmed failure revokes the node's leases through the **normal** obligation protocol (commit/abort). The abort runs no compensation by itself; the lease owner runs any cleanup, such as a saga step's compensation. |
 //! | `Left`     | Graceful departure revokes leases the same way, but is not treated as a fault for chaos/false-positive accounting. |
 //!
 //! Because `Dead`/`Left` revoke via the existing obligation discharge path, no
-//! novel "node died" cleanup code is required — death is just another reason an
+//! novel "node died" failure path is required — death is just another reason an
 //! obligation is aborted, and the structured-concurrency leak invariants
 //! (no obligation leaks) continue to hold. The `MembershipEvent` stream is the
 //! seam: bead `.4.3` subscribes the lease manager to it.

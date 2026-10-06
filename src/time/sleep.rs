@@ -953,11 +953,33 @@ impl Sleep {
                         // Update existing timer with new waker
                         if let Some(handle) = state.timer_handle.take() {
                             let old_id = handle.id();
-                            let new_handle = timer.update(
+                            let mut new_handle = timer.update(
                                 &handle,
                                 self.deadline,
                                 readiness_waker(Arc::clone(&self.ready), cx.waker().clone()),
                             );
+                            // `update` returns a handle the wheel has already
+                            // retired unchanged and registers nothing: the timer
+                            // fired after this poll checked `ready`, and its wake
+                            // goes to the previous waker only. Wake this poller if
+                            // the fire has landed; otherwise register this waker
+                            // afresh, so the fire still reaches it
+                            // (br-asupersync-2u7bpm L3). Compare whole handles:
+                            // a successful update reuses the slab id with a new
+                            // generation.
+                            if new_handle == handle {
+                                if self.ready.load(Ordering::Acquire) {
+                                    cx.waker().wake_by_ref();
+                                } else {
+                                    new_handle = timer.register(
+                                        self.deadline,
+                                        readiness_waker(
+                                            Arc::clone(&self.ready),
+                                            cx.waker().clone(),
+                                        ),
+                                    );
+                                }
+                            }
                             if let Some(trace) = trace.as_ref() {
                                 trace.record_event(|seq| {
                                     TraceEvent::timer_cancelled(seq, now, old_id)
@@ -1852,6 +1874,66 @@ mod tests {
         );
 
         crate::test_complete!("reset_cancels_old_timer_and_re_registers_on_poll");
+    }
+
+    /// br-asupersync-2u7bpm L3: a re-poll with a new waker updates the timer.
+    /// When the wheel had already retired the registration (it fired after
+    /// the poll's readiness check, before its waker ran), `update` returned
+    /// the stale handle unchanged and registered nothing, so the new waker was
+    /// never woken.
+    #[test]
+    fn repoll_with_a_new_waker_after_the_wheel_retired_the_timer_wakes_the_new_waker() {
+        init_test("repoll_with_a_new_waker_after_the_wheel_retired_the_timer_wakes_the_new_waker");
+
+        let clock = Arc::new(VirtualClock::new());
+        let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let _guard = Cx::set_current(Some(cx));
+
+        let mut sleep = Sleep::after(timer.now(), Duration::from_secs(5));
+        let first_woken = Arc::new(AtomicBool::new(false));
+        let first = waker_that_sets(Arc::clone(&first_woken));
+        assert!(
+            Pin::new(&mut sleep)
+                .poll(&mut Context::from_waker(&first))
+                .is_pending()
+        );
+
+        // The wheel retires the registration before this Sleep sees it fire.
+        let handle = sleep.state.lock().timer_handle.expect("a registered timer");
+        assert!(timer.cancel(&handle));
+
+        let second_woken = Arc::new(AtomicBool::new(false));
+        let second = waker_that_sets(Arc::clone(&second_woken));
+        assert!(
+            Pin::new(&mut sleep)
+                .poll(&mut Context::from_waker(&second))
+                .is_pending()
+        );
+
+        clock.set(Time::from_secs(5));
+        let _ = timer.process_timers();
+        assert!(
+            second_woken.load(Ordering::SeqCst),
+            "the waker of the latest poll is woken at the deadline"
+        );
+        assert!(
+            Pin::new(&mut sleep)
+                .poll(&mut Context::from_waker(&second))
+                .is_ready()
+        );
+        crate::test_complete!(
+            "repoll_with_a_new_waker_after_the_wheel_retired_the_timer_wakes_the_new_waker"
+        );
     }
 
     #[test]

@@ -21,6 +21,42 @@ use std::path::Path;
 #[cfg(feature = "tls")]
 use std::sync::Arc;
 
+/// The error `accept` returns when `require_sni` refuses a client that sent
+/// no SNI.
+#[cfg(feature = "tls")]
+fn sni_required_error() -> TlsError {
+    TlsError::Configuration(
+        "SECURITY: Client did not send SNI extension but require_sni() is set. \
+         SNI-less connections are rejected to prevent exposure of default \
+         certificate tenant in multi-tenant deployments (asupersync-3iqbx3)"
+            .into(),
+    )
+}
+
+/// The certificate resolver of an acceptor built with `require_sni`: it
+/// chooses no certificate for a ClientHello without SNI. rustls then aborts
+/// the handshake with an `access_denied` alert before it sends any
+/// certificate, so an SNI-less client never sees the chain
+/// (br-asupersync-2dxusr item 5). Hellos with SNI go to the inner resolver.
+#[cfg(feature = "tls")]
+#[derive(Debug)]
+struct RequireSniResolver(Arc<dyn rustls::server::ResolvesServerCert>);
+
+#[cfg(feature = "tls")]
+impl rustls::server::ResolvesServerCert for RequireSniResolver {
+    fn resolve(
+        &self,
+        client_hello: rustls::server::ClientHello<'_>,
+    ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        client_hello.server_name()?;
+        self.0.resolve(client_hello)
+    }
+
+    fn only_raw_public_keys(&self) -> bool {
+        self.0.only_raw_public_keys()
+    }
+}
+
 /// Server-side TLS acceptor.
 ///
 /// This is typically configured once and reused to accept many connections.
@@ -234,7 +270,7 @@ impl TlsAcceptor {
         let conn = ServerConnection::new(Arc::clone(&self.config))
             .map_err(|e| TlsError::Configuration(e.to_string()))?;
         let mut stream = TlsStream::new_server(io, conn);
-        if let Some(timeout) = self.handshake_timeout {
+        let handshake = if let Some(timeout) = self.handshake_timeout {
             match crate::time::timeout(
                 super::timeout_now(),
                 timeout,
@@ -242,11 +278,23 @@ impl TlsAcceptor {
             )
             .await
             {
-                Ok(result) => result?,
+                Ok(result) => result,
                 Err(_) => return Err(TlsError::Timeout(timeout)),
             }
         } else {
-            poll_fn(|cx| stream.poll_handshake(cx)).await?;
+            poll_fn(|cx| stream.poll_handshake(cx)).await
+        };
+        if let Err(err) = handshake {
+            // With require_sni, the certificate resolver refuses a hello
+            // without SNI, so the handshake fails before any certificate is
+            // sent (RequireSniResolver). Report that as the SNI refusal.
+            if self.require_sni
+                && matches!(err, TlsError::Handshake(_))
+                && stream.sni_hostname().is_none()
+            {
+                return Err(sni_required_error());
+            }
+            return Err(err);
         }
         if self.alpn_required {
             let expected = self.config.alpn_protocols.clone();
@@ -266,14 +314,11 @@ impl TlsAcceptor {
 
         // br-asupersync-vu10zb — require SNI when configured. Multi-
         // tenant servers MUST reject SNI-less connections so the
-        // default-cert tenant is not reachable via probing.
+        // default-cert tenant is not reachable via probing. The resolver
+        // already refused such a hello during the handshake; this check
+        // stays as defence in depth.
         if self.require_sni && stream.sni_hostname().is_none() {
-            return Err(TlsError::Configuration(
-                "SECURITY: Client did not send SNI extension but require_sni() is set. \
-                 SNI-less connections are rejected to prevent exposure of default \
-                 certificate tenant in multi-tenant deployments (asupersync-3iqbx3)"
-                    .into(),
-            ));
+            return Err(sni_required_error());
         }
 
         // br-asupersync-i4n46s — SNI/ALPN consistency check. When the
@@ -480,6 +525,10 @@ pub struct TlsAcceptorBuilder {
     /// acknowledged. Production deployments MUST specify a replay
     /// protection strategy when enabling 0-RTT.
     early_data_replay_protection: EarlyDataReplayProtection,
+    /// The rustls crypto provider set with [`Self::crypto_provider`].
+    /// `None` resolves as the `tls` module documentation describes.
+    #[cfg(feature = "tls")]
+    crypto_provider: Option<Arc<rustls::crypto::CryptoProvider>>,
 }
 
 impl TlsAcceptorBuilder {
@@ -615,14 +664,18 @@ impl TlsAcceptorBuilder {
             // Operators must explicitly specify protection strategy
             // when enabling 0-RTT.
             early_data_replay_protection: EarlyDataReplayProtection::None,
+            #[cfg(feature = "tls")]
+            crypto_provider: None,
         }
     }
 
     /// br-asupersync-vu10zb — require that incoming ClientHello
-    /// messages carry the SNI extension. Connections that omit SNI
-    /// are rejected after the rustls handshake completes (so the
-    /// connection state is fully established before
-    /// fail-closed) — necessary in multi-tenant deployments where
+    /// messages carry the SNI extension. A connection that omits SNI
+    /// is refused during the handshake, before the server sends its
+    /// certificate: the client gets an `access_denied` alert, and
+    /// `accept` returns a `TlsError::Configuration` that says SNI was
+    /// missing (br-asupersync-2dxusr item 5) — necessary in
+    /// multi-tenant deployments where
     /// SNI is the disambiguation primitive for which tenant's
     /// certificate / configuration applies. Without `require_sni()`
     /// a probing attacker reaches the default-cert tenant.
@@ -976,6 +1029,19 @@ impl TlsAcceptorBuilder {
         self
     }
 
+    /// Use `provider` for this acceptor's cipher suites, key exchange,
+    /// signing and client-certificate verification.
+    ///
+    /// Mirrors `TlsConnectorBuilder::crypto_provider`: without it, the
+    /// acceptor uses the ring provider when `tls` links it, else rustls's
+    /// process default; a `tls-core` build with neither fails in
+    /// [`Self::build`].
+    #[cfg(feature = "tls")]
+    pub fn crypto_provider(mut self, provider: Arc<rustls::crypto::CryptoProvider>) -> Self {
+        self.crypto_provider = Some(provider);
+        self
+    }
+
     /// Build the `TlsAcceptor`.
     ///
     /// # Errors
@@ -983,7 +1049,6 @@ impl TlsAcceptorBuilder {
     /// Returns an error if the configuration is invalid (e.g., invalid certificate/key pair).
     #[cfg(feature = "tls")]
     pub fn build(self) -> Result<TlsAcceptor, TlsError> {
-        use rustls::crypto::ring::default_provider;
         use rustls::server::WebPkiClientVerifier;
 
         if self.alpn_required && self.alpn_protocols.is_empty() {
@@ -1129,7 +1194,8 @@ impl TlsAcceptorBuilder {
         // narrower protocol range than the rustls safe defaults (e.g.,
         // TLS 1.3 only to eliminate downgrade-attack surface and TLS
         // 1.2 cipher-suite negotiation pitfalls).
-        let builder = ServerConfig::builder_with_provider(Arc::new(default_provider()));
+        let provider = super::resolve_crypto_provider(self.crypto_provider.as_ref())?;
+        let builder = ServerConfig::builder_with_provider(Arc::clone(&provider));
         let builder = if self.min_protocol.is_some() || self.max_protocol.is_some() {
             // Convert protocol versions to the wire ordinals so the
             // range comparison works regardless of the
@@ -1183,20 +1249,28 @@ impl TlsAcceptorBuilder {
                 .map_err(|e| TlsError::Configuration(e.to_string()))?
         };
 
-        // Configure client auth
+        // Configure client auth. `builder_with_provider` keeps the verifier on
+        // the connection's provider; plain `builder` would use rustls's
+        // process default.
         let builder = match self.client_auth {
             ClientAuth::None => builder.with_no_client_auth(),
             ClientAuth::Optional(roots) => {
-                let verifier = WebPkiClientVerifier::builder(Arc::new(roots.into_inner()))
-                    .allow_unauthenticated()
-                    .build()
-                    .map_err(|e| TlsError::Configuration(e.to_string()))?;
+                let verifier = WebPkiClientVerifier::builder_with_provider(
+                    Arc::new(roots.into_inner()),
+                    provider,
+                )
+                .allow_unauthenticated()
+                .build()
+                .map_err(|e| TlsError::Configuration(e.to_string()))?;
                 builder.with_client_cert_verifier(verifier)
             }
             ClientAuth::Required(roots) => {
-                let verifier = WebPkiClientVerifier::builder(Arc::new(roots.into_inner()))
-                    .build()
-                    .map_err(|e| TlsError::Configuration(e.to_string()))?;
+                let verifier = WebPkiClientVerifier::builder_with_provider(
+                    Arc::new(roots.into_inner()),
+                    provider,
+                )
+                .build()
+                .map_err(|e| TlsError::Configuration(e.to_string()))?;
                 builder.with_client_cert_verifier(verifier)
             }
         };
@@ -1204,6 +1278,12 @@ impl TlsAcceptorBuilder {
         let mut config = builder
             .with_single_cert(self.cert_chain.into_inner(), self.key.clone_inner())
             .map_err(|e| TlsError::Configuration(e.to_string()))?;
+
+        // Refuse a hello without SNI before the certificate is sent, not
+        // after the handshake completed (br-asupersync-2dxusr item 5).
+        if self.require_sni {
+            config.cert_resolver = Arc::new(RequireSniResolver(Arc::clone(&config.cert_resolver)));
+        }
 
         // Set ALPN if specified
         if !self.alpn_protocols.is_empty() {
@@ -2325,6 +2405,179 @@ SrXuVI5uunTgPWuOtJOP+KM=
             acceptor.require_sni,
             "require_sni() must flip the acceptor's flag"
         );
+    }
+
+    /// br-asupersync-2dxusr item 5: require_sni refused an SNI-less client
+    /// only after the handshake had completed, so the client had already
+    /// received the certificate it was meant to keep from probes. The
+    /// server now refuses the hello before it sends any certificate.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn require_sni_refuses_a_hello_without_sni_before_sending_the_certificate() {
+        use rustls::client::danger::{
+            HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+        };
+        use rustls::crypto::ring::default_provider;
+        use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        /// Accepts any certificate and records that one arrived.
+        #[derive(Debug)]
+        struct RecordingVerifier(Arc<AtomicBool>);
+
+        impl ServerCertVerifier for RecordingVerifier {
+            fn verify_server_cert(
+                &self,
+                _end_entity: &CertificateDer<'_>,
+                _intermediates: &[CertificateDer<'_>],
+                _server_name: &ServerName<'_>,
+                _ocsp_response: &[u8],
+                _now: UnixTime,
+            ) -> Result<ServerCertVerified, rustls::Error> {
+                self.0.store(true, Ordering::SeqCst);
+                Ok(ServerCertVerified::assertion())
+            }
+
+            fn verify_tls12_signature(
+                &self,
+                _message: &[u8],
+                _cert: &CertificateDer<'_>,
+                _dss: &rustls::DigitallySignedStruct,
+            ) -> Result<HandshakeSignatureValid, rustls::Error> {
+                Ok(HandshakeSignatureValid::assertion())
+            }
+
+            fn verify_tls13_signature(
+                &self,
+                _message: &[u8],
+                _cert: &CertificateDer<'_>,
+                _dss: &rustls::DigitallySignedStruct,
+            ) -> Result<HandshakeSignatureValid, rustls::Error> {
+                Ok(HandshakeSignatureValid::assertion())
+            }
+
+            fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+                default_provider()
+                    .signature_verification_algorithms
+                    .supported_schemes()
+            }
+        }
+
+        let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+        let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+        let acceptor = TlsAcceptorBuilder::new(chain, key)
+            .require_sni()
+            .build()
+            .expect("build should succeed");
+
+        let certificate_seen = Arc::new(AtomicBool::new(false));
+        let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(default_provider()))
+            .with_safe_default_protocol_versions()
+            .expect("default client protocol versions")
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(RecordingVerifier(Arc::clone(
+                &certificate_seen,
+            ))))
+            .with_no_client_auth();
+        config.enable_sni = false;
+        let server_name = ServerName::try_from("localhost".to_string()).expect("server name");
+        let mut client =
+            rustls::ClientConnection::new(Arc::new(config), server_name).expect("client config");
+        let mut server =
+            rustls::ServerConnection::new(Arc::clone(acceptor.config())).expect("server config");
+
+        let mut server_error = None;
+        for _ in 0..8 {
+            let mut to_server = Vec::new();
+            while client.wants_write() {
+                client.write_tls(&mut to_server).expect("client bytes");
+            }
+            let mut rest = to_server.as_slice();
+            while !rest.is_empty() && server_error.is_none() {
+                server.read_tls(&mut rest).expect("server reads");
+                if let Err(err) = server.process_new_packets() {
+                    server_error = Some(err);
+                }
+            }
+            let mut to_client = Vec::new();
+            while server.wants_write() {
+                server.write_tls(&mut to_client).expect("server bytes");
+            }
+            if to_client.is_empty() && to_server.is_empty() {
+                break;
+            }
+            let mut rest = to_client.as_slice();
+            while !rest.is_empty() {
+                client.read_tls(&mut rest).expect("client reads");
+                if client.process_new_packets().is_err() {
+                    break;
+                }
+            }
+        }
+
+        assert!(
+            !certificate_seen.load(Ordering::SeqCst),
+            "the SNI-less client received the server certificate"
+        );
+        assert!(
+            server_error.is_some(),
+            "the server refused the hello without SNI"
+        );
+        assert!(
+            client.is_handshaking(),
+            "the client never completed a handshake"
+        );
+    }
+
+    /// The same refusal through the public API: the client's connect fails,
+    /// and accept reports the missing SNI.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn require_sni_accept_reports_the_missing_sni_and_the_client_fails() {
+        use crate::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
+        use crate::net::tcp::VirtualTcpStream;
+        use futures_lite::future::zip;
+
+        let config = TestConfig::new()
+            .with_seed(0x2D_C5E5)
+            .with_max_steps(20_000);
+        let mut runtime = LabRuntimeTarget::create_runtime(config);
+        let (client_res, server_res) = LabRuntimeTarget::block_on(&mut runtime, async move {
+            let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+            let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+            let acceptor = TlsAcceptorBuilder::new(chain, key)
+                .require_sni()
+                .build()
+                .unwrap();
+            let certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
+            let connector = crate::tls::TlsConnectorBuilder::new()
+                .add_root_certificates(certs)
+                .disable_sni()
+                .build()
+                .unwrap();
+            let (client_io, server_io) = VirtualTcpStream::pair(
+                "127.0.0.1:5100".parse().unwrap(),
+                "127.0.0.1:5101".parse().unwrap(),
+            );
+            let (client_res, server_res) = zip(
+                connector.connect("localhost", client_io),
+                acceptor.accept(server_io),
+            )
+            .await;
+            (client_res.map(|_| ()), server_res.map(|_| ()))
+        });
+
+        assert!(
+            client_res.is_err(),
+            "a client without SNI completed the handshake"
+        );
+        match server_res {
+            Err(TlsError::Configuration(msg)) => assert!(
+                msg.contains("did not send SNI"),
+                "unexpected error message: {msg}"
+            ),
+            other => panic!("expected the SNI refusal, got {other:?}"),
+        }
     }
 
     /// br-asupersync-i4n46s — sni_alpn_allow_list whose protocols are

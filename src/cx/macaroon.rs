@@ -103,6 +103,8 @@ pub enum CaveatPredicate {
     ///
     /// The pattern uses simple glob syntax: `*` matches any segment,
     /// `**` matches any number of segments, exact segments match literally.
+    /// A path with a `.`, `..` or backslash segment never matches: check
+    /// the canonical (resolved) path.
     ResourceScope(String),
     /// Windowed rate limit: at most `max_count` uses per `window_secs` seconds.
     ///
@@ -613,16 +615,17 @@ impl MacaroonKeyRing {
         let active_match = self.active.constant_time_eq(candidate);
         // br-asupersync-y4fpfl: ALWAYS compare against the retired
         // slot, even when it's None, to keep verify wall-clock time
-        // independent of rotation state. The zero-signature sentinel
-        // comparison cannot match a legitimate HMAC output (which
-        // would require the attacker to find an HMAC-SHA256 preimage
-        // for the all-zeros output — infeasible).
+        // independent of rotation state. The candidate comes from the
+        // caller, so a sentinel match must never count: without a retired
+        // signature the comparison runs but its result is masked off
+        // (otherwise an all-zero candidate would match the zero sentinel).
         let zero_signature_sentinel = MacaroonSignature::from_bytes([0u8; AUTH_KEY_SIZE]);
         let retired_ref = self.retired.as_ref().unwrap_or(&zero_signature_sentinel);
-        let retired_match = retired_ref.constant_time_eq(candidate);
+        let retired_match =
+            u8::from(retired_ref.constant_time_eq(candidate)) & u8::from(self.retired.is_some());
         // OR-fold without short-circuit so the boolean combine itself
         // is also constant-time.
-        u8::from(active_match) | u8::from(retired_match) != 0
+        u8::from(active_match) | retired_match != 0
     }
 }
 
@@ -688,7 +691,26 @@ struct ThirdPartyVerification<'a> {
     /// bind-to-parent semantics that contradicted the spec and the
     /// `bind_for_request` docstring).
     auth_unbound_signature: &'a MacaroonSignature,
-    active_discharges: &'a mut Vec<u64>,
+    walk: &'a mut DischargeWalk,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Discharge verifications this thread ran (tests count the walk's work).
+    static DISCHARGE_VERIFICATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// State of one discharge verification walk.
+#[derive(Default)]
+struct DischargeWalk {
+    /// Discharges being verified on the current path (cycle detection and
+    /// the depth bound).
+    active: Vec<u64>,
+    /// Discharges this walk already verified, with the caveat key each was
+    /// verified under. A later caveat that references the same discharge
+    /// under the same key reuses the result: verifying it again for every
+    /// reference made fan-out discharge chains exponential (s45073 M1).
+    verified: std::collections::HashSet<(u64, [u8; AUTH_KEY_SIZE])>,
 }
 
 impl MacaroonToken {
@@ -898,16 +920,9 @@ impl MacaroonToken {
         context: &VerificationContext,
         discharges: &[Self],
     ) -> Result<(), VerificationError> {
-        let mut active_discharges = Vec::new();
-        self.verify_with_discharges_inner(
-            root_key,
-            context,
-            discharges,
-            None,
-            None,
-            &mut active_discharges,
-        )
-        .map(|_| ())
+        let mut walk = DischargeWalk::default();
+        self.verify_with_discharges_inner(root_key, context, discharges, None, None, &mut walk)
+            .map(|_| ())
     }
 
     /// Verify the token for a specific capability identifier, including any
@@ -926,16 +941,9 @@ impl MacaroonToken {
             });
         }
 
-        let mut active_discharges = Vec::new();
-        self.verify_with_discharges_inner(
-            root_key,
-            context,
-            discharges,
-            None,
-            None,
-            &mut active_discharges,
-        )
-        .map(|_| ())
+        let mut walk = DischargeWalk::default();
+        self.verify_with_discharges_inner(root_key, context, discharges, None, None, &mut walk)
+            .map(|_| ())
     }
 
     /// Maximum nesting depth for recursive third-party discharge verification.
@@ -967,32 +975,32 @@ impl MacaroonToken {
         discharges: &[Self],
         binding_signature: Option<&MacaroonSignature>,
         auth_unbound_signature: Option<&MacaroonSignature>,
-        active_discharges: &mut Vec<u64>,
+        walk: &mut DischargeWalk,
     ) -> Result<MacaroonSignature, VerificationError> {
         // Enhanced depth checking to prevent stack overflow (br-asupersync-kya99g)
-        if active_discharges.len() >= Self::MAX_DISCHARGE_DEPTH {
+        if walk.active.len() >= Self::MAX_DISCHARGE_DEPTH {
             return Err(VerificationError::DischargeChainTooDeep {
-                depth: active_discharges.len(),
+                depth: walk.active.len(),
             });
         }
 
         // Additional stack safety check (br-asupersync-kya99g)
         // Approximate stack usage check to prevent overflow in tight loops
         const STACK_FRAME_SIZE_ESTIMATE: usize = 2048; // Conservative estimate per frame
-        let approximate_stack_usage = active_discharges.len() * STACK_FRAME_SIZE_ESTIMATE;
+        let approximate_stack_usage = walk.active.len() * STACK_FRAME_SIZE_ESTIMATE;
         if approximate_stack_usage > 32768 {
             // Conservative 32KB stack usage limit
             return Err(VerificationError::DischargeChainTooDeep {
-                depth: active_discharges.len(),
+                depth: walk.active.len(),
             });
         }
 
         let unbound_signature = self.verify_discharge_signature(root_key, binding_signature)?;
         let self_ptr = Self::discharge_stack_id(self);
-        if active_discharges.contains(&self_ptr) {
+        if walk.active.contains(&self_ptr) {
             return Err(Self::discharge_invalid(0, &self.identifier));
         }
-        active_discharges.push(self_ptr);
+        walk.active.push(self_ptr);
 
         // br-asupersync-bst7yx: at the top level we just computed the
         // AUTH macaroon's unbound_sig — it becomes the
@@ -1002,16 +1010,10 @@ impl MacaroonToken {
         let effective_auth_unbound = auth_unbound_signature.unwrap_or(&unbound_signature);
 
         let result = self
-            .verify_caveat_chain(
-                root_key,
-                context,
-                discharges,
-                effective_auth_unbound,
-                active_discharges,
-            )
+            .verify_caveat_chain(root_key, context, discharges, effective_auth_unbound, walk)
             .map(|()| unbound_signature);
 
-        active_discharges.pop();
+        walk.active.pop();
         result
     }
 
@@ -1044,14 +1046,14 @@ impl MacaroonToken {
         context: &VerificationContext,
         discharges: &[Self],
         auth_unbound_signature: &MacaroonSignature,
-        active_discharges: &mut Vec<u64>,
+        walk: &mut DischargeWalk,
     ) -> Result<(), VerificationError> {
         let mut sig = hmac_compute(root_key, self.identifier.as_bytes());
         let mut third_party = ThirdPartyVerification {
             context,
             discharges,
             auth_unbound_signature,
-            active_discharges,
+            walk,
         };
         for (index, caveat) in self.caveats.iter().enumerate() {
             sig = match caveat {
@@ -1111,31 +1113,42 @@ impl MacaroonToken {
         .map_err(|_| VerificationError::WeakCaveatKey)?;
         let discharge = Self::find_discharge(index, tp_id, verification.discharges)?;
         let discharge_ptr = Self::discharge_stack_id(discharge);
-        if verification.active_discharges.contains(&discharge_ptr) {
+        if verification.walk.active.contains(&discharge_ptr) {
             return Err(Self::discharge_invalid(index, tp_id));
         }
 
-        // Stack overflow protection (br-asupersync-kya99g)
-        if verification.active_discharges.len() >= Self::MAX_DISCHARGE_DEPTH - 1 {
-            return Err(VerificationError::DischargeChainTooDeep {
-                depth: verification.active_discharges.len() + 1,
-            });
-        }
+        // A discharge verified under this caveat key earlier in the walk is
+        // valid here too: the context and the binding (the authorizing
+        // token's unbound signature) are the same for the whole walk.
+        // (Recording it before verifying is safe: a failure aborts the whole
+        // walk, and a discharge that references itself is caught by the
+        // `active` check above first.)
+        let memo = (discharge_ptr, *caveat_key.as_bytes());
+        if verification.walk.verified.insert(memo) {
+            #[cfg(test)]
+            DISCHARGE_VERIFICATIONS.with(|count| count.set(count.get() + 1));
+            // Stack overflow protection (br-asupersync-kya99g)
+            if verification.walk.active.len() >= Self::MAX_DISCHARGE_DEPTH - 1 {
+                return Err(VerificationError::DischargeChainTooDeep {
+                    depth: verification.walk.active.len() + 1,
+                });
+            }
 
-        // br-asupersync-bst7yx: bind ALL nested discharges to the
-        // ROOT authorizing macaroon's unbound_sig (not the parent
-        // discharge's). This matches the Macaroon spec and the
-        // bind_for_request docstring.
-        discharge
-            .verify_with_discharges_inner(
-                &caveat_key,
-                verification.context,
-                verification.discharges,
-                Some(verification.auth_unbound_signature),
-                Some(verification.auth_unbound_signature),
-                verification.active_discharges,
-            )
-            .map_err(|err| Self::map_discharge_error(index, tp_id, err))?;
+            // br-asupersync-bst7yx: bind ALL nested discharges to the
+            // ROOT authorizing macaroon's unbound_sig (not the parent
+            // discharge's). This matches the Macaroon spec and the
+            // bind_for_request docstring.
+            discharge
+                .verify_with_discharges_inner(
+                    &caveat_key,
+                    verification.context,
+                    verification.discharges,
+                    Some(verification.auth_unbound_signature),
+                    Some(verification.auth_unbound_signature),
+                    verification.walk,
+                )
+                .map_err(|err| Self::map_discharge_error(index, tp_id, err))?;
+        }
 
         let mut chain_bytes = Vec::with_capacity(vid.len() + tp_id.len());
         chain_bytes.extend_from_slice(vid);
@@ -1694,6 +1707,15 @@ fn read_len_prefixed_bytes(data: &[u8], pos: &mut usize) -> Option<Vec<u8>> {
 fn glob_match(pattern: &str, path: &str) -> bool {
     let pattern_parts: Vec<&str> = pattern.split('/').filter(|s| !s.is_empty()).collect();
     let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    // A non-canonical path can name something outside the pattern's scope
+    // once it is resolved (`files/public/../secret`), so it never matches
+    // (s45073 M2).
+    if segs
+        .iter()
+        .any(|seg| *seg == "." || *seg == ".." || seg.contains('\\'))
+    {
+        return false;
+    }
     glob_match_parts(&pattern_parts, &segs)
 }
 
@@ -1855,6 +1877,26 @@ mod tests {
         assert!(ring.verify(&new));
         ring.retire(); // idempotent
         assert!(ring.retired.is_none());
+    }
+
+    #[test]
+    fn macaroon_ring_without_a_retired_slot_rejects_the_zero_signature() {
+        // The retired-slot comparison runs against a zero sentinel when no
+        // signature is retired; a caller-supplied all-zero candidate must
+        // not match it.
+        let zero = MacaroonSignature::from_bytes([0u8; AUTH_KEY_SIZE]);
+        let old = MacaroonSignature::from_bytes([0x11u8; 32]);
+        let new = MacaroonSignature::from_bytes([0x22u8; 32]);
+        let mut ring = MacaroonKeyRing::new(old);
+        assert!(
+            !ring.verify(&zero),
+            "a fresh ring rejects the zero signature"
+        );
+        ring.rotate(new);
+        assert!(!ring.verify(&zero), "a rotating ring rejects it");
+        ring.retire();
+        assert!(!ring.verify(&zero), "a ring whose window closed rejects it");
+        assert!(ring.verify(&new));
     }
 
     #[test]
@@ -3046,6 +3088,58 @@ mod tests {
         assert!(super::glob_match("foo/**", "foo/bar/baz"));
         assert!(super::glob_match("foo/**", "foo"));
         assert!(!super::glob_match("foo/**", "bar/foo"));
+    }
+
+    #[test]
+    fn glob_never_matches_a_path_that_could_leave_its_scope() {
+        // `*` and `**` used to match `..`, so a resource check passed a
+        // path that resolves outside the pattern (s45073 M2).
+        assert!(!super::glob_match(
+            "files/public/**",
+            "files/public/../secret/key"
+        ));
+        assert!(!super::glob_match("a/*", "a/.."));
+        assert!(!super::glob_match("a/*", "a/."));
+        assert!(!super::glob_match("a/**", "a/b\\..\\c"));
+        assert!(super::glob_match("files/public/**", "files/public/x/key"));
+    }
+
+    #[test]
+    fn a_discharge_referenced_many_times_is_verified_once() {
+        // Each level references the next discharge four times. Verifying a
+        // discharge again for every reference made this 4 + 16 + 64 = 84
+        // discharge verifications (exponential in depth); the walk now
+        // verifies each (discharge, caveat key) pair once (s45073 M1).
+        let root_key = test_root_key();
+        let keys = [
+            AuthKey::from_seed(901),
+            AuthKey::from_seed(902),
+            AuthKey::from_seed(903),
+        ];
+        let mut token = MacaroonToken::mint(&root_key, "cap", "loc");
+        for _ in 0..4 {
+            token = token.add_third_party_caveat("tp", "d1", &keys[0]);
+        }
+        let mut d1 = MacaroonToken::mint(&keys[0], "d1", "tp");
+        let mut d2 = MacaroonToken::mint(&keys[1], "d2", "tp");
+        for _ in 0..4 {
+            d1 = d1.add_third_party_caveat("tp", "d2", &keys[1]);
+            d2 = d2.add_third_party_caveat("tp", "d3", &keys[2]);
+        }
+        let d3 = MacaroonToken::mint(&keys[2], "d3", "tp");
+        let discharges: Vec<MacaroonToken> = [d1, d2, d3]
+            .iter()
+            .map(|discharge| token.bind_for_request(discharge).expect("bind"))
+            .collect();
+
+        DISCHARGE_VERIFICATIONS.with(|count| count.set(0));
+        let ctx = VerificationContext::new().with_time(1000);
+        assert!(
+            token
+                .verify_with_discharges(&root_key, &ctx, &discharges)
+                .is_ok()
+        );
+        assert_eq!(DISCHARGE_VERIFICATIONS.with(std::cell::Cell::get), 3);
     }
 
     #[test]

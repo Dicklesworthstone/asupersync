@@ -313,6 +313,26 @@ mod tests {
     }
 
     #[test]
+    fn a_large_bound_reserves_a_small_queue_and_grows_to_it() {
+        // br-asupersync-9ngu0p: the queue reserved the whole bound, so a large
+        // bound panicked with a capacity overflow or allocated it all up front.
+        init_test("a_large_bound_reserves_a_small_queue_and_grows_to_it");
+        let huge = std::panic::catch_unwind(|| channel::<u64>(usize::MAX / 4));
+        assert!(huge.is_ok(), "a large bound must not overflow the queue");
+
+        let (tx, mut rx) = channel::<[u8; 4096]>(1 << 20);
+        assert!(tx.shared.inner.lock().queue.capacity() <= 64);
+        for _ in 0..100 {
+            tx.try_send([7; 4096]).expect("below the bound");
+        }
+        assert_eq!(tx.shared.inner.lock().queue.len(), 100, "the queue grows");
+        let cx = test_cx();
+        let first = block_on(rx.recv(&cx)).expect("first message");
+        assert_eq!(first[0], 7);
+        crate::test_complete!("a_large_bound_reserves_a_small_queue_and_grows_to_it");
+    }
+
+    #[test]
     fn recv_cancelled_display_has_asup_e203() {
         init_test("recv_cancelled_display_has_asup_e203");
         let text = RecvError::Cancelled.to_string();
@@ -1419,8 +1439,12 @@ mod tests {
                 SenderDrainAction::ReceiverDrop => drop(rx),
             }
 
-            assert_waker_retired_after_unlock(&drops, &unlocked_drops, action.name());
+            // The drain retired the channel's clone; the pending reserve's
+            // cancellation registration still owns the waker, so its final
+            // destructor runs when the reserve drops, with the channel unlocked.
+            assert_eq!(drops.load(Ordering::SeqCst), 0, "{}", action.name());
             drop(reserve);
+            assert_waker_retired_after_unlock(&drops, &unlocked_drops, action.name());
         }
 
         crate::test_complete!("sender_waiter_drains_retire_wakers_after_unlock");
@@ -1482,6 +1506,195 @@ mod tests {
 
         assert_waker_retired_after_unlock(&drops, &unlocked_drops, "Recv::drop");
         crate::test_complete!("recv_future_drop_retires_waker_after_unlock");
+    }
+
+    /// A safe Waker that panics when woken (br-asupersync-9siwk7).
+    struct PanickingMpscWaker;
+
+    impl std::task::Wake for PanickingMpscWaker {
+        fn wake(self: Arc<Self>) {
+            panic!("hostile mpsc waker panics on wake");
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            panic!("hostile mpsc waker panics on wake");
+        }
+    }
+
+    type ParkedReserve<'a> = Pin<Box<Reserve<'a, u32>>>;
+
+    /// Parks two senders on a full channel: the first with a Waker that panics,
+    /// the second with one that counts its wakes.
+    fn two_parked_senders<'a>(
+        tx: &'a Sender<u32>,
+        cx: &'a Cx,
+        woken: &Arc<AtomicUsize>,
+    ) -> (ParkedReserve<'a>, ParkedReserve<'a>, Waker) {
+        let panicking = Waker::from(Arc::new(PanickingMpscWaker));
+        let counting = counting_waker(Arc::clone(woken));
+        let mut first = Box::pin(tx.reserve(cx));
+        let mut second = Box::pin(tx.reserve(cx));
+        assert!(
+            first
+                .as_mut()
+                .poll(&mut Context::from_waker(&panicking))
+                .is_pending()
+        );
+        assert!(
+            second
+                .as_mut()
+                .poll(&mut Context::from_waker(&counting))
+                .is_pending()
+        );
+        assert_eq!(tx.shared.inner.lock().waiter_queue.len(), 2);
+        (first, second, counting)
+    }
+
+    /// close() detaches every waiting sender and then wakes them. A panic in
+    /// the first sender's Waker stranded the second, which is no longer
+    /// registered anywhere. Now every sender is woken and the panic is resumed
+    /// after the fan-out (br-asupersync-9siwk7).
+    #[test]
+    fn close_wakes_every_detached_sender_when_one_waker_panics() {
+        init_test("close_wakes_every_detached_sender_when_one_waker_panics");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<u32>(1);
+        tx.try_send(1).unwrap();
+        let woken = Arc::new(AtomicUsize::new(0));
+        let (first, mut second, counting) = two_parked_senders(&tx, &cx, &woken);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rx.close()));
+        assert!(
+            result.is_err(),
+            "close resumes the wake panic after the fan-out"
+        );
+        assert_eq!(
+            woken.load(Ordering::SeqCst),
+            1,
+            "the second sender is woken"
+        );
+        assert!(matches!(
+            second.as_mut().poll(&mut Context::from_waker(&counting)),
+            Poll::Ready(Err(SendError::Disconnected(())))
+        ));
+        drop(first);
+        crate::test_complete!("close_wakes_every_detached_sender_when_one_waker_panics");
+    }
+
+    /// recv_many frees several slots and wakes one waiting sender per freed
+    /// slot in a loop; a panicking first Waker stranded the second sender
+    /// (br-asupersync-9siwk7).
+    #[test]
+    fn recv_many_wakes_every_sender_for_freed_slots_when_one_waker_panics() {
+        init_test("recv_many_wakes_every_sender_for_freed_slots_when_one_waker_panics");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<u32>(2);
+        tx.try_send(1).unwrap();
+        tx.try_send(2).unwrap();
+        let woken = Arc::new(AtomicUsize::new(0));
+        let (first, mut second, counting) = two_parked_senders(&tx, &cx, &woken);
+        let mut buffer = Vec::new();
+        let mut recv = Box::pin(rx.recv_many(&cx, &mut buffer, 2));
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            recv.as_mut().poll(&mut Context::from_waker(&noop_waker()))
+        }));
+        assert!(
+            result.is_err(),
+            "recv_many resumes the wake panic after the fan-out"
+        );
+        assert_eq!(
+            woken.load(Ordering::SeqCst),
+            1,
+            "the second sender is woken"
+        );
+        drop(recv);
+        assert_eq!(buffer, vec![1, 2]);
+        // Reservation is FIFO: the second sender acquires once the head leaves.
+        drop(first);
+        let Poll::Ready(Ok(permit)) = second.as_mut().poll(&mut Context::from_waker(&counting))
+        else {
+            panic!("the second sender obtains a freed slot");
+        };
+        permit.try_send(3).unwrap();
+        crate::test_complete!("recv_many_wakes_every_sender_for_freed_slots_when_one_waker_panics");
+    }
+
+    /// Dropping the receiver while a panic unwinds wakes the waiting senders.
+    /// A panicking sender Waker there was a second panic, which aborts the
+    /// process; now its payload is dropped silently and the other sender is
+    /// still woken (br-asupersync-9siwk7).
+    #[test]
+    fn receiver_dropped_during_an_unwind_survives_a_panicking_sender_waker() {
+        init_test("receiver_dropped_during_an_unwind_survives_a_panicking_sender_waker");
+        let cx = test_cx();
+        let (tx, rx) = channel::<u32>(1);
+        tx.try_send(1).unwrap();
+        let woken = Arc::new(AtomicUsize::new(0));
+        let (first, second, _counting) = two_parked_senders(&tx, &cx, &woken);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let receiver = rx;
+            std::hint::black_box(&receiver);
+            panic!("unwind in progress");
+        }));
+        let payload = result.expect_err("the unwind's own panic propagates");
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&"unwind in progress"));
+        assert_eq!(
+            woken.load(Ordering::SeqCst),
+            1,
+            "the second sender is woken"
+        );
+        drop((first, second));
+        crate::test_complete!(
+            "receiver_dropped_during_an_unwind_survives_a_panicking_sender_waker"
+        );
+    }
+
+    /// A Reserve woken for a freed slot and then dropped hands the slot to the
+    /// next waiting sender. When that drop runs during an unwind and the next
+    /// sender's Waker panics, the process aborted; now the unwind carries on
+    /// with its own payload (br-asupersync-9siwk7).
+    #[test]
+    fn reserve_dropped_during_an_unwind_survives_a_panicking_successor_waker() {
+        init_test("reserve_dropped_during_an_unwind_survives_a_panicking_successor_waker");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<u32>(1);
+        tx.try_send(1).unwrap();
+        let woken = Arc::new(AtomicUsize::new(0));
+        let counting = counting_waker(Arc::clone(&woken));
+        let panicking = Waker::from(Arc::new(PanickingMpscWaker));
+        let mut head = Box::pin(tx.reserve(&cx));
+        let mut successor = Box::pin(tx.reserve(&cx));
+        assert!(
+            head.as_mut()
+                .poll(&mut Context::from_waker(&counting))
+                .is_pending()
+        );
+        assert!(
+            successor
+                .as_mut()
+                .poll(&mut Context::from_waker(&panicking))
+                .is_pending()
+        );
+        assert_eq!(rx.try_recv(), Ok(1));
+        assert_eq!(
+            woken.load(Ordering::SeqCst),
+            1,
+            "the head is woken for the slot"
+        );
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let woken_but_unpolled = head;
+            std::hint::black_box(&woken_but_unpolled);
+            panic!("unwind in progress");
+        }));
+        let payload = result.expect_err("the unwind's own panic propagates");
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&"unwind in progress"));
+        drop(successor);
+        crate::test_complete!(
+            "reserve_dropped_during_an_unwind_survives_a_panicking_successor_waker"
+        );
     }
 
     #[test]
@@ -2449,7 +2662,14 @@ mod tests {
         let mut task_cx = Context::from_waker(&waker);
         let mut reserve = Box::pin(tx.reserve(&cx));
         assert!(reserve.as_mut().poll(&mut task_cx).is_pending());
-        assert_eq!(probe.clones(), 1, "initial registration clones once");
+        // One clone for the channel registration and two for the pending
+        // reserve's cancellation registration: its own strong owner and the
+        // Cx registry's, so no final destructor runs under either lock.
+        assert_eq!(
+            probe.clones(),
+            3,
+            "registration clones the waker three times"
+        );
         assert_eq!(
             probe.clones_under_lock(),
             0,
@@ -2460,7 +2680,7 @@ mod tests {
             .expect("free one slot and snapshot head waiter");
         assert_eq!(
             probe.clones(),
-            1,
+            3,
             "head wake snapshot must clone only Arc<RegisteredWaker>"
         );
         assert_eq!(probe.wakes(), 1, "head waiter is woken once");
@@ -2488,7 +2708,8 @@ mod tests {
         let mut second = Box::pin(tx.reserve(&cx));
         assert!(first.as_mut().poll(&mut sender_cx).is_pending());
         assert!(second.as_mut().poll(&mut sender_cx).is_pending());
-        assert_eq!(probe.clones(), 2, "each registration clones once");
+        // Three clones per pending reserve, as in the head-snapshot test.
+        assert_eq!(probe.clones(), 6, "each registration clones three times");
         assert_eq!(probe.clones_under_lock(), 0);
 
         let receiver_waker = noop_waker();
@@ -2500,7 +2721,7 @@ mod tests {
         ));
         assert_eq!(
             probe.clones(),
-            2,
+            6,
             "batch wake snapshot must clone only Arc<RegisteredWaker>"
         );
         assert_eq!(probe.wakes(), 2, "both capacity waiters are woken");

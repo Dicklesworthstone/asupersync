@@ -94,10 +94,12 @@ impl fmt::Debug for RegistryHandle {
 ///
 /// - **Reserve** (`NameLease::new`): creates the lease with an armed
 ///   [`ObligationToken<LeaseKind>`]. The name is now owned.
-/// - **Commit** (`release()`): the holder is done; obligation committed,
-///   name slot freed.
-/// - **Abort** (`abort()`): cancellation/cleanup path; obligation aborted,
-///   name slot freed.
+/// - **Commit** (`release()`): the holder is done; obligation committed.
+/// - **Abort** (`abort()`): cancellation/cleanup path; obligation aborted.
+///
+/// Resolving the lease does not touch the [`NameRegistry`]: free the name
+/// there too, with [`NameRegistry::unregister_owned_and_grant`] (or
+/// `unregister`), or `whereis` keeps reporting the holder.
 ///
 /// Dropping without resolving panics, approximating linear-type ownership.
 #[derive(Debug)]
@@ -187,7 +189,8 @@ impl NameLease {
 
     /// Release the name (commit the obligation).
     ///
-    /// The name slot is freed and the obligation is committed.
+    /// The obligation is committed. The registry entry is not removed:
+    /// free the name with [`NameRegistry::unregister_owned_and_grant`].
     ///
     /// # Errors
     ///
@@ -201,7 +204,8 @@ impl NameLease {
     /// Abort the name lease (abort the obligation).
     ///
     /// Used when the holder is cancelled or the region is cleaning up.
-    /// The name slot is freed.
+    /// The obligation is aborted. The registry entry is not removed: free
+    /// the name with [`NameRegistry::unregister_owned_and_grant`].
     ///
     /// # Errors
     ///
@@ -815,6 +819,9 @@ impl NameRegistry {
                 current_holder: entry.holder,
             });
         }
+        // Mint before mutating: minting panics for a root-region holder
+        // (ASUP-E103), which must leave the registry unchanged.
+        let lease = NameLease::new(name.clone(), holder, region, now);
         self.leases.insert(
             name.clone(),
             NameEntry {
@@ -825,7 +832,7 @@ impl NameRegistry {
             },
         );
         self.emit_name_change(&name, holder, region, NameOwnershipKind::Acquired);
-        Ok(NameLease::new(name, holder, region, now))
+        Ok(lease)
     }
 
     /// Reserve a name, creating a [`NamePermit`].
@@ -860,12 +867,14 @@ impl NameRegistry {
             });
         }
         let permit_id = self.next_permit_id;
+        // Mint before mutating (see `register`).
+        let permit = NamePermit::new(name.clone(), holder, region, now, permit_id);
         self.next_permit_id = self
             .next_permit_id
             .checked_add(1)
             .expect("permit identity overflow");
         self.pending.insert(
-            name.clone(),
+            name,
             NameEntry {
                 holder,
                 region,
@@ -873,7 +882,7 @@ impl NameRegistry {
                 identity_nonce: permit_id,
             },
         );
-        Ok(NamePermit::new(name, holder, region, now, permit_id))
+        Ok(permit)
     }
 
     /// Commit a permit, transitioning it to a [`NameLease`].
@@ -994,11 +1003,11 @@ impl NameRegistry {
     /// - [`NameLeaseError::AlreadyResolved`] if the permit was already
     ///   committed or aborted.
     ///
-    /// On any error other than `AlreadyResolved`, the pending entry is
-    /// not removed and the obligation token is not resolved — the
-    /// caller can retry safely. On `AlreadyResolved`, the pending
-    /// entry is also left intact (the registry has no proof that the
-    /// permit ever owned it).
+    /// On an error, a pending entry the permit does not own is left
+    /// intact, and the permit's obligation token is still resolved
+    /// (aborted): the permit is consumed, and an entry that is gone or
+    /// belongs to someone else can never be cancelled by it later, so
+    /// returning with the token armed would only panic on drop.
     pub fn abort_permit(
         &mut self,
         mut permit: NamePermit,
@@ -1008,7 +1017,11 @@ impl NameRegistry {
         // never resolve the obligation while leaving the registry in
         // a leaked-pending state. cancel_permit returns
         // PermissionDenied / NotFound without mutating the token.
-        self.cancel_permit(&permit, now)?;
+        if let Err(error) = self.cancel_permit(&permit, now) {
+            // AlreadyResolved means the token is resolved already.
+            let _ = permit.abort();
+            return Err(error);
+        }
         // Resolve the obligation token. This is the only call site of
         // the now-pub(crate) `NamePermit::abort` outside registry.rs's
         // own internal commit_permit error paths.
@@ -1044,7 +1057,9 @@ impl NameRegistry {
 
         match existing {
             None => {
-                // No collision — register normally.
+                // No collision — register normally, minting first (see
+                // `register`).
+                let lease = NameLease::new(&name, holder, region, now);
                 self.leases.insert(
                     name.clone(),
                     NameEntry {
@@ -1055,7 +1070,6 @@ impl NameRegistry {
                     },
                 );
                 self.emit_name_change(&name, holder, region, NameOwnershipKind::Acquired);
-                let lease = NameLease::new(&name, holder, region, now);
                 Ok(NameCollisionOutcome::Registered { lease })
             }
             Some(entry) => {
@@ -1067,6 +1081,8 @@ impl NameRegistry {
                         current_holder,
                     }),
                     NameCollisionPolicy::Replace => {
+                        // Mint before displacing anyone (see `register`).
+                        let lease = NameLease::new(&name, holder, region, now);
                         // Remove old entries from both maps; track whether
                         // the displaced holder had an active lease (vs pending).
                         let was_active = self.leases.remove(&name).is_some();
@@ -1093,7 +1109,6 @@ impl NameRegistry {
                             },
                         );
                         self.emit_name_change(&name, holder, region, NameOwnershipKind::Acquired);
-                        let lease = NameLease::new(&name, holder, region, now);
                         Ok(NameCollisionOutcome::Replaced {
                             lease,
                             displaced_holder: current_holder,
@@ -1104,6 +1119,15 @@ impl NameRegistry {
                         if deadline < now {
                             return Err(NameLeaseError::WaitBudgetExceeded { name });
                         }
+                        // A granted waiter is minted a lease, which panics
+                        // for a root-region holder (ASUP-E103). Fail here, in
+                        // the waiter's own call, not later inside whichever
+                        // task frees the name.
+                        assert!(
+                            region.as_u64() != 0,
+                            "[ASUP-E103] Cannot wait for name {name:?} from the root region: \
+                             a name lease is an obligation and must be scoped to a non-root region"
+                        );
                         // Enqueue a budgeted waiter.
                         self.waiters
                             .entry(name)
@@ -4663,5 +4687,92 @@ mod tests {
             "name_lease:сервис-α-🔒"
         );
         let _ = uni.release().expect("unicode lease cleanup");
+    }
+
+    /// The root region: minting a lease for it panics (ASUP-E103).
+    fn root() -> RegionId {
+        RegionId::from_arena(ArenaIndex::new(0, 0))
+    }
+
+    #[test]
+    fn abort_permit_resolves_its_permit_when_the_pending_entry_is_gone() {
+        init_test("abort_permit_resolves_its_permit_when_the_pending_entry_is_gone");
+        let now = Time::from_secs(1);
+        let mut reg = NameRegistry::new();
+        let permit = reg.reserve("svc", tid(1), rid(1), now).expect("reserve");
+        let NameCollisionOutcome::Replaced { mut lease, .. } = reg
+            .register_with_policy("svc", tid(2), rid(2), now, NameCollisionPolicy::Replace)
+            .expect("replace")
+        else {
+            panic!("Replace displaces the pending permit");
+        };
+        // The permit's entry is gone; aborting it must report that, not
+        // panic by dropping the permit with its token armed.
+        let aborted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            reg.abort_permit(permit, now)
+        }));
+        assert!(
+            matches!(aborted, Ok(Err(NameLeaseError::NotFound { .. }))),
+            "abort_permit returns NotFound: {aborted:?}"
+        );
+        assert_eq!(
+            reg.whereis("svc"),
+            Some(tid(2)),
+            "the replacement keeps the name"
+        );
+        let _ = lease.release().expect("release the replacement");
+    }
+
+    #[test]
+    fn a_root_region_registration_panics_before_changing_the_registry() {
+        init_test("a_root_region_registration_panics_before_changing_the_registry");
+        let now = Time::from_secs(1);
+        let mut reg = NameRegistry::new();
+        let register = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            reg.register("svc", tid(1), root(), now)
+        }));
+        assert!(
+            register.is_err(),
+            "a root-region lease is refused (ASUP-E103)"
+        );
+        assert_eq!(reg.whereis("svc"), None, "and leaves no lease-less entry");
+
+        let reserve = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            reg.reserve("svc", tid(1), root(), now)
+        }));
+        assert!(reserve.is_err(), "a root-region permit is refused");
+        let mut lease = reg
+            .register("svc", tid(2), rid(2), now)
+            .expect("name still free");
+
+        let replace = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            reg.register_with_policy("svc", tid(3), root(), now, NameCollisionPolicy::Replace)
+        }));
+        assert!(replace.is_err(), "a root-region replacement is refused");
+        assert_eq!(
+            reg.whereis("svc"),
+            Some(tid(2)),
+            "the holder is not displaced by a refused replacement"
+        );
+
+        let wait = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            reg.register_with_policy(
+                "svc",
+                tid(4),
+                root(),
+                now,
+                NameCollisionPolicy::Wait {
+                    deadline: Time::from_secs(60),
+                },
+            )
+        }));
+        assert!(
+            wait.is_err(),
+            "a root-region waiter is refused when it enqueues"
+        );
+        assert_eq!(reg.waiter_count(), 0, "no waiter is left for a later grant");
+        reg.unregister_owned_and_grant(&lease, now)
+            .expect("unregister");
+        let _ = lease.release().expect("release");
     }
 }

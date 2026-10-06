@@ -159,6 +159,9 @@ pub struct Interval {
     period: Duration,
     /// Behavior for missed ticks.
     missed_tick_behavior: MissedTickBehavior,
+    /// Set once the tick at `Time::MAX` has fired: no later deadline exists,
+    /// so the interval stays silent until it is reset.
+    exhausted: bool,
 }
 
 impl Interval {
@@ -187,6 +190,7 @@ impl Interval {
             deadline: start,
             period,
             missed_tick_behavior: MissedTickBehavior::default(),
+            exhausted: false,
         }
     }
 
@@ -255,7 +259,7 @@ impl Interval {
     /// assert_eq!(tick, Time::from_millis(100));
     /// ```
     pub fn poll_tick(&mut self, now: Time) -> Option<Time> {
-        if now >= self.deadline {
+        if !self.exhausted && now >= self.deadline {
             let tick_time = self.deadline;
             self.advance_deadline(now);
             Some(tick_time)
@@ -289,7 +293,7 @@ impl Interval {
     pub fn tick(&mut self, now: Time) -> Time {
         // If we're called before the deadline, just return the deadline without advancing.
         // This prevents consuming the tick prematurely or calculating incorrect delays.
-        if now < self.deadline {
+        if self.exhausted || now < self.deadline {
             return self.deadline;
         }
 
@@ -337,6 +341,7 @@ impl Interval {
     /// ```
     pub fn reset(&mut self, now: Time) {
         self.deadline = now;
+        self.exhausted = false;
     }
 
     /// Resets the interval to start at a specific time.
@@ -354,6 +359,7 @@ impl Interval {
     /// ```
     pub fn reset_at(&mut self, instant: Time) {
         self.deadline = instant;
+        self.exhausted = false;
     }
 
     /// Resets the interval to fire after a delay from now.
@@ -371,10 +377,17 @@ impl Interval {
     /// ```
     pub fn reset_after(&mut self, now: Time, after: Duration) {
         self.deadline = now.saturating_add_nanos(duration_as_nanos_u64_saturating(after));
+        self.exhausted = false;
     }
 
     /// Advances the deadline according to the missed tick behavior.
     fn advance_deadline(&mut self, now: Time) {
+        // A tick at Time::MAX is the last one; every later deadline would
+        // saturate back to Time::MAX and fire again forever.
+        if self.deadline == Time::MAX {
+            self.exhausted = true;
+            return;
+        }
         let period_nanos = duration_as_nanos_u64_saturating(self.period);
 
         match self.missed_tick_behavior {
@@ -477,6 +490,27 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    #[test]
+    fn a_tick_at_time_max_is_the_last_until_reset() {
+        init_test("a_tick_at_time_max_is_the_last_until_reset");
+        let mut interval = Interval::new(Time::ZERO, Duration::MAX);
+        assert_eq!(interval.poll_tick(Time::MAX), Some(Time::ZERO));
+        assert_eq!(interval.poll_tick(Time::MAX), Some(Time::MAX));
+        assert_eq!(
+            interval.poll_tick(Time::MAX),
+            None,
+            "nothing comes after Time::MAX"
+        );
+        assert_eq!(interval.tick(Time::MAX), Time::MAX);
+        assert_eq!(interval.poll_tick(Time::MAX), None);
+
+        interval.reset_after(Time::ZERO, Duration::from_secs(1));
+        assert_eq!(
+            interval.poll_tick(Time::from_secs(1)),
+            Some(Time::from_secs(1))
+        );
     }
 
     #[test]

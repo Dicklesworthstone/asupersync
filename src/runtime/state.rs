@@ -2012,6 +2012,9 @@ pub struct RuntimeState {
     state_verifier: Arc<super::state_verifier::StateTransitionVerifier>,
     /// Cancel protocol state machine validator for runtime cancellation compliance.
     cancel_protocol_validator: Arc<parking_lot::Mutex<CancelProtocolValidator>>,
+    /// Whether that validator tracks state machines. When it does not
+    /// (release builds), runtime paths skip its lock entirely.
+    cancel_protocol_tracking: bool,
     /// Cancellation debt accumulation monitor.
     debt_monitor: Arc<crate::observability::CancellationDebtMonitor>,
     /// Resource monitor for graceful degradation.
@@ -2211,8 +2214,8 @@ impl RuntimeState {
             )),
             // Protocol validation feeds violation diagnostics only. It tracks
             // every task in this crate's tests and debug builds; release builds
-            // keep an untracked validator so spawn and completion skip its map
-            // work (br-asupersync-issue65-criticisms-kpmoy5.1.8).
+            // keep an untracked validator, and spawn, completion and obligation
+            // paths skip its global lock (br-asupersync-issue65-criticisms-kpmoy5.1.8).
             cancel_protocol_validator: Arc::new(parking_lot::Mutex::new(
                 if cfg!(any(test, debug_assertions)) {
                     CancelProtocolValidator::new(CancelValidationLevel::Basic)
@@ -2220,6 +2223,7 @@ impl RuntimeState {
                     CancelProtocolValidator::untracked()
                 },
             )),
+            cancel_protocol_tracking: cfg!(any(test, debug_assertions)),
             debt_monitor: Arc::new(crate::observability::CancellationDebtMonitor::default()),
             resource_monitor,
             swarm_pressure_governor,
@@ -2616,6 +2620,24 @@ impl RuntimeState {
         &self.cancel_protocol_validator
     }
 
+    /// The validator's lock, or `None` when it tracks nothing: an untracked
+    /// validator answers every call with "valid" and records nothing, so
+    /// callers skip the global lock and return that answer themselves.
+    #[inline]
+    fn tracked_cancel_protocol_validator(
+        &self,
+    ) -> Option<parking_lot::MutexGuard<'_, CancelProtocolValidator>> {
+        self.cancel_protocol_tracking
+            .then(|| self.cancel_protocol_validator.lock())
+    }
+
+    /// Runs the runtime on an untracked validator, as release builds do.
+    #[cfg(test)]
+    pub(crate) fn use_untracked_cancel_protocol_validator(&mut self) {
+        *self.cancel_protocol_validator.lock() = CancelProtocolValidator::untracked();
+        self.cancel_protocol_tracking = false;
+    }
+
     /// Validates a region state transition using the cancel protocol validator.
     fn validate_region_protocol_transition(
         &self,
@@ -2623,7 +2645,9 @@ impl RuntimeState {
         event: RegionEvent,
         context: &RegionContext,
     ) -> TransitionResult {
-        let mut validator = self.cancel_protocol_validator.lock();
+        let Some(mut validator) = self.tracked_cancel_protocol_validator() else {
+            return TransitionResult::Valid;
+        };
         validator.validate_region_transition(region_id, event, context)
     }
 
@@ -2656,6 +2680,9 @@ impl RuntimeState {
         event: RegionEvent,
         operation: &'static str,
     ) {
+        if !self.cancel_protocol_tracking {
+            return;
+        }
         let context = {
             let Some(region) = regions
                 .resolve_ref(&self.regions)
@@ -2687,7 +2714,9 @@ impl RuntimeState {
         event: TaskEvent,
         context: &TaskContext,
     ) -> TransitionResult {
-        let mut validator = self.cancel_protocol_validator.lock();
+        let Some(mut validator) = self.tracked_cancel_protocol_validator() else {
+            return TransitionResult::Valid;
+        };
         validator.validate_task_transition_without_logging(task_id, event, context)
     }
 
@@ -2724,6 +2753,9 @@ impl RuntimeState {
         task_id: TaskId,
         event: TaskEvent,
     ) -> Option<TransitionResult> {
+        if !self.cancel_protocol_tracking {
+            return None;
+        }
         let context = {
             let task = tasks.resolve_ref(&self.tasks).task(task_id)?;
             TaskContext {
@@ -2751,7 +2783,9 @@ impl RuntimeState {
         event: ObligationEvent,
         context: &ObligationContext,
     ) -> TransitionResult {
-        let mut validator = self.cancel_protocol_validator.lock();
+        let Some(mut validator) = self.tracked_cancel_protocol_validator() else {
+            return TransitionResult::Valid;
+        };
         validator.validate_obligation_transition(obligation_id, event, context)
     }
 
@@ -2762,7 +2796,9 @@ impl RuntimeState {
         created_at: Time,
     ) {
         {
-            let mut validator = self.cancel_protocol_validator.lock();
+            let Some(mut validator) = self.tracked_cancel_protocol_validator() else {
+                return;
+            };
             validator.register_region(region_id);
         }
 
@@ -3093,7 +3129,7 @@ impl RuntimeState {
             validation_level: CancelValidationLevel::Basic,
         };
         let validation_result = {
-            let mut validator = self.cancel_protocol_validator.lock();
+            let mut validator = self.tracked_cancel_protocol_validator()?;
             if allow_retired_noop && validator.task_state(task_id).is_none() {
                 return None;
             }
@@ -3133,7 +3169,7 @@ impl RuntimeState {
             validation_level: CancelValidationLevel::Basic,
         };
         let validation_result = {
-            let mut validator = self.cancel_protocol_validator.lock();
+            let mut validator = self.tracked_cancel_protocol_validator()?;
             // External completion validates and removes the task machine in one
             // validator critical section. When the caller proves the record was
             // already detached, a missing machine means completion overtook this
@@ -3166,7 +3202,9 @@ impl RuntimeState {
         cancellation_materialized: bool,
     ) {
         let (request_result, completion_result) = {
-            let mut validator = self.cancel_protocol_validator.lock();
+            let Some(mut validator) = self.tracked_cancel_protocol_validator() else {
+                return;
+            };
             let request_result = if cancellation_materialized
                 && matches!(
                     validator.task_state(task_id),
@@ -3485,7 +3523,9 @@ impl RuntimeState {
         // every spawn and `TaskId`s carry generations so recycled slots mint
         // fresh keys rather than overwriting
         // (br-asupersync-cancelvalidator-leak-mdvuf9).
-        self.cancel_protocol_validator.lock().remove_task(task_id);
+        if self.cancel_protocol_tracking {
+            self.cancel_protocol_validator.lock().remove_task(task_id);
+        }
         self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
     }
 
@@ -4041,7 +4081,7 @@ impl RuntimeState {
         let task_id = TaskId::from_arena(idx);
 
         // Register task with cancel protocol validator
-        {
+        if self.cancel_protocol_tracking {
             let mut validator = self.cancel_protocol_validator.lock();
             validator.register_task(task_id, region);
         }
@@ -4084,7 +4124,9 @@ impl RuntimeState {
                 tasks
                     .resolve(&mut self.tasks)
                     .remove_and_recycle_task(task_id);
-                self.cancel_protocol_validator.lock().remove_task(task_id);
+                if self.cancel_protocol_tracking {
+                    self.cancel_protocol_validator.lock().remove_task(task_id);
+                }
                 self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
                 return Err(match err {
                     AdmissionError::Closed => SpawnError::RegionClosed(region),
@@ -4103,7 +4145,9 @@ impl RuntimeState {
             tasks
                 .resolve(&mut self.tasks)
                 .remove_and_recycle_task(task_id);
-            self.cancel_protocol_validator.lock().remove_task(task_id);
+            if self.cancel_protocol_tracking {
+                self.cancel_protocol_validator.lock().remove_task(task_id);
+            }
             self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
             return Err(SpawnError::RegionNotFound(region));
         }
@@ -4117,7 +4161,7 @@ impl RuntimeState {
         let logical_clock = self
             .logical_clock_mode
             .build_handle(self.timer_driver_handle());
-        let cx = crate::cx::Cx::new_with_drivers(
+        let cx = crate::cx::Cx::new_with_drivers_and_clock(
             region,
             task_id,
             budget,
@@ -4126,9 +4170,9 @@ impl RuntimeState {
             None,
             self.timer_driver_handle(),
             Some(entropy),
+            logical_clock,
         )
         .with_blocking_pool_handle(self.blocking_pool_handle())
-        .with_logical_clock(logical_clock)
         .with_spawn_gateway(self.spawn_gateway.clone())
         .with_pending_spawn_counter(
             regions
@@ -4151,6 +4195,11 @@ impl RuntimeState {
         );
         cx.set_trace_buffer(self.trace_handle());
         cx.set_loser_drain_history_handle(self.loser_drain_history_handle());
+        // Cleanup (async finalizer) tasks keep their masked legacy deadline
+        // handling; only work tasks get the deadline timer.
+        if !cleanup_task {
+            cx.arm_budget_deadline();
+        }
         let cx_weak = std::sync::Arc::downgrade(&cx.inner);
 
         // Link the shared state to the TaskRecord in the minting table.
@@ -4438,7 +4487,7 @@ impl RuntimeState {
             });
         let task_id = TaskId::from_arena(idx);
 
-        {
+        if self.cancel_protocol_tracking {
             let mut validator = self.cancel_protocol_validator.lock();
             validator.register_task(task_id, region);
         }
@@ -4471,7 +4520,9 @@ impl RuntimeState {
             tasks
                 .resolve(&mut self.tasks)
                 .remove_and_recycle_task(task_id);
-            self.cancel_protocol_validator.lock().remove_task(task_id);
+            if self.cancel_protocol_tracking {
+                self.cancel_protocol_validator.lock().remove_task(task_id);
+            }
             self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
             let error = match err {
                 AdmissionError::Closed => SpawnError::RegionClosed(region),
@@ -4494,7 +4545,7 @@ impl RuntimeState {
         let logical_clock = self
             .logical_clock_mode
             .build_handle(self.timer_driver_handle());
-        let cx = crate::cx::Cx::new_with_drivers(
+        let cx = crate::cx::Cx::new_with_drivers_and_clock(
             region,
             task_id,
             budget,
@@ -4503,9 +4554,9 @@ impl RuntimeState {
             None,
             self.timer_driver_handle(),
             Some(entropy),
+            logical_clock,
         )
         .with_blocking_pool_handle(self.blocking_pool_handle())
-        .with_logical_clock(logical_clock)
         .with_spawn_gateway(self.spawn_gateway.clone())
         .with_pending_spawn_counter(
             regions
@@ -4544,6 +4595,7 @@ impl RuntimeState {
         }
         cx.set_trace_buffer(self.trace_handle());
         cx.set_loser_drain_history_handle(self.loser_drain_history_handle());
+        cx.arm_budget_deadline();
         tasks
             .resolve(&mut self.tasks)
             .update_task(task_id, |record| {
@@ -4715,7 +4767,7 @@ impl RuntimeState {
             .observability
             .as_ref()
             .map(|obs| obs.for_task(child_region, principal_task_id));
-        let principal_cx = crate::cx::Cx::new_with_drivers(
+        let principal_cx = crate::cx::Cx::new_with_drivers_and_clock(
             child_region,
             principal_task_id,
             record_budget,
@@ -4724,12 +4776,10 @@ impl RuntimeState {
             None,
             self.timer_driver_handle(),
             Some(self.entropy_source.fork(principal_task_id)),
-        )
-        .with_blocking_pool_handle(self.blocking_pool_handle())
-        .with_logical_clock(
             self.logical_clock_mode
                 .build_handle(self.timer_driver_handle()),
         )
+        .with_blocking_pool_handle(self.blocking_pool_handle())
         .with_spawn_gateway(self.spawn_gateway.clone())
         .with_pending_spawn_counter(
             self.region(child_region)
@@ -5994,7 +6044,7 @@ impl RuntimeState {
         self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::RegionTable);
 
         // Register obligation with cancel protocol validator
-        {
+        if self.cancel_protocol_tracking {
             let mut validator = self.cancel_protocol_validator.lock();
             validator.register_obligation(obligation);
         }
@@ -6075,9 +6125,11 @@ impl RuntimeState {
     ) {
         match sink {
             LifecycleEffectsSink::Inline => {
-                self.cancel_protocol_validator
-                    .lock()
-                    .remove_obligation(obligation);
+                if self.cancel_protocol_tracking {
+                    self.cancel_protocol_validator
+                        .lock()
+                        .remove_obligation(obligation);
+                }
             }
             LifecycleEffectsSink::Buffered(buffer) => {
                 buffer.push(LifecycleEffect::ValidatorRemoveObligation(obligation));
@@ -6100,9 +6152,11 @@ impl RuntimeState {
                     self.dispatch_region_lifecycle_effect(effect);
                 }
                 LifecycleEffect::ValidatorRemoveObligation(obligation) => {
-                    self.cancel_protocol_validator
-                        .lock()
-                        .remove_obligation(obligation);
+                    if self.cancel_protocol_tracking {
+                        self.cancel_protocol_validator
+                            .lock()
+                            .remove_obligation(obligation);
+                    }
                 }
             }
         }
@@ -7593,8 +7647,11 @@ impl RuntimeState {
         let all_tasks_done = region
             .tasks_completed(&|task_id| tasks.task(task_id).is_some_and(|t| t.state.is_terminal()));
 
-        // Check all child regions are closed
-        let all_children_closed = region.child_ids().iter().all(|&child_id| {
+        // Check all child regions are closed. In place, like the tasks: a
+        // cloned child list on every advance made draining N child regions
+        // O(N^2) (br-asupersync-exeimj). A child's state is an atomic, so no
+        // second region lock is taken under this one.
+        let all_children_closed = region.children_closed(&|child_id| {
             regions
                 .get(child_id.arena_index())
                 .is_none_or(|r| r.state().is_terminal())
@@ -8333,7 +8390,7 @@ impl RuntimeState {
             let logical_clock = self
                 .logical_clock_mode
                 .build_handle(self.timer_driver_handle());
-            let cx = crate::cx::Cx::new_with_drivers(
+            let cx = crate::cx::Cx::new_with_drivers_and_clock(
                 region_id,
                 cleanup_task,
                 cleanup_budget,
@@ -8342,8 +8399,8 @@ impl RuntimeState {
                 None,
                 self.timer_driver_handle(),
                 Some(entropy),
+                logical_clock,
             )
-            .with_logical_clock(logical_clock)
             .with_runtime_obligation_context();
             cx.set_trace_buffer(self.trace_handle());
             cx.set_loser_drain_history_handle(self.loser_drain_history_handle());
@@ -9453,7 +9510,11 @@ impl RuntimeState {
     /// into the machine when accounting is not terminal.
     fn dispatch_region_close_validation(&self, region_id: RegionId) {
         let validation_result = {
-            let mut validator = self.cancel_protocol_validator.lock();
+            // An untracked validator holds no region accounting, so this check
+            // would report every close as a violation.
+            let Some(mut validator) = self.tracked_cancel_protocol_validator() else {
+                return;
+            };
             let validator_state = validator.region_state(region_id).cloned();
             let already_finalized = matches!(
                 validator_state,
@@ -9600,9 +9661,11 @@ impl RuntimeState {
                 self.dispatch_region_closed_effects(region_id, parent, created_at);
             }
             RegionLifecycleEffect::RemoveValidator { region_id } => {
-                self.cancel_protocol_validator
-                    .lock()
-                    .remove_region(region_id);
+                if self.cancel_protocol_tracking {
+                    self.cancel_protocol_validator
+                        .lock()
+                        .remove_region(region_id);
+                }
             }
         }
     }

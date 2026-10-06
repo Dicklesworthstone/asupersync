@@ -746,7 +746,7 @@ impl NativeQuicUdpConnection {
             };
             let frames = [QuicFrame::ConnectionClose {
                 error_code,
-                frame_type: None,
+                frame_type: self.connection.inner().local_close_frame_type(),
                 reason_phrase: Bytes::new(),
             }];
             let mut payload = BytesMut::new();
@@ -1189,6 +1189,17 @@ impl NativeQuicUdpConnection {
                     // hole. Reliable frames can return under a fresh number.
                     progress.packets_dropped = progress.packets_dropped.saturating_add(1);
                     continue;
+                }
+                // A peer violation closed the connection: send its transport
+                // CONNECTION_CLOSE before reporting the error. A failed send
+                // keeps the close for a later flush.
+                if self.connection.inner().local_close_frame_type().is_some()
+                    && matches!(
+                        self.flush(cx).await,
+                        Err(NativeQuicUdpConnectionError::Cancelled)
+                    )
+                {
+                    return Err(NativeQuicUdpConnectionError::Cancelled);
                 }
                 return Err(error.into());
             }
@@ -2305,6 +2316,86 @@ mod tests {
                     .receive_wait_duration(&cx, Duration::from_secs(1))
                     .unwrap(),
                 Duration::from_secs(1)
+            );
+        });
+    }
+
+    /// br-asupersync-tzjbn9 F3: a peer frame past the stream's receive window
+    /// returned the error with the connection still open and nothing sent, so
+    /// the peer never learned why. RFC 9000 10.2 and 4.1: the connection closes
+    /// with FLOW_CONTROL_ERROR in a transport CONNECTION_CLOSE.
+    #[test]
+    fn udp_peer_flow_control_violation_sends_a_transport_close() {
+        block_on(async {
+            let cx = Cx::for_testing();
+            let (mut client, mut server) = authenticated_udp_pair().await;
+            let stream = client.connection.inner_mut().open_local_bidi(&cx).unwrap();
+            // Past both the stream and the connection receive limits.
+            let config = NativeQuicConnectionConfig::default();
+            let frames = [QuicFrame::Stream {
+                stream_id: VarInt(stream.0),
+                offset: Some(VarInt(config.recv_window.max(config.connection_recv_limit))),
+                data: Bytes::from_static(b"x"),
+                fin: false,
+            }];
+            let mut payload = BytesMut::new();
+            NativeQuicConnection::encode_frames(&frames, &mut payload).unwrap();
+            let packet = assemble_protected_1rtt_packet(
+                &cx,
+                server.local_cid,
+                client.connection.inner_mut(),
+                &mut client.protection,
+                &frames,
+                &payload,
+                0,
+                false,
+            )
+            .await
+            .unwrap();
+            let sent = client
+                .endpoint
+                .send_batch(
+                    &cx,
+                    &[OutgoingPacket {
+                        dst_addr: server.local_addr(),
+                        data: packet,
+                        send_time: None,
+                    }],
+                )
+                .await
+                .unwrap();
+            assert_eq!(sent.packets_processed, 1);
+
+            let error = server
+                .drive_io_once(&cx, Duration::from_secs(5))
+                .await
+                .expect_err("the violation is still reported");
+            assert!(
+                matches!(error, NativeQuicUdpConnectionError::Transport(_)),
+                "{error:?}"
+            );
+            assert_eq!(
+                server.connection.inner().state(),
+                QuicConnectionState::Draining
+            );
+            assert_eq!(
+                server.connection.inner().transport().close_code(),
+                Some(0x03),
+                "FLOW_CONTROL_ERROR"
+            );
+            assert!(!server.connection.close_was_peer_initiated());
+            let close = server.local_close.as_ref().expect("a close was assembled");
+            assert!(!close.pending, "and sent before the error returned");
+
+            let progress = client
+                .drive_io_once(&cx, Duration::from_secs(5))
+                .await
+                .unwrap();
+            assert_eq!(progress.packets_received, 1);
+            assert!(client.connection.close_was_peer_initiated());
+            assert_eq!(
+                client.connection.inner().transport().close_code(),
+                Some(0x03)
             );
         });
     }

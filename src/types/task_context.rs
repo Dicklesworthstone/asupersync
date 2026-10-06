@@ -66,6 +66,22 @@ pub(crate) struct CancelWakerRegistration {
     pub(crate) target: Arc<CancelWaker>,
 }
 
+/// The timer that cancels a context when its budget deadline passes, so a task
+/// parked in a cancel-aware wait learns of the deadline without reaching a
+/// checkpoint (br-asupersync-pev2xi). Dropping it, with the context, removes the
+/// timer from the wheel.
+#[derive(Debug)]
+pub(crate) struct BudgetDeadlineTimer {
+    pub(crate) timer: crate::time::TimerDriverHandle,
+    pub(crate) handle: crate::time::TimerHandle,
+}
+
+impl Drop for BudgetDeadlineTimer {
+    fn drop(&mut self) {
+        let _ = self.timer.cancel(&self.handle);
+    }
+}
+
 /// Closed task-cancellation trace events that can cross the post-lock effect
 /// boundary without retaining an arbitrary callback or destructor.
 #[derive(Debug, Clone, Copy)]
@@ -753,7 +769,7 @@ impl Default for CheckpointState {
             last_checkpoint: None,
             last_message: None,
             checkpoint_count: 0,
-            history: VecDeque::with_capacity(DEFAULT_CHECKPOINT_HISTORY_CAPACITY),
+            history: VecDeque::new(),
             history_capacity: DEFAULT_CHECKPOINT_HISTORY_CAPACITY,
         }
     }
@@ -881,6 +897,8 @@ pub struct CxInner {
     pub(crate) next_cancel_waker_token: u64,
     /// Set when task completion detaches the registry permanently.
     pub(crate) cancel_waker_registry_closed: bool,
+    /// Timer armed at the budget deadline (br-asupersync-pev2xi).
+    pub(crate) budget_deadline_timer: Option<BudgetDeadlineTimer>,
     /// Current mask depth.
     pub mask_depth: u32,
     /// The task runs its cancellation cleanup: `budget` is the cleanup budget,
@@ -945,6 +963,7 @@ impl CxInner {
             cancel_waker_registrations: Vec::new(),
             next_cancel_waker_token: 0,
             cancel_waker_registry_closed: false,
+            budget_deadline_timer: None,
             mask_depth: 0,
             cleanup_phase: false,
             checkpoint_state: CheckpointState::new(),
@@ -1020,6 +1039,9 @@ impl CxInner {
     pub(crate) fn take_cancel_wakers(&mut self) -> smallvec::SmallVec<[Arc<CancelWaker>; 4]> {
         self.cancel_waker_registry_closed = true;
         self.cancel_wakers_pending = false;
+        // A finished task's deadline cancels nothing: take its timer out of the
+        // wheel now, not when the context drops (br-asupersync-pev2xi).
+        drop(self.budget_deadline_timer.take());
         #[cfg(feature = "tracing-integration")]
         {
             // A task that retires without ever crossing admission has no lane

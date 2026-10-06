@@ -1189,6 +1189,7 @@ pub async fn receive_bonded_with_options_and_advertised_ips(
     let symbol_auth_enabled = symbol_auth.is_some();
     let manifest = manifest_from_bonded_descriptor(descriptor);
     validate_manifest(&manifest, &config)?;
+    check_bonded_receive_symbol_budget(descriptor, &config)?;
 
     // UDP symbol plane first so every enrollment can advertise the ports.
     let bind_ip: std::net::IpAddr = udp_bind_ip
@@ -3399,6 +3400,76 @@ mod tests {
         );
         assert!(refusal.contains(&hello.max_block_size.to_string()));
         assert!(refusal.contains(&descriptor.max_block_size.to_string()));
+    }
+
+    /// br-asupersync-w9yojl census LOW-1: a bonded descriptor's geometry was
+    /// checked only for zero. One byte per block over a 1 MiB entry needs
+    /// 2^20 source blocks (a source block number names 256), and the donor
+    /// and the receiver sized and iterated per-block state from it.
+    #[test]
+    fn bonded_descriptor_geometry_gets_the_hello_bounds() {
+        let mut descriptor = bonded_enrollment_descriptor();
+        descriptor.entries = vec![crate::net::atp::bonding::BondEntry {
+            index: 0,
+            rel_path: "payload.bin".to_string(),
+            size: 1 << 20,
+            sha256_hex: "0".repeat(64),
+        }];
+        descriptor.total_bytes = 1 << 20;
+        descriptor.max_block_size = 1;
+        let mut config = RqConfig::default();
+        let before = config.max_block_size;
+        let err = apply_bonded_descriptor_config(&descriptor, &mut config)
+            .expect_err("one byte per block over 1 MiB is refused");
+        assert!(
+            matches!(&err, RqError::Coding(reason) if reason.contains("source blocks")),
+            "{err:?}"
+        );
+        assert_eq!(
+            config.max_block_size, before,
+            "a refused geometry is not adopted"
+        );
+
+        descriptor.max_block_size = 64 * 1024;
+        apply_bonded_descriptor_config(&descriptor, &mut config).expect("a sound geometry applies");
+        assert_eq!(config.max_block_size, 64 * 1024);
+    }
+
+    /// The receiver also applies the Hello path's source-symbol budget. With
+    /// 16-byte symbols, three 200 MB entries (each within the per-entry
+    /// bounds) need 37.5 million source symbols, over the 2^24 floor budget
+    /// of a receiver limited to 1 GiB.
+    #[test]
+    fn bonded_receive_refuses_a_descriptor_over_the_source_symbol_budget() {
+        let mut descriptor = bonded_enrollment_descriptor();
+        descriptor.symbol_size = 16;
+        descriptor.max_block_size = 900_000;
+        descriptor.entries = (0..3)
+            .map(|index| crate::net::atp::bonding::BondEntry {
+                index,
+                rel_path: format!("part{index}.bin"),
+                size: 200_000_000,
+                sha256_hex: "0".repeat(64),
+            })
+            .collect();
+        descriptor.total_bytes = 600_000_000;
+        let config = RqConfig {
+            max_transfer_bytes: 1 << 30,
+            ..RqConfig::default()
+        };
+        let mut adopted = config.clone();
+        apply_bonded_descriptor_config(&descriptor, &mut adopted)
+            .expect("each entry is within the per-entry bounds");
+        let err = check_bonded_receive_symbol_budget(&descriptor, &adopted)
+            .expect_err("the transfer is over the receiver's symbol budget");
+        assert!(
+            matches!(&err, RqError::Coding(reason) if reason.contains("budget")),
+            "{err:?}"
+        );
+
+        descriptor.symbol_size = 1024;
+        check_bonded_receive_symbol_budget(&descriptor, &adopted)
+            .expect("the same bytes in 1024-byte symbols fit");
     }
 
     #[test]

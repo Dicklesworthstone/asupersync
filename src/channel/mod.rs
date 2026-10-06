@@ -5,7 +5,8 @@
 //! these channels split the send operation into two steps:
 //!
 //! 1. **Reserve**: Allocate a slot and create an obligation
-//! 2. **Commit**: Send the actual message (cannot fail)
+//! 2. **Commit**: Send the actual message (never waits; if the receiver is
+//!    gone it fails and hands the message back)
 //!
 //! # Cancel Safety
 //!
@@ -13,7 +14,9 @@
 //!
 //! - If cancelled during reserve: nothing is committed
 //! - If cancelled after reserve: the permit's `Drop` impl aborts cleanly
-//! - The commit operation (`send`) is infallible once the permit is obtained
+//! - The commit operation (`send`) never waits once the permit is obtained; it
+//!   fails only if the receiver is gone, returning the message
+//!   (`Disconnected(value)`), so a commit never loses it silently
 //!
 //! Use bounded [`mpsc::channel`] by default. [`mpsc::unbounded_channel`] (also
 //! available as [`mpsc::unbounded`]) is available when the caller has a separate

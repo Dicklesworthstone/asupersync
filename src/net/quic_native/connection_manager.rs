@@ -811,6 +811,7 @@ impl ConnectionRouter {
                         if error.is_stream_reassembly_backpressure() {
                             return Ok(false);
                         }
+                        Self::request_peer_violation_close(handle);
                         return Err(ConnectionRouterError::PacketProcessingFailed {
                             connection_id,
                             reason: error.to_string(),
@@ -915,6 +916,7 @@ impl ConnectionRouter {
                         reason: "stream reassembly backpressure".to_string(),
                     });
                 }
+                Self::request_peer_violation_close(handle);
                 return Err(ConnectionRouterError::PacketProcessingFailed {
                     connection_id,
                     reason: error.to_string(),
@@ -1369,6 +1371,22 @@ impl ConnectionRouter {
             }
         }
         Ok(packets)
+    }
+
+    /// A peer frame that broke a transport rule has closed this connection
+    /// (`process_packet_frames`). Its transport CONNECTION_CLOSE leaves on the
+    /// next deferred-output turn, as a requested close does.
+    fn request_peer_violation_close(handle: &mut ConnectionHandle) {
+        #[cfg(all(feature = "tls", any(test, feature = "http3")))]
+        if handle.local_close_output.is_none()
+            && handle.connection.local_close_frame_type().is_some()
+        {
+            handle.local_close_output = Some(LocalCloseOutput::Requested);
+            handle.deferred_spaces = [false; 3];
+            handle.next_timer_deadline = None;
+        }
+        #[cfg(not(all(feature = "tls", any(test, feature = "http3"))))]
+        let _ = handle;
     }
 
     /// Refresh a connection's PTO deadline from its transport state.
@@ -1976,7 +1994,7 @@ async fn prepare_local_close_packet(
     };
     let frames = [QuicFrame::ConnectionClose {
         error_code,
-        frame_type: None,
+        frame_type: handle.connection.local_close_frame_type(),
         reason_phrase: crate::bytes::Bytes::new(),
     }];
     if !handle.connection.is_local_close_frame(&frames) {
@@ -5719,6 +5737,82 @@ mod tests {
             assert_eq!(
                 router.connections[&cid].local_close_output,
                 Some(LocalCloseOutput::Requested)
+            );
+        });
+    }
+
+    /// br-asupersync-tzjbn9 F3: the managed endpoint logged a peer's stream
+    /// violation and kept the connection open, with the packet partly applied
+    /// and unacknowledged, so every retransmission failed again. The route now
+    /// closes with the transport code, and the next deferred-output turn sends
+    /// the transport CONNECTION_CLOSE that names the frame type.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn authenticated_peer_flow_control_violation_sends_a_transport_close() {
+        run_test_with_cx(|cx| async move {
+            let config = NativeQuicConnectionConfig::default();
+            let mut router = ConnectionRouter::new(config);
+            let cid = ConnectionId::new(b"violated").unwrap();
+            let peer_cid = ConnectionId::new(b"violator").unwrap();
+            let peer = "127.0.0.1:4493".parse().unwrap();
+            let origin = router.clock_origin;
+            add_authenticated_close_test_connection(&cx, &mut router, cid, peer_cid, peer, origin)
+                .await;
+            // Past both the stream and the connection receive limits.
+            let frames = [QuicFrame::Stream {
+                stream_id: VarInt(1),
+                offset: Some(VarInt(config.recv_window.max(config.connection_recv_limit))),
+                data: Bytes::from_static(b"x"),
+                fin: false,
+            }];
+            let mut payload = BytesMut::new();
+            NativeQuicConnection::encode_frames(&frames, &mut payload).unwrap();
+            let mut sender = NativeQuicConnection::new(config);
+            establish_for_application_data(&cx, &mut sender);
+            let mut sender_protection = deterministic_one_rtt_protection(&cx).await;
+            let data = assemble_protected_1rtt_packet(
+                &cx,
+                cid,
+                &mut sender,
+                &mut sender_protection,
+                &frames,
+                &payload,
+                1_000,
+                true,
+            )
+            .await
+            .unwrap();
+            let now = origin + Duration::from_millis(1);
+            let packet = ReceivedPacket {
+                src_addr: peer,
+                data,
+                receive_time: now,
+                transmit_time: None,
+            };
+            assert!(matches!(
+                router.route_packet_with_output(&cx, packet, true).await,
+                Err(ConnectionRouterError::PacketProcessingFailed { .. })
+            ));
+            let handle = &router.connections[&cid];
+            assert_eq!(handle.connection.state(), QuicConnectionState::Draining);
+            assert_eq!(handle.connection.transport().close_code(), Some(0x03));
+
+            let packets = router.drain_deferred_output(&cx, now, 8).await.unwrap();
+            assert_eq!(packets.len(), 1, "only the close leaves");
+            assert_eq!(packets[0].packet.dst_addr, peer);
+            let mut verifier = deterministic_one_rtt_protection(&cx).await;
+            let decoded =
+                unprotect_1rtt_packet(&cx, peer_cid, &mut verifier, &packets[0].packet.data)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                NativeQuicConnection::decode_frames(&decoded.plaintext).unwrap(),
+                vec![QuicFrame::ConnectionClose {
+                    error_code: VarInt(0x03),
+                    frame_type: Some(VarInt(0x0c)),
+                    reason_phrase: Bytes::new(),
+                }],
+                "FLOW_CONTROL_ERROR for a STREAM frame with an offset"
             );
         });
     }

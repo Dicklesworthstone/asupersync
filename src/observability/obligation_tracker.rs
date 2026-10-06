@@ -44,9 +44,11 @@ use std::time::Duration;
 pub struct ObligationTrackerConfig {
     /// Age threshold for potential leak warnings (default: 60s).
     pub leak_age_threshold: Duration,
-    /// Enable periodic leak checks.
+    /// Enable periodic leak checks. Not applied yet: the tracker runs no
+    /// periodic check; call
+    /// [`ObligationTracker::find_potential_leaks_default`] instead.
     pub periodic_checks: bool,
-    /// Interval between periodic checks.
+    /// Interval between periodic checks. Not applied yet.
     pub check_interval: Duration,
 }
 
@@ -68,7 +70,8 @@ impl ObligationTrackerConfig {
         self
     }
 
-    /// Enable periodic leak checks at the specified interval.
+    /// Enable periodic leak checks at the specified interval. Not applied
+    /// yet (see [`ObligationTrackerConfig::periodic_checks`]).
     #[must_use]
     pub fn with_periodic_checks(mut self, interval: Duration) -> Self {
         self.periodic_checks = true;

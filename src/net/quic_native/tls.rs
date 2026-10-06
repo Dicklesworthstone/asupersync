@@ -306,10 +306,21 @@ impl QuicServerIdentityVerifier {
         if root_count == 0 {
             return Err(server_identity_failure("server_identity_root_store_empty"));
         }
-        let verifier =
-            rustls::client::WebPkiServerVerifier::builder(Arc::new(root_store.into_inner()))
-                .build()
-                .map_err(|_| server_identity_failure("server_identity_verifier_build_failed"))?;
+        // Resolve the provider like every other asupersync TLS configuration;
+        // plain `WebPkiServerVerifier::builder` would use rustls's process
+        // default, and panic when there is none.
+        let provider = crate::tls::resolve_crypto_provider(None).map_err(|_| {
+            QuicTlsError::CryptoProviderFailure {
+                provider: "rustls-quic-server-identity",
+                code: "crypto_provider_unavailable",
+            }
+        })?;
+        let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
+            Arc::new(root_store.into_inner()),
+            provider,
+        )
+        .build()
+        .map_err(|_| server_identity_failure("server_identity_verifier_build_failed"))?;
         Ok(Self {
             verifier,
             root_count,
@@ -858,10 +869,16 @@ pub struct RustlsQuicCryptoProvider {
 
 #[cfg(feature = "tls")]
 impl RustlsQuicCryptoProvider {
-    /// Construct a QUIC v1 provider using rustls' ring-backed AES-128-GCM
-    /// initial suite.
+    /// Construct a QUIC v1 provider using the AES-128-GCM initial suite of the
+    /// resolved rustls crypto provider (ring when `tls` links it; see the
+    /// `crate::tls` module documentation).
     pub fn new_v1(side: RustlsQuicProviderSide) -> Result<Self, QuicTlsError> {
-        let provider = rustls::crypto::ring::default_provider();
+        let provider = crate::tls::resolve_crypto_provider(None).map_err(|_| {
+            QuicTlsError::CryptoProviderFailure {
+                provider: "rustls-quic-ring",
+                code: "crypto_provider_unavailable",
+            }
+        })?;
         let suite = provider
             .cipher_suites
             .iter()

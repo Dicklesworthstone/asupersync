@@ -1426,7 +1426,7 @@ fn region_deadline_cancels_a_parked_task(cx: Cx) -> ScenarioFuture {
 /// A child region with a 50 ms deadline and a task that checkpoints every
 /// 5 ms: both runtimes enforce the deadline at the first checkpoint after it
 /// passes, with the deadline as the reason. (A task parked across the deadline
-/// is never woken; see `region_deadline_cancels_a_parked_task`.)
+/// is woken by the deadline timer; see `region_deadline_cancels_a_parked_task`.)
 fn region_deadline_stops_a_checkpointing_task(cx: Cx) -> ScenarioFuture {
     Box::pin(async move {
         let mut spec = ChildRegionSpec::inherit();
@@ -2233,6 +2233,11 @@ fn scope_timeout_inside_a_tighter_region_deadline(cx: Cx) -> ScenarioFuture {
                         Ok::<u32, String>(0)
                     })
                     .await;
+                // The region deadline also cancels this task (its budget carries
+                // it). Acknowledge that before returning, so the result is kept
+                // whichever of the two same-instant deadlines a schedule runs
+                // first; an unacknowledged late value is task-level cancelled.
+                let _ = task_cx.checkpoint();
                 match &result {
                     Ok(TimedResult::Completed(Outcome::Err(reason))) => {
                         format!("completed:err:{reason}")
@@ -2532,6 +2537,8 @@ fn lab_time_does_not_advance_past_a_pending_spawn() {
 // Tests: one per scenario
 // ---------------------------------------------------------------------------
 
+// The `ignore` arm is kept for the next known lab/native gap.
+#[allow(unused_macro_rules)]
 macro_rules! differential {
     ($test:ident, $scenario:ident, [$($dependent:literal),*]) => {
         #[test]
@@ -2715,9 +2722,34 @@ differential!(
 differential!(
     differential_region_deadline_parked,
     region_deadline_cancels_a_parked_task,
-    [],
-    ignore = "asupersync-pev2xi: neither runtime wakes a parked task at a region deadline (lab runs out of steps, native hangs)"
+    []
 );
+
+/// The runs above only have to agree; here the deadline must be what ended
+/// the parked wait, on every runtime (br-asupersync-pev2xi).
+#[test]
+fn region_deadline_is_the_reason_a_parked_task_ends() {
+    let scenario = Scenario {
+        name: "region_deadline_cancels_a_parked_task",
+        run: region_deadline_cancels_a_parked_task,
+        schedule_dependent: &[],
+    };
+    for (runtime, observation) in [
+        ("lab", run_lab(LAB_SEEDS[0], &scenario)),
+        ("native current-thread", run_native(None, &scenario)),
+        (
+            "native multi-thread",
+            run_native(Some(NATIVE_WORKERS), &scenario),
+        ),
+    ] {
+        let join = observation.get("join").expect("join observed");
+        assert!(
+            join.contains("Deadline"),
+            "{runtime}: the parked task must report the deadline as its cancel reason, got {join}"
+        );
+    }
+}
+
 differential!(
     differential_region_poll_quota,
     region_poll_quota_stops_a_busy_task,

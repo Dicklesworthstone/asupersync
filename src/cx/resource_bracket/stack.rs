@@ -9,7 +9,7 @@
 //! A standalone stack's owner must establish user quiescence BEFORE `close`.
 //! [`Cx::spawn_resource_scope`] instead retains the stack inside the existing
 //! bracket controller and drains its work subtree before releasing any resource.
-//! Its work callback receives [`ResourceScope`], which cannot close or replace
+//! Its work callback receives [`ResourceScope`](crate::cx::resource_bracket::stack::ResourceScope), which cannot close or replace
 //! the stack. This is not general runtime finalizer registration. Dropping an
 //! entire standalone stack performs ordinary destruction, not async release.
 //! A blocked release blocks older entries deliberately: dependent resources must

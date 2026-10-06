@@ -21,7 +21,9 @@ use crate::cx::Cx;
 use crate::net::quic_core::{QUIC_VARINT_MAX, QuicCoreError, decode_varint, encode_varint};
 use crate::net::quic_native::connection::NativeQuicConnectionError;
 use crate::net::quic_native::endpoint_api::QuicConnection;
-use crate::net::quic_native::streams::{StreamDirection, StreamId, StreamReadiness, StreamRole};
+use crate::net::quic_native::streams::{
+    FlowControlError, QuicStreamError, StreamDirection, StreamId, StreamReadiness, StreamRole,
+};
 
 #[path = "h3_receive_frame.rs"]
 mod receive_frame;
@@ -809,6 +811,11 @@ impl NativeH3Session {
     }
 
     /// Queue one complete request on a new client-initiated bidirectional stream.
+    ///
+    /// The request is written in one piece, so it must fit both the peer's
+    /// initial window for a stream this endpoint opens and the connection's
+    /// remaining send credit. A larger request fails with the flow-control
+    /// error and opens no stream.
     pub fn send_request(
         &mut self,
         cx: &Cx,
@@ -837,6 +844,30 @@ impl NativeH3Session {
             ));
         }
 
+        let mut wire = Vec::new();
+        H3Frame::Headers(qpack_encode_request_field_section(head)?).encode(&mut wire)?;
+        encode_body_frames(&body, self.config.max_frame_payload_size, &mut wire)?;
+        // The request goes out in one write, which takes all of it or none.
+        // Refuse one that a new stream's credit cannot take, with the error
+        // that write would give, before opening a stream it would leave open.
+        let streams = connection.inner().streams();
+        let attempted = wire.len() as u64;
+        for remaining in [
+            streams.initial_send_windows().local_bidi,
+            streams.connection_send_remaining(),
+        ] {
+            if attempted > remaining {
+                return Err(NativeH3SessionError::Transport(
+                    NativeQuicConnectionError::Stream(QuicStreamError::Flow(
+                        FlowControlError::Exhausted {
+                            attempted,
+                            remaining,
+                        },
+                    )),
+                ));
+            }
+        }
+
         let stream_id = connection.open_bidi_stream(cx)?;
         if stream_id.0 != self.next_local_request_stream_id {
             return Err(NativeH3SessionError::InvalidState(
@@ -844,9 +875,6 @@ impl NativeH3Session {
             ));
         }
         self.next_local_request_stream_id = self.next_local_request_stream_id.saturating_add(4);
-        let mut wire = Vec::new();
-        H3Frame::Headers(qpack_encode_request_field_section(head)?).encode(&mut wire)?;
-        encode_body_frames(&body, self.config.max_frame_payload_size, &mut wire)?;
         connection.write_stream(cx, stream_id, Bytes::from(wire), true)?;
         Ok(stream_id)
     }
@@ -941,6 +969,10 @@ impl NativeH3Session {
     }
 
     /// Queue one complete final response on an existing request stream.
+    ///
+    /// The response is written in one piece, so it must fit the stream's and
+    /// the connection's remaining send credit; a larger one fails with the
+    /// flow-control error and writes nothing.
     pub fn send_response(
         &mut self,
         cx: &Cx,

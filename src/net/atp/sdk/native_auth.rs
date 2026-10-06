@@ -263,6 +263,14 @@ impl ClientCertVerifier for AuthorizedClientVerifier {
     }
 }
 
+/// The crypto provider for native ATP TLS, resolved like every other
+/// asupersync TLS configuration (`crate::tls` module documentation).
+fn native_crypto_provider() -> Result<Arc<rustls::crypto::CryptoProvider>, NativeAuthenticationError>
+{
+    crate::tls::resolve_crypto_provider(None)
+        .map_err(|err| NativeAuthenticationError::Tls(rustls::Error::General(err.to_string())))
+}
+
 fn client_tls(
     name: ServerName<'static>,
     roots: RootCertStore,
@@ -271,7 +279,7 @@ fn client_tls(
     if roots.is_empty() {
         return Err(NativeAuthenticationError::EmptyRoots);
     }
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let provider = native_crypto_provider()?;
     let mut config = ClientConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_root_certificates(roots)
@@ -289,7 +297,7 @@ fn server_tls(
     identity: NativeTlsIdentity,
     authorization: NativeClientAuthorization,
 ) -> Result<QuicServerTls, NativeAuthenticationError> {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let provider = native_crypto_provider()?;
     let webpki = WebPkiClientVerifier::builder_with_provider(
         Arc::clone(&authorization.roots),
         Arc::clone(&provider),

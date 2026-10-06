@@ -422,14 +422,26 @@ pub fn quorum_to_result<T, E>(result: QuorumResult<T, E>) -> Result<Vec<T>, Quor
         // Return successful values (without indices)
         Ok(result.successes.into_iter().map(|(_, v)| v).collect())
     } else {
-        // Check for cancellations (but not quorum-met cancellations, which are expected)
+        // Check for cancellations (but not quorum-met cancellations, which are
+        // expected), reporting the strongest as join_all does: the first by
+        // index could be weaker (a branch's own poll-quota stop) than the
+        // shutdown that drained the rest (br-asupersync-1sngsf).
+        let mut cancelled: Option<CancelReason> = None;
         for (_, failure) in &result.failures {
             if let QuorumFailure::Cancelled(r) = failure {
                 // Only report if it's not a "quorum met" cancellation (i.e., a loser)
                 if !matches!(r.kind(), crate::types::cancel::CancelKind::RaceLost) {
-                    return Err(QuorumError::Cancelled(r.clone()));
+                    match &mut cancelled {
+                        Some(strongest) => {
+                            strongest.strengthen(r);
+                        }
+                        None => cancelled = Some(r.clone()),
+                    }
                 }
             }
+        }
+        if let Some(reason) = cancelled {
+            return Err(QuorumError::Cancelled(reason));
         }
 
         // Compute counts before moving failures
@@ -688,6 +700,26 @@ mod tests {
 
         assert!(result.quorum_met);
         assert!(result.has_cancellation);
+    }
+
+    /// Among cancellations that are not quorum losers, the strongest is
+    /// reported, whatever its index (br-asupersync-1sngsf).
+    #[test]
+    fn quorum_to_result_reports_the_strongest_cancellation() {
+        let outcomes: Vec<Outcome<i32, &str>> = vec![
+            Outcome::Cancelled(CancelReason::user("user")),
+            Outcome::Cancelled(CancelReason::shutdown()),
+            Outcome::Err("e"),
+        ];
+        let err = quorum_to_result(quorum_outcomes(2, outcomes)).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                QuorumError::Cancelled(reason)
+                    if reason.kind() == crate::types::cancel::CancelKind::Shutdown
+            ),
+            "the shutdown outranks the earlier user cancel, got {err}"
+        );
     }
 
     #[test]

@@ -40,7 +40,7 @@ impl<T: Clone> BroadcastStream<T> {
     /// Returns a mutable reference to the underlying broadcast receiver.
     #[inline]
     pub fn get_mut(&mut self) -> &mut broadcast::Receiver<T> {
-        &mut self.inner
+        self.receiver_for_mutation()
     }
 
     /// Returns a reference to the capability context.
@@ -67,6 +67,17 @@ impl<T: Clone> BroadcastStream<T> {
         unsafe { ptr::drop_in_place(&raw mut md.cx) };
 
         inner
+    }
+
+    /// Hands out the receiver for mutation. The caller may replace it with a
+    /// receiver of another channel, and this stream's waiter registration is
+    /// a token into the current channel's waker arena: used against another
+    /// channel it would evict an unrelated receiver's waker. So the
+    /// registration is cleared first; the next poll registers afresh
+    /// (br-asupersync-lh4z78).
+    fn receiver_for_mutation(&mut self) -> &mut broadcast::Receiver<T> {
+        self.inner.clear_waiter_registration(&mut self.waiter);
+        &mut self.inner
     }
 }
 
@@ -418,5 +429,41 @@ mod tests {
         );
 
         crate::test_complete!("mr_broadcast_stream_pre_send_subscribers_receive_same_sequence");
+    }
+
+    /// A stream parked on channel A whose receiver is replaced through
+    /// `get_mut` with one of channel B must not use its old waiter token
+    /// against B, where it evicted the waker of a receiver parked on B.
+    #[test]
+    fn replacing_the_receiver_keeps_another_receivers_waker() {
+        use std::future::Future as _;
+
+        init_test("replacing_the_receiver_keeps_another_receivers_waker");
+        let cx: Cx = Cx::for_testing();
+        let (_tx_a, rx_a) = broadcast::channel::<i32>(4);
+        let mut stream = BroadcastStream::new(Cx::for_testing(), rx_a);
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+        assert!(Pin::new(&mut stream).poll_next(&mut task_cx).is_pending());
+
+        let (tx_b, mut rx_b) = broadcast::channel::<i32>(4);
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let counting = counting_waker(Arc::clone(&wakes));
+        let mut recv = Box::pin(rx_b.recv(&cx));
+        assert!(
+            recv.as_mut()
+                .poll(&mut Context::from_waker(&counting))
+                .is_pending()
+        );
+
+        *stream.get_mut() = tx_b.subscribe();
+        drop(stream);
+        tx_b.send(&cx, 7).expect("send on channel B");
+        assert_eq!(
+            wakes.load(Ordering::SeqCst),
+            1,
+            "the receiver parked on channel B is still woken"
+        );
+        drop(recv);
     }
 }

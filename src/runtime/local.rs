@@ -273,17 +273,38 @@ fn with_current_store<R>(f: impl FnOnce(&mut LocalTaskStore) -> R) -> R {
     if key == 0 {
         return LOCAL_TASKS.with(|tasks| f(&mut tasks.borrow_mut()));
     }
-    KEYED_LOCAL_TASKS.with(|stores| {
+    let outcome = KEYED_LOCAL_TASKS.with(|stores| {
         let mut stores = stores.borrow_mut();
         let index = match stores.iter().position(|(stored_key, _)| *stored_key == key) {
             Some(index) => index,
+            None if is_retired_local_store_key(key) => return Err(f),
             None => {
                 stores.push((key, LocalTaskStore::new()));
                 stores.len() - 1
             }
         };
-        f(&mut stores[index].1)
-    })
+        Ok(f(&mut stores[index].1))
+    });
+    match outcome {
+        Ok(result) => result,
+        Err(f) => {
+            // The runtime behind this key was retired after the purge above:
+            // never revive its store, which no later purge would drop. Work on
+            // a throwaway store; whatever it holds drops here, outside every
+            // store borrow.
+            let mut retired = LocalTaskStore::new();
+            let result = f(&mut retired);
+            drop(retired);
+            result
+        }
+    }
+}
+
+fn is_retired_local_store_key(key: usize) -> bool {
+    RETIRED_LOCAL_STORE_KEYS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(key)
 }
 
 /// Stores a local task in the current thread's storage.
@@ -462,6 +483,42 @@ mod tests {
             "the parked task is dropped with its store"
         );
         holder.join().expect("holder thread");
+    }
+
+    /// A task stored under a key that was retired after this thread's last
+    /// purge (a concurrent shutdown) is dropped at once; the retired store is
+    /// not revived, where no later purge would find it.
+    #[test]
+    fn storing_under_a_retired_key_drops_the_task_and_revives_no_store() {
+        init_test("storing_under_a_retired_key_drops_the_task_and_revives_no_store");
+        let key = allocate_local_store_key();
+        publish_retired_local_store_key(key);
+        let _ = local_task_count();
+        let before = keyed_local_store_count();
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        struct DropFlag(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let flag = DropFlag(std::sync::Arc::clone(&dropped));
+        {
+            let _key = ScopedLocalStoreKey::new(key);
+            store_local_task(
+                TaskId::new_for_test(42_778, 0),
+                LocalStoredTask::new(async move {
+                    let _flag = flag;
+                    std::future::pending::<()>().await;
+                    Outcome::Ok(())
+                }),
+            );
+        }
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "the task stored under a retired key is dropped"
+        );
+        assert_eq!(keyed_local_store_count(), before, "no store revived");
     }
 
     #[test]

@@ -14,7 +14,7 @@ source revision being evaluated and retain its terminal evidence.
 ## VER-A5-SPARSE-FEATURES
 
 The artifact contains one direct sparse profile for every feature declared in
-the root `Cargo.toml`. The contract joins those 60 profiles to the 60 feature
+the root `Cargo.toml`. The contract joins those 62 profiles to the 62 feature
 rows in `artifacts/dependency_capability_registry_v1.json`.
 
 The September 9, 2026 source review adds the maintained

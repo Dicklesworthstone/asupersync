@@ -584,17 +584,21 @@ impl ShutdownSignal {
     }
 
     pub(crate) async fn wait_until(&self, deadline: Time) {
-        match &self.state.time_source {
+        let sleep = match &self.state.time_source {
             ShutdownTimeSource::TimerDriver(driver) => {
-                Sleep::with_timer_driver(deadline, driver.clone()).await;
+                Sleep::with_timer_driver(deadline, driver.clone())
             }
             ShutdownTimeSource::Custom(time_getter) => {
-                Sleep::with_time_getter(deadline, *time_getter).await;
+                Sleep::with_time_getter(deadline, *time_getter)
             }
-            ShutdownTimeSource::WallClock => {
-                sleep_until(deadline).await;
-            }
-        }
+            ShutdownTimeSource::WallClock => sleep_until(deadline),
+        };
+        // Wait for the deadline itself. A cancel-aware sleep completes as soon
+        // as the waiting task is cancelled, which is how a region-owned
+        // listener is shut down, and every drain loop re-checking the clock
+        // then spun on it until the deadline (br-asupersync-m8xsjx).
+        let mut sleep = std::pin::pin!(sleep);
+        std::future::poll_fn(|cx| sleep.as_mut().poll_deadline(cx)).await;
     }
 
     /// Returns the current shutdown phase.
@@ -1044,6 +1048,40 @@ mod tests {
             stats.duration
         );
         crate::test_complete!("new_captures_timer_driver_from_current_context");
+    }
+
+    /// A drain waiting for its deadline keeps waiting when the waiting task
+    /// is cancelled; it used to complete at once, so the drain loop spun.
+    #[test]
+    fn wait_until_ignores_the_waiting_tasks_cancellation() {
+        init_test("wait_until_ignores_the_waiting_tasks_cancellation");
+        let virtual_clock = Arc::new(VirtualClock::starting_at(Time::from_secs(10)));
+        let timer_driver = TimerDriverHandle::with_virtual_clock(Arc::clone(&virtual_clock));
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(7, 2),
+            TaskId::new_for_test(9, 2),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer_driver.clone()),
+            None,
+        );
+        cx.set_cancel_requested(true);
+        let _guard = Cx::set_current(Some(cx));
+        let signal = ShutdownSignal::new();
+        let waker = std::task::Waker::noop();
+        let mut task_cx = std::task::Context::from_waker(waker);
+        let mut wait = std::pin::pin!(signal.wait_until(Time::from_secs(3_610)));
+        for _ in 0..2 {
+            assert!(
+                std::future::Future::poll(wait.as_mut(), &mut task_cx).is_pending(),
+                "a cancelled waiter still waits for the deadline"
+            );
+        }
+        virtual_clock.advance_to(Time::from_secs(3_610));
+        let _ = timer_driver.process_timers();
+        assert!(std::future::Future::poll(wait.as_mut(), &mut task_cx).is_ready());
     }
 
     #[test]

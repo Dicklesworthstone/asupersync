@@ -1818,7 +1818,8 @@ impl<P: Policy> Scope<'_, P> {
         E: Send + 'static,
     {
         use crate::combinator::quorum::{
-            QuorumError, quorum_achieved, quorum_outcomes, quorum_still_possible, quorum_to_result,
+            QuorumError, QuorumFailure, quorum_achieved, quorum_outcomes, quorum_still_possible,
+            quorum_to_result,
         };
 
         let branches: Vec<F> = branches.into_iter().collect();
@@ -1912,7 +1913,28 @@ impl<P: Policy> Scope<'_, P> {
             .into_iter()
             .map(|outcome| outcome.expect("every quorum branch was joined to a terminal outcome"))
             .collect();
-        quorum_to_result(quorum_outcomes(needed, outcomes))
+        let result = quorum_outcomes(needed, outcomes);
+        // A caller cancelled before the quorum was met gets Cancelled, as
+        // documented, whatever its kind. A caller cancelled as a race loser
+        // drains its branches with RaceLost, which quorum_to_result takes for
+        // ordinary quorum losers, so it came back as InsufficientSuccesses, a
+        // retryable failure (br-asupersync-1sngsf). A panic still outranks it.
+        if caller_cancelled && !result.quorum_met {
+            let mut reason = drain_reason;
+            for (_, failure) in &result.failures {
+                match failure {
+                    QuorumFailure::Panicked(payload) => {
+                        return Err(QuorumError::Panicked(payload.clone()));
+                    }
+                    QuorumFailure::Cancelled(branch_reason) => {
+                        reason.strengthen(branch_reason);
+                    }
+                    QuorumFailure::Error(_) => {}
+                }
+            }
+            return Err(QuorumError::Cancelled(reason));
+        }
+        quorum_to_result(result)
     }
 
     /// Spawns every quorum branch into this scope's region, failing closed on
@@ -2092,7 +2114,8 @@ impl<P: Policy> Scope<'_, P> {
     /// data produced after the deadline is surfaced rather than lost. Only an
     /// operation that never acknowledged the cancellation (cancellation-blind,
     /// or cancelled before its first poll) is reported as
-    /// `TimedResult::TimedOut`.
+    /// `TimedResult::TimedOut`, also when it was the caller's cancellation,
+    /// not the deadline, that ended the wait.
     ///
     /// The deadline is measured on the scope's clock (`cx.now()`), so lab
     /// virtual time drives it deterministically.

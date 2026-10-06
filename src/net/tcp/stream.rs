@@ -310,11 +310,11 @@ impl TcpStream {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn from_parts(
         inner: Arc<net::TcpStream>,
-        registration: Option<IoRegistration>,
+        registration: (Option<IoRegistration>, bool),
     ) -> Self {
         Self {
             inner,
-            registration: ReactorRegistration::from_registration(registration),
+            registration: ReactorRegistration::from_parts(registration),
             shutdown_on_drop: true,
             #[cfg(target_os = "windows")]
             connect_settle_retries: 0,
@@ -434,7 +434,7 @@ impl TcpStream {
 
         // socket.into() preserves the nonblocking flag set above; no need to set again.
         let stream: net::TcpStream = socket.into();
-        Ok(Self::from_parts(Arc::new(stream), registration))
+        Ok(Self::from_parts(Arc::new(stream), (registration, false)))
     }
 
     /// Connect with timeout.
@@ -2246,7 +2246,7 @@ mod tests {
             let peer = net::TcpStream::connect(addr).expect("connect peer");
             let (accepted, _) = listener.accept().expect("accept");
             accepted.set_nonblocking(true).expect("nonblocking");
-            (TcpStream::from_parts(Arc::new(accepted), None), peer)
+            (TcpStream::from_std(accepted).expect("wrap"), peer)
         }
 
         fn poll_read_once(

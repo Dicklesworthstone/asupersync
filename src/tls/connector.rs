@@ -293,12 +293,12 @@ pub struct TlsConnectorBuilder {
     /// and prevents accidental replay-vulnerable 0-RTT). See
     /// [`Self::enable_early_data`] for the explicit opt-in.
     early_data_enabled: bool,
-    /// br-asupersync-h41wya — operator acknowledgement that combining
-    /// session resumption with 0-RTT exposes the application to
-    /// replay attacks on the early-data payload. When `false`,
-    /// `build()` rejects the combination of `early_data_enabled =
-    /// true` + non-disabled session resumption so a misconfiguration
-    /// cannot ship by accident. The operator must call
+    /// br-asupersync-h41wya — operator acknowledgement that 0-RTT
+    /// exposes the application to replay attacks on the early-data
+    /// payload. When `false`, `build()` rejects
+    /// `early_data_enabled = true` whatever the session-resumption
+    /// setting (without resumption no 0-RTT is offered anyway), so a
+    /// misconfiguration cannot ship by accident. The operator must call
     /// [`Self::acknowledge_zero_rtt_replay_risk`] to opt in,
     /// signalling that the application layer enforces idempotency
     /// for every request that could carry early data.
@@ -310,6 +310,10 @@ pub struct TlsConnectorBuilder {
     /// [`Self::with_strict_ca_validation`]; automatically set as a
     /// side effect of [`Self::enable_env_cert_loading`].
     validate_ca_constraints: bool,
+    /// The rustls crypto provider set with [`Self::crypto_provider`].
+    /// `None` resolves as the `tls` module documentation describes.
+    #[cfg(feature = "tls")]
+    crypto_provider: Option<Arc<rustls::crypto::CryptoProvider>>,
 }
 
 impl TlsConnectorBuilder {
@@ -342,7 +346,7 @@ impl TlsConnectorBuilder {
             // until the operator opts in via enable_early_data(true).
             early_data_enabled: false,
             // br-asupersync-h41wya: 0-RTT replay risk is unacknowledged
-            // by default; build() rejects 0-RTT + resumption until the
+            // by default; build() rejects early data until the
             // operator calls acknowledge_zero_rtt_replay_risk().
             acknowledge_zero_rtt_replay_risk: false,
             // br-asupersync-sx6j9y: BasicConstraints CA:TRUE gate is
@@ -352,6 +356,8 @@ impl TlsConnectorBuilder {
             // also sets it as a side effect because env-loaded certs
             // are unconditionally CA-gated by br-asupersync-0owoem.
             validate_ca_constraints: false,
+            #[cfg(feature = "tls")]
+            crypto_provider: None,
         }
     }
 
@@ -497,9 +503,9 @@ impl TlsConnectorBuilder {
     /// carry early data (idempotency keys, per-request nonces, or
     /// restriction of 0-RTT to safe HTTP methods).
     ///
-    /// `build()` rejects the combination of `enable_early_data(true)`
-    /// plus non-disabled session resumption when this acknowledgement
-    /// has not been made — preventing a misconfiguration from
+    /// `build()` rejects `enable_early_data(true)` when this
+    /// acknowledgement has not been made, whatever the session-resumption
+    /// setting — preventing a misconfiguration from
     /// shipping silently. Call this only after wiring up the
     /// application-level idempotency layer.
     #[must_use]
@@ -920,6 +926,19 @@ impl TlsConnectorBuilder {
         self
     }
 
+    /// Use `provider` for this connector's cipher suites, key exchange and
+    /// certificate signature verification.
+    ///
+    /// Without it, the connector uses the ring provider when `tls` links it,
+    /// else rustls's process default; a `tls-core` build with neither fails
+    /// in [`Self::build`]. The certificate verifier always uses the same
+    /// provider as the connection.
+    #[cfg(feature = "tls")]
+    pub fn crypto_provider(mut self, provider: Arc<rustls::crypto::CryptoProvider>) -> Self {
+        self.crypto_provider = Some(provider);
+        self
+    }
+
     /// Configure TLS session resumption.
     ///
     /// By default, rustls enables in-memory session storage (256 sessions).
@@ -950,8 +969,8 @@ impl TlsConnectorBuilder {
         self
     }
 
-    /// **DANGEROUS**: send TLS 1.3 0-RTT (early data) on resumed
-    /// handshakes when the server's resumption ticket allows it.
+    /// **DANGEROUS**: offer TLS 1.3 0-RTT (early data) on resumed
+    /// handshakes. No asupersync stream API writes early data yet.
     ///
     /// br-asupersync-y0gm5q: 0-RTT is OFF by default on the
     /// client side — rustls's `enable_early_data` defaults to
@@ -1035,8 +1054,6 @@ impl TlsConnectorBuilder {
     /// Returns an error if the configuration is invalid (e.g., invalid client certificate).
     #[cfg(feature = "tls")]
     pub fn build(self) -> Result<TlsConnector, TlsError> {
-        use rustls::crypto::ring::default_provider;
-
         if self.alpn_required && self.alpn_protocols.is_empty() {
             return Err(TlsError::Configuration(
                 "require_alpn set but no ALPN protocols configured".into(),
@@ -1072,7 +1089,8 @@ impl TlsConnectorBuilder {
         }
 
         // Create the config builder with the crypto provider and protocol versions.
-        let builder = ClientConfig::builder_with_provider(Arc::new(default_provider()));
+        let provider = super::resolve_crypto_provider(self.crypto_provider.as_ref())?;
+        let builder = ClientConfig::builder_with_provider(Arc::clone(&provider));
         let builder = if self.min_protocol.is_some() || self.max_protocol.is_some() {
             // Compare protocol versions by their wire value (TLS 1.0 = 0x0301
             // ... TLS 1.3 = 0x0304), which orders every TLS version. A bound
@@ -1156,11 +1174,16 @@ impl TlsConnectorBuilder {
             // no configured CRL (UnknownRevocationStatus). A CRL covers only
             // its issuer, as documented on `with_crl_pem`, so a chain from a
             // CA without one is accepted and a listed serial is still refused.
-            let verifier = rustls::client::WebPkiServerVerifier::builder(Arc::new(roots))
-                .with_crls(crl_ders)
-                .allow_unknown_revocation_status()
-                .build()
-                .map_err(|e| TlsError::Configuration(format!("CRL verifier build: {e}")))?;
+            // `builder_with_provider` keeps the verifier on the connection's
+            // provider; plain `builder` would use rustls's process default.
+            let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
+                Arc::new(roots),
+                provider,
+            )
+            .with_crls(crl_ders)
+            .allow_unknown_revocation_status()
+            .build()
+            .map_err(|e| TlsError::Configuration(format!("CRL verifier build: {e}")))?;
             // The dangerous() name reflects that callers can plug in
             // an arbitrary verifier — here we plug in webpki's own
             // verifier with CRLs attached, which is *strictly more*
@@ -1488,33 +1511,18 @@ mod tests {
     #[cfg(feature = "tls")]
     #[test]
     fn test_with_crl_pem_accepts_crl_and_rejects_malformed_tail() {
-        // Public parser fixture from rustls-pemfile 2.2.0 tests/data/crl.pem
-        // (Apache-2.0 / ISC / MIT). This proves CRL configuration, not
-        // revocation enforcement or current validity of this historical CRL.
-        let crl = b"-----BEGIN X509 CRL-----\n\
-MIICiTBzAgEBMA0GCSqGSIb3DQEBCwUAMBoxGDAWBgNVBAMMD3Bvbnl0b3duIFJT\n\
-QSBDQRcNMjMwNjI3MDgyODEyWhcNMjMwNzI3MDgyODEyWjAVMBMCAgHIFw0yMzA2\n\
-MjcwODI3NTlaoA4wDDAKBgNVHRQEAwIBAjANBgkqhkiG9w0BAQsFAAOCAgEAP6EX\n\
-9+hxjx/AqdBpynZXjGkEqigBcLcJ2PADOXngdQI1jC0WuYnZymUimemeULtt8X+1\n\
-ai2KxAuF1m4NEKZsrGKvO+/9s/X1xbGroyHSAMKtZafFopFpoB2aNbYlx7yIyLtD\n\
-BBIZIF50g20U+3izqpHutTD10itdk9TLsSceJHpwTkNJtaWMkOfBV28nKzEzVutV\n\
-f6WzRpURGzui6nQy7aIqImeanpoBoz323psMfC32U0uMBCZltyHNqsX58/2Uhucx\n\
-0IPnitNuhv4scCPf/jeRfGIWDrTf1/25LDzRxyg1S4z9aa+3GM4O3dqy4igZEhgT\n\
-q3pjlJ2hUL5E0oqbZDIQD1SN8UUUv5N2AjwZcxVBNnYeGyuO7YpTBYiu62o73iL2\n\
-CjgElfaMq/9hEr9GR9kJozh7VTxtQPbnr4DiucQvhv8o/A1z+zkC0gj8iCLFtDbO\n\
-8bvDowcdle9LKkrLaBe6sO+fSH/I9Wj8vrEJKsuwaEraIdEaq2VrIMUPEWN0/MH9\n\
-vTwHyadGSMK4CWtrn9fCAgSLw6NX74D7Cx1IaS8vstMjpeUqOS0dk5ThiW47HceB\n\
-DTko7rV5N+RGH2nW1ynLoZKCJQqqZcLilFMyKPui3jifJnQlMFi54jGVgg/D6UQn\n\
-7dA7wb2ux/1hSiaarp+mi7ncVOyByz6/WQP8mfc=\n\
------END X509 CRL-----\n";
+        // The rustls-pemfile CRL fixture (see its provenance in `tls::tests`).
+        // This proves CRL configuration, not revocation enforcement or
+        // current validity of this historical CRL.
+        let crl = crate::tls::tests::RUSTLS_PEMFILE_CRL_PEM;
         builder_with_test_root()
-            .with_crl_pem([TEST_CERT_PEM, b"\n", crl.as_slice()].concat())
+            .with_crl_pem([TEST_CERT_PEM, b"\n", crl].concat())
             .build()
             .expect("a valid CRL can be configured in a mixed PEM bundle");
 
         let malformed = b"-----BEGIN X509 CRL-----\n!invalid!\n-----END X509 CRL-----\n";
         let error = builder_with_test_root()
-            .with_crl_pem([crl.as_slice(), malformed.as_slice()].concat())
+            .with_crl_pem([crl, malformed.as_slice()].concat())
             .build()
             .expect_err("a later malformed CRL must reject the whole configuration");
         assert!(matches!(

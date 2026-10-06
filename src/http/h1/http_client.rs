@@ -1433,6 +1433,13 @@ impl HttpClient {
     /// `proxy_url` is the proxy server URL (e.g. `http://proxy.local:3128`).
     /// `target_authority` is the requested CONNECT authority-form target
     /// (e.g. `example.com:443`).
+    ///
+    /// Establishing the tunnel (connecting to the proxy and the CONNECT
+    /// exchange) is bounded like a request: by
+    /// [`HttpClientConfig::request_timeout`] and the remaining budget
+    /// deadline, whichever is tighter. On expiry it returns
+    /// [`ClientError::DeadlineExceeded`]. Traffic through the established
+    /// tunnel is not bounded by them.
     pub async fn connect_tunnel(
         &self,
         cx: &Cx,
@@ -1442,14 +1449,19 @@ impl HttpClient {
     ) -> Result<HttpConnectTunnel<ClientIo>, ClientError> {
         check_cx(cx)?;
         let proxy = ParsedUrl::parse(proxy_url)?;
-        let io = self.connect_io(cx, &proxy).await?;
-        establish_http_connect_tunnel(
-            io,
-            target_authority,
-            self.config.user_agent.as_deref(),
-            &extra_headers,
-        )
-        .await
+        // br-asupersync-vxmjgn: a proxy that accepts and never answers held
+        // this call until the Cx was cancelled.
+        let fut = async {
+            let io = self.connect_io(cx, &proxy).await?;
+            establish_http_connect_tunnel(
+                io,
+                target_authority,
+                self.config.user_agent.as_deref(),
+                &extra_headers,
+            )
+            .await
+        };
+        drive_with_budget_deadline(cx, self.config.request_timeout, None, fut).await
     }
 
     /// Execute a request, following redirects as configured.
@@ -7089,6 +7101,39 @@ mod tests {
             );
             assert!(forwarded[0].contains("remaining_ns="));
             assert!(forwarded[0].contains("total_timeout_ns="));
+        }
+
+        /// br-asupersync-vxmjgn: connect_tunnel had no deadline, so a proxy
+        /// that accepts the connection and never answers the CONNECT held
+        /// the call until the Cx was cancelled. Establishing the tunnel is now
+        /// bounded by request_timeout.
+        #[test]
+        fn connect_tunnel_to_a_silent_proxy_ends_at_the_request_timeout() {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the proxy");
+            let proxy_addr = listener.local_addr().expect("proxy address");
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let client = HttpClient::builder()
+                    .request_timeout(Duration::from_millis(200))
+                    .build();
+                let cx = Cx::for_request_with_budget(Budget::INFINITE);
+                let result = runtime_block_on(client.connect_tunnel(
+                    &cx,
+                    &format!("http://{proxy_addr}"),
+                    "example.com:443",
+                    Vec::new(),
+                ));
+                let _ = done_tx.send(result.map(|_| ()));
+            });
+            // Accept and keep the connection open without ever answering.
+            let (_silent, _) = listener.accept().expect("accept the client");
+            let result = done_rx
+                .recv_timeout(Duration::from_secs(20))
+                .expect("connect_tunnel never returned from a silent proxy");
+            assert!(
+                matches!(result, Err(ClientError::DeadlineExceeded)),
+                "got {result:?}"
+            );
         }
     }
 }

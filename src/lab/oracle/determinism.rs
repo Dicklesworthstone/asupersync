@@ -347,14 +347,10 @@ impl TraceEventSummary {
                     held.len()
                 )
             }
-            TraceData::Message(msg) => {
-                // Truncate long messages for comparison
-                if msg.len() > 100 {
-                    format!("msg={}...", &msg[..100])
-                } else {
-                    format!("msg={msg}")
-                }
-            }
+            // The whole message: a prefix compared runs that differed after
+            // it as equal, and cutting at a byte offset panicked inside a
+            // multi-byte character.
+            TraceData::Message(msg) => format!("msg={msg}"),
             TraceData::Chaos { kind, task, detail } => {
                 let mut summary = format!("chaos={kind}");
                 if let Some(t) = task {
@@ -464,7 +460,10 @@ impl fmt::Display for TraceEventSummary {
 /// Oracle for verifying deterministic execution.
 ///
 /// This oracle runs a program twice with identical configuration and
-/// verifies that the traces are identical.
+/// verifies that the traces are identical. When the first run records more
+/// events than the configured trace buffer keeps, the program runs once more
+/// with a buffer that holds them all, so the comparison covers the whole
+/// trace and not only the buffer's newest events.
 #[derive(Debug, Default)]
 pub struct DeterminismOracle {
     /// Number of context events to include before divergence.
@@ -499,27 +498,9 @@ impl DeterminismOracle {
     where
         F: Fn(&mut LabRuntime),
     {
-        // First run
-        let mut runtime1 = LabRuntime::new(config.clone());
-        program(&mut runtime1);
-        let trace1: Vec<_> = runtime1
-            .trace()
-            .snapshot()
-            .into_iter()
-            .map(|e| TraceEventSummary::from_event(&e))
-            .collect();
-
-        // Second run with identical config
-        let mut runtime2 = LabRuntime::new(config);
-        program(&mut runtime2);
-        let trace2: Vec<_> = runtime2
-            .trace()
-            .snapshot()
-            .into_iter()
-            .map(|e| TraceEventSummary::from_event(&e))
-            .collect();
-
-        // Compare traces
+        let (config, trace1) = capture_reference(config, &program);
+        // Second run with the config the reference was captured under
+        let (trace2, _) = run_and_summarize(&config, &program);
         self.compare_traces(&trace1, &trace2)
     }
 
@@ -569,6 +550,53 @@ impl DeterminismOracle {
     }
 }
 
+/// The most events a re-run keeps when a program's trace overflows the
+/// configured buffer (see [`capture_reference`]).
+const FULL_TRACE_EVENT_LIMIT: u64 = 1 << 20;
+
+/// Runs `program` on a fresh runtime built from `config`. Returns the
+/// summaries of the events its trace buffer kept and the number of events it
+/// recorded, kept or evicted.
+fn run_and_summarize<F>(config: &LabConfig, program: &F) -> (Vec<TraceEventSummary>, u64)
+where
+    F: Fn(&mut LabRuntime),
+{
+    let mut runtime = LabRuntime::new(config.clone());
+    program(&mut runtime);
+    let trace = runtime.trace();
+    let summaries = trace
+        .snapshot()
+        .into_iter()
+        .map(|e| TraceEventSummary::from_event(&e))
+        .collect();
+    (summaries, trace.total_pushed())
+}
+
+/// Runs `program` once for the reference trace. Returns the config the runs
+/// compared against it must use, and the trace.
+///
+/// The trace buffer keeps only the newest `trace_capacity` events, so two
+/// overflowed buffers compared only their newest events: runs that diverged
+/// and converged again passed. A first run that overflowed is repeated with a
+/// buffer that holds every event it recorded (up to
+/// [`FULL_TRACE_EVENT_LIMIT`]), and that config is returned.
+fn capture_reference<F>(config: LabConfig, program: &F) -> (LabConfig, Vec<TraceEventSummary>)
+where
+    F: Fn(&mut LabRuntime),
+{
+    let (trace, recorded) = run_and_summarize(&config, program);
+    let kept = u64::try_from(trace.len()).unwrap_or(u64::MAX);
+    if recorded <= kept || recorded > FULL_TRACE_EVENT_LIMIT {
+        return (config, trace);
+    }
+    let Ok(capacity) = usize::try_from(recorded) else {
+        return (config, trace);
+    };
+    let config = config.trace_capacity(capacity);
+    let (trace, _) = run_and_summarize(&config, program);
+    (config, trace)
+}
+
 /// Convenience function to verify determinism with a simple program.
 ///
 /// This is the easiest way to check if a program is deterministic:
@@ -601,7 +629,9 @@ where
 
 /// Convenience function to verify determinism with multiple runs.
 ///
-/// Runs the program `runs` times and verifies all traces are identical.
+/// Runs the program `runs` times and verifies all traces are identical. As
+/// in [`DeterminismOracle::verify`], a first run that overflows the trace
+/// buffer is repeated with a buffer that holds every event.
 ///
 /// # Panics
 ///
@@ -613,27 +643,13 @@ where
     assert!(runs >= 2, "Need at least 2 runs to verify determinism");
 
     // Capture the reference trace from the first run
-    let mut reference = LabRuntime::new(config.clone());
-    program(&mut reference);
-    let reference_trace: Vec<_> = reference
-        .trace()
-        .snapshot()
-        .into_iter()
-        .map(|e| TraceEventSummary::from_event(&e))
-        .collect();
+    let (config, reference_trace) = capture_reference(config.clone(), &program);
 
     let oracle = DeterminismOracle::new();
 
     // Compare each subsequent run
     for run in 2..=runs {
-        let mut runtime = LabRuntime::new(config.clone());
-        program(&mut runtime);
-        let trace: Vec<_> = runtime
-            .trace()
-            .snapshot()
-            .into_iter()
-            .map(|e| TraceEventSummary::from_event(&e))
-            .collect();
+        let (trace, _) = run_and_summarize(&config, &program);
 
         if let Err(violation) = oracle.compare_traces(&reference_trace, &trace) {
             panic!(
@@ -688,6 +704,7 @@ mod tests {
     use super::*;
     use crate::types::{Budget, ObligationId, RegionId, TaskId, Time};
     use crate::util::ArenaIndex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -1210,5 +1227,94 @@ mod tests {
         let result = oracle.compare_traces(&[], &[]);
         assert!(result.is_ok());
         crate::test_complete!("determinism_oracle_empty_traces_ok");
+    }
+
+    fn record_message(runtime: &LabRuntime, message: String) {
+        runtime.trace().record_event(|seq| {
+            TraceEvent::new(
+                seq,
+                Time::ZERO,
+                TraceEventKind::UserTrace,
+                TraceData::Message(message),
+            )
+        });
+    }
+
+    /// A message summary keeps the whole message. Cut at byte 100, it
+    /// panicked inside a multi-byte character (br-asupersync-vcu2oz M5).
+    #[test]
+    fn a_message_is_summarized_whole_across_a_multibyte_character() {
+        init_test("a_message_is_summarized_whole_across_a_multibyte_character");
+        // 'é' takes bytes 99 and 100, so a cut at byte 100 splits it.
+        let message = format!("{}é tail", "x".repeat(99));
+        let summary = TraceEventSummary::from_event(&TraceEvent::new(
+            0,
+            Time::ZERO,
+            TraceEventKind::UserTrace,
+            TraceData::Message(message.clone()),
+        ));
+        assert_eq!(summary.data_summary, format!("msg={message}"));
+        crate::test_complete!("a_message_is_summarized_whole_across_a_multibyte_character");
+    }
+
+    /// Runs whose messages differ after byte 100 diverge. The 100-byte prefix
+    /// compared them as equal (br-asupersync-vcu2oz M5).
+    #[test]
+    fn messages_that_differ_after_byte_100_diverge() {
+        init_test("messages_that_differ_after_byte_100_diverge");
+        let runs = AtomicUsize::new(0);
+        let result = DeterminismOracle::new().verify(LabConfig::new(42), |runtime| {
+            let run = runs.fetch_add(1, Ordering::SeqCst);
+            record_message(runtime, format!("{}{run}", "x".repeat(120)));
+        });
+        assert!(result.is_err(), "the messages differ at byte 120");
+        crate::test_complete!("messages_that_differ_after_byte_100_diverge");
+    }
+
+    /// Traces that overflow the buffer are compared whole: a divergence among
+    /// the events the buffer evicted is reported, and identical runs still
+    /// pass. Only the newest `trace_capacity` events were compared, so these
+    /// runs passed (br-asupersync-vcu2oz M5).
+    #[test]
+    fn a_divergence_the_trace_buffer_evicted_is_detected() {
+        init_test("a_divergence_the_trace_buffer_evicted_is_detected");
+        let config = LabConfig::new(42).trace_capacity(8);
+        let runs = AtomicUsize::new(0);
+        let result = DeterminismOracle::new().verify(config.clone(), |runtime| {
+            let run = runs.fetch_add(1, Ordering::SeqCst);
+            record_message(runtime, format!("early {run}"));
+            for i in 0..32 {
+                record_message(runtime, format!("late {i}"));
+            }
+        });
+        let violation = result.expect_err("the first message differs in every run");
+        assert!(
+            violation
+                .expected
+                .as_ref()
+                .is_some_and(|event| event.data_summary.starts_with("msg=early")),
+            "the divergence is the evicted first message: {violation}"
+        );
+
+        let identical = DeterminismOracle::new().verify(config, |runtime| {
+            for i in 0..40 {
+                record_message(runtime, format!("same {i}"));
+            }
+        });
+        assert!(identical.is_ok(), "identical overflowing runs pass");
+        crate::test_complete!("a_divergence_the_trace_buffer_evicted_is_detected");
+    }
+
+    #[test]
+    #[should_panic(expected = "Determinism check failed on run 2 of 3")]
+    fn assert_deterministic_multi_compares_the_evicted_events() {
+        let runs = AtomicUsize::new(0);
+        assert_deterministic_multi(&LabConfig::new(42).trace_capacity(8), 3, |runtime| {
+            let run = runs.fetch_add(1, Ordering::SeqCst);
+            record_message(runtime, format!("early {run}"));
+            for i in 0..32 {
+                record_message(runtime, format!("late {i}"));
+            }
+        });
     }
 }

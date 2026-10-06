@@ -119,6 +119,8 @@ pub struct RecorderConfig {
     pub max_memory: usize,
     /// Maximum file size for trace file.
     /// Default: 1GB.
+    /// Not enforced by the recorder; the trace file writer enforces its own
+    /// `TraceFileConfig::max_file_size`.
     pub max_file_size: u64,
     /// Action when limit reached.
     pub on_limit: LimitAction,

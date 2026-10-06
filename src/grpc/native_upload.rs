@@ -17,6 +17,13 @@ use std::future::{Future, poll_fn};
 use std::pin::{Pin, pin};
 use std::task::{Context, Poll};
 
+mod client_streaming;
+pub use client_streaming::NativeClientStreamingCall;
+mod request_channel;
+pub use request_channel::{
+    NativeRequestSendError, NativeRequestSender, NativeRequestStream, native_request_channel,
+};
+
 const PROGRESS_BUDGET: usize = 32;
 
 /// A native bidirectional RPC driven by response demand.
@@ -48,6 +55,7 @@ pub struct NativeBidiStream<IO, C, S> {
     cx: Cx,
     call: Option<NativeDuplexStream<IO, C>>,
     source: Option<Pin<Box<S>>>,
+    request_control: Option<std::sync::Arc<request_channel::RequestControl>>,
     requests_closed: bool,
     initial: Option<Metadata>,
     trailers: Option<Metadata>,
@@ -116,6 +124,7 @@ where
             cx,
             call: Some(call),
             source: Some(Box::pin(source)),
+            request_control: None,
             requests_closed: false,
             initial: None,
             trailers: None,
@@ -162,10 +171,12 @@ where
         self.requests_closed = true;
         // Remove both owners before invoking user destructors. A caught panic
         // cannot leave this object claiming terminal EOF with a live transport.
+        let control = self.request_control.take();
         let source = self.source.take();
         let call = self.call.take();
         drop(call);
         drop(source);
+        drop(control);
         status
     }
 
@@ -174,6 +185,12 @@ where
             return Poll::Ready(None);
         }
         let _ambient = Cx::set_current(Some(self.cx.clone()));
+        // A bounded channel's producer can fail while one encoded request is
+        // blocked on zero peer credit. That failure is control traffic: never
+        // wait for request_ready() before observing it or registering its wake.
+        if let Some(status) = self.request_control.as_ref().and_then(|control| control.poll_failure(task)) {
+            return Poll::Ready(Some(Err(self.finish(status))));
+        }
         loop {
             // Bound ready producer work as well as network events. Counting
             // across polls also stops an always-ready response consumer from
@@ -217,7 +234,8 @@ where
                     // read wakeup. Poll the network again before parking on a
                     // producer alone, or an early response could remain unread.
                     Poll::Pending if network_pending => return Poll::Pending,
-                    Poll::Pending => continue,
+                    // The loop polls the network again.
+                    Poll::Pending => {}
                     Poll::Ready(Some(Ok(message))) => {
                         if let Err(status) = call.queue_message(&message) {
                             return Poll::Ready(Some(Err(self.finish(status))));
@@ -272,10 +290,12 @@ where
 impl<IO, C, S> Drop for NativeBidiStream<IO, C, S> {
     fn drop(&mut self) {
         let _ambient = Cx::set_current(Some(self.cx.clone()));
+        let control = self.request_control.take();
         let source = self.source.take();
         let call = self.call.take();
         drop(call);
         drop(source);
+        drop(control);
     }
 }
 

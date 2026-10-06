@@ -11,6 +11,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
+// This file is only ever compiled as owned_join's `#[cfg(test)] mod tests;`.
+// The ambient-authority audit reads files one at a time and cannot see that,
+// so this helper's watchdog thread says it is test code here
+// (br-asupersync-5w2yte).
+#[cfg(test)]
 fn bounded(test: impl FnOnce() + Send + 'static) {
     let (send, receive) = mpsc::channel();
     let worker = std::thread::spawn(move || {
@@ -187,7 +192,7 @@ fn normal_empty_and_large_joins_preserve_nonclone_nonunpin_results() {
             let runtime = runtime(workers);
             runtime.block_on(async {
                 let cx = Cx::current().unwrap();
-                let empty = cx.scope().join_all_owned::<Value>(&cx, Vec::new()).await;
+                let empty = cx.scope().join_all_owned::<Value, _>(&cx, Vec::new()).await;
                 assert!(empty.is_empty());
                 let handles = (0..130).map(|index| {
                     cx.spawn(move |_| async move {
@@ -239,7 +244,7 @@ fn dropping_an_unpolled_pair_requests_both_children_without_cancelling_parent() 
                 }).unwrap();
                 let a = parked_a.recv(&cx).await.unwrap();
                 let b = parked_b.recv(&cx).await.unwrap();
-                drop(owner.scope().join_owned(&owner, first, second));
+                drop(owner.scope().join_owned(owner, first, second));
                 assert!(a.is_cancel_requested());
                 assert!(b.is_cancel_requested());
                 assert!(!owner.is_cancel_requested());
@@ -268,7 +273,7 @@ fn dropping_an_unpolled_many_join_already_owns_the_entire_input() {
                     }).unwrap());
                     children.push(parked.recv(&cx).await.unwrap());
                 }
-                drop(owner.scope().join_all_owned(&owner, handles));
+                drop(owner.scope().join_all_owned(owner, handles));
                 assert!(children.iter().all(Cx::is_cancel_requested));
                 assert!(!owner.is_cancel_requested());
                 region.close().await.unwrap();
@@ -309,7 +314,7 @@ fn dropping_a_partial_many_join_cancels_the_unpolled_suffix_not_the_ready_prefix
                     }).unwrap());
                     pending.push(parked.recv(&cx).await.unwrap());
                 }
-                let mut joining = Box::pin(owner.scope().join_all_owned(&owner, handles));
+                let mut joining = Box::pin(owner.scope().join_all_owned(owner, handles));
                 poll_fn(|task| {
                     assert!(joining.as_mut().poll(task).is_pending());
                     Poll::Ready(())

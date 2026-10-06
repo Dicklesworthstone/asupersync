@@ -14,7 +14,7 @@ use crate::bytes::{Bytes, BytesMut};
 use crate::codec::Decoder as _;
 use crate::cx::Cx;
 use crate::http::h2::connection::{CLIENT_PREFACE, ReceivedFrame};
-use crate::http::h2::{Connection, ErrorCode, FrameCodec, Header, Settings};
+use crate::http::h2::{Connection, ConnectionState, ErrorCode, FrameCodec, Header, Settings};
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::time::{Sleep, TimerDriverHandle};
 use crate::types::{CancelKind, Time};
@@ -97,8 +97,10 @@ impl Channel {
     /// Returns after final response headers, before collecting messages. Call
     /// `message()` until `None` to verify the mandatory terminal gRPC status.
     /// The channel timeout, request timeout and caller deadline are met once;
-    /// connect_timeout bounds this lane's initial-header wait, not the lifetime
-    /// of an otherwise unbounded stream. Metadata is supplied directly: this
+    /// connect_timeout bounds this lane's HTTP/2 handshake (the wait for the
+    /// server's SETTINGS), not the response headers, which servers may send
+    /// with their first message, and not the lifetime of an otherwise
+    /// unbounded stream. Metadata is supplied directly: this
     /// Channel API does not run a GrpcClient's separately registered interceptors.
     /// Keepalive configuration is rejected rather than silently ignored; this
     /// lane does not provide a background heartbeat or connection pool.
@@ -267,7 +269,18 @@ where
         {
             return Err(Status::deadline_exceeded("gRPC stream deadline exceeded"));
         }
+        // connect_timeout bounds the HTTP/2 handshake only: the wait for the
+        // server's SETTINGS, which a live HTTP/2 server sends first (RFC 9113
+        // section 3.4). grpc-go and grpc-java send response headers lazily,
+        // with the first message, so a Watch whose first event came after
+        // connect_timeout used to fail (br-asupersync-grpc-client-server-audit-jq0c7j
+        // item 10(a), as NativeStreamEndpoint did before cmg03d). After the
+        // handshake, response headers wait under the call deadline only.
+        if self.header_timer.is_some() && self.connection.state() != ConnectionState::Handshaking {
+            self.header_timer = None;
+        }
         if !self.response.headers_received
+            && self.header_timer.is_some()
             && (self.clock.now() >= self.header_deadline
                 || self.header_timer.as_mut().is_some_and(|timer| Pin::new(timer).poll(task).is_ready()))
         {

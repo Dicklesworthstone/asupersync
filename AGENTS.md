@@ -314,7 +314,9 @@ debug-server = []              # Debug HTTP server for runtime inspection
 config-file = [...]            # TOML config file loading for RuntimeBuilder
 lock-metrics = []              # ContendedMutex wait/hold time tracking
 io-uring = [...]               # Linux io_uring reactor (kernel 5.1+)
-tls = [...]                    # TLS support via rustls
+tls = [...]                    # TLS support via rustls (= tls-ring)
+tls-ring = [...]               # TLS with the ring crypto provider linked
+tls-core = [...]               # TLS code without a crypto provider (caller supplies one)
 tls-native-roots = [...]       # Native root certificates for TLS
 tls-webpki-roots = [...]       # webpki root certificates for TLS
 cli = [...]                    # CLI tooling (trace inspection)

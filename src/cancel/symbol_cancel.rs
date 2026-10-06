@@ -1201,7 +1201,7 @@ impl<S: CancelSink> CancelBroadcaster<S> {
         let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
         let msg = CancelMessage::new(token_id, object_id, reason.kind(), now, sequence);
 
-        self.mark_seen(object_id, msg.token_id(), sequence);
+        let _ = self.mark_seen(object_id, msg.token_id(), sequence);
         self.initiated.fetch_add(1, Ordering::Relaxed);
 
         msg
@@ -1217,13 +1217,14 @@ impl<S: CancelSink> CancelBroadcaster<S> {
         msg: &CancelMessage,
         _received_at: Time,
     ) -> Option<CancelMessage> {
-        // Check for duplicate
-        if self.is_seen(msg.object_id(), msg.token_id(), msg.sequence()) {
+        // Check for a duplicate and record the message in one step: a check
+        // under one lock and a mark under another let two copies arriving at
+        // once from two peers both pass and both be forwarded, the fan-out
+        // amplification this exists to stop (br-asupersync-27bbrg).
+        if !self.mark_seen(msg.object_id(), msg.token_id(), msg.sequence()) {
             self.duplicates.fetch_add(1, Ordering::Relaxed);
             return None;
         }
-
-        self.mark_seen(msg.object_id(), msg.token_id(), msg.sequence());
         self.received.fetch_add(1, Ordering::Relaxed);
 
         // Cancel local token if present
@@ -1320,12 +1321,7 @@ impl<S: CancelSink> CancelBroadcaster<S> {
 
         // Process retry queue until empty or we hit a failure
         loop {
-            let (msg, original_queue_len) = {
-                let mut retries = self.pending_retries.write();
-                let msg = retries.pop_front();
-                let queue_len = retries.len();
-                (msg, queue_len)
-            };
+            let msg = self.pending_retries.write().pop_front();
 
             let Some(msg) = msg else {
                 break; // No more messages to retry
@@ -1337,21 +1333,11 @@ impl<S: CancelSink> CancelBroadcaster<S> {
                     // Successfully retried, continue with next message
                 }
                 Err(err) => {
-                    // Failed again, put message back preserving FIFO order.
-                    // Insert at the position it would have been if we hadn't removed it,
-                    // accounting for any messages added during the async broadcast.
-                    {
-                        let mut retries = self.pending_retries.write();
-                        let current_len = retries.len();
-                        if current_len > original_queue_len {
-                            // New messages were added during broadcast, insert after original messages
-                            // but before the newly added ones to preserve temporal ordering
-                            retries.insert(original_queue_len, msg);
-                        } else {
-                            // No new messages added, safe to put back at front
-                            retries.push_front(msg);
-                        }
-                    }
+                    // Failed again: it is still the oldest message. Only this
+                    // loop removes from the queue, and messages queued during
+                    // the broadcast went to the back, so it goes back to the
+                    // front (it used to land behind every older message).
+                    self.pending_retries.write().push_front(msg);
                     last_error = Some(err);
                     break; // Stop retrying on first failure to preserve order
                 }
@@ -1374,17 +1360,11 @@ impl<S: CancelSink> CancelBroadcaster<S> {
         }
     }
 
-    fn is_seen(&self, object_id: ObjectId, token_id: u64, sequence: u64) -> bool {
-        self.seen_sequences
-            .read()
-            .set
-            .contains(&(object_id, token_id, sequence))
-    }
-
-    fn mark_seen(&self, object_id: ObjectId, token_id: u64, sequence: u64) {
+    /// Records the message as seen; false if it already was.
+    fn mark_seen(&self, object_id: ObjectId, token_id: u64, sequence: u64) -> bool {
         let mut seen = self.seen_sequences.write();
         if seen.set.contains(&(object_id, token_id, sequence)) {
-            return;
+            return false;
         }
 
         // br-asupersync-as12cf — evict BEFORE insert, not after.
@@ -1404,6 +1384,7 @@ impl<S: CancelSink> CancelBroadcaster<S> {
         }
 
         seen.insert((object_id, token_id, sequence));
+        true
     }
 }
 

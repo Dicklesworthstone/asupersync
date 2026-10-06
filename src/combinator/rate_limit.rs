@@ -55,6 +55,9 @@ pub struct RateLimitPolicy {
     pub rate: u32,
 
     /// Time period for rate calculation.
+    ///
+    /// The limiters keep time in whole milliseconds and round the period up,
+    /// so a period of 100 us counts as 1 ms and 1.9 ms as 2 ms.
     pub period: Duration,
 
     /// Maximum burst capacity (tokens can accumulate up to this).
@@ -66,7 +69,8 @@ pub struct RateLimitPolicy {
     /// Cost per operation (default 1, allows weighted operations).
     pub default_cost: u32,
 
-    /// Algorithm variant.
+    /// Algorithm variant. [`RateLimiter`] runs a token bucket whichever
+    /// variant is set; see [`RateLimitAlgorithm`].
     pub algorithm: RateLimitAlgorithm,
 }
 
@@ -85,19 +89,25 @@ pub enum WaitStrategy {
 }
 
 /// Rate limiting algorithm.
+///
+/// [`RateLimiter`] implements only [`TokenBucket`](Self::TokenBucket) and
+/// runs a token bucket for the other variants too. For a sliding window use
+/// [`SlidingWindowRateLimiter`], whose window is the policy's `period`.
 #[derive(Clone, Debug, Default)]
 pub enum RateLimitAlgorithm {
     /// Classic token bucket.
     #[default]
     TokenBucket,
 
-    /// Sliding window log (more memory, smoother).
+    /// Sliding window log (more memory, smoother). Not implemented by
+    /// [`RateLimiter`]; see the type docs.
     SlidingWindowLog {
-        /// Window size for the sliding window.
+        /// Window size for the sliding window. Not read.
         window_size: Duration,
     },
 
-    /// Fixed window (simpler, allows bursts at boundaries).
+    /// Fixed window (simpler, allows bursts at boundaries). Not implemented
+    /// by [`RateLimiter`]; see the type docs.
     FixedWindow,
 }
 
@@ -215,6 +225,24 @@ struct QueueEntry {
 #[inline]
 fn duration_to_millis_saturating(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+/// The policy period in whole milliseconds, the unit these limiters keep time
+/// in, rounded up. Truncated, a sub-millisecond period became 0: the token
+/// bucket never refilled (retry_after said `Duration::MAX`) and the sliding
+/// window never expired an entry, so the limiter stayed shut. A fractional
+/// period such as 1.9 ms became 1 ms and admitted 1.9 times the rate. Rounded
+/// up, a limiter never admits more than `rate` per period. Zero stays zero
+/// (br-asupersync-e9gn8y).
+#[inline]
+fn period_to_millis_ceil(period: Duration) -> u64 {
+    let whole = period.as_millis();
+    let rounded = if period.subsec_nanos() % 1_000_000 == 0 {
+        whole
+    } else {
+        whole + 1
+    };
+    u64::try_from(rounded).unwrap_or(u64::MAX)
 }
 
 /// Internal state of the token bucket.
@@ -358,7 +386,7 @@ impl RateLimiter {
         }
 
         let elapsed_ms = now_millis - state.last_refill;
-        let period_ms = duration_to_millis_saturating(self.policy.period);
+        let period_ms = period_to_millis_ceil(self.policy.period);
 
         if period_ms > 0 && self.policy.rate > 0 {
             let added_fractional = u128::from(elapsed_ms) * u128::from(self.policy.rate);
@@ -565,17 +593,31 @@ impl RateLimiter {
             (state.tokens, state.fractional)
         };
 
-        if current_tokens >= cost {
+        // Queued waiters are served first, so a new request also waits for
+        // their tokens: free tokens the head waiter cannot use yet do not make
+        // a try_acquire succeed now (br-asupersync-r0x5ho).
+        let queued_cost: u64 = if self.pending_queue_count.load(Ordering::Relaxed) > 0 {
+            self.wait_queue
+                .read()
+                .iter()
+                .filter(|entry| entry.result.is_none())
+                .map(|entry| u64::from(entry.cost))
+                .sum()
+        } else {
+            0
+        };
+        let demand = queued_cost.saturating_add(u64::from(cost));
+        if u64::from(current_tokens) >= demand {
             return Duration::ZERO;
         }
 
-        if self.policy.rate == 0 || self.policy.period.as_millis() == 0 {
+        if self.policy.rate == 0 || self.policy.period.is_zero() {
             return Duration::MAX; // No refill rate
         }
 
-        let period_ms = duration_to_millis_saturating(self.policy.period);
+        let period_ms = period_to_millis_ceil(self.policy.period);
 
-        let tokens_needed = cost - current_tokens;
+        let tokens_needed = demand - u64::from(current_tokens);
         let fractional_needed = u128::from(tokens_needed) * u128::from(period_ms);
         let additional_fractional =
             fractional_needed.saturating_sub(u128::from(current_fractional));
@@ -843,6 +885,12 @@ impl RateLimiter {
             let previous_result = entry.result;
             let cost = entry.cost;
             let enqueued_at_millis = entry.enqueued_at_millis;
+            // Every change to the count happens under the queue lock: a
+            // concurrent reset() zeroing it between the removal and this
+            // decrement wrapped it to u32::MAX, closing the fast path for good.
+            if previous_result.is_none() {
+                self.pending_queue_count.fetch_sub(1, Ordering::Relaxed);
+            }
             drop(queue);
 
             if previous_result == Some(Ok(())) {
@@ -854,7 +902,6 @@ impl RateLimiter {
                 drop(state);
                 let _ = self.process_queue(now);
             } else if previous_result.is_none() {
-                self.pending_queue_count.fetch_sub(1, Ordering::Relaxed);
                 let wait_ms = now.as_millis().saturating_sub(enqueued_at_millis);
                 self.total_wait_time_ms
                     .fetch_add(wait_ms, Ordering::Relaxed);
@@ -874,8 +921,12 @@ impl RateLimiter {
             state.last_refill = 0;
         }
 
-        self.wait_queue.write().clear();
+        // Clear and zero under one lock so no enqueue, grant or cancel lands
+        // between them.
+        let mut queue = self.wait_queue.write();
+        queue.clear();
         self.pending_queue_count.store(0, Ordering::Relaxed);
+        drop(queue);
     }
 }
 
@@ -941,7 +992,7 @@ impl SlidingWindowRateLimiter {
     #[allow(clippy::significant_drop_tightening, clippy::cast_possible_truncation)]
     pub fn try_acquire(&self, cost: u32, now: Time) -> bool {
         let now_millis = now.as_millis();
-        let period_millis = duration_to_millis_saturating(self.policy.period);
+        let period_millis = period_to_millis_ceil(self.policy.period);
 
         // Single lock acquisition: cleanup expired + check usage + add entry
         let mut window = self.window.write();
@@ -983,7 +1034,7 @@ impl SlidingWindowRateLimiter {
     #[allow(clippy::cast_possible_truncation, clippy::significant_drop_tightening)]
     pub fn time_until_available(&self, cost: u32, now: Time) -> Duration {
         let now_millis = now.as_millis();
-        let period_millis = duration_to_millis_saturating(self.policy.period);
+        let period_millis = period_to_millis_ceil(self.policy.period);
 
         let mut window = self.window.write();
 
@@ -1158,7 +1209,8 @@ impl RateLimitPolicyBuilder {
         self
     }
 
-    /// Set the algorithm.
+    /// Set the algorithm. [`RateLimiter`] runs a token bucket for every
+    /// variant; see [`RateLimitAlgorithm`].
     #[must_use]
     pub fn algorithm(mut self, algorithm: RateLimitAlgorithm) -> Self {
         self.policy.algorithm = algorithm;
@@ -1461,6 +1513,70 @@ mod tests {
     }
 
     #[test]
+    fn reset_racing_cancel_never_wraps_the_pending_count() {
+        // br-asupersync-r0x5ho: cancel_entry decremented the pending count after
+        // releasing the queue lock, so a reset() zeroing it in between wrapped
+        // it to u32::MAX and every later try_acquire failed. The window is a
+        // few instructions wide, so this loops; a wrapped count is never a
+        // legitimate value, whatever reset runs afterwards.
+        let rl = Arc::new(RateLimiter::new(RateLimitPolicy {
+            rate: 1,
+            burst: 1,
+            wait_strategy: WaitStrategy::Block,
+            ..Default::default()
+        }));
+        let now = Time::from_millis(0);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let resetter = {
+            let rl = Arc::clone(&rl);
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    rl.reset();
+                }
+            })
+        };
+        for _ in 0..50_000 {
+            let _ = rl.try_acquire(1, now);
+            if let Ok(entry_id) = rl.enqueue(1, now) {
+                rl.cancel_entry(entry_id, now);
+            }
+            let pending = rl
+                .pending_queue_count
+                .load(std::sync::atomic::Ordering::Relaxed);
+            assert!(pending < 1 << 16, "pending count wrapped to {pending}");
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        resetter.join().expect("resetter thread");
+        rl.reset();
+        assert!(rl.try_acquire(1, now), "the fast path stays open");
+    }
+
+    #[test]
+    fn retry_after_counts_the_tokens_queued_waiters_take_first() {
+        // br-asupersync-r0x5ho: with tokens free but a queued waiter needing
+        // more, try_acquire refuses (FIFO) yet retry_after said ZERO, so a
+        // caller backing off on it spun.
+        let rl = RateLimiter::new(RateLimitPolicy {
+            rate: 5,
+            period: Duration::from_secs(1),
+            burst: 5,
+            wait_strategy: WaitStrategy::Block,
+            ..Default::default()
+        });
+        let now = Time::from_millis(0);
+        assert!(rl.try_acquire(2, now));
+        let waiter = rl.enqueue(5, now).expect("enqueue the waiter");
+        assert_ne!(
+            waiter, IMMEDIATE_ACQUIRE_SENTINEL,
+            "3 tokens cannot serve 5"
+        );
+        assert!(!rl.try_acquire(1, now), "the queued waiter goes first");
+        // 5 queued + 1 requested - 3 free = 3 tokens at 5 per second.
+        assert_eq!(rl.retry_after(1, now), Duration::from_millis(600));
+    }
+
+    #[test]
     fn reset_clears_fractional_accumulator() {
         // Regression: reset() must zero the fractional accumulator so the
         // first refill period after reset starts fresh.
@@ -1500,6 +1616,58 @@ mod tests {
             1,
             "exactly one period after reset+drain must yield exactly 1 token"
         );
+    }
+
+    #[test]
+    fn sub_millisecond_period_refills_after_one_millisecond() {
+        // br-asupersync-e9gn8y: a 100 us period truncated to 0 ms, so the
+        // bucket never refilled and retry_after said Duration::MAX.
+        let rl = RateLimiter::new(RateLimitPolicy {
+            rate: 1,
+            period: Duration::from_micros(100),
+            burst: 1,
+            ..Default::default()
+        });
+        let t0 = Time::from_millis(1_000);
+        assert!(rl.try_acquire(1, t0));
+        assert!(!rl.try_acquire(1, t0));
+        assert_eq!(rl.retry_after(1, t0), Duration::from_millis(1));
+        assert!(rl.try_acquire(1, Time::from_millis(1_001)));
+    }
+
+    #[test]
+    fn fractional_millisecond_period_admits_at_most_the_rate() {
+        // br-asupersync-e9gn8y: a 1.9 ms period truncated to 1 ms admitted a
+        // token every millisecond, 1.9 times the rate. Rounded up to 2 ms, it
+        // never admits more than the rate.
+        let rl = RateLimiter::new(RateLimitPolicy {
+            rate: 1,
+            period: Duration::from_micros(1_900),
+            burst: 1,
+            ..Default::default()
+        });
+        assert!(rl.try_acquire(1, Time::from_millis(1_000)));
+        assert!(
+            !rl.try_acquire(1, Time::from_millis(1_001)),
+            "1 ms is less than one 1.9 ms period"
+        );
+        assert!(rl.try_acquire(1, Time::from_millis(1_002)));
+    }
+
+    #[test]
+    fn sliding_window_sub_millisecond_period_expires_entries() {
+        // br-asupersync-e9gn8y: a 100 us period truncated to 0 ms, so no entry
+        // ever expired and the window stayed full forever.
+        let rl = SlidingWindowRateLimiter::new(RateLimitPolicy {
+            rate: 1,
+            period: Duration::from_micros(100),
+            ..Default::default()
+        });
+        let t0 = Time::from_millis(1_000);
+        assert!(rl.try_acquire(1, t0));
+        assert!(!rl.try_acquire(1, t0));
+        assert_eq!(rl.time_until_available(1, t0), Duration::from_millis(1));
+        assert!(rl.try_acquire(1, Time::from_millis(1_001)));
     }
 
     // =========================================================================

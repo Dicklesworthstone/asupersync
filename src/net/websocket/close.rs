@@ -12,7 +12,7 @@
 //!
 //! Close operations are designed to be cancel-safe:
 //! - Bounded timeout prevents hanging on unresponsive peers
-//! - Cancellation uses GoingAway (1001) status code
+//! - Cancellation closes with `CloseConfig::cancellation_code` (GoingAway, 1001, by default)
 //! - Partial close is handled gracefully
 //!
 //! # Example
@@ -351,6 +351,23 @@ pub struct CloseHandshake {
 }
 
 impl CloseHandshake {
+    /// The close reason for a connection closed because its task was
+    /// cancelled: the configured [`CloseConfig::cancellation_code`]
+    /// (`GoingAway` by default), or `GoingAway` if the configured code may not
+    /// be sent on the wire.
+    #[must_use]
+    pub(crate) fn cancellation_reason(&self) -> CloseReason {
+        let code = self.config.cancellation_code;
+        CloseReason::new(
+            if code.is_sendable() {
+                code
+            } else {
+                CloseCode::GoingAway
+            },
+            None,
+        )
+    }
+
     /// Create a new close handshake tracker.
     #[must_use]
     pub fn new() -> Self {
@@ -609,6 +626,27 @@ mod tests {
 
         let result = CloseReason::parse(&payload);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn cancellation_reason_uses_the_configured_sendable_code() {
+        // br-asupersync-y6naky: CloseConfig::cancellation_code was
+        // stored but never sent; cancellation always closed with GoingAway.
+        let default = CloseHandshake::new().cancellation_reason();
+        assert_eq!(default.code, Some(CloseCode::GoingAway));
+        let restart = CloseHandshake::with_config(
+            CloseConfig::new().with_cancellation_code(CloseCode::ServiceRestart),
+        );
+        let restart = restart.cancellation_reason();
+        assert_eq!(restart.code, Some(CloseCode::ServiceRestart));
+        let reserved = CloseHandshake::with_config(
+            CloseConfig::new().with_cancellation_code(CloseCode::Abnormal),
+        );
+        assert_eq!(
+            reserved.cancellation_reason().code,
+            Some(CloseCode::GoingAway),
+            "a code that may not be sent falls back to GoingAway"
+        );
     }
 
     #[test]

@@ -101,7 +101,7 @@ use crate::tracing_compat::{debug, error, warn};
 use crate::types::Time;
 
 use super::compress::{
-    RequestCompressionSensitivity, compression_oracle_sensitive, is_partial_content,
+    RequestCompressionSensitivity, compression_oracle_sensitive, is_partial_content, weaken_etag,
 };
 use super::extract::Request;
 use super::handler::Handler;
@@ -487,8 +487,10 @@ impl<H: Handler> TimeoutMiddleware<H> {
     ///
     /// The effective timeout is the smaller of `cap` and the remaining
     /// request budget (`cx.budget().deadline`) observed at request start —
-    /// min-plus composition: the tightest constraint wins. A request that
-    /// arrives with its budget already exhausted times out immediately.
+    /// min-plus composition: the tightest constraint wins. As with every
+    /// timeout of this middleware, the check runs when the handler returns:
+    /// a request that arrives with its budget already exhausted still runs
+    /// its handler (whose effects stand) and then gets the 504.
     #[must_use]
     pub fn budget_aware(inner: H, cap: Duration) -> Self {
         Self::budget_aware_with_time_getter(inner, cap, wall_clock_now)
@@ -1010,7 +1012,12 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
             let sensitivity = RequestCompressionSensitivity::from_request(&req);
             let mut resp = self.inner.call(&cx, req).await;
 
-            if resp.status == StatusCode::NO_CONTENT || resp.status == StatusCode::NOT_MODIFIED {
+            if resp.status == StatusCode::NO_CONTENT {
+                return resp;
+            }
+            if resp.status == StatusCode::NOT_MODIFIED {
+                // A 304 carries the Vary of the response it validates.
+                append_vary_header(&mut resp, "accept-encoding");
                 return resp;
             }
 
@@ -1020,6 +1027,12 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
             }
 
             if is_partial_content(&resp) {
+                return resp;
+            }
+
+            // Nothing to encode: gzipping an empty body broke streamed routes
+            // (their head may not carry bytes) and HEAD's Content-Length.
+            if resp.body.is_empty() {
                 return resp;
             }
 
@@ -1122,6 +1135,7 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
             resp.body = compressed.into();
             resp.remove_header("content-length");
             resp.set_header("content-encoding", encoding.as_token().to_string());
+            weaken_etag(&mut resp);
             append_vary_header(&mut resp, "accept-encoding");
             resp
         })
@@ -3780,6 +3794,46 @@ mod tests {
             .with_header("accept-encoding", "gzip;q=1, identity;q=0");
         let resp = mw.call(req);
         assert_eq!(resp.status.as_u16(), 406);
+    }
+
+    #[test]
+    fn compression_weakens_the_etag_and_varies_a_not_modified() {
+        // br-asupersync-a1q12q: a compressed body kept the identity bytes'
+        // strong ETag (a resumed download spliced identity bytes onto it), and
+        // a 304 left out the Vary its 200 carries.
+        fn not_modified() -> Response {
+            Response::empty(StatusCode::NOT_MODIFIED)
+        }
+        let mw =
+            CompressionMiddleware::new(FnHandler::new(not_modified), CompressionConfig::default());
+        let req = Request::new("GET", "/compress").with_header("accept-encoding", "gzip");
+        let resp = mw.call(req);
+        assert_eq!(
+            resp.headers.get("vary"),
+            Some(&"accept-encoding".to_string())
+        );
+
+        #[cfg(feature = "compression")]
+        {
+            fn tagged() -> Response {
+                Response::new(StatusCode::OK, "Hello, World! ".repeat(100).into_bytes())
+                    .header("etag", "\"v1\"")
+            }
+            let mw = CompressionMiddleware::new(
+                FnHandler::new(tagged),
+                CompressionConfig {
+                    min_body_size: 0,
+                    ..CompressionConfig::default()
+                },
+            );
+            let req = Request::new("GET", "/compress").with_header("accept-encoding", "gzip");
+            let resp = mw.call(req);
+            assert_eq!(
+                resp.headers.get("content-encoding"),
+                Some(&"gzip".to_string())
+            );
+            assert_eq!(resp.headers.get("etag"), Some(&"W/\"v1\"".to_string()));
+        }
     }
 
     // --- RequestBodyLimitMiddleware ---

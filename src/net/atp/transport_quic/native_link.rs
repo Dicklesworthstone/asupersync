@@ -81,7 +81,7 @@ use crate::net::atp::transport_rq::erase_send;
 use crate::net::quic_core::ConnectionId;
 use crate::net::quic_native::handshake_driver::{
     ATP_QUIC_ALPN, HandshakeLevel, QuicHandshakeDriver, client_handshake_over_udp,
-    is_stale_handshake_packet_error,
+    is_stale_handshake_packet_error, is_unauthenticated_handshake_packet_error,
 };
 use crate::net::quic_native::tls::{
     PacketProtectionRequest, PacketProtectionSpace, RustlsQuicCryptoProvider,
@@ -870,6 +870,36 @@ fn describe_fallback_io_delta(now: FallbackIoProbe, before: FallbackIoProbe) -> 
 fn describe_fallback_io_delta(_now: FallbackIoProbe, _before: FallbackIoProbe) -> String {
     "fallback_io_delta=unavailable".to_string()
 }
+
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-internals")))]
+std::thread_local! {
+    static RECEIVER_MEMBER_PATH_DELAY: std::cell::Cell<Duration> =
+        const { std::cell::Cell::new(Duration::ZERO) };
+}
+
+/// Test hook (br-asupersync-r02ssd): slows packed-tree commits on this thread.
+///
+/// A receive polled on this thread waits `delay` before it resolves each
+/// member path at commit, so a test can reproduce a slow commit (a loaded
+/// disk) deterministically. Drive the receive on the calling thread, as
+/// `block_on` does; other threads are unaffected. `Duration::ZERO`, the
+/// default, turns it off.
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-internals")))]
+pub fn set_receiver_member_path_delay_for_testing(delay: Duration) {
+    RECEIVER_MEMBER_PATH_DELAY.with(|cell| cell.set(delay));
+}
+
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-internals")))]
+async fn receiver_member_path_delay_for_testing(cx: &Cx) {
+    let delay = RECEIVER_MEMBER_PATH_DELAY.with(std::cell::Cell::get);
+    if !delay.is_zero() {
+        crate::time::sleep(cx.now(), delay).await;
+    }
+}
+
+#[cfg(not(all(not(target_arch = "wasm32"), any(test, feature = "test-internals"))))]
+#[allow(clippy::unused_async)]
+async fn receiver_member_path_delay_for_testing(_cx: &Cx) {}
 
 /// Socket waits shorter than this are drain-grace polls between batches,
 /// not idle parks; `pump_idle` traces only real parks.
@@ -6646,6 +6676,47 @@ async fn send_server_handshake_flight(
     Ok(packets)
 }
 
+/// Most 1-RTT packets [`accept`] holds for replay while its handshake runs.
+const ACCEPT_EARLY_ONE_RTT_MAX_PACKETS: usize = 4096;
+/// Most bytes of 1-RTT packets [`accept`] holds for replay while its
+/// handshake runs: twice the initial stream receive window.
+const ACCEPT_EARLY_ONE_RTT_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// The 1-RTT packets that arrive while [`accept`]'s handshake is still running,
+/// kept for replay into the link.
+///
+/// Nothing authenticates them until the link decrypts them, so the stash is
+/// bounded: before the client's Initial names the peer, a short-header packet
+/// cannot be its data and is dropped, and afterwards the stash keeps at most
+/// [`ACCEPT_EARLY_ONE_RTT_MAX_PACKETS`] packets and
+/// [`ACCEPT_EARLY_ONE_RTT_MAX_BYTES`] bytes. It used to keep every short-header
+/// datagram from any address for the whole accept timeout, so anyone who could
+/// reach the port could exhaust the receiver's memory before authenticating
+/// (br-asupersync-8vrx8q). A dropped packet is ordinary loss to the data
+/// plane, which recovers it.
+#[derive(Default)]
+struct EarlyOneRttStash {
+    packets: Vec<ReceivedPacket>,
+    bytes: usize,
+}
+
+impl EarlyOneRttStash {
+    /// Keeps `packet` when the peer is known and the stash has room; returns
+    /// whether it was kept.
+    fn offer(&mut self, packet: ReceivedPacket, peer_known: bool) -> bool {
+        let len = packet.data.len();
+        if !peer_known
+            || self.packets.len() >= ACCEPT_EARLY_ONE_RTT_MAX_PACKETS
+            || self.bytes.saturating_add(len) > ACCEPT_EARLY_ONE_RTT_MAX_BYTES
+        {
+            return false;
+        }
+        self.bytes += len;
+        self.packets.push(packet);
+        true
+    }
+}
+
 /// Accept one QUIC client on a bound server `endpoint`: run the real TLS-1.3
 /// handshake (presenting the server certificate) and return an established
 /// [`QuicLink`] plus any 1-RTT data-plane packets that arrived before the
@@ -6676,7 +6747,7 @@ async fn accept(
 
     let mut server_pn = 0u64;
     let mut peer: Option<(SocketAddr, ConnectionId)> = None;
-    let mut early_data: Vec<ReceivedPacket> = Vec::new();
+    let mut early_data = EarlyOneRttStash::default();
     let mut last_flight: Vec<OutgoingPacket> = Vec::new();
     // `accept_timeout` bounds the WHOLE accept, and each receive waits at most
     // one recovery PTO so lost flights are re-offered on a real cadence
@@ -6725,6 +6796,12 @@ async fn accept(
             }
         };
         for packet in received {
+            // Once the client is known, datagrams from any other address are
+            // not part of this accept: neither its handshake nor its early
+            // data (br-asupersync-5f1fcj).
+            if peer.is_some_and(|(addr, _)| addr != packet.src_addr) {
+                continue;
+            }
             if is_long_header(&packet.data) {
                 let client_cid = match driver.recv_handshake_packet(&packet.data) {
                     Ok(client_cid) => client_cid,
@@ -6740,6 +6817,11 @@ async fn accept(
                         }
                         continue;
                     }
+                    // A forged, corrupted or stray long-header datagram (ATP's
+                    // Initial DCID is a protocol constant, so anyone can aim one
+                    // here) is discarded, RFC 9000 section 12.2. It used to end
+                    // the accept of the client still driving it.
+                    Err(err) if is_unauthenticated_handshake_packet_error(&err) => continue,
                     Err(err) => return Err(map_tls_error(err)),
                 };
                 if peer.is_none() {
@@ -6760,10 +6842,18 @@ async fn accept(
                     if !sent.is_empty() {
                         last_flight = sent;
                     } else if !driver.is_complete() && !last_flight.is_empty() {
-                        endpoint
-                            .send_batch(cx, &last_flight)
-                            .await
-                            .map_err(map_udp_error)?;
+                        // A packet that produced no new output (a client
+                        // retransmission, or a replayed or forged Initial)
+                        // re-offers the flight at most once per recovery PTO,
+                        // like a stale-key packet, instead of on demand.
+                        let now = cx.now();
+                        if stale_resend_at.is_none_or(|at| now >= at) {
+                            stale_resend_at = Some(now + HANDSHAKE_RECOVERY_RESEND_PTO);
+                            endpoint
+                                .send_batch(cx, &last_flight)
+                                .await
+                                .map_err(map_udp_error)?;
+                        }
                     }
                 }
             } else {
@@ -6774,8 +6864,9 @@ async fn accept(
                 // flight (rate-limited) so the client's data plane sees a
                 // long-header packet and re-sends its Finished
                 // (br-asupersync-jmri58). Early-data packets deliberately do
-                // NOT consume the flight budget.
-                early_data.push(packet);
+                // NOT consume the flight budget. The stash drops packets from
+                // before the peer is known and keeps the rest bounded.
+                early_data.offer(packet, peer.is_some());
                 if !driver.is_complete()
                     && !last_flight.is_empty()
                     && last_early_data_resend
@@ -6800,7 +6891,7 @@ async fn accept(
     let (peer_addr, _peer_cid) = peer
         .ok_or_else(|| QuicTransportError::Quic("server handshake learned no peer".to_string()))?;
     let link = link_from_handshake(cx, driver, endpoint, peer_addr, StreamRole::Server, config)?;
-    Ok((link, early_data))
+    Ok((link, early_data.packets))
 }
 
 // ─── Sender session ─────────────────────────────────────────────────────────
@@ -9908,8 +9999,19 @@ async fn commit_staged_entries(
                 // files AND apply member metadata with one blocking-pool
                 // batch (the staged pack itself is scratch; the staging-dir
                 // guard reclaims it).
+                //
+                // One keep-alive cadence covers the whole packed commit, from
+                // resolving the member paths on. That loop awaits a blocking
+                // symlink check per member: for 2000 members it kept the
+                // receiver silent for 10 s on an idle machine and past the
+                // sender's idle budget under load, so the sender gave up on a
+                // transfer the receiver then committed (br-asupersync-r02ssd).
+                let mut member_keep_alive = LocalWorkKeepAlive::new(Instant::now());
                 let mut writes = Vec::with_capacity(entry.members.len());
                 for (member_index, member) in entry.members.iter().enumerate() {
+                    keep_peer_alive_during_local_work(cx, link, control, &mut member_keep_alive)
+                        .await?;
+                    receiver_member_path_delay_for_testing(cx).await;
                     let member_path = super::quic_join_relative(&base, &member.rel_path)?;
                     super::reject_quic_destination_symlink_prefix(&base, &member_path).await?;
                     writes.push(QuicPackedMemberWrite {
@@ -9937,7 +10039,6 @@ async fn commit_staged_entries(
                     super::trace_quic_metadata_skips(cx, path, report);
                 }
                 let mut member_clock = Instant::now();
-                let mut member_keep_alive = LocalWorkKeepAlive::new(Instant::now());
                 for (member_index, (member, write)) in entry.members.iter().zip(&writes).enumerate()
                 {
                     keep_peer_alive_during_local_work(cx, link, control, &mut member_keep_alive)
@@ -11843,6 +11944,135 @@ mod gh67_liveness_tests {
         let (mut server, early) = server.expect("server link");
         server.ingest_packets(cx, early).expect("early packets");
         (client, server)
+    }
+
+    // br-asupersync-5f1fcj: a long-header datagram that fails to authenticate
+    // made the server's accept return an error, so anyone who could reach the
+    // port could end an accept with one garbage packet (ATP's Initial DCID is
+    // a protocol constant). It must be discarded and the handshake complete.
+    #[test]
+    fn a_garbage_long_header_datagram_does_not_end_an_accept() {
+        let cx = Cx::for_testing();
+        let config = QuicConfig::default();
+        block_on(async {
+            let endpoint = bind_endpoint(&cx, "127.0.0.1:0".parse().unwrap())
+                .await
+                .expect("bind endpoint");
+            let address = endpoint.local_addr();
+            // An Initial-typed long header with ATP's Initial DCID and a body
+            // that cannot authenticate, queued before the real client.
+            let mut garbage = vec![0xc0, 0x00, 0x00, 0x00, 0x01];
+            garbage.push(u8::try_from(ATP_QUIC_INITIAL_DCID.len()).expect("dcid length"));
+            garbage.extend_from_slice(ATP_QUIC_INITIAL_DCID);
+            garbage.extend_from_slice(&[8, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0x44, 0x00]);
+            garbage.resize(1_200, 0xa5);
+            let forger = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind forger");
+            forger.send_to(&garbage, address).expect("send garbage");
+
+            let client_tls = QuicClientTls {
+                server_name: ServerName::try_from("localhost").unwrap(),
+                config: client_config(
+                    vec![parse_one_cert(CA_CERT_PEM)],
+                    vec![ATP_QUIC_ALPN.to_vec()],
+                )
+                .unwrap(),
+            };
+            let server_tls = QuicServerTls {
+                config: server_config(
+                    vec![parse_one_cert(LEAF_CERT_PEM)],
+                    leaf_key(),
+                    vec![ATP_QUIC_ALPN.to_vec()],
+                )
+                .unwrap(),
+            };
+            let (client, server) = zip(
+                connect(&cx, address, &client_tls, &config),
+                accept(&cx, endpoint, &server_tls, &config),
+            )
+            .await;
+            client.expect("client link");
+            server.expect("the accept survives the garbage datagram");
+        });
+    }
+
+    // br-asupersync-8vrx8q (audit r8 H1): accept stashed every short-header
+    // datagram from any address while no peer was known, without bound. Those
+    // sent before the client's Initial must not reach the replayed early data.
+    #[test]
+    fn short_header_datagrams_before_the_client_is_known_are_not_stashed() {
+        let cx = Cx::for_testing();
+        let config = QuicConfig::default();
+        block_on(async {
+            let endpoint = bind_endpoint(&cx, "127.0.0.1:0".parse().unwrap())
+                .await
+                .expect("bind endpoint");
+            let address = endpoint.local_addr();
+            let sprayer = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind sprayer");
+            let sprayer_addr = sprayer.local_addr().expect("sprayer address");
+            for _ in 0..64 {
+                sprayer
+                    .send_to(&[0x40; 1_200], address)
+                    .expect("send short header");
+            }
+
+            let client_tls = QuicClientTls {
+                server_name: ServerName::try_from("localhost").unwrap(),
+                config: client_config(
+                    vec![parse_one_cert(CA_CERT_PEM)],
+                    vec![ATP_QUIC_ALPN.to_vec()],
+                )
+                .unwrap(),
+            };
+            let server_tls = QuicServerTls {
+                config: server_config(
+                    vec![parse_one_cert(LEAF_CERT_PEM)],
+                    leaf_key(),
+                    vec![ATP_QUIC_ALPN.to_vec()],
+                )
+                .unwrap(),
+            };
+            let (client, server) = zip(
+                connect(&cx, address, &client_tls, &config),
+                accept(&cx, endpoint, &server_tls, &config),
+            )
+            .await;
+            client.expect("client link");
+            let (_server, early) = server.expect("server link");
+            let sprayed = early
+                .iter()
+                .filter(|packet| packet.src_addr == sprayer_addr)
+                .count();
+            assert_eq!(
+                sprayed, 0,
+                "short-header datagrams sent before the client's Initial were stashed"
+            );
+        });
+    }
+
+    // br-asupersync-8vrx8q (audit r8 H1): once the peer is known the stash is
+    // bounded by packet count and by bytes.
+    #[test]
+    fn the_early_one_rtt_stash_is_bounded() {
+        let packet = |len: usize| ReceivedPacket {
+            src_addr: "127.0.0.1:9".parse().unwrap(),
+            data: vec![0x40; len],
+            receive_time: Instant::now(),
+            transmit_time: None,
+        };
+        let mut stash = EarlyOneRttStash::default();
+        assert!(!stash.offer(packet(64), false), "no peer yet: dropped");
+        for _ in 0..ACCEPT_EARLY_ONE_RTT_MAX_PACKETS {
+            assert!(stash.offer(packet(1), true));
+        }
+        assert!(!stash.offer(packet(1), true), "count cap reached");
+
+        let mut stash = EarlyOneRttStash::default();
+        let big = 64 * 1024;
+        for _ in 0..ACCEPT_EARLY_ONE_RTT_MAX_BYTES / big {
+            assert!(stash.offer(packet(big), true));
+        }
+        assert!(!stash.offer(packet(1), true), "byte cap reached");
+        assert_eq!(stash.bytes, ACCEPT_EARLY_ONE_RTT_MAX_BYTES);
     }
 
     // asupersync-18hhdp: the client's handshake source CID is per connection,

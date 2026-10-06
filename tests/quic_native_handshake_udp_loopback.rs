@@ -630,6 +630,179 @@ fn real_tls13_handshake_completes_over_real_loopback_udp() {
     });
 }
 
+/// br-asupersync-5f1fcj: the server sent its whole Handshake-level CRYPTO (the
+/// certificate chain) in one datagram, so any chain larger than about 1.3 KB
+/// exceeded the default 1500-byte packet size and the handshake failed with
+/// `udp_send`. A leaf plus four copies of the CA (about 2.1 KB of DER) must
+/// complete at the default packet size.
+#[test]
+fn real_tls13_handshake_fits_a_long_certificate_chain_into_default_datagrams() {
+    block_on(async {
+        let cx = Cx::for_testing();
+        let udp_config = QuicUdpEndpointConfig::default();
+        let mut client_ep =
+            QuicUdpEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), udp_config.clone())
+                .await
+                .expect("bind client UDP");
+        let mut server_ep = QuicUdpEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), udp_config)
+            .await
+            .expect("bind server UDP");
+        let server_addr = server_ep.local_addr();
+
+        let alpn = vec![ATP_QUIC_ALPN.to_vec()];
+        let mut chain = vec![parse_one_cert(LEAF_CERT_PEM)];
+        chain.extend((0..4).map(|_| parse_one_cert(CA_CERT_PEM)));
+        let chain_bytes: usize = chain.iter().map(|cert| cert.len()).sum();
+        assert!(chain_bytes > 1_500, "the chain alone exceeds one datagram");
+        let server_cfg = server_config(chain, leaf_key(), alpn.clone()).expect("server config");
+        let client_cfg =
+            client_config(vec![parse_one_cert(CA_CERT_PEM)], alpn).expect("client config");
+        let mut client = QuicHandshakeDriver::client(
+            client_cfg,
+            ServerName::try_from("localhost").expect("server name"),
+            b"client-transport-params".to_vec(),
+        )
+        .expect("client driver");
+        let mut server =
+            QuicHandshakeDriver::server(server_cfg, b"server-transport-params".to_vec())
+                .expect("server driver");
+        let dcid =
+            ConnectionId::new(&[0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x19]).expect("dcid");
+        let client_scid = ConnectionId::new(&[0x11, 0x22, 0x33, 0x45]).expect("client scid");
+        let server_scid = ConnectionId::new(&[0x55, 0x66, 0x77, 0x89]).expect("server scid");
+
+        let (client_result, server_result) = zip(
+            client_handshake_over_udp(
+                &cx,
+                &mut client_ep,
+                server_addr,
+                &mut client,
+                dcid,
+                client_scid,
+            ),
+            server_handshake_over_udp(&cx, &mut server_ep, &mut server, dcid, server_scid),
+        )
+        .await;
+        client_result.expect("client handshake completed");
+        server_result.expect("server handshake completed");
+        assert!(client.is_complete() && server.is_complete());
+        assert!(client.one_rtt_keys_installed() && server.one_rtt_keys_installed());
+    });
+}
+
+/// Forwards the client's first datagram to the server and nothing else, and
+/// counts what the server sends back. To the server this is a client that
+/// never answers, which is what a forged Initial carrying a victim's source
+/// address looks like. Returns (bytes forwarded, bytes the server sent).
+fn spawn_one_datagram_reflector(
+    server_addr: SocketAddr,
+    stop: Arc<AtomicBool>,
+) -> (SocketAddr, JoinHandle<(usize, usize)>) {
+    let socket = UdpSocket::bind("127.0.0.1:0").expect("bind reflector");
+    socket.set_nonblocking(true).expect("reflector nonblocking");
+    let addr = socket.local_addr().expect("reflector addr");
+    let handle = thread::spawn(move || {
+        let mut forwarded = 0usize;
+        let mut reflected = 0usize;
+        let mut buf = vec![0u8; 65_535];
+        while !stop.load(Ordering::Relaxed) {
+            loop {
+                match socket.recv_from(&mut buf) {
+                    Ok((len, src)) if src == server_addr => reflected += len,
+                    Ok((len, _)) if forwarded == 0 => {
+                        forwarded = len;
+                        let _ = socket.send_to(&buf[..len], server_addr);
+                    }
+                    Ok(_) => {}
+                    Err(err) if err.kind() == ErrorKind::WouldBlock => break,
+                    Err(_) => return (forwarded, reflected),
+                }
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        (forwarded, reflected)
+    });
+    (addr, handle)
+}
+
+/// br-asupersync-5f1fcj: the standalone server handshake had no
+/// anti-amplification limit. For one Initial from an address that never
+/// answers it sent its whole flight, then resent it on every PTO, so a
+/// forged Initial made it reflect many times its size to the victim. RFC
+/// 9000 section 8.1 allows three times the bytes received until the address
+/// is validated. A long certificate chain makes each flight about 2.5 KB.
+#[test]
+fn server_handshake_sends_an_unvalidated_address_at_most_three_times_what_it_sent() {
+    block_on(async {
+        let cx = Cx::for_testing();
+        let udp_config = QuicUdpEndpointConfig::default();
+        let mut client_ep =
+            QuicUdpEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), udp_config.clone())
+                .await
+                .expect("bind client UDP");
+        let mut server_ep = QuicUdpEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), udp_config)
+            .await
+            .expect("bind server UDP");
+        let server_addr = server_ep.local_addr();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (reflector, counts) = spawn_one_datagram_reflector(server_addr, Arc::clone(&stop));
+
+        let alpn = vec![ATP_QUIC_ALPN.to_vec()];
+        let mut chain = vec![parse_one_cert(LEAF_CERT_PEM)];
+        chain.extend((0..4).map(|_| parse_one_cert(CA_CERT_PEM)));
+        let server_cfg = server_config(chain, leaf_key(), alpn.clone()).expect("server config");
+        let client_cfg =
+            client_config(vec![parse_one_cert(CA_CERT_PEM)], alpn).expect("client config");
+        let mut client = QuicHandshakeDriver::client(
+            client_cfg,
+            ServerName::try_from("localhost").expect("server name"),
+            b"client-transport-params".to_vec(),
+        )
+        .expect("client driver");
+        let mut server =
+            QuicHandshakeDriver::server(server_cfg, b"server-transport-params".to_vec())
+                .expect("server driver");
+        let dcid =
+            ConnectionId::new(&[0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x1a]).expect("dcid");
+        let client_scid = ConnectionId::new(&[0x11, 0x22, 0x33, 0x46]).expect("client scid");
+        let server_scid = ConnectionId::new(&[0x55, 0x66, 0x77, 0x8a]).expect("server scid");
+
+        // Two PTO periods: the server's first flight and at least two resends.
+        let window = Duration::from_millis(4_000);
+        let _ = zip(
+            timeout(
+                wall_now(),
+                window,
+                client_handshake_over_udp(
+                    &cx,
+                    &mut client_ep,
+                    reflector,
+                    &mut client,
+                    dcid,
+                    client_scid,
+                ),
+            ),
+            timeout(
+                wall_now(),
+                window,
+                server_handshake_over_udp(&cx, &mut server_ep, &mut server, dcid, server_scid),
+            ),
+        )
+        .await;
+        stop.store(true, Ordering::Relaxed);
+        let (forwarded, reflected) = counts.join().expect("reflector thread");
+        assert!(
+            forwarded >= 1_200,
+            "the client's padded Initial reached the server"
+        );
+        assert!(reflected > 0, "the server answered the Initial");
+        assert!(
+            reflected <= 3 * forwarded,
+            "the server sent {reflected} bytes to an unvalidated address that sent {forwarded}"
+        );
+    });
+}
+
 // This test uses only small packet numbers (no truncated-number wraparound).
 // Decode the actual AEAD-protected UDP bytes independently of ACK generation.
 fn decode_test_handshake_packet(

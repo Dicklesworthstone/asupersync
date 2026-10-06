@@ -209,10 +209,14 @@ impl SporkAppHarness {
     }
 
     /// Check whether all oracles pass for the current runtime state.
+    ///
+    /// The oracles are hydrated from the runtime state first, as
+    /// [`Self::snapshot_report`] does. Reading the suite directly reported
+    /// whatever it last saw: nothing at all before any report, so every
+    /// runtime-fed oracle passed (br-asupersync-vcu2oz).
     #[must_use]
     pub fn oracles_pass(&mut self) -> bool {
-        let now = self.runtime.now();
-        self.runtime.oracles.report(now).all_passed()
+        self.runtime.report().oracle_report.all_passed()
     }
 }
 
@@ -1192,6 +1196,36 @@ mod tests {
         );
 
         crate::test_complete!("conformance_oracles_pass_at_snapshot");
+    }
+
+    /// oracles_pass hydrates the oracles from the runtime state, so a
+    /// violation present there fails it (br-asupersync-vcu2oz). It read the
+    /// suite directly, which nothing had fed, and passed.
+    #[test]
+    fn oracles_pass_sees_a_violation_in_the_runtime_state() {
+        crate::test_utils::init_test_logging();
+        let app = AppSpec::new("planted_violation").child(conformance_child("worker_a"));
+        let mut harness = SporkAppHarness::with_seed(7, app).unwrap();
+        schedule_children(&harness);
+        harness.run_until_idle();
+
+        // A region marked closed with a finalizer that never ran.
+        let parent = harness.cx.region_id();
+        let state = &mut harness.runtime.state;
+        let region = state
+            .create_child_region(parent, crate::types::Budget::INFINITE)
+            .expect("child region");
+        assert!(state.register_sync_finalizer(region, || {}));
+        state.record_finalizer_close_for_test(region);
+        state
+            .region(region)
+            .expect("region exists")
+            .set_state(crate::record::region::RegionState::Closed);
+
+        assert!(
+            !harness.oracles_pass(),
+            "a closed region with an unrun finalizer fails the oracles"
+        );
     }
 
     /// Conformance: report schema version is stable.

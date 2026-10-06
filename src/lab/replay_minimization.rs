@@ -88,7 +88,7 @@ pub struct TraceMinimizer {
     config: MinimizationConfig,
     validator: Arc<dyn ReplayValidator>,
     strategy: MinimizationStrategy,
-    cache: HashMap<Vec<usize>, bool>,
+    cache: HashMap<Vec<u64>, bool>,
 }
 
 impl TraceMinimizer {
@@ -116,6 +116,7 @@ impl TraceMinimizer {
             original_size, self.strategy
         );
 
+        let original = events.clone();
         let minimized_events = match self.strategy {
             MinimizationStrategy::DeltaDebugging => self.delta_debugging_minimize(events).await?,
             MinimizationStrategy::DependencyPruning => {
@@ -134,14 +135,19 @@ impl TraceMinimizer {
 
         let duration = start_time.elapsed();
 
-        // Compute essential and pruned event indices
-        let essential_events: Vec<usize> = minimized_events
-            .iter()
-            .enumerate()
-            .map(|(i, _)| i)
-            .collect();
-
-        let pruned_events: Vec<usize> = (minimized_size..original_size).collect();
+        // Every strategy keeps a subsequence of the original trace, in order;
+        // name each event by its index in the original.
+        let mut kept = minimized_events.iter().peekable();
+        let mut essential_events = Vec::with_capacity(minimized_size);
+        let mut pruned_events = Vec::new();
+        for (index, event) in original.iter().enumerate() {
+            if kept.peek() == Some(&event) {
+                kept.next();
+                essential_events.push(index);
+            } else {
+                pruned_events.push(index);
+            }
+        }
 
         let result = MinimizationResult {
             original_size,
@@ -316,16 +322,21 @@ impl TraceMinimizer {
 
     /// Validate a candidate trace
     async fn validate_candidate(&mut self, events: &[TraceEvent]) -> Result<bool> {
-        // Check cache first
-        let key: Vec<usize> = events.iter().enumerate().map(|(i, _)| i).collect();
-        if let Some(&cached) = self.cache.get(&key) {
+        // A candidate is a subsequence of the trace, so its sequence numbers
+        // name it while they are distinct; otherwise it is not cached.
+        let key = events
+            .windows(2)
+            .all(|pair| pair[0].seq < pair[1].seq)
+            .then(|| events.iter().map(|event| event.seq).collect::<Vec<u64>>());
+        if let Some(&cached) = key.as_ref().and_then(|key| self.cache.get(key)) {
             return Ok(cached);
         }
 
         let result = self.validator.validate_replay(events)?;
 
-        // Cache the result
-        self.cache.insert(key, result);
+        if let Some(key) = key {
+            self.cache.insert(key, result);
+        }
 
         Ok(result)
     }
@@ -1027,6 +1038,44 @@ mod tests {
 
         let result = optimizer.optimize(events).await;
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn delta_debugging_tests_each_candidate_and_reports_original_indices() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+
+        struct NeedsSeq(u64);
+        impl ReplayValidator for NeedsSeq {
+            fn validate_replay(&self, events: &[TraceEvent]) -> Result<bool> {
+                Ok(events.iter().any(|event| event.seq == self.0))
+            }
+            fn target_description(&self) -> String {
+                format!("keeps event {}", self.0)
+            }
+        }
+
+        let events: Vec<TraceEvent> = (0..16)
+            .map(|seq| TraceEvent::user_trace(seq, crate::types::Time::ZERO, "event"))
+            .collect();
+        let mut minimizer = TraceMinimizer::new(
+            MinimizationConfig::default(),
+            Arc::new(NeedsSeq(5)),
+            MinimizationStrategy::DeltaDebugging,
+        );
+        let minimize = std::pin::pin!(minimizer.minimize(events));
+        let Poll::Ready(result) = minimize.poll(&mut Context::from_waker(Waker::noop())) else {
+            panic!("the minimizer awaits nothing external");
+        };
+        let result = result.expect("minimizes");
+        assert_eq!(
+            (result.minimized_size, result.essential_events.clone()),
+            (1, vec![5]),
+        );
+        assert_eq!(
+            result.pruned_events,
+            (0..16).filter(|&index| index != 5).collect::<Vec<_>>()
+        );
     }
 
     #[test]

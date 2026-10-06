@@ -1641,6 +1641,16 @@ fn mailbox_and_scope_spawn_paths_classify_before_terminal_publication() {
     // fail this lane until its publication behavior is deliberately classified.
     let expected_census = BTreeMap::from([
         ("src/combinator/join_set.rs|TaskHandle::new(".to_owned(), 1),
+        // Classified (02469ad83, 1sngsf, bi2462.147): a `#[cfg(test)]` fixture
+        // in the fail-fast JoinSet owner tests (`manual_member`) that builds a
+        // handle over a hand-held oneshot so a test can complete members in
+        // any order. It is not a spawn adapter: production members are
+        // spawned through `Cx` spawn paths, whose pair factories are counted
+        // under src/cx/cx.rs.
+        (
+            "src/combinator/join_set/owner/fail_fast.rs|TaskHandle::new(".to_owned(),
+            1,
+        ),
         // Classified (27a96729f, bi2462.102): a `#[cfg(test)]` fixture in the
         // HTTP/2 request-owner tests that builds a handle over a hand-held
         // oneshot to publish a terminal between two probes. It is not a spawn

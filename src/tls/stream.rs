@@ -72,6 +72,8 @@ pub struct TlsStream<IO> {
     conn: TlsConnection,
     state: TlsState,
     read_closed: bool,
+    /// The error that ended reading, reported again by every later read.
+    read_error: Option<(io::ErrorKind, String)>,
 }
 
 /// Fallback `TlsStream` when TLS is disabled.
@@ -160,6 +162,22 @@ impl TlsConnection {
         }
     }
 
+    fn negotiated_cipher_suite(&self) -> Option<rustls::CipherSuite> {
+        match self {
+            Self::Client(c) => c.negotiated_cipher_suite(),
+            Self::Server(s) => s.negotiated_cipher_suite(),
+        }
+        .map(|suite| suite.suite())
+    }
+
+    fn negotiated_key_exchange_group(&self) -> Option<rustls::NamedGroup> {
+        match self {
+            Self::Client(c) => c.negotiated_key_exchange_group(),
+            Self::Server(s) => s.negotiated_key_exchange_group(),
+        }
+        .map(|group| group.name())
+    }
+
     /// Leaf peer certificate (DER bytes), if the handshake produced one.
     /// Used by PostgreSQL SCRAM-SHA-256-PLUS channel binding
     /// (br-asupersync-7n2xsi).
@@ -170,6 +188,14 @@ impl TlsConnection {
         }?;
         let leaf = certs.first()?;
         Some(leaf.as_ref().to_vec())
+    }
+
+    fn peer_certificate_chain_der(&self) -> Option<Vec<Vec<u8>>> {
+        let certs = match self {
+            Self::Client(c) => c.peer_certificates(),
+            Self::Server(s) => s.peer_certificates(),
+        }?;
+        Some(certs.iter().map(|cert| cert.as_ref().to_vec()).collect())
     }
 
     fn alpn_protocol(&self) -> Option<&[u8]> {
@@ -196,6 +222,7 @@ impl<IO> TlsStream<IO> {
             conn: TlsConnection::Client(conn),
             state: TlsState::Handshaking,
             read_closed: false,
+            read_error: None,
         }
     }
 
@@ -206,6 +233,7 @@ impl<IO> TlsStream<IO> {
             conn: TlsConnection::Server(conn),
             state: TlsState::Handshaking,
             read_closed: false,
+            read_error: None,
         }
     }
 
@@ -217,6 +245,17 @@ impl<IO> TlsStream<IO> {
     /// Get the TLS protocol version.
     pub fn protocol_version(&self) -> Option<rustls::ProtocolVersion> {
         self.conn.protocol_version()
+    }
+
+    /// Get the negotiated cipher suite, once the handshake has chosen one.
+    pub fn negotiated_cipher_suite(&self) -> Option<rustls::CipherSuite> {
+        self.conn.negotiated_cipher_suite()
+    }
+
+    /// Get the negotiated key-exchange group, once the handshake has chosen
+    /// one. rustls reports `None` for a handshake without a key exchange.
+    pub fn negotiated_key_exchange_group(&self) -> Option<rustls::NamedGroup> {
+        self.conn.negotiated_key_exchange_group()
     }
 
     /// Get the SNI hostname (server-side only).
@@ -231,6 +270,13 @@ impl<IO> TlsStream<IO> {
     /// certificate. (br-asupersync-7n2xsi)
     pub fn peer_leaf_certificate_der(&self) -> Option<Vec<u8>> {
         self.conn.peer_leaf_certificate_der()
+    }
+
+    /// Returns the DER-encoded certificates the peer presented, leaf first,
+    /// in the order it sent them. `None` before the handshake is complete or
+    /// when the peer presented no certificate.
+    pub fn peer_certificate_chain_der(&self) -> Option<Vec<Vec<u8>>> {
+        self.conn.peer_certificate_chain_der()
     }
 
     /// Get a reference to the underlying IO.
@@ -263,6 +309,17 @@ impl<IO> TlsStream<IO> {
         if self.state.shutdown_pending() {
             self.state = TlsState::Closed;
         }
+    }
+
+    /// Closes the stream on a read error and keeps the error for later
+    /// reads. Reading again must not turn a truncated or corrupt stream
+    /// into a clean end of file; rustls's own reader repeats such an
+    /// error as well (br-asupersync-2dxusr item 4).
+    fn fail_read(&mut self, kind: io::ErrorKind, message: String) -> io::Error {
+        self.state = TlsState::Closed;
+        let err = io::Error::new(kind, message.clone());
+        self.read_error = Some((kind, message));
+        err
     }
 }
 
@@ -506,6 +563,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
             return Poll::Ready(Ok(()));
         }
 
+        if let Some((kind, message)) = &self.read_error {
+            return Poll::Ready(Err(io::Error::new(*kind, message.clone())));
+        }
+
         if self.read_closed || self.state.is_terminal() {
             return Poll::Ready(Ok(()));
         }
@@ -516,6 +577,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
                 Poll::Ready(Ok(())) => {}
                 Poll::Ready(Err(e)) => {
                     // poll_handshake already updates state to Closed on failure
+                    self.read_error = Some((io::ErrorKind::Other, e.to_string()));
                     return Poll::Ready(Err(io::Error::other(e)));
                 }
                 Poll::Pending => return Poll::Pending,
@@ -551,21 +613,18 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
             match self.poll_read_tls(cx) {
                 Poll::Ready(Ok(0)) => {
                     // Transport EOF without close_notify (since Reader::read didn't return Ok(0))
-                    self.state = TlsState::Closed;
-                    return Poll::Ready(Err(io::Error::new(
+                    return Poll::Ready(Err(self.fail_read(
                         io::ErrorKind::UnexpectedEof,
-                        "tls connection closed without close_notify",
+                        "tls connection closed without close_notify".to_owned(),
                     )));
                 }
                 Poll::Ready(Ok(_)) => {
                     // Process the new TLS data
                     if let Err(e) = self.conn.process_new_packets() {
                         self.flush_alert_best_effort(cx);
-                        self.state = TlsState::Closed;
-                        return Poll::Ready(Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            e.to_string(),
-                        )));
+                        return Poll::Ready(Err(
+                            self.fail_read(io::ErrorKind::InvalidData, e.to_string())
+                        ));
                     }
                 }
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
@@ -924,6 +983,73 @@ mod tests {
         assert_eq!(server_alpn.as_deref(), Some(b"h2".as_slice()));
         assert_eq!(checkpoints.len(), 2);
         assert!(runtime.is_quiescent());
+    }
+
+    /// br-asupersync-2dxusr item 4: after the peer's transport closed without
+    /// close_notify, the first read failed with UnexpectedEof but the next
+    /// one returned a clean end of file, so a caller that read again took a
+    /// truncated stream for a complete one.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn a_truncated_stream_keeps_failing_instead_of_reporting_a_clean_eof() {
+        let config = TestConfig::new()
+            .with_seed(0x2D_C504)
+            .with_max_steps(20_000);
+        let mut runtime = LabRuntimeTarget::create_runtime(config);
+        let (first, second) = LabRuntimeTarget::block_on(&mut runtime, async move {
+            let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+            let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+            let acceptor = TlsAcceptorBuilder::new(chain, key).build().unwrap();
+            let certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
+            let connector = TlsConnectorBuilder::new()
+                .add_root_certificates(certs)
+                .build()
+                .unwrap();
+            let server_name = ServerName::try_from("localhost".to_string()).unwrap();
+            let client_conn =
+                ClientConnection::new(Arc::clone(connector.config()), server_name).unwrap();
+            let server_conn = ServerConnection::new(Arc::clone(acceptor.config())).unwrap();
+            let (client_io, server_io) = VirtualTcpStream::pair(
+                "127.0.0.1:5300".parse().unwrap(),
+                "127.0.0.1:5301".parse().unwrap(),
+            );
+            let mut client = TlsStream::new_client(client_io, client_conn);
+            let mut server = TlsStream::new_server(server_io, server_conn);
+            let (client_result, server_result) = zip(
+                poll_fn(|cx| client.poll_handshake(cx)),
+                poll_fn(|cx| server.poll_handshake(cx)),
+            )
+            .await;
+            client_result.expect("client handshake should succeed");
+            server_result.expect("server handshake should succeed");
+
+            // The server's transport closes without a close_notify.
+            drop(server);
+            let first = read_once(&mut client).await;
+            let second = read_once(&mut client).await;
+            (first, second)
+        });
+
+        async fn read_once(
+            stream: &mut TlsStream<VirtualTcpStream>,
+        ) -> Result<usize, io::ErrorKind> {
+            let mut bytes = [0_u8; 64];
+            poll_fn(|cx| {
+                let mut buf = ReadBuf::new(&mut bytes);
+                Pin::new(&mut *stream)
+                    .poll_read(cx, &mut buf)
+                    .map(|result| result.map(|()| buf.filled().len()))
+            })
+            .await
+            .map_err(|err| err.kind())
+        }
+
+        assert_eq!(first, Err(io::ErrorKind::UnexpectedEof));
+        assert_eq!(
+            second,
+            Err(io::ErrorKind::UnexpectedEof),
+            "a second read reported a clean end of file"
+        );
     }
 
     #[cfg(feature = "tls")]

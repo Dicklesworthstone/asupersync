@@ -143,7 +143,8 @@ pub struct ConsumerConfig {
     pub enable_auto_commit: bool,
     /// Auto-commit interval.
     pub auto_commit_interval: Duration,
-    /// Max records returned per poll.
+    /// Max records returned per poll. Not applied: `KafkaConsumer::poll`
+    /// returns one record per call; this is only checked to be non-zero.
     pub max_poll_records: usize,
     /// Fetch minimum bytes.
     pub fetch_min_bytes: usize,
@@ -347,7 +348,8 @@ impl ConsumerConfig {
         self
     }
 
-    /// Set max records returned per poll.
+    /// Set max records returned per poll. Not applied (see
+    /// [`ConsumerConfig::max_poll_records`]).
     #[must_use]
     pub const fn max_poll_records(mut self, max: usize) -> Self {
         self.max_poll_records = max;
@@ -1949,6 +1951,15 @@ impl KafkaConsumer {
                         let buffered_outcome = Arc::clone(&self.buffered_outcome);
                         move || -> Result<(), KafkaError> {
                             let _guard = broker_ops.lock();
+                            // The broker thread of a poll whose future was
+                            // dropped may have buffered its result while this
+                            // one waited for the lock. Polling again would
+                            // overwrite that record, already past its position
+                            // (and stored under auto-commit): leave it for the
+                            // caller (br-asupersync-pm29wb).
+                            if buffered_outcome.lock().is_some() {
+                                return Ok(());
+                            }
                             let mut transient_error: Option<&'static str> = None;
                             let record = match consumer.poll(wait_for) {
                                 Some(Ok(message)) => {
@@ -2684,6 +2695,74 @@ mod tests {
             Some(1),
             "a record for another partition is kept"
         );
+    }
+
+    /// br-asupersync-pm29wb: the broker thread of a dropped poll can buffer
+    /// its record after the next poll has started its own broker thread. That
+    /// thread polled again and replaced the buffered record, which was never
+    /// delivered although its position had advanced.
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn a_record_buffered_by_a_dropped_poll_is_not_overwritten() {
+        // Test builds use the native backend only when forced; librdkafka's
+        // in-process mock broker stands in for a cluster.
+        let cluster = rdkafka::mocking::MockCluster::new(1).unwrap();
+        cluster.create_topic("orders", 1, 1).unwrap();
+        let config = ConsumerConfig::new(vec![cluster.bootstrap_servers()], "buffered-poll-group")
+            .force_real_kafka(true);
+        run_test_with_cx(|cx| async move {
+            let consumer = KafkaConsumer::new(config).unwrap();
+            consumer.subscribe(&cx, &["orders"]).await.unwrap();
+            let operations = Arc::clone(consumer.broker_ops.as_ref().expect("native backend"));
+
+            // Stand in for the dropped poll's broker thread, which holds the lock.
+            let (locked, await_locked) = std::sync::mpsc::channel();
+            let (release, await_release) = std::sync::mpsc::channel::<()>();
+            let holder = {
+                let operations = Arc::clone(&operations);
+                std::thread::spawn(move || {
+                    let _lock = operations.serial.lock();
+                    locked.send(()).unwrap();
+                    let _ = await_release.recv_timeout(Duration::from_secs(20));
+                })
+            };
+            await_locked.recv_timeout(Duration::from_secs(10)).unwrap();
+
+            let (attempted, mut wait_attempted) = crate::channel::oneshot::channel();
+            *operations.before_lock.lock() = Some(attempted);
+            let mut polling = Box::pin(consumer.poll(&cx, Duration::from_secs(5)));
+            let mut attempted = Box::pin(wait_attempted.recv(&cx));
+            std::future::poll_fn(|task_cx| {
+                assert!(polling.as_mut().poll(task_cx).is_pending());
+                attempted.as_mut().poll(task_cx)
+            })
+            .await
+            .unwrap();
+
+            // The next poll's broker thread now waits for the lock; the dropped
+            // poll's thread buffers its record and releases it.
+            *consumer.buffered_outcome.lock() = Some(Ok(BrokerPollOutcome {
+                record: Some(ConsumerRecord {
+                    topic: "orders".to_string(),
+                    partition: 0,
+                    offset: 41,
+                    key: None,
+                    payload: b"x".to_vec(),
+                    timestamp: None,
+                    headers: Vec::new(),
+                }),
+                snapshot: BrokerSnapshot {
+                    assigned_partitions: [("orders".to_string(), 0)].into_iter().collect(),
+                    positions: [(("orders".to_string(), 0), 42)].into_iter().collect(),
+                },
+                transient_error: None,
+            }));
+            release.send(()).unwrap();
+            holder.join().unwrap();
+
+            let delivered = polling.await.expect("poll").expect("the buffered record");
+            assert_eq!((delivered.partition, delivered.offset), (0, 41));
+        });
     }
 
     #[test]

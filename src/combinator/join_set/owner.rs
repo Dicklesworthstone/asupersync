@@ -30,7 +30,10 @@ where
     /// Dropping this future, even before its first poll, keeps the set's normal
     /// abort-on-drop behavior. Region close is the asynchronous drain backstop;
     /// a non-cooperative member can still delay it. No region or task is created.
-    pub async fn join_all_cancel_on_owner(mut self, cx: &Cx) -> Vec<Outcome<T, E>> {
+    ///
+    /// The owner needs no runtime capabilities: a task's own context or a
+    /// [`Cx::detached_cancel_context`] both work.
+    pub async fn join_all_cancel_on_owner<Caps>(mut self, cx: &Cx<Caps>) -> Vec<Outcome<T, E>> {
         let mut cancelled = pin!(cx.cancelled());
         let mut forwarded = false;
         let mut outcomes = Vec::with_capacity(self.members.len());
@@ -81,9 +84,12 @@ where
     /// or lose an outcome. Cancellation already forwarded is not rolled back.
     /// The next call can use either collection API. This reuses the existing
     /// ready-member index and persistent member wakers, not a full repeated scan.
-    pub async fn join_next_cancel_on_owner(&mut self, cx: &Cx) -> Option<Outcome<T, E>> {
+    pub async fn join_next_cancel_on_owner<Caps>(
+        &mut self,
+        cx: &Cx<Caps>,
+    ) -> Option<Outcome<T, E>> {
         let completed = {
-            let mut waiting = pin!(self.join_next(cx));
+            let mut waiting = pin!(self.next_outcome());
             let mut cancelled = pin!(cx.cancelled());
             poll_fn(|task| {
                 if let Poll::Ready(outcome) = waiting.as_mut().poll(task) {
@@ -105,7 +111,7 @@ where
                 self.cancel_unfinished_for_owner(&reason);
                 // The temporary borrowing wait has retired, but its member
                 // registrations live on the handles and survive this boundary.
-                self.join_next(cx).await
+                self.next_outcome().await
             }
         }
     }
@@ -405,7 +411,9 @@ mod tests {
         bounded(|| {
             for workers in [1, 2] {
                 run(workers, |cx| async move {
-                    let owner = Cx::detached_cancel_context();
+                    // Legacy join_next takes a full-capability context; it is
+                    // cancelled here and must still not be forwarded.
+                    let observer = Cx::for_testing();
                     let mut set = JoinSet::<(), (), _>::in_cx(&cx);
                     let (started, mut parked) = oneshot::channel();
                     set.spawn(&cx, move |child| async move {
@@ -413,8 +421,8 @@ mod tests {
                         Ok(())
                     }).unwrap();
                     let child = parked.recv(&cx).await.unwrap();
-                    owner.cancel_with(CancelKind::User, Some("legacy observer cancellation"));
-                    let mut next = Box::pin(set.join_next(&owner));
+                    observer.cancel_with(CancelKind::User, Some("legacy observer cancellation"));
+                    let mut next = Box::pin(set.join_next(&observer));
                     poll_fn(|task| {
                         assert!(next.as_mut().poll(task).is_pending());
                         Poll::Ready(())

@@ -126,7 +126,21 @@ fn write_pending(socket: &mut std::net::TcpStream, connection: &mut Connection) 
     while let Some(frame) = connection.next_frame() {
         let mut bytes = BytesMut::new();
         frame.encode(&mut bytes).unwrap();
-        socket.write_all(&bytes).unwrap();
+        match socket.write_all(&bytes) {
+            Ok(()) => {}
+            // A cancelled call closes its connection, possibly while the peer
+            // is still answering. Stop writing; the next read sees the close
+            // and ends the exchange (closed_read).
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+                ) =>
+            {
+                return;
+            }
+            Err(error) => panic!("native upload peer write: {error}"),
+        }
     }
 }
 
@@ -434,12 +448,12 @@ fn owner_cancellation_wakes_a_call_with_a_never_ready_source() {
                 let cx = Cx::current().unwrap();
                 let region = cx.open_child_region(crate::cx::ChildRegionSpec::inherit()).await.unwrap();
                 let owner = region.cx();
-                let (source, _gate, stats) = source("cancel parked producer", &owner, witness,
+                let (source, _gate, stats) = source("cancel parked producer", owner, witness,
                     VecDeque::new());
                 let channel = Channel::builder(format!("http://{}", peer.address))
                     .timeout(LIMIT).connect().await.unwrap();
                 let mut call = GrpcClient::new(channel)
-                    .into_native_bidi_streaming(&owner, "/test.Upload/Exchange", Request::new(source))
+                    .into_native_bidi_streaming(owner, "/test.Upload/Exchange", Request::new(source))
                     .await.unwrap();
                 peer.respond.send(()).unwrap();
                 {

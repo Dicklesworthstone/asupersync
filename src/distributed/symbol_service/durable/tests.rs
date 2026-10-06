@@ -336,3 +336,56 @@ fn actual_file_torn_tail_is_preserved_and_committed_data_is_readable() {
     drop(store);
     assert_eq!(std::fs::read(path).unwrap(), before);
 }
+
+/// br-asupersync-symbol-service-audit-35pjgc LOW 4: a crash after the file grew
+/// but before the appended data reached the disk leaves a tail of zero bytes.
+/// Its length tag fails authentication, and open refused the whole journal, so
+/// every committed batch became unreadable. It now opens read-only.
+#[test]
+fn a_zero_filled_tail_reopens_read_only_with_committed_data() {
+    let mut log = journal();
+    let first = batch(1, b"first");
+    log.put(&peer(), first.as_ref()).unwrap();
+    let committed = log.offset;
+    let mut bytes = log.file.bytes.into_inner();
+    bytes.extend_from_slice(&[0; 64]);
+    let restored = reopen(bytes, limits()).unwrap();
+    assert_eq!(restored.status, JournalStatus::ReadOnlyTail);
+    assert_eq!(restored.offset, committed);
+    assert!(restored.get(&peer(), first.key()).is_ok());
+}
+
+/// The same holds when a record's authenticated prefix reached the disk but
+/// its body did not.
+#[test]
+fn a_record_whose_body_is_zero_filled_reopens_read_only() {
+    let mut log = journal();
+    let first = batch(1, b"first");
+    log.put(&peer(), first.as_ref()).unwrap();
+    let first_end = usize::try_from(log.offset).unwrap();
+    let second = batch(2, b"second");
+    log.put(&peer(), second.as_ref()).unwrap();
+    let mut bytes = log.file.bytes.into_inner();
+    for byte in &mut bytes[first_end + PREFIX_BYTES..] {
+        *byte = 0;
+    }
+    let restored = reopen(bytes, limits()).unwrap();
+    assert_eq!(restored.status, JournalStatus::ReadOnlyTail);
+    assert_eq!(restored.offset, u64::try_from(first_end).unwrap());
+    assert!(restored.get(&peer(), first.key()).is_ok());
+    assert!(restored.get(&peer(), second.key()).is_err());
+}
+
+/// A tail with any non-zero byte still fails closed.
+#[test]
+fn a_tail_with_a_non_zero_byte_still_fails_authentication() {
+    let mut log = journal();
+    log.put(&peer(), batch(1, b"first").as_ref()).unwrap();
+    let mut bytes = log.file.bytes.into_inner();
+    bytes.extend_from_slice(&[0; 63]);
+    bytes.push(1);
+    assert!(matches!(
+        reopen(bytes, limits()),
+        Err(DurableSymbolError::Authentication)
+    ));
+}

@@ -80,6 +80,17 @@ use streaming::{StreamingDispatch, StreamingRequests};
 /// §6.8).
 const DRAIN_SUPERVISION_TICK: Duration = Duration::from_millis(10);
 
+/// Waits one drain supervision tick from `now`, whether or not the listener
+/// task is cancelled. A region-owned listener is shut down by cancelling its
+/// task; a cancel-aware sleep then completed after one scheduler round trip,
+/// and the supervision loop spun until the drain deadline
+/// (br-asupersync-m8xsjx).
+async fn drain_supervision_tick(now: Time) {
+    let tick = crate::time::sleep(now, DRAIN_SUPERVISION_TICK);
+    let mut tick = std::pin::pin!(tick);
+    std::future::poll_fn(|cx| tick.as_mut().poll_deadline(cx)).await;
+}
+
 /// Capacity of the per-connection handler-response funnel.
 const RESPONSE_FUNNEL_CAPACITY: usize = 64;
 
@@ -3160,6 +3171,17 @@ fn frame_codec_for(max_frame_size: u32) -> ListenerFrameCodec {
     codec
 }
 
+/// The read buffer holds one frame at the advertised SETTINGS_MAX_FRAME_SIZE
+/// (its 9-byte header and a read of what follows), since Framed's default
+/// 8 MiB cap would drop a peer for sending a frame the codec accepts.
+fn listener_framed<T>(io: T, max_frame_size: u32) -> Framed<T, ListenerFrameCodec> {
+    let max_buffer_len = usize::try_from(max_frame_size)
+        .unwrap_or(usize::MAX)
+        .saturating_add(9 + 64 * 1024)
+        .max(crate::codec::framed_read::DEFAULT_MAX_BUFFER_LEN);
+    Framed::new(io, frame_codec_for(max_frame_size)).with_max_buffer_len(max_buffer_len)
+}
+
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
 async fn serve_h2_connection<F, Fut>(
@@ -3272,7 +3294,7 @@ where
         conn.queue_initial_settings();
         conn.set_initial_connection_recv_window(initial_connection_window_size)
             .map_err(io::Error::other)?;
-        let mut framed = Framed::new(stream, frame_codec_for(local_max_frame_size));
+        let mut framed = listener_framed(stream, local_max_frame_size);
 
         let (resp_tx, mut resp_rx) = mpsc::channel::<FunnelItem>(RESPONSE_FUNNEL_CAPACITY);
         // Per-stream request assembly: headers arrive first, DATA accumulates
@@ -5341,7 +5363,7 @@ impl<F> Http2Listener<F> {
                         let sleep_now = Cx::current()
                             .and_then(|cx| cx.timer_driver())
                             .map_or_else(crate::time::wall_now, |timer| timer.now());
-                        crate::time::sleep(sleep_now, DRAIN_SUPERVISION_TICK).await;
+                        drain_supervision_tick(sleep_now).await;
                     }
                     DrainStep::Escalate => {
                         self.stats.record_drain_escalated();
@@ -7736,6 +7758,38 @@ mod tests {
     }
 
     #[test]
+    fn listener_framed_reads_a_frame_over_eight_mib_that_the_settings_allow() {
+        use crate::stream::Stream as _;
+        use std::task::Waker;
+
+        // A DATA frame of 0x900000 bytes (9 MiB) on stream 1, then a PING.
+        // SETTINGS_MAX_FRAME_SIZE may advertise up to 16 MiB - 1.
+        let len = 9 * 1024 * 1024;
+        let mut wire = vec![0x90, 0x00, 0x00, 0x0, 0x0, 0, 0, 0, 1];
+        wire.resize(9 + len, 0);
+        wire.extend_from_slice(&[0, 0, 8, 0x6, 0, 0, 0, 0, 0, 7, 7, 7, 7, 7, 7, 7, 7]);
+        let mut framed = listener_framed(std::io::Cursor::new(wire), (1 << 24) - 1);
+        let mut context = Context::from_waker(Waker::noop());
+        let mut next = || {
+            for _ in 0..10_000 {
+                if let Poll::Ready(item) = Pin::new(&mut framed).poll_next(&mut context) {
+                    return item;
+                }
+            }
+            panic!("the framed reader never produced a frame");
+        };
+        match next() {
+            Some(Ok(DecodedFrame::Frame(Frame::Data(data)))) => assert_eq!(data.data.len(), len),
+            other => panic!("expected the 9 MiB DATA frame, got {other:?}"),
+        }
+        let ping = next();
+        assert!(
+            matches!(ping, Some(Ok(DecodedFrame::Frame(Frame::Ping(_))))),
+            "expected the PING after it, got {ping:?}",
+        );
+    }
+
+    #[test]
     fn request_mapping_extracts_pseudo_headers_and_synthesizes_host() {
         let request =
             request_from_h2_headers(request_block(&[("x-trace", "abc")]), b"body".to_vec(), None)
@@ -8451,5 +8505,39 @@ mod tests {
 
         assert!(response.body.is_empty());
         assert_eq!(response.header_value("content-length"), Some("999"));
+    }
+
+    /// The drain supervision tick waits its interval when the listener task
+    /// is cancelled; it used to complete at once, so the drain loop spun.
+    #[test]
+    fn drain_supervision_tick_ignores_the_listener_tasks_cancellation() {
+        let virtual_clock =
+            std::sync::Arc::new(crate::time::VirtualClock::starting_at(Time::from_secs(10)));
+        let timer_driver = crate::time::TimerDriverHandle::with_virtual_clock(
+            std::sync::Arc::clone(&virtual_clock),
+        );
+        let cx = Cx::new_with_drivers(
+            crate::types::RegionId::new_for_test(7, 2),
+            crate::types::TaskId::new_for_test(9, 2),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer_driver.clone()),
+            None,
+        );
+        cx.set_cancel_requested(true);
+        let _guard = Cx::set_current(Some(cx));
+        let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let mut tick = std::pin::pin!(drain_supervision_tick(Time::from_secs(10)));
+        for _ in 0..2 {
+            assert!(
+                tick.as_mut().poll(&mut task_cx).is_pending(),
+                "a cancelled listener still waits for the tick"
+            );
+        }
+        virtual_clock.advance_to(Time::from_secs(10) + DRAIN_SUPERVISION_TICK);
+        let _ = timer_driver.process_timers();
+        assert!(tick.as_mut().poll(&mut task_cx).is_ready());
     }
 }

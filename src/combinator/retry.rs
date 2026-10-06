@@ -234,7 +234,13 @@ pub fn calculate_delay(policy: &RetryPolicy, attempt: u32, rng: Option<&mut DetR
         policy.initial_delay.as_secs_f64() * 1_000_000_000.0
     };
 
-    let base_nanos = if multiplier_factor.is_infinite() {
+    let base_nanos = if policy.initial_delay.is_zero() {
+        // Zero stays zero at every attempt. Mapping an infinite factor to an
+        // infinite delay made a zero initial delay jump to max_delay once
+        // powi overflowed, at attempt 1025 for multiplier 2
+        // (br-asupersync-e9gn8y).
+        0.0
+    } else if multiplier_factor.is_infinite() {
         f64::INFINITY
     } else {
         initial_nanos_f64 * multiplier_factor
@@ -453,9 +459,10 @@ impl RetryTokenBucket {
         // for `rate == 0`. (`NaN > 0.0` is `false`, so NaN falls through too.)
         if self.refill_rate > 0.0 {
             let tokens_needed = cost as f64 - self.tokens;
-            let time_needed_secs = tokens_needed / self.refill_rate;
-            if time_needed_secs.is_finite() {
-                return Duration::from_secs_f64(time_needed_secs);
+            // A finite quotient can still exceed Duration's range (a refill rate
+            // of 1e-30 gives 1e30 s), where from_secs_f64 panics.
+            if let Ok(wait) = Duration::try_from_secs_f64(tokens_needed / self.refill_rate) {
+                return wait;
             }
         }
         Duration::MAX
@@ -893,6 +900,16 @@ where
                     }
                     match sleep.poll(cx) {
                         Poll::Ready(()) => {
+                            // A Sleep also completes early when its task is
+                            // cancelled; that must not start another attempt.
+                            if let Some(r) = Cx::current().and_then(|c| {
+                                c.checkpoint()
+                                    .is_err()
+                                    .then(|| c.cancel_reason().unwrap_or_default())
+                            }) {
+                                this.inner.set(RetryInner::Completed);
+                                return Poll::Ready(RetryResult::Cancelled(r));
+                            }
                             // Sleep done, start factory
                             let fut = (this.factory)();
                             this.inner.set(RetryInner::Polling(fut));
@@ -1075,6 +1092,26 @@ mod tests {
         assert_eq!(delay, Duration::ZERO);
     }
 
+    /// A zero initial delay stays zero at every attempt. Once
+    /// multiplier.powi(attempt - 1) overflowed (attempt 1025 for multiplier
+    /// 2: 2^1024 is not a finite f64), the infinite factor became an infinite
+    /// delay, capped to max_delay (br-asupersync-e9gn8y).
+    #[test]
+    fn zero_initial_delay_stays_zero_past_the_multiplier_overflow() {
+        let policy = RetryPolicy::new()
+            .with_initial_delay(Duration::ZERO)
+            .with_max_delay(Duration::from_secs(30))
+            .with_multiplier(2.0)
+            .no_jitter();
+        for attempt in [1, 1025, 1026, 5000, u32::MAX] {
+            assert_eq!(
+                calculate_delay(&policy, attempt, None),
+                Duration::ZERO,
+                "attempt {attempt}"
+            );
+        }
+    }
+
     /// With multiplier 1.0 the delay is the same at every attempt. Exponents
     /// above 60 were forced to infinity, so the 62nd attempt jumped to
     /// max_delay.
@@ -1110,6 +1147,15 @@ mod tests {
             4,
             "the 102-105 s interval must not be credited twice"
         );
+    }
+
+    /// br-asupersync-r0x5ho: a tiny refill rate gives a finite wait beyond
+    /// Duration's range, where Duration::from_secs_f64 panicked.
+    #[test]
+    fn token_bucket_wait_beyond_duration_range_is_duration_max() {
+        let mut bucket = RetryTokenBucket::new(1, 1e-30, Time::from_secs(1));
+        assert!(bucket.try_consume(1, Time::from_secs(1)));
+        assert_eq!(bucket.time_to_tokens(1), Duration::MAX);
     }
 
     #[test]

@@ -3274,6 +3274,13 @@ impl LabRuntime {
                 }
                 // A timer or reactor event is already due at the current time.
                 total_wakeups = total_wakeups.saturating_add(self.pump_due_system_events() as u64);
+                // A due deadline that wakes nothing never goes away (a paused
+                // clock keeps timers from firing), and this branch takes no
+                // step, so it counts as a stall like an empty step does.
+                stuck_counter = stuck_counter.saturating_add(1);
+                if stuck_counter > 1000 {
+                    break AutoAdvanceTermination::StuckBailout;
+                }
                 continue;
             }
 
@@ -3356,6 +3363,9 @@ impl LabRuntime {
 
     /// Runs until quiescent or max steps reached.
     ///
+    /// With [`LabConfig::auto_advance_time`] set, virtual time jumps to the
+    /// next timer or lab-reactor deadline whenever nothing can run before it.
+    ///
     /// Returns the number of steps executed.
     pub fn run_until_quiescent(&mut self) -> u64 {
         let start_steps = self.steps;
@@ -3369,10 +3379,32 @@ impl LabRuntime {
             if self.replay_stopped() {
                 break;
             }
+            if self.config.auto_advance_time && self.advance_idle_time() {
+                continue;
+            }
             self.step();
         }
 
         self.steps - start_steps
+    }
+
+    /// Moves virtual time to the next timer or lab-reactor deadline when no
+    /// task, command or obligation post can run before it, and returns whether
+    /// time moved. The next step fires what is due.
+    fn advance_idle_time(&mut self) -> bool {
+        if !self.scheduler.lock().is_empty()
+            || self.has_pending_dispatch_commands()
+            || self.state.has_pending_obligation_posts()
+        {
+            return false;
+        }
+        match self.next_auto_advance_deadline() {
+            Some(deadline) if deadline > self.virtual_time => {
+                self.advance_time_to(deadline);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Runs until there are no runnable tasks in the scheduler.
@@ -3950,15 +3982,23 @@ impl LabRuntime {
                     }
                     cancel_wakes.dispatch();
                 }
-                crate::runtime::state::SpawnAdmission::Denied { parts, error } => match error {
-                    crate::runtime::state::SpawnError::RegionClosed(_)
-                    | crate::runtime::state::SpawnError::RegionNotFound(_) => {
-                        parts.resolve_cancelled(crate::types::CancelReason::new(
-                            crate::types::CancelKind::ParentCancelled,
-                        ));
+                crate::runtime::state::SpawnAdmission::Denied { parts, error } => {
+                    // Resolving the denial releases the region's pending-spawn
+                    // credit, which close gates on: re-advance the region, as
+                    // the native scheduler does, or a region that began
+                    // closing with this spawn in flight never closes.
+                    let region = parts.region;
+                    match error {
+                        crate::runtime::state::SpawnError::RegionClosed(_)
+                        | crate::runtime::state::SpawnError::RegionNotFound(_) => {
+                            parts.resolve_cancelled(crate::types::CancelReason::new(
+                                crate::types::CancelKind::ParentCancelled,
+                            ));
+                        }
+                        other => parts.resolve_failed(other),
                     }
-                    other => parts.resolve_failed(other),
-                },
+                    self.state.advance_region_state(region);
+                }
             }
         }
     }
@@ -8788,6 +8828,54 @@ mod tests {
         crate::test_complete!("report_hydrates_cancellation_propagation_from_state_snapshot");
     }
 
+    /// The same propagation failure after a task has run. The lab feeds the
+    /// cancellation_protocol oracle live task events, and once it had any,
+    /// report() no longer read the region tree from the state, so the
+    /// uncancelled child passed (br-asupersync-vcu2oz).
+    #[test]
+    fn report_checks_cancellation_propagation_after_a_task_has_run() {
+        init_test("report_checks_cancellation_propagation_after_a_task_has_run");
+        let config = LabConfig::new(32).panic_on_cancellation_violation(false);
+        let mut runtime = LabRuntime::new(config);
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let (task, _handle) = runtime
+            .state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create task");
+        runtime.scheduler.lock().schedule(task, 0);
+        runtime.run_until_idle();
+        let fed_live = runtime.oracles.cancellation_protocol.has_observed_events();
+        crate::assert_with_log!(
+            fed_live,
+            "the polled task fed the oracle live",
+            true,
+            fed_live
+        );
+
+        let _child = runtime
+            .state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("create child");
+        runtime
+            .state
+            .region(root)
+            .expect("root exists")
+            .cancel_request(crate::types::CancelReason::shutdown());
+
+        let report = runtime.report();
+        let cancellation = report
+            .oracle_report
+            .entry("cancellation_protocol")
+            .expect("cancellation_protocol entry");
+        crate::assert_with_log!(
+            !cancellation.passed,
+            "a cancelled region with an uncancelled child fails after live events",
+            false,
+            cancellation.passed
+        );
+        crate::test_complete!("report_checks_cancellation_propagation_after_a_task_has_run");
+    }
+
     #[test]
     fn report_surfaces_refinement_firewall_violation_from_trace_snapshot() {
         init_test("report_surfaces_refinement_firewall_violation_from_trace_snapshot");
@@ -11073,6 +11161,62 @@ mod tests {
     }
 
     #[test]
+    fn the_auto_advance_flag_moves_time_for_run_until_quiescent() {
+        init_test("the_auto_advance_flag_moves_time_for_run_until_quiescent");
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = pending_command_before_timer_fixture(
+            LabConfig::new(0xA070_0001)
+                .with_auto_advance()
+                .max_steps(64),
+            Arc::clone(&observations),
+        );
+        runtime.run_until_quiescent();
+        assert!(runtime.is_quiescent(), "the sleeping task finished");
+        assert_eq!(*observations.lock(), vec![0, 1_000_000_000]);
+        assert_eq!(runtime.now(), Time::from_secs(1));
+
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = pending_command_before_timer_fixture(
+            LabConfig::new(0xA070_0001).max_steps(64),
+            Arc::clone(&observations),
+        );
+        runtime.run_until_quiescent();
+        assert!(!runtime.is_quiescent(), "without the flag time stays put");
+        assert_eq!(*observations.lock(), vec![0]);
+        assert_eq!(runtime.now(), Time::ZERO);
+
+        let (woke_at, report) = run_async_under_lab_with_config(
+            LabConfig::new(0xA070_0002).with_auto_advance(),
+            |cx| async move {
+                crate::time::sleep(cx.now(), Duration::from_millis(1)).await;
+                cx.now()
+            },
+        );
+        assert!(report.quiescent);
+        assert_eq!(woke_at, Time::from_millis(1));
+        crate::test_complete!("the_auto_advance_flag_moves_time_for_run_until_quiescent");
+    }
+
+    #[test]
+    fn auto_advance_under_a_paused_clock_bails_out_instead_of_spinning() {
+        init_test("auto_advance_under_a_paused_clock_bails_out_instead_of_spinning");
+        let (done, outcome) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut runtime = pending_command_before_timer_fixture(
+                LabConfig::new(0xA070_0003).max_steps(1_000_000),
+                Arc::new(Mutex::new(Vec::new())),
+            );
+            runtime.pause_clock();
+            let _ = done.send(runtime.run_with_auto_advance().termination);
+        });
+        let termination = outcome
+            .recv_timeout(Duration::from_secs(30))
+            .expect("run_with_auto_advance returns while the clock is paused");
+        assert_eq!(termination, AutoAdvanceTermination::StuckBailout);
+        crate::test_complete!("auto_advance_under_a_paused_clock_bails_out_instead_of_spinning");
+    }
+
+    #[test]
     fn pending_dispatch_run_until_idle_admits_spawn() {
         init_test("pending_dispatch_run_until_idle_admits_spawn");
         let observations = Arc::new(Mutex::new(Vec::new()));
@@ -12791,5 +12935,45 @@ mod tests {
                 "{name}: re-reporting the same state is not a new observation"
             );
         }
+    }
+
+    /// A task spawning into its own region after the region began closing is
+    /// denied; the denial releases the region's pending-spawn credit and must
+    /// re-advance the region, as the native scheduler does. The lab left the
+    /// region Closing, so its close never resolved (a lab-only hang).
+    #[test]
+    fn a_denied_spawn_re_advances_its_closing_region() {
+        let mut lab = LabRuntime::new(LabConfig::new(0xD3_41ED).max_steps(10_000));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let (release, mut gate) = crate::channel::oneshot::channel::<()>();
+        let closed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = std::sync::Arc::clone(&closed);
+        let (owner, _join) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = crate::cx::Cx::current().expect("owner Cx");
+                let child = cx
+                    .open_child_region(crate::cx::ChildRegionSpec::inherit())
+                    .await
+                    .expect("open child region");
+                let _late = child
+                    .cx()
+                    .spawn(move |task_cx| async move {
+                        gate.recv_uninterruptible().await.expect("release");
+                        let _ = task_cx.spawn(|_| async {});
+                    })
+                    .expect("spawn the late spawner");
+                let _ = child.close().await;
+                observed.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+            .expect("create owner");
+        lab.scheduler.lock().schedule(owner, 0);
+        lab.run_until_idle();
+        release.send_blocking(()).expect("release the late spawner");
+        lab.run_until_quiescent();
+        assert!(
+            closed.load(std::sync::atomic::Ordering::SeqCst),
+            "the closing region closed after the denied spawn"
+        );
     }
 }

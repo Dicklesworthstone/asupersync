@@ -386,7 +386,13 @@ impl OracleSuite {
         self.finalizer.reset();
         self.region_tree.reset();
         self.deadline_monotone.reset();
-        if !self.cancellation_protocol.has_observed_events() {
+        if self.cancellation_protocol.has_observed_events() {
+            // Live task history stays; the region tree and region
+            // cancellations, which the lab does not feed live, come from the
+            // state (br-asupersync-vcu2oz).
+            self.cancellation_protocol
+                .refresh_region_topology_from_state(state);
+        } else {
             self.cancellation_protocol.snapshot_from_state(state, now);
         }
         self.cancel_correctness.reset();
@@ -406,8 +412,13 @@ impl OracleSuite {
             }
         }
 
-        if !self.loser_drain.has_observed_events() {
+        // Replayed on every hydration, not only the first: a race in flight
+        // at one report completes by the next (br-asupersync-vcu2oz). A suite
+        // fed by hand keeps its events; an empty history marks nothing, so
+        // events fed after it are still kept apart.
+        if self.loser_drain.accepts_state_history() {
             for event in state.loser_drain_history() {
+                self.loser_drain.mark_hydrated_from_state();
                 match event {
                     crate::runtime::state::LoserDrainHistoryEvent::RaceStarted {
                         race_id,
@@ -514,6 +525,19 @@ impl OracleSuite {
             self.task_leak.on_spawn(task_id, region_id, now);
             if terminal {
                 self.task_leak.on_complete(task_id, now);
+            }
+        }
+
+        // A closed region leaves the runtime's table in the walk that closes
+        // it; its close survives only in the history (br-asupersync-iwbef2).
+        for event in state.finalizer_history() {
+            if let crate::runtime::state::FinalizerHistoryEvent::RegionClosed { region, time } =
+                *event
+                && regions
+                    .get(&region)
+                    .is_none_or(|snapshot| !snapshot.state.is_terminal())
+            {
+                self.task_leak.on_region_close(region, time);
             }
         }
 
@@ -1475,6 +1499,81 @@ mod tests {
         crate::test_complete!("hydrate_temporal_from_state_replays_finalizer_history");
     }
 
+    /// br-asupersync-iwbef2: the runtime removes a region from its table in the
+    /// walk that closes it, and hydration only looked at regions still there,
+    /// so the quiescence and task-leak oracles never checked a real close.
+    #[test]
+    fn hydration_checks_regions_the_runtime_closed_and_removed() {
+        init_test("hydration_checks_regions_the_runtime_closed_and_removed");
+        let budget = crate::types::Budget::INFINITE;
+        let mut state = crate::runtime::RuntimeState::new();
+        let root = state.create_root_region(budget);
+        let child = state
+            .create_child_region(root, budget)
+            .expect("create child region");
+        let (task, _handle) = state
+            .create_task(child, budget, async {})
+            .expect("create task");
+        let (_cancelled, wakes) = state
+            .cancel_request(child, &crate::types::CancelReason::user("done"), None)
+            .into_parts();
+        state
+            .task_mut(task)
+            .expect("task")
+            .complete(crate::types::Outcome::Cancelled(
+                crate::types::CancelReason::parent_cancelled(),
+            ));
+        let _waiters = state.task_completed(task).into_waiters_without_observers();
+        wakes.dispatch();
+        let child_removed = state.regions_iter().all(|(_, region)| region.id != child);
+        crate::assert_with_log!(
+            child_removed,
+            "closed child left the table",
+            true,
+            child_removed
+        );
+
+        let mut suite = OracleSuite::new();
+        suite.hydrate_temporal_from_state(&state, state.now);
+        let closed = suite.quiescence.closed_count();
+        crate::assert_with_log!(closed >= 1, "real close checked", ">= 1", closed);
+        crate::assert_with_log!(
+            suite.quiescence.check().is_ok(),
+            "a clean close passes",
+            true,
+            suite.quiescence.check().is_ok()
+        );
+        crate::assert_with_log!(
+            suite.task_leak.check(state.now).is_ok(),
+            "no task leaked",
+            true,
+            suite.task_leak.check(state.now).is_ok()
+        );
+
+        // A task still live in a region the runtime recorded as closed.
+        let mut state = crate::runtime::RuntimeState::new();
+        let region = state.create_root_region(budget);
+        let (live, _handle) = state
+            .create_task(region, budget, async {})
+            .expect("create task");
+        state.record_finalizer_close_for_test(region);
+        let mut suite = OracleSuite::new();
+        suite.hydrate_temporal_from_state(&state, state.now);
+        let violation = suite
+            .quiescence
+            .check()
+            .expect_err("a task outlived its region's close");
+        crate::assert_with_log!(
+            violation.region == region && violation.live_tasks == vec![live],
+            "violation names the region and task",
+            (region, vec![live]),
+            (violation.region, violation.live_tasks.clone())
+        );
+        let leaked = suite.task_leak.check(state.now).is_err();
+        crate::assert_with_log!(leaked, "task leak reported", true, leaked);
+        crate::test_complete!("hydration_checks_regions_the_runtime_closed_and_removed");
+    }
+
     #[test]
     fn hydrate_temporal_from_state_preserves_live_cancellation_protocol_history() {
         init_test("hydrate_temporal_from_state_preserves_live_cancellation_protocol_history");
@@ -1671,6 +1770,75 @@ mod tests {
             }
         }
         crate::test_complete!("hydrate_temporal_from_state_replays_owner_cancelled_race_history");
+    }
+
+    /// Every hydration replays the loser-drain history, not only the first:
+    /// a race in flight at one report and drained by the next passes the
+    /// next, replaying a completed race again keeps it completed, and a
+    /// reset suite hydrates again. A suite fed by hand keeps its own events
+    /// (br-asupersync-vcu2oz M3).
+    #[test]
+    fn hydrate_temporal_from_state_replays_loser_drain_history_on_every_report() {
+        init_test("hydrate_temporal_from_state_replays_loser_drain_history_on_every_report");
+        let state = crate::runtime::RuntimeState::new();
+        let history = state.loser_drain_history_handle();
+        let region = crate::types::RegionId::new_for_test(4, 0);
+        let winner = crate::types::TaskId::new_for_test(10, 0);
+        let loser = crate::types::TaskId::new_for_test(11, 0);
+        let race_id = history.record_race_start(region, vec![winner, loser], Time::from_nanos(10));
+
+        let mut suite = OracleSuite::new();
+        suite.hydrate_temporal_from_state(&state, Time::from_nanos(20));
+        assert!(
+            matches!(
+                suite.loser_drain.check(),
+                Err(LoserDrainViolation::ActiveRaceNotCompleted { .. })
+            ),
+            "the race is in flight at the first report"
+        );
+
+        history.record_task_complete(winner, Time::from_nanos(50));
+        history.record_task_complete(loser, Time::from_nanos(60));
+        history.record_race_complete(race_id, winner, Time::from_nanos(100));
+        for now in [150, 160] {
+            suite.hydrate_temporal_from_state(&state, Time::from_nanos(now));
+            let result = suite.loser_drain.check();
+            assert!(result.is_ok(), "drained race at {now}: {result:?}");
+            assert_eq!(suite.loser_drain.completed_race_count(), 1);
+        }
+
+        suite.reset();
+        suite.hydrate_temporal_from_state(&state, Time::from_nanos(200));
+        assert_eq!(
+            suite.loser_drain.completed_race_count(),
+            1,
+            "a reset suite hydrates again"
+        );
+
+        // Hand-fed race 0 completes differently from the state's race 0.
+        let mut fed = OracleSuite::new();
+        let drain = &mut fed.loser_drain;
+        let own = drain.on_race_start(region, vec![winner], Time::from_nanos(1));
+        drain.on_task_complete(winner, Time::from_nanos(2));
+        drain.on_race_complete(own, winner, Time::from_nanos(3));
+        fed.hydrate_temporal_from_state(&state, Time::from_nanos(300));
+        let result = fed.loser_drain.check();
+        assert!(result.is_ok(), "hand-fed events only: {result:?}");
+
+        // A hydration that replayed nothing marks nothing: events fed after
+        // it are still kept apart from the state's.
+        let mut early = OracleSuite::new();
+        early.hydrate_temporal_from_state(&crate::runtime::RuntimeState::new(), Time::ZERO);
+        let drain = &mut early.loser_drain;
+        let own = drain.on_race_start(region, vec![winner], Time::from_nanos(1));
+        drain.on_task_complete(winner, Time::from_nanos(2));
+        drain.on_race_complete(own, winner, Time::from_nanos(3));
+        early.hydrate_temporal_from_state(&state, Time::from_nanos(300));
+        let result = early.loser_drain.check();
+        assert!(result.is_ok(), "fed after an empty hydration: {result:?}");
+        crate::test_complete!(
+            "hydrate_temporal_from_state_replays_loser_drain_history_on_every_report"
+        );
     }
 
     #[test]

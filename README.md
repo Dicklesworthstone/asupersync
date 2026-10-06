@@ -112,7 +112,7 @@ If you already know tokio, this section maps the primitives you use daily to the
 | `tokio::spawn_blocking(f)` | `cx.spawn_blocking(\|cx\| f())` | Same idea when the runtime has a blocking pool: `#[main]`/`#[test]` configure one on demand (`blocking = N`, `0` opts out). A bare `RuntimeBuilder::new()` ships with `blocking_threads(0, 0)`, and without a pool the closure runs inline on the async worker. |
 | `tokio::select!` | `race!(cx, { move \|child\| a(child), move \|child\| b(child) })` or `cx.race_drained_with(...)` | Returns only after the winner is selected and every loser is protocol-cancelled and drained. Each branch receives its own child `Cx`; pass it to the branch's operations. A prebuilt branch that awaits on the caller's `cx` (for example `rx.recv(&cx)`) never sees its cancellation, so the drain waits for it to finish on its own. See [`docs/macro-dsl.md`](./docs/macro-dsl.md#race). |
 | `tokio::join!` | `join!(a, b)`; use `JoinSet::join_all(cx)` for dynamic arity | Inline branches complete together; spawned dynamic members remain region-owned and are collected in spawn order. See [`macros_basic.rs`](./examples/macros_basic.rs). |
-| `FuturesUnordered` / `join_all` over borrowed data | `cx::fiber::scope(\|s\| async move { s.spawn(fut) })` | Fibers run concurrently inside the calling task, may borrow from its stack (no `'static`), and the scope waits for all of them. They are not parallel; use tasks for that. See [`fibers_borrowing.rs`](./examples/fibers_borrowing.rs). |
+| `FuturesUnordered` / `join_all` over borrowed data | `cx::fiber::scope(\|s\| async move { s.spawn(fut) })` | Fibers run concurrently inside the calling task, may borrow from its stack (no `'static`), and the scope waits for all of them. Each fiber has its own cancellation: the task's cancellation reaches every fiber, `FiberHandle::cancel` stops one, and a panicking fiber cancels its siblings. They are not parallel; use tasks for that. See [`fibers_borrowing.rs`](./examples/fibers_borrowing.rs). |
 | `tokio::time::sleep(dur)` | `sleep(now, dur)` | Takes current `Time` instead of reading the clock implicitly. Works with virtual time in lab runtime. |
 | `tokio::time::timeout(dur, fut)` | `timeout(now, dur, fut)` or `cx.scope().timeout(&cx, dur, \|cx\| op)` | `time::timeout` returns `Result<T, Elapsed>` and drops the inner future when the clock wins; `Scope::timeout` spawns the operation as a region task and cancels **and drains** it on expiry, reporting a late terminal outcome instead of losing it. |
 | `tokio::time::interval(dur)` | `interval(now, dur)` | Same `MissedTickBehavior` options (Burst, Delay, Skip). |
@@ -1249,6 +1249,15 @@ for rustls. Cross-compiling TLS to `x86_64-pc-windows-gnu` from a Unix worker
 therefore requires the MinGW C toolchain (`x86_64-w64-mingw32-gcc`) even though
 the asupersync source is Windows-gated.
 
+`tls-ring` is another name for the same selection. `tls-core` compiles the TLS
+code without linking any crypto provider, for applications that must not link
+ring: pass a rustls `CryptoProvider` with `crypto_provider` on
+`TlsConnectorBuilder` or `TlsAcceptorBuilder`, or install a process default.
+Every builder resolves its provider in one order: the explicit one, then the
+linked ring provider, then the process default; with none of them, building
+fails with a configuration error. Asupersync's own TLS tests use ring and run
+with `tls`.
+
 ### DNS and UDP
 
 `src/net/dns/` provides async DNS resolution with address-family selection. `src/net/udp.rs` provides async UDP sockets with send/receive and cancellation safety.
@@ -2134,6 +2143,8 @@ Asupersync is feature-light by default; the lab runtime is available without fla
 | `lock-metrics` | Contended mutex wait/hold metrics | No |
 | `io-uring` | Linux io_uring reactor (kernel 5.1+) | No |
 | `tls` | TLS support via rustls | No |
+| `tls-ring` | The same as `tls`: TLS with the ring crypto provider | No |
+| `tls-core` | TLS code without a crypto provider; the application supplies one | No |
 | `tls-native-roots` | TLS with native root certs | No |
 | `tls-webpki-roots` | TLS with webpki root certs | No |
 | `remote-service` | Unix static RemoteRuntime V3 process host (`cli` + `tls`) | No |

@@ -541,7 +541,7 @@ impl Notify {
     fn pass_baton(&self, mut waiters: parking_lot::MutexGuard<'_, WaiterSlab>) {
         if let Some(waker) = waiters.take_next_active_waker() {
             drop(waiters);
-            waker.wake();
+            wake_baton(waker);
             return;
         }
         self.stored_notifications.fetch_add(1, Ordering::Release);
@@ -565,7 +565,7 @@ impl Notify {
     ) {
         if let Some(waker) = waiters.take_next_active_waker() {
             drop(waiters);
-            waker.wake();
+            wake_baton(waker);
             return;
         }
         if store_if_absent {
@@ -626,6 +626,26 @@ impl Drop for Notify {
                 },
             )));
         }
+    }
+}
+
+/// Wakes the waiter that a cancelled [`Notified`] hands its `notify_one` baton
+/// to.
+///
+/// This runs from `Notified::drop`, possibly during an unwind, where a
+/// panicking safe Waker would be a second panic and abort the process. The
+/// payload is then suppressed, as in `Notify::drop`. Outside an unwind the
+/// panic propagates as before (br-asupersync-9siwk7).
+fn wake_baton(waker: Waker) {
+    if std::thread::panicking() {
+        if let Err(payload) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || waker.wake()))
+        {
+            // A payload may itself panic on drop; never risk a double unwind.
+            std::mem::forget(payload);
+        }
+    } else {
+        waker.wake();
     }
 }
 

@@ -598,11 +598,12 @@ impl CircuitBreaker {
             let current_bits = self.state_bits.load(Ordering::Acquire);
             if State::from_bits(current_bits) == (State::Closed { failures: 0 }) {
                 // Already clean, just check sliding window
-                self.check_sliding_window_success(now_millis, permit);
+                self.check_sliding_window_success(now_millis, permit, false);
                 return;
             }
         }
 
+        let mut closed_by_this_probe = false;
         let callback_event = match permit {
             Permit::Normal => {
                 // Reset failure count in Closed state if needed
@@ -653,6 +654,7 @@ impl CircuitBreaker {
                                     Ordering::Acquire,
                                 ) {
                                     Ok(_) => {
+                                        closed_by_this_probe = true;
                                         self.times_closed.fetch_add(1, Ordering::Relaxed);
                                         let mut m = self.metrics.write();
                                         m.current_state = new_state;
@@ -695,7 +697,7 @@ impl CircuitBreaker {
             }
         }
 
-        self.check_sliding_window_success(now_millis, permit);
+        self.check_sliding_window_success(now_millis, permit, closed_by_this_probe);
     }
 
     /// Helper to update metrics on state change.
@@ -769,21 +771,41 @@ impl CircuitBreaker {
         Ok(())
     }
 
-    /// Whether a finished call's outcome goes into the sliding window: a
-    /// probe's always (it is the recovery sample), an ordinary call's only
-    /// while Closed. Call it with the window lock held; opening clears the
-    /// window under the same lock. Calls admitted while Closed that finish
-    /// after the breaker opened belong to the period the open already
-    /// judged. Recording their failures refilled the cleared window, so the
-    /// half-open probe's successful close tripped the breaker again at once.
-    fn window_records_outcomes(&self, permit: Permit) -> bool {
-        matches!(permit, Permit::Probe { .. }) || matches!(self.state(), State::Closed { .. })
+    /// Whether a finished call's outcome goes into the sliding window. An
+    /// ordinary call's only while Closed. A probe's (the recovery sample)
+    /// only while its own half-open episode is current, or when its success
+    /// just closed the breaker (`closed_by_this_probe`: Closed carries no
+    /// epoch to tell the closing probe from a stale one). Call it with the
+    /// window lock held; opening clears the window under the same lock.
+    /// Calls admitted before an open that finish after it, ordinary calls
+    /// and probes of an episode that already re-opened alike, belong to the
+    /// period the open already judged. Recording their failures refilled the
+    /// cleared window, so the next half-open probe's successful close
+    /// tripped the breaker again at once (br-asupersync-e9gn8y).
+    fn window_records_outcomes(&self, permit: Permit, closed_by_this_probe: bool) -> bool {
+        match permit {
+            Permit::Normal => matches!(self.state(), State::Closed { .. }),
+            Permit::Probe {
+                epoch: permit_epoch,
+            } => {
+                closed_by_this_probe
+                    || matches!(
+                        self.state(),
+                        State::HalfOpen { epoch, .. } if epoch == permit_epoch
+                    )
+            }
+        }
     }
 
-    fn check_sliding_window_success(&self, now_millis: u64, permit: Permit) {
+    fn check_sliding_window_success(
+        &self,
+        now_millis: u64,
+        permit: Permit,
+        closed_by_this_probe: bool,
+    ) {
         let window_triggered = self.sliding_window.as_ref().is_some_and(|window| {
             let mut w = window.write();
-            if !self.window_records_outcomes(permit) {
+            if !self.window_records_outcomes(permit, closed_by_this_probe) {
                 return false;
             }
             w.record_success(now_millis);
@@ -926,7 +948,7 @@ impl CircuitBreaker {
         // Check sliding window if enabled
         let window_triggered = self.sliding_window.as_ref().is_some_and(|window| {
             let mut w = window.write();
-            if !self.window_records_outcomes(permit) {
+            if !self.window_records_outcomes(permit, false) {
                 return false;
             }
             w.record_failure(now_millis);
@@ -2452,6 +2474,57 @@ mod tests {
             cb.metrics().times_opened,
             1,
             "the probe's success must not re-open the breaker"
+        );
+    }
+
+    /// Probes of a half-open episode that already re-opened are as stale as
+    /// ordinary calls from before an open: their failures filled the window
+    /// the re-open had cleared, so the next recovery's closing probe opened
+    /// the breaker again at once (br-asupersync-e9gn8y).
+    #[test]
+    fn stale_probe_failures_do_not_reopen_after_recovery() {
+        let policy = CircuitBreakerPolicy {
+            failure_threshold: 1000,
+            success_threshold: 1,
+            half_open_max_probes: 4,
+            open_duration: Duration::from_secs(10),
+            sliding_window: Some(SlidingWindowConfig {
+                window_duration: Duration::from_secs(60),
+                minimum_calls: 4,
+                failure_rate_threshold: 0.5,
+            }),
+            ..CircuitBreakerPolicy::default()
+        };
+        let cb = CircuitBreaker::new(policy);
+        let start = Time::from_millis(1_000);
+        for _ in 0..4 {
+            let permit = cb.should_allow(start).expect("closed");
+            cb.record_failure(permit, "err", start);
+        }
+        assert!(cb.should_allow(start).is_err(), "should be open");
+
+        // Four probes of one half-open episode: the first fails and re-opens
+        // the breaker, the others fail later, while it is open again.
+        let half_open = Time::from_millis(11_500);
+        let probes: Vec<_> = (0..4)
+            .map(|_| cb.should_allow(half_open).expect("half-open probe"))
+            .collect();
+        let mut probes = probes.into_iter();
+        cb.record_failure(probes.next().expect("a probe"), "err", half_open);
+        assert!(cb.should_allow(half_open).is_err(), "re-opened");
+        let late = Time::from_millis(12_000);
+        for probe in probes {
+            cb.record_failure(probe, "err", late);
+        }
+
+        let recovery = Time::from_millis(22_500);
+        let probe = cb.should_allow(recovery).expect("next half-open probe");
+        cb.record_success(probe, recovery);
+        assert_eq!(cb.state(), State::Closed { failures: 0 });
+        assert_eq!(
+            cb.metrics().times_opened,
+            2,
+            "the recovery must not re-open the breaker"
         );
     }
 

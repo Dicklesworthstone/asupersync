@@ -118,7 +118,7 @@ fn checksum(bytes: &[u8]) -> [u8; 32] {
 impl EntropyTape {
     /// Encode without consuming the tape, under an explicit output bound.
     ///
-    /// V1 is little-endian: magic[8], version:u32, source/call/random-byte
+    /// V1 is little-endian: magic\[8\], version:u32, source/call/random-byte
     /// counts:u64, then one call count:u64 per source followed by its events.
     /// Tags are 0 (length:u64 + bytes), 1 (u64), and 2 (task:u64 + child:u64).
     /// A domain-separated SHA-256 covers every preceding byte. Forks refer to

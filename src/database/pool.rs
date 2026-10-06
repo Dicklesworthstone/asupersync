@@ -126,7 +126,9 @@ pub trait ConnectionManager: Send + Sync + 'static {
 /// Configuration for the database connection pool.
 #[derive(Debug, Clone)]
 pub struct DbPoolConfig {
-    /// Minimum number of idle connections to maintain.
+    /// Minimum number of idle connections to maintain. Only `warm_up` opens
+    /// them and `set_max_size` keeps the cap at or above it; the pool does
+    /// not open new ones when idle connections close or expire.
     pub min_idle: usize,
     /// Maximum number of connections in the pool.
     pub max_size: usize,

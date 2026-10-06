@@ -113,7 +113,7 @@ fn vector<T>(capacity: usize) -> Result<Vec<T>, IoGroupTapeError> {
 impl RecordedIoGroup {
     /// Export one complete group with an aggregate shrinking encoded-byte budget.
     ///
-    /// V1: magic[8], version:u32, stream-count:u64, event-count:u64; then each
+    /// V1: magic\[8\], version:u32, stream-count:u64, event-count:u64; then each
     /// stream's id:u64, tape-length:u64 and unchanged canonical IoTape bytes;
     /// then events (stream-ordinal:u64, operation-tag:u8); finally SHA-256 of
     /// the domain followed by all prior envelope bytes. Integers are LE.

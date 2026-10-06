@@ -116,7 +116,11 @@
 //! | Cost quota | `cost_quota == Some(0)` | `Outcome::Cancelled(CancelReason::budget())` |
 //!
 //! The runtime checks these conditions at scheduling points and propagates
-//! cancellation through the region tree.
+//! cancellation through the region tree. A task's deadline is also armed as a
+//! timer when the task is created, so a task parked in a cancel-aware wait
+//! (a channel receive, a lock, a semaphore) is cancelled with
+//! `CancelReason::deadline()` when the deadline passes, without waiting for a
+//! checkpoint it would never reach.
 //!
 //! # Creating Budgets
 //!

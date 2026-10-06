@@ -12,7 +12,7 @@
 //! Pending polls are not recorded. Within each stream, operation order remains
 //! strict. Use the existing standalone group's duplex halves when only byte-I/O
 //! order is needed. Opaque connection attempts can be included with
-//! [`Self::connect_with`](RecordingGroupSession::connect_with). Unwrapped effects
+//! [`RecordingGroupSession::connect_with`](crate::io::replay_group_session::RecordingGroupSession::connect_with). Unwrapped effects
 //! remain outside this window; clocks here do not drive a runtime's timers.
 //!
 //! Drain source users before finishing. Limits invalidate capture without

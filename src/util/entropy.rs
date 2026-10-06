@@ -46,9 +46,13 @@ impl EntropySource for OsEntropy {
         u64::from_le_bytes(buf)
     }
 
+    // Every fork is the same stateless source, so tasks share one `Arc`
+    // instead of allocating one each (twice per spawned task).
     #[inline]
     fn fork(&self, _task_id: TaskId) -> Arc<dyn EntropySource> {
-        Arc::new(Self)
+        static SHARED: std::sync::LazyLock<Arc<dyn EntropySource>> =
+            std::sync::LazyLock::new(|| Arc::new(OsEntropy));
+        Arc::clone(&SHARED)
     }
 
     #[inline]

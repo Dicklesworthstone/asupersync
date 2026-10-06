@@ -15,6 +15,8 @@ use std::sync::{Arc, Condvar, Mutex as StdMutex};
 #[cfg(feature = "test-internals")]
 use std::time::Duration;
 
+mod scoped_atomic;
+
 /// Deterministic handshake for testing soft-cancelled filesystem operations.
 #[cfg(feature = "test-internals")]
 #[doc(hidden)]
@@ -588,51 +590,7 @@ fn stage_write_atomic_blocking(
     contents: &[u8],
     hook: OperationProbeHook,
 ) -> io::Result<StagedAtomicWrite> {
-    let parent = normalized_parent(path);
-    let file_name = path.file_name().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "atomic write target must include a file name",
-        )
-    })?;
-    let existing_permissions = match std::fs::metadata(path) {
-        Ok(metadata) => Some(metadata.permissions()),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => None,
-        Err(err) => return Err(err),
-    };
-
-    loop {
-        let tmp_path = unique_tmp_path(parent, file_name);
-        let mut file = match std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&tmp_path)
-        {
-            Ok(file) => file,
-            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(err) => return Err(err),
-        };
-        let tmp_guard = TempPathGuard::new(tmp_path.clone());
-
-        file.write_all(contents)?;
-        if let Some(permissions) = &existing_permissions {
-            // Preserve the target file's permissions before the replacement rename swaps in the
-            // temp inode.
-            file.set_permissions(permissions.clone())?;
-        }
-        file.sync_all()?;
-        drop(file);
-
-        hook.block_until_released();
-        #[cfg(feature = "test-internals")]
-        let completion_probe = hook.completion_probe();
-        return Ok(StagedAtomicWrite {
-            target_path: path.to_owned(),
-            temp_path: tmp_guard,
-            #[cfg(feature = "test-internals")]
-            completion_probe,
-        });
-    }
+    scoped_atomic::stage_with(path, false, || Ok(()), |file| file.write_all(contents), hook)
 }
 
 fn normalized_parent(path: &Path) -> &Path {

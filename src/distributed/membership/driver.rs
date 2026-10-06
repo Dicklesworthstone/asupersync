@@ -1,7 +1,7 @@
 //! Runtime-driven SWIM over the existing UDP membership adapter.
 //!
 //! This is an explicit, bounded failure detector, not membership authority.
-//! [`UdpSwimDriver::new_trusted_network`] preserves the existing unauthenticated
+//! [`UdpSwimDriver::new_trusted_network`](crate::distributed::membership::driver::UdpSwimDriver::new_trusted_network) preserves the existing unauthenticated
 //! wire protocol. Its address allowlist is NOT cryptographic authentication.
 //! Do not feed these observations directly into authoritative lease admission
 //! or revocation; that remains the separate authenticated membership service.

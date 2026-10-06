@@ -874,6 +874,50 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_copies_of_one_message_are_forwarded_once() {
+        // br-asupersync-27bbrg: receive_message checked whether a message was
+        // seen and then marked it seen under a second lock, so two copies
+        // arriving at once from two peers could both pass the check and both
+        // be forwarded.
+        for round in 0..2_000_u64 {
+            let broadcaster = Arc::new(CancelBroadcaster::new(NullSink));
+            let msg = CancelMessage::new(
+                1,
+                ObjectId::new_for_test(1),
+                CancelKind::User,
+                Time::from_millis(100),
+                round,
+            );
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let receivers: Vec<_> = (0..2)
+                .map(|_| {
+                    let broadcaster = Arc::clone(&broadcaster);
+                    let barrier = Arc::clone(&barrier);
+                    let msg = msg.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        broadcaster
+                            .receive_message(&msg, Time::from_millis(100))
+                            .is_some()
+                    })
+                })
+                .collect();
+            let forwarded = receivers
+                .into_iter()
+                .map(|receiver| receiver.join().expect("receiver thread"))
+                .filter(|&forwarded| forwarded)
+                .count();
+            assert_eq!(forwarded, 1, "round {round}: one copy is forwarded");
+            let metrics = broadcaster.metrics();
+            assert_eq!(
+                (metrics.received, metrics.duplicates),
+                (1, 1),
+                "round {round}"
+            );
+        }
+    }
+
+    #[test]
     fn test_prepare_cancel_uses_token_id() {
         let mut rng = DetRng::new(7);
         let object_id = ObjectId::new_for_test(42);
@@ -4132,5 +4176,72 @@ mod tests {
             2,
             "only the owning retry pass should broadcast the queued messages"
         );
+    }
+
+    #[test]
+    fn a_failed_retry_goes_back_to_the_front_of_the_queue() {
+        // br-asupersync-27bbrg: a message whose retry failed while another was
+        // queued during the broadcast went back behind the older messages.
+        use std::task::{Context, Poll, Waker};
+
+        struct PendingOnceThenFailingSink;
+
+        impl CancelSink for PendingOnceThenFailingSink {
+            fn send_to(
+                &self,
+                _peer: &PeerId,
+                _msg: &CancelMessage,
+            ) -> impl std::future::Future<Output = crate::error::Result<()>> + Send {
+                std::future::ready(Ok(()))
+            }
+
+            fn broadcast(
+                &self,
+                _msg: &CancelMessage,
+            ) -> impl std::future::Future<Output = crate::error::Result<usize>> + Send {
+                let mut pending = true;
+                std::future::poll_fn(move |_| {
+                    if std::mem::take(&mut pending) {
+                        Poll::Pending
+                    } else {
+                        Poll::Ready(Err(crate::error::Error::new(
+                            crate::error::ErrorKind::Internal,
+                        )
+                        .with_message("broadcast failed")))
+                    }
+                })
+            }
+        }
+
+        let message = |sequence| {
+            CancelMessage::new(
+                1,
+                ObjectId::new_for_test(7),
+                CancelKind::User,
+                Time::from_nanos(sequence),
+                sequence,
+            )
+        };
+        let broadcaster = CancelBroadcaster::new(PendingOnceThenFailingSink);
+        broadcaster
+            .pending_retries
+            .write()
+            .extend([message(0), message(1)]);
+        let mut retry = Box::pin(broadcaster.retry_failed_broadcasts());
+        let mut task_cx = Context::from_waker(Waker::noop());
+        assert!(retry.as_mut().poll(&mut task_cx).is_pending());
+        broadcaster.pending_retries.write().push_back(message(2));
+        let Poll::Ready((retried, error)) = retry.as_mut().poll(&mut task_cx) else {
+            panic!("a failed broadcast ends the retry pass");
+        };
+        assert_eq!(retried, 0);
+        assert!(error.is_some());
+        let order: Vec<u64> = broadcaster
+            .pending_retries
+            .read()
+            .iter()
+            .map(CancelMessage::sequence)
+            .collect();
+        assert_eq!(order, vec![0, 1, 2], "the failed message stays first");
     }
 }

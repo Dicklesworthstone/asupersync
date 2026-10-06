@@ -59,15 +59,21 @@ impl H2FlowControlProgress {
         produced_bodies: &BTreeMap<u32, ActiveProducedBody>,
         now: Time,
     ) -> Option<(u32, Time)> {
+        // A pushed response (a server-initiated, even stream) has no request
+        // guard, but its DATA waits on the same peer credit; untracked, a push
+        // that never got credit kept the connection from idling or closing.
+        let tracked = |stream_id: u32| {
+            response_guards.contains_key(&stream_id)
+                || produced_bodies.contains_key(&stream_id)
+                || stream_id.is_multiple_of(2)
+        };
         // A successful transport pump leaves only flow-control-blocked DATA
         // (and headers ordered behind it) in a buffered response's queue.
         // Produced responses can instead be parked before polling their body,
         // with no DATA yet in the connection queue. Cover that gate as well.
         let blocked: HashSet<u32> = conn
             .flow_control_blocked_data_streams()
-            .filter(|stream_id| {
-                response_guards.contains_key(stream_id) || produced_bodies.contains_key(stream_id)
-            })
+            .filter(|&stream_id| tracked(stream_id))
             .chain(produced_bodies.iter().filter_map(|(&stream_id, state)| {
                 let terminal_only = matches!(
                     state.producer_outcome,
@@ -82,8 +88,8 @@ impl H2FlowControlProgress {
             }))
             .collect();
 
-        self.deadlines.retain(|stream_id, _| {
-            response_guards.contains_key(stream_id) || produced_bodies.contains_key(stream_id)
+        self.deadlines.retain(|&stream_id, _| {
+            tracked(stream_id) && (!stream_id.is_multiple_of(2) || conn.stream(stream_id).is_some())
         });
         for stream_id in &blocked {
             self.deadlines
@@ -246,6 +252,55 @@ mod tests {
         assert!(
             progress.deadlines.is_empty(),
             "retired responses retain no deadline state"
+        );
+    }
+
+    #[test]
+    fn a_pushed_response_held_by_peer_credit_gets_a_deadline() {
+        let mut conn = Connection::server(Settings::server());
+        conn.process_frame(Frame::Settings(SettingsFrame::new(vec![
+            Setting::InitialWindowSize(0),
+        ])))
+        .unwrap();
+        let request = [
+            Header::new(":method", "GET"),
+            Header::new(":scheme", "http"),
+            Header::new(":path", "/"),
+            Header::new(":authority", "localhost"),
+        ];
+        let mut headers = BytesMut::new();
+        HpackEncoder::new().encode(&request, &mut headers);
+        conn.process_frame(Frame::Headers(HeadersFrame::new(
+            1,
+            headers.freeze(),
+            true,
+            true,
+        )))
+        .unwrap();
+        let mut promised = request.to_vec();
+        promised[2] = Header::new(":path", "/style.css");
+        let pushed = conn.send_push_promise(1, promised).unwrap();
+        conn.send_headers(pushed, vec![Header::new(":status", "200")], false)
+            .unwrap();
+        conn.send_data(pushed, Bytes::from_static(b"blocked"), true)
+            .unwrap();
+        while let Some(frame) = conn.next_frame() {
+            assert!(
+                !matches!(frame, Frame::Data(_)),
+                "zero peer credit holds the pushed DATA"
+            );
+        }
+
+        let mut progress = H2FlowControlProgress::new(Duration::from_nanos(10));
+        assert_eq!(
+            progress.next_deadline(
+                &conn,
+                &HashMap::new(),
+                &BTreeMap::new(),
+                Time::from_nanos(10)
+            ),
+            Some((pushed, Time::from_nanos(20))),
+            "a push with no peer credit times out like a response does"
         );
     }
 }

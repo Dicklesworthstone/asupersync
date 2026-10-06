@@ -17,7 +17,7 @@
     "operator_runbook": "docs/dependency_feature_platform_consumer_matrix.md"
   },
   "counts": {
-    "cargo_features": 60,
+    "cargo_features": 62,
     "capabilities": 50,
     "platform_selectors": 15,
     "target_coordinates": 11,
@@ -107,7 +107,9 @@
     {"profile_id":"sparse-tailscale-path-provider","feature_id":"tailscale-path-provider","default_features":false,"requested_features":["tailscale-path-provider"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
     {"profile_id":"sparse-test-internals","feature_id":"test-internals","default_features":false,"requested_features":["test-internals"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
     {"profile_id":"sparse-tls","feature_id":"tls","default_features":false,"requested_features":["tls"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-tls-core","feature_id":"tls-core","default_features":false,"requested_features":["tls-core"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
     {"profile_id":"sparse-tls-native-roots","feature_id":"tls-native-roots","default_features":false,"requested_features":["tls-native-roots"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-tls-ring","feature_id":"tls-ring","default_features":false,"requested_features":["tls-ring"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
     {"profile_id":"sparse-tls-webpki-roots","feature_id":"tls-webpki-roots","default_features":false,"requested_features":["tls-webpki-roots"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
     {"profile_id":"sparse-tokio-compat","feature_id":"tokio-compat","default_features":false,"requested_features":["tokio-compat"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
     {"profile_id":"sparse-tower","feature_id":"tower","default_features":false,"requested_features":["tower"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},

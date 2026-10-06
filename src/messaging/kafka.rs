@@ -514,6 +514,23 @@ fn map_error_code(code: RDKafkaErrorCode, topic: Option<&str>) -> KafkaError {
         RDKafkaErrorCode::InvalidTopic | RDKafkaErrorCode::UnknownTopic => {
             KafkaError::InvalidTopic(topic.unwrap_or("unknown").to_string())
         }
+        // Refused credentials or ACLs: retrying the same request cannot help.
+        RDKafkaErrorCode::Authentication
+        | RDKafkaErrorCode::SaslAuthenticationFailed
+        | RDKafkaErrorCode::TopicAuthorizationFailed
+        | RDKafkaErrorCode::GroupAuthorizationFailed
+        | RDKafkaErrorCode::ClusterAuthorizationFailed
+        | RDKafkaErrorCode::TransactionalIdAuthorizationFailed
+        | RDKafkaErrorCode::DelegationTokenAuthorizationFailed => {
+            KafkaError::Authentication(format!("{code:?}"))
+        }
+        // A delivery or request that ran out of time is a timeout (still
+        // retryable), so `is_timeout` reports it.
+        RDKafkaErrorCode::MessageTimedOut
+        | RDKafkaErrorCode::RequestTimedOut
+        | RDKafkaErrorCode::OperationTimedOut => {
+            KafkaError::Io(io::Error::new(io::ErrorKind::TimedOut, format!("{code:?}")))
+        }
         _ => KafkaError::Broker(format!("{code:?}")),
     }
 }
@@ -3587,6 +3604,40 @@ mod tests {
 
         let done = KafkaError::PolledAfterCompletion;
         assert!(done.to_string().contains("polled after completion"));
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn refused_credentials_are_not_retried_and_delivery_timeouts_are_timeouts() {
+        for code in [
+            RDKafkaErrorCode::Authentication,
+            RDKafkaErrorCode::SaslAuthenticationFailed,
+            RDKafkaErrorCode::TopicAuthorizationFailed,
+            RDKafkaErrorCode::GroupAuthorizationFailed,
+            RDKafkaErrorCode::ClusterAuthorizationFailed,
+            RDKafkaErrorCode::TransactionalIdAuthorizationFailed,
+            RDKafkaErrorCode::DelegationTokenAuthorizationFailed,
+        ] {
+            let error = map_error_code(code, Some("orders"));
+            assert!(
+                matches!(error, KafkaError::Authentication(_))
+                    && !error.is_retryable()
+                    && !error.is_transient(),
+                "{code:?} -> {error:?}"
+            );
+        }
+        for code in [
+            RDKafkaErrorCode::MessageTimedOut,
+            RDKafkaErrorCode::RequestTimedOut,
+            RDKafkaErrorCode::OperationTimedOut,
+        ] {
+            let error = map_error_code(code, Some("orders"));
+            assert!(
+                error.is_timeout() && error.is_retryable(),
+                "{code:?} -> {error:?}"
+            );
+        }
+        assert!(map_error_code(RDKafkaErrorCode::BrokerNotAvailable, None).is_retryable());
     }
 
     #[test]

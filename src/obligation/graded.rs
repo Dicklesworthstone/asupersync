@@ -992,6 +992,8 @@ impl<K: TokenKind> Drop for ObligationToken<K> {
     fn drop(&mut self) {
         if self.armed {
             if std::thread::panicking() {
+                // Counted like GradedObligation (br-asupersync-27bbrg).
+                PANIC_LEAK_TRACKER.record_panic_leak();
                 return;
             }
             panic!(
@@ -1909,6 +1911,29 @@ mod tests {
             message.contains("OBLIGATION TOKEN LEAKED")
         );
         crate::test_complete!("token_drop_without_consume_panic_carries_asup_e101");
+    }
+
+    #[test]
+    fn tokens_dropped_while_unwinding_count_as_panic_leaks() {
+        // br-asupersync-27bbrg: a token dropped during a panic returned without
+        // being counted, so panic_leak_count missed permits, leases and
+        // transaction tokens. The counter is global; 50 leaks in one unwind
+        // cannot come from a concurrent test.
+        init_test("tokens_dropped_while_unwinding_count_as_panic_leaks");
+        let before = panic_leak_count();
+        let result = std::panic::catch_unwind(|| {
+            let _tokens: Vec<SendPermitToken> = (0..50)
+                .map(|_| ObligationToken::reserve_test("unwound-token"))
+                .collect();
+            panic!("force unwind with armed tokens");
+        });
+        assert!(result.is_err());
+        let after = panic_leak_count();
+        assert!(
+            after >= before + 50,
+            "50 armed tokens dropped while unwinding: {before} -> {after}"
+        );
+        crate::test_complete!("tokens_dropped_while_unwinding_count_as_panic_leaks");
     }
 
     #[test]

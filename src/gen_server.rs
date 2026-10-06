@@ -507,9 +507,11 @@ impl SystemMsgBatch {
 ///
 /// # Cancel Safety
 ///
-/// When a GenServer is cancelled:
+/// When a GenServer stops or is cancelled:
 /// 1. The mailbox closes (no new messages accepted)
-/// 2. Buffered messages are drained (calls receive errors, casts are processed)
+/// 2. Buffered messages are drained: calls receive errors; casts and info
+///    messages are processed after a graceful `stop()`, but dropped unhandled
+///    when the server was cancelled or aborted
 /// 3. `on_stop` runs for cleanup
 /// 4. The server state is returned via `GenServerHandle::join`
 pub trait GenServer: Send + 'static {
@@ -773,7 +775,11 @@ impl<S: GenServer> Drop for GenServerCell<S> {
     /// cell, a scheduler worker included. Abort them instead, so their callers
     /// get an error (br-asupersync-c9b5nb). After the loop's own drain
     /// this finds nothing.
+    ///
+    /// The server can no longer run, so it is `Stopped`: an unrun server
+    /// stayed `Created` and reported itself alive forever.
     fn drop(&mut self) {
+        self.state.store(ActorState::Stopped);
         self.mailbox.close();
         while let Ok(envelope) = self.mailbox.try_recv() {
             if let Envelope::Call { reply_permit, .. } = envelope {
@@ -914,6 +920,26 @@ impl GenServerStateCell {
             match self.state.compare_exchange_weak(
                 current,
                 running,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    /// Moves to `Stopping` unless the server already `Stopped`: a stop or
+    /// abort after the server finished must not make it look alive again
+    /// (br-asupersync-c9b5nb).
+    fn request_stop(&self) {
+        let stopped = encode_actor_state(ActorState::Stopped);
+        let stopping = encode_actor_state(ActorState::Stopping);
+        let mut current = self.state.load(Ordering::Acquire);
+        while current != stopped {
+            match self.state.compare_exchange_weak(
+                current,
+                stopping,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
@@ -1390,7 +1416,7 @@ impl<S: GenServer> GenServerHandle<S> {
     ///
     /// Closes the mailbox and waits for the server to process remaining messages.
     pub fn stop(&self) {
-        self.state.store(ActorState::Stopping);
+        self.state.request_stop();
         // Ensure a server blocked in `mailbox.recv()` is woken so it can observe
         // the state change and run drain/on_stop deterministically.
         self.sender.wake_receiver();
@@ -1401,7 +1427,7 @@ impl<S: GenServer> GenServerHandle<S> {
     /// Sets `cancel_requested` on the server's context, causing the loop
     /// to exit at the next cancellation check point.
     pub fn abort(&self) {
-        self.state.store(ActorState::Stopping);
+        self.state.request_stop();
         if let Some(inner) = self.inner.upgrade() {
             let cancel_wakers = {
                 let mut guard = inner.write();
@@ -1468,7 +1494,7 @@ impl<S: GenServer> GenServerJoinFuture<'_, S> {
     }
 
     fn abort(&self) {
-        self.state.store(ActorState::Stopping);
+        self.state.request_stop();
         if let Some(inner) = self.cx_inner.upgrade() {
             let cancel_wakers = {
                 let mut guard = inner.write();
@@ -1562,6 +1588,8 @@ pub struct GenServerRef<S: GenServer> {
     sender: mpsc::Sender<Envelope<S>>,
     state: Arc<GenServerStateCell>,
     overflow_policy: CastOverflowPolicy,
+    /// Shared with the handle: evictions through any reference count once.
+    evicted_count: Arc<AtomicU64>,
 }
 
 impl<S: GenServer> Clone for GenServerRef<S> {
@@ -1571,6 +1599,7 @@ impl<S: GenServer> Clone for GenServerRef<S> {
             sender: self.sender.clone(),
             state: Arc::clone(&self.state),
             overflow_policy: self.overflow_policy,
+            evicted_count: Arc::clone(&self.evicted_count),
         }
     }
 }
@@ -1580,6 +1609,14 @@ impl<S: GenServer> GenServerRef<S> {
     #[must_use]
     pub const fn cast_overflow_policy(&self) -> CastOverflowPolicy {
         self.overflow_policy
+    }
+
+    /// Casts evicted under [`CastOverflowPolicy::DropOldest`] through the
+    /// handle or any of its references; the same count as
+    /// [`GenServerHandle::evicted_count`].
+    #[must_use]
+    pub fn evicted_count(&self) -> u64 {
+        self.evicted_count.load(Ordering::Relaxed)
     }
 
     /// Send a call to the server.
@@ -1742,6 +1779,17 @@ impl<S: GenServer> GenServerRef<S> {
             {
                 Ok(Some(evicted)) => {
                     debug_assert!(matches!(evicted, Envelope::Cast { .. }));
+                    // Counted and logged as the handle's evictions are
+                    // (br-asupersync-dqdgcq, br-asupersync-c9b5nb).
+                    let _evicted_total = self
+                        .evicted_count
+                        .fetch_add(1, Ordering::Relaxed)
+                        .saturating_add(1);
+                    crate::tracing_compat::warn!(
+                        actor_id = ?self.actor_id,
+                        evicted_total = _evicted_total,
+                        "gen_server::cast_evicted_oldest"
+                    );
                     if let Some(cx) = Cx::current() {
                         cx.trace("gen_server::cast_evicted_oldest");
                     }
@@ -1836,6 +1884,7 @@ impl<S: GenServer> GenServerHandle<S> {
             sender: self.sender.clone(),
             state: Arc::clone(&self.state),
             overflow_policy: self.overflow_policy,
+            evicted_count: Arc::clone(&self.evicted_count),
         }
     }
 }
@@ -2596,7 +2645,10 @@ impl<S: GenServer> NamedGenServerHandle<S> {
     /// Returns [`ReleaseNameError::StillRunning`] if the underlying server
     /// task has not finished yet. Returns [`ReleaseNameError::Lease`] if
     /// the lease was already resolved or moved out via
-    /// [`take_lease`](Self::take_lease), or if lease resolution fails.
+    /// [`take_lease`](Self::take_lease), or if lease resolution fails. If
+    /// the registry no longer holds this lease's entry (`NotFound`, or
+    /// `PermissionDenied` after a `Replace`), the lease is aborted and that
+    /// error is returned.
     pub fn release_name(
         &mut self,
         registry: &mut crate::cx::NameRegistry,
@@ -2617,20 +2669,23 @@ impl<S: GenServer> NamedGenServerHandle<S> {
             return Err(ReleaseNameError::StillRunning);
         }
 
-        registry
-            .unregister_owned_and_grant(lease, now)
+        if let Err(error) = registry.unregister_owned_and_grant(lease, now) {
+            // The registry entry is gone or now someone else's (a Replace,
+            // a cleanup): this lease can never free it, so abort the lease
+            // rather than leave it armed for its drop to panic, and report.
+            if let Some(mut lease) = self.lease.take() {
+                let _ = lease.abort();
+            }
+            return Err(ReleaseNameError::Lease(error));
+        }
+        self.lease
+            .take()
+            .ok_or(ReleaseNameError::Lease(
+                crate::cx::NameLeaseError::AlreadyResolved,
+            ))?
+            .release()
             .map(|_proof| ())
             .map_err(ReleaseNameError::Lease)
-            .and_then(|()| {
-                self.lease
-                    .take()
-                    .ok_or(ReleaseNameError::Lease(
-                        crate::cx::NameLeaseError::AlreadyResolved,
-                    ))?
-                    .release()
-                    .map(|_proof| ())
-                    .map_err(ReleaseNameError::Lease)
-            })
     }
 
     /// Abort the name lease without stopping the server.
@@ -2642,6 +2697,9 @@ impl<S: GenServer> NamedGenServerHandle<S> {
     ///
     /// Returns [`crate::cx::NameLeaseError::AlreadyResolved`] if the lease was
     /// already resolved or moved out via [`take_lease`](Self::take_lease).
+    /// If the registry no longer holds this lease's entry (`NotFound`, or
+    /// `PermissionDenied` after a `Replace`), that error is returned and the
+    /// lease is aborted all the same.
     pub fn abort_lease(
         &mut self,
         registry: &mut crate::cx::NameRegistry,
@@ -2653,7 +2711,16 @@ impl<S: GenServer> NamedGenServerHandle<S> {
         if !lease.is_active() {
             return Err(crate::cx::NameLeaseError::AlreadyResolved);
         }
-        registry.unregister_owned_and_grant(lease, now)?;
+        if let Err(error) = registry.unregister_owned_and_grant(lease, now) {
+            // The entry is gone or now someone else's (a Replace, a
+            // cleanup): report that as before, but resolve the lease, which
+            // can never free the entry, instead of leaving it armed for the
+            // handle's drop to panic.
+            if let Some(mut lease) = self.lease.take() {
+                let _ = lease.abort();
+            }
+            return Err(error);
+        }
         self.lease
             .take()
             .ok_or(crate::cx::NameLeaseError::AlreadyResolved)?
@@ -4049,6 +4116,51 @@ mod tests {
         assert!(!server_ref.is_alive());
 
         crate::test_complete!("gen_server_stop_transitions");
+    }
+
+    /// br-asupersync-c9b5nb LOW 5: stop() and abort() stored Stopping
+    /// unconditionally, so either one on a finished server moved it from
+    /// Stopped back to Stopping, and is_alive() reported it alive again. A
+    /// server whose task was dropped unrun stayed Created, alive forever.
+    #[test]
+    fn a_finished_or_unrun_server_stays_not_alive() {
+        init_test("a_finished_or_unrun_server_stays_not_alive");
+
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
+
+        let (handle, stored) = scope
+            .spawn_gen_server(&mut runtime.state, &cx, Counter { count: 0 }, 32)
+            .expect("spawn counter");
+        let task_id = handle.task_id();
+        runtime.state.store_spawned_task(task_id, stored);
+        let server_ref = handle.server_ref();
+        handle.stop();
+        {
+            runtime.scheduler.lock().schedule(task_id, 0);
+        }
+        runtime.run_until_quiescent();
+        assert!(handle.is_finished());
+        assert!(!server_ref.is_alive());
+        handle.stop();
+        assert!(!server_ref.is_alive(), "a stop after the server finished");
+        handle.abort();
+        assert!(!server_ref.is_alive(), "an abort after the server finished");
+
+        let (unrun, stored) = scope
+            .spawn_gen_server(&mut runtime.state, &cx, Counter { count: 0 }, 32)
+            .expect("spawn counter");
+        let unrun_ref = unrun.server_ref();
+        assert!(unrun_ref.is_alive(), "a server not yet run is alive");
+        drop(stored);
+        assert!(
+            !unrun_ref.is_alive(),
+            "a server whose task was dropped unrun can never run"
+        );
+
+        crate::test_complete!("a_finished_or_unrun_server_stays_not_alive");
     }
 
     #[test]
@@ -6363,6 +6475,47 @@ mod tests {
         crate::test_complete!("conformance_mailbox_drop_oldest_preserves_newest");
     }
 
+    /// br-asupersync-c9b5nb LOW 6: GenServerRef::try_cast evicted under
+    /// DropOldest without counting or logging it; only evictions through the
+    /// handle showed in evicted_count().
+    #[test]
+    fn server_ref_drop_oldest_evictions_are_counted() {
+        init_test("server_ref_drop_oldest_evictions_are_counted");
+
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
+        let (mut handle, stored) = scope
+            .spawn_gen_server(&mut runtime.state, &cx, DropOldestCounter { count: 0 }, 2)
+            .unwrap();
+        let server_task_id = handle.task_id();
+        runtime.state.store_spawned_task(server_task_id, stored);
+
+        let server_ref = handle.server_ref();
+        server_ref.try_cast(TaggedCast::Set(1)).unwrap();
+        server_ref.try_cast(TaggedCast::Set(2)).unwrap();
+        server_ref.try_cast(TaggedCast::Set(3)).unwrap();
+        assert_eq!(server_ref.evicted_count(), 1, "the reference's eviction");
+        assert_eq!(
+            handle.evicted_count(),
+            1,
+            "the handle counts evictions through its references"
+        );
+        handle.try_cast(TaggedCast::Set(4)).unwrap();
+        assert_eq!(server_ref.clone().evicted_count(), 2);
+
+        handle.stop();
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
+        runtime.run_until_quiescent();
+        let server = futures_lite::future::block_on(handle.join(&cx)).expect("server join ok");
+        assert_eq!(server.count, 4, "the newest casts survive");
+
+        crate::test_complete!("server_ref_drop_oldest_evictions_are_counted");
+    }
+
     /// Budget-driven timeout: a call with a tight poll_quota budget
     /// must terminate deterministically without wall-clock dependence.
     #[test]
@@ -6804,6 +6957,114 @@ mod tests {
             .state
             .create_child_region(root, budget)
             .expect("named gen_server tests need a non-root lease region")
+    }
+
+    /// A named server whose registry entry another task took over (Replace)
+    /// can still give up its name: abort_lease and release_name resolve the
+    /// lease instead of leaving it armed for the handle's drop to panic.
+    #[test]
+    fn named_server_lease_resolves_after_its_entry_was_replaced() {
+        use crate::cx::registry::{NameCollisionOutcome, NameCollisionPolicy};
+
+        #[derive(Debug)]
+        struct Idle;
+
+        impl GenServer for Idle {
+            type Call = u64;
+            type Reply = u64;
+            type Cast = ();
+            type Info = SystemMsg;
+
+            fn handle_call(
+                &mut self,
+                _cx: &Cx,
+                request: u64,
+                reply: Reply<u64>,
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                let _ = reply.send(request);
+                Box::pin(async {})
+            }
+
+            fn handle_cast(
+                &mut self,
+                _cx: &Cx,
+                _msg: (),
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                Box::pin(async {})
+            }
+        }
+
+        crate::test_utils::init_test_logging();
+        crate::test_phase!("named_server_lease_resolves_after_its_entry_was_replaced");
+        let budget = Budget::new().with_poll_quota(100_000);
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(43));
+        let region = named_gen_server_test_region(&mut runtime, budget);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, budget);
+        let mut registry = crate::cx::NameRegistry::new();
+        let now = crate::types::Time::from_nanos(1_000_000_000);
+
+        for give_up_with_abort in [true, false] {
+            let name = if give_up_with_abort {
+                "svc_abort"
+            } else {
+                "svc_release"
+            };
+            let (mut named, stored) = scope
+                .spawn_named_gen_server(&mut runtime.state, &cx, &mut registry, name, Idle, 8, now)
+                .expect("spawn the named server");
+            let task_id = named.task_id();
+            runtime.state.store_spawned_task(task_id, stored);
+            let NameCollisionOutcome::Replaced {
+                lease: mut usurper, ..
+            } = registry
+                .register_with_policy(
+                    name,
+                    TaskId::new_for_test(9_999, 0),
+                    region,
+                    now,
+                    NameCollisionPolicy::Replace,
+                )
+                .expect("another task takes the name over")
+            else {
+                panic!("Replace displaces the named server");
+            };
+            named.stop();
+            runtime.scheduler.lock().schedule(task_id, 0);
+            runtime.run_until_idle();
+            let later = runtime.state.now;
+
+            let gave_up = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if give_up_with_abort {
+                    assert!(matches!(
+                        named.abort_lease(&mut registry, later),
+                        Err(crate::cx::NameLeaseError::PermissionDenied { .. })
+                    ));
+                } else {
+                    assert!(matches!(
+                        named.release_name(&mut registry, later),
+                        Err(ReleaseNameError::Lease(
+                            crate::cx::NameLeaseError::PermissionDenied { .. }
+                        ))
+                    ));
+                }
+                // The lease is resolved, so dropping the handle is quiet.
+                drop(named);
+            }));
+            assert!(
+                gave_up.is_ok(),
+                "giving up the name must not panic ({name})"
+            );
+            assert_eq!(
+                registry.whereis(name),
+                Some(TaskId::new_for_test(9_999, 0)),
+                "the usurper keeps the name"
+            );
+            registry
+                .unregister_owned_and_grant(&usurper, later)
+                .expect("unregister the usurper");
+            let _ = usurper.release().expect("release the usurper");
+        }
     }
 
     /// Named server: spawn registers name, whereis finds it.

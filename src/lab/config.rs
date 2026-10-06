@@ -155,8 +155,11 @@ pub struct LabConfig {
     /// When enabled, the runtime will record all non-determinism sources
     /// for later replay.
     pub replay_recording: Option<RecorderConfig>,
-    /// When true, the runtime auto-advances virtual time to the next timer
-    /// deadline whenever all tasks are idle (no runnable tasks in scheduler).
+    /// When true, `LabRuntime::run_until_quiescent` (and so
+    /// `run_async_under_lab` and async `#[lab_test]` bodies) jumps virtual
+    /// time to the next timer or lab-reactor deadline whenever nothing can run
+    /// before it. `LabRuntime::run_with_auto_advance` does so whether or not
+    /// this is set.
     ///
     /// This enables "instant timeout testing" — a 24-hour wall-clock scenario
     /// completes in <1 second of real time because sleep/timeout deadlines
@@ -364,9 +367,9 @@ impl LabConfig {
 
     /// Enables automatic time advancement when all tasks are idle.
     ///
-    /// When enabled, `run_with_auto_advance()` will jump virtual time to the
-    /// next timer deadline whenever the scheduler has no runnable tasks,
-    /// enabling instant timeout testing.
+    /// When enabled, `run_until_quiescent()` jumps virtual time to the next
+    /// timer deadline whenever nothing can run before it, enabling instant
+    /// timeout testing. `run_with_auto_advance()` always does.
     #[must_use]
     pub const fn with_auto_advance(mut self) -> Self {
         self.auto_advance_time = true;
