@@ -744,6 +744,62 @@ impl ResponseState {
     }
 }
 
+/// The transport under the frame codec. The codec reports a failed read as a
+/// protocol error, so this keeps the read error, which the client then
+/// reports as the I/O failure it is (br-asupersync-h2-client-audit-6hvls9).
+struct ReadErrorTap<T> {
+    inner: T,
+    read_error: Option<io::Error>,
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for ReadErrorTap<T> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        task: &mut std::task::Context<'_>,
+        buf: &mut crate::io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let poll = Pin::new(&mut this.inner).poll_read(task, buf);
+        if let Poll::Ready(Err(error)) = &poll {
+            this.read_error = Some(io::Error::new(error.kind(), error.to_string()));
+        }
+        poll
+    }
+}
+
+impl<T: AsyncWrite + Unpin> AsyncWrite for ReadErrorTap<T> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        task: &mut std::task::Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(task, bytes)
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        task: &mut std::task::Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write_vectored(task, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, task: &mut std::task::Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(task)
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        task: &mut std::task::Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(task)
+    }
+}
+
 async fn exchange<T>(
     mut transport: T,
     request: PreparedRequest,
@@ -766,6 +822,10 @@ where
     connection.queue_initial_settings();
     // SETTINGS must be the first frame; the connection WINDOW_UPDATE follows it.
     connection.set_initial_connection_recv_window(receive_window)?;
+    let transport = ReadErrorTap {
+        inner: transport,
+        read_error: None,
+    };
     let mut wire =
         Framed::new(transport, FrameCodec::new()).with_max_buffer_len(DATA_CHUNK + 8192 + 9);
     let mut headers = Some(request.headers);
@@ -825,9 +885,19 @@ where
                         None => {}
                     }
                 }
-                Poll::Ready(Some(Err(error))) => return Poll::Ready(Err(error.into())),
+                Poll::Ready(Some(Err(error))) => {
+                    let error = wire
+                        .get_mut()
+                        .read_error
+                        .take()
+                        .map_or_else(|| error.into(), Http2ClientError::Io);
+                    return Poll::Ready(Err(error));
+                }
                 Poll::Ready(None) => {
-                    return Poll::Ready(Err(protocol("peer closed before response completed")));
+                    return Poll::Ready(Err(Http2ClientError::Io(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "peer closed before response completed",
+                    ))));
                 }
                 Poll::Pending => {}
             }
@@ -942,6 +1012,69 @@ mod tests {
         }
         fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
             Poll::Ready(Ok(()))
+        }
+    }
+
+    /// A transport that accepts writes and whose reads fail with the given
+    /// kind, or end the stream (`None`).
+    struct FailingReadTransport(Option<io::ErrorKind>);
+
+    impl AsyncRead for FailingReadTransport {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            _: &mut crate::io::ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Ready(match self.0 {
+                Some(kind) => Err(io::Error::new(kind, "transport read failed")),
+                None => Ok(()),
+            })
+        }
+    }
+
+    impl AsyncWrite for FailingReadTransport {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Ok(bytes.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// br-asupersync-h2-client-audit-6hvls9 LOW 3: a failed transport read
+    /// came back as Protocol(INTERNAL_ERROR), and a peer that closed the
+    /// connection mid-response as Protocol too. Io is documented as the
+    /// transport failure, so a retry policy keyed on it misread both.
+    #[test]
+    fn transport_read_failure_and_eof_are_reported_as_io() {
+        for (transport, expected) in [
+            (
+                FailingReadTransport(Some(io::ErrorKind::ConnectionReset)),
+                io::ErrorKind::ConnectionReset,
+            ),
+            (FailingReadTransport(None), io::ErrorKind::UnexpectedEof),
+        ] {
+            let caller = Cx::for_testing();
+            let waker = Waker::from(Arc::new(CountWake::default()));
+            let mut task = Context::from_waker(&waker);
+            let mut future = Box::pin(
+                Http2Client::new()
+                    .get("http://localhost/")
+                    .send_on(&caller, transport),
+            );
+            match future.as_mut().poll(&mut task) {
+                Poll::Ready(Err(Http2ClientError::Io(error))) => {
+                    assert_eq!(error.kind(), expected);
+                }
+                other => panic!("expected an I/O error of kind {expected:?}, got {other:?}"),
+            }
         }
     }
 
