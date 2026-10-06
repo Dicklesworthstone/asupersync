@@ -309,6 +309,16 @@ impl Drop for PendingReceipt<'_> {
     }
 }
 
+/// Counts one dequeued post as applied when its application ends, also when
+/// it unwinds.
+struct AppliedReceipt<'a>(&'a AtomicU64);
+
+impl Drop for AppliedReceipt<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// What a post asks the runtime to do with an obligation ticket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObligationOp {
@@ -940,12 +950,17 @@ pub(crate) fn apply_obligation_posts_with_task_table(
     if mailbox.is_empty() {
         return 0;
     }
-    let mut posts = Vec::with_capacity(max.min(64));
-    let drained = mailbox.queue.pop_batch_into(max, &mut posts);
-    if drained == 0 {
-        return 0;
-    }
-    for queued in posts {
+    // One post at a time: a post whose application unwinds (a leak under the
+    // Panic policy, a panicking metrics callback) leaves the posts behind it
+    // queued for the next drain. A local batch dropped them, so a Reserve
+    // behind it never created its record and its region could never close.
+    let mut drained = 0;
+    while drained < max {
+        let Some(queued) = mailbox.queue.pop() else {
+            break;
+        };
+        drained += 1;
+        let _applied = AppliedReceipt(&mailbox.applied);
         let (post, admission) = match queued {
             QueuedObligationPost::Operation { post, admission } => (post, admission),
             QueuedObligationPost::Handoff { source } => {
@@ -968,7 +983,6 @@ pub(crate) fn apply_obligation_posts_with_task_table(
                         mailbox.refused.fetch_add(1, Ordering::Relaxed);
                     }
                 }
-                mailbox.applied.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
         };
@@ -980,7 +994,6 @@ pub(crate) fn apply_obligation_posts_with_task_table(
             .as_ref()
             .is_some_and(|credit| credit.application_finished.load(Ordering::Acquire))
         {
-            mailbox.applied.fetch_add(1, Ordering::Relaxed);
             continue;
         }
         let ticket_id = mailbox
@@ -1065,7 +1078,6 @@ pub(crate) fn apply_obligation_posts_with_task_table(
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(&post.ticket);
         }
-        mailbox.applied.fetch_add(1, Ordering::Relaxed);
     }
     drained
 }
@@ -1096,6 +1108,41 @@ mod tests {
                 .expect("lab runtime installs an obligation gateway")
                 .mailbox(),
         )
+    }
+
+    /// A post whose application unwinds (a leak under the Panic policy)
+    /// leaves the posts behind it queued for the next drain. A batch drain
+    /// dropped them: the next token's Reserve was lost, its Commit refused,
+    /// and its region could never close.
+    #[test]
+    fn a_panicking_post_leaves_the_rest_of_the_batch_queued() {
+        let (mut runtime, _region, holder, cx) = checked_holder(4);
+        runtime
+            .state
+            .set_obligation_leak_response(ObligationLeakResponse::Panic);
+        let mailbox = mailbox_of(&runtime);
+        let leaked = cx
+            .try_register_obligation_checked(ObligationKind::SendPermit, holder)
+            .unwrap()
+            .unwrap();
+        drop(leaked);
+        let kept = cx
+            .try_register_obligation_checked(ObligationKind::SendPermit, holder)
+            .unwrap()
+            .unwrap();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.state.drain_obligation_posts(64)
+        }));
+        assert!(
+            panicked.is_err(),
+            "the leak post panics under the Panic policy"
+        );
+        assert!(kept.commit());
+        runtime.state.drain_obligation_posts(64);
+        let stats = mailbox.stats();
+        assert_eq!(stats.refused, 0, "the Reserve behind the panic survived");
+        assert_eq!(stats.committed, 1);
+        assert_eq!(stats.posted, stats.applied);
     }
 
     fn checked_holder(limit: usize) -> (LabRuntime, RegionId, TaskId, Cx) {
