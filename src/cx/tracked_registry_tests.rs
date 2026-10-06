@@ -37,7 +37,7 @@ pub(super) fn finish(mut lab: LabRuntime, cx: &Cx, mut handle: TaskHandle<()>, r
     assert!(report.invariant_violations.is_empty());
     assert!(report.oracle_report.all_passed(), "{:?}", report.oracle_report.failures());
     assert!(handle.try_join().unwrap().is_some());
-    let mailbox = lab.state.obligation_gateway().unwrap().mailbox();
+    let mailbox = Arc::clone(lab.state.obligation_gateway().unwrap().mailbox());
     let stats = mailbox.stats();
     assert_eq!(stats.reserved, reserved);
     assert_eq!(stats.committed + stats.aborted, reserved);
