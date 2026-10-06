@@ -2092,7 +2092,8 @@ impl<P: Policy> Scope<'_, P> {
     /// data produced after the deadline is surfaced rather than lost. Only an
     /// operation that never acknowledged the cancellation (cancellation-blind,
     /// or cancelled before its first poll) is reported as
-    /// `TimedResult::TimedOut`.
+    /// `TimedResult::TimedOut`, also when it was the caller's cancellation,
+    /// not the deadline, that ended the wait.
     ///
     /// The deadline is measured on the scope's clock (`cx.now()`), so lab
     /// virtual time drives it deterministically.
