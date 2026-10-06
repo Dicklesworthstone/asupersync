@@ -10149,8 +10149,43 @@ fn apply_bonded_descriptor_config(
             "bonded donor descriptor has zero max_block_size".to_string(),
         ));
     }
+    // The geometry sizes per-block and per-symbol state on the donor and the
+    // receiver, as a peer's Hello geometry does, so each entry gets the same
+    // bounds as a Hello manifest (br-asupersync-w9yojl census LOW-1).
+    if let Some(reason) = descriptor.entries.iter().find_map(|entry| {
+        rq_entry_geometry_error(
+            entry.size,
+            descriptor.symbol_size,
+            descriptor.max_block_size,
+        )
+    }) {
+        return Err(RqError::Coding(format!("bonded descriptor: {reason}")));
+    }
     config.symbol_size = descriptor.symbol_size;
     config.max_block_size = max_block_size;
+    Ok(())
+}
+
+/// Refuses a bonded receive whose descriptor needs more source symbols than
+/// one received transfer may hold: the budget the Hello path applies to a
+/// peer's manifest. Only the receiver checks it, because it keeps the
+/// per-symbol state, and its manifest validation has bounded the bytes.
+fn check_bonded_receive_symbol_budget(
+    descriptor: &BondTransferDescriptor,
+    config: &RqConfig,
+) -> Result<(), RqError> {
+    let symbol_size = u64::from(descriptor.symbol_size.max(1));
+    let source_symbols = descriptor.entries.iter().try_fold(0u64, |total, entry| {
+        total.checked_add(entry.size.div_ceil(symbol_size))
+    });
+    let budget = rq_receive_source_symbol_budget(config);
+    if source_symbols.is_none_or(|symbols| symbols > budget) {
+        return Err(RqError::Coding(format!(
+            "bonded transfer of {} bytes in {}-byte symbols exceeds the receiver's budget of \
+             {budget} source symbols",
+            descriptor.total_bytes, descriptor.symbol_size
+        )));
+    }
     Ok(())
 }
 
