@@ -985,6 +985,8 @@ mod tests {
 
     #[test]
     fn lab_injection_oracles_check_the_runtime_state() {
+        use crate::lab::oracle::CancellationProtocolViolation;
+
         let config = LabInjectionConfig::new(42)
             .with_strategy(InjectionStrategy::FirstN(1))
             .with_all_oracles();
@@ -1007,11 +1009,19 @@ mod tests {
         });
 
         assert_eq!(report.tests_run, 1);
+        let reports_the_child = |violation: &OracleViolation| {
+            matches!(
+                violation,
+                OracleViolation::CancellationProtocol(
+                    CancellationProtocolViolation::CancelNotPropagated { .. }
+                )
+            )
+        };
         assert!(
             report
                 .results
                 .iter()
-                .all(|result| !result.oracle_violations.is_empty()),
+                .all(|result| result.oracle_violations.iter().any(reports_the_child)),
             "the uncancelled child must be reported: {:?}",
             report.results
         );
