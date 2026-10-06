@@ -234,7 +234,13 @@ pub fn calculate_delay(policy: &RetryPolicy, attempt: u32, rng: Option<&mut DetR
         policy.initial_delay.as_secs_f64() * 1_000_000_000.0
     };
 
-    let base_nanos = if multiplier_factor.is_infinite() {
+    let base_nanos = if policy.initial_delay.is_zero() {
+        // Zero stays zero at every attempt. Mapping an infinite factor to an
+        // infinite delay made a zero initial delay jump to max_delay once
+        // powi overflowed, at attempt 1025 for multiplier 2
+        // (br-asupersync-e9gn8y).
+        0.0
+    } else if multiplier_factor.is_infinite() {
         f64::INFINITY
     } else {
         initial_nanos_f64 * multiplier_factor
@@ -1084,6 +1090,26 @@ mod tests {
         let policy = RetryPolicy::new();
         let delay = calculate_delay(&policy, 0, None);
         assert_eq!(delay, Duration::ZERO);
+    }
+
+    /// A zero initial delay stays zero at every attempt. Once
+    /// multiplier.powi(attempt - 1) overflowed (attempt 1025 for multiplier
+    /// 2: 2^1024 is not a finite f64), the infinite factor became an infinite
+    /// delay, capped to max_delay (br-asupersync-e9gn8y).
+    #[test]
+    fn zero_initial_delay_stays_zero_past_the_multiplier_overflow() {
+        let policy = RetryPolicy::new()
+            .with_initial_delay(Duration::ZERO)
+            .with_max_delay(Duration::from_secs(30))
+            .with_multiplier(2.0)
+            .no_jitter();
+        for attempt in [1, 1025, 1026, 5000, u32::MAX] {
+            assert_eq!(
+                calculate_delay(&policy, attempt, None),
+                Duration::ZERO,
+                "attempt {attempt}"
+            );
+        }
     }
 
     /// With multiplier 1.0 the delay is the same at every attempt. Exponents
