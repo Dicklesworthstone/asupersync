@@ -871,6 +871,36 @@ fn describe_fallback_io_delta(_now: FallbackIoProbe, _before: FallbackIoProbe) -
     "fallback_io_delta=unavailable".to_string()
 }
 
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-internals")))]
+std::thread_local! {
+    static RECEIVER_MEMBER_PATH_DELAY: std::cell::Cell<Duration> =
+        const { std::cell::Cell::new(Duration::ZERO) };
+}
+
+/// Test hook (br-asupersync-r02ssd): slows packed-tree commits on this thread.
+///
+/// A receive polled on this thread waits `delay` before it resolves each
+/// member path at commit, so a test can reproduce a slow commit (a loaded
+/// disk) deterministically. Drive the receive on the calling thread, as
+/// `block_on` does; other threads are unaffected. `Duration::ZERO`, the
+/// default, turns it off.
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-internals")))]
+pub fn set_receiver_member_path_delay_for_testing(delay: Duration) {
+    RECEIVER_MEMBER_PATH_DELAY.with(|cell| cell.set(delay));
+}
+
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-internals")))]
+async fn receiver_member_path_delay_for_testing(cx: &Cx) {
+    let delay = RECEIVER_MEMBER_PATH_DELAY.with(std::cell::Cell::get);
+    if !delay.is_zero() {
+        crate::time::sleep(cx.now(), delay).await;
+    }
+}
+
+#[cfg(not(all(not(target_arch = "wasm32"), any(test, feature = "test-internals"))))]
+#[allow(clippy::unused_async)]
+async fn receiver_member_path_delay_for_testing(_cx: &Cx) {}
+
 /// Socket waits shorter than this are drain-grace polls between batches,
 /// not idle parks; `pump_idle` traces only real parks.
 const PUMP_IDLE_TRACE_MIN_WAIT: Duration = Duration::from_millis(100);
@@ -9969,8 +9999,19 @@ async fn commit_staged_entries(
                 // files AND apply member metadata with one blocking-pool
                 // batch (the staged pack itself is scratch; the staging-dir
                 // guard reclaims it).
+                //
+                // One keep-alive cadence covers the whole packed commit, from
+                // resolving the member paths on. That loop awaits a blocking
+                // symlink check per member: for 2000 members it kept the
+                // receiver silent for 10 s on an idle machine and past the
+                // sender's idle budget under load, so the sender gave up on a
+                // transfer the receiver then committed (br-asupersync-r02ssd).
+                let mut member_keep_alive = LocalWorkKeepAlive::new(Instant::now());
                 let mut writes = Vec::with_capacity(entry.members.len());
                 for (member_index, member) in entry.members.iter().enumerate() {
+                    keep_peer_alive_during_local_work(cx, link, control, &mut member_keep_alive)
+                        .await?;
+                    receiver_member_path_delay_for_testing(cx).await;
                     let member_path = super::quic_join_relative(&base, &member.rel_path)?;
                     super::reject_quic_destination_symlink_prefix(&base, &member_path).await?;
                     writes.push(QuicPackedMemberWrite {
@@ -9998,7 +10039,6 @@ async fn commit_staged_entries(
                     super::trace_quic_metadata_skips(cx, path, report);
                 }
                 let mut member_clock = Instant::now();
-                let mut member_keep_alive = LocalWorkKeepAlive::new(Instant::now());
                 for (member_index, (member, write)) in entry.members.iter().zip(&writes).enumerate()
                 {
                     keep_peer_alive_during_local_work(cx, link, control, &mut member_keep_alive)

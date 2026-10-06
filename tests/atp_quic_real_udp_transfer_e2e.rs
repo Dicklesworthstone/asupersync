@@ -33,7 +33,7 @@ use asupersync::atp::object::MetadataPolicy;
 use asupersync::cx::Cx;
 use asupersync::net::atp::transport_quic::native_link::{
     QuicClientTls, QuicServerTls, bind_server_endpoint, receive_on_endpoint,
-    receive_on_endpoint_with_options,
+    receive_on_endpoint_with_options, set_receiver_member_path_delay_for_testing,
 };
 use asupersync::net::atp::transport_quic::{
     DEFAULT_MAX_BLOCK_SIZE, DEFAULT_SYMBOL_SIZE, QuicConfig, QuicReceiveOptions,
@@ -1485,6 +1485,42 @@ fn real_udp_quic_tree_manifest_survives_lossy_control_stream() {
             .unwrap_or_else(|err| panic!("read committed member {member_path}: {err}"));
         assert_eq!(&committed, payload, "member {rel} bytes must match");
     }
+    assert_no_staging_residue(dst.path());
+}
+
+/// br-asupersync-r02ssd: a receiver that commits a 2000-member packed tree
+/// slowly keeps the sender alive. The commit-start loop that resolves and
+/// checks every member path sent no keep-alive. It took 10 s on an idle
+/// machine and longer under load, so a sender whose idle budget ran out first
+/// reported failure for a transfer the receiver then committed. The test hook
+/// makes that loop take at least 16 s (8 ms per member) against a 10 s sender
+/// idle budget.
+#[test]
+fn real_udp_quic_tree_commit_slower_than_the_sender_idle_budget_keeps_the_sender_alive() {
+    let src = tempfile::tempdir().expect("src dir");
+    let dst = tempfile::tempdir().expect("dst dir");
+    let root = src.path().join("tree");
+    let expected = write_lossy_manifest_tree(&root);
+    let mut cfg = transport_authenticated_configs();
+    cfg.send.idle_timeout = Duration::from_secs(10);
+    // Room for the sender's 2000-member manifest build before its first
+    // packet (asupersync-bi2462.147.70).
+    cfg.recv.accept_timeout = Duration::from_secs(120);
+
+    // The receive is driven on this thread by `block_on`, which is where the
+    // hook applies.
+    set_receiver_member_path_delay_for_testing(Duration::from_millis(8));
+    let (send, recv) = run_transfer(cfg.send, cfg.recv, &root, dst.path());
+    set_receiver_member_path_delay_for_testing(Duration::ZERO);
+
+    let send = send.unwrap_or_else(|err| {
+        panic!("the sender must outlast a commit slower than its idle budget: {err:?}; receiver={recv:?}")
+    });
+    let recv = recv.expect("the receiver commits the packed tree");
+    assert!(recv.committed, "receiver must commit the packed tree");
+    assert_eq!(send.transfer_id, recv.transfer_id);
+    assert_eq!(send.files as usize, expected.len());
+    assert!(send.receipt.committed && send.receipt.sha_ok && send.receipt.merkle_ok);
     assert_no_staging_residue(dst.path());
 }
 
