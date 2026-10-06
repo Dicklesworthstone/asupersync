@@ -803,11 +803,29 @@ impl<T> Receiver<T> {
             return Poll::Ready(Ok(()));
         }
 
+        #[cfg(test)]
+        BEFORE_FINAL_CLOSED_CHECK.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().take() {
+                hook();
+            }
+        });
+
         if self.inner.is_sender_dropped() {
             // Also fast path for drop
             if let Some(w) = self.waiter.as_ref() {
                 w.store(false, Ordering::Release);
             }
+            // The sender may have sent a final value and dropped since the
+            // version was read above: report that value before Closed, as the
+            // first check does.
+            let current = self.inner.current_version();
+            if current != self.seen_version {
+                self.seen_version = current;
+                self.inner
+                    .update_receiver_version(self.receiver_token, self.seen_version);
+                return Poll::Ready(Ok(()));
+            }
+            cx.trace("watch::changed sender dropped");
             return Poll::Ready(Err(RecvError::Closed));
         }
 
@@ -1043,6 +1061,14 @@ impl<T: Clone> Ref<'_, T> {
     pub fn clone_inner(&self) -> T {
         self.guard.0.clone()
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Runs once on this thread just before `poll_changed`'s final
+    /// sender-dropped check, so a test can send and drop in that window.
+    static BEFORE_FINAL_CLOSED_CHECK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -1437,6 +1463,30 @@ mod tests {
         );
         crate::assert_with_log!(closed.closed, "closed telemetry state", true, closed.closed);
         crate::test_complete!("watch_telemetry_receiver_count");
+    }
+
+    /// A value sent just before the sender drops is reported by `changed()`
+    /// before `Closed`, also when the send and the drop land after the
+    /// receiver's last version read.
+    #[test]
+    fn changed_reports_a_final_value_sent_just_before_the_last_check() {
+        init_test("changed_reports_a_final_value_sent_just_before_the_last_check");
+        let cx = test_cx();
+        let (tx, mut rx) = channel(0);
+        BEFORE_FINAL_CLOSED_CHECK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                tx.send(7).expect("send the final value");
+                drop(tx);
+            }));
+        });
+        let result = poll_ready(&mut rx.changed(&cx));
+        assert!(
+            result.is_ok(),
+            "the final value comes before Closed: {result:?}"
+        );
+        assert_eq!(*rx.borrow(), 7);
+        let closed = poll_ready(&mut rx.changed(&cx));
+        assert!(closed.is_err(), "then Closed");
     }
 
     #[test]
