@@ -1020,6 +1020,28 @@ impl ServerRequestRegion {
         self.cx.cancel_with(CancelKind::Timeout, Some(message));
     }
 
+    /// Cancels the request for its elapsed budget deadline with the hop's
+    /// attribution, `CancelKind::Timeout` and ASUP-E501, stamped at that
+    /// deadline rather than when the hop saw it. The context's own
+    /// budget-deadline timer may already have cancelled it with
+    /// `CancelKind::Deadline`, stamped at the deadline and without a message.
+    /// An equal-severity reason replaces another only if it is not newer
+    /// (`CancelReason::strengthen`), so a hop that saw the deadline late lost
+    /// its attribution to the timer's (br-asupersync-pev2xi).
+    fn cancel_deadline_exceeded(&self) {
+        let now = self.cx.now_for_observability();
+        let at = self
+            .cx
+            .budget()
+            .deadline
+            .map_or(now, |deadline| deadline.min(now));
+        self.cx.cancel_with_reason(
+            crate::types::CancelReason::with_origin(CancelKind::Timeout, self.cx.region_id(), at)
+                .with_task(self.cx.task_id())
+                .with_message(HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC),
+        );
+    }
+
     /// Emits the `server.budget_consumed` event and consumes the region.
     ///
     /// `outcome` must be one of the stable tokens: `ok`, `err`,
@@ -1240,10 +1262,7 @@ impl ServerRequestRegion {
                 }
             }
             Ok(PhaseA::ConnCancelled) | Err(_) => {
-                self.cx.cancel_with(
-                    CancelKind::Timeout,
-                    Some(HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC),
-                );
+                self.cancel_deadline_exceeded();
                 match self.drain_handler(drain_grace, fut.as_mut()).await {
                     Some(Ok(response)) => {
                         self.finish("ok");
@@ -2881,6 +2900,18 @@ mod tests {
                 task_budget: Budget,
                 cell: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
             ) {
+                run_lab_cell_jumping(seed, task_budget, None, cell);
+            }
+
+            /// [`run_lab_cell_with_budget`]; with `jump_to`, virtual time first
+            /// jumps there once the cell is idle, so timers due earlier fire
+            /// late, as on a stalled worker.
+            fn run_lab_cell_jumping(
+                seed: u64,
+                task_budget: Budget,
+                jump_to: Option<Time>,
+                cell: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+            ) {
                 let mut lab = LabRuntime::new(LabConfig::new(seed));
                 let root = lab.state.create_root_region(Budget::INFINITE);
                 let system_cx = lab.state.create_system_cx();
@@ -2900,6 +2931,10 @@ mod tests {
                 );
                 lab.scheduler.lock().schedule(tid, 0);
                 spawn_effects.dispatch();
+                if let Some(at) = jump_to {
+                    lab.run_until_idle();
+                    lab.advance_time_to(at);
+                }
 
                 let vt = lab.run_with_auto_advance();
                 assert_eq!(
@@ -3072,6 +3107,57 @@ mod tests {
                     *got.lock().unwrap(),
                     Some(CellOutcome::DeadlineExceeded),
                     "the task's own deadline must resolve as the request deadline"
+                );
+            }
+
+            /// The same cell with the deadline seen late: virtual time jumps
+            /// past it while the handler is parked, so the budget-deadline
+            /// timer cancels the shared Cx with Deadline, stamped at the
+            /// deadline, before the hop observes it. The request still ends
+            /// with the hop's attribution, Timeout and ASUP-E501, which
+            /// tests/quic_h3_live_udp.rs requires of the h3 listener
+            /// (br-asupersync-pev2xi).
+            #[cfg(not(target_arch = "wasm32"))]
+            #[test]
+            fn lab_cell_task_deadline_seen_late_keeps_the_hop_attribution() {
+                type Seen = (CellOutcome, bool, Option<String>);
+                let got: Arc<Mutex<Option<Seen>>> = Arc::new(Mutex::new(None));
+                let slot = Arc::clone(&got);
+                run_lab_cell_jumping(
+                    43,
+                    Budget::with_deadline_at_ns(10_000_000),
+                    Some(Time::from_nanos(20_000_000)),
+                    Box::pin(async move {
+                        let cx = Cx::current().expect("lab task context");
+                        let region =
+                            ServerRequestRegion::from_body_cx("lab", cx.clone(), ambient_now());
+                        let outcome = region
+                            .run_with_protocol_drain(
+                                RequestBudgetSource::ServerConfig,
+                                Some(cx.clone()),
+                                Duration::from_millis(5),
+                                async {
+                                    let handler_now = ambient_now();
+                                    crate::time::sleep(handler_now, Duration::from_secs(600)).await;
+                                    9_u8
+                                },
+                            )
+                            .await;
+                        let message = cx
+                            .cancel_reason()
+                            .and_then(|reason| reason.message.as_deref().map(str::to_owned));
+                        *slot.lock().unwrap() =
+                            Some((tag(&outcome), cx.cancelled_by(CancelKind::Timeout), message));
+                    }),
+                );
+                assert_eq!(
+                    *got.lock().unwrap(),
+                    Some((
+                        CellOutcome::DeadlineExceeded,
+                        true,
+                        Some(HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC.to_owned()),
+                    )),
+                    "a deadline seen late keeps the hop's Timeout and ASUP-E501 attribution"
                 );
             }
         }
