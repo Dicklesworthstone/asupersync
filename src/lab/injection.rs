@@ -984,6 +984,40 @@ mod tests {
     }
 
     #[test]
+    fn lab_injection_oracles_check_the_runtime_state() {
+        let config = LabInjectionConfig::new(42)
+            .with_strategy(InjectionStrategy::FirstN(1))
+            .with_all_oracles();
+        let mut runner = LabInjectionRunner::new(config);
+
+        let report = runner.run_with_lab(|injector, runtime, _oracles| {
+            let root = runtime
+                .state
+                .create_root_region(crate::types::Budget::INFINITE);
+            let _child = runtime
+                .state
+                .create_child_region(root, crate::types::Budget::INFINITE)
+                .expect("create child");
+            runtime
+                .state
+                .region(root)
+                .expect("root exists")
+                .cancel_request(crate::types::CancelReason::shutdown());
+            InstrumentedFuture::new(YieldingFuture::new(3, 42), injector)
+        });
+
+        assert_eq!(report.tests_run, 1);
+        assert!(
+            report
+                .results
+                .iter()
+                .all(|result| !result.oracle_violations.is_empty()),
+            "the uncancelled child must be reported: {:?}",
+            report.results
+        );
+    }
+
+    #[test]
     fn lab_builder_api() {
         let report = lab(42)
             .with_cancellation_injection(InjectionStrategy::FirstN(2))
