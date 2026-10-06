@@ -143,7 +143,8 @@ pub struct ConsumerConfig {
     pub enable_auto_commit: bool,
     /// Auto-commit interval.
     pub auto_commit_interval: Duration,
-    /// Max records returned per poll.
+    /// Max records returned per poll. Not applied: `KafkaConsumer::poll`
+    /// returns one record per call; this is only checked to be non-zero.
     pub max_poll_records: usize,
     /// Fetch minimum bytes.
     pub fetch_min_bytes: usize,
@@ -347,7 +348,8 @@ impl ConsumerConfig {
         self
     }
 
-    /// Set max records returned per poll.
+    /// Set max records returned per poll. Not applied (see
+    /// [`ConsumerConfig::max_poll_records`]).
     #[must_use]
     pub const fn max_poll_records(mut self, max: usize) -> Self {
         self.max_poll_records = max;
