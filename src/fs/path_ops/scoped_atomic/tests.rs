@@ -53,7 +53,7 @@ fn staging_error_and_panic_close_the_file_before_discarding_it() {
         let result = catch_unwind(AssertUnwindSafe(|| stage_with(
             &path, true, || Ok(()), |file| {
                 file.write_all(b"partial")?;
-                if panic { panic!("staging writer panic"); }
+                assert!(!panic, "staging writer panic");
                 Err(io::Error::other("writer refusal"))
             }, OperationProbeHook::default(),
         )));
@@ -375,4 +375,36 @@ fn private_staging_preserves_target_permissions_without_rewriting_aliases() {
         });
         drained(&runtime);
     });
+}
+
+// br-asupersync-pxg07b: legacy staging (write_atomic) created the temp file
+// with the default 0o666 & !umask and narrowed it to the target's mode only
+// after the write, so a 0600 target's new contents were 0644 meanwhile.
+#[cfg(unix)]
+#[test]
+fn legacy_staging_writes_a_private_targets_contents_into_a_private_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("credentials");
+    std::fs::write(&path, b"old secret").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut mode_while_written = None;
+    let staged = stage_with(
+        &path,
+        false,
+        || Ok(()),
+        |file| {
+            mode_while_written = Some(file.metadata()?.permissions().mode() & 0o777);
+            file.write_all(b"new secret")
+        },
+        OperationProbeHook::default(),
+    )
+    .unwrap();
+    staged.commit().unwrap();
+    assert_eq!(mode_while_written.map(|mode| mode & 0o077), Some(0));
+    assert_eq!(std::fs::read(&path).unwrap(), b"new secret");
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
 }

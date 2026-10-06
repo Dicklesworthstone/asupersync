@@ -126,9 +126,17 @@ pub(super) fn stage_with(
     let mut options = File::options();
     options.create_new(true).write(true);
     #[cfg(unix)]
-    if private_staging {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        if private_staging {
+            options.mode(0o600);
+        } else if let Some(permissions) = &existing_permissions {
+            // Never more readable than the file it replaces while the new
+            // contents are written; set_permissions below makes the mode
+            // exact. Created 0o666 & !umask, a 0600 target's replacement was
+            // 0644 until then (br-asupersync-pxg07b).
+            options.mode(permissions.mode() & 0o777);
+        }
     }
     #[cfg(not(unix))]
     let _ = private_staging;
@@ -138,7 +146,7 @@ pub(super) fn stage_with(
         let temp = unique_tmp_path(parent, file_name);
         match options.open(&temp) {
             Ok(file) => break (TempPathGuard::new(temp), file),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
         }
     };
