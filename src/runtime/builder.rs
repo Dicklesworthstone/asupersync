@@ -2966,8 +2966,8 @@ impl RuntimeBuilder {
 
     /// Set the spawn authorization key.
     ///
-    /// When set, the runtime will require valid capability macaroons for spawn operations.
-    /// When not set, spawn authorization is disabled (fail-open for testing).
+    /// Only `RuntimeState::create_task_with_auth` checks it: `Cx::spawn`, `Scope::spawn*` and
+    /// runtime-handle spawns do not consult it (asupersync-s45073 H3). Unset, nothing is checked.
     #[must_use]
     pub fn with_spawn_authorization_key(mut self, key: crate::security::key::AuthKey) -> Self {
         self.config.security.spawn_authorization_key = Some(key);
