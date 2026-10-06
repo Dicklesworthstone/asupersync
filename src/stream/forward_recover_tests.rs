@@ -187,7 +187,7 @@ fn recoverable_repeated_drop_and_resume_has_no_loss_or_duplicates() {
             }
             Poll::Pending => {
                 // Only the next undelivered item may have been read ahead.
-                assert_eq!(pending, Some(delivered.len() as i32));
+                assert_eq!(pending, Some(i32::try_from(delivered.len()).unwrap()));
             }
             Poll::Ready(Err(error)) => panic!("unexpected refusal: {error}"),
         }

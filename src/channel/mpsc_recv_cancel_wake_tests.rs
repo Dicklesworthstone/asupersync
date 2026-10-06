@@ -279,6 +279,8 @@ fn dropping_recv_does_not_remove_same_waker_cancellation_observer() {
 
 struct CancelOnDrop(Cx);
 
+// Waking does nothing; dropping the waker cancels, which is the point.
+#[allow(clippy::manual_noop_waker)]
 impl Wake for CancelOnDrop {
     fn wake(self: Arc<Self>) {}
 }

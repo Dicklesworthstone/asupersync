@@ -213,6 +213,8 @@ fn with_cx_accepts_borrowed_non_send_items() {
 
 struct CancelOnDrop(Cx);
 
+// Waking does nothing; dropping the waker cancels, which is the point.
+#[allow(clippy::manual_noop_waker)]
 impl Wake for CancelOnDrop {
     fn wake(self: Arc<Self>) {}
 }
