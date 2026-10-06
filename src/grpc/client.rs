@@ -155,9 +155,13 @@ pub struct ChannelConfig {
     pub initial_connection_window_size: u32,
     /// Initial stream window size.
     pub initial_stream_window_size: u32,
-    /// Keep-alive interval.
+    /// Keep-alive interval: HTTP/2 PINGs while the stream owner is polled.
+    /// Only `GrpcClient::into_native_server_streaming` and
+    /// `GrpcClient::into_native_duplex` apply it; other calls, unary
+    /// included, send no PINGs.
     pub keepalive_interval: Option<Duration>,
-    /// Keep-alive timeout.
+    /// Keep-alive timeout, applied by the same two calls as
+    /// `keepalive_interval`.
     pub keepalive_timeout: Option<Duration>,
     /// Whether to use TLS.
     pub use_tls: bool,
@@ -263,14 +267,16 @@ impl ChannelBuilder {
         self
     }
 
-    /// Set the keep-alive interval.
+    /// Set the keep-alive interval (applied only to native server-streaming
+    /// and duplex calls; see [`ChannelConfig::keepalive_interval`]).
     #[must_use]
     pub fn keepalive_interval(mut self, interval: Duration) -> Self {
         self.config.keepalive_interval = Some(interval);
         self
     }
 
-    /// Set the keep-alive timeout.
+    /// Set the keep-alive timeout (applied only to native server-streaming
+    /// and duplex calls; see [`ChannelConfig::keepalive_timeout`]).
     #[must_use]
     pub fn keepalive_timeout(mut self, timeout: Duration) -> Self {
         self.config.keepalive_timeout = Some(timeout);

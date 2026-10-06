@@ -464,9 +464,10 @@ pub struct ServerConfig {
     /// [`ConnectionRegistry::enforce_stream_limits`] for non-H2 adapters that
     /// opt into the legacy accounting helper.
     pub max_concurrent_streams: u32,
-    /// Keep-alive interval.
+    /// Keep-alive interval. Not applied yet: the server sends no keep-alive
+    /// PINGs whatever the value.
     pub keepalive_interval_ms: Option<u64>,
-    /// Keep-alive timeout.
+    /// Keep-alive timeout. Not applied yet, like `keepalive_interval_ms`.
     pub keepalive_timeout_ms: Option<u64>,
     /// Default timeout applied when the client omits `grpc-timeout` or sends
     /// a malformed value.
@@ -1044,14 +1045,16 @@ impl ServerBuilder {
         self
     }
 
-    /// Set the keep-alive interval.
+    /// Set the keep-alive interval. Not applied yet (see
+    /// [`ServerConfig::keepalive_interval_ms`]).
     #[must_use]
     pub fn keepalive_interval(mut self, ms: u64) -> Self {
         self.config.keepalive_interval_ms = Some(ms);
         self
     }
 
-    /// Set the keep-alive timeout.
+    /// Set the keep-alive timeout. Not applied yet (see
+    /// [`ServerConfig::keepalive_timeout_ms`]).
     #[must_use]
     pub fn keepalive_timeout(mut self, ms: u64) -> Self {
         self.config.keepalive_timeout_ms = Some(ms);
