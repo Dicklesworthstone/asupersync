@@ -1439,8 +1439,12 @@ mod tests {
                 SenderDrainAction::ReceiverDrop => drop(rx),
             }
 
-            assert_waker_retired_after_unlock(&drops, &unlocked_drops, action.name());
+            // The drain retired the channel's clone; the pending reserve's
+            // cancellation registration still owns the waker, so its final
+            // destructor runs when the reserve drops, with the channel unlocked.
+            assert_eq!(drops.load(Ordering::SeqCst), 0, "{}", action.name());
             drop(reserve);
+            assert_waker_retired_after_unlock(&drops, &unlocked_drops, action.name());
         }
 
         crate::test_complete!("sender_waiter_drains_retire_wakers_after_unlock");
@@ -2658,7 +2662,14 @@ mod tests {
         let mut task_cx = Context::from_waker(&waker);
         let mut reserve = Box::pin(tx.reserve(&cx));
         assert!(reserve.as_mut().poll(&mut task_cx).is_pending());
-        assert_eq!(probe.clones(), 1, "initial registration clones once");
+        // One clone for the channel registration and two for the pending
+        // reserve's cancellation registration: its own strong owner and the
+        // Cx registry's, so no final destructor runs under either lock.
+        assert_eq!(
+            probe.clones(),
+            3,
+            "registration clones the waker three times"
+        );
         assert_eq!(
             probe.clones_under_lock(),
             0,
@@ -2669,7 +2680,7 @@ mod tests {
             .expect("free one slot and snapshot head waiter");
         assert_eq!(
             probe.clones(),
-            1,
+            3,
             "head wake snapshot must clone only Arc<RegisteredWaker>"
         );
         assert_eq!(probe.wakes(), 1, "head waiter is woken once");
@@ -2697,7 +2708,8 @@ mod tests {
         let mut second = Box::pin(tx.reserve(&cx));
         assert!(first.as_mut().poll(&mut sender_cx).is_pending());
         assert!(second.as_mut().poll(&mut sender_cx).is_pending());
-        assert_eq!(probe.clones(), 2, "each registration clones once");
+        // Three clones per pending reserve, as in the head-snapshot test.
+        assert_eq!(probe.clones(), 6, "each registration clones three times");
         assert_eq!(probe.clones_under_lock(), 0);
 
         let receiver_waker = noop_waker();
@@ -2709,7 +2721,7 @@ mod tests {
         ));
         assert_eq!(
             probe.clones(),
-            2,
+            6,
             "batch wake snapshot must clone only Arc<RegisteredWaker>"
         );
         assert_eq!(probe.wakes(), 2, "both capacity waiters are woken");
