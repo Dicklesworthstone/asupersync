@@ -1251,4 +1251,97 @@ mod tests {
         }));
         assert!(ran, "no ambient context, and cancel() is a no-op");
     }
+
+    // --- Native task abort (br-asupersync-issue65-criticisms-kpmoy5.3.3) ---
+
+    /// Parks on the ambient (fiber) context's cancel waker, counting itself
+    /// in `parked` once it is parked, and records the cancellation kind it
+    /// then observes in `seen`.
+    fn parked_until_cancelled(
+        parked: Arc<AtomicUsize>,
+        seen: Arc<Mutex<Vec<CancelKind>>>,
+    ) -> impl Future<Output = ()> {
+        let mut counted = false;
+        poll_fn(move |task_cx| {
+            let cx = Cx::current().expect("the fiber's context");
+            if !cx.is_cancel_requested() {
+                cx.register_cancel_waker(task_cx.waker());
+                if !cx.is_cancel_requested() {
+                    if !counted {
+                        counted = true;
+                        parked.fetch_add(1, Ordering::SeqCst);
+                    }
+                    return Poll::Pending;
+                }
+            }
+            let reason = cx
+                .cancel_reason()
+                .expect("a cancelled context has a reason");
+            seen.lock().push(reason.kind);
+            Poll::Ready(())
+        })
+    }
+
+    /// Spawns a task whose body runs a scope with two fibers parked on their
+    /// own contexts, proves both are parked, aborts the task, and returns
+    /// the cancellation kinds the fibers observed.
+    fn abort_a_task_with_parked_fibers(builder: RuntimeBuilder) -> Vec<CancelKind> {
+        let runtime = builder.build().expect("runtime");
+        let parked = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (parked_in_task, seen_in_task) = (Arc::clone(&parked), Arc::clone(&seen));
+        runtime.block_on(async move {
+            let cx = Cx::current().expect("the root context");
+            let mut handle = cx
+                .spawn(move |_task_cx| async move {
+                    scope(|s| async move {
+                        let waits: Vec<_> = (0..2)
+                            .map(|_| {
+                                s.spawn(parked_until_cancelled(
+                                    Arc::clone(&parked_in_task),
+                                    Arc::clone(&seen_in_task),
+                                ))
+                            })
+                            .collect();
+                        for wait in waits {
+                            wait.await.expect("fiber");
+                        }
+                    })
+                    .await;
+                })
+                .expect("spawn the task");
+            while parked.load(Ordering::SeqCst) < 2 {
+                crate::runtime::yield_now().await;
+            }
+            handle.abort_with_reason(
+                CancelReason::new(CancelKind::Shutdown).with_message("abort the scope's task"),
+            );
+            // Cancelled or Ok: either way the task finishes after its fibers drain.
+            let _ = handle.join(&cx).await;
+        });
+        seen.lock().clone()
+    }
+
+    #[test]
+    fn aborting_the_task_reaches_its_parked_fibers_current_thread() {
+        let seen =
+            within_watchdog(|| abort_a_task_with_parked_fibers(RuntimeBuilder::current_thread()));
+        assert_eq!(
+            seen,
+            vec![CancelKind::Shutdown; 2],
+            "both fibers see the task's reason"
+        );
+    }
+
+    #[test]
+    fn aborting_the_task_reaches_its_parked_fibers_four_workers() {
+        let seen = within_watchdog(|| {
+            abort_a_task_with_parked_fibers(RuntimeBuilder::new().worker_threads(4))
+        });
+        assert_eq!(
+            seen,
+            vec![CancelKind::Shutdown; 2],
+            "both fibers see the task's reason"
+        );
+    }
 }
