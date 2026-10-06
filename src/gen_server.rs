@@ -2596,7 +2596,10 @@ impl<S: GenServer> NamedGenServerHandle<S> {
     /// Returns [`ReleaseNameError::StillRunning`] if the underlying server
     /// task has not finished yet. Returns [`ReleaseNameError::Lease`] if
     /// the lease was already resolved or moved out via
-    /// [`take_lease`](Self::take_lease), or if lease resolution fails.
+    /// [`take_lease`](Self::take_lease), or if lease resolution fails. If
+    /// the registry no longer holds this lease's entry (`NotFound`, or
+    /// `PermissionDenied` after a `Replace`), the lease is aborted and that
+    /// error is returned.
     pub fn release_name(
         &mut self,
         registry: &mut crate::cx::NameRegistry,
@@ -2617,20 +2620,23 @@ impl<S: GenServer> NamedGenServerHandle<S> {
             return Err(ReleaseNameError::StillRunning);
         }
 
-        registry
-            .unregister_owned_and_grant(lease, now)
+        if let Err(error) = registry.unregister_owned_and_grant(lease, now) {
+            // The registry entry is gone or now someone else's (a Replace,
+            // a cleanup): this lease can never free it, so abort the lease
+            // rather than leave it armed for its drop to panic, and report.
+            if let Some(mut lease) = self.lease.take() {
+                let _ = lease.abort();
+            }
+            return Err(ReleaseNameError::Lease(error));
+        }
+        self.lease
+            .take()
+            .ok_or(ReleaseNameError::Lease(
+                crate::cx::NameLeaseError::AlreadyResolved,
+            ))?
+            .release()
             .map(|_proof| ())
             .map_err(ReleaseNameError::Lease)
-            .and_then(|()| {
-                self.lease
-                    .take()
-                    .ok_or(ReleaseNameError::Lease(
-                        crate::cx::NameLeaseError::AlreadyResolved,
-                    ))?
-                    .release()
-                    .map(|_proof| ())
-                    .map_err(ReleaseNameError::Lease)
-            })
     }
 
     /// Abort the name lease without stopping the server.
@@ -2642,6 +2648,9 @@ impl<S: GenServer> NamedGenServerHandle<S> {
     ///
     /// Returns [`crate::cx::NameLeaseError::AlreadyResolved`] if the lease was
     /// already resolved or moved out via [`take_lease`](Self::take_lease).
+    /// If the registry no longer holds this lease's entry (`NotFound`, or
+    /// `PermissionDenied` after a `Replace`), that error is returned and the
+    /// lease is aborted all the same.
     pub fn abort_lease(
         &mut self,
         registry: &mut crate::cx::NameRegistry,
@@ -2653,7 +2662,16 @@ impl<S: GenServer> NamedGenServerHandle<S> {
         if !lease.is_active() {
             return Err(crate::cx::NameLeaseError::AlreadyResolved);
         }
-        registry.unregister_owned_and_grant(lease, now)?;
+        if let Err(error) = registry.unregister_owned_and_grant(lease, now) {
+            // The entry is gone or now someone else's (a Replace, a
+            // cleanup): report that as before, but resolve the lease, which
+            // can never free the entry, instead of leaving it armed for the
+            // handle's drop to panic.
+            if let Some(mut lease) = self.lease.take() {
+                let _ = lease.abort();
+            }
+            return Err(error);
+        }
         self.lease
             .take()
             .ok_or(crate::cx::NameLeaseError::AlreadyResolved)?
@@ -6804,6 +6822,114 @@ mod tests {
             .state
             .create_child_region(root, budget)
             .expect("named gen_server tests need a non-root lease region")
+    }
+
+    /// A named server whose registry entry another task took over (Replace)
+    /// can still give up its name: abort_lease and release_name resolve the
+    /// lease instead of leaving it armed for the handle's drop to panic.
+    #[test]
+    fn named_server_lease_resolves_after_its_entry_was_replaced() {
+        use crate::cx::registry::{NameCollisionOutcome, NameCollisionPolicy};
+
+        #[derive(Debug)]
+        struct Idle;
+
+        impl GenServer for Idle {
+            type Call = u64;
+            type Reply = u64;
+            type Cast = ();
+            type Info = SystemMsg;
+
+            fn handle_call(
+                &mut self,
+                _cx: &Cx,
+                request: u64,
+                reply: Reply<u64>,
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                let _ = reply.send(request);
+                Box::pin(async {})
+            }
+
+            fn handle_cast(
+                &mut self,
+                _cx: &Cx,
+                _msg: (),
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                Box::pin(async {})
+            }
+        }
+
+        crate::test_utils::init_test_logging();
+        crate::test_phase!("named_server_lease_resolves_after_its_entry_was_replaced");
+        let budget = Budget::new().with_poll_quota(100_000);
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(43));
+        let region = named_gen_server_test_region(&mut runtime, budget);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, budget);
+        let mut registry = crate::cx::NameRegistry::new();
+        let now = crate::types::Time::from_nanos(1_000_000_000);
+
+        for give_up_with_abort in [true, false] {
+            let name = if give_up_with_abort {
+                "svc_abort"
+            } else {
+                "svc_release"
+            };
+            let (mut named, stored) = scope
+                .spawn_named_gen_server(&mut runtime.state, &cx, &mut registry, name, Idle, 8, now)
+                .expect("spawn the named server");
+            let task_id = named.task_id();
+            runtime.state.store_spawned_task(task_id, stored);
+            let NameCollisionOutcome::Replaced {
+                lease: mut usurper, ..
+            } = registry
+                .register_with_policy(
+                    name,
+                    TaskId::new_for_test(9_999, 0),
+                    region,
+                    now,
+                    NameCollisionPolicy::Replace,
+                )
+                .expect("another task takes the name over")
+            else {
+                panic!("Replace displaces the named server");
+            };
+            named.stop();
+            runtime.scheduler.lock().schedule(task_id, 0);
+            runtime.run_until_idle();
+            let later = runtime.state.now;
+
+            let gave_up = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if give_up_with_abort {
+                    assert!(matches!(
+                        named.abort_lease(&mut registry, later),
+                        Err(crate::cx::NameLeaseError::PermissionDenied { .. })
+                    ));
+                } else {
+                    assert!(matches!(
+                        named.release_name(&mut registry, later),
+                        Err(ReleaseNameError::Lease(
+                            crate::cx::NameLeaseError::PermissionDenied { .. }
+                        ))
+                    ));
+                }
+                // The lease is resolved, so dropping the handle is quiet.
+                drop(named);
+            }));
+            assert!(
+                gave_up.is_ok(),
+                "giving up the name must not panic ({name})"
+            );
+            assert_eq!(
+                registry.whereis(name),
+                Some(TaskId::new_for_test(9_999, 0)),
+                "the usurper keeps the name"
+            );
+            registry
+                .unregister_owned_and_grant(&usurper, later)
+                .expect("unregister the usurper");
+            let _ = usurper.release().expect("release the usurper");
+        }
     }
 
     /// Named server: spawn registers name, whereis finds it.
