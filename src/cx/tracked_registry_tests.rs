@@ -7,7 +7,7 @@ use crate::runtime::obligation_mailbox::{ObligationGateway, apply_obligation_pos
 use crate::types::{Budget, CancelKind};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-fn fixture(limit: usize) -> (LabRuntime, Cx, TaskHandle<()>) {
+pub(super) fn fixture(limit: usize) -> (LabRuntime, Cx, TaskHandle<()>) {
     crate::test_utils::init_test_logging();
     let mut lab = LabRuntime::new(LabConfig::new(0x100_1ea5e).max_steps(512));
     let root = lab.state.create_root_region(Budget::INFINITE);
@@ -24,12 +24,12 @@ fn fixture(limit: usize) -> (LabRuntime, Cx, TaskHandle<()>) {
     (lab, cx, handle)
 }
 
-fn flush(lab: &mut LabRuntime) {
+pub(super) fn flush(lab: &mut LabRuntime) {
     let mailbox = Arc::clone(lab.state.obligation_gateway().unwrap().mailbox());
     apply_obligation_posts(&mut lab.state, &mailbox, usize::MAX);
 }
 
-fn finish(mut lab: LabRuntime, cx: &Cx, mut handle: TaskHandle<()>, reserved: u64) {
+pub(super) fn finish(mut lab: LabRuntime, cx: &Cx, mut handle: TaskHandle<()>, reserved: u64) {
     flush(&mut lab);
     assert_eq!(lab.state.pending_obligation_count(), 0);
     lab.scheduler.lock().schedule(cx.task_id(), 0);
@@ -231,7 +231,7 @@ fn retaining_guard_beyond_holder_completion_is_a_runtime_leak() {
     assert_eq!(lab.state.pending_obligation_count(), 1);
     lab.scheduler.lock().schedule(cx.task_id(), 0);
     let _report = lab.run_until_quiescent_with_report();
-    assert!(handle.try_join().unwrap().is_some());
+    assert!(!matches!(handle.try_join(), Ok(None)), "holder must terminate");
     assert_eq!(lab.state.leak_count(), 1);
     assert_eq!(registry.whereis("worker"), Some(cx.task_id()));
     // Late physical cleanup must not rewrite the already chosen leak outcome.

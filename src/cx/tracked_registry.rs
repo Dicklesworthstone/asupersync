@@ -13,6 +13,9 @@
 //! guards within the lifetime of the task named by the admitting context. A
 //! Rust move does not transfer the obligation to another task or region.
 
+mod permit;
+pub use permit::TrackedNamePermit;
+
 use super::registry::{NameLease, NameLeaseError, NameRegistry, RegistryCap, RegistryHandle};
 use super::Cx;
 use crate::record::{ObligationAbortReason, ObligationKind};

@@ -119,7 +119,9 @@ pub use registry::{
 pub use scope::Scope;
 pub use scoped_cpu::{CpuCx, ScopedCpu, ScopedCpuError};
 pub use scoped_fs::{ScopedFs, ScopedFsError};
-pub use tracked_registry::{TrackedNameError, TrackedNameLease, TrackedNameRegistry};
+pub use tracked_registry::{
+    TrackedNameError, TrackedNameLease, TrackedNamePermit, TrackedNameRegistry,
+};
 pub use wrappers::{
     BackgroundCaps, BackgroundContext, EntropyCaps, GrpcCaps, GrpcContext, PureCaps, WebCaps,
     WebContext, narrow,
