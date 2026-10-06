@@ -476,6 +476,9 @@ struct RequestBodyWork {
     finished: bool,
     stopped: bool,
     clean_receive_stop: bool,
+    /// The response completed while the body was unread, so `complete`
+    /// stopped input and failed the body with `ParentCancelled`.
+    stopped_by_response: bool,
 }
 
 impl RequestBodyWork {
@@ -487,6 +490,7 @@ impl RequestBodyWork {
             finished: false,
             stopped: false,
             clean_receive_stop: false,
+            stopped_by_response: false,
         }
     }
 
@@ -545,6 +549,20 @@ impl RequestBodyWork {
             Poll::Ready(Err(error)) => Some(error),
             Poll::Ready(Ok(())) | Poll::Pending => None,
         }
+    }
+
+    /// A consumer failure that fails the request. A descendant that still
+    /// reads after the response completed observes the `ParentCancelled`
+    /// stop that `complete` injected; that is the end of its input, not a
+    /// failure of the finished request (br-asupersync-1u6l5r item 1).
+    fn request_failure(&mut self, task_cx: &mut TaskContext<'_>) -> Option<IncomingBodyError> {
+        let error = self.consumer_failure(task_cx)?;
+        let stopped_by_response = self.stopped_by_response
+            && error
+                == IncomingBodyError::Cancelled {
+                    kind: CancelKind::ParentCancelled,
+                };
+        (!stopped_by_response).then_some(error)
     }
 
     fn ready_to_receive(&self) -> bool {
@@ -754,6 +772,7 @@ impl RequestWork {
                 });
                 connection.stop_stream_receiving(cx, stream_id, H3_NO_ERROR)?;
                 body.clean_receive_stop = true;
+                body.stopped_by_response = true;
             }
             self.terminal = Some(true);
             if let Some(command) = self.command.take() {
@@ -781,7 +800,7 @@ impl RequestWork {
         if let Some(error) = self
             .body
             .as_mut()
-            .and_then(|body| body.consumer_failure(task_cx))
+            .and_then(|body| body.request_failure(task_cx))
             && self.terminal != Some(false)
         {
             self.input_error_code = Some(request_body_error_code(&error));
@@ -953,7 +972,7 @@ impl RequestWork {
                     if let Some(error) = self
                         .body
                         .as_mut()
-                        .and_then(|body| body.consumer_failure(task_cx))
+                        .and_then(|body| body.request_failure(task_cx))
                     {
                         self.input_error_code = Some(request_body_error_code(&error));
                         self.body

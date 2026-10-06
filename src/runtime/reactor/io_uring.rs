@@ -1190,7 +1190,7 @@ mod imp {
     impl IoUringReactor {
         /// Creates a new io_uring reactor with a default queue size.
         pub fn new() -> io::Result<Self> {
-            let mut ring = IoUring::new(DEFAULT_ENTRIES)?;
+            let mut ring = IoUring::new(DEFAULT_ENTRIES).and_then(require_ext_arg)?;
             let wake_fd = create_eventfd()?;
 
             // Arm poll on eventfd so Reactor::wake() can interrupt poll().
@@ -3993,6 +3993,30 @@ mod imp {
             let (events, ended) = apply_batch(&mut state, &[(701, -libc::ECANCELED, 0)]);
             assert!(events.is_empty() && ended.is_empty());
         }
+
+        /// br-asupersync-n89rul H1: a kernel without IORING_FEAT_EXT_ARG
+        /// (before 5.11) answers every timed wait with EINVAL, so the
+        /// constructor refuses such a ring with `Unsupported`, which makes
+        /// `create_reactor` fall back to epoll. A kernel with it is accepted,
+        /// and a reactor built here then completes a timed poll.
+        #[test]
+        fn a_ring_without_ext_arg_is_refused_and_a_timed_poll_works_with_it() {
+            let refused = ext_arg_supported(false).expect_err("no EXT_ARG must be refused");
+            assert_eq!(refused.kind(), io::ErrorKind::Unsupported);
+            ext_arg_supported(true).expect("EXT_ARG is accepted");
+
+            let Ok(reactor) = IoUringReactor::new() else {
+                return;
+            };
+            assert!(
+                reactor.ring.lock().params().is_feature_ext_arg(),
+                "a constructed reactor's ring supports EXT_ARG"
+            );
+            let mut events = Events::with_capacity(4);
+            reactor
+                .poll(&mut events, Some(Duration::from_millis(5)))
+                .expect("a timed poll on an idle reactor returns once the timeout passes");
+        }
     }
 
     // asupersync-ubwvb0: persistent edge-triggered registrations, and the test
@@ -4256,6 +4280,33 @@ mod imp {
                 }
                 Err(_) => emitted_events.push(Event::errored(token)),
             }
+        }
+    }
+
+    // br-asupersync-n89rul H1. Like the items above, this follows the test
+    // module so that the file's unsafe-ledger line locators keep their lines.
+
+    /// Refuses a ring whose kernel cannot take a timeout in `io_uring_enter`.
+    ///
+    /// The reactor's timed `poll` goes through `submit_with_args`, which sets
+    /// `IORING_ENTER_EXT_ARG`. Kernels before 5.11 lack that flag and answer
+    /// every timed wait with `EINVAL`, so an idle runtime blocked on accept or
+    /// read would never see readiness. With the ring refused, `create_reactor`
+    /// falls back to epoll.
+    fn require_ext_arg(ring: IoUring) -> io::Result<IoUring> {
+        ext_arg_supported(ring.params().is_feature_ext_arg())?;
+        Ok(ring)
+    }
+
+    fn ext_arg_supported(supported: bool) -> io::Result<()> {
+        if supported {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "io_uring without IORING_FEAT_EXT_ARG (Linux before 5.11) cannot bound a wait; \
+                 use the epoll reactor",
+            ))
         }
     }
 }

@@ -1498,6 +1498,93 @@ mod native_h3_listener_live {
             });
         }
 
+        /// br-asupersync-1u6l5r item 1: the handler gives its unread body to a
+        /// task it spawned in the request region and answers at once. The
+        /// listener stops input and fails the body with ParentCancelled; the
+        /// reader then observes that failure, and the listener used to count
+        /// the finished request as cancelled and reset its stream with
+        /// H3_REQUEST_CANCELLED after the response had ended.
+        #[test]
+        fn authenticated_listener_streaming_response_before_a_spawned_reader_ends_completes() {
+            run(2, async {
+                let cx = Cx::current().unwrap();
+                let (started_tx, mut started_rx) = asupersync::channel::oneshot::channel();
+                let started_slot = Arc::new(Mutex::new(Some(started_tx)));
+                let reader_end = Arc::new(Mutex::new(None));
+                let reader_end_handler = Arc::clone(&reader_end);
+                let router = Router::new().route(
+                    "/early",
+                    post(AsyncCxFnHandler1::<_, StreamingRawBody>::new(
+                        move |request_cx: Cx, mut body: StreamingRawBody| {
+                            let started = started_slot.lock().unwrap().take().unwrap();
+                            let reader_end = Arc::clone(&reader_end_handler);
+                            async move {
+                                let _reader = request_cx
+                                    .spawn(move |_reader_cx| async move {
+                                        let end = loop {
+                                            let frame = std::future::poll_fn(|task_cx| {
+                                                Pin::new(&mut body).poll_frame(task_cx)
+                                            })
+                                            .await;
+                                            match frame {
+                                                Some(Ok(_)) => {}
+                                                Some(Err(error)) => break Some(error),
+                                                None => break None,
+                                            }
+                                        };
+                                        *reader_end.lock().unwrap() = Some(end);
+                                    })
+                                    .unwrap();
+                                started.send(&request_cx, request_cx.clone()).unwrap();
+                                Response::new(StatusCode::OK, "answered before the upload ended")
+                            }
+                        },
+                    )),
+                );
+                let listener = bind(&cx, router, config(8)).await;
+                let address = listener.local_addr();
+                let (shutdown_tx, mut shutdown_rx) = asupersync::channel::oneshot::channel();
+                let serving = listener.serve_with_shutdown(&cx, async {
+                    shutdown_rx.recv(&cx).await.unwrap();
+                });
+                let client = async {
+                    let (mut owner, mut session) = connect(&cx, address, 85).await;
+                    // The upload never sends DATA or FIN.
+                    let stream = open_upload(&cx, &mut owner, "/early", None).await;
+                    let request_cx: Cx = started_rx.recv(&cx).await.unwrap();
+                    receive_response(
+                        &cx,
+                        &mut owner,
+                        &mut session,
+                        stream,
+                        &H3ResponseHead::new(200, Vec::new()).unwrap(),
+                        b"answered before the upload ended",
+                    )
+                    .await;
+                    wait_region_closed(&request_cx).await;
+                    shutdown_tx.send(&cx, ()).unwrap();
+                    // No StreamReset may follow the finished response.
+                    acknowledge_shutdown_goaway(&cx, &mut owner, &mut session, stream.0 + 4, None)
+                        .await;
+                };
+                let (report, ()) = zip(serving, client).await;
+                let report = report.unwrap();
+                assert!(
+                    matches!(
+                        *reader_end.lock().unwrap(),
+                        Some(Some(IncomingBodyError::Cancelled { .. }))
+                    ),
+                    "the spawned reader observed the stop: {:?}",
+                    reader_end.lock().unwrap()
+                );
+                assert_eq!(report.completed_requests, 1);
+                assert_eq!(report.cancelled_requests, 0);
+                assert_eq!(report.refused_requests, 0);
+                assert_eq!(report.failed_connections, 0);
+                assert!(!report.drain_timed_out);
+            });
+        }
+
         #[cfg(feature = "test-internals")]
         #[test]
         fn authenticated_listener_finalizer_failure_preserves_parked_peer_and_admission() {

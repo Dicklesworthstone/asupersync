@@ -163,7 +163,9 @@ pub enum ConcurrencyLimitError<E> {
     NotReady,
     /// The concurrency-limit future was polled after it had already completed.
     PolledAfterCompletion,
-    /// Failed to acquire a permit (should not happen in normal operation).
+    /// `poll_ready` could not acquire a permit: the semaphore was closed, or
+    /// the task waiting for a permit was cancelled. A limiter that is only
+    /// full does not fail; `poll_ready` waits for a permit instead.
     LimitExceeded,
     /// The inner service returned an error.
     Inner(E),

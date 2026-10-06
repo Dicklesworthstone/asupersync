@@ -16,6 +16,18 @@ fn wall_clock_now() -> Time {
     crate::time::wall_now()
 }
 
+/// The time source of a layer or service: a custom getter, or the runtime's
+/// clock (`None`). The runtime's clock is `wall_now`, which reads the ambient
+/// timer driver, so its deadlines wait on that driver or, off the runtime, on
+/// the shared fallback timer. A custom getter makes every request's `Sleep`
+/// poll that getter from a thread of its own (br-asupersync-1sxucf).
+const fn effective_time_getter(time_getter: Option<fn() -> Time>) -> fn() -> Time {
+    match time_getter {
+        Some(time_getter) => time_getter,
+        None => wall_clock_now,
+    }
+}
+
 fn duration_to_nanos(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
 }
@@ -36,7 +48,7 @@ fn duration_to_nanos(duration: Duration) -> u64 {
 #[derive(Debug, Clone, Copy)]
 pub struct TimeoutLayer {
     duration: Duration,
-    time_getter: fn() -> Time,
+    time_getter: Option<fn() -> Time>,
 }
 
 impl TimeoutLayer {
@@ -45,7 +57,7 @@ impl TimeoutLayer {
     pub const fn new(timeout: Duration) -> Self {
         Self {
             duration: timeout,
-            time_getter: wall_clock_now,
+            time_getter: None,
         }
     }
 
@@ -54,7 +66,7 @@ impl TimeoutLayer {
     pub const fn with_time_getter(timeout: Duration, time_getter: fn() -> Time) -> Self {
         Self {
             duration: timeout,
-            time_getter,
+            time_getter: Some(time_getter),
         }
     }
 
@@ -67,7 +79,7 @@ impl TimeoutLayer {
     /// Returns the time source used by this layer.
     #[must_use]
     pub const fn time_getter(&self) -> fn() -> Time {
-        self.time_getter
+        effective_time_getter(self.time_getter)
     }
 }
 
@@ -75,7 +87,12 @@ impl<S> Layer<S> for TimeoutLayer {
     type Service = Timeout<S>;
 
     fn layer(&self, inner: S) -> Self::Service {
-        Timeout::with_time_getter(inner, self.duration, self.time_getter)
+        Timeout {
+            inner,
+            duration: self.duration,
+            time_getter: self.time_getter,
+            ready_observed: false,
+        }
     }
 }
 
@@ -89,7 +106,7 @@ impl<S> Layer<S> for TimeoutLayer {
 pub struct Timeout<S> {
     inner: S,
     duration: Duration,
-    time_getter: fn() -> Time,
+    time_getter: Option<fn() -> Time>,
     ready_observed: bool,
 }
 
@@ -112,7 +129,7 @@ impl<S> Timeout<S> {
         Self {
             inner,
             duration: timeout,
-            time_getter: wall_clock_now,
+            time_getter: None,
             ready_observed: false,
         }
     }
@@ -123,7 +140,7 @@ impl<S> Timeout<S> {
         Self {
             inner,
             duration: timeout,
-            time_getter,
+            time_getter: Some(time_getter),
             ready_observed: false,
         }
     }
@@ -137,7 +154,7 @@ impl<S> Timeout<S> {
     /// Returns the time source used by this service.
     #[must_use]
     pub const fn time_getter(&self) -> fn() -> Time {
-        self.time_getter
+        effective_time_getter(self.time_getter)
     }
 
     /// Returns a reference to the inner service.
@@ -224,9 +241,13 @@ where
         if !std::mem::replace(&mut self.ready_observed, false) {
             return TimeoutFuture::not_ready();
         }
-        let now = (self.time_getter)();
+        let now = (self.time_getter())();
         let deadline = now.saturating_add_nanos(duration_to_nanos(self.duration));
-        TimeoutFuture::with_time_getter(self.inner.call(req), deadline, self.time_getter)
+        let inner = self.inner.call(req);
+        match self.time_getter {
+            Some(time_getter) => TimeoutFuture::with_time_getter(inner, deadline, time_getter),
+            None => TimeoutFuture::new(inner, deadline),
+        }
     }
 }
 
@@ -1096,5 +1117,93 @@ mod tests {
             }
             other => panic!("Expected inner timeout, got: {:?}", other),
         }
+    }
+
+    /// br-asupersync-1sxucf LOW: the default Timeout passed the wall clock as
+    /// a custom time getter. A `Sleep` with a custom getter cannot use the
+    /// shared fallback timer, so off the runtime every request spawned a
+    /// thread that polled the clock every millisecond.
+    #[test]
+    fn default_timeout_waits_on_the_runtime_clock_not_a_custom_getter() {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        for mut svc in [
+            Timeout::new(NeverService, Duration::from_secs(30)),
+            TimeoutLayer::new(Duration::from_secs(30)).layer(NeverService),
+        ] {
+            assert!(matches!(svc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+            let future = svc.call(());
+            let TimeoutFutureState::Running {
+                sleep, time_getter, ..
+            } = &future.state
+            else {
+                panic!("the call was authorized");
+            };
+            assert!(!sleep.has_custom_time_getter());
+            assert!(time_getter.is_none());
+        }
+
+        let mut svc = Timeout::with_time_getter(NeverService, Duration::from_secs(30), test_time);
+        assert!(matches!(svc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        let future = svc.call(());
+        let TimeoutFutureState::Running { sleep, .. } = &future.state else {
+            panic!("the call was authorized");
+        };
+        assert!(sleep.has_custom_time_getter(), "a custom getter is kept");
+    }
+
+    /// The default Timeout still expires off the runtime: its `Sleep` now
+    /// waits on the shared fallback timer.
+    #[test]
+    fn default_timeout_off_the_runtime_expires_through_the_shared_timer() {
+        assert!(Cx::current().is_none(), "no ambient Cx");
+        let mut svc = Timeout::new(NeverService, Duration::from_millis(20));
+        let woken = CountingWaker::new();
+        let waker = Waker::from(Arc::clone(&woken));
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(svc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        let mut future = svc.call(());
+        let give_up = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let seen = woken.count();
+            match Future::poll(Pin::new(&mut future), &mut cx) {
+                Poll::Ready(Err(TimeoutError::Elapsed(_))) => break,
+                Poll::Ready(other) => panic!("expected Elapsed, got {other:?}"),
+                Poll::Pending => {}
+            }
+            while woken.count() == seen {
+                assert!(
+                    std::time::Instant::now() < give_up,
+                    "the timeout never woke its task"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
+
+    /// Default timeouts polled off the runtime share the fallback timer's one
+    /// thread instead of spawning a thread per request.
+    #[cfg(feature = "runtime-metrics")]
+    #[test]
+    fn default_timeouts_off_the_runtime_spawn_no_timer_thread_per_request() {
+        assert!(Cx::current().is_none(), "no ambient Cx");
+        let requests: u64 = 16;
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut svc = Timeout::new(NeverService, Duration::from_secs(30));
+        // Counters are process-global and tests run in parallel, so assert a
+        // bound that one thread per request cannot meet.
+        let before = crate::runtime::metrics::snapshot();
+        for _ in 0..requests {
+            assert!(matches!(svc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+            let mut future = svc.call(());
+            assert!(Future::poll(Pin::new(&mut future), &mut cx).is_pending());
+        }
+        let after = crate::runtime::metrics::snapshot();
+        let spawned = after.timer_threads_spawned - before.timer_threads_spawned;
+        assert!(
+            spawned < requests,
+            "{spawned} timer threads for {requests} requests"
+        );
     }
 }
