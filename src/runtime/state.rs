@@ -4161,7 +4161,7 @@ impl RuntimeState {
         let logical_clock = self
             .logical_clock_mode
             .build_handle(self.timer_driver_handle());
-        let cx = crate::cx::Cx::new_with_drivers(
+        let cx = crate::cx::Cx::new_with_drivers_and_clock(
             region,
             task_id,
             budget,
@@ -4170,9 +4170,9 @@ impl RuntimeState {
             None,
             self.timer_driver_handle(),
             Some(entropy),
+            logical_clock,
         )
         .with_blocking_pool_handle(self.blocking_pool_handle())
-        .with_logical_clock(logical_clock)
         .with_spawn_gateway(self.spawn_gateway.clone())
         .with_pending_spawn_counter(
             regions
@@ -4195,6 +4195,11 @@ impl RuntimeState {
         );
         cx.set_trace_buffer(self.trace_handle());
         cx.set_loser_drain_history_handle(self.loser_drain_history_handle());
+        // Cleanup (async finalizer) tasks keep their masked legacy deadline
+        // handling; only work tasks get the deadline timer.
+        if !cleanup_task {
+            cx.arm_budget_deadline();
+        }
         let cx_weak = std::sync::Arc::downgrade(&cx.inner);
 
         // Link the shared state to the TaskRecord in the minting table.
@@ -4540,7 +4545,7 @@ impl RuntimeState {
         let logical_clock = self
             .logical_clock_mode
             .build_handle(self.timer_driver_handle());
-        let cx = crate::cx::Cx::new_with_drivers(
+        let cx = crate::cx::Cx::new_with_drivers_and_clock(
             region,
             task_id,
             budget,
@@ -4549,9 +4554,9 @@ impl RuntimeState {
             None,
             self.timer_driver_handle(),
             Some(entropy),
+            logical_clock,
         )
         .with_blocking_pool_handle(self.blocking_pool_handle())
-        .with_logical_clock(logical_clock)
         .with_spawn_gateway(self.spawn_gateway.clone())
         .with_pending_spawn_counter(
             regions
@@ -4590,6 +4595,7 @@ impl RuntimeState {
         }
         cx.set_trace_buffer(self.trace_handle());
         cx.set_loser_drain_history_handle(self.loser_drain_history_handle());
+        cx.arm_budget_deadline();
         tasks
             .resolve(&mut self.tasks)
             .update_task(task_id, |record| {
@@ -4761,7 +4767,7 @@ impl RuntimeState {
             .observability
             .as_ref()
             .map(|obs| obs.for_task(child_region, principal_task_id));
-        let principal_cx = crate::cx::Cx::new_with_drivers(
+        let principal_cx = crate::cx::Cx::new_with_drivers_and_clock(
             child_region,
             principal_task_id,
             record_budget,
@@ -4770,12 +4776,10 @@ impl RuntimeState {
             None,
             self.timer_driver_handle(),
             Some(self.entropy_source.fork(principal_task_id)),
-        )
-        .with_blocking_pool_handle(self.blocking_pool_handle())
-        .with_logical_clock(
             self.logical_clock_mode
                 .build_handle(self.timer_driver_handle()),
         )
+        .with_blocking_pool_handle(self.blocking_pool_handle())
         .with_spawn_gateway(self.spawn_gateway.clone())
         .with_pending_spawn_counter(
             self.region(child_region)
@@ -7643,8 +7647,11 @@ impl RuntimeState {
         let all_tasks_done = region
             .tasks_completed(&|task_id| tasks.task(task_id).is_some_and(|t| t.state.is_terminal()));
 
-        // Check all child regions are closed
-        let all_children_closed = region.child_ids().iter().all(|&child_id| {
+        // Check all child regions are closed. In place, like the tasks: a
+        // cloned child list on every advance made draining N child regions
+        // O(N^2) (br-asupersync-exeimj). A child's state is an atomic, so no
+        // second region lock is taken under this one.
+        let all_children_closed = region.children_closed(&|child_id| {
             regions
                 .get(child_id.arena_index())
                 .is_none_or(|r| r.state().is_terminal())
@@ -8383,7 +8390,7 @@ impl RuntimeState {
             let logical_clock = self
                 .logical_clock_mode
                 .build_handle(self.timer_driver_handle());
-            let cx = crate::cx::Cx::new_with_drivers(
+            let cx = crate::cx::Cx::new_with_drivers_and_clock(
                 region_id,
                 cleanup_task,
                 cleanup_budget,
@@ -8392,8 +8399,8 @@ impl RuntimeState {
                 None,
                 self.timer_driver_handle(),
                 Some(entropy),
+                logical_clock,
             )
-            .with_logical_clock(logical_clock)
             .with_runtime_obligation_context();
             cx.set_trace_buffer(self.trace_handle());
             cx.set_loser_drain_history_handle(self.loser_drain_history_handle());

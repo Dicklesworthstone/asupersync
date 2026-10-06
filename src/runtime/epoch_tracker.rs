@@ -276,6 +276,10 @@ struct SequencedEpochTelemetryReceipt {
     receipt: EpochTelemetryReceipt,
 }
 
+/// One dispatch's receipts. A spawn or completion yields one or two, which
+/// fit inline, so a dispatch allocates nothing.
+type ReceiptBatch = smallvec::SmallVec<[EpochTelemetryReceipt; 4]>;
+
 impl EpochTelemetryOutbox {
     fn new(capacity: usize) -> Self {
         let capacity = capacity.max(1);
@@ -305,13 +309,9 @@ impl EpochTelemetryOutbox {
             .push_back(SequencedEpochTelemetryReceipt { sequence, receipt });
     }
 
-    fn pop_batch_through(
-        &self,
-        watermark: Option<u128>,
-        limit: usize,
-    ) -> Vec<EpochTelemetryReceipt> {
+    fn pop_batch_through(&self, watermark: Option<u128>, limit: usize) -> ReceiptBatch {
         let Some(watermark) = watermark else {
-            return Vec::new();
+            return ReceiptBatch::new();
         };
         let mut state = self.state.lock();
         let eligible = state
@@ -320,15 +320,15 @@ impl EpochTelemetryOutbox {
             .take(limit)
             .take_while(|receipt| receipt.sequence <= watermark)
             .count();
-        let mut receipts = Vec::with_capacity(eligible);
-        for receipt in state.receipts.drain(..eligible) {
-            receipts.push(receipt.receipt);
-        }
-        receipts
+        state
+            .receipts
+            .drain(..eligible)
+            .map(|receipt| receipt.receipt)
+            .collect()
     }
 
     #[cfg(test)]
-    fn pop_batch(&self, limit: usize) -> Vec<EpochTelemetryReceipt> {
+    fn pop_batch(&self, limit: usize) -> ReceiptBatch {
         let watermark = self.watermark();
         self.pop_batch_through(watermark, limit)
     }
@@ -679,7 +679,7 @@ impl EpochTelemetryDispatch {
         Self::dispatch_receipts(&outbox, receipts);
     }
 
-    fn dispatch_receipts(outbox: &EpochTelemetryOutbox, receipts: Vec<EpochTelemetryReceipt>) {
+    fn dispatch_receipts(outbox: &EpochTelemetryOutbox, receipts: ReceiptBatch) {
         let mut emitted = 0u64;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             for receipt in receipts {
