@@ -225,7 +225,7 @@ pub mod record;
 pub mod remote;
 /// Async future utilities.
 ///
-/// Re-exports the runtime's cooperative [`yield_now`](crate::runtime::yield_now)
+/// Re-exports the runtime's cooperative [`yield_now`](fn@crate::runtime::yield_now)
 /// so `crate::future::yield_now()` resolves the way callers reach for it by
 /// analogy with `std::future`. Additive convenience; the canonical
 /// `crate::runtime::yield_now` remains valid.

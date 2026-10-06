@@ -133,7 +133,7 @@ impl RecordedGroupSession {
     /// Encode every component and its complete cross-provider timeline atomically
     /// as one logical envelope (not an implicit filesystem transaction).
     ///
-    /// V1 uses LE integers: magic[8], version:u32, stream-count:u64,
+    /// V1 uses LE integers: magic\[8\], version:u32, stream-count:u64,
     /// effect-count:u64, entropy-length:u64, clock-length:u64. Each stream is
     /// id:u64, length:u64, canonical IoTape bytes; then entropy bytes, clock bytes,
     /// and effects (tag:u8, subject:u64, child:u64), followed by SHA-256 of the

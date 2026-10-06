@@ -129,7 +129,7 @@ pub const UDP_MAX_BATCH_SIZE: usize = 1000;
 pub const UDP_DEFAULT_GSO_SEGMENT_BYTES: usize = 1456;
 /// Maximum UDP GSO segments planned into one super-packet.
 ///
-/// A super-packet is also limited to [`UDP_GSO_MAX_SUPER_PACKET_BYTES`] of
+/// A super-packet is also limited to `UDP_GSO_MAX_SUPER_PACKET_BYTES` of
 /// payload, so full-size segments fit fewer than this many.
 pub const UDP_MAX_GSO_SEGMENTS: usize = 64;
 /// Largest payload the planner puts in one UDP GSO super-packet.
@@ -1644,7 +1644,7 @@ mod fallback_io_probe {
 /// Snapshot of the process-global fallback I/O driver (GH#67).
 ///
 /// The pump's reactor statistics plus the socket-side counters from
-/// [`fallback_io_probe`]. Tests use it to tell "no datagram reached the
+/// `fallback_io_probe`. Tests use it to tell "no datagram reached the
 /// socket" from "the socket was never re-polled after its wake".
 #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-internals")))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

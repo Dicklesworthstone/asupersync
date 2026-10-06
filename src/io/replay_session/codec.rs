@@ -121,7 +121,7 @@ fn put_size(out: &mut Vec<u8>, size: usize) -> Result<(), SessionTapeError> {
 impl RecordedSession {
     /// Export all three tapes in one explicitly bounded V1 envelope.
     ///
-    /// Wire layout: magic[8], version:u32, I/O length:u64, entropy length:u64,
+    /// Wire layout: magic\[8\], version:u32, I/O length:u64, entropy length:u64,
     /// clock length:u64, followed by the three complete component encodings in
     /// that order and a SHA-256 checksum of the domain followed by the entire
     /// preceding envelope. All integers are little-endian. Components retain

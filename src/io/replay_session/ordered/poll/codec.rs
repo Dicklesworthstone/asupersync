@@ -115,11 +115,11 @@ fn decode_io(bytes: &[u8]) -> Result<IoStep, PolledTapeError> {
 impl PolledRecordedSession {
     /// Export a versioned envelope without losing Pending outcomes or boundaries.
     ///
-    /// V1 uses little-endian fixed integers: magic[8], version:u32, ordered-byte
+    /// V1 uses little-endian fixed integers: magic\[8\], version:u32, ordered-byte
     /// length:u64, I/O-poll count:u64, consumer-poll count:u64, construction and
     /// terminal checkpoints (each effects:u64 + I/O polls:u64). Then come the
     /// complete ordered bytes, 58-byte I/O records (operation:u8, pending:u8,
-    /// effect:u64, length:u64, slices:u64, digest[32]), 17-byte consumer records
+    /// effect:u64, length:u64, slices:u64, digest\[32\]), 17-byte consumer records
     /// (checkpoint + ready:u8), and SHA-256(domain || all preceding bytes).
     /// Operation IDs 0..4 are read/write/vectored/flush/shutdown. No padding.
     ///

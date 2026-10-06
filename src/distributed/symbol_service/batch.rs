@@ -140,8 +140,8 @@ fn copy(bytes: &[u8]) -> Result<Vec<u8>, SymbolStoreError> {
 
 /// Encode a single object's symbols sorted by (block, ESI), without signing them.
 ///
-/// V1: magic[8], version:u32, object:u128, count:u32, then each symbol's
-/// block:u8, ESI:u32, kind:u8 (0=source, 1=repair), length:u32, tag[32], payload.
+/// V1: magic\[8\], version:u32, object:u128, count:u32, then each symbol's
+/// block:u8, ESI:u32, kind:u8 (0=source, 1=repair), length:u32, tag\[32\], payload.
 /// Integers are little-endian. Empty, duplicate and mixed-object batches refuse.
 /// Existing tags are preserved, NOT trusted: receivers must call the decoder.
 /// Temporary sorting references are bounded by the decoded-storage limit.

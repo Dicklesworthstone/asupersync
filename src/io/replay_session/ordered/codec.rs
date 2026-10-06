@@ -161,7 +161,7 @@ impl OrderedRecordedSession {
     /// sessions always use V2, even with no pending attempts: strict polling must
     /// not silently downgrade to completed-effect replay.
     ///
-    /// V1 layout: magic[8], version:u32, component-session length:u64, effect
+    /// V1 layout: magic\[8\], version:u32, component-session length:u64, effect
     /// count:u64, complete component-session V1 bytes, fixed 17-byte entries
     /// (tag:u8, source:u64, child:u64), and SHA-256 of domain then all prior bytes.
     /// All integers are little-endian. Tags 0..4 are read/write/vectored/flush/
@@ -170,7 +170,7 @@ impl OrderedRecordedSession {
     ///
     /// V2 keeps this header and component format but uses version 2 and the
     /// checksum domain `asupersync.ordered-session.v2`. Each 66-byte entry is the
-    /// V1 entry plus a pending flag (0/1), extent:u64, slice-count:u64, digest[32].
+    /// V1 entry plus a pending flag (0/1), extent:u64, slice-count:u64, digest\[32\].
     /// Nonpending entries have 49 zero extension bytes. Pending entries are I/O
     /// only; reads use capacity/zero-slices/zero-digest, flush and shutdown use
     /// all-zero request metadata, and writes retain offered length and their

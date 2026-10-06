@@ -93,7 +93,7 @@ pub struct Http1Config {
     /// socket: the buffered server reads a whole request (head and body)
     /// under it, and the streaming server applies it to the head and then to
     /// the body's accumulated socket waits (asupersync-1to1qw). It also
-    /// bounds the TLS handshake on [`crate::http::h1::listener::Http1Listener::run_tls`]
+    /// bounds the TLS handshake on `Http1Listener::run_tls` (feature `tls`)
     /// when the acceptor sets no handshake timeout of its own.
     /// Response writes, flushes, and waits for the next produced body frame
     /// also use this bound. Successful frame transmission starts a new window.

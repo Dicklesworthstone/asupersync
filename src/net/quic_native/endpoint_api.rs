@@ -23,7 +23,7 @@
 //! and deterministic transports. What is deliberately *deterministic /
 //! lab-only* is the in-memory transport that carries bytes between two handles
 //! — [`establish_loopback`] and [`pump_app_data`]. Production callers instead
-//! bind the same handle to [`NativeQuicUdpConnection`](super::udp_connection::NativeQuicUdpConnection),
+//! bind the same handle to `udp_connection::NativeQuicUdpConnection` (feature `tls`),
 //! which owns:
 //!
 //! * a real UDP endpoint and caller-driven bounded I/O/timer operations;
