@@ -305,6 +305,10 @@ impl<T> TrackedSender<T> {
     }
 
     /// Convenience: reserve a slot, send a value, and return the proof.
+    ///
+    /// **Cancellation:** this future owns `value` while it waits for a slot;
+    /// cancelling it before the reserve completes drops the value. Reserve
+    /// first and commit on the permit to keep the value in the caller's hands.
     pub async fn send(
         &self,
         cx: &Cx,
@@ -327,7 +331,8 @@ impl<T> TrackedSender<T> {
     /// Reserves with checked admission, sends the value, and returns its proof.
     ///
     /// Returns ownership of `value` on channel or admission failure. The region
-    /// requirement is the same as [`Self::reserve_checked`].
+    /// requirement is the same as [`Self::reserve_checked`]. Cancelling the
+    /// future while it waits for a slot drops `value`, as with [`Self::send`].
     pub async fn send_checked(
         &self,
         cx: &Cx,

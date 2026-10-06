@@ -511,9 +511,11 @@ impl<T> Sender<T> {
 
     /// Modifies the current value.
     ///
-    /// To avoid deadlocks, this method clones the current value, releases the lock,
-    /// applies the closure to the clone, then reacquires the lock to update the value.
-    /// This prevents user closures from running while holding the write lock.
+    /// This method clones the current value, applies the closure to the clone
+    /// and writes it back, so the closure never runs under the value lock and
+    /// readers are not stalled. The clone and the closure do run under the
+    /// sender's write-serialization lock: a closure (or `T::clone`) that sends
+    /// on this channel deadlocks, and concurrent `send` calls wait for it.
     ///
     /// Applies an in-place update to the latest value for current and future
     /// subscribers.

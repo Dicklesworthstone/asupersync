@@ -635,6 +635,11 @@ impl<T> Sender<T> {
     }
 
     /// Sends after checked obligation admission, retaining the value on refusal.
+    ///
+    /// **Cancellation:** like [`send`](Self::send), this future owns `value`
+    /// while it waits for a slot; cancelling it before the reserve completes
+    /// drops the value. Use [`reserve_checked`](Self::reserve_checked) and commit
+    /// on the permit to keep the value in the caller's hands.
     pub async fn send_checked(&self, cx: &Cx, value: T) -> Result<(), CheckedSendError<T>> {
         match self.reserve_checked(cx).await {
             Ok(permit) => permit.try_send(value).map_err(CheckedSendError::Channel),
@@ -859,6 +864,10 @@ impl<T> Sender<T> {
     /// logically full because a queued waiter owns the next free slot, and no
     /// matching queued message is evictable, or `Err(SendError::Disconnected(value))`
     /// if the receiver has dropped.
+    ///
+    /// `predicate` runs while the channel's lock is held: it must not use this
+    /// channel (that deadlocks), and a slow predicate stalls every sender and
+    /// the receiver.
     pub fn send_evict_oldest_where<F>(
         &self,
         value: T,
