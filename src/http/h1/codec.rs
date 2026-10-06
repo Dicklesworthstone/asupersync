@@ -196,6 +196,13 @@ pub struct Http1Codec {
     state: DecodeState,
     max_headers_size: usize,
     max_body_size: usize,
+    /// Buffered head bytes already checked without finding the head's end,
+    /// so a head that arrives a few bytes per read is not rescanned from its
+    /// first byte on every read (quadratic up to `max_headers_size`).
+    head_scanned: usize,
+    /// Bytes the head checks have scanned, for the linear-scan test.
+    #[cfg(test)]
+    head_bytes_scanned: usize,
 }
 
 impl Http1Codec {
@@ -207,7 +214,57 @@ impl Http1Codec {
             state: DecodeState::Head,
             max_headers_size: DEFAULT_MAX_HEADERS_SIZE,
             max_body_size: DEFAULT_MAX_BODY_SIZE,
+            head_scanned: 0,
+            #[cfg(test)]
+            head_bytes_scanned: 0,
         }
+    }
+
+    /// Returns `true` while the buffered head is still incomplete, checking
+    /// only the bytes that arrived since the previous call with the same
+    /// errors `inspect_request_head_parts` reports for an incomplete head.
+    /// Returns `false` once the head's end is buffered, so the full
+    /// inspection runs exactly once per head.
+    fn head_still_incomplete(&mut self, src: &[u8]) -> Result<bool, HttpError> {
+        // A caller that drained or replaced the buffer starts a new scan.
+        let scanned = if self.head_scanned > src.len() {
+            0
+        } else {
+            self.head_scanned
+        };
+        // The terminator can straddle the previous end.
+        let from = scanned.saturating_sub(3);
+        #[cfg(test)]
+        {
+            self.head_bytes_scanned += src.len() - from;
+        }
+        if memmem::find(&src[from..], b"\r\n\r\n").is_some() {
+            self.head_scanned = 0;
+            return Ok(false);
+        }
+        // A trailing CR left unjudged last time is judged now.
+        let limit = src.len().min(self.max_headers_size);
+        let cr_from = scanned.saturating_sub(1).min(limit);
+        for idx in memchr_iter(b'\r', &src[cr_from..limit]) {
+            let idx = cr_from + idx;
+            if idx + 1 < limit && src[idx + 1] != b'\n' {
+                return Err(HttpError::BadRequestLine);
+            }
+        }
+        if src.len() > self.max_headers_size {
+            return Err(HttpError::HeadersTooLarge);
+        }
+        if src.len() > MAX_REQUEST_LINE {
+            match find_crlf(src) {
+                Some(line_end) if line_end > MAX_REQUEST_LINE => {
+                    return Err(HttpError::RequestLineTooLong);
+                }
+                Some(_) => {}
+                None => return Err(HttpError::RequestLineTooLong),
+            }
+        }
+        self.head_scanned = src.len();
+        Ok(true)
     }
 
     /// Set the maximum header block size.
@@ -1558,6 +1615,11 @@ impl Decoder for Http1Codec {
 impl Http1Codec {
     fn decode_inner(&mut self, src: &mut BytesMut) -> Result<Option<Request>, HttpError> {
         loop {
+            if matches!(self.state, DecodeState::Head)
+                && self.head_still_incomplete(src.as_ref())?
+            {
+                return Ok(None);
+            }
             match &mut self.state {
                 DecodeState::Poisoned => {
                     return Err(HttpError::BadHeader); // Generic error for poisoned state
@@ -1919,6 +1981,72 @@ mod tests {
         assert_eq!(req.headers[0].0, "Host");
         assert_eq!(req.headers[0].1, "localhost");
         assert!(req.body.is_empty());
+    }
+
+    /// Feed `raw` one byte per decode call, as a peer trickling its request
+    /// would, and return every decode result that is not `Ok(None)`.
+    fn decode_trickled(codec: &mut Http1Codec, raw: &[u8]) -> Vec<Result<Request, HttpError>> {
+        let mut buf = BytesMut::new();
+        let mut out = Vec::new();
+        for byte in raw {
+            buf.extend_from_slice(&[*byte]);
+            match codec.decode(&mut buf) {
+                Ok(None) => {}
+                Ok(Some(req)) => out.push(Ok(req)),
+                Err(err) => {
+                    out.push(Err(err));
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_trickled_head_is_scanned_in_linear_time() {
+        let raw = format!(
+            "GET /pad HTTP/1.1\r\nHost: a\r\nX-Pad: {}\r\n\r\nGET /next HTTP/1.1\r\nHost: a\r\n\r\n",
+            "p".repeat(8_000)
+        );
+        let mut codec = Http1Codec::new();
+        let results = decode_trickled(&mut codec, raw.as_bytes());
+        let uris: Vec<String> = results
+            .into_iter()
+            .map(|result| result.expect("valid requests").uri)
+            .collect();
+        assert_eq!(uris, ["/pad", "/next"]);
+        // Each byte is scanned with the three before it (the terminator can
+        // straddle reads): linear, where a rescan per read is quadratic.
+        assert!(
+            codec.head_bytes_scanned < 8 * raw.len(),
+            "{} head bytes scanned for {} bytes of requests",
+            codec.head_bytes_scanned,
+            raw.len()
+        );
+    }
+
+    #[test]
+    fn a_trickled_head_reports_the_same_errors() {
+        let bare_cr = decode_trickled(&mut Http1Codec::new(), b"GET / HTTP/1.1\r\nX: a\rb\r\n\r\n");
+        assert!(matches!(
+            bare_cr.as_slice(),
+            [Err(HttpError::BadRequestLine)]
+        ));
+
+        let long_line = format!("GET /{} HTTP/1.1\r\n\r\n", "a".repeat(MAX_REQUEST_LINE));
+        let too_long = decode_trickled(&mut Http1Codec::new(), long_line.as_bytes());
+        assert!(matches!(
+            too_long.as_slice(),
+            [Err(HttpError::RequestLineTooLong)]
+        ));
+
+        let mut small = Http1Codec::new().max_headers_size(64);
+        let big = format!("GET / HTTP/1.1\r\nX: {}\r\n\r\n", "a".repeat(100));
+        let too_large = decode_trickled(&mut small, big.as_bytes());
+        assert!(matches!(
+            too_large.as_slice(),
+            [Err(HttpError::HeadersTooLarge)]
+        ));
     }
 
     #[test]
