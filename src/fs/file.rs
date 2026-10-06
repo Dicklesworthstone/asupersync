@@ -223,6 +223,15 @@ enum PendingIo {
     },
 }
 
+/// A poll-trait write that a read, flush or owned operation settled before
+/// its caller polled it again. Reads and writes interleave on one handle
+/// under `copy_bidirectional` or `split`; crediting the retry from here keeps
+/// it from submitting the same bytes a second time.
+struct SettledWrite {
+    chunk: Arc<Vec<u8>>,
+    written: usize,
+}
+
 impl fmt::Debug for PendingIo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -248,6 +257,9 @@ pub struct File {
     cursor_gate: Arc<Mutex<()>>,
     /// Outstanding blocking-pool operation of the poll-based traits.
     pending: Mutex<Option<PendingIo>>,
+    /// A write settled by another operation, awaiting its caller's retry.
+    /// Locked only while `pending` is held.
+    settled_write: Mutex<Option<SettledWrite>>,
     #[cfg(feature = "test-internals")]
     cursor_probe: Option<Arc<FileCursorOperationProbe>>,
 }
@@ -430,6 +442,7 @@ impl File {
             inner: Arc::new(file),
             cursor_gate: Arc::new(Mutex::new(())),
             pending: Mutex::new(None),
+            settled_write: Mutex::new(None),
             #[cfg(feature = "test-internals")]
             cursor_probe: None,
         }
@@ -446,6 +459,7 @@ impl File {
             inner,
             cursor_gate,
             pending,
+            settled_write: _,
             #[cfg(feature = "test-internals")]
                 cursor_probe: _,
         } = self;
@@ -545,6 +559,7 @@ impl File {
             inner: Arc::new(file),
             cursor_gate: Arc::clone(&self.cursor_gate),
             pending: Mutex::new(None),
+            settled_write: Mutex::new(None),
             #[cfg(feature = "test-internals")]
             cursor_probe: self.cursor_probe.clone(),
         })
@@ -677,8 +692,11 @@ impl File {
     /// to a settled state before a new operation starts, so no started
     /// syscall is ever lost or reordered. A completed read settles as
     /// read-ahead bytes; a completed write, flush, or seek settles as `None`.
+    /// With `retain`, a completed write's count is kept there for its caller's
+    /// retry (see [`SettledWrite`]).
     fn settle_foreign_pending(
         pending: &mut Option<PendingIo>,
+        retain: Option<&mut Option<SettledWrite>>,
         poll_cx: &mut Context<'_>,
     ) -> Poll<io::Result<()>> {
         match pending.take() {
@@ -724,10 +742,20 @@ impl File {
                     *pending = Some(PendingIo::Write { future, chunk });
                     Poll::Pending
                 }
-                // The abandoned write's byte count has no consumer left; the
-                // bytes were committed to the file, which is the documented
-                // "started syscall commits" behaviour.
-                Poll::Ready(result) => Poll::Ready(result.map(|_| ())),
+                // The bytes were committed to the file, which is the documented
+                // "started syscall commits" behaviour. A read, flush or owned
+                // operation keeps the count for the write's caller: under
+                // copy_bidirectional or split it is still polling and would
+                // otherwise submit the same bytes again (br-asupersync-pxg07b).
+                Poll::Ready(result) => {
+                    if let (Ok(written), Some(slot)) = (&result, retain) {
+                        *slot = Some(SettledWrite {
+                            chunk,
+                            written: *written,
+                        });
+                    }
+                    Poll::Ready(result.map(|_| ()))
+                }
             },
             Some(PendingIo::Flush { mut future }) => match future.as_mut().poll(poll_cx) {
                 Poll::Pending => {
@@ -760,7 +788,7 @@ impl File {
     async fn settle_trait_pending(&self) -> io::Result<()> {
         std::future::poll_fn(|poll_cx| {
             let mut pending = self.pending.lock();
-            Self::settle_foreign_pending(&mut pending, poll_cx)
+            Self::settle_foreign_pending(&mut pending, None, poll_cx)
         })
         .await
     }
@@ -817,7 +845,8 @@ impl AsyncRead for File {
                 }
                 other => {
                     *pending = other;
-                    match Self::settle_foreign_pending(&mut pending, poll_cx) {
+                    let mut settled = this.settled_write.lock();
+                    match Self::settle_foreign_pending(&mut pending, Some(&mut *settled), poll_cx) {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                         Poll::Ready(Ok(())) => {}
@@ -839,6 +868,14 @@ impl AsyncWrite for File {
         }
         let this = self.get_mut();
         let mut pending = this.pending.lock();
+        // A write another operation settled before this retry already
+        // committed its bytes: report it instead of writing them again. Any
+        // other write means it was abandoned.
+        if let Some(settled) = this.settled_write.lock().take()
+            && buf.starts_with(&settled.chunk)
+        {
+            return Poll::Ready(Ok(settled.written));
+        }
         loop {
             match pending.take() {
                 // A retry passes the same bytes, so its buffer starts with
@@ -882,7 +919,7 @@ impl AsyncWrite for File {
                 }
                 other => {
                     *pending = other;
-                    match Self::settle_foreign_pending(&mut pending, poll_cx) {
+                    match Self::settle_foreign_pending(&mut pending, None, poll_cx) {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                         Poll::Ready(Ok(())) => {}
@@ -918,7 +955,8 @@ impl AsyncWrite for File {
                 }
                 other => {
                     *pending = other;
-                    match Self::settle_foreign_pending(&mut pending, poll_cx) {
+                    let mut settled = this.settled_write.lock();
+                    match Self::settle_foreign_pending(&mut pending, Some(&mut *settled), poll_cx) {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                         Poll::Ready(Ok(())) => {}
@@ -944,6 +982,8 @@ impl AsyncSeek for File {
     ) -> Poll<io::Result<u64>> {
         let this = self.get_mut();
         let mut pending = this.pending.lock();
+        // A write retried after the cursor moves is a new write, not a retry.
+        this.settled_write.lock().take();
         loop {
             match pending.take() {
                 // A retry asks for the same position. A different one is a new
@@ -981,7 +1021,7 @@ impl AsyncSeek for File {
                 }
                 other => {
                     *pending = other;
-                    match Self::settle_foreign_pending(&mut pending, poll_cx) {
+                    match Self::settle_foreign_pending(&mut pending, None, poll_cx) {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                         Poll::Ready(Ok(())) => {}
@@ -1353,6 +1393,67 @@ mod tests {
         crate::test_complete!("test_into_std_settles_in_flight_read");
     }
 
+    /// br-asupersync-pxg07b: copy_bidirectional and split poll a file's read
+    /// and write sides alternately. A read that found the other side's write
+    /// still pending settled it and dropped its count, so the writer's retry
+    /// submitted the same bytes again: the file held "hellohello".
+    #[test]
+    fn a_write_settled_by_an_interleaved_read_is_not_written_twice() {
+        init_test("a_write_settled_by_an_interleaved_read_is_not_written_twice");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("interleaved.txt");
+        let pool = crate::runtime::BlockingPool::new(1, 1);
+        let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+        let _guard = crate::cx::Cx::set_current(Some(cx));
+        let mut file = File::from_std(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&path)
+                .unwrap(),
+        );
+
+        // The write goes to the pool and its first poll is Pending.
+        let mut task_cx = Context::from_waker(std::task::Waker::noop());
+        assert!(
+            Pin::new(&mut file)
+                .poll_write(&mut task_cx, b"hello")
+                .is_pending()
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::fs::read(&path).unwrap() != b"hello" {
+            assert!(std::time::Instant::now() < deadline, "the pool never wrote");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        // The other direction reads the same handle before the writer retries.
+        let mut buf = [0u8; 8];
+        let read = futures_lite::future::block_on(std::future::poll_fn(|poll_cx| {
+            let mut read_buf = ReadBuf::new(&mut buf);
+            Pin::new(&mut file)
+                .poll_read(poll_cx, &mut read_buf)
+                .map_ok(|()| read_buf.filled().len())
+        }))
+        .unwrap();
+        crate::assert_with_log!(read == 0, "read at end of file", 0usize, read);
+
+        let written = futures_lite::future::block_on(std::future::poll_fn(|poll_cx| {
+            Pin::new(&mut file).poll_write(poll_cx, b"hello")
+        }))
+        .unwrap();
+        crate::assert_with_log!(written == 5, "retried write reports", 5usize, written);
+        let contents = std::fs::read(&path).unwrap();
+        crate::assert_with_log!(
+            contents == b"hello",
+            "the retried write is not submitted again",
+            "hello",
+            String::from_utf8_lossy(&contents)
+        );
+        crate::test_complete!("a_write_settled_by_an_interleaved_read_is_not_written_twice");
+    }
+
     #[derive(Clone, Copy, Debug)]
     enum CancelledCursorOp {
         Position,
@@ -1535,6 +1636,7 @@ mod tests {
             inner: Arc::clone(&file.inner),
             cursor_gate: Arc::clone(&file.cursor_gate),
             pending: Mutex::new(None),
+            settled_write: Mutex::new(None),
             cursor_probe: Some(Arc::clone(&probe)),
         };
         let pool = crate::runtime::BlockingPool::new(2, 2);
@@ -1587,6 +1689,7 @@ mod tests {
                 inner: Arc::clone(&shared),
                 cursor_gate: Arc::new(Mutex::new(())),
                 pending: Mutex::new(None),
+                settled_write: Mutex::new(None),
                 #[cfg(feature = "test-internals")]
                 cursor_probe: None,
             };
@@ -1594,6 +1697,7 @@ mod tests {
                 inner: Arc::clone(&shared),
                 cursor_gate: Arc::clone(&seeker.cursor_gate),
                 pending: Mutex::new(None),
+                settled_write: Mutex::new(None),
                 #[cfg(feature = "test-internals")]
                 cursor_probe: None,
             };
