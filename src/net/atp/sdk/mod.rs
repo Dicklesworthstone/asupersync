@@ -58,7 +58,8 @@ pub enum SdkMode {
 pub struct SessionConfig {
     /// Local peer identity.
     pub local_peer: PeerId,
-    /// Session timeout in milliseconds.
+    /// Session timeout in milliseconds. Not applied yet: no session times
+    /// out on this value.
     pub session_timeout_ms: u64,
     /// Enable compression during transfers.
     pub enable_compression: bool,
@@ -68,7 +69,7 @@ pub struct SessionConfig {
     pub enable_resume: bool,
     /// Maximum concurrent transfers per session.
     pub max_concurrent_transfers: u32,
-    /// Buffer size for streaming operations.
+    /// Buffer size for streaming operations. Not applied yet.
     pub stream_buffer_size: usize,
 }
 
@@ -79,15 +80,19 @@ pub struct TransferPolicy {
     pub max_transfer_size_bytes: u64,
     /// Maximum chunk size in bytes.
     pub max_chunk_size_bytes: u32,
-    /// Transfer timeout in milliseconds.
+    /// Transfer timeout in milliseconds. Not applied yet: no transfer times
+    /// out on this value.
     pub transfer_timeout_ms: u64,
-    /// Enable automatic retry on recoverable failures.
+    /// Enable automatic retry on recoverable failures. Not applied yet: the
+    /// SDK never retries a failed transfer, whatever this and the two
+    /// settings below say (the default `true` included).
     pub enable_auto_retry: bool,
-    /// Maximum retry attempts.
+    /// Maximum retry attempts. Not applied yet (see `enable_auto_retry`).
     pub max_retry_attempts: u32,
-    /// Backoff strategy for retries.
+    /// Backoff strategy for retries. Not applied yet (see
+    /// `enable_auto_retry`).
     pub retry_backoff_ms: u64,
-    /// Progress reporting interval in milliseconds.
+    /// Progress reporting interval in milliseconds. Not applied yet.
     pub progress_report_interval_ms: u64,
 }
 
