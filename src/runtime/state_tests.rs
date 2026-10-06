@@ -10354,3 +10354,75 @@ fn authorization_denial_error_format() {
 
     crate::test_complete!("authorization_denial_error_format");
 }
+
+#[test]
+fn an_untracked_validator_stays_unlocked_and_silent_through_a_region_lifecycle() {
+    // br-asupersync-issue65-criticisms-kpmoy5.1.8: release builds keep an
+    // untracked validator. Region creation, spawn, obligations, completion and
+    // region close must not take its global lock, and a region close must not
+    // count a violation: the untracked validator holds no finalizer
+    // accounting, so the close check reported every close in release builds.
+    init_test("an_untracked_validator_stays_unlocked_and_silent_through_a_region_lifecycle");
+    let mut state = RuntimeState::new();
+    state.use_untracked_cancel_protocol_validator();
+    let validator = Arc::clone(state.cancel_protocol_validator());
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let guard = validator.lock();
+        held_tx.send(()).expect("signal the held lock");
+        // A runtime path that takes the lock blocks until this times out.
+        let timed_out = done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .is_err();
+        drop(guard);
+        timed_out
+    });
+    held_rx.recv().expect("validator lock held");
+
+    let root = state.create_root_region(Budget::INFINITE);
+    let child = state
+        .create_child_region(root, Budget::INFINITE)
+        .expect("create child region");
+    let (task_id, _handle) = state
+        .create_task(child, Budget::INFINITE, async {})
+        .expect("create task");
+    let obligation = state
+        .create_obligation(ObligationKind::SendPermit, task_id, child, None)
+        .expect("create obligation");
+    let _ = state
+        .commit_obligation(obligation)
+        .expect("commit obligation");
+    let (_tasks, wakes) = state
+        .cancel_request(root, &CancelReason::user("done"), None)
+        .into_parts();
+    state
+        .task_mut(task_id)
+        .expect("task")
+        .complete(Outcome::Cancelled(CancelReason::parent_cancelled()));
+    let _waiters = state
+        .task_completed(task_id)
+        .into_waiters_without_observers();
+    wakes.dispatch();
+    let _ = done_tx.send(());
+
+    assert!(
+        !holder.join().expect("lock holder thread"),
+        "a runtime path took the untracked validator's lock"
+    );
+    let closed = state
+        .trace
+        .snapshot()
+        .into_iter()
+        .filter(|event| event.kind == TraceEventKind::RegionCloseComplete)
+        .count();
+    assert!(closed > 0, "the lifecycle reached region close");
+    assert_eq!(
+        state.cancel_protocol_validator().lock().violation_count(),
+        0,
+        "closing a region with an untracked validator is not a violation"
+    );
+    crate::test_complete!(
+        "an_untracked_validator_stays_unlocked_and_silent_through_a_region_lifecycle"
+    );
+}
