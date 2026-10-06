@@ -584,7 +584,7 @@ impl<M: Send + 'static> ActorRef<M> {
 pub struct MailboxConfig {
     /// Maximum number of messages the mailbox can hold.
     pub capacity: usize,
-    /// Reserved: no spawn API reads it. Actor mailboxes never drop a message.
+    /// Reserved: no spawn API reads it; a full actor mailbox never evicts a message.
     pub backpressure: bool,
 }
 
@@ -748,7 +748,7 @@ impl<'a, M: Send + 'static> ActorContext<'a, M> {
 
     /// Request this actor to stop gracefully.
     ///
-    /// Sets the stopping flag that this context's `checkpoint` and `is_stopping`
+    /// Sets the flag this context's `checkpoint`, `is_stopping` and `is_cancel_requested`
     /// report. No actor loop reads it: spawned actors get `&Cx`, not a context.
     pub fn stop_self(&mut self) {
         self.stopping = true;
