@@ -998,6 +998,9 @@ impl QuicStream {
     }
 
     /// Locally reset the send side (`RESET_STREAM`).
+    ///
+    /// `final_size` must equal the bytes this side has sent: RFC 9000
+    /// section 4.5 makes it the flow-control credit the stream consumed.
     pub fn reset_send(&mut self, error_code: u64, final_size: u64) -> Result<(), QuicStreamError> {
         if final_size < self.send_offset {
             return Err(QuicStreamError::InvalidFinalSize {
@@ -1011,6 +1014,14 @@ impl QuicStream {
             return Err(QuicStreamError::InconsistentReset {
                 previous_final_size,
                 new_final_size: final_size,
+            });
+        }
+        // A larger final size would charge the peer's flow control for bytes
+        // never sent, and can exceed its limit (br-asupersync-tzjbn9 F8).
+        if final_size > self.send_offset {
+            return Err(QuicStreamError::InvalidFinalSize {
+                final_size,
+                received: self.send_offset,
             });
         }
         self.send_reset = Some((error_code, final_size));
@@ -4150,6 +4161,26 @@ mod tests {
         );
         assert!(tbl.read_stream_bytes(id, 8).expect("empty read").is_empty());
         assert!(tbl.take_next_readable_stream().is_none());
+    }
+
+    /// br-asupersync-tzjbn9 F8: reset_send accepted a final size larger than
+    /// the bytes sent, which RESET_STREAM would then announce to the peer.
+    #[test]
+    fn reset_send_final_size_must_not_exceed_sent_bytes() {
+        let mut tbl = StreamTable::new(StreamRole::Client, 1, 0, 32, 32);
+        let id = tbl.open_local_bidi().expect("open");
+        let s = tbl.stream_mut(id).expect("stream");
+        s.write(8).expect("write");
+        let err = s.reset_send(7, 9).expect_err("must fail");
+        assert_eq!(
+            err,
+            QuicStreamError::InvalidFinalSize {
+                final_size: 9,
+                received: 8
+            }
+        );
+        assert_eq!(s.send_reset, None, "a refused reset is not recorded");
+        s.reset_send(7, 8).expect("the exact final size resets");
     }
 
     #[test]
