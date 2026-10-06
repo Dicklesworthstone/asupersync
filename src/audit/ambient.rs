@@ -1554,7 +1554,16 @@ fn test_function() {
     // the snapshot rows re-blessed with the listener waiter rewrite (one
     // accept site fewer) and the 10-03 DNS resolver and OTLP exporter fixes
     // (two clock reads each, inside their own timeouts).
-    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 812;
+    // 812 -> 826 (br-asupersync-5w2yte, reviewed at aa95b778d): test
+    // harnesses only. The native gRPC upload tests (2c41a94fe, 5b75f7df1)
+    // run a fake HTTP/2 peer: in grpc/native_upload/tests.rs and
+    // client_streaming/tests.rs, each has one TcpListener bind, two
+    // std::net::TcpStream helpers, two watchdog/peer threads and two deadline
+    // clock reads (7 each). The cx/owned_join tests' watchdog helper is now
+    // marked #[cfg(test)], which the whole file already is, so pristine cx
+    // stays empty. No production code, scanner exemption or detection
+    // pattern changed.
+    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 826;
 
     fn src_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src")

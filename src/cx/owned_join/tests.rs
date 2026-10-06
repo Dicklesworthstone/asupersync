@@ -11,6 +11,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
+// This file is only ever compiled as owned_join's `#[cfg(test)] mod tests;`.
+// The ambient-authority audit reads files one at a time and cannot see that,
+// so this helper's watchdog thread says it is test code here
+// (br-asupersync-5w2yte).
+#[cfg(test)]
 fn bounded(test: impl FnOnce() + Send + 'static) {
     let (send, receive) = mpsc::channel();
     let worker = std::thread::spawn(move || {

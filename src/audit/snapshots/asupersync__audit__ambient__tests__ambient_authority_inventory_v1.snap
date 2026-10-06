@@ -66,6 +66,10 @@ expression: inventory
 1	Io	grpc/native_stream/duplex/tests.rs	TcpStream::
 2	Io	grpc/native_stream/duplex/tests.rs	std::net::TcpStream
 4	Io	grpc/native_stream/tests/native.rs	std::net::TcpStream
+1	Io	grpc/native_upload/client_streaming/tests.rs	TcpListener::
+2	Io	grpc/native_upload/client_streaming/tests.rs	std::net::TcpStream
+1	Io	grpc/native_upload/tests.rs	TcpListener::
+2	Io	grpc/native_upload/tests.rs	std::net::TcpStream
 1	Io	grpc/server.rs	std::net::TcpListener
 1	Io	grpc/server/duplex/tests.rs	TcpStream::
 2	Io	grpc/server/duplex/tests.rs	std::net::TcpStream
@@ -161,6 +165,8 @@ expression: inventory
 1	Spawn	grpc/health_rpc/tests/native.rs	std::thread::spawn
 1	Spawn	grpc/native_stream/connect/tests.rs	std::thread::spawn
 4	Spawn	grpc/native_stream/duplex/tests.rs	std::thread::spawn
+2	Spawn	grpc/native_upload/client_streaming/tests.rs	std::thread::spawn
+2	Spawn	grpc/native_upload/tests.rs	std::thread::spawn
 2	Spawn	grpc/server/duplex/tests.rs	std::thread::spawn
 1	Spawn	grpc/server/server_streaming/tests.rs	std::thread::spawn
 1	Spawn	net/quic_native/handshake_driver.rs	std::thread::spawn
@@ -227,6 +233,8 @@ expression: inventory
 1	Time	decoding.rs	Instant::now()
 2	Time	grpc/native_stream/connect/tests.rs	std::time::Instant::now()
 4	Time	grpc/native_stream/duplex/tests.rs	Instant::now()
+2	Time	grpc/native_upload/client_streaming/tests.rs	Instant::now()
+2	Time	grpc/native_upload/tests.rs	Instant::now()
 1	Time	grpc/server.rs	Instant::now()
 2	Time	grpc/server/duplex/tests.rs	std::time::Instant::now()
 1	Time	grpc/server/server_streaming.rs	Instant::now()
@@ -400,6 +408,12 @@ expression: inventory
 1	Io	grpc/native_stream/tests/native.rs	std::net::TcpStream	fn duplex_peer_request_body(socket: &mut std::net::TcpStream) {
 1	Io	grpc/native_stream/tests/native.rs	std::net::TcpStream	fn duplex_peer_request_head(socket: &mut std::net::TcpStream) {
 1	Io	grpc/native_stream/tests/native.rs	std::net::TcpStream	fn read_request(socket: &mut std::net::TcpStream) {
+1	Io	grpc/native_upload/client_streaming/tests.rs	TcpListener::	let listener = TcpListener::bind().unwrap();
+1	Io	grpc/native_upload/client_streaming/tests.rs	std::net::TcpStream	fn flush(socket: &mut std::net::TcpStream, connection: &mut Connection) {
+1	Io	grpc/native_upload/client_streaming/tests.rs	std::net::TcpStream	fn reply(socket: &mut std::net::TcpStream, connection: &mut Connection,
+1	Io	grpc/native_upload/tests.rs	TcpListener::	let listener = TcpListener::bind().unwrap();
+1	Io	grpc/native_upload/tests.rs	std::net::TcpStream	fn closed_read(socket: &mut std::net::TcpStream, buffer: &mut [u8]) -> usize {
+1	Io	grpc/native_upload/tests.rs	std::net::TcpStream	fn write_pending(socket: &mut std::net::TcpStream, connection: &mut Connection) {
 1	Io	grpc/server.rs	std::net::TcpListener	let listener = std::net::TcpListener::bind(addr).map_err(|error| {
 1	Io	grpc/server/duplex/tests.rs	TcpStream::	let socket = TcpStream::connect(addr).await.unwrap();
 1	Io	grpc/server/duplex/tests.rs	std::net::TcpStream	let socket = std::net::TcpStream::connect_timeout(&address, LIMIT).unwrap();
@@ -532,6 +546,8 @@ expression: inventory
 1	Spawn	grpc/native_stream/connect/tests.rs	std::thread::spawn	let peer = std::thread::spawn(move || {
 3	Spawn	grpc/native_stream/duplex/tests.rs	std::thread::spawn	let thread = std::thread::spawn(move || {
 1	Spawn	grpc/native_stream/duplex/tests.rs	std::thread::spawn	let worker = std::thread::spawn(move || {
+2	Spawn	grpc/native_upload/client_streaming/tests.rs	std::thread::spawn	let worker = std::thread::spawn(move || {
+2	Spawn	grpc/native_upload/tests.rs	std::thread::spawn	let worker = std::thread::spawn(move || {
 1	Spawn	grpc/server/duplex/tests.rs	std::thread::spawn	let peer = std::thread::spawn(move || {
 1	Spawn	grpc/server/duplex/tests.rs	std::thread::spawn	let worker = std::thread::spawn(move || {
 1	Spawn	grpc/server/server_streaming/tests.rs	std::thread::spawn	let peer = std::thread::spawn(move || {
@@ -706,6 +722,10 @@ expression: inventory
 1	Time	grpc/native_stream/connect/tests.rs	std::time::Instant::now()	let until = std::time::Instant::now() + Duration::from_secs(5);
 2	Time	grpc/native_stream/duplex/tests.rs	Instant::now()	assert!(Instant::now() < until, );
 2	Time	grpc/native_stream/duplex/tests.rs	Instant::now()	let until = Instant::now() + LIMIT;
+1	Time	grpc/native_upload/client_streaming/tests.rs	Instant::now()	assert!(Instant::now() < deadline, );
+1	Time	grpc/native_upload/client_streaming/tests.rs	Instant::now()	let deadline = Instant::now() + LIMIT;
+1	Time	grpc/native_upload/tests.rs	Instant::now()	assert!(Instant::now() < deadline, );
+1	Time	grpc/native_upload/tests.rs	Instant::now()	let deadline = Instant::now() + LIMIT;
 1	Time	grpc/server.rs	Instant::now()	Instant::now()
 1	Time	grpc/server/duplex/tests.rs	std::time::Instant::now()	let deadline = std::time::Instant::now() + LIMIT;
 1	Time	grpc/server/duplex/tests.rs	std::time::Instant::now()	std::time::Instant::now() < deadline,
