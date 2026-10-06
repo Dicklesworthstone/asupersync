@@ -626,3 +626,60 @@ fn managed_app_rejects_unbound_or_unsupported_work_before_factory_calls() {
         Err(ManagedAppBindError::Unsupported { .. })
     ));
 }
+
+fn route_entry(name: &str, method: &str, path: &str) -> Value {
+    json!({
+        "name": name, "method": method, "path": path, "handler": "example::route",
+        "required_capabilities": {
+            "cx_capabilities": ["pure"], "feature_flags": [], "resources": []
+        },
+        "budget": "work"
+    })
+}
+
+fn bind_two_routes(
+    first: (&str, &str),
+    second: (&str, &str),
+) -> Result<asupersync::app::ManagedApp<()>, ManagedAppBindError> {
+    let mut manifest = manifest_json();
+    manifest["services"][0]["actors"] = json!([]);
+    manifest["services"][0]["routes"] = json!([
+        route_entry("first", first.0, first.1),
+        route_entry("second", second.0, second.1),
+    ]);
+    parse(manifest).bind_managed::<()>(
+        vec![
+            ManagedAppBinding::route(
+                "api.route.first",
+                AsyncCxFnHandler::new(|_: Cx| async { Response::new(StatusCode::OK, "first") }),
+            ),
+            ManagedAppBinding::route(
+                "api.route.second",
+                AsyncCxFnHandler::new(|_: Cx| async { Response::new(StatusCode::OK, "second") }),
+            ),
+        ],
+        config(),
+    )
+}
+
+/// Routes the web router merges or shadows are one route: a trailing slash or
+/// a renamed parameter with the same method is a duplicate, refused before
+/// any handler is silently unreachable (br-asupersync-mopkmt).
+#[test]
+fn managed_app_refuses_routes_the_router_would_merge_or_shadow() {
+    for (first, second) in [
+        (("GET", "/users"), ("GET", "/users/")),
+        (("GET", "/users/:id"), ("GET", "/users/:uid")),
+    ] {
+        assert!(
+            matches!(
+                bind_two_routes(first, second),
+                Err(ManagedAppBindError::Duplicate(name)) if name == "api.route.second"
+            ),
+            "{first:?} and {second:?} are one route"
+        );
+    }
+    // Different methods on one route shape are merged into one method router,
+    // so neither handler is shadowed.
+    assert!(bind_two_routes(("GET", "/users/:id"), ("DELETE", "/users/:uid")).is_ok());
+}

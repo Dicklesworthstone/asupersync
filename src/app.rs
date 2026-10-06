@@ -68,6 +68,28 @@ mod managed_execution {
     use std::task::Poll;
     use std::time::Duration;
 
+    /// The web router's view of a route path: empty segments dropped and
+    /// parameter names erased. `/users`, `/users/` and `//users` are one route to
+    /// the router (it merges them, the later handler replacing the earlier), and
+    /// `/users/:id` and `/users/:uid` are one route too (the first registered
+    /// shadows the other), so AppSpec duplicate detection and method merging key
+    /// on this shape, not on the raw path (br-asupersync-mopkmt).
+    fn route_shape(path: &str) -> String {
+        let mut shape = String::new();
+        for segment in path.split('/').filter(|segment| !segment.is_empty()) {
+            shape.push('/');
+            if segment.starts_with(':') {
+                shape.push(':');
+            } else {
+                shape.push_str(segment);
+            }
+        }
+        if shape.is_empty() {
+            shape.push('/');
+        }
+        shape
+    }
+
     enum BindingKind<E> {
         Route(Arc<dyn Handler>),
         Worker(ManagedRestartMode, Arc<dyn ManagedChildFactory<E>>),
@@ -665,7 +687,10 @@ mod managed_execution {
                 .collect();
             let mut policies = Vec::new();
             let mut managed = Vec::new();
-            let mut methods: BTreeMap<String, MethodRouter> = BTreeMap::new();
+            // Keyed by route shape (see `route_shape`): one method router per
+            // route the web router will match, registered under the first
+            // path seen for it.
+            let mut methods: BTreeMap<String, (String, MethodRouter)> = BTreeMap::new();
             let mut route_keys = BTreeSet::new();
             let mut routes = Vec::new();
             for child in plan.children {
@@ -736,7 +761,8 @@ mod managed_execution {
                     (AppSpecV1WorkUnitKind::Route, BindingKind::Route(handler)) => {
                         let route = child.route.expect("compiler includes route binding");
                         let method_key = format!("{:?}", route.method);
-                        if !route_keys.insert((route.path.clone(), method_key)) {
+                        let shape = route_shape(&route.path);
+                        if !route_keys.insert((shape.clone(), method_key)) {
                             return Err(ManagedAppBindError::Duplicate(child.name));
                         }
                         let slot = Arc::new(Mutex::new(None));
@@ -745,7 +771,9 @@ mod managed_execution {
                             policy: Arc::clone(&policy),
                             handler,
                         };
-                        let method = methods.remove(&route.path).unwrap_or_default();
+                        let (path, method) = methods
+                            .remove(&shape)
+                            .unwrap_or_else(|| (route.path.clone(), MethodRouter::default()));
                         let method = match route.method {
                             AppRouteMethodV1::Get => method.get(app_handler),
                             AppRouteMethodV1::Post => method.post(app_handler),
@@ -755,7 +783,7 @@ mod managed_execution {
                             AppRouteMethodV1::Head => method.head(app_handler),
                             AppRouteMethodV1::Options => method.options(app_handler),
                         };
-                        methods.insert(route.path, method);
+                        methods.insert(shape, (path, method));
                         let publication = Arc::clone(&slot);
                         managed.push(ManagedChildBinding::new(
                             child.name,
@@ -808,7 +836,7 @@ mod managed_execution {
                 .bind_managed(managed, config)
                 .map_err(ManagedAppBindError::Supervisor)?;
             let mut router = Router::new().without_default_trace();
-            for (path, method) in methods {
+            for (path, method) in methods.into_values() {
                 router = router.route(&path, method);
             }
             Ok(ManagedApp {
