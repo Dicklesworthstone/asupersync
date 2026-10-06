@@ -487,8 +487,10 @@ impl<H: Handler> TimeoutMiddleware<H> {
     ///
     /// The effective timeout is the smaller of `cap` and the remaining
     /// request budget (`cx.budget().deadline`) observed at request start —
-    /// min-plus composition: the tightest constraint wins. A request that
-    /// arrives with its budget already exhausted times out immediately.
+    /// min-plus composition: the tightest constraint wins. As with every
+    /// timeout of this middleware, the check runs when the handler returns:
+    /// a request that arrives with its budget already exhausted still runs
+    /// its handler (whose effects stand) and then gets the 504.
     #[must_use]
     pub fn budget_aware(inner: H, cap: Duration) -> Self {
         Self::budget_aware_with_time_getter(inner, cap, wall_clock_now)

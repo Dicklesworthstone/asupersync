@@ -527,6 +527,11 @@ pub struct SessionConfig {
     /// stored under `CSRF_TOKEN_KEY` inside `SessionData`, and must be
     /// supplied by the client as the `X-CSRF-Token` request header.
     /// **Default: `true`.** (br-asupersync-7udumi)
+    ///
+    /// The token is checked only for requests that carry a stored session.
+    /// A state-changing request without one (a login form posted
+    /// cross-site) is not checked; set [`Self::allowed_origins`] so its
+    /// `Origin` is (br-asupersync-a1q12q).
     pub csrf_protection: bool,
     /// br-asupersync-czbj90 — Allowed `Origin` values for state-changing
     /// requests. Each entry is a scheme+host[+port] string matched

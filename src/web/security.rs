@@ -41,8 +41,10 @@ pub struct SecurityPolicy {
     /// Set to `None` to disable (e.g., for non-HTTPS deployments).
     pub hsts: Option<String>,
 
-    /// Value for `Content-Security-Policy`. Default: `None` (not set).
-    /// Example: `"default-src 'self'; script-src 'self'"`.
+    /// Value for `Content-Security-Policy`. Default: `"default-src 'self';
+    /// script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'
+    /// data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'"`.
+    /// Set to `None` to send no CSP.
     pub content_security_policy: Option<String>,
 
     /// Value for `Permissions-Policy`. Default: `None` (not set).
