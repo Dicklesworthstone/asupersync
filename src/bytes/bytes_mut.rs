@@ -170,6 +170,10 @@ impl BytesMut {
 
     /// Freeze into an immutable `Bytes`.
     ///
+    /// As with [`into_vec`](Self::into_vec), if bytes were consumed from the
+    /// front, the remaining bytes are first shifted to the start of the
+    /// buffer (an in-place copy of the remaining length).
+    ///
     /// # Examples
     ///
     /// ```
@@ -188,21 +192,22 @@ impl BytesMut {
         Bytes::from(self.data)
     }
 
-    /// Consume `self` and return the underlying `Vec<u8>` WITHOUT copying.
+    /// Consume `self` and return the underlying `Vec<u8>` without allocating.
     ///
-    /// br-asupersync-i5w8lh: this is the zero-copy escape hatch for
-    /// callers that have a `BytesMut` and need a `Vec<u8>` (e.g. the
-    /// HTTP/1 codec building a `Request { body: Vec<u8> }`). The
-    /// previous canonical idiom `body_bytes.to_vec()` allocates a fresh
-    /// `Vec<u8>` and memcpy's the contents — pointless when we already
-    /// own a uniquely-referenced `Vec<u8>` inside this `BytesMut`.
-    /// `into_vec` simply moves the inner `data` field out of `self`,
-    /// which is one move + zero allocations + zero memcpy.
+    /// br-asupersync-i5w8lh: this is the escape hatch for callers that
+    /// have a `BytesMut` and need a `Vec<u8>` (e.g. the HTTP/1 codec
+    /// building a `Request { body: Vec<u8> }`). The previous canonical
+    /// idiom `body_bytes.to_vec()` allocates a fresh `Vec<u8>` and copies
+    /// the contents. `into_vec` moves the inner buffer out instead. If
+    /// bytes were consumed from the front (`advance`, `split_to`), the
+    /// remaining bytes are first shifted to the start of that buffer: an
+    /// in-place copy of the remaining length, still with no allocation
+    /// (br-asupersync-htq0xp). Otherwise it is a plain move.
     ///
     /// Note: in the current `Vec<u8>`-backed `BytesMut` representation,
     /// every `BytesMut` exclusively owns its underlying `Vec<u8>` (no
-    /// shared backing — see `split_to` doc), so this conversion is
-    /// always safe and zero-cost. If a future refactor introduces
+    /// shared backing — see `split_to` doc), so this conversion never
+    /// allocates. If a future refactor introduces
     /// shared backing storage for `BytesMut` (mirroring `Bytes`), this
     /// method may need to clone in the shared case to preserve the
     /// `Vec<u8>` exclusive-ownership contract — but the API contract
