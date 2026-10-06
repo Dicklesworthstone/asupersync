@@ -25,9 +25,10 @@
 use crate::cx::Cx;
 use crate::runtime::blocking_pool::{BlockingPoolHandle, BlockingTaskHandle};
 use parking_lot::Mutex;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::task::Waker;
+use std::task::{Context, Poll, Waker};
 use std::thread;
 
 /// A blocking operation whose runtime task retains ownership until the pool
@@ -366,6 +367,69 @@ const MAX_FALLBACK_THREADS: usize = 256;
 /// Current number of active fallback blocking threads.
 static FALLBACK_THREAD_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+/// Tasks waiting for a fallback thread while all of them are busy.
+static FALLBACK_WAITERS: Mutex<VecDeque<Waker>> = Mutex::new(VecDeque::new());
+
+/// Claims a fallback thread slot, or parks the caller until one is released.
+///
+/// A waiter used to yield and re-poll itself while the cap was full, so every
+/// executor worker kept spinning for as long as the fallback threads stayed
+/// busy (a DNS outage with every resolver thread blocked). It now parks its
+/// waker and a released slot wakes it.
+fn poll_claim_fallback_slot(
+    count: &AtomicUsize,
+    cap: usize,
+    waiters: &Mutex<VecDeque<Waker>>,
+    context: &Context<'_>,
+) -> Poll<()> {
+    if try_claim_fallback_slot(count, cap) {
+        return Poll::Ready(());
+    }
+    {
+        let mut waiters = waiters.lock();
+        if !waiters
+            .iter()
+            .any(|waiter| waiter.will_wake(context.waker()))
+        {
+            waiters.push_back(context.waker().clone());
+        }
+    }
+    // A slot released between the first claim and the registration woke the
+    // waiters before this one joined them: claim again.
+    if try_claim_fallback_slot(count, cap) {
+        Poll::Ready(())
+    } else {
+        Poll::Pending
+    }
+}
+
+fn try_claim_fallback_slot(count: &AtomicUsize, cap: usize) -> bool {
+    let mut current = count.load(Ordering::Relaxed);
+    while current < cap {
+        match count.compare_exchange_weak(
+            current,
+            current + 1,
+            Ordering::Release,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return true,
+            Err(observed) => current = observed,
+        }
+    }
+    false
+}
+
+/// Releases a fallback slot and wakes every parked waiter. They race for the
+/// slot and the losers park again; waking all of them, not one, keeps a
+/// waiter whose future was dropped from stranding the free slot.
+fn release_fallback_slot(count: &AtomicUsize, waiters: &Mutex<VecDeque<Waker>>) {
+    count.fetch_sub(1, Ordering::Release);
+    let woken = std::mem::take(&mut *waiters.lock());
+    for waker in woken {
+        waker.wake();
+    }
+}
+
 struct CancelOnDrop {
     handle: BlockingTaskHandle,
     done: bool,
@@ -639,7 +703,7 @@ struct FallbackGuard;
 
 impl Drop for FallbackGuard {
     fn drop(&mut self) {
-        FALLBACK_THREAD_COUNT.fetch_sub(1, Ordering::Release);
+        release_fallback_slot(&FALLBACK_THREAD_COUNT, &FALLBACK_WAITERS);
     }
 }
 
@@ -650,21 +714,15 @@ where
 {
     // Wait until we are under the fallback thread limit to prevent unbounded
     // thread creation when no blocking pool is available.
-    loop {
-        let current = FALLBACK_THREAD_COUNT.load(Ordering::Relaxed);
-        if current < MAX_FALLBACK_THREADS {
-            if FALLBACK_THREAD_COUNT
-                .compare_exchange_weak(current, current + 1, Ordering::Release, Ordering::Relaxed)
-                .is_ok()
-            {
-                break;
-            }
-        } else {
-            // Yield back to the executor instead of blocking the worker thread
-            // with a busy spin.
-            crate::runtime::yield_now::yield_now().await;
-        }
-    }
+    std::future::poll_fn(|context| {
+        poll_claim_fallback_slot(
+            &FALLBACK_THREAD_COUNT,
+            MAX_FALLBACK_THREADS,
+            &FALLBACK_WAITERS,
+            context,
+        )
+    })
+    .await;
 
     let (tx, rx) = BlockingOneshot::new();
 
@@ -687,7 +745,7 @@ where
     match thread_result {
         Ok(_) => rx.await,
         Err(_err) => {
-            FALLBACK_THREAD_COUNT.fetch_sub(1, Ordering::Release);
+            release_fallback_slot(&FALLBACK_THREAD_COUNT, &FALLBACK_WAITERS);
             let f = f_cell
                 .lock()
                 .take()
@@ -721,6 +779,40 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    /// A waiter at a full fallback cap is parked until a slot is released;
+    /// it no longer wakes itself on every poll.
+    #[test]
+    fn a_full_fallback_cap_parks_the_waiter_until_a_slot_is_released() {
+        init_test("a_full_fallback_cap_parks_the_waiter_until_a_slot_is_released");
+        struct Flag(std::sync::atomic::AtomicBool);
+        impl std::task::Wake for Flag {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let count = AtomicUsize::new(0);
+        let waiters = Mutex::new(VecDeque::new());
+        let first = Context::from_waker(Waker::noop());
+        assert!(poll_claim_fallback_slot(&count, 1, &waiters, &first).is_ready());
+
+        let flag = Arc::new(Flag(std::sync::atomic::AtomicBool::new(false)));
+        let waker = Waker::from(Arc::clone(&flag));
+        let waiting = Context::from_waker(&waker);
+        assert!(poll_claim_fallback_slot(&count, 1, &waiters, &waiting).is_pending());
+        assert!(
+            !flag.0.load(Ordering::SeqCst),
+            "a waiter at the cap is parked, not re-polled"
+        );
+
+        release_fallback_slot(&count, &waiters);
+        assert!(
+            flag.0.load(Ordering::SeqCst),
+            "a released slot wakes the waiter"
+        );
+        assert!(poll_claim_fallback_slot(&count, 1, &waiters, &waiting).is_ready());
+        assert_eq!(count.load(Ordering::SeqCst), 1);
     }
 
     #[test]
