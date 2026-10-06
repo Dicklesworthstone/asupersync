@@ -144,7 +144,8 @@ impl DurableSymbolReplicaStore {
     /// Reopen, authenticate and sync a bounded journal before serving any data.
     ///
     /// The expected replica and both keys are explicit local authority. A valid
-    /// partial tail is preserved and reported as `ReadOnlyTail`; previous records
+    /// partial tail, or a tail of zero bytes left by a crash after the file grew,
+    /// is preserved and reported as `ReadOnlyTail`; previous records
     /// remain fetchable and identical puts remain idempotent. New objects refuse.
     /// Complete corrupt records, wrong keys, changed limits and invalid headers
     /// fail closed. This function never creates or repairs the file.
@@ -313,6 +314,10 @@ impl<F: JournalIo> Journal<F> {
             let length_tag = AuthenticationTag::from_bytes(prefix[8..].try_into().expect("length tag"));
             if !length_tag.verify_domain_payload(&journal.journal_key, PREFIX_DOMAIN,
                 &prefix_payload(body_len, next, journal.last)) {
+                if journal.tail_is_zero(journal.offset, length)? {
+                    journal.status = JournalStatus::ReadOnlyTail;
+                    break;
+                }
                 return Err(DurableSymbolError::Authentication);
             }
             let max_body = size64(add(RECORD_FIXED + 255, limits.batch.max_encoded_bytes)?)?;
@@ -326,7 +331,15 @@ impl<F: JournalIo> Journal<F> {
             record.extend_from_slice(&prefix);
             record.resize(n, 0);
             journal.file.read_exact(&mut record[PREFIX_BYTES..])?;
-            journal.replay_record(&record)?;
+            match journal.replay_record(&record) {
+                Err(DurableSymbolError::Authentication)
+                    if journal.tail_is_zero(journal.offset + size64(PREFIX_BYTES)?, length)? =>
+                {
+                    journal.status = JournalStatus::ReadOnlyTail;
+                    break;
+                }
+                result => result?,
+            }
             journal.offset = journal.offset.checked_add(record_len).ok_or(SymbolStoreError::Overflow)?;
         }
         if journal.file.length()? != length { return Err(DurableSymbolError::Changed); }
@@ -334,6 +347,27 @@ impl<F: JournalIo> Journal<F> {
         // every admitted prefix durable before exposing it as committed storage.
         journal.file.sync()?;
         Ok(journal)
+    }
+
+    /// Whether every byte from `from` to `length` is zero. That is the tail a
+    /// crash leaves when the file grew but the appended data never reached the
+    /// disk; open treats it as a partial tail instead of refusing the journal
+    /// (br-asupersync-symbol-service-audit-35pjgc LOW 4). Any non-zero byte keeps
+    /// the authentication failure.
+    fn tail_is_zero(&mut self, from: u64, length: u64) -> Result<bool, DurableSymbolError> {
+        self.file.seek(SeekFrom::Start(from))?;
+        let mut remaining = length.saturating_sub(from);
+        let mut chunk = [0_u8; 4096];
+        while remaining > 0 {
+            let n = usize::try_from(remaining.min(size64(chunk.len())?))
+                .map_err(|_| SymbolStoreError::Overflow)?;
+            self.file.read_exact(&mut chunk[..n])?;
+            if chunk[..n].iter().any(|&byte| byte != 0) {
+                return Ok(false);
+            }
+            remaining -= size64(n)?;
+        }
+        Ok(true)
     }
 
     fn replay_record(&mut self, record: &[u8]) -> Result<(), DurableSymbolError> {
