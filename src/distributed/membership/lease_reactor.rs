@@ -12,10 +12,10 @@
 //! |-----------------|--------------|
 //! | `Alive`   | [`LeaseAction::Resume`] — grant and hold leases normally. |
 //! | `Suspect` | [`LeaseAction::PauseGrants`] — stop issuing *new* grants; existing obligations are not yet discharged (a refutation can still rescue them). |
-//! | `Dead` / `Left` | [`LeaseAction::Revoke`] — revoke the node's leases through the **normal** obligation protocol (commit/abort), which triggers any attached saga compensation. |
+//! | `Dead` / `Left` | [`LeaseAction::Revoke`] — revoke the node's leases through the **normal** obligation protocol (commit/abort). The abort runs no compensation by itself; the lease owner runs any cleanup, such as a saga step's compensation. |
 //!
 //! Because `Dead`/`Left` revoke via the existing obligation discharge path, no
-//! novel "node died" cleanup code is required — death is just another reason an
+//! novel "node died" failure path is required — death is just another reason an
 //! obligation is aborted, and the structured-concurrency leak invariants (no
 //! obligation leaks) continue to hold.
 //!
@@ -40,7 +40,7 @@ pub enum LeaseAction {
     /// refutation may still rescue its existing leases).
     PauseGrants,
     /// The node is confirmed dead/left: revoke its leases through the obligation
-    /// protocol (triggering attached saga compensation).
+    /// protocol (the lease owner runs any compensation; aborting runs none).
     Revoke,
 }
 

@@ -1460,8 +1460,10 @@ impl Lease {
 /// dead or left.
 ///
 /// The caller aborts the underlying obligation
-/// (`ObligationAbortReason::Cancel`) through `RuntimeState`, which triggers any
-/// saga compensation attached to that obligation.
+/// (`ObligationAbortReason::Cancel`) through `RuntimeState`. Aborting runs no
+/// compensation by itself: nothing attaches compensation to an obligation, so
+/// cleanup the revocation needs, such as a saga step's compensation, is the
+/// caller's to run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevokedLease {
     /// The node whose membership transition caused the revocation.
@@ -1480,8 +1482,9 @@ pub struct RevokedLease {
 /// existing leases); when a node is confirmed dead/left, each of its leases is
 /// marked expired and surfaced as a [`RevokedLease`] so the caller aborts the
 /// obligation through the normal protocol — death is just another reason an
-/// obligation is aborted, so saga compensation flows through the existing path
-/// with no novel failure handling (the parent's novel contribution).
+/// obligation is aborted, with no novel failure path (the parent's novel
+/// contribution). The abort runs no compensation by itself; the caller runs
+/// any cleanup the revocation needs.
 #[derive(Debug, Default)]
 pub struct MembershipLeaseManager {
     reactor: MembershipLeaseReactor,
@@ -1526,9 +1529,10 @@ impl MembershipLeaseManager {
 
     /// Applies pending membership transitions. For each node newly confirmed
     /// dead/left, marks its leases expired and returns them as [`RevokedLease`]s
-    /// for the caller to abort through the obligation protocol (which triggers
-    /// attached saga compensation). Suspicion/refutation transitions update the
-    /// grant-pause state consulted by [`try_grant`](Self::try_grant).
+    /// for the caller to abort through the obligation protocol; the caller also
+    /// runs any compensation, since aborting runs none. Suspicion/refutation
+    /// transitions update the grant-pause state consulted by
+    /// [`try_grant`](Self::try_grant).
     pub fn sync(&mut self, view: &MembershipView) -> Vec<RevokedLease> {
         let mut revoked = Vec::new();
         for (node, action) in self.reactor.poll(view) {
@@ -1539,8 +1543,8 @@ impl MembershipLeaseManager {
                 for lease in &mut leases {
                     let obligation_id = lease.obligation_id();
                     // Revoke via the obligation protocol: mark the lease expired
-                    // so the caller aborts the obligation (Cancel) and any saga
-                    // compensation attached to it runs.
+                    // so the caller aborts the obligation (Cancel) and runs its
+                    // own cleanup.
                     let _ = lease.mark_expired();
                     revoked.push(RevokedLease {
                         node: node.clone(),
