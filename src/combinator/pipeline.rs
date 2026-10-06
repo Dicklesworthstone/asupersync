@@ -405,8 +405,34 @@ where
                         Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
                         Outcome::Panicked(payload) => return Outcome::Panicked(payload),
                     }
-                    if let Err(error) = ack_sender.send_checked(&worker_cx, item.index).await {
-                        return pipeline_send_failure(&worker_cx, Some(stages), item.index, error);
+                    // The sink effect happened: acknowledge it even when
+                    // cancellation is now pending, so drain commits its credit
+                    // and counts it as consumed instead of aborting it. A
+                    // checked send refuses at its first checkpoint once the
+                    // pipeline is cancelled. The ack channel holds
+                    // max_in_flight entries, at least the outstanding credits,
+                    // and the sink is its only sender, so the non-blocking send
+                    // fails only when the coordinator is gone.
+                    match ack_sender.try_send(item.index) {
+                        Ok(()) => {}
+                        Err(mpsc::SendError::Full(index)) => {
+                            if let Err(error) = ack_sender.send_checked(&worker_cx, index).await {
+                                return pipeline_send_failure(
+                                    &worker_cx,
+                                    Some(stages),
+                                    index,
+                                    error,
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            return pipeline_send_failure(
+                                &worker_cx,
+                                Some(stages),
+                                item.index,
+                                mpsc::CheckedSendError::Channel(error),
+                            );
+                        }
                     }
                     quantum += 1;
                     if quantum == PIPELINE_QUANTUM {
@@ -2922,6 +2948,87 @@ mod tests {
             2,
             "failure did not pull another input or an EOF probe"
         );
+        execution_cleanup(&mut lab, region);
+    }
+
+    /// A sink effect that completes after the pipeline was cancelled is
+    /// acknowledged: its credit is committed and counted as consumed, not
+    /// aborted (a caller resuming from `consumed` would repeat the write).
+    #[test]
+    fn executing_pipeline_acknowledges_a_sink_effect_finished_after_cancellation() {
+        let mut lab = execution_lab(691);
+        let region = lab.state.create_root_region(Budget::INFINITE);
+        let gate = Arc::new(ExecutionGate::default());
+        let sink_gate = Arc::clone(&gate);
+        let outputs = Arc::new(Mutex::new(Vec::new()));
+        let actual = Arc::clone(&outputs);
+        let result = Arc::new(Mutex::new(None));
+        let returned = Arc::clone(&result);
+        let (task, mut handle) = lab
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                let cx = Cx::current().unwrap();
+                let report = cx
+                    .scope()
+                    .pipeline::<_, &'static str>(&cx, execution_config(2), 0..1_u32)
+                    .run(move |_, value| {
+                        let gate = Arc::clone(&sink_gate);
+                        let actual = Arc::clone(&actual);
+                        async move {
+                            gate.wait().await;
+                            actual.lock().unwrap().push(value);
+                            Outcome::Ok(())
+                        }
+                    })
+                    .await;
+                *returned.lock().unwrap() = Some(report);
+            })
+            .unwrap();
+        lab.scheduler.lock().schedule(task, 0);
+        lab.run_until_idle();
+        assert!(gate.is_parked());
+        let original: Vec<_> = lab
+            .state
+            .obligations
+            .iter()
+            .filter_map(|(_, record)| {
+                (record.holder == task
+                    && record.kind == ObligationKind::Lease
+                    && record.state == ObligationState::Reserved)
+                    .then_some(record.id)
+            })
+            .collect();
+        assert_eq!(
+            original.len(),
+            1,
+            "input 0's lease is held; the EOF probe's is already aborted"
+        );
+        handle.abort();
+        lab.run_until_idle();
+        gate.release();
+        lab.run_until_quiescent();
+        assert_eq!(
+            *outputs.lock().unwrap(),
+            vec![0],
+            "the sink effect happened"
+        );
+        let report = result
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the cancelled pipeline still drains and reports");
+        assert_eq!(
+            report.summary.consumed, 1,
+            "the completed effect counts: {report:?}"
+        );
+        assert_eq!(
+            lab.state.obligation(original[0]).unwrap().state,
+            ObligationState::Committed
+        );
+        match handle.try_join() {
+            Ok(Some(())) | Err(JoinError::Cancelled(_)) => {}
+            other => panic!("unexpected cancelled coordinator completion: {other:?}"),
+        }
         execution_cleanup(&mut lab, region);
     }
 
