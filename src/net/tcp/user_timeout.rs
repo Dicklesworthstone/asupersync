@@ -18,8 +18,9 @@ impl TcpStream {
     /// The abort surfaces from the next read or write as
     /// `io::ErrorKind::TimedOut`, or as a soft error already pending on the
     /// socket (such as `HostUnreachable`). `None` or a zero duration restores
-    /// the kernel default. The value has millisecond resolution and is clamped
-    /// to `u32::MAX` milliseconds. Unlike a connect timeout, it bounds an
+    /// the kernel default. The value has millisecond resolution: a non-zero
+    /// duration under 1 ms counts as 1 ms, and the value is clamped to
+    /// `u32::MAX` milliseconds. Unlike a connect timeout, it bounds an
     /// established connection; it does not replace read deadlines or
     /// cancellation.
     ///
@@ -100,6 +101,17 @@ pub(super) fn set_socket_user_timeout(
         target_os = "cygwin",
     ))]
     {
+        // The kernel takes whole milliseconds and reads 0 as its default, so
+        // a non-zero duration under 1 ms truncated to the default: the
+        // opposite of a tight bound. It rounds up to 1 ms instead
+        // (br-asupersync-8vrx8q).
+        let timeout = timeout.map(|t| {
+            if t.is_zero() {
+                t
+            } else {
+                t.max(Duration::from_millis(1))
+            }
+        });
         socket.set_tcp_user_timeout(timeout)
     }
 
@@ -174,6 +186,37 @@ mod tests {
 
         stream.set_user_timeout(None).expect("restore default");
         assert_eq!(stream.user_timeout().expect("read default again"), None);
+    }
+
+    /// A non-zero timeout under 1 ms truncated to 0, which the kernel reads as
+    /// "use the default": the opposite of the request (br-asupersync-8vrx8q).
+    /// It now rounds up to 1 ms, on a stream and on a socket applied at
+    /// connect, while a zero duration still restores the default.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sub_millisecond_user_timeout_rounds_up_to_one_millisecond() {
+        let (stream, _peer) = connected_stream(TcpSocket::new_v4().expect("new_v4"));
+        stream
+            .set_user_timeout(Some(Duration::from_micros(500)))
+            .expect("set 500 us");
+        assert_eq!(
+            stream.user_timeout().expect("read back"),
+            Some(Duration::from_millis(1))
+        );
+        stream
+            .set_user_timeout(Some(Duration::ZERO))
+            .expect("zero restores the default");
+        assert_eq!(stream.user_timeout().expect("read default"), None);
+
+        let socket = TcpSocket::new_v4().expect("new_v4");
+        socket
+            .set_user_timeout(Some(Duration::from_nanos(1)))
+            .expect("set on socket");
+        let (stream, _peer) = connected_stream(socket);
+        assert_eq!(
+            stream.user_timeout().expect("read back"),
+            Some(Duration::from_millis(1))
+        );
     }
 
     #[cfg(target_os = "linux")]
