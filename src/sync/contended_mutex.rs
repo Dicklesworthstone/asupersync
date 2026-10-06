@@ -108,6 +108,10 @@ mod inner {
             if samples.len() == MAX_SAMPLES {
                 let evicted = samples.pop_front();
                 debug_assert!(evicted.is_some());
+            } else if samples.capacity() == 0 {
+                // Reserve the whole window on the first sample: growing it by
+                // doubling would allocate on the lock path the feature measures.
+                samples.reserve_exact(MAX_SAMPLES);
             }
             samples.push_back(sample);
         }
@@ -260,6 +264,18 @@ mod inner {
     #[cfg(test)]
     mod tests {
         use super::{MAX_SAMPLES, Metrics};
+
+        #[test]
+        fn the_sample_window_is_reserved_once_on_the_first_sample() {
+            let metrics = Metrics::default();
+            metrics.record_acquire(1, false);
+            let reserved = metrics.wait_samples.lock().unwrap().capacity();
+            assert!(reserved >= MAX_SAMPLES, "reserved {reserved}");
+            for sample in 0..(MAX_SAMPLES as u64 + 10) {
+                metrics.record_acquire(sample, false);
+            }
+            assert_eq!(metrics.wait_samples.lock().unwrap().capacity(), reserved);
+        }
 
         #[test]
         fn percentile_horizon_reports_retained_suffix_and_all_history_counters() {
