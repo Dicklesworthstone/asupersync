@@ -4894,7 +4894,13 @@ impl RuntimeState {
         reason: &CancelReason,
         shutdown_budget: Budget,
     ) {
-        self.close_region_command_in_task_table(region_id, reason, Some(shutdown_budget), None);
+        self.close_region_command_in_task_table(
+            region_id,
+            reason,
+            Some(shutdown_budget),
+            None,
+            None,
+        );
     }
 
     /// Scheduler routing includes its external-only task table, which need
@@ -4939,17 +4945,28 @@ impl RuntimeState {
             })
     }
 
+    /// `drain_now`, when given, is a clock read the caller took before this
+    /// state lock. The cancelled regions' drains are stamped with it before
+    /// the lock is released: a task already running there could otherwise
+    /// finish and close its region before the deferred batch is drained and
+    /// stamps it (br-asupersync-x9mmxl). No clock is read under the lock.
     pub(crate) fn close_region_command_in_task_table(
         &mut self,
         region_id: RegionId,
         reason: &CancelReason,
         shutdown_budget: Option<Budget>,
         task_table: Option<&Arc<crate::sync::ContendedMutex<TaskTable>>>,
+        drain_now: Option<Time>,
     ) {
         if self.shard_tables.is_some() || task_table.is_none() {
             let effects =
                 self.cancel_request_with_shutdown_budget(region_id, reason, None, shutdown_budget);
             self.advance_region_state(region_id);
+            // After the advance: a region that closed inside the cancel had
+            // nothing to drain and must keep its stamp unset.
+            if let Some(now) = drain_now {
+                effects.stamp_drains_at(now);
+            }
             self.defer_cancel_dispatch(effects);
             return;
         }
@@ -4983,6 +5000,10 @@ impl RuntimeState {
             effects
         };
         self.dispatch_lifecycle_effects(deferred);
+        // After the close effects, for the same reason as above.
+        if let Some(now) = drain_now {
+            effects.stamp_drains_at(now);
+        }
         self.defer_cancel_dispatch(effects);
     }
 

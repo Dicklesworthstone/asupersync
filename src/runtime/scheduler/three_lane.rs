@@ -6776,6 +6776,19 @@ impl ThreeLaneWorker {
             return 0;
         }
         let count = commands.len();
+        // A cancel or close stamps its regions' drains with this time, read
+        // before the state lock (br-asupersync-x9mmxl).
+        let drain_now = commands
+            .iter()
+            .any(|command| {
+                matches!(
+                    command,
+                    crate::runtime::spawn_mailbox::RegionCommand::Cancel { .. }
+                        | crate::runtime::spawn_mailbox::RegionCommand::CancelWithBudget { .. }
+                        | crate::runtime::spawn_mailbox::RegionCommand::Close { .. }
+                )
+            })
+            .then(|| self.capture_now());
 
         let mut publications: Vec<(
             std::sync::Arc<crate::runtime::spawn_mailbox::AdmittedRegionSlot>,
@@ -6819,6 +6832,7 @@ impl ThreeLaneWorker {
                             &reason,
                             None,
                             self.task_table.as_ref(),
+                            drain_now,
                         );
                     }
                     crate::runtime::spawn_mailbox::RegionCommand::CancelWithBudget {
@@ -6831,6 +6845,7 @@ impl ThreeLaneWorker {
                             &reason,
                             Some(shutdown_budget),
                             self.task_table.as_ref(),
+                            drain_now,
                         );
                     }
                     crate::runtime::spawn_mailbox::RegionCommand::Close { region_id } => {
@@ -6841,6 +6856,7 @@ impl ThreeLaneWorker {
                             &completion,
                             None,
                             self.task_table.as_ref(),
+                            drain_now,
                         );
                     }
                 }

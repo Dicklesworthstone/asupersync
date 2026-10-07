@@ -155,6 +155,12 @@ impl CancelReportStamp {
             .timer
             .as_ref()
             .map_or(self.fallback_now, crate::time::TimerDriverHandle::now);
+        self.record_at(now);
+    }
+
+    /// Stamps a time the caller read earlier, for example before taking the
+    /// state lock under which no clock may be read.
+    fn record_at(&self, now: Time) {
         self.stamp
             .fetch_min(now.as_nanos(), std::sync::atomic::Ordering::AcqRel);
     }
@@ -516,15 +522,30 @@ impl CancelWakeEffects {
     /// is written, and the drain would go unreported (br-asupersync-x9mmxl).
     /// The dispatch that follows keeps the earlier stamp.
     pub(crate) fn stamp_drains(&self) {
-        for observer in self.observers.iter().flatten() {
-            if let CancelObserver::RegionCancellationMetric {
-                drain_stamp: Some(stamp),
-                ..
-            } = observer
-            {
-                stamp.record();
-            }
+        for stamp in self.drain_stamps() {
+            stamp.record();
         }
+    }
+
+    /// Like [`Self::stamp_drains`], with a time the caller read before
+    /// taking the state lock it still holds: no clock is read here.
+    pub(crate) fn stamp_drains_at(&self, now: Time) {
+        for stamp in self.drain_stamps() {
+            stamp.record_at(now);
+        }
+    }
+
+    fn drain_stamps(&self) -> impl Iterator<Item = &CancelReportStamp> {
+        self.observers
+            .iter()
+            .flatten()
+            .filter_map(|observer| match observer {
+                CancelObserver::RegionCancellationMetric {
+                    drain_stamp: Some(stamp),
+                    ..
+                } => Some(stamp),
+                _ => None,
+            })
     }
 
     /// Explicitly abandons callbacks when no post-lock dispatch boundary is
@@ -613,6 +634,12 @@ impl<T> CancellationEffects<T> {
     #[inline]
     pub(crate) fn ready(value: T) -> Self {
         Self::new(value, CancelWakeEffects::empty())
+    }
+
+    /// Stamps the drains this token reports with a time read before the
+    /// caller's state lock (see [`CancelWakeEffects::stamp_drains_at`]).
+    pub(crate) fn stamp_drains_at(&self, now: Time) {
+        self.wakes.stamp_drains_at(now);
     }
 
     /// Splits the callback-free value from the token that must be dispatched
