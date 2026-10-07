@@ -707,7 +707,7 @@ impl<'a, M: Send + 'static> ActorContext<'a, M> {
 
     /// Register a child actor as supervised by this actor.
     ///
-    /// Called internally when spawning supervised children.
+    /// The runtime does not call this; code that supervises children records them.
     pub fn register_child(&mut self, child_id: ActorId) {
         self.children.push(child_id);
     }

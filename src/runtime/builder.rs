@@ -2895,7 +2895,7 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Select a storage-temperature policy for runtime metadata and retained evidence.
+    /// Select a storage-temperature policy (reported only, not yet applied to allocation).
     #[must_use]
     pub fn arena_temperature_policy(
         mut self,
