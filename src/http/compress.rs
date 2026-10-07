@@ -666,13 +666,13 @@ impl Decompressor for GzipDecompressor {
 
 // ─── Deflate Compressor ─────────────────────────────────────────────────────
 
-/// Deflate compressor using the flate2 (miniz_oxide) backend.
+/// HTTP deflate compressor using the flate2 (miniz_oxide) backend.
 ///
-/// Compresses data in RFC 1951 raw deflate format (wrapped in zlib per
-/// HTTP deflate convention).
+/// Emits the RFC 1950 zlib wrapper around RFC 1951 DEFLATE data, including
+/// the Adler-32 trailer, as required by RFC 9110 section 8.4.1.2.
 #[cfg(feature = "compression")]
 pub struct DeflateCompressor {
-    encoder: flate2::write::DeflateEncoder<LimitedWriter>,
+    encoder: flate2::write::ZlibEncoder<LimitedWriter>,
     max_size: Option<usize>,
     emitted: usize,
     finished: bool,
@@ -706,7 +706,7 @@ impl DeflateCompressor {
         max_size: Option<usize>,
     ) -> Self {
         Self {
-            encoder: flate2::write::DeflateEncoder::new(
+            encoder: flate2::write::ZlibEncoder::new(
                 LimitedWriter::for_compressed_output(max_size),
                 level,
             ),
@@ -749,7 +749,7 @@ impl Compressor for DeflateCompressor {
         self.refresh_remaining_limit();
         let inner = std::mem::replace(
             &mut self.encoder,
-            flate2::write::DeflateEncoder::new(
+            flate2::write::ZlibEncoder::new(
                 LimitedWriter::for_compressed_output(None),
                 flate2::Compression::none(),
             ),
@@ -765,12 +765,25 @@ impl Compressor for DeflateCompressor {
     }
 }
 
-/// Deflate decompressor using the flate2 (miniz_oxide) backend.
+/// HTTP deflate decompressor with bounded output and legacy raw-stream support.
+///
+/// The first two bytes select RFC 1950 zlib framing when they form a valid
+/// zlib header; otherwise the stream is treated as legacy raw RFC 1951 data.
+/// Selection is independent of input chunk boundaries. Once zlib is selected,
+/// checksum or dictionary errors are never retried as raw data.
+///
+/// Call [`Decompressor::finish`] to validate the end of the stream. Truncated
+/// streams and bytes after the single compressed stream are rejected. An error
+/// poisons the decoder, and the failing call does not publish partial output.
 #[cfg(feature = "compression")]
 pub struct DeflateDecompressor {
     max_size: Option<usize>,
     total: usize,
-    decoder: flate2::write::DeflateDecoder<LimitedWriter>,
+    decoder: flate2::Decompress,
+    header: [u8; 2],
+    header_len: usize,
+    stream_ended: bool,
+    finished: bool,
     /// br-asupersync-8vcp64: see [`GzipDecompressor::poisoned`].
     poisoned: bool,
 }
@@ -783,9 +796,90 @@ impl DeflateDecompressor {
         Self {
             max_size,
             total: 0,
-            decoder: flate2::write::DeflateDecoder::new(LimitedWriter::new(max_size)),
+            decoder: flate2::Decompress::new(false),
+            header: [0; 2],
+            header_len: 0,
+            stream_ended: false,
+            finished: false,
             poisoned: false,
         }
+    }
+
+    fn decode_chunk(
+        &mut self,
+        mut input: &[u8],
+        output: &mut LimitedWriter,
+        flush: flate2::FlushDecompress,
+    ) -> io::Result<()> {
+        use io::Write;
+
+        if self.stream_ended {
+            return if input.is_empty() {
+                Ok(())
+            } else {
+                Err(limit_error("data after end of deflate stream"))
+            };
+        }
+
+        // Bound codec scratch space independently of the caller's input size.
+        // LimitedWriter enforces the remaining cumulative output budget before
+        // allocating, and staged bytes are published only after the call succeeds.
+        let mut scratch = [0; 8192];
+        loop {
+            let before_in = self.decoder.total_in();
+            let before_out = self.decoder.total_out();
+            let status = self
+                .decoder
+                .decompress(input, &mut scratch, flush)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            let consumed = usize::try_from(self.decoder.total_in() - before_in)
+                .map_err(|_| limit_error("deflate input count overflow"))?;
+            let produced = usize::try_from(self.decoder.total_out() - before_out)
+                .map_err(|_| limit_error("deflate output count overflow"))?;
+            input = &input[consumed..];
+            output.write_all(&scratch[..produced])?;
+
+            if status == flate2::Status::StreamEnd {
+                self.stream_ended = true;
+                return if input.is_empty() {
+                    Ok(())
+                } else {
+                    Err(limit_error("data after end of deflate stream"))
+                };
+            }
+            if consumed == 0 && produced == 0 {
+                return if input.is_empty() {
+                    Ok(())
+                } else {
+                    Err(limit_error("deflate decoder made no progress"))
+                };
+            }
+        }
+    }
+
+    fn decompress_inner(&mut self, mut input: &[u8], output: &mut Vec<u8>) -> io::Result<()> {
+        let mut staged = LimitedWriter::new(remaining_limit(self.max_size, self.total));
+        if self.header_len < self.header.len() {
+            let needed = self.header.len() - self.header_len;
+            let copied = needed.min(input.len());
+            self.header[self.header_len..self.header_len + copied].copy_from_slice(&input[..copied]);
+            self.header_len += copied;
+            input = &input[copied..];
+            if self.header_len < self.header.len() {
+                return Ok(());
+            }
+
+            let header = self.header;
+            let zlib = header[0] & 0x0f == 8
+                && header[0] >> 4 <= 7
+                && u16::from_be_bytes(header) % 31 == 0;
+            self.decoder.reset(zlib);
+            self.decode_chunk(&header, &mut staged, flate2::FlushDecompress::None)?;
+        }
+        self.decode_chunk(input, &mut staged, flate2::FlushDecompress::None)?;
+        update_decompressed_total(&mut self.total, staged.inner.len(), self.max_size)?;
+        output.append(&mut staged.inner);
+        Ok(())
     }
 }
 
@@ -797,25 +891,17 @@ impl Decompressor for DeflateDecompressor {
                 "DeflateDecompressor poisoned by prior error (br-asupersync-8vcp64)",
             ));
         }
-        use io::Write;
-
-        let remaining = self.max_size.map(|m| m.saturating_sub(self.total));
-        self.decoder.get_mut().max_size = remaining;
-
-        let result: io::Result<()> = (|| {
-            self.decoder.write_all(input)?;
-            self.decoder.flush()?;
-            let mut buf = std::mem::take(&mut self.decoder.get_mut().inner);
-            update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
-            output.append(&mut buf);
-            Ok(())
-        })();
-        if let Err(e) = result {
-            self.poisoned = true;
-            self.decoder.get_mut().inner.clear();
-            return Err(e);
+        if self.finished {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "DeflateDecompressor already finished",
+            ));
         }
-        Ok(())
+        let result = self.decompress_inner(input, output);
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
     }
 
     fn finish(&mut self, output: &mut Vec<u8>) -> io::Result<()> {
@@ -824,21 +910,34 @@ impl Decompressor for DeflateDecompressor {
                 "DeflateDecompressor poisoned by prior error (br-asupersync-8vcp64)",
             ));
         }
-        let mut finishing_decoder = flate2::write::DeflateDecoder::new(LimitedWriter::new(None));
-        std::mem::swap(&mut self.decoder, &mut finishing_decoder);
-        finishing_decoder.get_mut().max_size = self.max_size.map(|m| m.saturating_sub(self.total));
-
-        let result: io::Result<()> = (|| {
-            let mut buf = finishing_decoder.finish()?.inner;
-            update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
-            output.append(&mut buf);
+        if self.finished {
+            return Ok(());
+        }
+        let result = (|| {
+            if self.header_len < self.header.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "truncated deflate stream",
+                ));
+            }
+            let mut staged = LimitedWriter::new(remaining_limit(self.max_size, self.total));
+            self.decode_chunk(&[], &mut staged, flate2::FlushDecompress::Finish)?;
+            if !self.stream_ended {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "truncated deflate stream",
+                ));
+            }
+            update_decompressed_total(&mut self.total, staged.inner.len(), self.max_size)?;
+            output.append(&mut staged.inner);
             Ok(())
         })();
-        if let Err(e) = result {
+        if result.is_err() {
             self.poisoned = true;
-            return Err(e);
+        } else {
+            self.finished = true;
         }
-        Ok(())
+        result
     }
 
     fn encoding(&self) -> ContentEncoding {
@@ -2267,11 +2366,11 @@ mod tests {
     #[test]
     fn deflate_streaming_output_matches_reference_encoder() {
         use flate2::Compression;
-        use flate2::read::DeflateDecoder as ReferenceDeflateDecoder;
-        use flate2::write::DeflateEncoder as ReferenceDeflateEncoder;
+        use flate2::read::ZlibDecoder as ReferenceDeflateDecoder;
+        use flate2::write::ZlibEncoder as ReferenceDeflateEncoder;
         use std::io::{Read, Write};
 
-        let input = b"RFC 1951 differential vector: repeated repeated repeated payload.";
+        let input = b"RFC 1950 differential vector: repeated repeated repeated payload.";
 
         let mut ours = DeflateCompressor::with_level(Compression::default());
         let mut streamed = Vec::new();
@@ -2286,7 +2385,7 @@ mod tests {
 
         assert_eq!(
             streamed, reference_bytes,
-            "streaming wrapper must match canonical RFC 1951 deflate bytes for the same payload"
+            "HTTP deflate must match RFC 1950 zlib bytes for the same payload"
         );
 
         let mut ours_dec = DeflateDecompressor::new(None);
@@ -2320,15 +2419,15 @@ mod tests {
 
     #[cfg(feature = "compression")]
     #[test]
-    fn deflate_empty_stream_matches_rfc1951_empty_final_block_vector() {
+    fn deflate_empty_stream_matches_rfc1950_vector() {
         let mut comp = DeflateCompressor::new();
         let mut compressed = Vec::new();
         comp.finish(&mut compressed).unwrap();
 
         assert_eq!(
             compressed,
-            vec![0x03, 0x00],
-            "empty raw DEFLATE stream should be a final empty block"
+            vec![0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01],
+            "empty HTTP deflate stream must include a zlib header and Adler-32 trailer"
         );
 
         let mut dec = DeflateDecompressor::new(None);
@@ -2368,12 +2467,8 @@ mod tests {
         comp.compress(b"x", &mut compressed).unwrap();
         comp.finish(&mut compressed).unwrap();
 
-        let mut dec = DeflateDecompressor {
-            max_size: None,
-            total: usize::MAX,
-            decoder: flate2::write::DeflateDecoder::new(LimitedWriter::new(None)),
-            poisoned: false,
-        };
+        let mut dec = DeflateDecompressor::new(None);
+        dec.total = usize::MAX;
         let mut decompressed = Vec::new();
         let result = dec.decompress(&compressed, &mut decompressed);
         assert!(result.is_err());
