@@ -28,6 +28,15 @@ export interface BrowserFetchOptions {
    * for host cleanup. Browser timer throttling can delay expiry delivery.
    */
   timeoutMs?: number;
+  /**
+   * Optional native AbortSignal, observed from admission through body EOF.
+   * An already-aborted signal prevents host I/O. Its reason is rendered into
+   * the typed cancellation message; `closed` still waits for host cleanup.
+   * Requires native AbortSignal.any so other listeners cannot suppress this
+   * observer. Null is equivalent to omission. Cancelling the handle never
+   * aborts this caller-owned signal or its other consumers.
+   */
+  signal?: AbortSignal | null;
 }
 
 export interface BrowserFetchResponse {
@@ -159,6 +168,37 @@ function byteView(value: unknown): Uint8Array {
   return new Uint8Array(value as ArrayBuffer, 0, length);
 }
 
+// Native slot reads and a private dependent signal prevent forged source
+// abort events and stopImmediatePropagation from defeating cancellation.
+// Capture intrinsics once; the no-signal path needs none of these host features.
+const SIGNAL_CLASS = typeof AbortSignal === "undefined" ? undefined : AbortSignal;
+const SIGNAL_ABORTED = SIGNAL_CLASS && Object.getOwnPropertyDescriptor(SIGNAL_CLASS.prototype, "aborted")?.get;
+const SIGNAL_REASON = SIGNAL_CLASS && Object.getOwnPropertyDescriptor(SIGNAL_CLASS.prototype, "reason")?.get;
+const SIGNAL_ANY = SIGNAL_CLASS?.any;
+const EVENT_ADD = typeof EventTarget === "undefined" ? undefined : EventTarget.prototype.addEventListener;
+const EVENT_REMOVE = typeof EventTarget === "undefined" ? undefined : EventTarget.prototype.removeEventListener;
+
+function prepareSignal(value: AbortSignal | null | undefined): AbortSignal | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!SIGNAL_ABORTED || !SIGNAL_REASON || typeof SIGNAL_ANY !== "function"
+      || typeof EVENT_ADD !== "function" || typeof EVENT_REMOVE !== "function") {
+    throw failure("fetch signals require native AbortSignal.any and EventTarget support");
+  }
+  try {
+    // An already-aborted source needs no event observer. Preserve its native
+    // reason even on hosts whose any() consults shadowable JS properties.
+    if (Reflect.apply(SIGNAL_ABORTED, value, [])) return value;
+    const signal = Reflect.apply(SIGNAL_ANY, SIGNAL_CLASS, [[value]]) as AbortSignal;
+    // Composition may run host code. Do not lose a source abort occurring
+    // there, or accept an aborted clone of a still-live source.
+    if (Reflect.apply(SIGNAL_ABORTED, value, [])) return value;
+    if (Reflect.apply(SIGNAL_ABORTED, signal, [])) throw new TypeError("inconsistent signal state");
+    return signal;
+  } catch {
+    throw failure("fetch signal must be a native AbortSignal");
+  }
+}
+
 interface Prepared {
   url: string;
   method: string;
@@ -167,13 +207,14 @@ interface Prepared {
   body?: Uint8Array;
   maxResponseBytes: number;
   timeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 function prepare(options: BrowserFetchOptions, grant: FetchAuthority): Prepared {
   if (!options || typeof options !== "object") throw new TypeError("fetch options must be an object");
   const { url: suppliedUrl, method: suppliedMethod = "GET", credentials = false,
     headers: suppliedHeaders = [], body, maxResponseBytes = BROWSER_FETCH_LIMITS.maxResponseBytes,
-    timeoutMs } = options;
+    timeoutMs, signal } = options;
   if (typeof suppliedUrl !== "string" || suppliedUrl.length * 2 > BROWSER_FETCH_LIMITS.maxHeaderBytes) throw new RangeError("fetch request URL exceeds limit");
   const url = httpUrl(suppliedUrl);
   if (typeof suppliedMethod !== "string") throw new TypeError("fetch method must be a string");
@@ -216,7 +257,8 @@ function prepare(options: BrowserFetchOptions, grant: FetchAuthority): Prepared 
     if (view.byteLength > BROWSER_FETCH_LIMITS.maxRequestBytes) throw new RangeError("fetch request body exceeds limit");
     copied = view.slice();
   }
-  return { url: url.href, method, credentials, headers, body: copied, maxResponseBytes, timeoutMs };
+  return { url: url.href, method, credentials, headers, body: copied, maxResponseBytes, timeoutMs,
+    signal: prepareSignal(signal) };
 }
 
 function asFailure(error: unknown): Failure {
@@ -274,7 +316,9 @@ export function createBrowserFetchManager(dependencies: {
     terminalFailure: Failure | null = null;
     creditHeld = true;
     cancelling: Promise<Outcome<void>> | null = null;
+    cancelMustStopOnRefusal = false;
     clearDeadline: (() => void) | null = null;
+    clearSignal: (() => void) | null = null;
     readonly taskKey: string;
 
     constructor(readonly scopeKey: string, readonly grant: BrowserFetchGrant,
@@ -290,6 +334,7 @@ export function createBrowserFetchManager(dependencies: {
     finish(outcome: Outcome<void>): void {
       if (this.completed) return;
       this.completed = true;
+      this.disarmSignal();
       this.disarmDeadline();
       let publicationFailed = false;
       if (!this.ownerReleased) {
@@ -335,6 +380,7 @@ export function createBrowserFetchManager(dependencies: {
       if (outcome.outcome === "err") Object.freeze(outcome.failure);
       Object.freeze(outcome);
       this.stopped = outcome;
+      this.disarmSignal();
       this.disarmDeadline();
       this.head.resolve(outcome);
       const reader = this.reader;
@@ -354,6 +400,44 @@ export function createBrowserFetchManager(dependencies: {
       await attempt(() => response.body?.cancel(this.stopped));
     }
 
+    disarmSignal(): void {
+      const clear = this.clearSignal;
+      this.clearSignal = null;
+      this.request.signal = undefined;
+      clear?.();
+    }
+
+    armSignal(): void {
+      const signal = this.request.signal;
+      this.request.signal = undefined;
+      if (!signal || this.stopped || this.completed) return;
+      if (Reflect.apply(SIGNAL_ABORTED!, signal, [])) {
+        void this.requestCancel("fetch_cancel", message(Reflect.apply(SIGNAL_REASON!, signal, [])), true);
+        return;
+      }
+      const observer: { fire: (() => void) | null } = { fire: () => {
+        if (this.stopped || this.completed) return;
+        try {
+          if (!Reflect.apply(SIGNAL_ABORTED!, signal, [])) return;
+          const reason = message(Reflect.apply(SIGNAL_REASON!, signal, []));
+          void this.requestCancel("fetch_cancel", reason, true);
+        } catch (error) { this.stop(asFailure(error)); }
+      } };
+      const listener = () => observer.fire?.();
+      // Publish before registration, which can fail after acquiring the host
+      // listener. Invalidating fire also makes late callbacks inert if cleanup
+      // throws, without retaining the operation through the signal.
+      this.clearSignal = () => {
+        observer.fire = null;
+        try { Reflect.apply(EVENT_REMOVE!, signal, ["abort", listener]); }
+        catch { /* Preserve the first terminal outcome. */ }
+      };
+      Reflect.apply(EVENT_ADD!, signal, ["abort", listener, { once: true }]);
+      // A source may have aborted during preparation or task admission, before
+      // an observer existed. Its native state, not event delivery, is decisive.
+      listener();
+    }
+
     disarmDeadline(): void {
       const clear = this.clearDeadline;
       this.clearDeadline = null;
@@ -362,14 +446,7 @@ export function createBrowserFetchManager(dependencies: {
 
     expireDeadline(): void {
       if (this.stopped || this.completed) return;
-      void this.requestCancel("deadline", `fetch deadline exceeded after ${this.request.timeoutMs} ms`)
-        .then((receipt) => {
-          // An implicit cancellation has no direct caller to observe refusal.
-          // Fail the operation with that receipt rather than silently running
-          // past its deadline or claiming an admitted cancellation. Publication
-          // refusal still retains its task/credit through the ordinary path.
-          if (receipt.outcome !== "ok" && !this.stopped && !this.completed) this.stop(receipt);
-        });
+      void this.requestCancel("deadline", `fetch deadline exceeded after ${this.request.timeoutMs} ms`, true);
     }
 
     armDeadline(host: Record<string, unknown> | undefined): void {
@@ -416,6 +493,20 @@ export function createBrowserFetchManager(dependencies: {
     async launch(): Promise<void> {
       let response: Response | undefined;
       try {
+        // Admission can reenter owner teardown before this operation reaches
+        // the registry. Revalidate after registration and before host effects;
+        // the owner's earlier drain snapshot cannot include this task.
+        if (dependencies.lookup(this.scopeKey) !== this.grant) {
+          this.ownerReleased = true;
+          this.stop(cancelled("scope_close", "fetch owner closed during admission", this.task));
+          return;
+        }
+        if (dependencies.isClosing(this.scopeKey)) {
+          void this.requestCancel("scope_close", "fetch owner began closing during admission", true);
+          return;
+        }
+        this.armSignal();
+        if (this.stopped) return;
         if (this.request.timeoutMs === 0) { this.expireDeadline(); return; }
         const host = dependencies.globalObject();
         this.armDeadline(host);
@@ -546,16 +637,23 @@ export function createBrowserFetchManager(dependencies: {
       return this.requestCancel("fetch_cancel", reason);
     }
 
-    requestCancel(kind: string, reason: string): Promise<Outcome<void>> {
+    requestCancel(kind: string, reason: string, stopOnRefusal = false): Promise<Outcome<void>> {
       if (this.completed || this.stopped) return this.closed.promise;
+      // Implicit cancellations have no caller to handle refusal. Latch this
+      // before coalescing: an implicit request can reenter an explicit ABI
+      // request, and its refusal must still stop host I/O synchronously.
+      this.cancelMustStopOnRefusal ||= stopOnRefusal;
       if (this.cancelling) return this.cancelling;
       const attempt = deferred<Outcome<void>>();
       this.cancelling = attempt.promise;
       let admitted: Outcome<void>;
       try { admitted = taskCancel({ task: this.task, kind, message: reason }, this.version); }
       catch (error) { admitted = asFailure(error); }
+      const mustStop = this.cancelMustStopOnRefusal;
+      this.cancelMustStopOnRefusal = false;
       if (admitted.outcome !== "ok") {
         this.cancelling = null;
+        if (mustStop) this.stop(admitted);
         attempt.resolve(admitted);
       } else {
         this.stop(cancelled(kind, reason, this.task));
@@ -597,11 +695,8 @@ export function createBrowserFetchManager(dependencies: {
         if (spawned.outcome !== "ok") { releaseCredit(grant.rootKey); return spawned; }
         const operation = new Operation(scopeKey, grant, spawned.value, consumerVersion, request);
         active.set(operation.taskKey, operation);
-        if (dependencies.lookup(scopeKey) !== grant) operation.ownerReleased = true;
-        if (operation.ownerReleased) {
-          operation.stop(cancelled("scope_close", "fetch owner closed during admission", operation.task));
-          operation.launched.resolve();
-        } else void operation.launch();
+        // launch owns all post-spawn checks, including their failure cleanup.
+        void operation.launch();
         return Outcomes.ok(operation.handle());
       } catch (error) { return asFailure(error); }
     },
