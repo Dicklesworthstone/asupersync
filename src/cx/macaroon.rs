@@ -872,8 +872,9 @@ impl MacaroonToken {
     /// Verify the token and check all first-party caveat predicates.
     ///
     /// Returns `Ok(())` if signature is valid AND all first-party caveats
-    /// pass. Third-party caveats are **not** checked (use
-    /// [`verify_with_discharges`](Self::verify_with_discharges) for that).
+    /// pass. No discharges are supplied, so a token with a third-party caveat
+    /// fails with [`VerificationError::MissingDischarge`]; use
+    /// [`verify_with_discharges`](Self::verify_with_discharges) for those.
     ///
     /// This validates integrity and caveat satisfaction only. Callers that are
     /// authorizing a specific capability should use
@@ -895,7 +896,9 @@ impl MacaroonToken {
     ///
     /// This is the authorization-safe variant of [`Self::verify`]. It rejects
     /// tokens whose signed identifier does not match the expected capability,
-    /// then verifies the signature chain and first-party caveats.
+    /// then verifies the signature chain and first-party caveats. As with
+    /// [`Self::verify`], a third-party caveat fails with
+    /// [`VerificationError::MissingDischarge`].
     pub fn verify_for_identifier(
         &self,
         root_key: &AuthKey,
@@ -1337,10 +1340,11 @@ impl MacaroonToken {
             return None;
         }
 
-        // Additional bounds check: verify sufficient data for minimum caveat size
-        let caveat_count = caveat_count_raw.min((data.len() - pos) / 3);
-        let mut caveats = Vec::with_capacity(caveat_count);
-        for _ in 0..caveat_count {
+        // Every declared caveat must decode: a count that disagrees with the
+        // caveats present is malformed, not a shorter token. The capacity is
+        // still bounded by the bytes left (each caveat takes at least 3).
+        let mut caveats = Vec::with_capacity(caveat_count_raw.min((data.len() - pos) / 3));
+        for _ in 0..caveat_count_raw {
             if pos >= data.len() {
                 return None;
             }
@@ -1357,7 +1361,14 @@ impl MacaroonToken {
                     if pos + pred_len > data.len() {
                         return None;
                     }
-                    let (predicate, _) = CaveatPredicate::from_bytes(&data[pos..pos + pred_len])?;
+                    // The frame holds exactly one predicate. Extra bytes in it
+                    // would give one token many encodings, each with the same
+                    // signature, and defeat byte-keyed replay caches.
+                    let (predicate, consumed) =
+                        CaveatPredicate::from_bytes(&data[pos..pos + pred_len])?;
+                    if consumed != pred_len {
+                        return None;
+                    }
                     caveats.push(Caveat::first_party(predicate));
                     pos += pred_len;
                 }
@@ -2342,6 +2353,44 @@ mod tests {
                 assert!(MacaroonToken::from_binary(&bytes[..len]).is_none());
             }
         }
+    }
+
+    /// br-asupersync-s45073 L1: a token has exactly one binary encoding. A
+    /// first-party caveat frame longer than its predicate, or a caveat count
+    /// that disagrees with the caveats present, is refused. Before, the extra
+    /// frame bytes were skipped, and the padded token decoded with the same
+    /// signature.
+    #[test]
+    fn from_binary_refuses_non_canonical_encodings() {
+        let key = test_root_key();
+        let token = MacaroonToken::mint(&key, "cap", "loc")
+            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
+        let bytes = token.to_binary();
+        assert!(MacaroonToken::from_binary(&bytes).is_some());
+
+        // Version, then "cap" and "loc" (a 2-byte length and 3 bytes each).
+        let count_at = 1 + 5 + 5;
+        let frame_at = count_at + 2;
+        assert_eq!(bytes[frame_at], 0x00, "first-party caveat frame");
+        let pred_len = u16::from_le_bytes([bytes[frame_at + 1], bytes[frame_at + 2]]);
+        assert_eq!(pred_len, 9, "TimeBefore is a tag and 8 bytes");
+        let pred_end = frame_at + 3 + 9;
+
+        // One byte of padding inside the frame.
+        let mut padded = bytes[..=frame_at].to_vec();
+        padded.extend_from_slice(&(pred_len + 1).to_le_bytes());
+        padded.extend_from_slice(&bytes[frame_at + 3..pred_end]);
+        padded.push(0xa5);
+        padded.extend_from_slice(&bytes[pred_end..]);
+        assert!(
+            MacaroonToken::from_binary(&padded).is_none(),
+            "a padded caveat frame must not decode"
+        );
+
+        // A declared count of 2 with one caveat present.
+        let mut overcount = bytes.clone();
+        overcount[count_at..count_at + 2].copy_from_slice(&2u16.to_le_bytes());
+        assert!(MacaroonToken::from_binary(&overcount).is_none());
     }
 
     // --- Predicate serialization ---
