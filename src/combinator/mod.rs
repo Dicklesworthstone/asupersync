@@ -122,6 +122,7 @@ pub mod rate_limit;
 pub mod retry;
 pub mod select;
 pub mod stream_collect;
+pub mod stream_control;
 pub mod stream_send;
 pub mod timeout;
 #[cfg(test)]
@@ -185,6 +186,7 @@ pub use select::{
     SelectAllError, SelectError,
 };
 pub use stream_collect::{map_collect_concurrent, try_map_collect_concurrent};
+pub use stream_control::try_for_each_concurrent_scoped_until;
 pub use stream_send::{StreamSendError, try_map_send_concurrent_scoped};
 pub use timeout::{
     TimedError, TimedResult, Timeout, TimeoutConfig, TimeoutError, effective_deadline,
