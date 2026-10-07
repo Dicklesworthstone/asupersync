@@ -2538,6 +2538,12 @@ impl StreamTable {
         self.send_connection_credit.remaining()
     }
 
+    /// The connection-level send limit, the peer's latest MAX_DATA.
+    #[must_use]
+    pub(crate) fn connection_send_limit(&self) -> u64 {
+        self.send_connection_credit.limit()
+    }
+
     /// Remaining connection-level receive credit.
     #[must_use]
     pub fn connection_recv_remaining(&self) -> u64 {

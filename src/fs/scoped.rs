@@ -15,7 +15,7 @@
 //!
 //! These are ordinary path-based host filesystem operations, not a filesystem
 //! sandbox or deterministic lab effects. Both I/O and spawn authority, a live
-//! runtime gateway, and an explicitly configured blocking pool are required.
+//! runtime gateway, and a blocking pool (a `RuntimeBuilder` default) are required.
 //! No path confinement, atomic replacement, rollback, or fsync is implied.
 
 use crate::cx::cap::{All, CapSetRuntimeMask, HasIo, HasSpawn};

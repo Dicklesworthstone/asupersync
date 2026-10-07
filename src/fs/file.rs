@@ -15,9 +15,9 @@
 //! path is a blocking-pool state machine rather than a reactor registration.
 //! Restricting task-spawn authority does not change this I/O placement: an
 //! inherited pool still services file operations without exposing its handle.
-//! On a runtime built without a blocking pool (`blocking_threads(0, 0)`, the
-//! bare `RuntimeBuilder` default) the offload degrades to the deterministic
-//! inline fallback of `spawn_blocking`, which is the pre-existing behaviour.
+//! A `RuntimeBuilder` configures an on-demand pool by default. On a runtime
+//! built without one (`blocking_threads(0, 0)`) the offload degrades to the
+//! deterministic inline fallback of `spawn_blocking` on the async worker.
 
 #![allow(clippy::unused_async)]
 

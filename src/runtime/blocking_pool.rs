@@ -308,6 +308,8 @@ struct BlockingPoolInner {
     /// blocks new spawns — threads above the cap retire naturally via idle
     /// timeout, so the atomic claim/retire invariants are preserved.
     live_max_threads: AtomicUsize,
+    /// Set when the runtime sized this pool by default, for blocking I/O.
+    default_sized: AtomicBool,
     /// Current number of active threads.
     active_threads: AtomicUsize,
     /// In-flight worker hand-offs: a retiring worker that observed pending work
@@ -549,6 +551,7 @@ impl BlockingPool {
             min_threads,
             max_threads,
             live_max_threads: AtomicUsize::new(max_threads),
+            default_sized: AtomicBool::new(false),
             active_threads: AtomicUsize::new(0),
             replacement_pending: AtomicUsize::new(0),
             busy_threads: AtomicUsize::new(0),
@@ -964,6 +967,18 @@ impl BlockingPoolHandle {
     #[must_use]
     pub fn current_max_threads(&self) -> usize {
         blocking_pool_current_max_threads(&self.inner)
+    }
+
+    /// Whether the cap was chosen explicitly and so may bound CPU-bound fan-out.
+    #[must_use]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn is_explicitly_sized(&self) -> bool {
+        !self.inner.default_sized.load(Ordering::Relaxed)
+    }
+
+    /// Records that the runtime sized this pool by default (kpmoy5.1.15).
+    pub(crate) fn mark_default_sized(&self) {
+        self.inner.default_sized.store(true, Ordering::Relaxed);
     }
 
     /// Set the live spawn cap, clamped into `[min_threads, max_threads]`.
@@ -1776,6 +1791,7 @@ mod tests {
             min_threads: 0,
             max_threads: 4,
             live_max_threads: AtomicUsize::new(4),
+            default_sized: AtomicBool::new(false),
             active_threads: AtomicUsize::new(0),
             replacement_pending: AtomicUsize::new(0),
             busy_threads: AtomicUsize::new(0),
@@ -2626,6 +2642,7 @@ mod tests {
             min_threads: 1,
             max_threads: 2,
             live_max_threads: AtomicUsize::new(2),
+            default_sized: AtomicBool::new(false),
             active_threads: AtomicUsize::new(2),
             replacement_pending: AtomicUsize::new(0),
             busy_threads: AtomicUsize::new(0),
@@ -2732,6 +2749,7 @@ mod tests {
             min_threads: 0,
             max_threads: 2,
             live_max_threads: AtomicUsize::new(2),
+            default_sized: AtomicBool::new(false),
             active_threads: AtomicUsize::new(2),
             replacement_pending: AtomicUsize::new(0),
             busy_threads: AtomicUsize::new(0),
@@ -2772,6 +2790,7 @@ mod tests {
             min_threads: 0,
             max_threads: 1,
             live_max_threads: AtomicUsize::new(1),
+            default_sized: AtomicBool::new(false),
             active_threads: AtomicUsize::new(1),
             replacement_pending: AtomicUsize::new(0),
             busy_threads: AtomicUsize::new(0),

@@ -1878,6 +1878,7 @@ mod tests {
         let runtime = std::sync::Arc::new(
             RuntimeBuilder::new()
                 .worker_threads(1)
+                .blocking_threads(0, 0)
                 .build()
                 .expect("Failed to create test runtime"),
         );

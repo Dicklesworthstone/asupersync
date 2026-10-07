@@ -328,7 +328,10 @@ fn success_panic_prestart_abort_and_missing_pool_have_exact_results() {
             "pre-start captures were destroyed on {destroyed_on:?}"
         );
         drained(&runtime);
-        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        let runtime = RuntimeBuilder::current_thread()
+            .blocking_threads(0, 0)
+            .build()
+            .unwrap();
         assert!(matches!(runtime.spawn_blocking_drained(|_| ()),
             Err(asupersync::runtime::SpawnError::RuntimeUnavailable)));
         let cx = runtime.request_cx_with_budget(Budget::INFINITE);

@@ -68,9 +68,9 @@ Defaults differ by attribute, mirroring tokio: `#[main]` builds
 currently 4; pass `workers = N` or `flavor = "current_thread"` to change it),
 while `#[test]` builds `RuntimeBuilder::current_thread()` so test bodies stay
 replay-stable. Both configure an on-demand blocking pool
-(`blocking_threads(0, 512)`) so `spawn_blocking` offloads to a dedicated thread;
-`blocking = N` changes the cap and `blocking = 0` restores the inline behaviour
-of a bare `RuntimeBuilder`, which ships without a pool.
+(`blocking_threads(0, 512)`, the `RuntimeBuilder` default, named explicitly) so
+`spawn_blocking` offloads to a dedicated thread; `blocking = N` changes the cap
+and `blocking = 0` emits `blocking_threads(0, 0)`, which runs it inline.
 
 ```rust
 use asupersync::{Cx, main};

@@ -1290,9 +1290,15 @@ fn real_udp_quic_transfer_recovers_lost_client_finished_flight() {
 /// manifest spans >100 control-stream packets while ~200-byte bodies keep the
 /// bulk phase short. Returns the members as (relative path, bytes).
 fn write_lossy_manifest_tree(root: &Path) -> Vec<(String, Vec<u8>)> {
+    write_manifest_tree(root, 2000)
+}
+
+/// `members` small files spread over 40 directories; the sender packs them
+/// into one packed entry.
+fn write_manifest_tree(root: &Path, members: usize) -> Vec<(String, Vec<u8>)> {
     std::fs::create_dir_all(root).expect("mkdir tree root");
-    let mut expected = Vec::with_capacity(2000);
-    for index in 0..2000usize {
+    let mut expected = Vec::with_capacity(members);
+    for index in 0..members {
         let rel = format!("dir_{:02}/member_{index:04}.bin", index % 40);
         let path = root.join(&rel);
         if let Some(parent) = path.parent() {
@@ -1488,28 +1494,28 @@ fn real_udp_quic_tree_manifest_survives_lossy_control_stream() {
     assert_no_staging_residue(dst.path());
 }
 
-/// br-asupersync-r02ssd: a receiver that commits a 2000-member packed tree
-/// slowly keeps the sender alive. The commit-start loop that resolves and
-/// checks every member path sent no keep-alive. It took 10 s on an idle
+/// br-asupersync-r02ssd: a receiver that commits a packed tree slowly keeps
+/// the sender alive. The commit-start loop that resolves and checks every
+/// member path sent no keep-alive. For 2000 members it took 10 s on an idle
 /// machine and longer under load, so a sender whose idle budget ran out first
 /// reported failure for a transfer the receiver then committed. The test hook
-/// makes that loop take at least 16 s (8 ms per member) against a 10 s sender
-/// idle budget.
+/// makes that loop take at least 16 s (80 ms for each of 200 members) against
+/// a 10 s sender idle budget. Few members keep the per-member commit (a
+/// directory fsync each) far below the sender's 80 s proof-wait cap even on a
+/// loaded disk: 2000 members exceeded it there.
 #[test]
 fn real_udp_quic_tree_commit_slower_than_the_sender_idle_budget_keeps_the_sender_alive() {
     let src = tempfile::tempdir().expect("src dir");
     let dst = tempfile::tempdir().expect("dst dir");
     let root = src.path().join("tree");
-    let expected = write_lossy_manifest_tree(&root);
+    let expected = write_manifest_tree(&root, 200);
     let mut cfg = transport_authenticated_configs();
     cfg.send.idle_timeout = Duration::from_secs(10);
-    // Room for the sender's 2000-member manifest build before its first
-    // packet (asupersync-bi2462.147.70).
     cfg.recv.accept_timeout = Duration::from_secs(120);
 
     // The receive is driven on this thread by `block_on`, which is where the
     // hook applies.
-    set_receiver_member_path_delay_for_testing(Duration::from_millis(8));
+    set_receiver_member_path_delay_for_testing(Duration::from_millis(80));
     let (send, recv) = run_transfer(cfg.send, cfg.recv, &root, dst.path());
     set_receiver_member_path_delay_for_testing(Duration::ZERO);
 
