@@ -20,7 +20,8 @@ impl TcpStream {
     /// socket (such as `HostUnreachable`). `None` or a zero duration restores
     /// the kernel default. The value has millisecond resolution: a non-zero
     /// duration under 1 ms counts as 1 ms, and the value is clamped to
-    /// `u32::MAX` milliseconds. Unlike a connect timeout, it bounds an
+    /// `i32::MAX` milliseconds (about 24.8 days), the most Linux accepts.
+    /// Unlike a connect timeout, it bounds an
     /// established connection; it does not replace read deadlines or
     /// cancellation.
     ///
@@ -104,12 +105,16 @@ pub(super) fn set_socket_user_timeout(
         // The kernel takes whole milliseconds and reads 0 as its default, so
         // a non-zero duration under 1 ms truncated to the default: the
         // opposite of a tight bound. It rounds up to 1 ms instead
-        // (br-asupersync-8vrx8q).
+        // (br-asupersync-8vrx8q). The kernel also takes the value as an
+        // `int` and refuses one above i32::MAX ms with EINVAL, keeping the
+        // old value, while socket2 clamps only to u32::MAX ms; the value is
+        // clamped to i32::MAX ms here (GH #74 follow-up).
+        let max = Duration::from_millis(2_147_483_647);
         let timeout = timeout.map(|t| {
             if t.is_zero() {
                 t
             } else {
-                t.max(Duration::from_millis(1))
+                t.clamp(Duration::from_millis(1), max)
             }
         });
         socket.set_tcp_user_timeout(timeout)
@@ -217,6 +222,40 @@ mod tests {
             stream.user_timeout().expect("read back"),
             Some(Duration::from_millis(1))
         );
+    }
+
+    /// Linux takes TCP_USER_TIMEOUT as an `int`: above i32::MAX ms it failed
+    /// with EINVAL and kept the old value, although the docs promised a
+    /// clamp. A huge timeout now clamps to i32::MAX ms, on a stream and on a
+    /// socket applied at connect (GH #74 follow-up).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn huge_user_timeout_clamps_to_the_kernel_maximum() {
+        let max = Duration::from_millis(2_147_483_647);
+        let (stream, _peer) = connected_stream(TcpSocket::new_v4().expect("new_v4"));
+        for huge in [
+            max + Duration::from_millis(1),
+            Duration::from_millis(u64::from(u32::MAX)),
+            Duration::MAX,
+        ] {
+            stream
+                .set_user_timeout(Some(huge))
+                .expect("a huge timeout clamps instead of failing");
+            assert_eq!(
+                stream.user_timeout().expect("read back"),
+                Some(max),
+                "{huge:?}"
+            );
+        }
+        stream.set_user_timeout(Some(max)).expect("set the maximum");
+        assert_eq!(stream.user_timeout().expect("read back"), Some(max));
+
+        let socket = TcpSocket::new_v4().expect("new_v4");
+        socket
+            .set_user_timeout(Some(Duration::MAX))
+            .expect("set on socket");
+        let (stream, _peer) = connected_stream(socket);
+        assert_eq!(stream.user_timeout().expect("read back"), Some(max));
     }
 
     #[cfg(target_os = "linux")]
