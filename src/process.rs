@@ -413,7 +413,7 @@ impl AsRef<OsStr> for EnvKey {
 }
 
 #[cfg(windows)]
-#[link(name = "Kernel32")]
+#[link(name = "kernel32")] // MinGW's import library is libkernel32.a (GH #75)
 unsafe extern "system" {
     #[link_name = "CompareStringOrdinal"]
     fn compare_string_ordinal(
