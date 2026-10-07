@@ -485,6 +485,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                max_execution_time_uncertain: false,
                 connect_autocommit: false,
             },
             options: None,
@@ -865,6 +866,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                max_execution_time_uncertain: false,
                 connect_autocommit: false,
             },
             options: None,
@@ -899,6 +901,7 @@ mod tests {
                     statement_timeout_override: None,
                     applied_max_execution_time_ms: None,
                     max_execution_time_unsupported: false,
+                    max_execution_time_uncertain: false,
                     connect_autocommit: false,
                 },
                 options: None,
@@ -965,6 +968,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                max_execution_time_uncertain: false,
                 connect_autocommit: false,
             },
             options: None,
@@ -1017,6 +1021,7 @@ mod tests {
                     statement_timeout_override: None,
                     applied_max_execution_time_ms: None,
                     max_execution_time_unsupported: false,
+                    max_execution_time_uncertain: false,
                     connect_autocommit: false,
                 },
                 options: None,
@@ -1031,6 +1036,8 @@ mod tests {
     #[test]
     fn cancelled_commit_marks_connection_for_rollback() {
         let mut conn = make_test_connection();
+        // As after START TRANSACTION: SERVER_STATUS_IN_TRANS.
+        conn.inner.status_flags = 0x0001;
         let cx = cancelled_cx();
 
         let outcome = run(async {
@@ -2497,6 +2504,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                max_execution_time_uncertain: false,
                 connect_autocommit: false,
             },
             options: None,
@@ -2587,6 +2595,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                max_execution_time_uncertain: false,
                 connect_autocommit: false,
             },
             options: None,
@@ -3186,6 +3195,8 @@ mod tests {
                 "25006",
                 "Cannot execute statement in a READ ONLY transaction",
             ));
+        // As after START TRANSACTION READ ONLY: SERVER_STATUS_IN_TRANS.
+        conn.inner.status_flags = 0x0001;
         let cx = Cx::for_testing();
 
         let outcome = run(async {
@@ -3294,6 +3305,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                max_execution_time_uncertain: false,
                 connect_autocommit: false,
             },
             options: None,
@@ -3378,6 +3390,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                max_execution_time_uncertain: false,
                 connect_autocommit: false,
             },
             options: None,
@@ -3590,6 +3603,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                max_execution_time_uncertain: false,
                 connect_autocommit: false,
             },
             options: None,
@@ -3707,6 +3721,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                max_execution_time_uncertain: false,
                 connect_autocommit: false,
             },
             options: None,
@@ -3786,6 +3801,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                max_execution_time_uncertain: false,
                 connect_autocommit: false,
             },
             options: None,
@@ -3920,6 +3936,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                max_execution_time_uncertain: false,
                 connect_autocommit: false,
             },
             options: None,
@@ -4034,6 +4051,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                max_execution_time_uncertain: false,
                 connect_autocommit: false,
             },
             options: None,
@@ -4139,6 +4157,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                max_execution_time_uncertain: false,
                 connect_autocommit: false,
             },
             options: None,
@@ -4239,6 +4258,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                max_execution_time_uncertain: false,
                 connect_autocommit: false,
             },
             options: None,
@@ -4360,6 +4380,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                max_execution_time_uncertain: false,
                 connect_autocommit: false,
             },
             options: None,
@@ -4554,6 +4575,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                max_execution_time_uncertain: false,
                 connect_autocommit: false,
             },
             options: None,
@@ -4643,6 +4665,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                max_execution_time_uncertain: false,
                 connect_autocommit: false,
             },
             options: None,
@@ -5175,6 +5198,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                max_execution_time_uncertain: false,
                 connect_autocommit: false,
             },
             options: None,
@@ -5435,6 +5459,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                max_execution_time_uncertain: false,
                 connect_autocommit: false,
             },
             options: None,
@@ -5520,6 +5545,7 @@ mod tests {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                max_execution_time_uncertain: false,
                 connect_autocommit: false,
             },
             options: None,
@@ -5959,5 +5985,343 @@ mod tests {
             elapsed < Duration::from_secs(5),
             "cancel must short-circuit the parked read promptly, took {elapsed:?}"
         );
+    }
+
+    // ─── br-asupersync-mysql-client-audit-r10 ───────────────────────────
+
+    /// A COM_STMT_PREPARE OK with no parameters and no result columns, so
+    /// no metadata packets follow it.
+    fn prepare_ok_payload(statement_id: u32) -> Vec<u8> {
+        let mut payload = vec![0x00];
+        payload.extend_from_slice(&statement_id.to_le_bytes());
+        payload.extend_from_slice(&0_u16.to_le_bytes()); // columns
+        payload.extend_from_slice(&0_u16.to_le_bytes()); // parameters
+        payload.push(0x00);
+        payload.extend_from_slice(&0_u16.to_le_bytes()); // warnings
+        payload
+    }
+
+    /// H1: MySQL binds a prepared statement to the default database it was
+    /// prepared in. After `USE tenant_b`, prepare of the same SQL returned
+    /// the cached statement, still bound to the earlier database, so its
+    /// reads and writes reached that database's tables. The cache is now
+    /// emptied, and the old statement closed, before the USE.
+    #[test]
+    fn prepare_after_use_does_not_return_a_statement_bound_to_the_previous_database() {
+        init_test(
+            "mysql_prepare_after_use_does_not_return_a_statement_bound_to_the_previous_database",
+        );
+        let (mut conn, listener) = make_server_backed_connection(41);
+        let sql = "SELECT v FROM t";
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+            let prepare = read_client_command(&mut stream);
+            assert_eq!(prepare[0], command::COM_STMT_PREPARE);
+            write_response_packet(&mut stream, 1, prepare_ok_payload(101));
+
+            let close = read_client_command(&mut stream);
+            assert_eq!(
+                close[0],
+                command::COM_STMT_CLOSE,
+                "the statement bound to the old database is closed before the USE"
+            );
+            assert_eq!(close[1..5], 101_u32.to_le_bytes());
+            assert_eq!(
+                command_sql(&read_client_command(&mut stream)),
+                "USE tenant_b"
+            );
+            write_response_packet(&mut stream, 1, ok_packet_payload(0, 0));
+
+            let prepare = read_client_command(&mut stream);
+            assert_eq!(
+                prepare[0],
+                command::COM_STMT_PREPARE,
+                "the SQL is prepared again in the new database"
+            );
+            write_response_packet(&mut stream, 1, prepare_ok_payload(102));
+        });
+
+        let cx = Cx::for_testing();
+        let first = match run(conn.prepare(&cx, sql)) {
+            Outcome::Ok(stmt) => stmt,
+            other => panic!("first prepare: {other:?}"),
+        };
+        assert_eq!(first.statement_id, 101);
+        match run(conn.execute_static_sql(&cx, "USE tenant_b")) {
+            Outcome::Ok(_) => {}
+            other => panic!("USE: {other:?}"),
+        }
+        let second = match run(conn.prepare(&cx, sql)) {
+            Outcome::Ok(stmt) => stmt,
+            other => panic!("second prepare: {other:?}"),
+        };
+        server.join().expect("server thread");
+        assert_eq!(second.statement_id, 102);
+    }
+
+    /// M1: `None` meant both "server default" and "unknown". A SET cancelled
+    /// before it was written left the old 500 ms limit on the server while
+    /// the cache read as the default, so a later query with no deadline sent
+    /// no SET and ran under the stale limit.
+    #[test]
+    fn statement_timeout_cancelled_before_its_set_resends_the_default_next_time() {
+        init_test("mysql_statement_timeout_cancelled_before_its_set_resends_the_default_next_time");
+        let (mut conn, listener) = make_server_backed_connection(41);
+        conn.set_statement_timeout_override(Some(Duration::from_millis(500)));
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+            let sql = command_sql(&read_client_command(&mut stream));
+            assert_eq!(sql, "SET SESSION max_execution_time = 500");
+            write_response_packet(&mut stream, 1, ok_packet_payload(0, 0));
+            let sql = command_sql(&read_client_command(&mut stream));
+            assert_eq!(sql, "SELECT @@max_execution_time");
+            write_response_packet(&mut stream, 1, ok_packet_payload(0, 0));
+
+            // The cancelled query sends nothing; the next one must restore
+            // the default before it runs.
+            let sql = command_sql(&read_client_command(&mut stream));
+            assert_eq!(sql, "SET SESSION max_execution_time = DEFAULT");
+            write_response_packet(&mut stream, 1, ok_packet_payload(0, 0));
+            let sql = command_sql(&read_client_command(&mut stream));
+            assert_eq!(sql, "SELECT @@session.max_execution_time");
+            write_response_packet(&mut stream, 1, ok_packet_payload(0, 0));
+        });
+
+        match run(conn.query_static_sql(&Cx::for_testing(), "SELECT @@max_execution_time")) {
+            Outcome::Ok(_) => {}
+            other => panic!("first query: {other:?}"),
+        }
+        conn.set_statement_timeout_override(Some(Duration::from_millis(250)));
+        match run(conn.query_static_sql(&cancelled_cx(), "SELECT @@max_execution_time")) {
+            Outcome::Cancelled(_) => {}
+            other => panic!("expected the cancelled query to send nothing, got {other:?}"),
+        }
+        conn.set_statement_timeout_override(None);
+        match run(conn.query_static_sql(&Cx::for_testing(), "SELECT @@session.max_execution_time"))
+        {
+            Outcome::Ok(_) => {}
+            other => panic!("third query: {other:?}"),
+        }
+        server.join().expect("server thread");
+        assert_eq!(conn.inner.applied_max_execution_time_ms, None);
+        assert!(!conn.inner.max_execution_time_uncertain);
+    }
+
+    /// Accepts a connection, reads `START TRANSACTION`, answers it, then the
+    /// given statement with `reply`, and checks that nothing else arrives:
+    /// neither a later statement nor a COMMIT.
+    fn serve_begin_then_one_statement(
+        listener: std::net::TcpListener,
+        statement: &'static str,
+        reply: Vec<u8>,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+            assert_eq!(
+                command_sql(&read_client_command(&mut stream)),
+                "START TRANSACTION"
+            );
+            // SERVER_STATUS_IN_TRANS | SERVER_STATUS_AUTOCOMMIT
+            write_response_packet(&mut stream, 1, ok_packet_payload(0, 0x0003));
+            assert_eq!(command_sql(&read_client_command(&mut stream)), statement);
+            write_response_packet(&mut stream, 1, reply);
+
+            stream
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .expect("set short read timeout");
+            let mut header = [0_u8; 4];
+            let err = std::io::Read::read_exact(&mut stream, &mut header)
+                .expect_err("nothing may follow once the server ended the transaction");
+            assert!(
+                matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ),
+                "expected a read timeout, got {err:?}"
+            );
+        })
+    }
+
+    /// M2: after a deadlock (1213) InnoDB has rolled the whole transaction
+    /// back and ended it. A later statement ran in autocommit mode and
+    /// commit() returned Ok for work that was partly rolled back and partly
+    /// committed on its own. Both are now refused before anything is sent.
+    #[test]
+    fn statements_and_commit_are_refused_after_a_deadlock_rolled_back_the_transaction() {
+        init_test(
+            "mysql_statements_and_commit_are_refused_after_a_deadlock_rolled_back_the_transaction",
+        );
+        let (mut conn, listener) = make_server_backed_connection(41);
+        let server = serve_begin_then_one_statement(
+            listener,
+            "UPDATE t SET v = 1 WHERE id = 1",
+            error_packet_payload(1213, "40001", "Deadlock found when trying to get lock"),
+        );
+
+        let cx = Cx::for_testing();
+        run(async {
+            let mut tx = match conn.begin(&cx).await {
+                Outcome::Ok(tx) => tx,
+                other => panic!("begin: {:?}", other.is_ok()),
+            };
+            match tx
+                .execute_static_sql(&cx, "UPDATE t SET v = 1 WHERE id = 1")
+                .await
+            {
+                Outcome::Err(MySqlError::Server { code: 1213, .. }) => {}
+                other => panic!("expected the deadlock, got {other:?}"),
+            }
+            match tx
+                .execute_static_sql(&cx, "UPDATE t SET v = 2 WHERE id = 2")
+                .await
+            {
+                Outcome::Err(MySqlError::Protocol(message)) => {
+                    assert!(message.contains("ended this transaction"), "{message}");
+                }
+                other => panic!("expected the statement to be refused, got {other:?}"),
+            }
+            match tx.commit(&cx).await {
+                Outcome::Err(MySqlError::Protocol(_)) => {}
+                other => panic!("expected the commit to be refused, got {other:?}"),
+            }
+        });
+        server.join().expect("server thread");
+    }
+
+    /// M2: a DDL statement commits the open transaction implicitly; commit()
+    /// reported the unit as committed although it was not one unit.
+    #[test]
+    fn commit_is_refused_after_a_ddl_statement_committed_the_transaction() {
+        init_test("mysql_commit_is_refused_after_a_ddl_statement_committed_the_transaction");
+        let (mut conn, listener) = make_server_backed_connection(41);
+        // SERVER_STATUS_AUTOCOMMIT only: the transaction ended.
+        let server = serve_begin_then_one_statement(
+            listener,
+            "CREATE TABLE x (id INT)",
+            ok_packet_payload(0, 0x0002),
+        );
+
+        let cx = Cx::for_testing();
+        run(async {
+            let mut tx = match conn.begin(&cx).await {
+                Outcome::Ok(tx) => tx,
+                other => panic!("begin: {:?}", other.is_ok()),
+            };
+            match tx.execute_static_sql(&cx, "CREATE TABLE x (id INT)").await {
+                Outcome::Ok(_) => {}
+                other => panic!("CREATE TABLE: {other:?}"),
+            }
+            match tx.commit(&cx).await {
+                Outcome::Err(MySqlError::Protocol(message)) => {
+                    assert!(message.contains("ended this transaction"), "{message}");
+                }
+                other => panic!("expected the commit to be refused, got {other:?}"),
+            }
+        });
+        server.join().expect("server thread");
+    }
+
+    /// L1: a server refusing the connection sends an ERR packet instead of
+    /// the greeting. It was reported as a malformed handshake, losing the
+    /// server's code.
+    #[test]
+    fn an_error_packet_in_place_of_the_greeting_reports_the_server_error() {
+        init_test("mysql_an_error_packet_in_place_of_the_greeting_reports_the_server_error");
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let mut payload = vec![0xFF];
+        payload.extend_from_slice(&1040_u16.to_le_bytes());
+        payload.extend_from_slice(b"#08004Too many connections");
+        write_response_packet(&mut peer, 0, payload);
+
+        match run(conn.read_handshake()) {
+            Err(MySqlError::Server { code, message, .. }) => {
+                assert_eq!(code, 1040);
+                assert_eq!(message, "Too many connections");
+            }
+            other => panic!("expected the server's 1040, got {other:?}"),
+        }
+    }
+
+    /// L2: URL key spellings vary. `sslMode`, `ssl_mode` and `SSL-MODE`
+    /// were ignored, so a URL asking for TLS connected in plaintext.
+    #[test]
+    fn ssl_mode_url_keys_are_read_whatever_their_spelling() {
+        init_test("mysql_ssl_mode_url_keys_are_read_whatever_their_spelling");
+        for url in [
+            "mysql://u:p@h/db?sslMode=REQUIRED",
+            "mysql://u:p@h/db?ssl_mode=required",
+            "mysql://u:p@h/db?SSL-MODE=required",
+            "mysql://u:p@h/db?ssl-mode=required",
+        ] {
+            let options = MySqlConnectOptions::parse(url).expect("the URL parses");
+            assert_eq!(options.ssl_mode, SslMode::Required, "{url}");
+        }
+        let options = MySqlConnectOptions::parse("mysql://u:p@h/db?connect-timeout=7")
+            .expect("the URL parses");
+        assert_eq!(options.connect_timeout, Some(Duration::from_secs(7)));
+    }
+
+    /// L5: a column type this client does not know (MySQL 9's VECTOR, 242)
+    /// with a binary payload failed the plain query; it comes back as bytes,
+    /// as on the binary protocol.
+    #[test]
+    fn an_unknown_column_type_with_a_binary_payload_reads_as_bytes() {
+        init_test("mysql_an_unknown_column_type_with_a_binary_payload_reads_as_bytes");
+        let column = test_column_with_type_and_charset("v", 242, 63);
+        let row = [4, 0x00, 0x00, 0x80, 0x3F];
+        match MySqlConnection::parse_text_row(&row, std::slice::from_ref(&column)) {
+            Ok(values) => assert_eq!(values, vec![MySqlValue::Bytes(vec![0, 0, 0x80, 0x3F])]),
+            other => panic!("expected bytes, got {other:?}"),
+        }
+    }
+
+    /// L6: an ERR packet after some rows (a KILL QUERY, or a
+    /// max_execution_time stop) ends the exchange, so the connection is in
+    /// step. It was left marked closed, and a healthy connection discarded.
+    #[test]
+    fn an_error_after_some_rows_keeps_the_connection_usable() {
+        init_test("mysql_an_error_after_some_rows_keeps_the_connection_usable");
+        let (mut conn, listener) = make_server_backed_connection(41);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+            assert_eq!(
+                command_sql(&read_client_command(&mut stream)),
+                "SELECT v FROM t"
+            );
+            write_response_packet(&mut stream, 1, vec![1]);
+            write_response_packet(&mut stream, 2, column_definition_payload("v"));
+            write_response_packet(&mut stream, 3, eof_packet_payload(0));
+            write_response_packet(&mut stream, 4, vec![1, b'1']);
+            write_response_packet(
+                &mut stream,
+                5,
+                error_packet_payload(
+                    3024,
+                    "HY000",
+                    "Query execution was interrupted, maximum statement execution time exceeded",
+                ),
+            );
+        });
+
+        match run(conn.query_static_sql(&Cx::for_testing(), "SELECT v FROM t")) {
+            Outcome::Err(MySqlError::Server { code: 3024, .. }) => {}
+            other => panic!("expected the server's 3024, got {other:?}"),
+        }
+        server.join().expect("server thread");
+        assert!(!conn.inner.closed, "the connection is in step and reusable");
     }
 }

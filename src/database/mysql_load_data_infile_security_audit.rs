@@ -87,6 +87,7 @@ fn make_test_connection(stream: crate::net::TcpStream, sequence: u8) -> MySqlCon
             statement_timeout_override: None,
             applied_max_execution_time_ms: None,
             max_execution_time_unsupported: false,
+            max_execution_time_uncertain: false,
             connect_autocommit: false,
         },
         options: None,
