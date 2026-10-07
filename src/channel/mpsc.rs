@@ -95,6 +95,9 @@ use crate::types::outcome::Outcome;
 mod cancel_registration;
 use cancel_registration::CancelRegistration;
 
+#[path = "mpsc_closed.rs"]
+mod closed;
+
 #[cfg(test)]
 #[path = "mpsc_cancel_wake_tests.rs"]
 mod cancel_wake_tests;
@@ -300,6 +303,8 @@ struct ChannelShared<T> {
     /// Whether the receiver has been dropped. Atomic so `Sender::is_closed`
     /// can read without locking. Monotone: transitions `false → true` once.
     receiver_dropped: AtomicBool,
+    /// Allocated only when a producer first waits for receiver closure.
+    closed: closed::ClosedSignal,
     /// Maximum capacity of the queue. Write-once (set at construction),
     /// stored outside the mutex so `capacity()` is lock-free.
     capacity: usize,
@@ -563,6 +568,7 @@ pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
         inner: Mutex::new(ChannelInner::new(capacity)),
         sender_count: AtomicUsize::new(1),
         receiver_dropped: AtomicBool::new(false),
+        closed: closed::ClosedSignal::default(),
         capacity,
     });
     let sender = Sender {
@@ -827,6 +833,7 @@ impl<T> Sender<T> {
             (send_wakers, recv_waker)
         };
 
+        let _closed = closed::WakeClosed(&self.shared);
         wake_detached(send_wakers.into_iter().chain(recv_waker));
     }
 
@@ -1699,6 +1706,7 @@ impl<T> Receiver<T> {
             drop(inner);
             wakers
         };
+        let _closed = closed::WakeClosed(&self.shared);
         wake_detached(wakers);
     }
 
@@ -2131,6 +2139,9 @@ impl<T> Drop for Receiver<T> {
             drop(inner);
             (wakers, items, recv_waker)
         };
+        // Declared after the extracted items: notify before their destruction,
+        // including when retiring an executor waker unwinds.
+        let _closed = closed::WakeClosed(&self.shared);
         drop(recv_waker);
         // Wake senders outside the lock to avoid wake-under-lock deadlocks.
         wake_detached(wakers);
