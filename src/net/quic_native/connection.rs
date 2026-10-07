@@ -2433,6 +2433,29 @@ const STREAM_LIMIT_ERROR: u64 = 0x04;
 const STREAM_STATE_ERROR: u64 = 0x05;
 const FINAL_SIZE_ERROR: u64 = 0x06;
 const FRAME_ENCODING_ERROR: u64 = 0x07;
+const PROTOCOL_VIOLATION: u64 = 0x0a;
+
+/// RFC 9000 section 12.4, Table 3: Initial and Handshake packets carry only
+/// PADDING, PING, ACK, CRYPTO and the transport CONNECTION_CLOSE. Initial
+/// keys derive from the client's connection ID, so an on-path party can forge
+/// an Initial packet; nothing else may reach stream or connection state there.
+const FRAME_NOT_PERMITTED_IN_PACKET_SPACE: &str =
+    "frame type is not permitted in an Initial or Handshake packet";
+
+fn frame_permitted_in_space(frame: &QuicFrame, space: PacketNumberSpace) -> bool {
+    space == PacketNumberSpace::ApplicationData
+        || matches!(
+            frame,
+            QuicFrame::Padding { .. }
+                | QuicFrame::Ping
+                | QuicFrame::Ack { .. }
+                | QuicFrame::Crypto { .. }
+                | QuicFrame::ConnectionClose {
+                    frame_type: Some(_),
+                    ..
+                }
+        )
+}
 
 /// The transport error code for an error raised while applying a peer's frame,
 /// or `None` when the error has no peer cause (it fails closed: an unmapped
@@ -2440,6 +2463,11 @@ const FRAME_ENCODING_ERROR: u64 = 0x07;
 fn peer_violation_code(error: &NativeQuicConnectionError) -> Option<u64> {
     let stream_error = match error {
         NativeQuicConnectionError::Frame(_) => return Some(FRAME_ENCODING_ERROR),
+        NativeQuicConnectionError::InvalidState(message)
+            if *message == FRAME_NOT_PERMITTED_IN_PACKET_SPACE =>
+        {
+            return Some(PROTOCOL_VIOLATION);
+        }
         NativeQuicConnectionError::Stream(stream_error) => stream_error,
         NativeQuicConnectionError::StreamTable(table_error) => match table_error {
             StreamTableError::StreamLimitExceeded { .. } => return Some(STREAM_LIMIT_ERROR),
@@ -2577,7 +2605,10 @@ impl NativeQuicConnection {
     /// A frame that breaks a stream, flow-control or frame-encoding rule closes
     /// the connection with the matching RFC 9000 transport error before the
     /// error returns: the connection drains, and its local CONNECTION_CLOSE is
-    /// the transport variant naming the offending frame type.
+    /// the transport variant naming the offending frame type. An Initial or
+    /// Handshake packet carrying a frame that RFC 9000 section 12.4 does not
+    /// permit there closes it with PROTOCOL_VIOLATION before any of the
+    /// packet's frames takes effect.
     pub fn process_packet_frames(
         &mut self,
         cx: &Cx,
@@ -2592,6 +2623,16 @@ impl NativeQuicConnection {
             QuicConnectionState::Draining | QuicConnectionState::Closed
         ) {
             return Ok(());
+        }
+        // Checked for the whole packet before any frame takes effect.
+        if let Some(frame) = frames
+            .iter()
+            .find(|frame| !frame_permitted_in_space(frame, space))
+        {
+            let error =
+                NativeQuicConnectionError::InvalidState(FRAME_NOT_PERMITTED_IN_PACKET_SPACE);
+            self.close_on_peer_violation(&error, received_frame_type(frame), now_micros);
+            return Err(error);
         }
         if self.streams.packet_reassembly_limits_would_be_exceeded(
             frames,
@@ -7025,14 +7066,86 @@ mod tests {
                 .expect_err("MAX_STREAMS is not permitted in handshake packets");
             assert_eq!(
                 error,
-                NativeQuicConnectionError::InvalidState(
-                    "MAX_STREAMS requires application data packet space"
-                )
+                NativeQuicConnectionError::InvalidState(FRAME_NOT_PERMITTED_IN_PACKET_SPACE)
             );
+            // RFC 9000 section 12.4: a PROTOCOL_VIOLATION naming MAX_STREAMS.
+            assert_eq!(conn.transport().close_code(), Some(PROTOCOL_VIOLATION));
+            assert_eq!(conn.local_close_frame_type(), Some(VarInt(0x12)));
+            assert!(!conn.has_pending_control_frames(), "no ACK for the packet");
             for _ in 0..128 {
-                conn.open_local_bidi(&cx).expect("initial credit unchanged");
+                conn.streams
+                    .open_local_bidi()
+                    .expect("initial credit unchanged");
             }
-            assert!(conn.open_local_bidi(&cx).is_err());
+            assert!(conn.streams.open_local_bidi().is_err());
+        }
+    }
+
+    /// br-asupersync-tzjbn9 F9: Initial keys derive from the client's
+    /// connection ID, so anyone on the path can forge an Initial packet. Its
+    /// STREAM data must never reach a stream, nor may the frames ahead of it
+    /// take effect.
+    #[test]
+    fn handshake_packets_refuse_frames_rfc_9000_does_not_permit_there() {
+        let cx = test_cx();
+        // A server: stream 0 is the peer's bidirectional stream.
+        let stream = QuicFrame::Stream {
+            stream_id: VarInt(0),
+            offset: None,
+            data: Bytes::from_static(b"forged"),
+            fin: false,
+        };
+        let max_data = QuicFrame::MaxData {
+            maximum_data: VarInt(1 << 30),
+        };
+        for space in [PacketNumberSpace::Initial, PacketNumberSpace::Handshake] {
+            let mut conn = established_server_conn();
+            let error = conn
+                .process_packet_frames(&cx, space, 1, &[QuicFrame::Ping, stream.clone()], 100)
+                .expect_err("STREAM is not permitted in handshake packets");
+            assert_eq!(
+                error,
+                NativeQuicConnectionError::InvalidState(FRAME_NOT_PERMITTED_IN_PACKET_SPACE)
+            );
+            assert_eq!(conn.transport().close_code(), Some(PROTOCOL_VIOLATION));
+            assert_eq!(conn.local_close_frame_type(), Some(VarInt(0x08)));
+            assert!(
+                conn.streams.stream(StreamId(0)).is_err(),
+                "forged data opened no stream"
+            );
+            // A server already owes HANDSHAKE_DONE, so look for the ACK itself.
+            assert!(
+                !conn
+                    .pending_control_frames
+                    .iter()
+                    .any(|frame| matches!(frame, QuicFrame::Ack { .. })),
+                "no ACK for the packet"
+            );
+
+            let mut conn = established_server_conn();
+            conn.process_packet_frames(&cx, space, 1, &[max_data.clone()], 100)
+                .expect_err("MAX_DATA is not permitted in handshake packets");
+            assert_eq!(conn.transport().close_code(), Some(PROTOCOL_VIOLATION));
+            assert_eq!(conn.local_close_frame_type(), Some(VarInt(0x10)));
+        }
+
+        // The same frames are ordinary 1-RTT input, and the frames Table 3
+        // permits stay accepted in the handshake spaces.
+        let mut conn = established_server_conn();
+        conn.process_packet_frames(&cx, PacketNumberSpace::ApplicationData, 1, &[stream], 100)
+            .expect("STREAM in a 1-RTT packet");
+        assert!(conn.streams.stream(StreamId(0)).is_ok());
+        for space in [PacketNumberSpace::Initial, PacketNumberSpace::Handshake] {
+            let mut conn = established_server_conn();
+            conn.process_packet_frames(
+                &cx,
+                space,
+                1,
+                &[QuicFrame::Padding { length: 1 }, QuicFrame::Ping],
+                100,
+            )
+            .expect("PADDING and PING are permitted in every space");
+            assert_eq!(conn.transport().close_code(), None);
         }
     }
 
