@@ -60,6 +60,25 @@ export interface FetchStreamHandle {
   readonly closed: Promise<Outcome<void>>;
   response(): Promise<Outcome<BrowserFetchResponse>>;
   read(): Promise<Outcome<BrowserFetchRead>>;
+  /**
+   * Transfer the remaining body to one memoized native WHATWG ReadableStream.
+   * There is no adapter read-ahead: chunks are pulled only on consumer demand.
+   * A pending manual read refuses transfer transiently; after transfer, use
+   * the native stream instead of read(). response(), cancel(), and closed
+   * remain available. Native stream support is required only for this method.
+   *
+   * pipeTo, async-iteration exit, and reader.cancel() drive owned cancellation.
+   * Await the initiating cancellation/pipe/iterator promise or closed for
+   * cleanup. Native EOF and repeated cancel() on an already closed stream do
+   * not rejoin pending cleanup. Errors have
+   * the terminal Outcome in error.cause. ABI refusal rejects cancellation;
+   * terminal-publication refusal still retains the owned task and its credit.
+   *
+   * This is a default stream of Uint8Array chunks, not a BYOB byte stream.
+   * Browser, downstream, Response buffering, and tee queues are outside the
+   * adapter's memory bound. A non-settling host still cannot be forcibly drained.
+   */
+  toReadableStream(): Outcome<ReadableStream<Uint8Array>>;
   cancel(reason?: string): Promise<Outcome<void>>;
 }
 
@@ -84,6 +103,15 @@ function failure(text: string, code: "capability_denied" | "compatibility_reject
   Object.freeze(outcome);
   LOCAL_FAILURES.add(outcome);
   return outcome as Failure;
+}
+
+// Native Streams reject with errors rather than Outcome envelopes. Keep the
+// exact terminal envelope as a non-writable cause so it remains inspectable.
+function bodyStreamError(outcome: Failure): Error {
+  const text = outcome.outcome === "err" ? outcome.failure.message
+    : outcome.outcome === "cancelled" ? outcome.cancellation.message ?? "fetch cancelled"
+    : outcome.message;
+  return Object.defineProperty(new Error(text), "cause", { value: outcome });
 }
 
 function cancelled(kind: string, reason: string | undefined, task: TaskHandle): Failure {
@@ -171,6 +199,7 @@ function byteView(value: unknown): Uint8Array {
 // Native slot reads and a private dependent signal prevent forged source
 // abort events and stopImmediatePropagation from defeating cancellation.
 // Capture intrinsics once; the no-signal path needs none of these host features.
+const NATIVE_READABLE_STREAM = typeof ReadableStream === "undefined" ? undefined : ReadableStream;
 const SIGNAL_CLASS = typeof AbortSignal === "undefined" ? undefined : AbortSignal;
 const SIGNAL_ABORTED = SIGNAL_CLASS && Object.getOwnPropertyDescriptor(SIGNAL_CLASS.prototype, "aborted")?.get;
 const SIGNAL_REASON = SIGNAL_CLASS && Object.getOwnPropertyDescriptor(SIGNAL_CLASS.prototype, "reason")?.get;
@@ -319,6 +348,8 @@ export function createBrowserFetchManager(dependencies: {
     cancelMustStopOnRefusal = false;
     clearDeadline: (() => void) | null = null;
     clearSignal: (() => void) | null = null;
+    bodyStream: ReadableStream<Uint8Array> | null = null;
+    bodyClaimed = false;
     readonly taskKey: string;
 
     constructor(readonly scopeKey: string, readonly grant: BrowserFetchGrant,
@@ -328,7 +359,75 @@ export function createBrowserFetchManager(dependencies: {
 
     handle(): FetchStreamHandle {
       return Object.freeze({ closed: this.closed.promise, response: () => this.head.promise,
-        read: () => this.read(), cancel: (reason?: string) => this.cancel(reason) });
+        read: () => this.read(), toReadableStream: () => this.toReadableStream(),
+        cancel: (reason?: string) => this.cancel(reason) });
+    }
+
+    toReadableStream(): Outcome<ReadableStream<Uint8Array>> {
+      if (this.bodyStream) return Outcomes.ok(this.bodyStream);
+      if (this.bodyClaimed || this.reading) {
+        return failure("fetch body consumption is already in progress", "compatibility_rejected", true);
+      }
+      if (typeof NATIVE_READABLE_STREAM !== "function") {
+        return failure("fetch body conversion requires native ReadableStream support");
+      }
+      // Reserve before construction: a host constructor may synchronously
+      // reenter the handle. Failed construction restores manual consumption.
+      this.bodyClaimed = true;
+      let ended = false;
+      try {
+        const stream = new NATIVE_READABLE_STREAM<Uint8Array>({
+          start: (controller) => {
+            // Observe even when no consumer is pulling. EOF and external
+            // cancellation become native closure/error only after owned host
+            // cleanup and terminal publication settle.
+            void this.closed.promise.then((outcome) => {
+              if (ended) return;
+              ended = true;
+              if (outcome.outcome === "ok") controller.close();
+              else controller.error(bodyStreamError(outcome));
+            });
+          },
+          pull: async (controller) => {
+            if (ended) return;
+            try {
+              const result = await this.read(true);
+              if (ended) return;
+              if (result.outcome !== "ok" || result.value.done || this.stopped) {
+                // The observer above owns terminal publication. A failed
+                // read can precede slow host cleanup; do not report it early.
+                await this.closed.promise;
+                return;
+              }
+              controller.enqueue(result.value.value);
+            } catch (error) {
+              this.stop(asFailure(error));
+              await this.closed.promise;
+            }
+          },
+          cancel: async (reason: unknown) => {
+            // Native cancel closes the consumer immediately, even on refusal.
+            // Mark that before callbacks, and stop host I/O on ABI refusal:
+            // this consumer can never resume to take responsibility for it.
+            ended = true;
+            await this.requestCancel("fetch_cancel",
+              reason === undefined ? "fetch stream cancelled by consumer" : message(reason), true);
+            const terminal = await this.closed.promise;
+            if (terminal.outcome !== "ok" && terminal.outcome !== "cancelled") {
+              throw bodyStreamError(terminal);
+            }
+            if (this.creditHeld) {
+              throw bodyStreamError(failure("fetch stream cleanup retained its owned task", "internal_failure"));
+            }
+          },
+        }, { highWaterMark: 0 });
+        this.bodyStream = stream;
+        return Outcomes.ok(stream);
+      } catch (error) {
+        ended = true;
+        this.bodyClaimed = false;
+        return asFailure(error);
+      }
     }
 
     finish(outcome: Outcome<void>): void {
@@ -585,7 +684,10 @@ export function createBrowserFetchManager(dependencies: {
       }
     }
 
-    async read(): Promise<Outcome<BrowserFetchRead>> {
+    async read(streamConsumer = false): Promise<Outcome<BrowserFetchRead>> {
+      if (this.bodyClaimed && !streamConsumer) {
+        return failure("fetch body has been transferred to a ReadableStream");
+      }
       if (this.completed) return this.terminalFailure ?? Outcomes.ok({ done: true });
       if (this.stopped) return this.stopped;
       if (this.reading) return failure("fetch already has a pending body read", "compatibility_rejected", true);
