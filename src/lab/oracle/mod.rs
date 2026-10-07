@@ -486,7 +486,8 @@ impl OracleSuite {
         }
 
         // GenServer reply history (br-asupersync-52hxjz), replayed whole on
-        // every hydration. A suite fed by hand keeps its events. Each `Reply`
+        // every hydration. It replaces the oracle's events; a suite fed by
+        // hand keeps them only while the runtime has recorded no reply. Each `Reply`
         // gets its own synthetic task, so calls to one server do not share an
         // entry. A reply still unresolved while its server runs is in flight,
         // not dropped, so a mid-run report leaves it out.
