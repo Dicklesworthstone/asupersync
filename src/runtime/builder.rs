@@ -135,6 +135,7 @@
 //! | [`adaptive_cancel_streak_epoch_steps`](RuntimeBuilder::adaptive_cancel_streak_epoch_steps) | 128 | Dispatches per adaptive epoch |
 //! | [`root_region_limits`](RuntimeBuilder::root_region_limits) | None | Admission limits for the root region |
 //! | [`observability`](RuntimeBuilder::observability) | None | Attach structured logging collectors |
+//! | [`scheduler_evidence_sink`](RuntimeBuilder::scheduler_evidence_sink) | None | Record the governor's scheduling decisions |
 //!
 //! # Error Handling
 //!
@@ -2626,6 +2627,8 @@ pub struct RuntimeBuilder {
     current_thread: bool,
     /// Optional bounded production poll/wake capture, installed before exposure.
     capture_schedules: bool,
+    /// Given to every worker before it starts (asupersync-7yq1pv item 2).
+    scheduler_evidence_sink: Option<Arc<dyn crate::evidence_sink::EvidenceSink>>,
 }
 
 impl RuntimeBuilder {
@@ -2644,6 +2647,7 @@ impl RuntimeBuilder {
             host_services: default_runtime_host_services(),
             current_thread: false,
             capture_schedules: false,
+            scheduler_evidence_sink: None,
         }
     }
 
@@ -2674,6 +2678,27 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn capture_schedules(mut self, enabled: bool) -> Self {
         self.capture_schedules = enabled;
+        self
+    }
+
+    /// Record the scheduling decisions of the Lyapunov governor into `sink`.
+    ///
+    /// Every worker emits one `scheduler` evidence entry each time it consults
+    /// the governor, which is once per scheduling turn (between snapshots the
+    /// cached suggestion still counts as a decision), plus the decision
+    /// contract's audit entries. Only a runtime with
+    /// [`enable_governor`](Self::enable_governor) consults the governor; without
+    /// it nothing is recorded. Each entry locks the runtime state for its
+    /// snapshot, so this is for audits and debugging, not steady production.
+    ///
+    /// Task-level budget and cancellation evidence is separate: attach a sink
+    /// to a context with [`Cx::with_evidence_sink`](crate::cx::Cx::with_evidence_sink).
+    #[must_use]
+    pub fn scheduler_evidence_sink(
+        mut self,
+        sink: Arc<dyn crate::evidence_sink::EvidenceSink>,
+    ) -> Self {
+        self.scheduler_evidence_sink = Some(sink);
         self
     }
 
@@ -3302,6 +3327,7 @@ impl RuntimeBuilder {
             host_services,
             current_thread,
             capture_schedules,
+            scheduler_evidence_sink,
         } = self;
         #[cfg(target_arch = "wasm32")]
         let _ = (platform_reactor, io_uring_capability_policy);
@@ -3359,6 +3385,7 @@ impl RuntimeBuilder {
             terminal_io_reactor_snapshot,
             host_services.as_ref(),
             current_thread,
+            scheduler_evidence_sink,
         )?;
         if capture_schedules {
             let trace = runtime
@@ -3966,6 +3993,7 @@ impl Runtime {
             None,
             host_services,
             false,
+            None,
         )
     }
 
@@ -3982,6 +4010,7 @@ impl Runtime {
         terminal_io_reactor_snapshot: Option<IoReactorCapabilitySnapshot>,
         host_services: &dyn RuntimeHostServices,
         current_thread: bool,
+        scheduler_evidence_sink: Option<Arc<dyn crate::evidence_sink::EvidenceSink>>,
     ) -> Result<Self, Error> {
         config.normalize();
         if let Some(monitor) = config.deadline_monitor.as_mut()
@@ -4020,6 +4049,7 @@ impl Runtime {
                 entropy_source,
                 terminal_io_reactor_snapshot,
                 host_services,
+                scheduler_evidence_sink,
             );
             let inner = Arc::new(inner);
             if let Some(pump) = host_services.browser_pump() {
@@ -4041,6 +4071,7 @@ impl Runtime {
                 entropy_source,
                 terminal_io_reactor_snapshot,
                 host_services,
+                scheduler_evidence_sink,
             );
             let inner = Arc::new(inner);
             if let Some(pump) = host_services.browser_pump() {
@@ -5997,6 +6028,7 @@ impl RuntimeInner {
         entropy_source: Option<Arc<dyn EntropySource>>,
         terminal_io_reactor_snapshot: Option<IoReactorCapabilitySnapshot>,
         host_services: &dyn RuntimeHostServices,
+        scheduler_evidence_sink: Option<Arc<dyn crate::evidence_sink::EvidenceSink>>,
     ) -> (Self, Vec<ThreeLaneWorker>) {
         // br-asupersync-8fuxnt: RuntimeConfig::runtime_state_shape routes
         // internally below — the Sharded shape constructs a ShardedState
@@ -6144,7 +6176,12 @@ impl RuntimeInner {
             } else {
                 None
             };
-        let workers = scheduler.take_workers();
+        let mut workers = scheduler.take_workers();
+        if let Some(sink) = scheduler_evidence_sink {
+            for worker in &mut workers {
+                worker.set_evidence_sink(Arc::clone(&sink));
+            }
+        }
 
         let deadline_monitor =
             host_services.start_deadline_monitor(&config, &state, scheduler.dispatch_task_table());
@@ -10550,6 +10587,53 @@ governor_interval = 80
         assert_eq!(runtime.config().governor_interval, 80);
     }
 
+    // asupersync-7yq1pv item 2: the builder gives its sink to every worker.
+    fn run_with_scheduler_evidence_sink(enable_governor: bool) -> Vec<String> {
+        use crate::evidence_sink::CollectorSink;
+
+        init_test_logging();
+        let sink = Arc::new(CollectorSink::new());
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(2)
+            .enable_governor(enable_governor)
+            .scheduler_evidence_sink(sink.clone())
+            .build()
+            .expect("runtime build");
+        let handle = runtime.handle();
+        let total = runtime.block_on(async move {
+            let mut total = 0u32;
+            for i in 0..8u32 {
+                total += handle.spawn(async move { i }).await;
+            }
+            total
+        });
+        assert_eq!(total, 28);
+        drop(runtime);
+        sink.entries()
+            .into_iter()
+            .map(|entry| entry.component)
+            .collect()
+    }
+
+    #[test]
+    fn scheduler_evidence_sink_records_governor_decisions() {
+        let components = run_with_scheduler_evidence_sink(true);
+        assert!(
+            !components.is_empty(),
+            "no scheduling decision was recorded"
+        );
+        assert!(
+            components.iter().any(|component| component == "scheduler"),
+            "{components:?}"
+        );
+    }
+
+    #[test]
+    fn scheduler_evidence_sink_records_nothing_without_the_governor() {
+        let components = run_with_scheduler_evidence_sink(false);
+        assert!(components.is_empty(), "{components:?}");
+    }
+
     #[cfg(feature = "config-file")]
     #[test]
     fn from_toml_str_with_programmatic_override() {
@@ -10907,6 +10991,7 @@ worker_threads = 16
             Some(expected),
             &NativeThreadHostServices::new(),
             false,
+            None,
         )
         .expect("runtime construction continues without a reactor");
 

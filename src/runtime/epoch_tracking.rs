@@ -4,6 +4,9 @@
 //! for the deferred cleanup system. The design focuses on minimal contention
 //! and integration with structured concurrency.
 //!
+//! Nothing in the runtime uses these types, including the deferred cleanup
+//! system in [`epoch_gc`](super::epoch_gc) (asupersync-7yq1pv item 5).
+//!
 //! # Architecture
 //!
 //! - [`GlobalEpochCounter`]: Monotonic global epoch with rate-limited advancement
