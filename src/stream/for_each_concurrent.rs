@@ -57,7 +57,7 @@
 
 use super::Stream;
 use crate::combinator::JoinSet;
-use crate::cx::{CancelWakerToken, Cx};
+use crate::cx::{CancelWakerToken, ChildRegion, Cx};
 use crate::runtime::yield_now;
 use crate::types::policy::FailFast;
 use crate::types::{CancelReason, Outcome, PanicPayload};
@@ -200,13 +200,54 @@ where
     Fut: Future<Output = Result<(), E>> + Send + 'static,
     E: Send + 'static,
 {
+    drive(cx, cx, None, stream, limit, f).await
+}
+
+impl ChildRegion {
+    /// Uses the same stream driver inside an explicitly owned work subtree.
+    /// The owner still supplies cancellation and source-poll authority; only
+    /// task admission uses the region's principal. The caller must close the
+    /// region after this returns to observe descendant/finalizer quiescence.
+    pub(crate) async fn for_each_stream<S, F, Fut, E>(
+        &self,
+        owner: &Cx,
+        stream: S,
+        limit: usize,
+        f: F,
+    ) -> Outcome<(), E>
+    where
+        S: Stream + Unpin,
+        S::Item: Send + 'static,
+        F: FnMut(Cx, S::Item) -> Fut + Clone + Send + 'static,
+        Fut: Future<Output = Result<(), E>> + Send + 'static,
+        E: Send + 'static,
+    {
+        drive(owner, self.cx(), Some(self), stream, limit, f).await
+    }
+}
+
+async fn drive<S, F, Fut, E>(
+    cx: &Cx,
+    spawn_cx: &Cx,
+    boundary: Option<&ChildRegion>,
+    stream: S,
+    limit: usize,
+    f: F,
+) -> Outcome<(), E>
+where
+    S: Stream + Unpin,
+    S::Item: Send + 'static,
+    F: FnMut(Cx, S::Item) -> Fut + Clone + Send + 'static,
+    Fut: Future<Output = Result<(), E>> + Send + 'static,
+    E: Send + 'static,
+{
     assert!(
         limit > 0,
         "try_for_each_concurrent limit must be non-zero; a zero limit can never make progress"
     );
 
     let mut stream = stream;
-    let mut set: JoinSet<'static, (), E, FailFast> = JoinSet::in_cx(cx);
+    let mut set: JoinSet<'static, (), E, FailFast> = JoinSet::in_cx(spawn_cx);
     let mut source_done = false;
     let mut admissions_since_yield = 0usize;
     let mut terminal: Option<Outcome<(), E>> = None;
@@ -293,7 +334,7 @@ where
                             break 'drive;
                         }
                     };
-                    if let Err(err) = set.spawn(cx, move |item_cx| make(item_cx, item)) {
+                    if let Err(err) = set.spawn(spawn_cx, move |item_cx| make(item_cx, item)) {
                         // A member could not be admitted to the region. This is
                         // structural misuse (no spawn gateway on this `Cx`),
                         // not an item error, and there is no `E` to describe
@@ -360,6 +401,21 @@ where
                 }
                 break 'drive;
             }
+        }
+    }
+
+    // A scoped member can await one of its descendants while cleaning up.
+    // Cancel the whole subtree BEFORE joining direct members, otherwise that
+    // descendant may never receive cancellation and the direct join can hang.
+    // Legacy callers share a region and deliberately do not take this path.
+    if terminal.is_some() {
+        if let Some(boundary) = boundary {
+            let reason = cx.cancel_reason().unwrap_or_else(|| {
+                CancelReason::user("scoped stream: draining work subtree")
+            });
+            // Runtime loss is reported by the owner's subsequent close. Never
+            // bypass direct handle retirement because cancellation enqueue failed.
+            let _ = boundary.cancel(reason);
         }
     }
 
