@@ -12489,4 +12489,570 @@ mod tests {
             });
         }
     }
+
+    // ─── br-asupersync-postgres-client-audit-r10-xi63yt ─────────────────
+
+    /// Read one frontend message (type byte and body) from the peer.
+    fn read_frontend_frame(peer: &mut std::net::TcpStream) -> (u8, Vec<u8>) {
+        use std::io::Read;
+
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .expect("set_read_timeout");
+        let mut header = [0u8; 5];
+        peer.read_exact(&mut header).expect("frontend header");
+        let len = u32::from_be_bytes([header[1], header[2], header[3], header[4]]);
+        let mut body = vec![0u8; usize::try_from(len).expect("frame length") - 4];
+        peer.read_exact(&mut body).expect("frontend body");
+        (header[0], body)
+    }
+
+    fn reply_complete(peer: &mut std::net::TcpStream, tag: &str, status: u8) {
+        std::io::Write::write_all(peer, &command_complete_message(tag))
+            .expect("write command complete");
+        std::io::Write::write_all(peer, &ready_for_query(status)).expect("write ready");
+    }
+
+    fn reply_parse_bind_complete(peer: &mut std::net::TcpStream) {
+        std::io::Write::write_all(peer, &backend_message(b'1', b"")).expect("parse complete");
+        std::io::Write::write_all(peer, &backend_message(b'2', b"")).expect("bind complete");
+    }
+
+    fn server_error_code<T>(outcome: Outcome<T, PgError>) -> Option<String> {
+        match outcome {
+            Outcome::Err(PgError::Server { code, .. }) => Some(code),
+            _ => None,
+        }
+    }
+
+    fn server_error_with_code(code: &str) -> PgError {
+        PgError::Server {
+            code: code.to_string(),
+            message: String::new(),
+            detail: None,
+            hint: None,
+            diagnostic: PgErrorDiagnostic::default(),
+        }
+    }
+
+    /// M1: a transaction dropped in a failed block (a `?` return after a
+    /// statement error) is rolled back before the managed SET
+    /// statement_timeout. The SET went first, failed with 25P02 inside the
+    /// aborted block, and so did every later call on the parameterized APIs.
+    #[test]
+    fn a_dropped_failed_transaction_is_rolled_back_before_the_statement_timeout_set() {
+        init_test("a_dropped_failed_transaction_is_rolled_back_before_the_statement_timeout_set");
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let cx = Cx::for_testing();
+        conn.set_statement_timeout_override(Some(std::time::Duration::from_millis(500)));
+        // As a PgTransaction dropped after a failed statement leaves it.
+        conn.inner.transaction_status = b'E';
+        conn.inner.needs_rollback = true;
+        conn.inner.needs_discard = true;
+
+        let responder = std::thread::spawn(move || {
+            let (kind, body) = read_frontend_frame(&mut peer);
+            assert!(
+                kind == b'Q' && contains_subslice(&body, b"ROLLBACK"),
+                "the orphan ROLLBACK goes first, got {:?}",
+                String::from_utf8_lossy(&body)
+            );
+            reply_complete(&mut peer, "ROLLBACK", b'I');
+            let _ = read_until_contains(&mut peer, b"SET statement_timeout = 500");
+            reply_complete(&mut peer, "SET", b'I');
+            let _ = read_until_contains(&mut peer, b"SELECT 1");
+            reply_parse_bind_complete(&mut peer);
+            reply_complete(&mut peer, "SELECT 1", b'I');
+            peer
+        });
+
+        match run(conn.execute_params(&cx, "SELECT 1", &[])) {
+            Outcome::Ok(_) => {}
+            other => panic!("the statement runs after the rollback, got {other:?}"),
+        }
+        let _peer = responder.join().expect("responder thread");
+        assert_eq!(conn.inner.transaction_status, b'I');
+        assert!(!conn.inner.needs_rollback);
+        assert_eq!(conn.inner.applied_statement_timeout_ms, Some(500));
+    }
+
+    /// M1: in the caller's own failed block a SET can only fail, and it
+    /// turned the caller's ROLLBACK TO SAVEPOINT into a 25P02 error. No SET
+    /// is sent there.
+    #[test]
+    fn rollback_to_savepoint_in_a_failed_block_is_not_preceded_by_a_set() {
+        init_test("rollback_to_savepoint_in_a_failed_block_is_not_preceded_by_a_set");
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let cx = Cx::for_testing();
+        conn.set_statement_timeout_override(Some(std::time::Duration::from_millis(500)));
+        conn.inner.transaction_status = b'E';
+
+        let responder = std::thread::spawn(move || {
+            let (kind, body) = read_frontend_frame(&mut peer);
+            assert!(
+                kind == b'P' && contains_subslice(&body, b"ROLLBACK TO SAVEPOINT sp"),
+                "the savepoint rollback is sent first, got {:?}",
+                String::from_utf8_lossy(&body)
+            );
+            reply_parse_bind_complete(&mut peer);
+            reply_complete(&mut peer, "ROLLBACK", b'T');
+            peer
+        });
+
+        match run(conn.execute_params(&cx, "ROLLBACK TO SAVEPOINT sp", &[])) {
+            Outcome::Ok(_) => {}
+            other => panic!("the savepoint rollback runs, got {other:?}"),
+        }
+        let _peer = responder.join().expect("responder thread");
+        assert_eq!(conn.inner.transaction_status, b'T');
+    }
+
+    /// M2: streams and COPY FROM STDIN reconcile the session's
+    /// statement_timeout like every other query. They ran under whatever
+    /// the previous query left: after a query with 150 ms of budget, a
+    /// stream with no deadline was cancelled by the server at 150 ms.
+    fn assert_statement_timeout_reset_before(operation: &str) {
+        let cx = Cx::for_testing();
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        // Left by an earlier query that ran with 150 ms of budget.
+        conn.inner.applied_statement_timeout_ms = Some(150);
+
+        let responder = std::thread::spawn(move || {
+            let request = read_until_contains(&mut peer, b"SET statement_timeout TO DEFAULT");
+            assert!(
+                !contains_subslice(&request, b"big"),
+                "the SET goes before the statement"
+            );
+            reply_complete(&mut peer, "SET", b'I');
+            let _ = read_until_contains(&mut peer, b"big");
+            std::io::Write::write_all(
+                &mut peer,
+                &error_response_message("42P01", "relation \"big\" does not exist"),
+            )
+            .expect("write error");
+            std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).expect("ready");
+            peer
+        });
+
+        let code = match operation {
+            "query_stream" => match run(conn.query_stream(&cx, "SELECT * FROM big")) {
+                Outcome::Ok(mut stream) => server_error_code(run(stream.next(&cx))),
+                other => server_error_code(other),
+            },
+            "query_stream_params" => {
+                match run(conn.query_stream_params(&cx, "SELECT * FROM big", &[])) {
+                    Outcome::Ok(mut stream) => server_error_code(run(stream.next(&cx))),
+                    other => server_error_code(other),
+                }
+            }
+            _ => server_error_code(run(conn.copy_in(&cx, "COPY big FROM STDIN"))),
+        };
+        let _peer = responder.join().expect("responder thread");
+        assert_eq!(code.as_deref(), Some("42P01"), "{operation}");
+        assert_eq!(conn.inner.applied_statement_timeout_ms, None, "{operation}");
+        assert!(!conn.inner.statement_timeout_uncertain, "{operation}");
+    }
+
+    #[test]
+    fn query_stream_resets_a_statement_timeout_an_earlier_query_left() {
+        init_test("query_stream_resets_a_statement_timeout_an_earlier_query_left");
+        assert_statement_timeout_reset_before("query_stream");
+    }
+
+    #[test]
+    fn query_stream_params_resets_a_statement_timeout_an_earlier_query_left() {
+        init_test("query_stream_params_resets_a_statement_timeout_an_earlier_query_left");
+        assert_statement_timeout_reset_before("query_stream_params");
+    }
+
+    #[test]
+    fn copy_in_resets_a_statement_timeout_an_earlier_query_left() {
+        init_test("copy_in_resets_a_statement_timeout_an_earlier_query_left");
+        assert_statement_timeout_reset_before("copy_in");
+    }
+
+    /// M4: after another session altered a table, PostgreSQL refuses a
+    /// cached plan whose result type changed (0A000). The statement leaves
+    /// the cache and is deallocated, so the next prepare parses it again;
+    /// prepare used to keep returning it, and every call failed.
+    #[test]
+    fn a_cached_statement_with_a_stale_plan_leaves_the_cache() {
+        init_test("a_cached_statement_with_a_stale_plan_leaves_the_cache");
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let cx = Cx::for_testing();
+        let sql = "SELECT * FROM t";
+        let stmt = PgStatement {
+            name: "__asupersync_s7".to_string(),
+            sql: sql.to_string(),
+            param_oids: Vec::new(),
+            columns: Vec::new(),
+            session_generation: 0,
+        };
+        assert_eq!(
+            conn.inner
+                .prepared_cache
+                .insert_returning_evicted_name(sql.to_string(), stmt.clone()),
+            None
+        );
+
+        let responder = std::thread::spawn(move || {
+            let _ = read_until_contains(&mut peer, b"__asupersync_s7");
+            std::io::Write::write_all(
+                &mut peer,
+                &error_response_message("0A000", "cached plan must not change result type"),
+            )
+            .expect("write error");
+            std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).expect("ready");
+            peer
+        });
+
+        assert_eq!(
+            server_error_code(run(conn.query_prepared(&cx, &stmt, &[]))).as_deref(),
+            Some("0A000")
+        );
+        let _peer = responder.join().expect("responder thread");
+        assert!(
+            conn.inner.prepared_cache.get_and_touch(sql).is_none(),
+            "the statement left the cache"
+        );
+        assert!(
+            conn.inner
+                .deallocate_retry_queue
+                .iter()
+                .any(|name| name == "__asupersync_s7"),
+            "the statement is deallocated"
+        );
+    }
+
+    /// L1: a row stream fails on a COPY response. It used to skip
+    /// CopyInResponse and wait forever for rows (or skip CopyData and
+    /// report success).
+    #[test]
+    fn a_row_stream_fails_on_a_copy_response() {
+        init_test("a_row_stream_fails_on_a_copy_response");
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let cx = Cx::for_testing();
+
+        let responder = std::thread::spawn(move || {
+            use std::io::Read;
+
+            let _ = read_until_contains(&mut peer, b"COPY t FROM STDIN");
+            std::io::Write::write_all(
+                &mut peer,
+                &copy_in_response_message(Format::Text, &[Format::Text]),
+            )
+            .expect("write CopyInResponse");
+            // Until the client closes, or for the 2 s read timeout; then
+            // close, so a client that keeps waiting reads EOF and the test
+            // ends either way.
+            let mut byte = [0u8; 1];
+            let _ = peer.read(&mut byte);
+        });
+
+        let Outcome::Ok(mut stream) = run(conn.query_stream(&cx, "COPY t FROM STDIN")) else {
+            panic!("the COPY is sent");
+        };
+        match run(stream.next(&cx)) {
+            Outcome::Err(PgError::Protocol(message)) => assert!(
+                message.contains("unexpected backend message in streaming query response: 'G'"),
+                "{message}"
+            ),
+            other => panic!("expected the stream to refuse CopyInResponse, got {other:?}"),
+        }
+        drop(stream);
+        responder.join().expect("responder thread");
+        assert!(conn.inner.closed, "the connection is not reused mid-COPY");
+    }
+
+    /// L1: a SET run through a stream marks the session for discard on pool
+    /// return, as the query loops do. Streams ignored command tags.
+    #[test]
+    fn a_set_run_through_a_stream_marks_the_session_for_discard() {
+        init_test("a_set_run_through_a_stream_marks_the_session_for_discard");
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let cx = Cx::for_testing();
+
+        let responder = std::thread::spawn(move || {
+            let _ = read_until_contains(&mut peer, b"SET ROLE admin");
+            reply_complete(&mut peer, "SET", b'I');
+            peer
+        });
+
+        let Outcome::Ok(mut stream) = run(conn.query_stream(&cx, "SET ROLE admin")) else {
+            panic!("the SET is sent");
+        };
+        match run(stream.next(&cx)) {
+            Outcome::Ok(None) => {}
+            other => panic!("the stream ends cleanly, got {other:?}"),
+        }
+        drop(stream);
+        let _peer = responder.join().expect("responder thread");
+        assert!(conn.inner.needs_discard);
+    }
+
+    /// L2: statement_timeout is an int setting. A budget past INT_MAX ms
+    /// (here a 30-day override) is sent as INT_MAX. The larger value was
+    /// refused by the server (22023), failing this query and every later one.
+    #[test]
+    fn a_statement_timeout_past_int_max_is_sent_as_int_max() {
+        init_test("a_statement_timeout_past_int_max_is_sent_as_int_max");
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let cx = Cx::for_testing();
+        conn.set_statement_timeout_override(Some(std::time::Duration::from_secs(30 * 86_400)));
+
+        let responder = std::thread::spawn(move || {
+            let _ = read_until_contains(&mut peer, b"SET statement_timeout = 2147483647\0");
+            reply_complete(&mut peer, "SET", b'I');
+            let _ = read_until_contains(&mut peer, b"INSERT INTO t VALUES (1)");
+            reply_complete(&mut peer, "INSERT 0 1", b'I');
+            peer
+        });
+
+        match run(conn.execute_unchecked(&cx, "INSERT INTO t VALUES (1)")) {
+            Outcome::Ok(affected) => assert_eq!(affected, 1),
+            other => panic!("expected the insert to run, got {other:?}"),
+        }
+        let _peer = responder.join().expect("responder thread");
+        assert_eq!(conn.inner.applied_statement_timeout_ms, Some(2_147_483_647));
+    }
+
+    /// L4: rollback() with an already-cancelled Cx sends its ROLLBACK,
+    /// masked for a bounded number of polls as cleanup is. It used to stop
+    /// at its first checkpoint, leaving the transaction and its locks open.
+    #[test]
+    fn rollback_with_a_cancelled_cx_still_rolls_back() {
+        init_test("rollback_with_a_cancelled_cx_still_rolls_back");
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let cx = Cx::for_testing();
+
+        let responder = std::thread::spawn(move || {
+            let _ = read_until_contains(&mut peer, b"BEGIN");
+            reply_complete(&mut peer, "BEGIN", b'T');
+            let _ = read_until_contains(&mut peer, b"ROLLBACK");
+            reply_complete(&mut peer, "ROLLBACK", b'I');
+            peer
+        });
+
+        let tx = match run(conn.begin(&cx)) {
+            Outcome::Ok(tx) => tx,
+            Outcome::Err(err) => panic!("BEGIN failed: {err}"),
+            _ => panic!("BEGIN did not complete"),
+        };
+        cx.cancel_fast(CancelKind::User);
+        match run(tx.rollback(&cx)) {
+            Outcome::Ok(()) => {}
+            other => panic!("the rollback runs, got {other:?}"),
+        }
+        let _peer = responder.join().expect("the ROLLBACK reached the server");
+        assert_eq!(conn.inner.transaction_status, b'I');
+        assert!(!conn.inner.needs_rollback);
+    }
+
+    /// L6: bytea text in the escape output format (bytea_output = 'escape')
+    /// is decoded. It came back as the escaped text itself.
+    #[test]
+    fn bytea_escape_output_is_decoded() {
+        init_test("bytea_escape_output_is_decoded");
+        let escaped: &[u8] = br"a\\b\000\377z";
+        assert_eq!(
+            <Vec<u8> as FromSql>::from_sql(escaped, oid::BYTEA, Format::Text)
+                .expect("escape output decodes"),
+            b"a\\b\x00\xffz".to_vec()
+        );
+        assert_eq!(
+            <Vec<u8> as FromSql>::from_sql(br"\x6162", oid::BYTEA, Format::Text)
+                .expect("hex output decodes"),
+            b"ab".to_vec()
+        );
+        assert!(<Vec<u8> as FromSql>::from_sql(br"bad\q", oid::BYTEA, Format::Text).is_err());
+        // A text column read as bytes keeps its text.
+        assert_eq!(
+            <Vec<u8> as FromSql>::from_sql(br"C:\path", oid::TEXT, Format::Text)
+                .expect("text is kept"),
+            br"C:\path".to_vec()
+        );
+
+        let (conn, _peer) = make_test_connection_with_peer();
+        assert!(matches!(
+            conn.parse_text_value(escaped, oid::BYTEA),
+            Ok(PgValue::Bytes(bytes)) if bytes == b"a\\b\x00\xffz"
+        ));
+    }
+
+    /// L7: as in libpq, connect_timeout=0 means wait indefinitely. It used to
+    /// be a zero deadline that failed every connect at once.
+    #[test]
+    fn connect_timeout_zero_means_no_timeout() {
+        init_test("connect_timeout_zero_means_no_timeout");
+        let options = PgConnectOptions::parse("postgres://u@localhost/db?connect_timeout=0")
+            .expect("connect_timeout=0 parses");
+        assert_eq!(options.connect_timeout, None);
+        let options = PgConnectOptions::parse("postgres://u@localhost/db?connect_timeout=5")
+            .expect("connect_timeout=5 parses");
+        assert_eq!(
+            options.connect_timeout,
+            Some(std::time::Duration::from_secs(5))
+        );
+    }
+
+    /// L8: SQLSTATE classes are compared as bytes. A hostile server's
+    /// non-ASCII code made the public classifiers panic slicing a str
+    /// inside a character.
+    #[test]
+    fn error_classifiers_do_not_panic_on_a_non_ascii_sqlstate() {
+        init_test("error_classifiers_do_not_panic_on_a_non_ascii_sqlstate");
+        let hostile = server_error_with_code("a\u{e9}000");
+        assert!(!hostile.is_constraint_violation());
+        assert!(!hostile.is_connection_error());
+        assert!(!hostile.is_transient());
+        assert!(!hostile.is_retryable());
+
+        assert!(server_error_with_code("23505").is_constraint_violation());
+        assert!(server_error_with_code("08006").is_connection_error());
+        assert!(server_error_with_code("40001").is_transient());
+        assert!(server_error_with_code("53300").is_transient());
+        assert!(!server_error_with_code("2").is_constraint_violation());
+    }
+
+    /// L8: interval fields at i32::MIN render instead of overflowing abs()
+    /// (a panic in debug builds).
+    #[test]
+    fn an_interval_at_i32_min_renders() {
+        init_test("an_interval_at_i32_min_renders");
+        let text = render_interval_text(i32::MIN, i32::MIN, 0);
+        assert!(text.contains("-2147483648 mons"), "{text}");
+        assert!(text.contains("-2147483648 days"), "{text}");
+    }
+
+    /// L8: ParameterStatus reports are bounded in size and count; a hostile
+    /// server could grow the map while the connection idled.
+    #[test]
+    fn server_parameter_status_reports_are_bounded() {
+        init_test("server_parameter_status_reports_are_bounded");
+        let (mut conn, _peer) = make_test_connection_with_peer();
+        let status = |name: &str, value: &str| {
+            let mut body = Vec::with_capacity(name.len() + value.len() + 2);
+            body.extend_from_slice(name.as_bytes());
+            body.push(0);
+            body.extend_from_slice(value.as_bytes());
+            body.push(0);
+            body
+        };
+
+        conn.handle_parameter_status(&status("TimeZone", "UTC"))
+            .expect("a normal report is kept");
+        assert_eq!(conn.parameter("TimeZone"), Some("UTC"));
+        let huge = "x".repeat(MAX_SERVER_PARAMETER_BYTES);
+        assert!(
+            conn.handle_parameter_status(&status("app.big", &huge))
+                .is_err()
+        );
+        for index in 1..MAX_SERVER_PARAMETERS {
+            conn.handle_parameter_status(&status(&format!("p{index}"), "v"))
+                .expect("within the count bound");
+        }
+        assert_eq!(conn.inner.parameters.len(), MAX_SERVER_PARAMETERS);
+        assert!(
+            conn.handle_parameter_status(&status("one.more", "v"))
+                .is_err(),
+            "a new name past the bound is refused"
+        );
+        conn.handle_parameter_status(&status("TimeZone", "Europe/Paris"))
+            .expect("a kept name can still change");
+        assert_eq!(conn.parameter("TimeZone"), Some("Europe/Paris"));
+    }
+
+    /// H1: prepare() lets the server infer parameter types. A binary i64
+    /// bound where it inferred double precision has the same width, so the
+    /// server stored 100i64 as 4.94e-322 without an error. Integer/float
+    /// pairs are refused before anything is written; a NULL still binds.
+    #[test]
+    fn prepared_statements_refuse_an_integer_bound_to_a_float_parameter() {
+        init_test("prepared_statements_refuse_an_integer_bound_to_a_float_parameter");
+        let (mut conn, peer) = make_test_connection_with_peer();
+        let cx = Cx::for_testing();
+        let stmt = PgStatement {
+            name: "s1".to_string(),
+            sql: "INSERT INTO t(price) VALUES ($1)".to_string(),
+            param_oids: vec![oid::FLOAT8],
+            columns: Vec::new(),
+            session_generation: 0,
+        };
+        // Answers whatever reaches it within 1 s, so a client that sends the
+        // Bind gets a reply instead of waiting forever.
+        let answer = |mut peer: std::net::TcpStream| {
+            std::thread::spawn(move || {
+                use std::io::Read;
+
+                peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                    .expect("set_read_timeout");
+                let mut chunk = [0u8; 512];
+                let sent = matches!(peer.read(&mut chunk), Ok(n) if n > 0);
+                if sent {
+                    reply_parse_bind_complete(&mut peer);
+                    reply_complete(&mut peer, "INSERT 0 1", b'I');
+                }
+                (sent, peer)
+            })
+        };
+
+        let responder = answer(peer);
+        let outcome = run(conn.execute_prepared(&cx, &stmt, &[&100i64]));
+        let (sent, peer) = responder.join().expect("responder thread");
+        match outcome {
+            Outcome::Err(PgError::Protocol(message)) => {
+                assert!(message.contains("parameter $1"), "{message}");
+            }
+            other => panic!("expected the bind to be refused, got {other:?}"),
+        }
+        assert!(!sent, "nothing reached the server");
+        assert!(!conn.inner.closed);
+
+        let responder = answer(peer);
+        let outcome = run(conn.execute_prepared(&cx, &stmt, &[&None::<i64>]));
+        let (sent, _peer) = responder.join().expect("responder thread");
+        assert!(sent);
+        match outcome {
+            Outcome::Ok(affected) => assert_eq!(affected, 1),
+            other => panic!("a NULL binds, got {other:?}"),
+        }
+    }
+
+    /// 91hka0 item 12: an OID above 2^31 in text form failed i32 parsing,
+    /// which failed the whole row. It keeps its bits, as in binary form.
+    #[test]
+    fn an_oid_above_two_to_the_31_decodes_in_text_as_in_binary() {
+        init_test("an_oid_above_two_to_the_31_decodes_in_text_as_in_binary");
+        let (conn, _peer) = make_test_connection_with_peer();
+        let large_oid: u32 = 3_000_000_000;
+        let text = conn.parse_text_value(large_oid.to_string().as_bytes(), oid::OID);
+        assert!(
+            matches!(text, Ok(PgValue::Int4(value)) if value == large_oid.cast_signed()),
+            "{text:?}"
+        );
+        let binary = conn.parse_binary_value(&large_oid.to_be_bytes(), oid::OID);
+        assert!(
+            matches!(binary, Ok(PgValue::Int4(value)) if value == large_oid.cast_signed()),
+            "{binary:?}"
+        );
+        assert_eq!(
+            <i32 as FromSql>::from_sql(b"3000000000", oid::OID, Format::Text)
+                .expect("an oid in text decodes"),
+            large_oid.cast_signed()
+        );
+        assert!(
+            <i32 as FromSql>::from_sql(b"3000000000", oid::INT4, Format::Text).is_err(),
+            "an int4 stays signed"
+        );
+    }
+
+    /// 91hka0 item 12: MERGE (PostgreSQL 15 and later) reports its row count;
+    /// it reported 0.
+    #[test]
+    fn merge_reports_its_row_count() {
+        init_test("merge_reports_its_row_count");
+        assert_eq!(
+            PgConnection::affected_rows_from_command_tag("MERGE 3"),
+            Some(3)
+        );
+    }
 }
