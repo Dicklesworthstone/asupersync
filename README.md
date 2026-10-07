@@ -337,13 +337,13 @@ The lab runtime provides:
 - **Deterministic scheduling**: same seed → same execution
 - **Trace capture/replay**: debug production issues locally
 - **Schedule exploration**: race-guided deterministic seed exploration with Mazurkiewicz/Foata trace-class deduplication
-- **Invariant oracles**: every `LabRuntime` report checks 9 of the 24 built-in
+- **Invariant oracles**: every `LabRuntime` report checks 10 of the 24 built-in
   oracles from runtime state: task leak, obligation leak, quiescence, loser
   drain, finalizer, region tree, deadline monotonicity, the cancellation
-  protocol and DOWN-message order
+  protocol, DOWN-message order and managed-supervisor restarts
   (`lab::oracle::LAB_RUNTIME_FED_ORACLE_NAMES`). Nothing in the runtime feeds
-  the other 15 yet (channel atomicity, waker dedup, actor and supervision
-  oracles among them); reports list them as passed and count them as not fed
+  the other 14 yet (channel atomicity, waker dedup and the actor oracles among
+  them); reports list them as passed and count them as not fed
   (asupersync-52hxjz).
 
 Concurrency bugs become reproducible test failures.

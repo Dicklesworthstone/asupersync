@@ -2448,12 +2448,18 @@ impl LabRuntime {
             state.trace_handle(),
         ));
         let spawn_liveness = Arc::new(());
-        state.set_spawn_gateway(Arc::new(crate::runtime::spawn_mailbox::SpawnGateway::new(
-            Arc::clone(&spawn_mailbox),
-            Arc::new(|| {}),
-            state.timer_driver_handle(),
-            Arc::downgrade(&spawn_liveness),
-        )));
+        // Managed supervisors record restart history for the supervision
+        // oracle (br-asupersync-52hxjz).
+        let supervision_history = state.supervision_history_handle();
+        state.set_spawn_gateway(Arc::new(
+            crate::runtime::spawn_mailbox::SpawnGateway::new(
+                Arc::clone(&spawn_mailbox),
+                Arc::new(|| {}),
+                state.timer_driver_handle(),
+                Arc::downgrade(&spawn_liveness),
+            )
+            .with_supervision_history(supervision_history),
+        ));
         // Obligation mailbox (br-asupersync-bi2462.13): drained at the start
         // of every step next to spawn admissions, so token reserve/commit/
         // abort/leak posts reach `RuntimeState` deterministically.
