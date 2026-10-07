@@ -99,6 +99,15 @@ where
             match selected {
                 Ok(outcome) => outcome,
                 Err(stopped) => {
+                    // A stop observed during owner cancellation must not turn
+                    // shutdown into a new application error. Panics still win.
+                    let stopped = if !matches!(&stopped, Outcome::Panicked(_))
+                        && cx.is_cancel_requested()
+                    {
+                        Outcome::Cancelled(owner_reason(cx))
+                    } else {
+                        stopped
+                    };
                     // Fence source admission BEFORE invoking any cancellation
                     // callback. The driver can observe EOF even with no members
                     // and a source that would otherwise never wake again.
@@ -106,9 +115,12 @@ where
                     // Descendant cleanup may unblock a direct member's join.
                     // Runtime loss is reported by close, not by skipping joins.
                     let _ = region.cancel(CancelReason::fail_fast());
-                    match work.await {
-                        failure @ (Outcome::Err(_) | Outcome::Panicked(_)) => failure,
-                        _ => stopped,
+                    match (work.await, stopped) {
+                        (Outcome::Panicked(payload), _) | (_, Outcome::Panicked(payload)) => {
+                            Outcome::Panicked(payload)
+                        }
+                        (failure @ Outcome::Err(_), _) => failure,
+                        (_, stopped) => stopped,
                     }
                 }
             }

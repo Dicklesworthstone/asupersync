@@ -6,7 +6,8 @@
 //!
 //! Bead: asupersync-dx-core-api-v2-u1z5hn.8 (bounded stream task composition).
 
-use super::stream_collect::{ScopedStreamError, try_for_each_concurrent_scoped};
+use super::stream_collect::ScopedStreamError;
+use super::stream_control::try_for_each_concurrent_scoped_until;
 use crate::channel::mpsc::{CheckedSendError, SendError, Sender};
 use crate::cx::Cx;
 use crate::stream::{Stream, StreamExt};
@@ -18,7 +19,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::Poll;
 
-/// A mapping failure or a checked refusal to publish its output.
+/// A mapping failure, checked delivery refusal, or closed destination.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum StreamSendError<E, T> {
@@ -26,6 +27,9 @@ pub enum StreamSendError<E, T> {
     Map(E),
     /// The channel or runtime refused publication, retaining that output.
     Delivery(CheckedSendError<T>),
+    /// The receiver closed before a delivery failure or completion was observed.
+    /// No particular output is returned; admitted work is cancelled and drained.
+    DestinationClosed,
 }
 
 impl<E: std::fmt::Display, T> std::fmt::Display for StreamSendError<E, T> {
@@ -33,6 +37,7 @@ impl<E: std::fmt::Display, T> std::fmt::Display for StreamSendError<E, T> {
         match self {
             Self::Map(error) => write!(f, "stream mapping failed: {error}"),
             Self::Delivery(error) => write!(f, "stream output refused: {error}"),
+            Self::DestinationClosed => f.write_str("stream destination closed"),
         }
     }
 }
@@ -46,6 +51,7 @@ where
         match self {
             Self::Map(error) => Some(error),
             Self::Delivery(error) => Some(error),
+            Self::DestinationClosed => None,
         }
     }
 }
@@ -69,9 +75,17 @@ where
 /// context's authoritative obligation admission and preserve the rejected value
 /// in a `Delivery` error. The first observed failure stops new admission, cancels
 /// the work subtree, and joins direct tasks, descendants, and finalizers before
-/// returning, following [`try_for_each_concurrent_scoped`]. Cleanup failure may
+/// returning, following [`try_for_each_concurrent_scoped_until`]. Cleanup failure may
 /// supersede the original item error. Other unpublished outputs are discarded
 /// during drain; this is not a recovery log for every item.
+///
+/// Receiver closure is independently observed even with no source item ready or
+/// all mappers blocked. It stops admission and requests cooperative subtree
+/// cancellation, returning `DestinationClosed` unless a work/cleanup failure
+/// takes precedence. An already-closed destination refuses BEFORE source polling
+/// or mapper invocation, including for an empty source. A delivery failure that
+/// the task driver has already selected keeps its rejected value. Closure only
+/// after direct work completes does not retroactively fail accepted output.
 ///
 /// Already accepted outputs are never rolled back, even on later failure. They
 /// may be received BEFORE subtree cleanup finishes and must not depend on a
@@ -124,9 +138,10 @@ where
 ///
 /// Output publication is not transactional with later subtree cleanup. Already
 /// accepted values remain visible, and other unpublished values are discarded
-/// during cancellation/drain. Destination closure is detected when publication
-/// is attempted; it does not forcibly interrupt an unfinished mapper. The item
-/// and resource-lifetime bounds of the unordered variant apply unchanged.
+/// during cancellation/drain. Receiver closure also cancels unfinished mappers
+/// and ordered-publication waits even when no send is attempted. This is
+/// cooperative cancellation, not forced preemption. The item and resource-
+/// lifetime bounds of the unordered variant apply unchanged.
 ///
 /// ```no_run
 /// # async fn example(cx: &asupersync::Cx) {
@@ -215,6 +230,10 @@ where
     T: Send + 'static,
     E: Send + 'static,
 {
+    let closed = async move {
+        sender.closed().await;
+        StreamSendError::DestinationClosed
+    };
     let sender = sender.clone();
     let mut previous = None;
     let stream = stream.map(move |item| {
@@ -222,7 +241,7 @@ where
         let predecessor = std::mem::replace(&mut previous, published.clone());
         (item, predecessor, published)
     });
-    try_for_each_concurrent_scoped(cx, stream, limit, move |child, (item, before, after)| {
+    try_for_each_concurrent_scoped_until(cx, stream, limit, closed, move |child, (item, before, after)| {
         let sender = sender.clone();
         let mapped = map(child.clone(), item);
         async move {
@@ -374,14 +393,22 @@ mod tests {
     fn disconnected_destination_returns_the_non_clone_output() {
         let ((), report) = run_async_under_lab(0x5E04, |cx| async move {
             let (sender, receiver) = mpsc::channel(1);
-            drop(receiver);
+            let receiver = Arc::new(parking_lot::Mutex::new(Some(receiver)));
             let live = Arc::new(AtomicUsize::new(0));
             let mapper_live = Arc::clone(&live);
             let outcome = try_map_send_concurrent_scoped(
                 &cx, iter([7]), 1, &sender,
                 move |_child, index| {
                     let live = Arc::clone(&mapper_live);
-                    async move { Ok::<_, &'static str>(Value::new(index, live)) }
+                    let receiver = Arc::clone(&receiver);
+                    async move {
+                        let value = Value::new(index, live);
+                        // Publish a real delivery refusal before this task
+                        // retires, rather than mapping into a preclosed sink.
+                        let retired = receiver.lock().take();
+                        drop(retired);
+                        Ok::<_, &'static str>(value)
+                    }
                 },
             ).await;
             match outcome {
@@ -830,3 +857,7 @@ mod ordered_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "stream_send/closed_tests.rs"]
+mod closed_tests;

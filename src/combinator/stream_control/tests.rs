@@ -245,7 +245,8 @@ fn zero_limit_refuses_before_polling_the_stop() {
 
 #[test]
 fn stop_during_error_drain_does_not_replace_the_selected_item_failure() {
-    let ((), report) = run_async_under_lab(0x5705, |cx| async move {
+    for stop_panics in [false, true] {
+    let ((), report) = run_async_under_lab(0x5705, move |cx| async move {
         let (stop, mut stopped) = oneshot::channel();
         let (in_cleanup, mut cleaning) = oneshot::channel();
         let (release, released) = oneshot::channel();
@@ -254,7 +255,11 @@ fn stop_during_error_drain_does_not_replace_the_selected_item_failure() {
         let mut producer = cx.spawn(move |owner| async move {
             try_for_each_concurrent_scoped_until(
                 &owner, iter([0, 1]), 2,
-                async move { stopped.recv_uninterruptible().await.unwrap(); "later stop" },
+                async move {
+                    stopped.recv_uninterruptible().await.unwrap();
+                    if stop_panics { panic!("stop panic during error drain"); }
+                    "later stop"
+                },
                 move |child, item| {
                     let gates = Arc::clone(&gates);
                     let started = Arc::clone(&started);
@@ -278,8 +283,13 @@ fn stop_during_error_drain_does_not_replace_the_selected_item_failure() {
         for _ in 0..8 { yield_now().await; }
         assert!(producer.try_join().unwrap().is_none(), "explicit cleanup gate still held");
         release.send_blocking(()).unwrap();
-        assert!(matches!(producer.join(&cx).await.unwrap(),
-            Outcome::Err(ScopedStreamError::Item("original item error"))));
+        let outcome = producer.join(&cx).await.unwrap();
+        if stop_panics {
+            assert!(matches!(outcome, Outcome::Panicked(ref p) if p.message().contains("stop panic during error drain")));
+        } else {
+            assert!(matches!(outcome, Outcome::Err(ScopedStreamError::Item("original item error"))));
+        }
     });
     assert!(report.quiescent && report.invariant_violations.is_empty());
+}
 }
