@@ -881,6 +881,11 @@ pub struct RegionRecord {
     /// race returns, and the region still never outlives its work
     /// (br-asupersync-issue65-criticisms-kpmoy5.2.2).
     sealed: AtomicBool,
+    /// When this region's first cancellation report was dispatched, in
+    /// nanoseconds (`u64::MAX` until then). Region close reports the drain
+    /// time from it. The first cancel creates it, so a region that is never
+    /// cancelled allocates nothing (br-asupersync-x9mmxl).
+    cancel_reported_at: Option<Arc<AtomicU64>>,
     /// Tracing span for region lifecycle (only active with tracing-integration feature).
     #[cfg(feature = "tracing-integration")]
     span: Span,
@@ -989,6 +994,7 @@ impl RegionRecord {
             pending_spawns: Arc::new(PendingSpawnCounter::new()),
             pending_obligation_posts: Arc::new(PendingSpawnCounter::new()),
             sealed: AtomicBool::new(false),
+            cancel_reported_at: None,
             span,
         }
     }
@@ -997,6 +1003,20 @@ impl RegionRecord {
     /// non-cancelling close by itself (see [`Self::is_sealed`]).
     pub(crate) fn seal(&self) {
         self.sealed.store(true, Ordering::Release);
+    }
+
+    /// The stamp this region's cancellation report writes when it is
+    /// dispatched, created by the first cancel.
+    pub(crate) fn cancel_report_stamp(&mut self) -> Arc<AtomicU64> {
+        Arc::clone(
+            self.cancel_reported_at
+                .get_or_insert_with(|| Arc::new(AtomicU64::new(u64::MAX))),
+        )
+    }
+
+    /// The cancellation-report stamp, if this region was ever cancelled.
+    pub(crate) fn cancel_reported_at(&self) -> Option<Arc<AtomicU64>> {
+        self.cancel_reported_at.clone()
     }
 
     /// Returns true when the region closes itself once its work is done,

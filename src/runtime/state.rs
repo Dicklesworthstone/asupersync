@@ -48,7 +48,7 @@ use crate::trace::{TraceBufferHandle, TraceEvent};
 use crate::tracing_compat::{debug, debug_span, trace};
 use crate::types::policy::PolicyAction;
 use crate::types::task_context::{
-    CancelWakeEffects, CancelWaker, CancellationEffects, CxInner, MAX_MASK_DEPTH,
+    CancelReportStamp, CancelWakeEffects, CancelWaker, CancellationEffects, CxInner, MAX_MASK_DEPTH,
 };
 use crate::types::{
     Budget, CancelAttributionConfig, CancelKind, CancelReason, CapabilityBudget,
@@ -798,6 +798,8 @@ enum TaskCompletionObserverPayload {
         outcome_label: &'static str,
         duration: Duration,
         waiter_count: usize,
+        /// The task ended cancelled by its deadline.
+        deadline_exceeded: bool,
     },
     UnknownTask {
         task_id: TaskId,
@@ -813,6 +815,7 @@ impl TaskCompletionObserver {
         outcome_label: &'static str,
         duration: Duration,
         waiter_count: usize,
+        deadline_exceeded: bool,
         panic_count: &Arc<AtomicU64>,
     ) -> Self {
         Self {
@@ -824,6 +827,7 @@ impl TaskCompletionObserver {
                 outcome_label,
                 duration,
                 waiter_count,
+                deadline_exceeded,
             }),
             panic_count: Some(Arc::clone(panic_count)),
             retired_cancel_wakers: TaskCompletionRetirements::empty(),
@@ -895,10 +899,14 @@ impl TaskCompletionObserver {
                 outcome_label,
                 duration,
                 waiter_count,
+                deadline_exceeded,
             } => {
                 let callback_result =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         metrics.task_completed(task_id, outcome_kind, duration);
+                        if deadline_exceeded {
+                            metrics.deadline_exceeded(region_id);
+                        }
                         #[cfg(not(feature = "tracing-integration"))]
                         let _ = (region_id, outcome_label, waiter_count);
                         debug!(
@@ -1116,6 +1124,12 @@ impl TaskSpawnEffects {
 
         let callback_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             metrics.task_spawned(region_id, task_id);
+            // The admitted budget's deadline is the one the task's deadline
+            // timer arms; report the time it has left (br-asupersync-x9mmxl).
+            if let Some(deadline) = budget.deadline {
+                let remaining = Duration::from_nanos(deadline.duration_since(spawned_at));
+                metrics.deadline_set(region_id, remaining);
+            }
             if let Some(admitted_seq) = admitted_seq {
                 // This observer event retains its admission-allocated seq;
                 // snapshot() sorts it with any later execution events.
@@ -1500,12 +1514,14 @@ pub(crate) enum RegionLifecycleEffect {
         now: Time,
     },
     /// `RegionCloseComplete` trace event + `region_closed` lifetime metric
-    /// for a completed close; `created_at` was captured before the arena
+    /// (+ `drain_completed` for a cancelled region) for a completed close;
+    /// `created_at` and the cancel stamp were captured before the arena
     /// removal.
     RegionClosed {
         region_id: RegionId,
         parent: Option<RegionId>,
         created_at: Time,
+        cancel_reported_at: Option<Arc<AtomicU64>>,
     },
     /// Retire validator state after the queued close checks and instrumentation.
     RemoveValidator { region_id: RegionId },
@@ -5389,6 +5405,10 @@ impl RuntimeState {
             TaskState::Completed(Outcome::Panicked(_)) => "Panicked",
             _ => "Unknown",
         };
+        let deadline_exceeded = matches!(
+            &task.state,
+            TaskState::Completed(Outcome::Cancelled(reason)) if reason.kind == CancelKind::Deadline
+        );
 
         TaskCompletionObserver::completed(
             Arc::clone(&self.metrics),
@@ -5398,6 +5418,7 @@ impl RuntimeState {
             outcome_label,
             duration,
             waiter_count,
+            deadline_exceeded,
             &self.task_completion_observer_panics,
         )
     }
@@ -7607,10 +7628,14 @@ impl RuntimeState {
                 TraceEvent::region_cancelled(seq, now, rid, region_reason.clone())
             });
 
+            let mut drain_stamp = None;
             if let Some(region) = regions
                 .resolve_mut(&mut self.regions)
                 .get_mut(rid.arena_index())
             {
+                if region.state() != crate::record::region::RegionState::Closed {
+                    drain_stamp = Some(region.cancel_report_stamp());
+                }
                 // Use the properly chained reason.
                 // Try to transition to Closing with the reason.
                 // If already Closing/Draining/etc., strengthen the reason instead.
@@ -7640,10 +7665,17 @@ impl RuntimeState {
                     region.strengthen_cancel_reason(region_reason);
                 }
             }
+            // The drain stamp reads the clock when the report is dispatched,
+            // not here under the state lock (br-asupersync-x9mmxl).
             wakes.push_region_cancellation_metric(
                 Arc::clone(&self.metrics),
                 rid,
                 region_cancel_kind,
+                drain_stamp.map(|stamp| CancelReportStamp {
+                    stamp,
+                    timer: self.timer_driver.clone(),
+                    fallback_now: self.now,
+                }),
             );
         }
 
@@ -9713,6 +9745,7 @@ impl RuntimeState {
         region_id: RegionId,
         parent: Option<RegionId>,
         created_at: Time,
+        cancel_reported_at: Option<Arc<AtomicU64>>,
     ) {
         let now = self.current_runtime_time();
         self.record_trace_event(|seq| {
@@ -9728,6 +9761,18 @@ impl RuntimeState {
         });
         let lifetime = Duration::from_nanos(now.duration_since(created_at));
         self.metrics.region_closed(region_id, lifetime);
+        // A cancelled region's drain runs from its first cancellation report
+        // to this close (br-asupersync-x9mmxl). An unset stamp means the
+        // region closed before that report was dispatched: an empty region
+        // closes inside the cancel itself (ChildRegion::close is a cancel
+        // request too), so there was nothing to drain and nothing is reported.
+        if let Some(stamp) = cancel_reported_at
+            .map(|reported_at| reported_at.load(Ordering::Acquire))
+            .filter(|&stamp| stamp != u64::MAX)
+        {
+            let drain = Duration::from_nanos(now.as_nanos().saturating_sub(stamp));
+            self.metrics.drain_completed(region_id, drain);
+        }
     }
 
     /// Deferred validator + instrumentation effects for a freshly minted
@@ -9838,8 +9883,14 @@ impl RuntimeState {
                 region_id,
                 parent,
                 created_at,
+                cancel_reported_at,
             } => {
-                self.dispatch_region_closed_effects(region_id, parent, created_at);
+                self.dispatch_region_closed_effects(
+                    region_id,
+                    parent,
+                    created_at,
+                    cancel_reported_at,
+                );
             }
             RegionLifecycleEffect::RemoveValidator { region_id } => {
                 if self.cancel_protocol_tracking {
@@ -10129,7 +10180,13 @@ impl RuntimeState {
                             let old_state = region.state();
                             let closed = region.complete_close();
                             let new_state = region.state();
-                            (closed, old_state, new_state, region.created_at())
+                            (
+                                closed,
+                                old_state,
+                                new_state,
+                                region.created_at(),
+                                region.cancel_reported_at(),
+                            )
                         };
 
                         // Deferred validator accounting check: fires for any
@@ -10164,6 +10221,7 @@ impl RuntimeState {
                                     region_id,
                                     parent,
                                     created_at: closed.3,
+                                    cancel_reported_at: closed.4,
                                 },
                             );
                             self.resource_monitor.clear_region_priority(region_id);
