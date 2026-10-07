@@ -10427,22 +10427,25 @@ fn an_untracked_validator_stays_unlocked_and_silent_through_a_region_lifecycle()
     );
 }
 
-/// The deadline hooks the runtime calls (br-asupersync-x9mmxl).
+/// The deadline and drain hooks the runtime calls (br-asupersync-x9mmxl).
 #[derive(Default)]
-struct DeadlineHookLog {
+struct MetricHookLog {
     set: Mutex<Vec<(RegionId, Duration)>>,
     exceeded: Mutex<Vec<RegionId>>,
+    drains: Mutex<Vec<(RegionId, Duration)>>,
 }
 
-struct DeadlineHookMetrics(Arc<DeadlineHookLog>);
+struct MetricHookMetrics(Arc<MetricHookLog>);
 
-impl MetricsProvider for DeadlineHookMetrics {
+impl MetricsProvider for MetricHookMetrics {
     fn task_spawned(&self, _: RegionId, _: TaskId) {}
     fn task_completed(&self, _: TaskId, _: OutcomeKind, _: Duration) {}
     fn region_created(&self, _: RegionId, _: Option<RegionId>) {}
     fn region_closed(&self, _: RegionId, _: Duration) {}
     fn cancellation_requested(&self, _: RegionId, _: CancelKind) {}
-    fn drain_completed(&self, _: RegionId, _: Duration) {}
+    fn drain_completed(&self, region: RegionId, duration: Duration) {
+        self.0.drains.lock().push((region, duration));
+    }
     fn deadline_set(&self, region: RegionId, deadline: Duration) {
         self.0.set.lock().push((region, deadline));
     }
@@ -10471,13 +10474,13 @@ fn task_deadlines_reach_the_metrics_provider() {
     init_test_logging();
     let timeout = Duration::from_millis(50);
     for workers in [None, Some(2)] {
-        let log = Arc::new(DeadlineHookLog::default());
+        let log = Arc::new(MetricHookLog::default());
         let builder = match workers {
             None => RuntimeBuilder::current_thread(),
             Some(count) => RuntimeBuilder::multi_thread().worker_threads(count),
         };
         let runtime = builder
-            .metrics(DeadlineHookMetrics(Arc::clone(&log)))
+            .metrics(MetricHookMetrics(Arc::clone(&log)))
             .build()
             .expect("build native runtime");
         let (bounded_region, bounded, aborted) = runtime.block_on(async move {
@@ -10550,4 +10553,89 @@ fn task_deadlines_reach_the_metrics_provider() {
         assert!(failures.is_empty(), "{workers:?}: {failures:#?}");
     }
     crate::test_complete!("task_deadlines_reach_the_metrics_provider");
+}
+
+/// A cancelled region reports its drain when it closes: the time from its
+/// cancellation report to the close. That is at least its task's cleanup and
+/// excludes the time the region lived before the cancel. A region with nothing
+/// to drain when it closes (`close` on an empty region) reports none.
+#[test]
+fn cancelled_region_drain_reaches_the_metrics_provider() {
+    use crate::cx::ChildRegionSpec;
+    use crate::runtime::RuntimeBuilder;
+
+    init_test_logging();
+    let cleanup = Duration::from_millis(30);
+    let held = Duration::from_secs(1);
+    for workers in [None, Some(2)] {
+        let log = Arc::new(MetricHookLog::default());
+        let builder = match workers {
+            None => RuntimeBuilder::current_thread(),
+            Some(count) => RuntimeBuilder::multi_thread().worker_threads(count),
+        };
+        let runtime = builder
+            .metrics(MetricHookMetrics(Arc::clone(&log)))
+            .build()
+            .expect("build native runtime");
+        let (cancelled_region, quiet_region) = runtime.block_on(async move {
+            let cx = crate::cx::Cx::current().expect("block_on installs a Cx");
+            let quiet = cx
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .expect("open the quiet region");
+            let quiet_region = quiet.cx().region_id();
+            quiet.close().await.expect("close the quiet region");
+
+            let child = cx
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .expect("open the cancelled region");
+            let cancelled_region = child.cx().region_id();
+            let started = Arc::new(AtomicBool::new(false));
+            let parked = Arc::clone(&started);
+            let mut handle = child
+                .cx()
+                .spawn(move |task_cx| async move {
+                    let (_hold, mut never) = crate::channel::mpsc::channel::<u32>(1);
+                    parked.store(true, Ordering::SeqCst);
+                    let _ = never.recv(&task_cx).await;
+                    // Cleanup the region's drain waits for.
+                    std::thread::sleep(cleanup);
+                })
+                .expect("spawn inside the cancelled region");
+            while !started.load(Ordering::SeqCst) {
+                crate::runtime::yield_now().await;
+            }
+            // Live time before the cancel, which the drain must not include.
+            crate::time::sleep(cx.now(), held).await;
+            child
+                .cancel(CancelReason::shutdown())
+                .expect("cancel the child region");
+            let _ = handle.join(&cx).await;
+            let _ = child.close().await;
+            (cancelled_region, quiet_region)
+        });
+        assert!(
+            runtime.shutdown_timeout(Duration::from_secs(10)),
+            "{workers:?}: the runtime shuts down"
+        );
+
+        // Shutdown may cancel and close the root region too; judge only the
+        // two regions under test.
+        let drains: Vec<_> = log
+            .drains
+            .lock()
+            .iter()
+            .copied()
+            .filter(|(region, _)| *region == cancelled_region || *region == quiet_region)
+            .collect();
+        assert!(
+            matches!(drains.as_slice(), [(region, drain)]
+                if *region == cancelled_region && *drain >= cleanup && *drain < held),
+            "{workers:?}: want one drain for {cancelled_region:?}, at least the {cleanup:?} \
+             cleanup and under the {held:?} it lived before the cancel, and none for \
+             {quiet_region:?}; got {drains:?}"
+        );
+    }
+    crate::test_complete!("cancelled_region_drain_reaches_the_metrics_provider");
 }
