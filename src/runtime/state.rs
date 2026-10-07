@@ -2611,14 +2611,14 @@ impl RuntimeState {
         self.blocking_pool.clone()
     }
 
-    /// Gets a reference to the state transition verifier.
+    /// The state transition verifier. The runtime does not feed it; see its module docs.
     #[inline]
     #[must_use]
     pub fn state_verifier(&self) -> &Arc<super::state_verifier::StateTransitionVerifier> {
         &self.state_verifier
     }
 
-    /// Gets the state verifier statistics snapshot.
+    /// The verifier's statistics: zero unless callers validate transitions through it.
     #[must_use]
     pub fn state_verifier_stats(&self) -> super::state_verifier::StateVerifierStatsSnapshot {
         self.state_verifier.stats()

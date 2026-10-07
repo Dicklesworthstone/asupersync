@@ -180,7 +180,7 @@ impl EvidenceSink for CollectorSink {
 
 /// Emit an evidence entry for a scheduler lane-selection decision.
 ///
-/// Called by the governor when a non-default scheduling suggestion is produced.
+/// A worker calls this for every governor decision, a repeated suggestion included.
 pub fn emit_scheduler_evidence(
     sink: &dyn EvidenceSink,
     suggestion: &str,
