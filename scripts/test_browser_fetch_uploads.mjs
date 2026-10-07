@@ -4,10 +4,11 @@
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { openAsBlob, readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { stripTypeScriptTypes } from "node:module";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { createContext, SourceTextModule, SyntheticModule } from "node:vm";
 
 const source = readFileSync(process.env.ASUPERSYNC_FETCH_UPLOAD_SOURCE
@@ -47,7 +48,7 @@ async function fixture(t, options = {}) {
     taskJoin(task, outcome) { calls.join.push({ task, outcome }); return options.joinReceipt ?? outcome; },
   };
   const context = createContext({ URL, ArrayBuffer, DataView, Uint8Array, AbortSignal, EventTarget,
-    ReadableStream, ReadableStreamDefaultReader, Request, ...options.globals });
+    ReadableStream, ReadableStreamDefaultReader, Request, Blob, File, ...options.globals });
   const abi = new SyntheticModule(Object.keys(exports), function () {
     for (const [name, value] of Object.entries(exports)) this.setExport(name, value);
   }, { context });
@@ -484,4 +485,184 @@ test("upload cancellation disconnects a real HTTP peer while the source is parke
   assert.equal(cancels, 1);
   assert.equal(source.locked, false);
   assert.equal(f.calls.join.length, 1);
+});
+
+
+// Delay/fault doubles wrap native Blob slice/read primitives; no production
+// injection hook is needed. The objects themselves retain native Blob slots.
+function instrumentBlobs(options = {}) {
+  const slices = [];
+  const reads = [];
+  function HostBlob() { throw new Error("the adapter must not construct a Blob"); }
+  Object.defineProperty(HostBlob.prototype, "size", Object.getOwnPropertyDescriptor(Blob.prototype, "size"));
+  HostBlob.prototype.slice = function (start, end) {
+    slices.push([start, end]);
+    return Reflect.apply(Blob.prototype.slice, this, [start, end]);
+  };
+  HostBlob.prototype.arrayBuffer = async function () {
+    reads.push(this.size);
+    await options.wait?.promise;
+    if (options.reject) throw new Error("file read failed");
+    const bytes = await Reflect.apply(Blob.prototype.arrayBuffer, this, []);
+    return options.truncate ? bytes.slice(0, Math.max(0, bytes.byteLength - 1)) : bytes;
+  };
+  return { HostBlob, slices, reads };
+}
+
+test("Blob uploads send only raw bytes and leave MIME/header authority explicit", limits, async (t) => {
+  const f = await fixture(t);
+  const body = new Blob([Uint8Array.of(2, 4, 6)], { type: "application/private-format" });
+  assert.equal((await f.admit(body).closed).outcome, "ok");
+  assert.deepEqual(f.calls.bytes, [2, 4, 6]);
+  assert.deepEqual(Array.from(f.calls.fetch[0].init.headers), []);
+  assert.equal(f.calls.fetch[0].init.duplex, "half");
+});
+
+test("File uploads never synthesize filenames or multipart metadata", limits, async (t) => {
+  const f = await fixture(t);
+  const body = new File(["payload"], "private-name.txt", { type: "text/plain", lastModified: 1234 });
+  assert.equal((await f.admit(body, { headers: { "content-type": "application/octet-stream" } }).closed).outcome, "ok");
+  assert.equal(Buffer.from(f.calls.bytes).toString(), "payload");
+  assert.deepEqual(Array.from(f.calls.fetch[0].init.headers, pair => Array.from(pair)), [["content-type", "application/octet-stream"]]);
+});
+
+test("known Blob size is rejected before task admission or file reads", limits, async (t) => {
+  const io = instrumentBlobs();
+  const f = await fixture(t, { globals: { Blob: io.HostBlob } });
+  const result = f.start({ body: new Blob(["large"]), maxUploadBytes: 4 });
+  assert.equal(result.outcome, "err");
+  assert.match(result.failure.message, /maxUploadBytes/);
+  assert.equal(f.calls.spawn.length, 0);
+  assert.equal(f.calls.fetch.length, 0);
+  assert.deepEqual(io.slices, []);
+  assert.deepEqual(io.reads, []);
+});
+
+test("Blob chunks are sliced only on demand and never exceed the chunk cap", limits, async (t) => {
+  const io = instrumentBlobs();
+  const ready = deferred();
+  const f = await fixture(t, { globals: { Blob: io.HostBlob }, fetch: () => ready.promise });
+  f.cleanup.push(() => ready.resolve(new Response(null)));
+  const size = 2 * 1_048_576 + 17;
+  const body = new Blob([new Uint8Array(size).fill(11)]);
+  const handle = f.admit(body, { maxUploadBytes: size });
+  await turn();
+  assert.deepEqual(io.reads, [], "no eager file I/O at admission");
+  const reader = f.calls.fetch[0].init.body.getReader();
+  for (const [index, expected] of [1_048_576, 1_048_576, 17].entries()) {
+    const item = await reader.read();
+    assert.equal(item.value.byteLength, expected);
+    assert.equal(item.value[0], 11);
+    assert.equal(item.value.at(-1), 11);
+    await turn();
+    assert.equal(io.reads.length, index + 1, "no file-read prefetch");
+  }
+  assert.equal((await reader.read()).done, true);
+  reader.releaseLock();
+  assert.deepEqual(io.reads, [1_048_576, 1_048_576, 17]);
+  assert.deepEqual(io.slices, [[0, 1_048_576], [1_048_576, 2_097_152], [2_097_152, size]]);
+  ready.resolve(new Response(null));
+  assert.equal((await handle.closed).outcome, "ok");
+});
+
+for (const trigger of ["caller", "signal", "deadline", "scope"]) {
+  test(`${trigger} cancellation waits for an in-flight Blob read without admitting another slice`, limits, async (t) => {
+    const held = deferred();
+    const io = instrumentBlobs({ wait: held });
+    const f = await fixture(t, { globals: { Blob: io.HostBlob } });
+    f.cleanup.push(held.resolve);
+    const controller = new AbortController();
+    const handle = f.admit(new Blob(["pending data"]), { signal: controller.signal, timeoutMs: 10 });
+    await turn();
+    assert.deepEqual(io.reads, [12]);
+    if (trigger === "caller") void handle.cancel("cancel file");
+    if (trigger === "signal") controller.abort("cancel file");
+    if (trigger === "deadline") f.calls.timers[0]();
+    if (trigger === "scope") f.manager.closeScopes(new Set([f.scopeKey]), "scope_close");
+    let settled = false;
+    void handle.closed.then(() => { settled = true; });
+    await turn();
+    assert.equal(settled, false, "native read settlement remains an owned obligation");
+    assert.equal(f.calls.join.length, 0);
+    held.resolve();
+    assert.equal((await handle.closed).outcome, "cancelled");
+    assert.equal(io.slices.length, 1);
+    assert.deepEqual(f.calls.bytes, [], "cancelled read's late bytes must not be transmitted");
+  });
+}
+
+for (const fault of ["reject", "truncate"]) {
+  test(`Blob ${fault} failure is not published as a successful upload`, limits, async (t) => {
+    const io = instrumentBlobs({ [fault]: true });
+    const f = await fixture(t, { globals: { Blob: io.HostBlob } });
+    const result = await f.admit(new Blob(["abc"])).closed;
+    assert.equal(result.outcome, "err");
+    assert.deepEqual(f.calls.bytes, []);
+    assert.equal(f.calls.join.length, 1);
+  });
+}
+
+test("a Blob read rejection arriving after cancellation preserves the first cause", limits, async (t) => {
+  const held = deferred();
+  const io = instrumentBlobs({ wait: held, reject: true });
+  const f = await fixture(t, { globals: { Blob: io.HostBlob } });
+  f.cleanup.push(held.resolve);
+  const handle = f.admit(new Blob(["pending"]));
+  await turn();
+  const cancel = handle.cancel("first reason");
+  held.resolve();
+  const result = await cancel;
+  assert.equal(result.outcome, "cancelled");
+  assert.equal(result.cancellation.message, "first reason");
+});
+
+for (const preempt of ["signal", "deadline"]) {
+  test(`a preempting ${preempt} does not start a Blob read`, limits, async (t) => {
+    const io = instrumentBlobs();
+    const f = await fixture(t, { globals: { Blob: io.HostBlob } });
+    const controller = new AbortController();
+    controller.abort();
+    const handle = f.admit(new Blob(["not read"]), preempt === "signal" ? { signal: controller.signal } : { timeoutMs: 0 });
+    assert.equal((await handle.closed).outcome, "cancelled");
+    assert.deepEqual(io.slices, []);
+    assert.deepEqual(io.reads, []);
+    assert.equal(f.calls.fetch.length, 0);
+  });
+}
+
+test("Blob instance shadows do not alter size, bytes or implicit metadata", limits, async (t) => {
+  const f = await fixture(t);
+  const body = new File([Uint8Array.of(1, 3, 5)], "hidden.bin");
+  for (const name of ["size", "slice", "arrayBuffer", "stream", "type", "name"]) {
+    Object.defineProperty(body, name, { get() { throw new Error(`shadowed ${name}`); } });
+  }
+  assert.equal((await f.admit(body).closed).outcome, "ok");
+  assert.deepEqual(f.calls.bytes, [1, 3, 5]);
+});
+
+test("empty Blob uploads require no slice reads and permit a zero byte limit", limits, async (t) => {
+  const io = instrumentBlobs();
+  const f = await fixture(t, { globals: { Blob: io.HostBlob } });
+  assert.equal((await f.admit(new Blob(), { maxUploadBytes: 0 }).closed).outcome, "ok");
+  assert.deepEqual(io.reads, []);
+  assert.deepEqual(io.slices, []);
+});
+
+test("filesystem-backed Blob bytes reach a real HTTP peer with an exact digest", { timeout: 10000 }, async (t) => {
+  const path = process.env.ASUPERSYNC_FETCH_UPLOAD_SOURCE
+    ?? fileURLToPath(new URL("../packages/browser/src/fetch.ts", import.meta.url));
+  const expected = readFileSync(path);
+  const file = await openAsBlob(path);
+  const origin = await httpServer(t, (request, response) => {
+    const hash = createHash("sha256");
+    let bytes = 0;
+    request.on("data", chunk => { hash.update(chunk); bytes += chunk.length; });
+    request.on("end", () => response.end(JSON.stringify({ bytes, digest: hash.digest("hex") })));
+  });
+  const f = await fixture(t, { origin, fetch: (url, init) => fetch(url, init) });
+  const handle = f.admit(file);
+  const receipt = JSON.parse((await consume(handle)).toString());
+  assert.equal(receipt.bytes, expected.length);
+  assert.equal(receipt.digest, createHash("sha256").update(expected).digest("hex"));
+  assert.equal((await handle.closed).outcome, "ok");
 });

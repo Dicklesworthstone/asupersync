@@ -32,9 +32,15 @@ export interface BrowserFetchOptions {
    * redirect. An early response cancels unused upload bytes before headers
    * are published. Cancellation waits for source-reader/cancel settlement,
    * not for arbitrary work hidden inside the source's underlying producer.
+   *
+   * A native Blob or File is sent as raw bytes through the same streaming
+   * path, sliced lazily on demand (at most maxChunkBytes per file read). Its
+   * known size must fit maxUploadBytes before admission. Filename, MIME type,
+   * and multipart metadata are not transmitted implicitly; set permitted
+   * headers explicitly. Cancellation also waits for any native slice read.
    */
-  body?: ArrayBuffer | ArrayBufferView | ReadableStream<Uint8Array>;
-  /** Finite streamed-upload byte cap; defaults to maxUploadBytes. Buffered bodies keep their fixed cap. */
+  body?: ArrayBuffer | ArrayBufferView | ReadableStream<Uint8Array> | Blob;
+  /** Finite stream/Blob/File upload cap; defaults to maxUploadBytes. Buffered bodies keep their fixed cap. */
   maxUploadBytes?: number;
   /** Actual decoded response bytes, independent of Content-Length. */
   maxResponseBytes?: number;
@@ -218,6 +224,10 @@ function byteView(value: unknown): Uint8Array {
 // Capture intrinsics once; the no-signal path needs none of these host features.
 const NATIVE_READABLE_STREAM = typeof ReadableStream === "undefined" ? undefined : ReadableStream;
 const NATIVE_REQUEST = typeof Request === "undefined" ? undefined : Request;
+const NATIVE_BLOB = typeof Blob === "undefined" ? undefined : Blob;
+const UPLOAD_BLOB_SIZE = NATIVE_BLOB && Object.getOwnPropertyDescriptor(NATIVE_BLOB.prototype, "size")?.get;
+const UPLOAD_BLOB_SLICE = NATIVE_BLOB?.prototype.slice;
+const UPLOAD_BLOB_READ = NATIVE_BLOB?.prototype.arrayBuffer;
 const UPLOAD_LOCKED = NATIVE_READABLE_STREAM && Object.getOwnPropertyDescriptor(NATIVE_READABLE_STREAM.prototype, "locked")?.get;
 const UPLOAD_READER = NATIVE_READABLE_STREAM?.prototype.getReader;
 const READER_CLASS = typeof ReadableStreamDefaultReader === "undefined" ? undefined : ReadableStreamDefaultReader;
@@ -313,7 +323,14 @@ function prepare(options: BrowserFetchOptions, grant: FetchAuthority): Prepared 
   let upload: ReadableStream<Uint8Array> | undefined;
   if (body !== undefined) {
     if (method === "GET" || method === "HEAD") throw new TypeError("GET and HEAD do not permit a request body");
-    if (isUploadStream(body)) {
+    const blobSize = uploadBlobSize(body);
+    if (blobSize !== null) {
+      if (!Number.isSafeInteger(blobSize) || blobSize < 0 || blobSize > maxUploadBytes) {
+        throw failure("fetch Blob/File size exceeds maxUploadBytes or is not safely representable");
+      }
+      upload = blobUploadStream(body as Blob, blobSize);
+      validateUploadStream(upload, url.href, method);
+    } else if (isUploadStream(body)) {
       validateUploadStream(body, url.href, method);
       upload = body;
     } else {
@@ -349,6 +366,69 @@ function sameTerminal(proposed: Outcome<void>, receipt: Outcome<WasmValue>): boo
 
 async function attempt(operation: () => unknown): Promise<void> {
   try { await operation(); } catch { /* Preserve the first terminal outcome. */ }
+}
+
+function uploadBlobSize(value: unknown): number | null {
+  if (!UPLOAD_BLOB_SIZE) return null;
+  try { return Reflect.apply(UPLOAD_BLOB_SIZE, value, []) as number; }
+  catch { return null; }
+}
+
+/**
+ * Native Blob/File I/O stays demand-driven and part of the existing upload
+ * owner's drain. Native reader cancellation settles read() immediately, but
+ * arrayBuffer() can still be in flight: the source cancel callback joins it.
+ */
+function blobUploadStream(blob: Blob, size: number): ReadableStream<Uint8Array> {
+  if (!NATIVE_READABLE_STREAM || !UPLOAD_BLOB_SLICE || !UPLOAD_BLOB_READ) {
+    throw failure("fetch Blob/File uploads require native Blob slice/read and ReadableStream support");
+  }
+  let source: Blob | null = blob;
+  let offset = 0;
+  let stopped = false;
+  let pending: Promise<void> | null = null;
+  return new NATIVE_READABLE_STREAM<Uint8Array>({
+    async pull(controller) {
+      if (stopped) return;
+      const completion = deferred<void>();
+      // Publish before native I/O; cancellation must see every admitted read.
+      pending = completion.promise;
+      try {
+        if (offset === size) {
+          stopped = true;
+          source = null;
+          controller.close();
+          return;
+        }
+        const length = Math.min(BROWSER_FETCH_LIMITS.maxChunkBytes, size - offset);
+        const part = Reflect.apply(UPLOAD_BLOB_SLICE!, source, [offset, offset + length]) as Blob;
+        if (stopped) return;
+        const data = await Reflect.apply(UPLOAD_BLOB_READ!, part, []) as ArrayBuffer;
+        if (stopped) return;
+        if (Reflect.apply(BUFFER_LENGTH, data, []) !== length) {
+          throw failure("fetch Blob/File read returned a truncated or inconsistent slice", "internal_failure");
+        }
+        offset += length;
+        controller.enqueue(new Uint8Array(data));
+      } catch (error) {
+        if (!stopped) {
+          stopped = true;
+          source = null;
+          controller.error(error);
+        }
+      } finally {
+        pending = null;
+        completion.resolve();
+      }
+    },
+    cancel() {
+      stopped = true;
+      source = null;
+      // No next slice is admitted; discard any result arriving after cancel.
+      // A non-settling native read cannot be forced to drain by JavaScript.
+      return pending ?? Promise.resolve();
+    },
+  }, { highWaterMark: 0 });
 }
 
 function isUploadStream(value: unknown): value is ReadableStream<Uint8Array> {
