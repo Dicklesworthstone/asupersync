@@ -759,23 +759,14 @@ impl QuicFrame {
                 // CRYPTO
                 let offset = VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
                 let length = VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
-
-                if buf.remaining() < length.value() as usize {
-                    return Err(QuicFrameError::UnexpectedEof);
-                }
-
-                let data = copy_to_bytes_from_buf(buf, length.value() as usize);
+                let data = copy_length_prefixed(buf, length)?;
                 Ok(Some(QuicFrame::Crypto { offset, data }))
             }
 
             0x07 => {
                 // NEW_TOKEN
                 let length = VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
-                let len = length.value() as usize;
-                if buf.remaining() < len {
-                    return Err(QuicFrameError::UnexpectedEof);
-                }
-                let token = copy_to_bytes_from_buf(buf, len);
+                let token = copy_length_prefixed(buf, length)?;
                 Ok(Some(QuicFrame::NewToken { token }))
             }
 
@@ -797,10 +788,7 @@ impl QuicFrame {
                 let data = if has_len {
                     let length =
                         VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
-                    if buf.remaining() < length.value() as usize {
-                        return Err(QuicFrameError::UnexpectedEof);
-                    }
-                    copy_to_bytes_from_buf(buf, length.value() as usize)
+                    copy_length_prefixed(buf, length)?
                 } else {
                     // Rest of packet
                     copy_to_bytes_from_buf(buf, buf.remaining())
@@ -964,12 +952,7 @@ impl QuicFrame {
                     Some(VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?);
                 let reason_length =
                     VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
-
-                if buf.remaining() < reason_length.value() as usize {
-                    return Err(QuicFrameError::UnexpectedEof);
-                }
-
-                let reason_phrase = copy_to_bytes_from_buf(buf, reason_length.value() as usize);
+                let reason_phrase = copy_length_prefixed(buf, reason_length)?;
                 Ok(Some(QuicFrame::ConnectionClose {
                     error_code,
                     frame_type,
@@ -983,12 +966,7 @@ impl QuicFrame {
                     VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
                 let reason_length =
                     VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
-
-                if buf.remaining() < reason_length.value() as usize {
-                    return Err(QuicFrameError::UnexpectedEof);
-                }
-
-                let reason_phrase = copy_to_bytes_from_buf(buf, reason_length.value() as usize);
+                let reason_phrase = copy_length_prefixed(buf, reason_length)?;
                 Ok(Some(QuicFrame::ConnectionClose {
                     error_code,
                     frame_type: None,
@@ -1009,10 +987,7 @@ impl QuicFrame {
                 let data = if has_len {
                     let length =
                         VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
-                    if buf.remaining() < length.value() as usize {
-                        return Err(QuicFrameError::UnexpectedEof);
-                    }
-                    copy_to_bytes_from_buf(buf, length.value() as usize)
+                    copy_length_prefixed(buf, length)?
                 } else {
                     // Rest of packet.
                     copy_to_bytes_from_buf(buf, buf.remaining())
@@ -1029,6 +1004,18 @@ fn copy_to_bytes_from_buf<B: Buf>(buf: &mut B, len: usize) -> Bytes {
     // Zero-copy when the underlying `Buf` is backed by shared storage
     // (e.g. `BytesCursor`); copies otherwise.
     buf.copy_to_bytes(len)
+}
+
+/// Take the `length` bytes a frame's length field announced, or fail if fewer
+/// remain. The length converts with `try_from`, not `as`: on a 32-bit target a
+/// length above `usize::MAX` would otherwise truncate to a smaller length that
+/// fits, and the frame would decode with the wrong boundary.
+fn copy_length_prefixed<B: Buf>(buf: &mut B, length: VarInt) -> Result<Bytes, QuicFrameError> {
+    let len = usize::try_from(length.value()).map_err(|_| QuicFrameError::UnexpectedEof)?;
+    if buf.remaining() < len {
+        return Err(QuicFrameError::UnexpectedEof);
+    }
+    Ok(copy_to_bytes_from_buf(buf, len))
 }
 
 /// Extensions for VarInt to work with Buf/BufMut
@@ -1373,5 +1360,39 @@ mod tests {
         let mut decode_buf = buf.freeze().reader();
         let decoded = QuicFrame::decode(&mut decode_buf).unwrap().unwrap();
         assert_eq!(decoded, frame);
+    }
+
+    /// Every length-prefixed frame refuses a length past the bytes left. The
+    /// length here has low 32 bits of 1: on a 32-bit target an `as usize`
+    /// cast truncated it to one byte, which fits.
+    #[test]
+    fn length_prefixed_frames_refuse_a_length_past_the_remaining_bytes() {
+        let length = VarInt::new((1 << 32) + 1).unwrap();
+        // (frame, type byte, the varint fields before its length)
+        let cases: [(&str, u8, &[u64]); 6] = [
+            ("CRYPTO", 0x06, &[0]),
+            ("NEW_TOKEN", 0x07, &[]),
+            ("STREAM with LEN", 0x0a, &[4]),
+            ("CONNECTION_CLOSE", 0x1c, &[1, 0]),
+            ("application CONNECTION_CLOSE", 0x1d, &[1]),
+            ("DATAGRAM with LEN", 0x31, &[]),
+        ];
+        for (label, frame_type, fields) in cases {
+            let mut encoded = BytesMut::new();
+            encoded.put_u8(frame_type);
+            for &field in fields {
+                VarInt::new(field).unwrap().encode(&mut encoded).unwrap();
+            }
+            length.encode(&mut encoded).unwrap();
+            encoded.put_u8(0xab);
+            let mut buf: &[u8] = &encoded;
+            assert!(
+                matches!(
+                    QuicFrame::decode(&mut buf),
+                    Err(QuicFrameError::UnexpectedEof)
+                ),
+                "{label}"
+            );
+        }
     }
 }
