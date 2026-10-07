@@ -675,6 +675,44 @@ impl StreamConfig {
         json.push('}');
         json
     }
+
+    /// The configuration a server reports for a stream. A negative limit
+    /// (the server's "unlimited") and a zero age or window become `None`; an
+    /// enum value this crate does not model keeps its default.
+    fn from_server_json(name: String, json: &str) -> Self {
+        let limit = |key: &str| extract_json_i64_simple(json, key).filter(|value| *value >= 0);
+        let nanos = |key: &str| {
+            extract_json_u64(json, key)
+                .filter(|value| *value > 0)
+                .map(Duration::from_nanos)
+        };
+        Self {
+            name,
+            subjects: extract_json_string_array(json, "subjects").unwrap_or_default(),
+            retention: match extract_json_string_simple(json, "retention").as_deref() {
+                Some("interest") => RetentionPolicy::Interest,
+                Some("workqueue") => RetentionPolicy::WorkQueue,
+                _ => RetentionPolicy::Limits,
+            },
+            storage: match extract_json_string_simple(json, "storage").as_deref() {
+                Some("memory") => StorageType::Memory,
+                _ => StorageType::File,
+            },
+            max_msgs: limit("max_msgs"),
+            max_bytes: limit("max_bytes"),
+            max_age: nanos("max_age"),
+            max_msg_size: limit("max_msg_size").and_then(|value| i32::try_from(value).ok()),
+            discard: match extract_json_string_simple(json, "discard").as_deref() {
+                Some("new") => DiscardPolicy::New,
+                _ => DiscardPolicy::Old,
+            },
+            replicas: extract_json_u64(json, "num_replicas")
+                .and_then(|value| u32::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(1),
+            duplicate_window: nanos("duplicate_window"),
+        }
+    }
 }
 
 /// Retention policy for streams.
@@ -1336,16 +1374,43 @@ impl JetStreamContext {
         }
     }
 
-    /// Create or update a stream.
+    /// Create a stream.
+    ///
+    /// The server returns the existing stream when one with this name has an
+    /// identical configuration, and refuses a different one; change an existing
+    /// stream with [`Self::update_stream`]. The returned [`StreamInfo`] holds
+    /// the configuration the server applied, including its defaults.
     pub async fn create_stream(
         &mut self,
         cx: &Cx,
         config: StreamConfig,
     ) -> Result<StreamInfo, JsError> {
+        self.stream_config_request(cx, "CREATE", config).await
+    }
+
+    /// Update an existing stream's configuration.
+    ///
+    /// The server refuses an unknown stream ([`JsError::StreamNotFound`]) and
+    /// changes it cannot apply in place, such as the storage type. The returned
+    /// [`StreamInfo`] holds the configuration the server applied.
+    pub async fn update_stream(
+        &mut self,
+        cx: &Cx,
+        config: StreamConfig,
+    ) -> Result<StreamInfo, JsError> {
+        self.stream_config_request(cx, "UPDATE", config).await
+    }
+
+    async fn stream_config_request(
+        &mut self,
+        cx: &Cx,
+        operation: &str,
+        config: StreamConfig,
+    ) -> Result<StreamInfo, JsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
         config.validate()?;
 
-        let subject = format!("{}.STREAM.CREATE.{}", self.prefix, config.name);
+        let subject = format!("{}.STREAM.{operation}.{}", self.prefix, config.name);
         let payload = config.to_json();
 
         let response = self
@@ -1550,22 +1615,26 @@ impl JetStreamContext {
             return Err(Self::parse_api_error(&json));
         }
 
-        // Parse config from response
-        let name = extract_json_string_simple(&json, "name")
+        // The server reports the configuration it applied under `config` and
+        // the counters under `state` (k6pxks item 19); a reply without them is
+        // read flat, as before.
+        let config_json = extract_json_object(&json, "config").unwrap_or(&*json);
+        let state_json = extract_json_object(&json, "state").unwrap_or(&*json);
+        let name = extract_json_string_simple(config_json, "name")
             .ok_or_else(|| JsError::ParseError("missing stream name".to_string()))?;
 
         let state = StreamState {
-            messages: extract_json_u64(&json, "messages").unwrap_or(0),
-            bytes: extract_json_u64(&json, "bytes").unwrap_or(0),
-            first_seq: extract_json_u64(&json, "first_seq").unwrap_or(0),
-            last_seq: extract_json_u64(&json, "last_seq").unwrap_or(0),
-            consumer_count: extract_json_u64(&json, "consumer_count")
+            messages: extract_json_u64(state_json, "messages").unwrap_or(0),
+            bytes: extract_json_u64(state_json, "bytes").unwrap_or(0),
+            first_seq: extract_json_u64(state_json, "first_seq").unwrap_or(0),
+            last_seq: extract_json_u64(state_json, "last_seq").unwrap_or(0),
+            consumer_count: extract_json_u64(state_json, "consumer_count")
                 .unwrap_or(0)
                 .min(u64::from(u32::MAX)) as u32,
         };
 
         Ok(StreamInfo {
-            config: StreamConfig::new(name),
+            config: StreamConfig::from_server_json(name, config_json),
             state,
         })
     }
@@ -3119,13 +3188,39 @@ fn extract_json_object<'a>(json: &'a str, key: &str) -> Option<&'a str> {
 
 fn extract_json_string_simple(json: &str, key: &str) -> Option<String> {
     let rest = json_value_after_key(json, key)?;
+    parse_json_string_literal(rest).map(|(value, _)| value)
+}
+
+/// A JSON array of strings, such as a stream's `subjects`.
+fn extract_json_string_array(json: &str, key: &str) -> Option<Vec<String>> {
+    let mut rest = json_value_after_key(json, key)?
+        .strip_prefix('[')?
+        .trim_start();
+    let mut values = Vec::new();
+    if rest.starts_with(']') {
+        return Some(values);
+    }
+    loop {
+        let (value, after) = parse_json_string_literal(rest)?;
+        values.push(value);
+        let after = after.trim_start();
+        if after.starts_with(']') {
+            return Some(values);
+        }
+        rest = after.strip_prefix(',')?.trim_start();
+    }
+}
+
+/// Decodes the JSON string literal at the start of `rest`; returns it and the
+/// text after its closing quote.
+fn parse_json_string_literal(rest: &str) -> Option<(String, &str)> {
     let slice = rest.strip_prefix('"')?;
     // Walk forward, respecting backslash escapes and building unescaped string
     let mut chars = slice.char_indices();
     let mut result = String::new();
     loop {
         match chars.next()? {
-            (_, '"') => return Some(result),
+            (idx, '"') => return Some((result, &slice[idx + 1..])),
             (_, '\\') => {
                 let (_, esc) = chars.next()?;
                 match esc {
@@ -4682,6 +4777,81 @@ mod tests {
         assert!(
             matches!(err, JsError::StreamNotFound(ref d) if d == "stream not found"),
             "spaced error envelope should be classified, got: {err:?}"
+        );
+    }
+
+    /// br-asupersync-messaging-client-audit-k6pxks item 19: the reported
+    /// config was `StreamConfig::new(name)` whatever the server applied, and
+    /// a config field named like a counter shadowed the state's counter.
+    #[test]
+    fn parse_stream_info_reports_the_server_configuration_and_state() {
+        let payload = br#"{"type":"io.nats.jetstream.api.v1.stream_create_response","config":{"name":"ORDERS","subjects":["orders.>", "audit.*"],"retention":"workqueue","max_consumers":-1,"max_msgs":1000,"max_bytes":-1,"max_age":60000000000,"max_msgs_per_subject":-1,"max_msg_size":-1,"discard":"new","storage":"memory","num_replicas":3,"duplicate_window":120000000000,"first_seq":5},"created":"2026-10-06T00:00:00Z","state":{"messages":7,"bytes":512,"first_seq":11,"first_ts":"2026-10-06T00:00:00Z","last_seq":17,"last_ts":"2026-10-06T00:00:01Z","consumer_count":2},"cluster":{"leader":"n1"}}"#;
+        let info = JetStreamContext::parse_stream_info(payload).expect("stream info");
+        let config = &info.config;
+        assert_eq!(config.name, "ORDERS");
+        assert_eq!(config.subjects, ["orders.>", "audit.*"]);
+        assert_eq!(config.retention, RetentionPolicy::WorkQueue);
+        assert_eq!(config.storage, StorageType::Memory);
+        assert_eq!(config.discard, DiscardPolicy::New);
+        assert_eq!(config.replicas, 3);
+        assert_eq!(config.max_msgs, Some(1000));
+        assert_eq!(config.max_bytes, None, "-1 is the server's unlimited");
+        assert_eq!(config.max_msg_size, None, "-1 is the server's unlimited");
+        assert_eq!(config.max_age, Some(Duration::from_secs(60)));
+        assert_eq!(config.duplicate_window, Some(Duration::from_secs(120)));
+        let state = &info.state;
+        assert_eq!(
+            (
+                state.messages,
+                state.bytes,
+                state.first_seq,
+                state.last_seq,
+                state.consumer_count
+            ),
+            (7, 512, 11, 17, 2),
+            "counters come from `state`, not from a config field of the same name"
+        );
+
+        let flat = JetStreamContext::parse_stream_info(br#"{"name":"FLAT"}"#).expect("flat reply");
+        assert_eq!(flat.config.name, "FLAT");
+        assert_eq!(flat.config.replicas, 1);
+        assert!(flat.config.subjects.is_empty());
+    }
+
+    #[test]
+    fn update_stream_sends_stream_update_and_returns_the_applied_config() {
+        let reply = br#"{"type":"io.nats.jetstream.api.v1.stream_update_response","config":{"name":"ORDERS","subjects":["orders.>"],"retention":"limits","max_msgs":50,"discard":"old","storage":"file","num_replicas":1},"state":{"messages":0,"bytes":0,"first_seq":0,"last_seq":0,"consumer_count":0}}"#.to_vec();
+        let wire = capture_wire_transcript(
+            DeterministicServerReply::Request(reply),
+            |cx, addr| async move {
+                let mut js = JetStreamContext::new(
+                    NatsClient::connect_with_config(
+                        &cx,
+                        NatsConfig {
+                            host: addr.ip().to_string(),
+                            port: addr.port(),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .expect("connect stream-update protocol server"),
+                );
+                let info = js
+                    .update_stream(
+                        &cx,
+                        StreamConfig::new("ORDERS")
+                            .subjects(&["orders.>"])
+                            .max_messages(50),
+                    )
+                    .await
+                    .expect("JetStream update_stream");
+                assert_eq!(info.config.max_msgs, Some(50));
+                assert_eq!(info.config.subjects, ["orders.>"]);
+            },
+        );
+        assert!(
+            wire.contains("PUB $JS.API.STREAM.UPDATE.ORDERS "),
+            "update_stream must request STREAM.UPDATE: {wire}"
         );
     }
 
