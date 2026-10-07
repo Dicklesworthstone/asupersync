@@ -10233,10 +10233,18 @@ impl RuntimeState {
                                 .unregister_region_envelope(region_id);
 
                             if let Some(parent_id) = parent {
-                                let cleanup_outcome = regions
+                                // A child's panic reaches its parent apart
+                                // from cleanup outcomes, so the subtree's
+                                // owner sees it (br-asupersync-b834ta).
+                                let (cleanup_outcome, descendant_panic) = regions
                                     .resolve_ref(&self.regions)
                                     .get(region_id.arena_index())
-                                    .and_then(|region| region.closed_cleanup_outcome());
+                                    .map_or((None, None), |region| {
+                                        (
+                                            region.closed_cleanup_outcome(),
+                                            region.closed_descendant_panic(),
+                                        )
+                                    });
                                 // Remove from parent
                                 if let Some(parent_record) = regions
                                     .resolve_ref(&self.regions)
@@ -10244,6 +10252,9 @@ impl RuntimeState {
                                 {
                                     if let Some(outcome) = cleanup_outcome {
                                         parent_record.record_cleanup_receipt(outcome);
+                                    }
+                                    if let Some(payload) = descendant_panic {
+                                        parent_record.record_descendant_panic(payload);
                                     }
                                     parent_record.remove_child(region_id);
                                 }

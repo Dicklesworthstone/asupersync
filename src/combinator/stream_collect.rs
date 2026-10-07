@@ -151,8 +151,16 @@ fn scoped_outcome<E>(
 ) -> Outcome<(), ScopedStreamError<E>> {
     // The region's aggregate includes cancellations we deliberately requested.
     // Its separate finalizer outcome distinguishes failed cleanup from that
-    // expected consequence. Descendant panics must still be surfaced.
-    match (work, close.outcome, close.cleanup_outcome) {
+    // expected consequence. Descendant panics must still be surfaced,
+    // including one in a nested region, which reaches this region's receipt
+    // apart from its own outcome (br-asupersync-b834ta).
+    let cleanup = match (close.cleanup_outcome, close.descendant_panic) {
+        (Some(Outcome::Panicked(payload)), _) | (_, Some(payload)) => {
+            Some(Outcome::Panicked(payload))
+        }
+        (cleanup, None) => cleanup,
+    };
+    match (work, close.outcome, cleanup) {
         (_, _, Some(Outcome::Panicked(payload)))
         | (_, Outcome::Panicked(payload), _)
         | (Outcome::Panicked(payload), _, _) => Outcome::Panicked(payload),
