@@ -224,6 +224,8 @@ fn poisoned_completion_retires_the_cancellation_observer() {
 }
 
 struct CancelOnDrop(Cx);
+// The waker's Drop is the point: it cancels the context on retirement.
+#[allow(clippy::manual_noop_waker)]
 impl Wake for CancelOnDrop { fn wake(self: Arc<Self>) {} }
 impl Drop for CancelOnDrop {
     fn drop(&mut self) { self.0.cancel_fast(CancelKind::User); }

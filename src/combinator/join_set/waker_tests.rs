@@ -132,6 +132,8 @@ struct ReenterOnRetirement {
     locked: Arc<AtomicBool>,
 }
 
+// The waker's Drop is the point: it reenters the ready set on retirement.
+#[allow(clippy::manual_noop_waker)]
 impl Wake for ReenterOnRetirement {
     fn wake(self: Arc<Self>) {}
 }
