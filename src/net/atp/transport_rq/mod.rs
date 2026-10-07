@@ -102,13 +102,12 @@ use crate::net::atp::transport_common::metadata::apply_entry_metadata;
 #[cfg(unix)]
 use crate::net::atp::transport_common::metadata::apply_entry_metadata_sync;
 use crate::net::atp::transport_common::metadata::{
-    DirectoryMetadataEntry, DirectoryMetadataManifest, EntryMetadata, FileKind, HardlinkIdentity,
-    MetadataApplyReport, PathLinkKind, capture_directory_metadata_manifest, classify_path_link,
-    classify_path_link_sync, commit_hardlink_transactionally,
-    commit_staged_regular_file_transactionally, commit_symlink_transactionally,
-    inode_key_if_regular_sync, metadata_commitment, path_is_link_or_reparse,
-    read_entry_metadata_sync, validate_entry_metadata_for_receive, write_sparse_zero_runs,
-    write_sparse_zero_runs_sync,
+    DeferredParentSyncs, DirectoryMetadataEntry, DirectoryMetadataManifest, EntryMetadata,
+    FileKind, HardlinkIdentity, MetadataApplyReport, PathLinkKind,
+    capture_directory_metadata_manifest, classify_path_link, classify_path_link_sync,
+    commit_hardlink_transactionally, commit_symlink_transactionally, inode_key_if_regular_sync,
+    metadata_commitment, path_is_link_or_reparse, read_entry_metadata_sync,
+    validate_entry_metadata_for_receive, write_sparse_zero_runs, write_sparse_zero_runs_sync,
 };
 use crate::net::atp::transport_common::{
     DeltaChunkWire, DeltaManifestWire, DeltaObjectRequest, DeltaWireMode, EntryDigest,
@@ -14964,6 +14963,9 @@ async fn verify_and_commit_with_options(
             reject_destination_symlink_prefix(&base, &base).await?;
             committed_paths.push(base.display().to_string());
         }
+        // Each committed file's directory is fsynced once, after the loop and
+        // before the receipt, instead of after every rename (r02ssd).
+        let mut parent_syncs = DeferredParentSyncs::default();
         for write in writes {
             match write {
                 CommitWrite::Rename {
@@ -14986,7 +14988,8 @@ async fn verify_and_commit_with_options(
                         crate::fs::create_dir_all(parent).await?;
                     }
                     reject_destination_symlink_prefix(&base, &out_path).await?;
-                    commit_staged_regular_file_transactionally(&staging_path, &out_path)
+                    parent_syncs
+                        .commit_staged_regular_file(&staging_path, &out_path)
                         .await
                         .map_err(|error| RqError::Source(error.into_message()))?;
                     if let Some(deferred_metadata) = deferred_metadata {
@@ -15025,12 +15028,10 @@ async fn verify_and_commit_with_options(
                             crate::fs::create_dir_all(parent).await?;
                         }
                         reject_destination_symlink_prefix(&base, &member.out_path).await?;
-                        commit_staged_regular_file_transactionally(
-                            &member.write_path,
-                            &member.out_path,
-                        )
-                        .await
-                        .map_err(|error| RqError::Source(error.into_message()))?;
+                        parent_syncs
+                            .commit_staged_regular_file(&member.write_path, &member.out_path)
+                            .await
+                            .map_err(|error| RqError::Source(error.into_message()))?;
                     }
                     for (member, deferred_metadata) in members.iter().zip(deferred_metadata) {
                         if let Some(deferred_metadata) = deferred_metadata {
@@ -15131,7 +15132,8 @@ async fn verify_and_commit_with_options(
                         crate::fs::create_dir_all(parent).await?;
                     }
                     reject_destination_symlink_prefix(&base, &out_path).await?;
-                    commit_staged_regular_file_transactionally(&staging_path, &out_path)
+                    parent_syncs
+                        .commit_staged_regular_file(&staging_path, &out_path)
                         .await
                         .map_err(|error| RqError::Source(error.into_message()))?;
                     if let Some(deferred_metadata) = deferred_metadata {
@@ -15141,6 +15143,10 @@ async fn verify_and_commit_with_options(
                 }
             }
         }
+        parent_syncs
+            .sync()
+            .await
+            .map_err(|error| RqError::Source(error.into_message()))?;
         if let Some(directories) = manifest
             .metadata
             .as_ref()

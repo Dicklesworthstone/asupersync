@@ -955,6 +955,7 @@ pub async fn commit_symlink_transactionally(
         &temporary,
         out_path,
         ReplaceableLeafKind::Symlink(kind),
+        None,
     )
     .await
     {
@@ -984,8 +985,67 @@ pub async fn commit_staged_regular_file_transactionally(
     staging_path: &Path,
     out_path: &Path,
 ) -> Result<(), StreamingError> {
-    install_staged_leaf_transactionally(staging_path, out_path, ReplaceableLeafKind::RegularFile)
+    install_staged_leaf_transactionally(
+        staging_path,
+        out_path,
+        ReplaceableLeafKind::RegularFile,
+        None,
+    )
+    .await
+}
+
+/// Parent directories whose fsync a batch of regular-file commits defers to
+/// one pass (br-asupersync-r02ssd).
+///
+/// [`commit_staged_regular_file_transactionally`] fsyncs the destination's
+/// parent after every rename, so N files committed into one directory pay N
+/// fsyncs of that directory. A receiver that commits a whole transfer before
+/// it reports success records the parents here instead and calls
+/// [`Self::sync`] once, before the report. Each rename is still atomic:
+/// readers see the old or the new file. A crash before `sync` returns can
+/// lose renames that nothing has acknowledged yet, which is what the per-file
+/// sync also allows between its rename and its fsync.
+#[derive(Debug, Default)]
+pub(crate) struct DeferredParentSyncs {
+    /// Each distinct parent, with one committed path inside it.
+    parents: BTreeMap<PathBuf, PathBuf>,
+}
+
+impl DeferredParentSyncs {
+    /// [`commit_staged_regular_file_transactionally`], with the parent fsync
+    /// deferred to [`Self::sync`].
+    pub(crate) async fn commit_staged_regular_file(
+        &mut self,
+        staging_path: &Path,
+        out_path: &Path,
+    ) -> Result<(), StreamingError> {
+        install_staged_leaf_transactionally(
+            staging_path,
+            out_path,
+            ReplaceableLeafKind::RegularFile,
+            Some(self),
+        )
         .await
+    }
+
+    /// Fsyncs every recorded parent directory once.
+    pub(crate) async fn sync(self) -> Result<(), StreamingError> {
+        for (parent, committed) in self.parents {
+            sync_committed_parent(&committed).await.map_err(|error| {
+                StreamingError::new(format!(
+                    "{}: sync committed directory: {error}",
+                    parent.display()
+                ))
+            })?;
+        }
+        Ok(())
+    }
+
+    fn record(&mut self, committed: &Path) {
+        self.parents
+            .entry(committed_parent(committed))
+            .or_insert_with(|| committed.to_path_buf());
+    }
 }
 
 /// Write bytes to a unique sibling and atomically replace a regular-file
@@ -1094,10 +1154,13 @@ async fn commit_regular_bytes_with_metadata_transactionally_inner(
     Ok(report)
 }
 
+// The Windows retry reuses `deferred_parent_syncs`; elsewhere one reborrow is its only use.
+#[cfg_attr(not(windows), allow(clippy::needless_option_as_deref))]
 async fn install_staged_leaf_transactionally(
     staging_path: &Path,
     out_path: &Path,
     expected_staging_kind: ReplaceableLeafKind,
+    mut deferred_parent_syncs: Option<&mut DeferredParentSyncs>,
 ) -> Result<(), StreamingError> {
     let staging_kind = replaceable_leaf_kind(staging_path).await?;
     let staging_matches = match (staging_kind, expected_staging_kind) {
@@ -1113,7 +1176,9 @@ async fn install_staged_leaf_transactionally(
     }
 
     let existing = replaceable_leaf_kind(out_path).await?;
-    match rename_staged_leaf_durably(staging_path, out_path).await {
+    match rename_staged_leaf_durably(staging_path, out_path, deferred_parent_syncs.as_deref_mut())
+        .await
+    {
         Ok(()) => Ok(()),
         Err(error) => {
             #[cfg(windows)]
@@ -1152,7 +1217,13 @@ async fn install_staged_leaf_transactionally(
                         )));
                     }
                 };
-                return match rename_staged_leaf_durably(staging_path, out_path).await {
+                return match rename_staged_leaf_durably(
+                    staging_path,
+                    out_path,
+                    deferred_parent_syncs.as_deref_mut(),
+                )
+                .await
+                {
                     Ok(()) => {
                         let mut failures = Vec::new();
                         if let Err(restore) = destination_restore.finish_after_replace() {
@@ -1204,18 +1275,34 @@ async fn install_staged_leaf_transactionally(
     }
 }
 
-async fn rename_staged_leaf_durably(from: &Path, to: &Path) -> io::Result<()> {
+/// Renames `from` to `to`, then fsyncs `to`'s parent, or records the parent
+/// in `deferred` for one later sync.
+async fn rename_staged_leaf_durably(
+    from: &Path,
+    to: &Path,
+    deferred: Option<&mut DeferredParentSyncs>,
+) -> io::Result<()> {
     crate::fs::rename(from, to).await?;
-    sync_committed_parent(to).await
+    match deferred {
+        Some(deferred) => {
+            deferred.record(to);
+            Ok(())
+        }
+        None => sync_committed_parent(to).await,
+    }
+}
+
+/// The directory whose entry a commit of `path` changed.
+fn committed_parent(path: &Path) -> PathBuf {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf()
 }
 
 #[cfg(unix)]
 async fn sync_committed_parent(path: &Path) -> io::Result<()> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."))
-        .to_path_buf();
+    let parent = committed_parent(path);
     crate::runtime::spawn_blocking_io(move || std::fs::File::open(parent)?.sync_all()).await
 }
 
@@ -3051,7 +3138,7 @@ pub async fn commit_fifo_transactionally(
             out_path.display()
         )));
     }
-    install_staged_leaf_transactionally(&staged, out_path, ReplaceableLeafKind::RegularFile)
+    install_staged_leaf_transactionally(&staged, out_path, ReplaceableLeafKind::RegularFile, None)
         .await?;
     staged_guard.disarm();
     Ok(report)
@@ -3264,6 +3351,42 @@ mod tests {
                     .to_string_lossy()
                     .starts_with(".atp-sym-backup-"))
         );
+    }
+
+    /// br-asupersync-r02ssd: a batch commits each file atomically and records
+    /// each distinct parent once, so one `sync` replaces a directory fsync per
+    /// file.
+    #[test]
+    fn deferred_parent_syncs_commit_each_file_and_sync_each_parent_once() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let first_dir = root.path().join("a");
+        let second_dir = root.path().join("b");
+        std::fs::create_dir(&first_dir).expect("create a");
+        std::fs::create_dir(&second_dir).expect("create b");
+        let mut batch = DeferredParentSyncs::default();
+        let destinations = [
+            first_dir.join("one"),
+            first_dir.join("two"),
+            first_dir.join("three"),
+            second_dir.join("four"),
+        ];
+        for (index, destination) in destinations.iter().enumerate() {
+            let staging = root.path().join(format!("staging-{index}"));
+            std::fs::write(&staging, format!("file {index}")).expect("write staged file");
+            futures_lite::future::block_on(batch.commit_staged_regular_file(&staging, destination))
+                .expect("commit staged regular file");
+            assert!(!staging.exists(), "staging leaf {index} must be consumed");
+            assert_eq!(
+                std::fs::read_to_string(destination).expect("read destination"),
+                format!("file {index}")
+            );
+        }
+        assert_eq!(
+            batch.parents.keys().cloned().collect::<Vec<_>>(),
+            vec![first_dir.clone(), second_dir.clone()],
+            "each distinct parent is recorded once and synced later, not per file"
+        );
+        futures_lite::future::block_on(batch.sync()).expect("sync recorded parents");
     }
 
     #[test]
