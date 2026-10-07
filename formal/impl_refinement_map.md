@@ -73,8 +73,8 @@ Current witnesses: `tests/scheduler_lane_fairness.rs::test_steal_only_from_ready
 |---|---|---|---|
 | `SPAWN` | `Scope::spawn` (`src/cx/scope.rs:348`), `Scope::spawn_task` (line 493), `RuntimeState::create_task` (`src/runtime/state.rs:1338`) | Implemented | Closing-region rejection covered: `tests::spawn_into_closing_region_should_fail` (`scope.rs:1933`). |
 | `SCHEDULE` (Created → Running) | `RuntimeState::create_task` enqueues; first `poll` flips state inside `runtime/state.rs` (`mark_task_running` family) | Implemented | |
-| `COMPLETE-OK` | `complete_task_ok` (`src/runtime/state.rs:7976`); waiter wake via `task_completed` (`src/runtime/state.rs:2446`) | Implemented | Callers compute `Policy::on_child_outcome` before taking the runtime-state lock, then pass the closed `PolicyAction` to `apply_policy_action`. |
-| `COMPLETE-ERR` | Same `task_completed` path, error outcome routed through policy aggregation | Implemented | |
+| `COMPLETE-OK` | `complete_task_ok` (`src/runtime/state.rs:7976`); waiter wake via `task_completed` (`src/runtime/state.rs:2446`) | Implemented | The region policy step is not wired: no production caller computes `Policy::on_child_outcome`, and `apply_policy_action` is exercised only by `state_tests.rs` (br-asupersync-mfqmcs). |
+| `COMPLETE-ERR` | Same `task_completed` path | Partial | The error outcome completes the task, but it does not reach the region's policy, so a `FailFast` region's siblings keep running (br-asupersync-mfqmcs). `JoinSet::try_join_all` implements fail-fast for its own members. |
 
 ### 3.2 Cancellation protocol
 
