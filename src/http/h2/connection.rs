@@ -350,6 +350,18 @@ impl PendingOp {
 struct PushPromiseAccumulator {
     associated_stream_id: u32,
     promised_stream_id: u32,
+    refusal: Option<PushRefusal>,
+}
+
+/// Why a PUSH_PROMISE is refused. Its field block is still decoded first
+/// (RFC 9113 §4.3); then the promised stream is reset with `reset`.
+#[derive(Debug, Clone, Copy)]
+struct PushRefusal {
+    reset: ErrorCode,
+    /// The stream error reported to the caller (stream, code, reason), if
+    /// any. `None` refuses silently: the promise raced our GOAWAY or our
+    /// reset of the associated stream, which is no error by the peer.
+    error: Option<(u32, ErrorCode, &'static str)>,
 }
 
 /// HTTP/2 connection.
@@ -1497,13 +1509,19 @@ impl Connection {
                         "promised stream not found",
                     )
                 })?;
-                promised.add_header_fragment(frame.header_block)?;
+                promised
+                    .add_header_fragment(frame.header_block)
+                    .map_err(Self::unkept_field_block_error)?;
 
                 if frame.end_headers {
                     self.pending_push_promise = None;
                     self.continuation_stream_id = None;
                     self.continuation_started_at = None;
-                    return self.decode_push_promise(frame.stream_id, promised_stream_id);
+                    return self.finish_push_promise(
+                        frame.stream_id,
+                        promised_stream_id,
+                        pending.refusal,
+                    );
                 }
 
                 return Ok(None);
@@ -1753,6 +1771,40 @@ impl Connection {
         }))
     }
 
+    /// Completes a PUSH_PROMISE field block: an accepted promise is decoded
+    /// into a [`ReceivedFrame::PushPromise`]; a refused one is decoded and
+    /// dropped, its promised stream reset, and its stream error, if any,
+    /// returned. The reset is sent here, so a caller that resets the error's
+    /// stream again sends nothing more (`reset_stream` skips a reset stream).
+    fn finish_push_promise(
+        &mut self,
+        associated_stream_id: u32,
+        promised_stream_id: u32,
+        refusal: Option<PushRefusal>,
+    ) -> Result<Option<ReceivedFrame>, H2Error> {
+        let Some(refusal) = refusal else {
+            return self.decode_push_promise(associated_stream_id, promised_stream_id);
+        };
+        let promised = self.streams.get_mut(promised_stream_id).ok_or_else(|| {
+            H2Error::connection(ErrorCode::InternalError, "refused promised stream missing")
+        })?;
+        let mut block = BytesMut::new();
+        for fragment in promised.take_header_fragments() {
+            block.extend_from_slice(&fragment);
+        }
+        promised.reset(refusal.reset);
+        promised.mark_reset_sent();
+        self.pending_ops.push_back(PendingOp::RstStream {
+            stream_id: promised_stream_id,
+            error_code: refusal.reset,
+        });
+        self.hpack_decoder.decode(&mut block.freeze())?;
+        match refusal.error {
+            Some((stream_id, code, reason)) => Err(H2Error::stream(stream_id, code, reason)),
+            None => Ok(None),
+        }
+    }
+
     /// Decode accumulated PUSH_PROMISE headers for a promised stream.
     fn decode_push_promise(
         &mut self,
@@ -1772,8 +1824,9 @@ impl Connection {
         let max_fragment_size =
             Stream::max_header_fragment_size_for(self.local_settings.max_header_list_size);
         if total_len > max_fragment_size {
-            return Err(H2Error::stream(
-                promised_stream_id,
+            // Undecoded, the block would leave the HPACK tables behind the
+            // peer's (RFC 9113 §4.3), so it ends the connection.
+            return Err(H2Error::connection(
                 ErrorCode::EnhanceYourCalm,
                 "accumulated header fragments too large",
             ));
@@ -1972,64 +2025,100 @@ impl Connection {
             return Err(H2Error::protocol("PUSH_PROMISE on server-initiated stream"));
         }
 
-        // RFC 9113 §6.8: After sending GOAWAY, refuse new streams with IDs
-        // above the advertised last_stream_id.
-        if self.stream_exceeds_sent_goaway(frame.promised_stream_id) {
-            self.pending_ops.push_back(PendingOp::RstStream {
-                stream_id: frame.promised_stream_id,
-                error_code: ErrorCode::RefusedStream,
-            });
-            return Ok(None);
-        }
-
-        // RFC 7540 §5.1: "An endpoint receiving a PUSH_PROMISE on a stream
-        // that is neither 'open' nor 'half-closed (local)' MUST treat this
-        // as a connection error of type PROTOCOL_ERROR."
-        let assoc_state = match self.streams.get(frame.stream_id) {
-            Some(stream) => stream.state(),
-            None => {
+        // A promise refused below still carries dynamic-table updates (RFC
+        // 9113 §4.3): its field block is collected and decoded like an
+        // accepted one, and the refusal is applied when the block is complete
+        // (finish_push_promise). Returning before decoding left this side's
+        // HPACK tables behind the peer's, so later field blocks decoded to
+        // the wrong header values.
+        let refusal = if self.stream_exceeds_sent_goaway(frame.promised_stream_id) {
+            // RFC 9113 §6.8: after sending GOAWAY, refuse new streams with
+            // IDs above the advertised last_stream_id.
+            Some(PushRefusal {
+                reset: ErrorCode::RefusedStream,
+                error: None,
+            })
+        } else {
+            let Some(associated) = self.streams.get(frame.stream_id) else {
                 return Err(H2Error::protocol("PUSH_PROMISE on unknown stream"));
+            };
+            let assoc_state = associated.state();
+            if associated.reset_sent() {
+                // RFC 9113 §6.6: a promise the peer sent before our RST_STREAM
+                // on the associated stream reached it is handled, not an
+                // error: the promised stream is cancelled.
+                Some(PushRefusal {
+                    reset: ErrorCode::Cancel,
+                    error: None,
+                })
+            } else if !matches!(
+                assoc_state,
+                StreamState::Open | StreamState::HalfClosedLocal
+            ) {
+                // RFC 7540 §5.1: PUSH_PROMISE is only valid on a stream that
+                // is open or half-closed (local).
+                let code = if assoc_state.is_closed() {
+                    ErrorCode::StreamClosed
+                } else {
+                    ErrorCode::ProtocolError
+                };
+                Some(PushRefusal {
+                    reset: ErrorCode::RefusedStream,
+                    error: Some((
+                        frame.stream_id,
+                        code,
+                        "PUSH_PROMISE on stream not in open or half-closed (local) state",
+                    )),
+                })
+            } else if self.streams.active_count() as u32
+                >= self.local_settings.max_concurrent_streams
+            {
+                // RST_STREAM must target the promised stream (RFC 7540
+                // §8.2.2), not the parent request stream.
+                Some(PushRefusal {
+                    reset: ErrorCode::RefusedStream,
+                    error: Some((
+                        frame.promised_stream_id,
+                        ErrorCode::RefusedStream,
+                        "max concurrent streams exceeded",
+                    )),
+                })
+            } else {
+                None
             }
         };
-        if !matches!(
-            assoc_state,
-            StreamState::Open | StreamState::HalfClosedLocal
-        ) {
-            let code = if assoc_state.is_closed() {
-                ErrorCode::StreamClosed
-            } else {
-                ErrorCode::ProtocolError
-            };
-            return Err(H2Error::stream(
-                frame.stream_id,
-                code,
-                "PUSH_PROMISE on stream not in open or half-closed (local) state",
-            ));
-        }
-
-        let max_concurrent = self.local_settings.max_concurrent_streams;
-        if self.streams.active_count() as u32 >= max_concurrent {
-            // RST_STREAM must target the promised stream (RFC 7540 §8.2.2),
-            // not the parent request stream.
-            return Err(H2Error::stream(
-                frame.promised_stream_id,
-                ErrorCode::RefusedStream,
-                "max concurrent streams exceeded",
-            ));
-        }
 
         let promised_stream_id = frame.promised_stream_id;
-        let promised_stream = self.streams.reserve_remote_stream(promised_stream_id)?;
-        promised_stream.add_header_fragment(frame.header_block.clone())?;
+        // A promised id the stream table refuses (past its gap ceiling) is a
+        // stream error with no record to collect the block in: a complete
+        // block is decoded first, a continued one ends the connection.
+        if let Err(error) = self
+            .streams
+            .reserve_remote_stream(promised_stream_id)
+            .map(|_| ())
+        {
+            return Err(self.decode_unkept_field_block(
+                frame.header_block.clone(),
+                frame.end_headers,
+                error,
+            ));
+        }
+        let promised_stream = self.streams.get_mut(promised_stream_id).ok_or_else(|| {
+            H2Error::connection(ErrorCode::InternalError, "promised stream missing")
+        })?;
+        promised_stream
+            .add_header_fragment(frame.header_block.clone())
+            .map_err(Self::unkept_field_block_error)?;
 
         if frame.end_headers {
             self.continuation_stream_id = None;
             self.continuation_started_at = None;
-            self.decode_push_promise(frame.stream_id, promised_stream_id)
+            self.finish_push_promise(frame.stream_id, promised_stream_id, refusal)
         } else {
             self.pending_push_promise = Some(PushPromiseAccumulator {
                 associated_stream_id: frame.stream_id,
                 promised_stream_id,
+                refusal,
             });
             self.continuation_stream_id = Some(frame.stream_id);
             self.continuation_started_at = Some((self.time_getter)());
@@ -5438,6 +5527,219 @@ mod tests {
         });
         let err = conn.process_frame(push3).unwrap_err();
         assert_eq!(err.code, ErrorCode::RefusedStream);
+    }
+
+    /// RFC 9113 §4.3: a PUSH_PROMISE refused for any reason still passes its
+    /// field block through the HPACK decoder. Each promise below adds a field
+    /// to the peer's dynamic table; a later response refers to it by index and
+    /// must decode to the same value. The promised stream is reset, and only
+    /// a promise that broke the protocol is reported as a stream error; one
+    /// that raced our GOAWAY or our reset of its associated stream is not
+    /// (RFC 9113 §6.6, §6.8) (br-asupersync-dycth8). Every case runs, and the
+    /// test reports all that fail.
+    #[test]
+    fn refused_push_promises_keep_hpack_in_step() {
+        let mut failures = Vec::new();
+        for refusal in [
+            PushRefusalCase::AfterOurGoaway,
+            PushRefusalCase::AssociatedResetByUs,
+            PushRefusalCase::AssociatedHalfClosedRemote,
+            PushRefusalCase::MaxConcurrentStreams,
+            PushRefusalCase::PromisedIdPastGapCeiling,
+        ] {
+            for split_block in [false, true] {
+                if let Err(failure) = refused_push_promise_case(refusal, split_block) {
+                    failures.push(format!("{refusal:?} split={split_block}: {failure}"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum PushRefusalCase {
+        AfterOurGoaway,
+        AssociatedResetByUs,
+        AssociatedHalfClosedRemote,
+        MaxConcurrentStreams,
+        PromisedIdPastGapCeiling,
+    }
+
+    fn refused_push_promise_case(
+        refusal: PushRefusalCase,
+        split_block: bool,
+    ) -> Result<(), String> {
+        let request = |path| {
+            vec![
+                Header::new(":method", "GET"),
+                Header::new(":path", path),
+                Header::new(":scheme", "https"),
+                Header::new(":authority", "example.com"),
+            ]
+        };
+        let push = |server: &mut hpack::Encoder, path: &str| {
+            encode_with(
+                server,
+                &[
+                    (":method", "GET"),
+                    (":scheme", "https"),
+                    (":path", path),
+                    (":authority", "example.com"),
+                    ("x-promised", path),
+                ],
+            )
+        };
+        let mut settings = Settings::client();
+        settings.enable_push = true;
+        settings.max_concurrent_streams = 2;
+        let mut conn = Connection::client(settings);
+        conn.state = ConnectionState::Open;
+        let mut server = hpack::Encoder::new();
+        let stream_id = conn
+            .open_stream(request("/"), false)
+            .map_err(|error| format!("open: {error:?}"))?;
+        while conn.next_frame().is_some() {}
+
+        let mut promised_stream_id = 2;
+        match refusal {
+            PushRefusalCase::AfterOurGoaway => conn.goaway(ErrorCode::NoError, Bytes::new()),
+            PushRefusalCase::AssociatedResetByUs => {
+                conn.reset_stream(stream_id, ErrorCode::Cancel);
+            }
+            PushRefusalCase::AssociatedHalfClosedRemote => {
+                let response = encode_with(&mut server, &[(":status", "200")]);
+                conn.process_frame(Frame::Headers(HeadersFrame::new(
+                    stream_id, response, true, true,
+                )))
+                .map_err(|error| format!("first response: {error:?}"))?;
+            }
+            PushRefusalCase::MaxConcurrentStreams => {
+                let accepted = push(&mut server, "/accepted");
+                let received = conn.process_frame(Frame::PushPromise(PushPromiseFrame {
+                    stream_id,
+                    promised_stream_id: 2,
+                    header_block: accepted,
+                    end_headers: true,
+                }));
+                if !matches!(received, Ok(Some(ReceivedFrame::PushPromise { .. }))) {
+                    return Err(format!("accepted promise: {received:?}"));
+                }
+                promised_stream_id = 4;
+            }
+            // Far past any stream-id gap the stream table accepts.
+            PushRefusalCase::PromisedIdPastGapCeiling => promised_stream_id = (1 << 30) + 2,
+        }
+        while conn.next_frame().is_some() {}
+
+        let block = push(&mut server, "/refused");
+        let result = if split_block {
+            let head = conn.process_frame(Frame::PushPromise(PushPromiseFrame {
+                stream_id,
+                promised_stream_id,
+                header_block: block.slice(..1),
+                end_headers: false,
+            }));
+            if matches!(refusal, PushRefusalCase::PromisedIdPastGapCeiling) {
+                // No record can collect the rest of the block, so the
+                // connection ends instead of losing HPACK sync.
+                return match head {
+                    Err(error) if error.stream_id.is_none() => Ok(()),
+                    other => Err(format!("expected a connection error: {other:?}")),
+                };
+            }
+            if !matches!(head, Ok(None)) {
+                return Err(format!("PUSH_PROMISE head: {head:?}"));
+            }
+            conn.process_frame(Frame::Continuation(ContinuationFrame {
+                stream_id,
+                header_block: block.slice(1..),
+                end_headers: true,
+            }))
+        } else {
+            conn.process_frame(Frame::PushPromise(PushPromiseFrame {
+                stream_id,
+                promised_stream_id,
+                header_block: block,
+                end_headers: true,
+            }))
+        };
+        let expected_error = match refusal {
+            PushRefusalCase::AfterOurGoaway | PushRefusalCase::AssociatedResetByUs => None,
+            PushRefusalCase::AssociatedHalfClosedRemote => {
+                Some((Some(stream_id), ErrorCode::ProtocolError))
+            }
+            PushRefusalCase::MaxConcurrentStreams | PushRefusalCase::PromisedIdPastGapCeiling => {
+                Some((Some(promised_stream_id), ErrorCode::RefusedStream))
+            }
+        };
+        match (&result, expected_error) {
+            (Ok(None), None) => {}
+            (Err(error), Some(expected)) if (error.stream_id, error.code) == expected => {}
+            _ => {
+                return Err(format!(
+                    "refused promise: {result:?}, expected {expected_error:?}"
+                ));
+            }
+        }
+
+        let mut resets = Vec::new();
+        while let Some(frame) = conn.next_frame() {
+            if let Frame::RstStream(reset) = frame {
+                resets.push((reset.stream_id, reset.error_code));
+            }
+        }
+        // Past the gap ceiling there is no record to reset here; the caller
+        // resets the stream named by the error.
+        let expected_resets = match refusal {
+            PushRefusalCase::PromisedIdPastGapCeiling => Vec::new(),
+            PushRefusalCase::AssociatedResetByUs => vec![(promised_stream_id, ErrorCode::Cancel)],
+            _ => vec![(promised_stream_id, ErrorCode::RefusedStream)],
+        };
+        if resets != expected_resets {
+            return Err(format!("resets {resets:?}, expected {expected_resets:?}"));
+        }
+
+        // The next response refers to the refused promise's field by index.
+        // It arrives on the associated stream, or on a new one when that
+        // stream can no longer carry a response.
+        let response_stream_id = match refusal {
+            PushRefusalCase::AfterOurGoaway
+            | PushRefusalCase::MaxConcurrentStreams
+            | PushRefusalCase::PromisedIdPastGapCeiling => stream_id,
+            PushRefusalCase::AssociatedResetByUs | PushRefusalCase::AssociatedHalfClosedRemote => {
+                let next = conn
+                    .open_stream(request("/next"), false)
+                    .map_err(|error| format!("open next: {error:?}"))?;
+                while conn.next_frame().is_some() {}
+                next
+            }
+        };
+        let response = encode_with(
+            &mut server,
+            &[(":status", "200"), ("x-promised", "/refused")],
+        );
+        let next = conn.process_frame(Frame::Headers(HeadersFrame::new(
+            response_stream_id,
+            response,
+            true,
+            true,
+        )));
+        match next {
+            Ok(Some(ReceivedFrame::Headers { headers, .. }))
+                if headers
+                    .iter()
+                    .any(|header| header.name == "x-promised" && header.value == "/refused") =>
+            {
+                Ok(())
+            }
+            // After our GOAWAY the connection also refuses responses on its
+            // own streams (a separate defect: the GOAWAY boundary should only
+            // cover peer-initiated streams), so this one is decoded and
+            // dropped. A table behind the peer's cannot decode its indexed
+            // field at all, so an Ok here still shows the tables in step.
+            Ok(None) if matches!(refusal, PushRefusalCase::AfterOurGoaway) => Ok(()),
+            other => Err(format!("the next response must decode: {other:?}")),
+        }
     }
 
     #[test]

@@ -2308,7 +2308,7 @@ impl<T> ResponseStream<T> {
     ///
     /// This is the suspend/resume counterpart to [`push`](Self::push): where
     /// `push` fails fast with
-    /// [`Code::ResourceExhausted`](crate::grpc::status::Code::ResourceExhausted)
+    /// [`Code::ResourceExhausted`]
     /// once the buffer is full, `poll_reserve` instead parks the producer until
     /// the consumer drains an item (the "window update"), then wakes it so the
     /// next `push` is guaranteed a free slot. A server-streaming handler that

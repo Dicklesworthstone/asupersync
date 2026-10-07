@@ -1037,7 +1037,7 @@ impl ObligationTable {
     ///
     /// Idempotent - calling multiple times on the same region is safe.
     ///
-    /// The fence remembers the most recent [`FINALIZED_FENCE_RETENTION`]
+    /// The fence remembers the most recent `FINALIZED_FENCE_RETENTION`
     /// regions. An older region's obligations are all resolved or leaked (a
     /// region closes with none pending), so `commit()` and `abort()` still
     /// refuse them, as already resolved.

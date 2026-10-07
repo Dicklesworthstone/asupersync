@@ -4472,14 +4472,6 @@ impl RuntimeState {
             return SpawnAdmission::Denied { parts, error };
         }
         let budget = parts.budget;
-        let runtime_mask = parts
-            .admitted_slot
-            .as_ref()
-            .map_or_else(crate::cx::cap::CapMask::all, |slot| slot.runtime_mask());
-        let retirement_barrier = parts
-            .admitted_slot
-            .as_ref()
-            .and_then(|slot| slot.retirement_barrier());
         let branch = self.mint_branch_region_in(&parts, regions);
         if let Some((child, _)) = &branch {
             // From here on the request belongs to the branch region: spawn
@@ -4491,8 +4483,7 @@ impl RuntimeState {
         let (task_id, cx, now) = match self.admit_spawn_record_in(
             region,
             budget,
-            runtime_mask,
-            retirement_barrier,
+            parts.admitted_slot.as_deref(),
             tasks,
             regions,
         ) {
@@ -4559,11 +4550,11 @@ impl RuntimeState {
         &mut self,
         region: RegionId,
         budget: Budget,
-        runtime_mask: crate::cx::cap::CapMask,
-        retirement_barrier: Option<Arc<crate::runtime::task_handle::RetirementBarrier>>,
+        slot: Option<&crate::runtime::spawn_mailbox::AdmittedTaskSlot>,
         tasks: &mut AdmissionTaskTarget<'_>,
         regions: &AdmissionRegionTarget<'_>,
     ) -> Result<(TaskId, crate::cx::Cx, Time), SpawnError> {
+        use crate::runtime::spawn_mailbox::AdmittedTaskSlot;
         // Region liveness first: missing or non-Open regions deny without
         // touching the task table.
         let Some(region_record) = regions.resolve_ref(&self.regions).get(region.arena_index())
@@ -4640,7 +4631,18 @@ impl RuntimeState {
 
         // Capability context, linked exactly as create_task_infrastructure
         // does, so cancellation and observability behave identically.
-        let entropy = self.entropy_source.fork(task_id);
+        let runtime_mask =
+            slot.map_or_else(crate::cx::cap::CapMask::all, AdmittedTaskSlot::runtime_mask);
+        let retirement_barrier = slot.and_then(AdmittedTaskSlot::retirement_barrier);
+        // The handles the task inherits from its spawner. This context is the
+        // task record's, which `Cx::current()` returns inside the task, so it
+        // must carry them, not only the spawn closure's context
+        // (br-asupersync-93zkbz).
+        let mut inherited = slot.and_then(AdmittedTaskSlot::take_inherited_handles);
+        let entropy = inherited.as_mut().map_or_else(
+            || self.entropy_source.fork(task_id),
+            |inherited| inherited.deferred_entropy(task_id),
+        );
         let observability = self
             .observability
             .as_ref()
@@ -4684,6 +4686,9 @@ impl RuntimeState {
                 .get(region.arena_index())
                 .map(|record| record.obligation_admission_handle(task_id)),
         );
+        if let Some(inherited) = inherited {
+            cx.adopt_inherited_handles(inherited);
+        }
         // The scheduler must install the inherited authority for the entire
         // task lifetime, including factory construction and panic cleanup.
         cx.runtime_mask = runtime_mask;
@@ -5044,19 +5049,10 @@ impl RuntimeState {
         }
         let region = request.region;
         let budget = request.budget;
-        let runtime_mask = request
-            .admitted_slot
-            .as_ref()
-            .map_or_else(crate::cx::cap::CapMask::all, |slot| slot.runtime_mask());
-        let retirement_barrier = request
-            .admitted_slot
-            .as_ref()
-            .and_then(|slot| slot.retirement_barrier());
         let (task_id, cx, now) = match self.admit_spawn_record_in(
             region,
             budget,
-            runtime_mask,
-            retirement_barrier,
+            request.admitted_slot.as_deref(),
             tasks,
             regions,
         ) {

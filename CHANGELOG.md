@@ -314,6 +314,30 @@ could spawn them before. Their handles report the admitted task id, abort and
 join through the runtime task, and their monitors and links fire in
 production (`asupersync-yvs9cx`).
 
+### Fiber cancellation
+
+Every fiber started by `cx::fiber::scope` inside a task has its own
+cancellation (its own `Cx::current()` while it runs):
+
+- the task's cancellation reaches every fiber;
+- `FiberHandle::cancel` stops one fiber;
+- a panicking fiber cancels its siblings with `FailFast`.
+
+The scope still waits for every fiber when its body returns, like
+`std::thread::scope` (`asupersync-issue65-criticisms-kpmoy5.3.1`, `.3.2`,
+`.3.3`).
+
+### Scheduler decision evidence
+
+`RuntimeBuilder::scheduler_evidence_sink(sink)` records every scheduling
+decision of the Lyapunov governor (one `scheduler` evidence entry per
+decision, plus the decision contract's audit entries) into an
+`EvidenceSink`. Only a runtime built with `enable_governor(true)` makes such
+decisions. Before, only a test could attach a sink to a worker. The docs of
+`StateTransitionVerifier`, `epoch_gc`, `epoch_tracking` and
+`resource_cleanup_verifier` now say the runtime does not use them
+(`asupersync-7yq1pv`).
+
 ### Durable ATP resume and journaling
 
 - Sender checkpoints are persisted in bounded, append-only journals before EOF,
@@ -386,6 +410,26 @@ production (`asupersync-yvs9cx`).
   actually cancelled. The Redis module docs now describe the two-context
   cancellation rule (a cancelled task cannot run cleanup commands by passing a
   fresh `Cx`).
+
+### Fixed: `Cx::current()` inside a spawned task lacked the spawner's handles
+
+Inside a task started with `Cx::spawn` or `Cx::spawn_local`, `Cx::current()`
+returned the runtime's admission context. That context did not carry the
+handles the task inherited from its spawner: the name registry, I/O
+capability, remote capability, evidence sink, macaroon, HTTP client slot and
+pressure handle. Its entropy stream and blocking pool were also not the
+spawner's. The task's own `cx` argument had them. Code that reached for
+`Cx::current()` (helpers several calls deep, prebuilt `race!` branches) lost
+them, and so did every task it spawned through that context. The task's
+contexts now share one set of handles, built at admission from a snapshot
+the spawner takes, which also removes a full copy of those handles per spawn
+(`asupersync-93zkbz`). In a seeded lab run, randomness drawn through
+`Cx::current()` inside a spawned task now comes from the spawner's forked
+stream, the one the task's own `cx` already used. Spawning through a `Cx` no
+longer forks the runtime's own entropy source, so tasks created by other
+paths (for example `RuntimeHandle::spawn`) can draw different seeded streams
+than before. A panicking custom `EntropySource::fork` still resolves the
+spawned task's join handle as `Panicked`.
 
 ### Fixed by the 2026-10-03 audits
 
@@ -789,6 +833,27 @@ Later fixes from the same audits:
   with the first registration again, as in v0.4.3; merging repeated patterns
   (so GET and POST registered separately both answer) had let the later
   registration replace it. (asupersync-pblpeg)
+
+Security:
+
+- `MacaroonKeyRing::verify` accepted an all-zero signature whenever no
+  retired key was set.
+- Verifying a macaroon whose third-party discharges fan out could take
+  exponential time; each (discharge, chain signature) pair is now verified
+  once per call.
+- `ResourceScope` glob matching let `..`, `.` and backslash segments escape
+  the scope (`files/public/../secret`); they now fail to match.
+
+Panics and stale names:
+
+- `NameRegistry::abort_permit` panicked (ASUP-E101) on every error path. It
+  now resolves the permit and returns the error.
+- A registration refused because its holder is the root region left the name
+  taken with no lease, or had already evicted the previous holder. Nothing
+  changes before the refusal now.
+- `NamedGenServerHandle::release_name` and `abort_lease` left the lease
+  armed after another task took the name over, so dropping the handle
+  panicked. They still return the registry's error, as in v0.4.3.
 
 ### UDP launch-time sends and the socket error queue (Linux, GH #73)
 

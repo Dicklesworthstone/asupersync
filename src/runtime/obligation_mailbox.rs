@@ -7,7 +7,7 @@
 //! can prove "no leaked permits" and the lab's obligation-leak oracle sees it.
 //! The obligation table lives inside [`RuntimeState`]: in Unified mode it is
 //! embedded (`RuntimeState::obligations`), the production runtime reaches it
-//! only through `Arc<Mutex<RuntimeState>>`, and the [`LabRuntime`] owns its
+//! only through `Arc<Mutex<RuntimeState>>`, and the [`LabRuntime`](crate::lab::LabRuntime) owns its
 //! state by value and polls task futures from inside its own step. A future
 //! being polled therefore has no path to `&mut RuntimeState`, and neither has
 //! a `Cx`. The spawn path solves exactly this with the
@@ -16,18 +16,18 @@
 //!
 //! # Shape
 //!
-//! * [`ObligationGateway`] (crate-private, attached to every task `Cx` by the
-//!   runtime) posts [`ObligationPost`] messages onto an unbounded lock-free
-//!   FIFO ([`ObligationMailbox`]). Checked posts also carry their owned credit.
-//! * [`Cx::try_register_obligation`](crate::cx::Cx::try_register_obligation)
+//! * [`ObligationGateway`](crate::runtime::obligation_mailbox::ObligationGateway) (crate-private, attached to every task `Cx` by the
+//!   runtime) posts [`ObligationPost`](crate::runtime::obligation_mailbox::ObligationPost) messages onto an unbounded lock-free
+//!   FIFO ([`ObligationMailbox`](crate::runtime::obligation_mailbox::ObligationMailbox)). Checked posts also carry their owned credit.
+//! * `Cx::try_register_obligation` (crate-private)
 //!   mints a ticket, reserves one credit on the region's pending-post counter
 //!   (so `is_quiescent` / drain gating see the reservation BEFORE the runtime
 //!   drains it, the way `PendingSpawnCounter` works for spawns), posts
-//!   `Reserve`, and returns an [`ObligationToken`].
-//! * [`ObligationToken::commit`] / [`ObligationToken::abort`] post the
+//!   `Reserve`, and returns an [`ObligationToken`](crate::runtime::obligation_mailbox::ObligationToken).
+//! * [`ObligationToken::commit`](crate::runtime::obligation_mailbox::ObligationToken::commit) / [`ObligationToken::abort`](crate::runtime::obligation_mailbox::ObligationToken::abort) post the
 //!   resolution; dropping an unresolved token posts `Leak` (never panics).
 //! * The runtime drains the mailbox where it drains spawn admissions
-//!   ([`apply_obligation_posts`]): `Reserve` -> `RuntimeState::create_obligation`
+//!   (`apply_obligation_posts`): `Reserve` -> `RuntimeState::create_obligation`
 //!   (holder / region checks, region accounting, trace event, oracle hooks),
 //!   `Commit` / `Abort` -> the matching `RuntimeState` method through the
 //!   ticket table, `Leak` -> `RuntimeState::report_obligation_leak`, the same
@@ -643,7 +643,7 @@ impl ObligationGateway {
 /// A runtime-tracked obligation minted through the obligation mailbox.
 ///
 /// Created by
-/// [`Cx::try_register_obligation`](crate::cx::Cx::try_register_obligation).
+/// `Cx::try_register_obligation` (crate-private).
 /// Resolve it with [`commit`](Self::commit) or [`abort`](Self::abort);
 /// dropping it unresolved posts a leak, which the runtime records through its
 /// obligation-leak policy (and the lab's obligation-leak oracle reports). The
