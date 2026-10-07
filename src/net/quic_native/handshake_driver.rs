@@ -231,6 +231,14 @@ pub(crate) fn retry_integrity_tag(
 /// Verify the RFC 9001 §5.8 Retry pseudo-packet with the QUIC v1 fixed key.
 /// Verify the bytes as received: the Retry header's unused bits participate in
 /// the integrity tag even though their value has no protocol meaning.
+/// Whether `datagram` starts with a short-header packet addressed to `cid`.
+fn is_short_header_for(datagram: &[u8], cid: ConnectionId) -> bool {
+    matches!(
+        ProtectedHeaderPrefix::decode(datagram, cid.len()),
+        Ok(ProtectedHeaderPrefix::Short { dst_cid, .. }) if dst_cid == cid
+    )
+}
+
 fn validated_client_retry(
     datagram: &[u8],
     original_dcid: ConnectionId,
@@ -1979,14 +1987,17 @@ pub async fn client_handshake_over_udp(
             }
             if packet.data.first().is_none_or(|byte| byte & 0x80 == 0) {
                 // Unauthenticated short-header traffic must not fill an early
-                // application queue before the server has even sent Initial.
-                if driver.peer_connection_id.is_none() {
-                    continue;
+                // application queue before the server has even sent Initial,
+                // and only a packet addressed to this client is kept. It
+                // authenticates in the data plane only, so a full queue drops
+                // it instead of ending the handshake (br-asupersync-2eqmd2
+                // L2); the server's loss recovery resends a real one.
+                if driver.peer_connection_id.is_some()
+                    && is_short_header_for(&packet.data, client_scid)
+                    && early_one_rtt.len() < MAX_EARLY_ONE_RTT_PACKETS
+                {
+                    early_one_rtt.push(packet);
                 }
-                if early_one_rtt.len() >= MAX_EARLY_ONE_RTT_PACKETS {
-                    return Err(handshake_failure("early_one_rtt_queue_exhausted"));
-                }
-                early_one_rtt.push(packet);
                 continue;
             }
             let prefix = match ProtectedHeaderPrefix::decode(&packet.data, 0) {
@@ -2242,14 +2253,19 @@ pub(crate) async fn server_handshake_over_udp_with_early_data(
     let mut no_peer_idle_timeouts = 0usize;
     let mut budget = AmplificationBudget::default();
     let mut pto = HANDSHAKE_PTO;
+    // As on the client, stray datagrams neither spend the flight budget nor
+    // move the receive deadline: a burst of them used to end a healthy
+    // handshake after 64 receive batches (br-asupersync-2eqmd2 L1), and with
+    // a relative timeout an endless trickle would keep it alive forever.
+    let mut flights = 0usize;
+    let mut receive_deadline = cx.now() + pto;
 
-    for _ in 0..HANDSHAKE_MAX_FLIGHTS {
+    while flights < HANDSHAKE_MAX_FLIGHTS {
         if driver.is_complete() {
             break;
         }
-        let received = match crate::time::timeout(
-            cx.now(),
-            pto,
+        let received = match crate::time::timeout_at(
+            receive_deadline,
             endpoint.receive_batch(cx, HANDSHAKE_RECEIVE_BATCH_SIZE),
         )
         .await
@@ -2257,15 +2273,18 @@ pub(crate) async fn server_handshake_over_udp_with_early_data(
             Ok(Ok(packets)) => packets,
             Ok(Err(_)) => return Err(handshake_failure("udp_recv")),
             Err(_) => {
+                flights += 1;
                 if peer.is_none() {
                     no_peer_idle_timeouts = no_peer_idle_timeouts.saturating_add(1);
                     if no_peer_idle_timeouts >= HANDSHAKE_SERVER_NO_PEER_IDLE_LIMIT {
                         return Err(handshake_failure("server_handshake_recv_timeout"));
                     }
+                    receive_deadline = cx.now() + pto;
                     continue;
                 }
                 // Each PTO without progress doubles the next one.
                 pto = pto.saturating_mul(2).min(HANDSHAKE_MAX_PTO);
+                receive_deadline = cx.now() + pto;
                 if budget.queue_retransmit(driver, &mut last_flight, &mut packet_number)? {
                     budget.flush(cx, endpoint).await?;
                     continue;
@@ -2276,6 +2295,7 @@ pub(crate) async fn server_handshake_over_udp_with_early_data(
         if !received.is_empty() {
             no_peer_idle_timeouts = 0;
         }
+        let mut accepted_batch = false;
         // Pump after EACH packet so newly-derived keys are installed before the
         // next packet is processed (symmetry with the client side).
         for packet in received {
@@ -2284,13 +2304,16 @@ pub(crate) async fn server_handshake_over_udp_with_early_data(
                 budget.received = budget.received.saturating_add(packet.data.len());
             }
             if packet.data.first().is_none_or(|byte| byte & 0x80 == 0) {
-                if !from_peer {
+                // Only the client's packets addressed to this server are kept,
+                // and a full queue drops one instead of ending the handshake
+                // (br-asupersync-2eqmd2 L2): it authenticates in the data
+                // plane only.
+                if !from_peer || !is_short_header_for(&packet.data, server_scid) {
                     continue;
                 }
-                if early_one_rtt.len() >= MAX_EARLY_ONE_RTT_PACKETS {
-                    return Err(handshake_failure("early_one_rtt_queue_exhausted"));
+                if early_one_rtt.len() < MAX_EARLY_ONE_RTT_PACKETS {
+                    early_one_rtt.push(packet);
                 }
-                early_one_rtt.push(packet);
                 if !driver.is_complete()
                     && !last_flight.packets.is_empty()
                     && last_early_data_resend.is_none_or(|at| at.elapsed() >= HANDSHAKE_PTO)
@@ -2369,7 +2392,9 @@ pub(crate) async fn server_handshake_over_udp_with_early_data(
             if driver.has_authenticated_handshake_packet() {
                 budget.validated = true;
             }
+            accepted_batch = true;
             pto = HANDSHAKE_PTO;
+            receive_deadline = cx.now() + pto;
             if let Some((addr, client_cid)) = peer {
                 let flight = driver.assemble_pending_flight(
                     endpoint.config().max_packet_size,
@@ -2394,6 +2419,9 @@ pub(crate) async fn server_handshake_over_udp_with_early_data(
                 }
             }
             budget.flush(cx, endpoint).await?;
+        }
+        if accepted_batch {
+            flights += 1;
         }
     }
 
@@ -5357,5 +5385,168 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
         )
         .await;
         (a_out, b_out)
+    }
+
+    fn udp_runtime() -> crate::runtime::Runtime {
+        crate::runtime::RuntimeBuilder::current_thread()
+            .with_reactor(crate::runtime::reactor::create_reactor().unwrap())
+            .build()
+            .unwrap()
+    }
+
+    /// br-asupersync-2eqmd2 L1: datagrams that are not part of the handshake
+    /// spend none of the standalone server's flight budget. More than 64
+    /// batches of them used to end the server's handshake before it read the
+    /// client's Initial, and the client then retransmitted into silence.
+    #[test]
+    fn stray_datagrams_do_not_spend_the_server_flight_budget() {
+        let original_cid = ConnectionId::new(DCID_BYTES).unwrap();
+        let client_scid = ConnectionId::new(&[0x31; 8]).unwrap();
+        let server_scid = ConnectionId::new(&[0x32; 8]).unwrap();
+        udp_runtime().block_on(async {
+            let cx = Cx::current().expect("native context");
+            let mut server_endpoint = loopback_endpoint(&cx).await;
+            let mut client_endpoint = loopback_endpoint(&cx).await;
+            let mut stray_endpoint = loopback_endpoint(&cx).await;
+            let server_addr = server_endpoint.local_addr();
+            let (mut client, mut server) = alpn_pair(ATP_QUIC_ALPN);
+            let strays: Vec<OutgoingPacket> = (0..8)
+                .map(|_| OutgoingPacket {
+                    dst_addr: server_addr,
+                    data: vec![0x40; 32],
+                    send_time: None,
+                })
+                .collect();
+            let connecting = async {
+                // 140 rounds of 8: at least 70 receive batches (one holds at
+                // most 16 datagrams) before the client's first Initial.
+                for _ in 0..140 {
+                    stray_endpoint.send_batch(&cx, &strays).await.unwrap();
+                    crate::time::sleep(cx.now(), Duration::from_millis(5)).await;
+                }
+                client_handshake_over_udp(
+                    &cx,
+                    &mut client_endpoint,
+                    server_addr,
+                    &mut client,
+                    original_cid,
+                    client_scid,
+                )
+                .await
+            };
+            let (served, connected) = join_within(
+                &cx,
+                Duration::from_secs(20),
+                server_handshake_over_udp(
+                    &cx,
+                    &mut server_endpoint,
+                    &mut server,
+                    original_cid,
+                    server_scid,
+                ),
+                connecting,
+            )
+            .await;
+            served
+                .expect("the server's handshake ends")
+                .expect("the strays are ignored and the handshake completes");
+            connected
+                .expect("the client's handshake ends")
+                .expect("the client completes");
+        });
+    }
+
+    /// br-asupersync-2eqmd2 L2: short-header packets that reach a client
+    /// mid-handshake are kept only when addressed to it, and a full queue
+    /// drops them instead of ending the handshake.
+    #[test]
+    fn a_full_early_one_rtt_queue_drops_packets_instead_of_ending_the_handshake() {
+        let original_cid = ConnectionId::new(DCID_BYTES).unwrap();
+        let client_scid = ConnectionId::new(&[0x41; 8]).unwrap();
+        let server_scid = ConnectionId::new(&[0x42; 8]).unwrap();
+        let other_cid = ConnectionId::new(&[0x43; 8]).unwrap();
+        udp_runtime().block_on(async {
+            let cx = Cx::current().expect("native context");
+            let mut server_endpoint = loopback_endpoint(&cx).await;
+            let mut client_endpoint = loopback_endpoint(&cx).await;
+            let server_addr = server_endpoint.local_addr();
+            let (mut client, mut server) = alpn_pair(ATP_QUIC_ALPN);
+            server.install_initial_keys(DCID_BYTES).unwrap();
+            // A scripted server: its Initial, then short-header packets, and
+            // only then its Handshake flight.
+            let scripted = async {
+                let hello = loop {
+                    let batch = server_endpoint.receive_batch(&cx, 1).await.unwrap();
+                    if let Some(packet) = batch.into_iter().next() {
+                        break packet;
+                    }
+                };
+                server.recv_handshake_packet(&hello.data).unwrap();
+                let mut packet_number = 0;
+                let flight = server
+                    .assemble_pending_flight(
+                        1200,
+                        hello.src_addr,
+                        client_scid,
+                        server_scid,
+                        &mut packet_number,
+                    )
+                    .unwrap();
+                let (initial, handshake): (Vec<_>, Vec<_>) =
+                    flight.packets.into_iter().partition(|packet| {
+                        long_prefix(&packet.data).packet_type == LongPacketType::Initial
+                    });
+                server_endpoint.send_batch(&cx, &initial).await.unwrap();
+                // 48 packets for another connection, then 2000 for this
+                // client: more than its 1024-packet early queue holds.
+                for round in 0..256 {
+                    let cid = if round < 6 { other_cid } else { client_scid };
+                    let batch: Vec<OutgoingPacket> = (0..8)
+                        .map(|_| {
+                            let mut data = vec![0x40];
+                            data.extend_from_slice(cid.as_bytes());
+                            data.extend_from_slice(&[0xaa; 24]);
+                            OutgoingPacket {
+                                dst_addr: hello.src_addr,
+                                data,
+                                send_time: None,
+                            }
+                        })
+                        .collect();
+                    server_endpoint.send_batch(&cx, &batch).await.unwrap();
+                    crate::time::sleep(cx.now(), Duration::from_millis(5)).await;
+                }
+                server_endpoint.send_batch(&cx, &handshake).await.unwrap();
+            };
+            let (scripted, connected) = join_within(
+                &cx,
+                Duration::from_secs(20),
+                scripted,
+                client_handshake_over_udp(
+                    &cx,
+                    &mut client_endpoint,
+                    server_addr,
+                    &mut client,
+                    original_cid,
+                    client_scid,
+                ),
+            )
+            .await;
+            scripted.expect("the scripted server finishes");
+            let early = connected
+                .expect("the client's handshake ends")
+                .expect("a full early queue does not end the handshake");
+            assert!(
+                !early.is_empty() && early.len() <= MAX_EARLY_ONE_RTT_PACKETS,
+                "{} early packets",
+                early.len()
+            );
+            assert!(
+                early
+                    .iter()
+                    .all(|packet| is_short_header_for(&packet.data, client_scid)),
+                "packets for another connection are dropped"
+            );
+        });
     }
 }
