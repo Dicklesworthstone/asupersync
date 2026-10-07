@@ -17,6 +17,7 @@
 //! - [`pipeline`]: Chain transformations with staged processing
 //! - [`map_reduce`]: Parallel map followed by monoid-based reduction
 //! - [`stream_collect`]: Ordered collection of concurrent region-owned stream work
+//! - [`stream_send`]: Backpressured concurrent mapping into bounded channels
 //! - [`circuit_breaker`]: Failure detection and prevention
 //! - [`bulkhead`]: Resource isolation and concurrency limiting
 //! - [`rate_limit`]: Throughput control with token bucket algorithm
@@ -121,6 +122,7 @@ pub mod rate_limit;
 pub mod retry;
 pub mod select;
 pub mod stream_collect;
+pub mod stream_send;
 pub mod timeout;
 #[cfg(test)]
 pub mod timeout_metamorphic;
@@ -183,6 +185,7 @@ pub use select::{
     SelectAllError, SelectError,
 };
 pub use stream_collect::{map_collect_concurrent, try_map_collect_concurrent};
+pub use stream_send::{StreamSendError, try_map_send_concurrent_scoped};
 pub use timeout::{
     TimedError, TimedResult, Timeout, TimeoutConfig, TimeoutError, effective_deadline,
     make_timed_result,
