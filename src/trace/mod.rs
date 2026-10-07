@@ -28,6 +28,7 @@
 //! - [`recorder`]: Trace recorder for Lab runtime instrumentation
 //! - [`replayer`]: Trace replayer for deterministic replay with stepping support
 //! - [`file`](mod@file): Binary file format for trace persistence
+//! - [`recovery`]: Explicit bounded salvage of unfinished crash traces
 //! - [`buffer`]: Ring buffer for recent events
 //! - [`format`](mod@format): Output formatting utilities
 //! - [`streaming`]: Streaming replay for large traces with O(1) memory
@@ -77,6 +78,7 @@ pub mod minimizer;
 pub mod raptorq_journal;
 pub mod raptorq_journal_writer;
 pub mod recorder;
+pub mod recovery;
 pub mod refinement_firewall;
 pub mod replay;
 pub mod replayer;
@@ -181,6 +183,9 @@ pub use minimizer::{
 pub use recorder::{
     DEFAULT_MAX_FILE_SIZE, DEFAULT_MAX_MEMORY, LimitAction, LimitKind, LimitReached,
     RecorderConfig, TraceRecorder,
+};
+pub use recovery::{
+    CrashRecovery, CrashRecoveryLimits, CrashRecoveryStop, recover_crashed_trace_prefix,
 };
 pub use refinement_firewall::{
     RefinementFirewallReport, RefinementViolation, check_refinement_firewall,
@@ -303,7 +308,7 @@ mod normalize_tests {
         ];
 
         let original_cost = trace_switch_cost(&events);
-        let (normalized, result) = normalize_trace_default(&events);
+        let (normalized, result) = normalize_trace(&events, &GeodesicConfig::default());
         let normalized_cost = trace_switch_cost(&normalized);
 
         // Original order has more switches than normalized
