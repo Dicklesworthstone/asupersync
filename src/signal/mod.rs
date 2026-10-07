@@ -58,7 +58,8 @@
 //!
 //! - `Signal::recv`: Cancel-safe
 //! - `ShutdownReceiver::wait`: Cancel-safe
-//! - `ctrl_c`: Cancel-safe
+//! - `ctrl_c`: dropping it is safe, but a Ctrl+C between calls is not seen by
+//!   the next call; keep one `signal(SignalKind::interrupt())` stream instead
 
 mod ctrl_c;
 mod graceful;

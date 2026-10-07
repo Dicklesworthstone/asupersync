@@ -47,7 +47,11 @@ impl From<CtrlCError> for io::Error {
 ///
 /// # Cancel Safety
 ///
-/// This function is cancel-safe. If cancelled, no Ctrl+C event is lost.
+/// Dropping the future is safe, but each call starts a fresh stream at the
+/// current delivery count. A Ctrl+C that arrives while no `ctrl_c()` future
+/// is being polled, or that completes a future which is then dropped, is not
+/// seen by a later call. A loop that must not miss one keeps a single
+/// `signal(SignalKind::interrupt())` stream and awaits its `recv`.
 ///
 /// # Example
 ///

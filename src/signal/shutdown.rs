@@ -241,9 +241,9 @@ impl ReloadReceiver {
 
             let mut notified = std::pin::pin!(state.notify.notified());
             std::future::poll_fn(|cx| {
-                let current = state.requests.load(Ordering::Acquire);
-                if current > self.seen_requests
-                    || std::future::Future::poll(notified.as_mut(), cx).is_ready()
+                // Enroll before the check: a broadcast between them still wakes us.
+                if std::future::Future::poll(notified.as_mut(), cx).is_ready()
+                    || state.requests.load(Ordering::Acquire) > self.seen_requests
                 {
                     return std::task::Poll::Ready(());
                 }
