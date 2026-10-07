@@ -289,14 +289,20 @@ impl Default for RuntimeCapacityHints {
 }
 
 /// Storage-temperature policy for runtime metadata and retained evidence.
+///
+/// The policy is reported, not yet applied.
+/// [`RuntimeConfig::arena_temperature_report`] describes the tiering a policy
+/// selects, but the runtime allocates on the unified path under every policy.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ArenaTemperaturePolicy {
     /// Keep hot metadata and retained evidence on the unified allocator path.
     #[default]
     Unified,
-    /// Separate retained evidence into a colder tier while keeping runtime metadata hot.
+    /// Request a colder tier for retained evidence while keeping runtime
+    /// metadata hot (reported only; see the type docs).
     TieredColdEvidence,
-    /// Prefer large-page cold slabs for retained evidence when the host supports them.
+    /// Request large-page cold slabs for retained evidence when the host
+    /// supports them (reported only; see the type docs).
     TieredColdEvidenceLargePages,
 }
 
