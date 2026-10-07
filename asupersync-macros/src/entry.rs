@@ -14,8 +14,12 @@ use syn::{
 /// configure by default. It mirrors tokio's `max_blocking_threads` default so
 /// `spawn_blocking` from an entry-macro program offloads to a dedicated thread
 /// instead of running inline on an async worker. Threads are only created on
-/// demand (`min = 0`) and retire when idle. `blocking = 0` restores the
-/// inline behaviour of a bare `RuntimeBuilder`.
+/// demand (`min = 0`) and retire when idle. `blocking = 0` configures no pool,
+/// so blocking work runs inline.
+///
+/// This equals the `RuntimeBuilder::new()` default but is emitted explicitly,
+/// so an expansion keeps its pool when paired with an `asupersync` release
+/// from before that default, and keeps sizing ATP's CPU fan-out as before.
 const DEFAULT_BLOCKING_THREADS: usize = 512;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -386,16 +390,12 @@ fn builder_tokens(args: &EntryArgs, kind: EntryKind) -> TokenStream2 {
         let literal = Literal::u32_unsuffixed(budget);
         quote!(.poll_budget(#literal))
     });
-    // A bare `RuntimeBuilder` ships with no blocking pool, which makes
-    // `spawn_blocking` run inline on the async worker. Entry-macro programs
-    // get an on-demand pool unless the author opts out with `blocking = 0`.
-    let blocking_step = match args.blocking.unwrap_or(DEFAULT_BLOCKING_THREADS) {
-        0 => None,
-        max_threads => {
-            let literal = Literal::usize_unsuffixed(max_threads);
-            Some(quote!(.blocking_threads(0, #literal)))
-        }
-    };
+    // Entry-macro programs get an on-demand pool unless the author opts out
+    // with `blocking = 0`. The opt-out is emitted too: omitting it would
+    // inherit the builder's default pool (kpmoy5.1.15).
+    let max_threads = args.blocking.unwrap_or(DEFAULT_BLOCKING_THREADS);
+    let literal = Literal::usize_unsuffixed(max_threads);
+    let blocking_step = quote!(.blocking_threads(0, #literal));
 
     quote!(#base #worker_step #budget_step #blocking_step)
 }
@@ -490,7 +490,7 @@ mod tests {
     }
 
     #[test]
-    fn blocking_zero_omits_the_pool_configuration() {
+    fn blocking_zero_emits_the_explicit_opt_out() {
         let input: ItemFn = syn::parse2(quote! {
             async fn main() {}
         })
@@ -502,7 +502,10 @@ mod tests {
         let tokens = expand_entry(&args, input, EntryKind::Main)
             .unwrap()
             .to_string();
-        assert!(!tokens.contains("blocking_threads"));
+        assert!(
+            tokens.contains("blocking_threads (0 , 0)"),
+            "an omitted step would inherit the builder's default pool: {tokens}"
+        );
     }
 
     #[test]

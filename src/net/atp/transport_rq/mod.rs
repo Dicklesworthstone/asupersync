@@ -8008,9 +8008,16 @@ fn rq_decode_core_limit_for_cx(cx: &Cx) -> usize {
     // ATP CLI/daemon runtimes size a blocking pool explicitly for CPU-heavy
     // RaptorQ work. Prefer that live cap over process CPU discovery so cgroup
     // or container affinity quirks do not collapse receiver decode to one lane.
+    // The runtime's default pool is sized for blocking I/O (up to 512 threads),
+    // so its cap only lowers the host-core limit (kpmoy5.1.15).
     cx.blocking_pool_handle()
         .map_or_else(rq_decode_core_limit, |pool| {
-            rq_decode_core_limit_for_available(pool.current_max_threads())
+            let pool_limit = rq_decode_core_limit_for_available(pool.current_max_threads());
+            if pool.is_explicitly_sized() {
+                pool_limit
+            } else {
+                pool_limit.min(rq_decode_core_limit())
+            }
         })
 }
 

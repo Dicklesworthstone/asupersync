@@ -280,6 +280,40 @@ pay nothing. Consequences:
 
 (asupersync-pev2xi)
 
+### Behavior change — `RuntimeBuilder` starts with an on-demand blocking pool
+
+`RuntimeBuilder::new()` and every preset built on it (`current_thread`,
+`multi_thread`, `high_throughput`, `low_latency`) now configure
+`blocking_threads(0, 512)` on native targets. No pool thread starts until the
+first blocking job, and idle threads retire. Before, a bare builder had no
+pool, so `spawn_blocking`, `File`'s poll traits and the other blocking-backed
+`fs` facades ran their syscalls inline on an async worker and stalled every
+task scheduled behind them. `#[main]`/`#[test]` already configured this pool;
+the builder default now matches them. Consequences:
+
+- `blocking_threads(0, 0)` restores the old behaviour: no pool, inline
+  fallback. `#[asupersync::main(blocking = 0)]` and `#[asupersync::test(blocking = 0)]`
+  now emit it explicitly; before, the macro emitted no blocking step and would
+  have inherited the new default.
+- APIs that refuse to run without a pool now accept on a default runtime:
+  `spawn_blocking_drained`, `Runtime::spawn_blocking` (it returns `Some`),
+  `blocking_handle`, `ScopedFs`, scoped Kafka consumers, persistent
+  membership, the durable symbol service, `NativeRemoteDiscoveryDriver::run`,
+  and managed-app `Blocking` capability binds.
+- Setting only `ASUPERSYNC_BLOCKING_MIN_THREADS` (or `[blocking] min_threads`)
+  now keeps the default maximum of 512 instead of a pool of exactly that size.
+- `RuntimeConfig::default()`, `Runtime::with_config`, `LabRuntime` and wasm32
+  builds are unchanged: they still have no pool unless one is configured.
+- CPU-bound fan-out onto the pool reads the cap of an explicitly sized pool
+  (`blocking_threads`, `ASUPERSYNC_BLOCKING_MAX_THREADS`, `[blocking]
+  max_threads`, the entry macros) as its CPU width, as before. The default
+  pool's cap is not a CPU estimate, so ATP's RaptorQ decode, symbol
+  verification and parallel packet unprotect bound their width on it by the
+  host's available parallelism. Without a pool, decode used the same bound
+  and the other two ran serially.
+
+(asupersync-issue65-criticisms-kpmoy5.1.15)
+
 ### Native GenServers and actors
 
 `Cx::spawn_gen_server`, `Cx::spawn_actor` and `Cx::spawn_supervised_actor`

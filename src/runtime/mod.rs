@@ -131,7 +131,7 @@
 //! - `thread_name_prefix`: default = `asupersync-worker`. Improves diagnostics.
 //! - `global_queue_limit`: default = 0 (unbounded). Lower values add backpressure.
 //! - `steal_batch_size`: default = 16. Larger favors throughput; smaller favors latency.
-//! - `blocking_threads(min, max)`: default = 0..0. Max is clamped to be >= min.
+//! - `blocking_threads(min, max)`: default = 0..512 on demand (0..0 on wasm32). Max is clamped to be >= min.
 //! - `enable_parking`: default = true. Disabling reduces wake latency at CPU cost.
 //! - `poll_budget`: default = 128. Lower for fairness, higher for throughput.
 //! - `root_region_limits`: default = None. Admission limits applied to root region.

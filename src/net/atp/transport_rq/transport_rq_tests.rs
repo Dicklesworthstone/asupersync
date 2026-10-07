@@ -257,6 +257,40 @@ fn auth_verify_width_uses_receiver_blocking_pool_without_decode_size_gate() {
 }
 
 #[test]
+fn a_default_sized_pool_bounds_decode_width_by_host_cores() {
+    // br-asupersync-issue65-criticisms-kpmoy5.1.15: the runtime's default pool
+    // caps at 512 threads for blocking I/O, which says nothing about CPUs.
+    let pool = crate::runtime::blocking_pool::BlockingPool::new(0, 512);
+    let handle = pool.handle();
+    let cx = Cx::new(
+        crate::types::RegionId::new_for_test(42, 1),
+        crate::types::TaskId::new_for_test(42, 0),
+        crate::types::Budget::INFINITE,
+    )
+    .with_blocking_pool_handle(Some(handle.clone()));
+    assert_eq!(
+        rq_decode_core_limit_for_cx(&cx),
+        RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD,
+        "an explicitly sized pool's cap stands in for CPU width"
+    );
+
+    handle.mark_default_sized();
+    assert_eq!(
+        rq_decode_core_limit_for_cx(&cx),
+        rq_decode_core_limit(),
+        "the default pool's decode width must come from the host's cores, as without a pool"
+    );
+    let symbols = RQ_AUTH_VERIFY_PARALLEL_MIN_SYMBOLS * 1024;
+    assert_eq!(
+        rq_auth_verify_width_for_cx(&cx, symbols),
+        rq_decode_core_limit()
+            .min(symbols.div_ceil(RQ_AUTH_VERIFY_TARGET_CHUNK_SYMBOLS))
+            .max(1),
+        "auth verification follows the same host-core bound"
+    );
+}
+
+#[test]
 fn decode_width_budget_reports_effective_core_and_memory_caps() {
     let budget = rq_decode_width_budget_snapshot(&[], DEFAULT_SYMBOL_SIZE);
     assert!(budget.effective >= 1);
