@@ -74,9 +74,9 @@ expression: inventory
 1	Io	grpc/server/duplex/tests.rs	TcpStream::
 2	Io	grpc/server/duplex/tests.rs	std::net::TcpStream
 1	Io	grpc/server/server_streaming/tests.rs	TcpStream::
-3	Io	http/h1/http_client.rs	TcpStream::
+1	Io	http/h1/http_client.rs	TcpStream::
 4	Io	http/h1/listener.rs	TcpListener::
-2	Io	http/h2/client.rs	TcpStream::
+1	Io	http/h2/client.rs	TcpStream::
 4	Io	http/h2/listener.rs	TcpListener::
 1	Io	io/replay_group_session/connect/tcp.rs	TcpStream::
 1	Io	messaging/nats.rs	TcpStream::
@@ -121,7 +121,7 @@ expression: inventory
 1	Io	net/atp/transport_tcp/mod.rs	TcpStream::
 1	Io	net/atp/transport_tcp/mod.rs	std::fs::OpenOptions
 1	Io	net/dns/resolver.rs	TcpStream::
-1	Io	net/happy_eyeballs.rs	TcpStream::
+2	Io	net/happy_eyeballs.rs	TcpStream::
 3	Io	net/quic_native/forensic_log.rs	std::fs::File::create
 2	Io	net/quic_native/handshake_driver.rs	std::net::UdpSocket
 1	Io	net/stun.rs	std::net::UdpSocket
@@ -133,7 +133,7 @@ expression: inventory
 2	Io	net/tcp/stream.rs	TcpStream::
 1	Io	net/tcp/traits.rs	TcpListener::
 1	Io	net/tcp/traits.rs	std::net::TcpListener
-4	Io	net/websocket/client.rs	TcpStream::
+1	Io	net/websocket/client.rs	TcpStream::
 1	Io	process.rs	std::fs::OpenOptions
 1	Io	remote.rs	TcpListener::
 1	Io	runtime/reactor/io_uring.rs	TcpListener::
@@ -419,11 +419,8 @@ expression: inventory
 1	Io	grpc/server/duplex/tests.rs	std::net::TcpStream	let socket = std::net::TcpStream::connect_timeout(&address, LIMIT).unwrap();
 1	Io	grpc/server/duplex/tests.rs	std::net::TcpStream	socket: std::net::TcpStream,
 1	Io	grpc/server/server_streaming/tests.rs	TcpStream::	let socket = TcpStream::connect_timeout(&addr, Duration::from_secs(3))
-1	Io	http/h1/http_client.rs	TcpStream::	TcpStream::connect(addr)
 1	Io	http/h1/http_client.rs	TcpStream::	TcpStream::connect_socket_addr(socket_addr)
-1	Io	http/h1/http_client.rs	TcpStream::	let mut stream = TcpStream::connect(addr)
 4	Io	http/h1/listener.rs	TcpListener::	let tcp_listener = TcpListener::bind(addr).await?;
-1	Io	http/h2/client.rs	TcpStream::	TcpStream::connect((host.to_owned(), request.url.port)).await?
 1	Io	http/h2/client.rs	TcpStream::	TcpStream::connect(SocketAddr::new(ip, request.url.port)).await?
 4	Io	http/h2/listener.rs	TcpListener::	let tcp_listener = TcpListener::bind(addr).await?;
 1	Io	io/replay_group_session/connect/tcp.rs	TcpStream::	TcpStream::connect_socket_addr(address)
@@ -490,7 +487,8 @@ expression: inventory
 1	Io	net/atp/transport_tcp/mod.rs	TcpStream::	with_transport_timeout(cx, config.idle_timeout, , TcpStream::connect(addr))
 1	Io	net/atp/transport_tcp/mod.rs	std::fs::OpenOptions	let file = std::fs::OpenOptions::new()
 1	Io	net/dns/resolver.rs	TcpStream::	TcpStream::connect_timeout_with_time_getter,
-1	Io	net/happy_eyeballs.rs	TcpStream::	match future_with_timeout(Box::pin(TcpStream::connect(addr)), deadline, time_getter).await {
+1	Io	net/happy_eyeballs.rs	TcpStream::	let attempt = Box::pin(TcpStream::connect(addr));
+1	Io	net/happy_eyeballs.rs	TcpStream::	return TcpStream::connect(*only).await;
 3	Io	net/quic_native/forensic_log.rs	std::fs::File::create	let file = std::fs::File::create(path)?;
 1	Io	net/quic_native/handshake_driver.rs	std::net::UdpSocket	let peer_socket = std::net::UdpSocket::bind().unwrap();
 1	Io	net/quic_native/handshake_driver.rs	std::net::UdpSocket	let stray = std::net::UdpSocket::bind().unwrap();
@@ -506,10 +504,7 @@ expression: inventory
 1	Io	net/tcp/stream.rs	TcpStream::	TcpStream::connect_timeout(addr, timeout).await?
 1	Io	net/tcp/traits.rs	TcpListener::	match super::listener::TcpListener::from_std(listener) {
 1	Io	net/tcp/traits.rs	std::net::TcpListener	let listener: std::net::TcpListener = socket.into();
-1	Io	net/websocket/client.rs	TcpStream::	TcpStream::connect((parsed.host.clone(), parsed.port)).await
-1	Io	net/websocket/client.rs	TcpStream::	TcpStream::connect(addr).await
 1	Io	net/websocket/client.rs	TcpStream::	TcpStream::connect(std::net::SocketAddr::new(ip, parsed.port)).await
-1	Io	net/websocket/client.rs	TcpStream::	TcpStream::connect_timeout(addr, timeout).await
 1	Io	process.rs	std::fs::OpenOptions	let file = std::fs::OpenOptions::new()
 1	Io	remote.rs	TcpListener::	let tcp_listener = TcpListener::bind(addr)
 1	Io	runtime/reactor/io_uring.rs	TcpListener::	let listener = match TcpListener::bind((Ipv4Addr::LOCALHOST, 0)) {
