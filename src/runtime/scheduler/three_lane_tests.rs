@@ -12752,3 +12752,107 @@ fn production_poll_quota_keeps_a_cancellation_already_requested_on_the_cx() {
         "an exhausted quota must not rewrite the requested reason"
     );
 }
+
+/// A deferred cancellation batch stamps its regions' drain start before it
+/// publishes their tasks (br-asupersync-x9mmxl). Before, only the batch's
+/// dispatch, after publication, wrote the stamp: another worker could run a
+/// published task, finish the drain and close the region first, and a batch
+/// whose publication failed was suppressed without ever writing it. Here the
+/// task leaves the table before the worker drains the batch, so publication
+/// fails and the stamp must still be written.
+#[test]
+fn deferred_cancel_batch_stamps_drains_before_publishing() {
+    let mut runtime = RuntimeState::new();
+    let root = runtime.create_root_region(Budget::INFINITE);
+    let child = runtime
+        .create_child_region(root, Budget::INFINITE)
+        .expect("child region");
+    let (task, _handle) = runtime
+        .create_task(child, Budget::INFINITE, async {})
+        .expect("task create");
+    let (tasks, wakes) = runtime
+        .cancel_request(child, &CancelReason::shutdown(), None)
+        .into_parts();
+    assert!(
+        tasks.iter().any(|(id, _)| *id == task),
+        "the cancel routes the task to the cancel lane: {tasks:?}"
+    );
+    runtime.defer_cancel_dispatch(crate::types::task_context::CancellationEffects::new(
+        tasks, wakes,
+    ));
+    let stamp = runtime
+        .region(child)
+        .expect("child region record")
+        .cancel_reported_at()
+        .expect("a cancelled region has a drain stamp");
+    assert_eq!(
+        stamp.load(Ordering::Acquire),
+        u64::MAX,
+        "nothing is stamped under the state lock"
+    );
+    assert!(runtime.remove_task(task).is_some());
+
+    let state = Arc::new(ContendedMutex::new("runtime_state", runtime));
+    let scheduler = ThreeLaneScheduler::new(1, &state);
+    scheduler.workers[0].drain_deferred_cancel_dispatches();
+    assert_ne!(
+        stamp.load(Ordering::Acquire),
+        u64::MAX,
+        "the drain stamp is written before (and whatever the outcome of) publication"
+    );
+}
+
+/// A region cancelled by a `RegionCommand` (`ChildRegion::cancel`) has its
+/// drain stamped while the worker applies the command, with a time read
+/// before the state lock (br-asupersync-x9mmxl). Before, the stamp waited
+/// for a later turn to drain the deferred batch, and a task already running
+/// in the region could finish and close it first. (That an empty region
+/// still reports no drain is checked end to end by
+/// `cancelled_region_drain_reaches_the_metrics_provider`.)
+#[test]
+fn region_cancel_command_stamps_the_drain_before_the_deferred_batch() {
+    use crate::runtime::spawn_mailbox::{RegionCommand, SpawnMailbox};
+
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    let mut scheduler = ThreeLaneScheduler::new(1, &state);
+    let mailbox = Arc::new(SpawnMailbox::new());
+    scheduler.attach_spawn_mailbox(Arc::clone(&mailbox));
+    let (busy, _task_handle) = {
+        let mut runtime = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = runtime.create_root_region(Budget::INFINITE);
+        let busy = runtime
+            .create_child_region(root, Budget::INFINITE)
+            .expect("busy region");
+        let (_task, handle) = runtime
+            .create_task(busy, Budget::INFINITE, async {})
+            .expect("task in the busy region");
+        (busy, handle)
+    };
+    mailbox.enqueue_region_command(RegionCommand::Cancel {
+        region_id: busy,
+        reason: CancelReason::shutdown(),
+    });
+    let mut worker = scheduler.take_workers().remove(0);
+    assert_eq!(worker.drain_region_commands(), 1);
+    {
+        let runtime = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let stamp = runtime
+            .region(busy)
+            .expect("the busy region is still draining")
+            .cancel_reported_at()
+            .expect("a cancelled region has a drain stamp");
+        assert_ne!(
+            stamp.load(Ordering::Acquire),
+            u64::MAX,
+            "stamped while the command was applied"
+        );
+        assert!(
+            runtime.has_deferred_cancel_dispatches(),
+            "the batch itself is still deferred"
+        );
+    }
+}

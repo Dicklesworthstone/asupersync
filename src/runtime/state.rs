@@ -1172,13 +1172,6 @@ impl TaskSpawnEffects {
         }
 
         let callback_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            metrics.task_spawned(region_id, task_id);
-            // The admitted budget's deadline is the one the task's deadline
-            // timer arms; report the time it has left (br-asupersync-x9mmxl).
-            if let Some(deadline) = budget.deadline {
-                let remaining = Duration::from_nanos(deadline.duration_since(spawned_at));
-                metrics.deadline_set(region_id, remaining);
-            }
             if let Some(admitted_seq) = admitted_seq {
                 // This observer event retains its admission-allocated seq;
                 // snapshot() sorts it with any later execution events.
@@ -1188,6 +1181,13 @@ impl TaskSpawnEffects {
                     None => event,
                 };
                 trace.push_event(event);
+            }
+            metrics.task_spawned(region_id, task_id);
+            // The admitted budget's deadline is the one the task's deadline
+            // timer arms; report the time it has left (br-asupersync-x9mmxl).
+            if let Some(deadline) = budget.deadline {
+                let remaining = Duration::from_nanos(deadline.duration_since(spawned_at));
+                metrics.deadline_set(region_id, remaining);
             }
 
             let _span = debug_span!(
@@ -4894,7 +4894,13 @@ impl RuntimeState {
         reason: &CancelReason,
         shutdown_budget: Budget,
     ) {
-        self.close_region_command_in_task_table(region_id, reason, Some(shutdown_budget), None);
+        self.close_region_command_in_task_table(
+            region_id,
+            reason,
+            Some(shutdown_budget),
+            None,
+            None,
+        );
     }
 
     /// Scheduler routing includes its external-only task table, which need
@@ -4939,17 +4945,28 @@ impl RuntimeState {
             })
     }
 
+    /// `drain_now`, when given, is a clock read the caller took before this
+    /// state lock. The cancelled regions' drains are stamped with it before
+    /// the lock is released: a task already running there could otherwise
+    /// finish and close its region before the deferred batch is drained and
+    /// stamps it (br-asupersync-x9mmxl). No clock is read under the lock.
     pub(crate) fn close_region_command_in_task_table(
         &mut self,
         region_id: RegionId,
         reason: &CancelReason,
         shutdown_budget: Option<Budget>,
         task_table: Option<&Arc<crate::sync::ContendedMutex<TaskTable>>>,
+        drain_now: Option<Time>,
     ) {
         if self.shard_tables.is_some() || task_table.is_none() {
             let effects =
                 self.cancel_request_with_shutdown_budget(region_id, reason, None, shutdown_budget);
             self.advance_region_state(region_id);
+            // After the advance: a region that closed inside the cancel had
+            // nothing to drain and must keep its stamp unset.
+            if let Some(now) = drain_now {
+                effects.stamp_drains_at(now);
+            }
             self.defer_cancel_dispatch(effects);
             return;
         }
@@ -4983,6 +5000,10 @@ impl RuntimeState {
             effects
         };
         self.dispatch_lifecycle_effects(deferred);
+        // After the close effects, for the same reason as above.
+        if let Some(now) = drain_now {
+            effects.stamp_drains_at(now);
+        }
         self.defer_cancel_dispatch(effects);
     }
 
@@ -6329,7 +6350,7 @@ impl RuntimeState {
         self.record_task_trace_event_with_logical_time(holder_logical_time, |seq| {
             TraceEvent::obligation_reserve(seq, now, obligation, holder, region, kind)
         });
-        self.metrics.obligation_created(region);
+        contain_metrics_hook(|| self.metrics.obligation_created(region));
 
         // Notify epoch tracker of obligation creation
         self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::ObligationTable);
@@ -6440,7 +6461,7 @@ impl RuntimeState {
                 info.duration,
             )
         });
-        self.metrics.obligation_discharged(info.region);
+        contain_metrics_hook(|| self.metrics.obligation_discharged(info.region));
         self.observe_obligation_age(info.duration);
 
         // Notify epoch tracker of obligation commit
@@ -6639,7 +6660,7 @@ impl RuntimeState {
                 info.reason,
             )
         });
-        self.metrics.obligation_discharged(info.region);
+        contain_metrics_hook(|| self.metrics.obligation_discharged(info.region));
         if !self.leak_recovered_obligations.remove(&info.id) {
             self.observe_obligation_age(info.duration);
         }
@@ -7070,7 +7091,7 @@ impl RuntimeState {
                 info.duration,
             )
         });
-        self.metrics.obligation_leaked(info.region);
+        contain_metrics_hook(|| self.metrics.obligation_leaked(info.region));
         self.observe_obligation_leak();
         if self.obligation_leak_response != ObligationLeakResponse::Silent {
             let span = crate::tracing_compat::error_span!(
@@ -9820,10 +9841,13 @@ impl RuntimeState {
         // could never close.
         contain_metrics_hook(|| self.metrics.region_closed(region_id, lifetime));
         // A cancelled region's drain runs from its first cancellation report
-        // to this close (br-asupersync-x9mmxl). An unset stamp means the
-        // region closed before that report was dispatched: an empty region
-        // closes inside the cancel itself (ChildRegion::close is a cancel
-        // request too), so there was nothing to drain and nothing is reported.
+        // to this close (br-asupersync-x9mmxl). The stamp is written before
+        // the scheduler publishes the cancelled tasks, so an unset stamp
+        // means the region closed inside the cancel itself: an empty region
+        // (ChildRegion::close is a cancel request too) had nothing to drain.
+        // The inline cancel path still leaves a narrow window: tasks queued
+        // under the lock can finish once it is released, before the
+        // canceller dispatches the report. Such a drain is not reported.
         if let Some(stamp) = cancel_reported_at
             .map(|reported_at| reported_at.load(Ordering::Acquire))
             .filter(|&stamp| stamp != u64::MAX)
@@ -9841,7 +9865,7 @@ impl RuntimeState {
     fn dispatch_region_created_root_effects(&mut self, region_id: RegionId, now: Time) {
         self.track_new_region_in_cancel_protocol_validator(region_id, None, now);
         self.record_trace_event(|seq| TraceEvent::region_created(seq, now, region_id, None));
-        self.metrics.region_created(region_id, None);
+        contain_metrics_hook(|| self.metrics.region_created(region_id, None));
 
         // Notify epoch tracker of region creation
         self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::RegionTable);
@@ -9869,7 +9893,7 @@ impl RuntimeState {
         self.record_trace_event(|seq| {
             TraceEvent::region_created(seq, now, region_id, Some(parent))
         });
-        self.metrics.region_created(region_id, Some(parent));
+        contain_metrics_hook(|| self.metrics.region_created(region_id, Some(parent)));
 
         // Register resource envelope with swarm pressure governor
         if let Some((budget, capability_budget)) = envelope_budgets
