@@ -10466,14 +10466,17 @@ impl MetricsProvider for MetricHookMetrics {
     }
 }
 
-/// A native runtime reports its workers' polls to the provider's
-/// `scheduler_tick` in batches of 1 to 64 (br-asupersync-x9mmxl).
+/// A native runtime reports each of its workers' polls to the provider's
+/// `scheduler_tick` with that poll's own duration (br-asupersync-x9mmxl): a
+/// poll that blocks for 20 ms shows up as a single-poll report of at least
+/// 20 ms, not folded into a sum with other polls.
 #[test]
 fn worker_polls_reach_the_metrics_provider_as_scheduler_ticks() {
     use crate::runtime::RuntimeBuilder;
 
     init_test_logging();
     let tasks = 200_usize;
+    let blocking = Duration::from_millis(20);
     for workers in [None, Some(2)] {
         let log = Arc::new(MetricHookLog::default());
         let builder = match workers {
@@ -10493,6 +10496,10 @@ fn worker_polls_reach_the_metrics_provider_as_scheduler_ticks() {
                         .expect("spawn a task"),
                 );
             }
+            handles.push(
+                cx.spawn(move |_| async move { std::thread::sleep(blocking) })
+                    .expect("spawn the blocking task"),
+            );
             for mut handle in handles {
                 let _ = handle.join(&cx).await;
             }
@@ -10506,14 +10513,22 @@ fn worker_polls_reach_the_metrics_provider_as_scheduler_ticks() {
         let polls: usize = ticks.iter().map(|(polled, _)| polled).sum();
         // Each task yields once, so it is polled at least twice.
         assert!(
-            polls >= 2 * tasks,
-            "{workers:?}: want at least {} polls reported, got {polls} in {} ticks",
+            polls > 2 * tasks,
+            "{workers:?}: want more than {} polls reported, got {polls} in {} ticks",
             2 * tasks,
             ticks.len()
         );
         assert!(
-            ticks.iter().all(|(polled, _)| (1..=64).contains(polled)),
-            "{workers:?}: every report carries 1 to 64 polls: {ticks:?}"
+            ticks.iter().all(|(polled, _)| *polled == 1),
+            "{workers:?}: every report carries exactly one poll: {:?}",
+            ticks
+                .iter()
+                .filter(|(polled, _)| *polled != 1)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            ticks.iter().any(|(_, duration)| *duration >= blocking),
+            "{workers:?}: the blocking poll is reported as a sample of at least {blocking:?}"
         );
     }
     crate::test_complete!("worker_polls_reach_the_metrics_provider_as_scheduler_ticks");
