@@ -2672,3 +2672,106 @@ fn production_grpc_adapter_preserves_error_status_over_real_h2() {
         let _ = run_handle.await.expect("listener run join");
     });
 }
+
+/// br-asupersync-y6naky: ServerConfig's keepalive reaches the listener that
+/// bind_http2 builds. A client that answers nothing is PINGed after the
+/// interval, raised to grpc-go's one-second floor, and disconnected when no
+/// frame follows within the timeout.
+#[test]
+fn grpc_server_keepalive_pings_then_disconnects_a_silent_client() {
+    init_test("grpc_server_keepalive_pings_then_disconnects_a_silent_client");
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let server = Arc::new(
+            Server::builder()
+                .keepalive_interval(100)
+                .keepalive_timeout(300)
+                .build(),
+        );
+        let listener = server
+            .bind_http2(
+                "127.0.0.1:0",
+                HostPolicy::allow_list(vec!["localhost".to_owned()]),
+                |_transport| async move { Ok::<_, Status>(Response::new(Bytes::new())) },
+            )
+            .await
+            .expect("bind gRPC H2 listener");
+        let addr = listener.local_addr().expect("listener local addr");
+        let manager = listener.connection_manager().clone();
+        let run_runtime = handle.clone();
+        let run_handle = handle
+            .clone()
+            .try_spawn(async move { listener.run(&run_runtime).await })
+            .expect("spawn gRPC H2 listener");
+
+        // Preface, SETTINGS and the SETTINGS ACK, then silence: count the
+        // server's PINGs until it closes the connection (at most 10 s).
+        let (pings, closed_after) = std::thread::spawn(move || {
+            let mut stream = std::net::TcpStream::connect(addr).expect("client connect");
+            stream
+                .set_read_timeout(Some(Duration::from_millis(50)))
+                .expect("set read timeout");
+            let started = Instant::now();
+            let mut out = BytesMut::new();
+            Frame::Settings(SettingsFrame::new(Vec::new()))
+                .encode(&mut out)
+                .expect("encode client SETTINGS");
+            stream.write_all(CLIENT_PREFACE).expect("write preface");
+            stream.write_all(&out).expect("write SETTINGS");
+            let mut codec = FrameCodec::new();
+            let mut input = BytesMut::new();
+            let mut chunk = [0u8; 4096];
+            let mut pings = 0usize;
+            while started.elapsed() < Duration::from_secs(10) {
+                while let Some(frame) = codec.decode(&mut input).expect("decode server frame") {
+                    match frame {
+                        Frame::Settings(settings) if !settings.ack => {
+                            let mut ack = BytesMut::new();
+                            Frame::Settings(SettingsFrame::ack())
+                                .encode(&mut ack)
+                                .expect("encode SETTINGS ACK");
+                            let _ = stream.write_all(&ack);
+                        }
+                        Frame::Ping(ping) if !ping.ack => pings += 1,
+                        _ => {}
+                    }
+                }
+                match stream.read(&mut chunk) {
+                    Ok(0) => return (pings, Some(started.elapsed())),
+                    Ok(n) => input.extend_from_slice(&chunk[..n]),
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) => {}
+                    Err(_) => return (pings, Some(started.elapsed())),
+                }
+            }
+            (pings, None)
+        })
+        .join()
+        .expect("silent gRPC client thread");
+        log_test_event(
+            "grpc_server_keepalive_silent_client",
+            json!({
+                "pings": pings,
+                "closed_after_ms": closed_after.map(|elapsed| elapsed.as_millis() as u64),
+            }),
+        );
+
+        assert!(pings >= 1, "the server must PING a silent client");
+        let closed = closed_after.expect("a silent client must be disconnected within 10 s");
+        assert!(
+            closed >= Duration::from_millis(1_300),
+            "the 100 ms interval is raised to 1 s, then 300 ms of timeout: {closed:?}"
+        );
+
+        assert!(manager.begin_drain(Duration::from_secs(5)));
+        let _ = run_handle.await.expect("listener run join");
+    });
+}

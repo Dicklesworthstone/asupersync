@@ -207,6 +207,7 @@ impl Server {
             self.http2_listener_config(host_policy),
         )
         .await
+        .map(|listener| self.with_http2_keepalive(listener))
     }
 
     /// Bind and run the mixed unary/server-streaming registered-service lane.
