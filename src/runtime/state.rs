@@ -1418,6 +1418,9 @@ pub(crate) enum RegionLifecycleEffect {
         priority: RegionPriority,
         budget: Budget,
         capability_budget: CapabilityBudget,
+        /// False for a race branch's region, which is not a governed
+        /// workload (kpmoy5.2.2).
+        register_envelope: bool,
     },
     /// Finalize-boundary validator transition (+ verdict logging and
     /// snapshot-cache invalidation on violation).
@@ -3899,9 +3902,47 @@ impl RuntimeState {
                 priority,
                 budget,
                 capability_budget,
+                register_envelope: true,
             },
         );
 
+        Ok(id)
+    }
+
+    /// Mints the sealed child region of one race branch
+    /// (br-asupersync-issue65-criticisms-kpmoy5.2.2).
+    ///
+    /// A branch region is not separately admitted work: it only decides where
+    /// an already-requested branch task runs, and a refused mint leaves the
+    /// task in `parent` anyway. So it skips the region-admission pressure
+    /// check (which cannot change whether the work runs, and was about 60% of
+    /// a child region's creation cost) and registers no resource envelope
+    /// with the swarm pressure governor (it is not a governed workload). The
+    /// record is sealed before anything can advance it. Validator tracking,
+    /// the trace event, metrics and the epoch advance are those of every
+    /// child region.
+    fn create_race_branch_region(&mut self, parent: RegionId) -> Result<RegionId, RegionCreateError> {
+        let now = self.current_runtime_time();
+        let id = self.regions.create_child_with_capability_budget(
+            parent,
+            Budget::INFINITE,
+            CapabilityBudget::UNSPECIFIED,
+            CapabilityBudgetRequirements::NONE,
+            now,
+        )?;
+        self.regions
+            .get(id.arena_index())
+            .expect("the branch region was minted above")
+            .seal();
+        self.dispatch_region_lifecycle_effect(RegionLifecycleEffect::CreatedChild {
+            region_id: id,
+            parent,
+            now,
+            priority: RegionPriority::Normal,
+            budget: Budget::INFINITE,
+            capability_budget: CapabilityBudget::UNSPECIFIED,
+            register_envelope: false,
+        });
         Ok(id)
     }
 
@@ -4477,7 +4518,7 @@ impl RuntimeState {
     ///
     /// Returns `None` when no branch region was requested, when the requested
     /// region carries admission limits, or when the mint is refused (parent
-    /// closed, resource pressure, or an external region table). The task is
+    /// closed or missing, or an external region table). The task is
     /// then admitted into the requested region exactly as before, so a
     /// refusal never changes whether the spawn itself is admitted. A region
     /// with limits keeps the branch in the region so the branch and its work
@@ -4504,19 +4545,7 @@ impl RuntimeState {
         {
             return None;
         }
-        let child = self
-            .create_child_region_with_capability_budget_and_priority(
-                parts.region,
-                Budget::INFINITE,
-                CapabilityBudget::UNSPECIFIED,
-                CapabilityBudgetRequirements::NONE,
-                RegionPriority::Normal,
-            )
-            .ok()?;
-        self.regions
-            .get(child.arena_index())
-            .expect("the branch region was minted above")
-            .seal();
+        let child = self.create_race_branch_region(parts.region).ok()?;
         Some((child, slot))
     }
 
@@ -9666,8 +9695,7 @@ impl RuntimeState {
         parent: RegionId,
         now: Time,
         priority: RegionPriority,
-        budget: Budget,
-        capability_budget: CapabilityBudget,
+        envelope_budgets: Option<(Budget, CapabilityBudget)>,
     ) {
         self.resource_monitor
             .engine()
@@ -9680,8 +9708,9 @@ impl RuntimeState {
         self.metrics.region_created(region_id, Some(parent));
 
         // Register resource envelope with swarm pressure governor
-        if let Ok(envelope) =
-            self.create_resource_envelope_for_region(region_id, &budget, &capability_budget)
+        if let Some((budget, capability_budget)) = envelope_budgets
+            && let Ok(envelope) =
+                self.create_resource_envelope_for_region(region_id, &budget, &capability_budget)
         {
             self.swarm_pressure_governor
                 .register_region_envelope(region_id, envelope);
@@ -9707,14 +9736,14 @@ impl RuntimeState {
                 priority,
                 budget,
                 capability_budget,
+                register_envelope,
             } => {
                 self.dispatch_region_created_child_effects(
                     region_id,
                     parent,
                     now,
                     priority,
-                    budget,
-                    capability_budget,
+                    register_envelope.then_some((budget, capability_budget)),
                 );
             }
             RegionLifecycleEffect::FinalizeValidation {
