@@ -12,8 +12,18 @@ use asupersync::signal::{ShutdownController, SignalKind};
 
 #[cfg(unix)]
 fn parked_signal_child(kind: SignalKind, scenario: &'static str) {
+    use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
     use std::future::{Future, poll_fn};
     use std::io::Write;
+
+    // A launcher (nohup-style wrappers, RCH workers) can start this process
+    // with SIGTERM blocked, and the mask is inherited. Unblock it BEFORE any
+    // asupersync call, so both scenarios measure asupersync's registrations
+    // rather than the launcher (tests/signal_subscription_isolation.rs guards
+    // the same hazard). Runtime threads spawned below inherit this mask.
+    let mut term = SigSet::empty();
+    term.add(Signal::SIGTERM);
+    pthread_sigmask(SigmaskHow::SIG_UNBLOCK, Some(&term), None).expect("unblock SIGTERM");
 
     let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
         .build()
@@ -45,6 +55,27 @@ fn parked_signal_child(kind: SignalKind, scenario: &'static str) {
     });
 }
 
+/// Whether this process inherited SIGTERM as ignored. `SIG_IGN` survives
+/// `exec`, so a child would start with it too, and the default-termination
+/// case could then only measure the launcher. Read from /proc rather than via
+/// `sigaction`, which would need `unsafe`.
+#[cfg(unix)]
+fn sigterm_ignored_by_launcher() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/proc/self/status")
+            .unwrap_or_default()
+            .lines()
+            .find_map(|line| line.strip_prefix("SigIgn:"))
+            .and_then(|mask| u64::from_str_radix(mask.trim(), 16).ok())
+            .is_some_and(|mask| mask & (1_u64 << (libc::SIGTERM - 1)) != 0)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
 #[cfg(unix)]
 fn run_signal_subprocess(test_name: &str, scenario: &str, expect_default_term: bool) {
     use nix::sys::signal::{Signal, kill};
@@ -54,6 +85,15 @@ fn run_signal_subprocess(test_name: &str, scenario: &str, expect_default_term: b
     use std::process::{Child, Command, Stdio};
     use std::sync::mpsc;
     use std::time::Instant;
+
+    if expect_default_term && sigterm_ignored_by_launcher() {
+        eprintln!(
+            "scenario={scenario} SKIPPED: this test process inherited SIGTERM as ignored, \
+             so a child cannot show the default termination (would measure the launcher, \
+             not asupersync)"
+        );
+        return;
+    }
 
     struct ChildGuard(Child);
     impl Drop for ChildGuard {
