@@ -212,6 +212,80 @@ struct CxHandles {
     fabric_capabilities: Arc<FabricCapabilityRegistry>,
 }
 
+/// The handles a spawned task inherits from the context that spawned it.
+///
+/// The spawner takes this snapshot and moves it into the task's admission
+/// slot. Admission builds the task's record context with it, and that record
+/// context is what `Cx::current()` returns inside the task. The context the
+/// spawn closure receives shares it, so both carry the same handles
+/// (br-asupersync-93zkbz).
+pub(crate) struct InheritedHandles {
+    /// Taken by admission into the task's [`DeferredFork`].
+    entropy: Option<Arc<dyn EntropySource>>,
+    io_cap: Option<Arc<dyn crate::io::IoCap>>,
+    registry: Option<RegistryHandle>,
+    remote_cap: Option<Arc<RemoteCap>>,
+    blocking_pool: Option<BlockingPoolHandle>,
+    evidence_sink: Option<Arc<dyn EvidenceSink>>,
+    macaroon: Option<Arc<MacaroonToken>>,
+    default_http_client: DefaultHttpClientSlot,
+    pressure: Option<Arc<SystemPressure>>,
+}
+
+impl InheritedHandles {
+    /// The child's entropy source: the spawner's, forked for `task` when the
+    /// task first polls (see [`DeferredFork`]). Admission calls this once,
+    /// under the runtime lock, so it only moves the spawner's source.
+    pub(crate) fn deferred_entropy(&mut self, task: TaskId) -> Arc<dyn EntropySource> {
+        let parent = self
+            .entropy
+            .take()
+            .expect("admission takes a task's inherited entropy once");
+        Arc::new(DeferredFork {
+            parent,
+            task,
+            forked: std::sync::OnceLock::new(),
+        })
+    }
+}
+
+/// A spawned task's entropy source: its spawner's, forked for the task on
+/// first use. Admission builds the task's context under the runtime lock
+/// and must not run the source's `fork` there. The spawn factory forces the
+/// fork before the task's own code runs, so a panicking fork still reaches
+/// the task's join handle, and every context of the task shares this one
+/// source (br-asupersync-93zkbz).
+#[derive(Debug)]
+struct DeferredFork {
+    parent: Arc<dyn EntropySource>,
+    task: TaskId,
+    forked: std::sync::OnceLock<Arc<dyn EntropySource>>,
+}
+
+impl DeferredFork {
+    fn forked(&self) -> &Arc<dyn EntropySource> {
+        self.forked.get_or_init(|| self.parent.fork(self.task))
+    }
+}
+
+impl EntropySource for DeferredFork {
+    fn fill_bytes(&self, dest: &mut [u8]) {
+        self.forked().fill_bytes(dest);
+    }
+
+    fn next_u64(&self) -> u64 {
+        self.forked().next_u64()
+    }
+
+    fn fork(&self, task_id: TaskId) -> Arc<dyn EntropySource> {
+        self.forked().fork(task_id)
+    }
+
+    fn source_id(&self) -> &'static str {
+        self.forked().source_id()
+    }
+}
+
 /// Opaque ownership token for one auxiliary cancellation-Waker registration.
 ///
 /// Live IDs are checked-monotonic and never reused, so an old token cannot
@@ -5297,7 +5371,10 @@ where
         let admitted_slot = Arc::new(
             AdmittedTaskSlot::new_with_cancel_gateway(Arc::clone(gateway))
                 .with_runtime_mask(self.runtime_mask)
-                .with_retirement_barrier(Arc::clone(&barrier)),
+                .with_retirement_barrier(Arc::clone(&barrier))
+                // Admission builds the task's one context with these, so
+                // `Cx::current()` in the task carries them (br-asupersync-93zkbz).
+                .with_inherited_handles(self.inherited_handles()),
         );
         let (result_tx, handle) = crate::runtime::task_handle::pending_task_handle_channel::<
             Fut::Output,
@@ -5535,7 +5612,10 @@ where
         let barrier = crate::runtime::task_handle::RetirementBarrier::pending();
         let mut admitted_slot = AdmittedTaskSlot::new_with_cancel_gateway(Arc::clone(gateway))
             .with_runtime_mask(self.runtime_mask)
-            .with_retirement_barrier(Arc::clone(&barrier));
+            .with_retirement_barrier(Arc::clone(&barrier))
+            // Admission builds the task's one context with these, so
+            // `Cx::current()` in the task carries them (br-asupersync-93zkbz).
+            .with_inherited_handles(self.inherited_handles());
         if let Some(branch_region) = branch_region {
             admitted_slot = admitted_slot.with_branch_region(branch_region);
         }
@@ -5639,40 +5719,81 @@ where
         Ok(handle)
     }
 
-    /// Overlays parent-inherited capability state onto an admission-built
-    /// child context, mirroring `Scope::build_child_task_cx` exactly:
-    /// observability and entropy fork from the parent; io-cap/registry/
-    /// remote/blocking/evidence/macaroon/pressure handles copy from the
+    /// Snapshots the handles a task spawned from this context inherits:
+    /// the entropy source (forked for the task on its first poll) and the io-cap,
+    /// registry, remote, blocking-pool, evidence, macaroon, HTTP-client and
+    /// pressure handles. The spawner takes it outside the runtime lock and
+    /// moves it into the task's admission slot (br-asupersync-93zkbz).
+    pub(crate) fn inherited_handles(&self) -> InheritedHandles {
+        InheritedHandles {
+            entropy: Some(self.handles.entropy.clone()),
+            io_cap: self.io_cap_handle(),
+            registry: self.registry_handle(),
+            remote_cap: self.remote_cap_handle(),
+            blocking_pool: self.blocking_pool_handle_for_inheritance(),
+            evidence_sink: self.evidence_sink_handle(),
+            macaroon: self.macaroon_handle(),
+            default_http_client: self.handles.default_http_client.clone(),
+            pressure: self.pressure_handle(),
+        }
+    }
+
+    /// Moves a spawner's inherited handles into an admission-built context,
+    /// mirroring `Scope::build_child_task_cx`: the handles replace what
+    /// admission built, and a spawner without a pressure handle keeps the
+    /// runtime's. Admission has already wrapped the spawner's entropy in a
+    /// [`DeferredFork`]. This only moves fields: the context is still private
+    /// to admission, so `Arc::make_mut` does not clone (br-asupersync-93zkbz).
+    pub(crate) fn adopt_inherited_handles(&mut self, inherited: InheritedHandles) {
+        let InheritedHandles {
+            entropy: _,
+            io_cap,
+            registry,
+            remote_cap,
+            blocking_pool,
+            evidence_sink,
+            macaroon,
+            default_http_client,
+            pressure,
+        } = inherited;
+        let handles = Arc::make_mut(&mut self.handles);
+        handles.io_cap = io_cap;
+        handles.registry = registry;
+        handles.remote_cap = remote_cap;
+        handles.blocking_pool = blocking_pool;
+        handles.evidence_sink = evidence_sink;
+        handles.macaroon = macaroon;
+        handles.default_http_client = default_http_client;
+        if pressure.is_some() {
+            handles.pressure = pressure;
+        }
+    }
+
+    /// Finishes an admission-built child context for the spawn closure,
+    /// mirroring `Scope::build_child_task_cx`: observability forks from the
     /// parent; `capability_budget` (the spawn target's planned envelope —
     /// the parent cx's for `Cx::spawn`, the SCOPE's for `Cx::spawn_in`,
     /// matching the state-threaded scope path, which applied the scope's;
     /// br-asupersync-4onmas) and the parent runtime mask apply.
+    /// The inherited handles are already in place: admission moved them in
+    /// from the slot, so the closure's context and the record's context
+    /// (`Cx::current()` inside the task) share them (br-asupersync-93zkbz).
     /// State-side wiring (drivers, logical clock, trace buffer, loser-drain
     /// history, spawn gateway, region counter) stays as admission built it.
     /// The shared `CxInner` is untouched, so cancellation and budget flow
     /// through the record linkage admission already established.
     pub(crate) fn overlay_parent_inheritance<PCaps, Out>(
-        mut self,
+        self,
         parent: &Cx<PCaps>,
         task_id: TaskId,
         capability_budget: crate::types::CapabilityBudget,
     ) -> Cx<Out> {
         let region = self.region_id();
         *self.observability.write() = parent.child_observability(region, task_id);
-        {
-            let handles = Arc::make_mut(&mut self.handles);
-            handles.entropy = parent.child_entropy(task_id);
-            handles.io_cap = parent.io_cap_handle();
-            handles.registry = parent.registry_handle();
-            handles.remote_cap = parent.remote_cap_handle();
-            handles.blocking_pool = parent.blocking_pool_handle_for_inheritance();
-            handles.evidence_sink = parent.evidence_sink_handle();
-            handles.macaroon = parent.macaroon_handle();
-            handles.default_http_client = parent.handles.default_http_client.clone();
-            if let Some(pressure) = parent.pressure_handle() {
-                handles.pressure = Some(pressure);
-            }
-        }
+        // Fork the inherited entropy now, on the task and before its code
+        // runs, where a panicking fork reaches the join handle. Admission only
+        // wrapped it (DeferredFork); source_id draws no randomness.
+        let _ = self.handles.entropy.source_id();
         let _ = self.apply_child_capability_budget(
             capability_budget,
             crate::types::CapabilityBudgetRequirements::NONE,
@@ -9044,5 +9165,145 @@ mod tests {
             assert_eq!(child.inner.read().mask_depth, 1);
             assert_eq!(parent.inner.read().mask_depth, 0);
         });
+    }
+
+    /// br-asupersync-93zkbz: inside a spawned task, `Cx::current()` is the
+    /// task record's context. It must share the spawn closure's handles, so
+    /// it carries what the task inherited from its spawner, and a task
+    /// spawned through it inherits them in turn.
+    mod spawned_task_ambient_context {
+        use super::*;
+        use crate::runtime::RuntimeBuilder;
+
+        /// What a spawned task saw through `Cx::current()`.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        struct Seen {
+            /// The ambient context and the task's own share one bundle.
+            same_handles: bool,
+            registry: bool,
+            io_cap: bool,
+            /// The spawner's pressure handle, not the runtime's.
+            pressure: bool,
+        }
+
+        const INHERITED: Seen = Seen {
+            same_handles: true,
+            registry: true,
+            io_cap: true,
+            pressure: true,
+        };
+
+        fn seen(own: &Cx, pressure: &Arc<SystemPressure>) -> Seen {
+            let current = Cx::current().expect("a spawned task has an ambient context");
+            Seen {
+                same_handles: Arc::ptr_eq(&current.handles, &own.handles),
+                registry: current.registry_handle().is_some(),
+                io_cap: current.io_cap_handle().is_some(),
+                pressure: current
+                    .pressure_handle()
+                    .is_some_and(|handle| Arc::ptr_eq(&handle, pressure)),
+            }
+        }
+
+        /// The ambient context with a registry, an I/O capability and a
+        /// pressure handle attached.
+        fn spawner(pressure: &Arc<SystemPressure>) -> Cx {
+            let registry = RegistryHandle::new(Arc::new(crate::cx::NameRegistry::new()));
+            let mut cx = Cx::current()
+                .expect("the test runs inside a task")
+                .with_registry_handle(Some(registry))
+                .with_pressure(Arc::clone(pressure));
+            Arc::make_mut(&mut cx.handles).io_cap =
+                Some(Arc::new(crate::io::LabIoCap::new_for_tests()));
+            cx
+        }
+
+        /// Spawns a child through `spawner`. The child records what it saw,
+        /// then spawns a grandchild through `Cx::current()`, which records the
+        /// same.
+        async fn child_and_grandchild(spawner: Cx, pressure: Arc<SystemPressure>) -> (Seen, Seen) {
+            let mut child = spawner
+                .spawn(move |child| async move {
+                    let in_child = seen(&child, &pressure);
+                    let current = Cx::current().expect("ambient context");
+                    let mut grandchild = current
+                        .spawn(move |grandchild| async move { seen(&grandchild, &pressure) })
+                        .expect("spawn through the ambient context");
+                    let in_grandchild = grandchild.join(&current).await.expect("grandchild joins");
+                    (in_child, in_grandchild)
+                })
+                .expect("spawn through the capable context");
+            child.join(&spawner).await.expect("child joins")
+        }
+
+        /// Runs `run` on its own thread and fails instead of hanging.
+        fn bounded<T: Send + 'static>(run: impl FnOnce() -> T + Send + 'static) -> T {
+            let (done, result) = std::sync::mpsc::channel();
+            let _worker = std::thread::spawn(move || {
+                let _ = done.send(run());
+            });
+            result
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the spawned tasks finished within 30 s")
+        }
+
+        #[test]
+        fn current_thread_spawn_and_spawn_local_carry_the_spawners_handles() {
+            let (child, grandchild, local) = bounded(|| {
+                let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+                runtime.block_on(async {
+                    let pressure = Arc::new(SystemPressure::new());
+                    let spawner = spawner(&pressure);
+                    let (child, grandchild) =
+                        child_and_grandchild(spawner.clone(), Arc::clone(&pressure)).await;
+                    let mut local = spawner
+                        .spawn_local(move |local| async move { seen(&local, &pressure) })
+                        .expect("spawn_local on the block_on thread");
+                    let local = local.join(&spawner).await.expect("local task joins");
+                    (child, grandchild, local)
+                })
+            });
+            assert_eq!(child, INHERITED, "spawned task");
+            assert_eq!(grandchild, INHERITED, "task spawned through Cx::current()");
+            assert_eq!(local, INHERITED, "spawn_local task");
+        }
+
+        #[test]
+        fn four_workers_spawn_carries_the_spawners_handles() {
+            let (child, grandchild) = bounded(|| {
+                let runtime = RuntimeBuilder::new()
+                    .worker_threads(4)
+                    .build()
+                    .expect("runtime");
+                runtime.block_on(async {
+                    let pressure = Arc::new(SystemPressure::new());
+                    child_and_grandchild(spawner(&pressure), pressure).await
+                })
+            });
+            assert_eq!(child, INHERITED, "spawned task");
+            assert_eq!(grandchild, INHERITED, "task spawned through Cx::current()");
+        }
+
+        #[test]
+        fn lab_spawn_carries_the_spawners_handles() {
+            use crate::lab::{LabConfig, LabRuntime};
+
+            let mut lab = LabRuntime::new(LabConfig::new(0x93_2B_B2));
+            let root = lab.state.create_root_region(crate::types::Budget::INFINITE);
+            let out = Arc::new(parking_lot::Mutex::new(None));
+            let out_in_task = Arc::clone(&out);
+            let (owner, _join) = lab
+                .state
+                .create_task(root, crate::types::Budget::INFINITE, async move {
+                    let pressure = Arc::new(SystemPressure::new());
+                    let seen = child_and_grandchild(spawner(&pressure), pressure).await;
+                    *out_in_task.lock() = Some(seen);
+                })
+                .expect("create the owner");
+            lab.scheduler.lock().schedule(owner, 0);
+            let report = lab.run_until_quiescent_with_report();
+            assert!(report.lab_test_passed(), "{report:?}");
+            assert_eq!(*out.lock(), Some((INHERITED, INHERITED)));
+        }
     }
 }

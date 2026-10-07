@@ -286,6 +286,11 @@ pub struct AdmittedTaskSlot {
     /// aborts. Every repeat abort command carries this slot, so whichever
     /// consumer wins first-lane publication also wins this receipt.
     spawn_effects: Mutex<SpawnEffectHandoff>,
+    /// The handles the task inherits from its spawner, taken once by
+    /// admission so the record's context (`Cx::current()` in the task)
+    /// carries them. Private for the same reason as `runtime_mask`
+    /// (br-asupersync-93zkbz).
+    inherited: Mutex<Option<crate::cx::cx::InheritedHandles>>,
 }
 
 struct SpawnEffectHandoff {
@@ -315,6 +320,7 @@ impl AdmittedTaskSlot {
             pending_cancel_reason: OnceLock::new(),
             branch_region: None,
             spawn_effects: Mutex::new(SpawnEffectHandoff::new()),
+            inherited: Mutex::new(None),
         }
     }
 
@@ -330,6 +336,7 @@ impl AdmittedTaskSlot {
             pending_cancel_reason: OnceLock::new(),
             branch_region: None,
             spawn_effects: Mutex::new(SpawnEffectHandoff::new()),
+            inherited: Mutex::new(None),
         }
     }
 
@@ -348,6 +355,21 @@ impl AdmittedTaskSlot {
     /// The branch-region request, when the producer made one.
     pub(crate) fn branch_region(&self) -> Option<&Arc<BranchRegionSlot>> {
         self.branch_region.as_ref()
+    }
+
+    /// Moves the spawner's inherited handles into the slot. Admission takes
+    /// them when it builds the task's context (br-asupersync-93zkbz).
+    pub(crate) fn with_inherited_handles(
+        mut self,
+        inherited: crate::cx::cx::InheritedHandles,
+    ) -> Self {
+        *self.inherited.get_mut() = Some(inherited);
+        self
+    }
+
+    /// Takes the inherited handles; admission calls this once.
+    pub(crate) fn take_inherited_handles(&self) -> Option<crate::cx::cx::InheritedHandles> {
+        self.inherited.lock().take()
     }
 
     pub(crate) fn runtime_mask(&self) -> crate::cx::cap::CapMask {
