@@ -29,6 +29,7 @@
 //! - [`replayer`]: Trace replayer for deterministic replay with stepping support
 //! - [`file`](mod@file): Binary file format for trace persistence
 //! - [`recovery`]: Explicit bounded salvage of unfinished crash traces
+//! - [`verified`]: Pre-verified streaming replay and content-bound checkpoints
 //! - [`buffer`]: Ring buffer for recent events
 //! - [`format`](mod@format): Output formatting utilities
 //! - [`streaming`]: Streaming replay for large traces with O(1) memory
@@ -85,6 +86,7 @@ pub mod replayer;
 pub mod scoring;
 pub mod streaming;
 pub mod tla_export;
+pub mod verified;
 
 pub use boundary::{SquareComplex, matmul_gf2};
 pub use buffer::{TraceBuffer, TraceBufferHandle};
@@ -209,6 +211,9 @@ pub use streaming::{
     TraceEvidenceSink, TraceEvidenceStreamConfig, TraceEvidenceStreamStats, TraceEvidenceStreamer,
 };
 pub use tla_export::{TlaExporter, TlaModule, TlaStateSnapshot};
+pub use verified::{
+    TraceReadLimits, VerifiedReplayCheckpoint, VerifiedTraceError, VerifiedTraceReader,
+};
 
 // ============================================================================
 // Convenience API for geodesic normalization
