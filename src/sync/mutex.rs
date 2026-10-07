@@ -41,6 +41,10 @@ use crate::sync::lock_ordering::{self, LockRank};
 use crate::time::Sleep;
 use crate::types::Time;
 
+#[cfg(test)]
+#[path = "mutex_cancel_tests.rs"]
+mod cancel_tests;
+
 /// Error returned when mutex locking fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockError {
@@ -179,11 +183,16 @@ impl<T> Mutex<T> {
     }
 
     /// Acquires the mutex asynchronously.
+    ///
+    /// Pending waits subscribe independently to context cancellation. Neither
+    /// an unlock nor a timer event is needed to wake a cancelled waiter. The
+    /// checkpoint still honors masking; completion/drop retire only this wait.
     #[inline]
     pub fn lock<'a, 'b, Caps>(&'a self, cx: &'b Cx<Caps>) -> LockFuture<'a, 'b, T, Caps> {
         LockFuture {
             mutex: self,
             cx,
+            cancelled: None,
             waiter_id: None,
             deadline_sleep: None,
             completed: false,
@@ -206,6 +215,7 @@ impl<T> Mutex<T> {
         LockFuture {
             mutex: self,
             cx,
+            cancelled: None,
             waiter_id: None,
             deadline_sleep: Some(cx.timer_driver().map_or_else(
                 || Sleep::new(deadline),
@@ -421,6 +431,8 @@ impl<T: Default> Default for Mutex<T> {
 pub struct LockFuture<'a, 'b, T, Caps = crate::cx::cap::All> {
     mutex: &'a Mutex<T>,
     cx: &'b Cx<Caps>,
+    /// Installed lazily on contention, separately from the FIFO wakeup.
+    cancelled: Option<crate::cx::Cancelled<'b, Caps>>,
     /// Slab index of this waiter's slot in the parent mutex's
     /// `WaiterChain` (br-asupersync-wlf0xh).
     waiter_id: Option<crate::sync::waiter::WaiterId>,
@@ -501,8 +513,39 @@ impl<'a, T, Caps> Future for LockFuture<'a, '_, T, Caps> {
     type Output = Result<MutexGuard<'a, T>, LockError>;
 
     #[inline]
-    #[allow(clippy::if_not_else, clippy::option_if_let_else)]
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let result = self.as_mut().poll_lock(context);
+        if result.is_ready() {
+            // Retire auxiliary executor references even if the caller keeps
+            // the completed future allocated. No mutex state guard is live.
+            self.cancelled = None;
+            self.deadline_sleep = None;
+            return result;
+        }
+
+        let cx = self.cx;
+        let cancelled = self.cancelled.get_or_insert_with(|| cx.cancelled());
+        if Pin::new(cancelled).poll(context).is_ready() && cx.checkpoint().is_err() {
+            // Cancelled owns the check/register/recheck protocol. In particular
+            // cancellation during a Waker clone or retirement cannot park us.
+            self.completed = true;
+            self.cleanup_waiter();
+            self.cancelled = None;
+            self.deadline_sleep = None;
+            Poll::Ready(Err(LockError::Cancelled))
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+impl<'a, T, Caps> LockFuture<'a, '_, T, Caps> {
+    #[inline]
+    #[allow(clippy::if_not_else, clippy::option_if_let_else)]
+    fn poll_lock(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Result<MutexGuard<'a, T>, LockError>> {
         if self.completed {
             return Poll::Ready(Err(LockError::PolledAfterCompletion));
         }
@@ -526,6 +569,14 @@ impl<'a, T, Caps> Future for LockFuture<'a, '_, T, Caps> {
         let mut queued_waker = None;
 
         loop {
+            // A prepared executor waker is arbitrary callback-bearing state.
+            // Recheck after cloning it, before committing lock ownership. On
+            // the ordinary path this does not charge a second checkpoint.
+            if self.cx.is_cancel_requested() && self.cx.checkpoint().is_err() {
+                self.completed = true;
+                self.cleanup_waiter();
+                return Poll::Ready(Err(LockError::Cancelled));
+            }
             let mut state = self.mutex.state.lock();
 
             if self.mutex.is_poisoned() {
