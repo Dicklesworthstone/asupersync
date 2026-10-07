@@ -9814,7 +9814,11 @@ impl RuntimeState {
             )
         });
         let lifetime = Duration::from_nanos(now.duration_since(created_at));
-        self.metrics.region_closed(region_id, lifetime);
+        // Both hooks run inside the close walk under the runtime lock. A
+        // panicking provider must not unwind through the walk: the region
+        // would stay in the arena, listed under its parent, and the parent
+        // could never close.
+        contain_metrics_hook(|| self.metrics.region_closed(region_id, lifetime));
         // A cancelled region's drain runs from its first cancellation report
         // to this close (br-asupersync-x9mmxl). An unset stamp means the
         // region closed before that report was dispatched: an empty region
@@ -9825,7 +9829,7 @@ impl RuntimeState {
             .filter(|&stamp| stamp != u64::MAX)
         {
             let drain = Duration::from_nanos(now.as_nanos().saturating_sub(stamp));
-            self.metrics.drain_completed(region_id, drain);
+            contain_metrics_hook(|| self.metrics.drain_completed(region_id, drain));
         }
     }
 
@@ -12062,6 +12066,15 @@ pub(crate) mod spawn_observer_test_support {
         fn obligation_discharged(&self, _: RegionId) {}
         fn obligation_leaked(&self, _: RegionId) {}
         fn scheduler_tick(&self, _: usize, _: Duration) {}
+    }
+}
+
+/// Runs a metrics hook that the runtime calls under its own lock, so a
+/// panicking provider cannot unwind through runtime bookkeeping. The payload
+/// is user data whose drop could panic again; it is leaked, as elsewhere here.
+fn contain_metrics_hook(hook: impl FnOnce()) {
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(hook)) {
+        std::mem::forget(payload);
     }
 }
 
