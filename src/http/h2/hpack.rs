@@ -1911,12 +1911,17 @@ mod tests {
     fn test_dynamic_table_eviction() {
         let mut table = DynamicTable::with_max_size(100);
 
-        // Insert entries that exceed max size
         table.insert(Header::new("header1", "value1")); // 32 + 7 + 6 = 45
         table.insert(Header::new("header2", "value2")); // 32 + 7 + 6 = 45
+        assert_eq!(table.size(), 90, "both entries fit");
 
-        // First entry should be evicted
-        assert!(table.size() <= 100);
+        // A third entry does not fit beside both: the oldest is evicted.
+        table.insert(Header::new("header3", "value3"));
+        assert_eq!(table.size(), 90);
+        assert_eq!(table.get(1), Some(Header::new("header3", "value3")));
+        assert_eq!(table.get(2), Some(Header::new("header2", "value2")));
+        assert_eq!(table.get(3), None, "header1 was evicted");
+        assert_eq!(table.find("header1", "value1"), None);
     }
 
     /// br-asupersync-4pshog: side-index returns the same HPACK index
@@ -2781,20 +2786,28 @@ mod tests {
 
     #[test]
     fn test_sensitive_header_encoding() {
-        // Test headers that should never be indexed (sensitive data)
+        // encode_sensitive writes every field as a never-indexed literal
+        // (RFC 7541 §6.2.3), even one with an exact static-table match, and
+        // neither side's dynamic table takes it.
         let mut enc = Encoder::new();
+        enc.set_use_huffman(false);
         let mut dec = Decoder::new();
 
-        // Encode with never-index flag for sensitive headers
         let headers = vec![
             Header::new(":method", "GET"),
             Header::new("authorization", "Bearer secret123"),
         ];
 
         let mut buf = BytesMut::new();
-        enc.encode(&headers, &mut buf);
+        enc.encode_sensitive(&headers, &mut buf);
+        // ":method" is one name-index byte, a length byte and "GET", so the
+        // second field starts at byte 5.
+        assert_eq!(buf[0] & 0xF0, 0x10, "first field is never indexed");
+        assert_eq!(buf[5] & 0xF0, 0x10, "second field is never indexed");
+        assert_eq!(enc.dynamic_table_size(), 0);
 
         let headers_out = dec.decode(&mut buf.freeze()).unwrap();
+        assert_eq!(dec.dynamic_table_size(), 0);
         assert_eq!(headers_out.len(), 2);
         assert_eq!(headers_out[1].name, "authorization");
         assert_eq!(headers_out[1].value, "Bearer secret123");
@@ -3205,9 +3218,13 @@ mod tests {
         data.extend_from_slice(&[0xff, 0xff, 0xff, 0xff]);
         data.push(0x7f); // final byte without continuation
         let mut src = Bytes::from(data);
-        // On 32-bit this MUST error (value would be ~34 GB).
-        // On 64-bit the value fits, so it may succeed, but we verify no panic.
-        let _ = decode_integer(&mut src, 5);
+        // 31 + 127 * (1 + 2^7 + 2^14 + 2^21 + 2^28) = 2^35 + 30: about 34 GB,
+        // which fits a 64-bit usize and must be refused on 32-bit.
+        let decoded = decode_integer(&mut src, 5);
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(decoded.expect("fits in 64 bits"), (1_usize << 35) + 30);
+        #[cfg(target_pointer_width = "32")]
+        assert_compression_error(decoded);
     }
 
     // =========================================================================
@@ -3777,20 +3794,12 @@ mod tests {
         let mut encoded_again = BytesMut::new();
         encoder.encode_sensitive(&sensitive_headers, &mut encoded_again);
 
-        // The encoding should be similar (literal representation, not indexed)
-        // Both encodings should start with 0x10 (never indexed literal) or similar
-        for &byte in &encoded_again[0..3] {
-            // Never indexed literals start with 0001xxxx pattern (0x10-0x1F)
-            let is_never_indexed = (byte & 0xF0) == 0x10;
-            // Or could be literal without indexing 0000xxxx (0x00-0x0F)
-            let is_literal_no_index = (byte & 0xF0) == 0x00;
-
-            assert!(
-                is_never_indexed || is_literal_no_index,
-                "Never-indexed header should not use indexed representation, got 0x{:02x}",
-                byte
-            );
-        }
+        // Never-indexed fields leave the encoder's table alone, so the second
+        // encoding is byte for byte the first, starting with a never-indexed
+        // literal (0001xxxx).
+        assert_eq!(encoded_again, encoded);
+        assert_eq!(encoded_again[0] & 0xF0, 0x10);
+        assert_eq!(encoder.dynamic_table_size(), 0);
 
         // Verify the second encoding decodes to the same values
         let mut src = encoded_again.freeze();
