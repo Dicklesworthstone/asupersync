@@ -11,6 +11,7 @@ export const BROWSER_FETCH_LIMITS = Object.freeze({
   maxResponseBytes: 16_777_216, maxChunkBytes: 1_048_576,
   maxResponseHeaders: 128, maxHeaderBytes: 65_536,
   maxTimeoutMs: 2_147_483_647,
+  maxUploadBytes: 16_777_216,
 });
 
 export interface BrowserFetchOptions {
@@ -18,7 +19,23 @@ export interface BrowserFetchOptions {
   method?: FetchMethod;
   credentials?: boolean;
   headers?: Readonly<Record<string, string>> | readonly (readonly [string, string])[];
-  body?: ArrayBuffer | ArrayBufferView;
+  /**
+   * Buffered bytes (at most maxRequestBytes), or a native, unlocked and
+   * undisturbed ReadableStream of Uint8Array chunks. Stream consumption is
+   * transferred when its reader is acquired after task admission; refusals
+   * before acquisition leave the source with the caller. No adapter read-ahead.
+   * Each streamed chunk is copied and limited to maxChunkBytes.
+   *
+   * Streaming requires native Request support for duplex: "half". Browser
+   * HTTP/2-or-newer, CORS/preflight and deployment restrictions still apply;
+   * this is not full duplex and streamed requests are never replayed on a
+   * redirect. An early response cancels unused upload bytes before headers
+   * are published. Cancellation waits for source-reader/cancel settlement,
+   * not for arbitrary work hidden inside the source's underlying producer.
+   */
+  body?: ArrayBuffer | ArrayBufferView | ReadableStream<Uint8Array>;
+  /** Finite streamed-upload byte cap; defaults to maxUploadBytes. Buffered bodies keep their fixed cap. */
+  maxUploadBytes?: number;
   /** Actual decoded response bytes, independent of Content-Length. */
   maxResponseBytes?: number;
   /**
@@ -200,6 +217,16 @@ function byteView(value: unknown): Uint8Array {
 // abort events and stopImmediatePropagation from defeating cancellation.
 // Capture intrinsics once; the no-signal path needs none of these host features.
 const NATIVE_READABLE_STREAM = typeof ReadableStream === "undefined" ? undefined : ReadableStream;
+const NATIVE_REQUEST = typeof Request === "undefined" ? undefined : Request;
+const UPLOAD_LOCKED = NATIVE_READABLE_STREAM && Object.getOwnPropertyDescriptor(NATIVE_READABLE_STREAM.prototype, "locked")?.get;
+const UPLOAD_READER = NATIVE_READABLE_STREAM?.prototype.getReader;
+const READER_CLASS = typeof ReadableStreamDefaultReader === "undefined" ? undefined : ReadableStreamDefaultReader;
+const UPLOAD_READ = READER_CLASS?.prototype.read;
+const UPLOAD_CANCEL = READER_CLASS?.prototype.cancel;
+const UPLOAD_RELEASE = READER_CLASS?.prototype.releaseLock;
+const UPLOAD_CLOSED = READER_CLASS && Object.getOwnPropertyDescriptor(READER_CLASS.prototype, "closed")?.get;
+const UPLOAD_TAG = Object.getOwnPropertyDescriptor(TYPED_ARRAY, Symbol.toStringTag)!.get!;
+const UPLOAD_VALUES = (TYPED_ARRAY as { values: () => unknown }).values;
 const SIGNAL_CLASS = typeof AbortSignal === "undefined" ? undefined : AbortSignal;
 const SIGNAL_ABORTED = SIGNAL_CLASS && Object.getOwnPropertyDescriptor(SIGNAL_CLASS.prototype, "aborted")?.get;
 const SIGNAL_REASON = SIGNAL_CLASS && Object.getOwnPropertyDescriptor(SIGNAL_CLASS.prototype, "reason")?.get;
@@ -234,6 +261,8 @@ interface Prepared {
   credentials: boolean;
   headers: [string, string][];
   body?: Uint8Array;
+  upload?: ReadableStream<Uint8Array>;
+  maxUploadBytes: number;
   maxResponseBytes: number;
   timeoutMs?: number;
   signal?: AbortSignal;
@@ -243,7 +272,7 @@ function prepare(options: BrowserFetchOptions, grant: FetchAuthority): Prepared 
   if (!options || typeof options !== "object") throw new TypeError("fetch options must be an object");
   const { url: suppliedUrl, method: suppliedMethod = "GET", credentials = false,
     headers: suppliedHeaders = [], body, maxResponseBytes = BROWSER_FETCH_LIMITS.maxResponseBytes,
-    timeoutMs, signal } = options;
+    timeoutMs, signal, maxUploadBytes = BROWSER_FETCH_LIMITS.maxUploadBytes } = options;
   if (typeof suppliedUrl !== "string" || suppliedUrl.length * 2 > BROWSER_FETCH_LIMITS.maxHeaderBytes) throw new RangeError("fetch request URL exceeds limit");
   const url = httpUrl(suppliedUrl);
   if (typeof suppliedMethod !== "string") throw new TypeError("fetch method must be a string");
@@ -251,6 +280,7 @@ function prepare(options: BrowserFetchOptions, grant: FetchAuthority): Prepared 
   if (!METHODS.has(method)) throw new TypeError("unsupported fetch method");
   if (typeof credentials !== "boolean") throw new TypeError("fetch credentials must be a boolean");
   if (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes < 0) throw new TypeError("maxResponseBytes must be a non-negative safe integer");
+  if (!Number.isSafeInteger(maxUploadBytes) || maxUploadBytes < 0) throw failure("maxUploadBytes must be a non-negative safe integer");
   if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs < 0
       || timeoutMs > BROWSER_FETCH_LIMITS.maxTimeoutMs)) {
     throw failure("fetch timeoutMs must be an integer between 0 and maxTimeoutMs");
@@ -280,13 +310,19 @@ function prepare(options: BrowserFetchOptions, grant: FetchAuthority): Prepared 
     for (const name of Object.keys(suppliedHeaders)) addHeader(name, (suppliedHeaders as Readonly<Record<string, string>>)[name]);
   }
   let copied: Uint8Array | undefined;
+  let upload: ReadableStream<Uint8Array> | undefined;
   if (body !== undefined) {
     if (method === "GET" || method === "HEAD") throw new TypeError("GET and HEAD do not permit a request body");
-    const view = byteView(body);
-    if (view.byteLength > BROWSER_FETCH_LIMITS.maxRequestBytes) throw new RangeError("fetch request body exceeds limit");
-    copied = view.slice();
+    if (isUploadStream(body)) {
+      validateUploadStream(body, url.href, method);
+      upload = body;
+    } else {
+      const view = byteView(body);
+      if (view.byteLength > BROWSER_FETCH_LIMITS.maxRequestBytes) throw new RangeError("fetch request body exceeds limit");
+      copied = view.slice();
+    }
   }
-  return { url: url.href, method, credentials, headers, body: copied, maxResponseBytes, timeoutMs,
+  return { url: url.href, method, credentials, headers, body: copied, upload, maxUploadBytes, maxResponseBytes, timeoutMs,
     signal: prepareSignal(signal) };
 }
 
@@ -315,6 +351,136 @@ async function attempt(operation: () => unknown): Promise<void> {
   try { await operation(); } catch { /* Preserve the first terminal outcome. */ }
 }
 
+function isUploadStream(value: unknown): value is ReadableStream<Uint8Array> {
+  if (!UPLOAD_LOCKED) return false;
+  try { Reflect.apply(UPLOAD_LOCKED, value, []); return true; }
+  catch { return false; }
+}
+
+function validateUploadStream(source: ReadableStream<Uint8Array>, url: string, method: string): void {
+  if (!NATIVE_REQUEST || !UPLOAD_READER || !UPLOAD_READ || !UPLOAD_CANCEL || !UPLOAD_RELEASE || !UPLOAD_CLOSED) {
+    throw failure("fetch uploads require native Request and ReadableStream reader support");
+  }
+  // Request construction checks the otherwise unobservable disturbed bit. It
+  // neither reads nor locks the stream. Verify duplex recognition and identity
+  // so an older host cannot silently stringify the stream into a request body.
+  try {
+    let duplexRead = false;
+    const probe = new NATIVE_REQUEST(url, { method, body: source,
+      get duplex() { duplexRead = true; return "half"; },
+    } as RequestInit);
+    if (!duplexRead || probe.body !== source) throw new TypeError("streaming requests are unsupported");
+  } catch (error) {
+    throw failure(`fetch upload source must be an unlocked, undisturbed native stream on a streaming-capable host: ${message(error)}`);
+  }
+}
+
+/** One source reader owned by the fetch task, not a detached upload task. */
+class OwnedFetchUpload {
+  readonly body: ReadableStream<Uint8Array>;
+  private reader: ReadableStreamDefaultReader<Uint8Array> | null;
+  private controller!: ReadableStreamDefaultController<Uint8Array>;
+  private readonly drained = deferred<void>();
+  private pending: Promise<void> | null = null;
+  private stopping = false;
+  private ended = false;
+  private sent = 0;
+
+  constructor(source: ReadableStream<Uint8Array>, private readonly maxBytes: number,
+    private readonly failed: (error: unknown) => void) {
+    // Native intrinsics ignore shadowed instance methods and accept streams
+    // from another same-origin realm. If acquisition fails, no source is owned.
+    this.reader = Reflect.apply(UPLOAD_READER!, source, []) as ReadableStreamDefaultReader<Uint8Array>;
+    try {
+      this.body = new NATIVE_READABLE_STREAM!<Uint8Array>({
+        start: (controller) => { this.controller = controller; },
+        pull: () => {
+          const pending = deferred<void>();
+          this.pending = pending.promise;
+          return this.pull().finally(() => { this.pending = null; pending.resolve(); });
+        },
+        cancel: (reason) => this.cancel(reason),
+      }, { highWaterMark: 0 });
+      const closed = Reflect.apply(UPLOAD_CLOSED!, this.reader, []) as Promise<void>;
+      void closed.catch((error) => { if (!this.stopping && !this.ended) this.failed(error); });
+    } catch (error) {
+      // The zero-watermark wrapper has not requested any source bytes yet.
+      Reflect.apply(UPLOAD_RELEASE!, this.reader, []);
+      throw error;
+    }
+  }
+
+  private release(): void {
+    if (!this.reader) return;
+    const reader = this.reader;
+    this.reader = null;
+    Reflect.apply(UPLOAD_RELEASE!, reader, []);
+  }
+
+  private async pull(): Promise<void> {
+    if (this.stopping || this.ended) return;
+    try {
+      const result = await Reflect.apply(UPLOAD_READ!, this.reader, []) as ReadableStreamReadResult<Uint8Array>;
+      if (this.stopping) return;
+      if (result.done) {
+        this.ended = true;
+        this.release();
+        this.controller.close();
+        this.drained.resolve();
+        return;
+      }
+      const value = result.value;
+      if (Reflect.apply(UPLOAD_TAG, value, []) !== "Uint8Array") {
+        throw failure("fetch upload chunks must be Uint8Array values");
+      }
+      // A detached typed array reports zero byteLength; validate its slots
+      // before applying limits or copying, rather than admitting silent EOF.
+      Reflect.apply(UPLOAD_VALUES, value, []);
+      const view = byteView(value);
+      if (view.byteLength > BROWSER_FETCH_LIMITS.maxChunkBytes || view.byteLength > this.maxBytes - this.sent) {
+        throw failure("fetch upload bytes exceed the configured chunk or maxUploadBytes limit");
+      }
+      const owned = view.slice();
+      this.sent += owned.byteLength;
+      this.controller.enqueue(owned);
+    } catch (error) {
+      // Never await the owner here: its drain waits for this admitted pull.
+      // It starts cancellation synchronously and preserves the original cause.
+      this.failed(error);
+    }
+  }
+
+  cancel(reason: unknown, graceful = false): Promise<void> {
+    if (this.stopping || this.ended) return this.drained.promise;
+    this.stopping = true;
+    const pending = this.pending;
+    try {
+      // A final response may end a request early. Close that upload rather
+      // than aborting the accepted response; caller cancellation errors it.
+      if (graceful) this.controller.close();
+      else this.controller.error(reason);
+    } catch { /* Native consumer cancellation already closes the wrapper. */ }
+    // Publish stopping before native cancel invokes arbitrary source cleanup.
+    // Both the cancel callback and the admitted read must settle before release.
+    void (async () => {
+      await Promise.all([
+        attempt(async () => {
+          try { await Reflect.apply(UPLOAD_CANCEL!, this.reader, [reason]); }
+          catch (error) { this.failed(error); }
+        }),
+        pending,
+      ]);
+      try { this.release(); } catch (error) { this.failed(error); }
+      this.drained.resolve();
+    })();
+    return this.drained.promise;
+  }
+
+  finishRequest(): Promise<void> {
+    return this.cancel("fetch response ended the request upload", true);
+  }
+}
+
 export interface BrowserFetchGrant { rootKey: string; authority: FetchAuthority; }
 
 /** Internal authority resolver and ownership registry, shared by all SDK scopes. */
@@ -336,6 +502,7 @@ export function createBrowserFetchManager(dependencies: {
     readonly closed = deferred<Outcome<void>>();
     readonly launched = deferred<void>();
     controller: AbortController | null = null;
+    upload: OwnedFetchUpload | null = null;
     reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
     reading: Deferred<void> | null = null;
     stopped: Failure | null = null;
@@ -486,11 +653,13 @@ export function createBrowserFetchManager(dependencies: {
       const reading = this.reading;
       void (async () => {
         await Promise.all([
+          attempt(() => this.upload?.cancel(outcome)),
           attempt(() => this.controller?.abort()), attempt(() => reader?.cancel(outcome)),
           this.launched.promise, reading?.promise,
         ]);
         if (reader) { try { reader.releaseLock(); } catch { /* Already released. */ } }
         this.reader = null;
+        this.upload = null;
         this.finish(outcome);
       })();
     }
@@ -604,6 +773,12 @@ export function createBrowserFetchManager(dependencies: {
           void this.requestCancel("scope_close", "fetch owner began closing during admission", true);
           return;
         }
+        if (this.request.upload) {
+          // Register ownership before signal/timer/host callbacks can cancel.
+          this.upload = new OwnedFetchUpload(this.request.upload, this.request.maxUploadBytes,
+            (error) => this.stop(asFailure(error)));
+          this.request.upload = undefined;
+        }
         this.armSignal();
         if (this.stopped) return;
         if (this.request.timeoutMs === 0) { this.expireDeadline(); return; }
@@ -622,10 +797,19 @@ export function createBrowserFetchManager(dependencies: {
         if (this.stopped) return;
         response = await Reflect.apply(fetch, host, [this.request.url, {
           method: this.request.method, headers: this.request.headers,
-          body: this.request.body, credentials: this.request.credentials ? "include" : "omit",
+          body: this.upload?.body ?? this.request.body,
+          ...(this.upload ? { duplex: "half" } : {}),
+          credentials: this.request.credentials ? "include" : "omit",
           redirect: "error", signal,
         }]) as Response;
         this.request.body = undefined;
+        // Browser fetch is half-duplex. On a host that exposes an early final
+        // response, retire the remaining upload before publishing its headers.
+        // A concurrent stop still owns any late response body through launch.
+        if (this.upload) {
+          await this.upload.finishRequest();
+          this.upload = null;
+        }
         if (this.stopped) { await this.disposeResponse(response); return; }
         const status = response.status;
         const statusText = response.statusText;
@@ -680,6 +864,7 @@ export function createBrowserFetchManager(dependencies: {
         if (response && !this.reader) await this.disposeResponse(response);
       } finally {
         this.request.body = undefined;
+        this.request.upload = undefined;
         this.launched.resolve();
       }
     }
