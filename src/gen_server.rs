@@ -632,8 +632,10 @@ impl<R> Reply<R> {
 
 impl<R: Send + 'static> Reply<R> {
     fn new(cx: &Cx, permit: TrackedOneshotPermit<R>) -> Self {
+        // Borrowed: a native runtime has no reply history, so a call costs
+        // only these Option checks, not a refcount on the shared gateway.
         let history = cx
-            .spawn_gateway_handle()
+            .spawn_gateway_ref()
             .and_then(|gateway| gateway.reply_history().cloned())
             .map(|history| {
                 let call = history.next_call();

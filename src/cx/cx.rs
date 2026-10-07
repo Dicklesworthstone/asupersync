@@ -4585,6 +4585,15 @@ impl<Caps> Cx<Caps> {
 }
 
 impl Cx<cap::All> {
+    /// Borrows the runtime's spawn gateway, for hot paths that only read it:
+    /// cloning the shared `Arc` would touch its refcount on every call.
+    #[inline]
+    pub(crate) fn spawn_gateway_ref(
+        &self,
+    ) -> Option<&Arc<crate::runtime::spawn_mailbox::SpawnGateway>> {
+        self.handles.spawn_gateway.as_ref()
+    }
+
     /// Races multiple inline futures with **loser-drain** semantics — the
     /// drain-correct engine behind the `race!` macro.
     ///
