@@ -190,7 +190,15 @@ impl PgError {
     /// Returns `true` if this is any constraint violation (SQLSTATE class `23`).
     #[must_use]
     pub fn is_constraint_violation(&self) -> bool {
-        self.code().is_some_and(|c| c.len() >= 2 && &c[..2] == "23")
+        self.sqlstate_class() == Some(*b"23")
+    }
+
+    /// The first two bytes of a server error's SQLSTATE. Compared as bytes:
+    /// the code comes from the server, and slicing a str at 2 would panic
+    /// on a non-ASCII code.
+    fn sqlstate_class(&self) -> Option<[u8; 2]> {
+        let code = self.code()?.as_bytes();
+        Some([*code.first()?, *code.get(1)?])
     }
 
     /// Returns `true` if this is a connection-level error.
@@ -202,7 +210,7 @@ impl PgError {
         matches!(
             self,
             Self::Io(_) | Self::ConnectionClosed | Self::TlsRequired | Self::Tls(_)
-        ) || self.code().is_some_and(|c| c.len() >= 2 && &c[..2] == "08")
+        ) || self.sqlstate_class() == Some(*b"08")
     }
 
     /// Returns `true` if this error is transient and may succeed on retry.
@@ -214,15 +222,14 @@ impl PgError {
         if matches!(self, Self::Io(_) | Self::ConnectionClosed) {
             return true;
         }
-        self.code().is_some_and(|c| {
-            c.len() >= 2
-                && matches!(
-                    &c[..2],
-                    "40" // transaction rollback (serialization, deadlock)
-                    | "08" // connection exception
-                    | "53" // insufficient resources
-                )
-        })
+        matches!(
+            self.sqlstate_class().as_ref(),
+            Some(
+                b"40" // transaction rollback (serialization, deadlock)
+                | b"08" // connection exception
+                | b"53" // insufficient resources
+            )
+        )
     }
 
     /// Returns `true` if this error is safe to retry automatically.
@@ -773,7 +780,7 @@ impl FromSql for i16 {
 }
 
 impl FromSql for i32 {
-    fn from_sql(data: &[u8], _oid: u32, format: Format) -> Result<Self, PgError> {
+    fn from_sql(data: &[u8], type_oid: u32, format: Format) -> Result<Self, PgError> {
         match format {
             Format::Binary => {
                 if data.len() < 4 {
@@ -784,6 +791,13 @@ impl FromSql for i32 {
             Format::Text => {
                 let s = std::str::from_utf8(data)
                     .map_err(|e| PgError::Protocol(format!("invalid UTF-8: {e}")))?;
+                if type_oid == oid::OID {
+                    // Unsigned: above 2^31 it keeps the bits, as in binary.
+                    return s
+                        .parse::<u32>()
+                        .map(u32::cast_signed)
+                        .map_err(|e| PgError::Protocol(format!("invalid oid: {e}")));
+                }
                 s.parse()
                     .map_err(|e| PgError::Protocol(format!("invalid int4: {e}")))
             }
@@ -898,15 +912,58 @@ impl FromSql for String {
     }
 }
 
+/// Decode bytea text in PostgreSQL's escape output format (`bytea_output =
+/// 'escape'`): `\\` is one backslash, `\ooo` one octal byte, and any other
+/// byte stands for itself. Hex output always starts with `\x`, which escape
+/// output never does, since it doubles every backslash.
+fn decode_bytea_escape(text: &[u8]) -> Result<Vec<u8>, PgError> {
+    let mut bytes = Vec::with_capacity(text.len());
+    let mut rest = text;
+    while let Some((&byte, tail)) = rest.split_first() {
+        if byte != b'\\' {
+            bytes.push(byte);
+            rest = tail;
+            continue;
+        }
+        match tail {
+            [b'\\', after @ ..] => {
+                bytes.push(b'\\');
+                rest = after;
+            }
+            [
+                high @ b'0'..=b'3',
+                mid @ b'0'..=b'7',
+                low @ b'0'..=b'7',
+                after @ ..,
+            ] => {
+                bytes.push(((high - b'0') << 6) | ((mid - b'0') << 3) | (low - b'0'));
+                rest = after;
+            }
+            _ => {
+                return Err(PgError::Protocol(
+                    "invalid bytea escape sequence".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(bytes)
+}
+
 impl FromSql for Vec<u8> {
-    fn from_sql(data: &[u8], _oid: u32, format: Format) -> Result<Self, PgError> {
+    fn from_sql(data: &[u8], type_oid: u32, format: Format) -> Result<Self, PgError> {
         match format {
             Format::Binary => Ok(data.to_vec()),
             Format::Text => {
                 let s = std::str::from_utf8(data)
                     .map_err(|e| PgError::Protocol(format!("invalid UTF-8: {e}")))?;
                 s.strip_prefix("\\x").map_or_else(
-                    || Ok(data.to_vec()),
+                    || {
+                        if type_oid == oid::BYTEA {
+                            decode_bytea_escape(data)
+                        } else {
+                            Ok(data.to_vec())
+                        }
+                    },
                     |hex_str| {
                         hex::decode(hex_str)
                             .map_err(|e| PgError::Protocol(format!("invalid bytea hex: {e}")))
@@ -1231,7 +1288,21 @@ impl PgRowStream<'_> {
                     }
                 }
                 b'C' => {
-                    // CommandComplete - continue to ReadyForQuery
+                    // CommandComplete. A SET or DDL run through a stream
+                    // updates the session flags as the query loops do.
+                    if let Some(tag) = PgConnection::parse_command_tag(&data) {
+                        if PgConnection::command_tag_requires_prepared_cache_invalidation(tag) {
+                            self.connection
+                                .invalidate_prepared_cache_after_schema_or_session_change();
+                        }
+                        if PgConnection::command_tag_requires_session_discard(tag) {
+                            self.connection.inner.needs_discard = true;
+                        }
+                    }
+                }
+                b'1' | b'2' | b'n' | b's' | b'I' => {
+                    // ParseComplete, BindComplete, NoData, PortalSuspended
+                    // and EmptyQueryResponse carry nothing for the stream.
                 }
                 b'Z' => {
                     // ReadyForQuery - stream complete
@@ -1255,14 +1326,23 @@ impl PgRowStream<'_> {
                     }
                     return Outcome::Err(err);
                 }
-                _ => {
-                    if let Err(err) = self
-                        .connection
-                        .handle_async_backend_message(msg_type, &data)
-                    {
-                        return self.connection.fail_in_flight(err);
+                _ => match self
+                    .connection
+                    .handle_async_backend_message(msg_type, &data)
+                {
+                    Ok(true) => {}
+                    // A COPY or any other exchange a row stream cannot run:
+                    // fail, rather than wait forever after CopyInResponse or
+                    // skip CopyData and report success.
+                    Ok(false) => {
+                        self.finished = true;
+                        return self.connection.fail_in_flight(unexpected_backend_message(
+                            "streaming query response",
+                            msg_type,
+                        ));
                     }
-                }
+                    Err(err) => return self.connection.fail_in_flight(err),
+                },
             }
         }
     }
@@ -1320,6 +1400,17 @@ impl PgConnection {
             Outcome::Err(err) => return Outcome::Err(err),
             Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
             Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+
+        // A stream reconciles the session's statement_timeout like any other
+        // query, or it would run under whatever the last query left there.
+        if !Self::is_session_control_statement(sql) {
+            match self.apply_statement_timeout(cx).await {
+                Outcome::Ok(()) => {}
+                Outcome::Err(err) => return Outcome::Err(err),
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+            }
         }
 
         // Mark closed until ReadyForQuery so cancellation or drop cannot leave
@@ -1414,6 +1505,13 @@ impl PgConnection {
         combined.extend_from_slice(&sync_msg);
 
         match self.ensure_no_orphaned_transaction(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+
+        match self.apply_statement_timeout(cx).await {
             Outcome::Ok(()) => {}
             Outcome::Err(err) => return Outcome::Err(err),
             Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
@@ -2640,7 +2738,10 @@ impl PgConnectOptions {
                         let secs = value.parse::<u64>().map_err(|_| {
                             PgError::InvalidUrl(format!("invalid connect_timeout: {value}"))
                         })?;
-                        connect_timeout = Some(std::time::Duration::from_secs(secs));
+                        // As in libpq, zero means wait indefinitely (it used
+                        // to fail every connect at once).
+                        connect_timeout =
+                            (secs != 0).then_some(std::time::Duration::from_secs(secs));
                     }
                     "sslcrl" | "sslcrldir" => revocation_list = Some(key),
                     _ => {} // ignore unknown parameters
@@ -3587,6 +3688,11 @@ const MAX_SCRAM_PBKDF2_ITERATIONS: u32 = 600_000;
 const SCRAM_PBKDF2_YIELD_INTERVAL: u32 = 1_024;
 const MAX_NOTIFICATION_CHANNEL_NAME_BYTES: usize = 63;
 const MAX_NOTIFICATION_PAYLOAD_BYTES: usize = 8_000;
+/// Bounds on the ParameterStatus reports a connection keeps. PostgreSQL
+/// reports about twenty parameters with short values; without a bound a
+/// hostile server could grow the map while the connection idles.
+const MAX_SERVER_PARAMETERS: usize = 256;
+const MAX_SERVER_PARAMETER_BYTES: usize = 64 * 1024;
 const COPY_TERMINAL_MASKED_POLLS: u32 = 64;
 
 /// A PostgreSQL LISTEN/NOTIFY event, in server delivery order.
@@ -4208,6 +4314,17 @@ impl PgConnection {
         let mut reader = MessageReader::new(data);
         let name = reader.read_cstring()?.to_string();
         let value = reader.read_cstring()?.to_string();
+        let bytes = name.len().saturating_add(value.len());
+        if bytes > MAX_SERVER_PARAMETER_BYTES
+            || (self.inner.parameters.len() >= MAX_SERVER_PARAMETERS
+                && !self.inner.parameters.contains_key(&name))
+        {
+            return Err(PgError::Protocol(format!(
+                "ParameterStatus of {bytes} bytes exceeds the client's bounds \
+                 ({} parameters kept)",
+                self.inner.parameters.len()
+            )));
+        }
         self.inner.parameters.insert(name, value);
         Ok(())
     }
@@ -5202,8 +5319,27 @@ impl PgConnection {
     /// which is correct for *user* session mutations but would make this
     /// client-managed, always-reconciled GUC unusable with pooling.
     async fn apply_statement_timeout(&mut self, cx: &Cx) -> Outcome<(), PgError> {
+        // A transaction the caller dropped is rolled back first. In its
+        // failed block the SET below could only fail (25P02), and every
+        // later call would fail the same way.
+        match self.ensure_no_orphaned_transaction(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+        // In the caller's own failed block the SET fails too, which would
+        // turn its ROLLBACK [TO SAVEPOINT] into an error. Nothing else runs
+        // there, so nothing needs the timeout.
+        if self.inner.transaction_status == b'E' {
+            return Outcome::Ok(());
+        }
         let override_timeout = self.inner.statement_timeout_override;
-        let effective_ms = crate::database::wire_statement_timeout_ms(cx, override_timeout);
+        // statement_timeout is an int setting: a budget past INT_MAX ms
+        // (about 24.8 days) is sent as INT_MAX, since the server refuses a
+        // larger value, and TO DEFAULT could be shorter than the budget.
+        let effective_ms = crate::database::wire_statement_timeout_ms(cx, override_timeout)
+            .map(|ms| ms.min(u64::from(i32::MAX.unsigned_abs())));
         if effective_ms == self.inner.applied_statement_timeout_ms
             && !self.inner.statement_timeout_uncertain
         {
@@ -5899,6 +6035,13 @@ impl PgConnection {
         }
 
         match self.ensure_no_orphaned_transaction(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+
+        match self.apply_statement_timeout(cx).await {
             Outcome::Ok(()) => {}
             Outcome::Err(err) => return Outcome::Err(err),
             Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
@@ -6972,7 +7115,7 @@ impl PgConnection {
                 }
                 count.parse::<u64>().ok()
             }
-            "UPDATE" | "DELETE" | "SELECT" | "COPY" | "MOVE" | "FETCH" => {
+            "UPDATE" | "DELETE" | "MERGE" | "SELECT" | "COPY" | "MOVE" | "FETCH" => {
                 let count = parts.next()?;
                 if parts.next().is_some() {
                     return None;
@@ -7025,6 +7168,40 @@ impl PgConnection {
             return Err(PgError::Protocol(format!(
                 "prepared statement '{}' expects {} parameters, got {}",
                 stmt.name, expected, got
+            )));
+        }
+        Ok(())
+    }
+
+    /// `prepare` sends no type hints, so the server infers each parameter's
+    /// type. A binary integer bound where it inferred a float, or a binary
+    /// float where it inferred an integer, has the same width, so the server
+    /// reads the bytes as the other type and stores a wrong value without
+    /// an error: `100i64` for a `double precision` parameter stored
+    /// 4.94e-322. Those pairs are refused before anything is written. NULLs
+    /// carry no bytes and pass; other mismatches are left to the server.
+    fn validate_prepared_bind_types(
+        stmt: &PgStatement,
+        params: &[&dyn ToSql],
+    ) -> Result<(), PgError> {
+        const INTEGERS: [u32; 3] = [oid::INT2, oid::INT4, oid::INT8];
+        const FLOATS: [u32; 2] = [oid::FLOAT4, oid::FLOAT8];
+        for (position, (param, &expected)) in params.iter().zip(&stmt.param_oids).enumerate() {
+            let sent = param.type_oid();
+            let crossed = (INTEGERS.contains(&sent) && FLOATS.contains(&expected))
+                || (FLOATS.contains(&sent) && INTEGERS.contains(&expected));
+            if !crossed
+                || param.format() != Format::Binary
+                || matches!(param.to_sql(&mut Vec::new())?, IsNull::Yes)
+            {
+                continue;
+            }
+            return Err(PgError::Protocol(format!(
+                "prepared statement '{}' parameter ${} is bound as type OID {sent}, but the \
+                 server expects type OID {expected}; the binary value would be stored as a \
+                 different number",
+                stmt.name,
+                position + 1
             )));
         }
         Ok(())
@@ -7083,7 +7260,9 @@ impl PgConnection {
             Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
-        if let Err(err) = Self::validate_prepared_bind_arity(stmt, params) {
+        if let Err(err) = Self::validate_prepared_bind_arity(stmt, params)
+            .and_then(|()| Self::validate_prepared_bind_types(stmt, params))
+        {
             return Outcome::Err(err);
         }
         let bind = match build_bind_msg("", &stmt.name, params, Format::Text) {
@@ -7129,7 +7308,9 @@ impl PgConnection {
             return self.fail_in_flight(e);
         }
 
-        self.read_extended_query_results(cx).await
+        let result = self.read_extended_query_results(cx).await;
+        self.forget_unusable_prepared_statement(&result, &stmt.name);
+        result
     }
 
     /// Execute a prepared statement returning affected row count.
@@ -7185,7 +7366,9 @@ impl PgConnection {
             Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
-        if let Err(err) = Self::validate_prepared_bind_arity(stmt, params) {
+        if let Err(err) = Self::validate_prepared_bind_arity(stmt, params)
+            .and_then(|()| Self::validate_prepared_bind_types(stmt, params))
+        {
             return Outcome::Err(err);
         }
         let bind = match build_bind_msg("", &stmt.name, params, Format::Text) {
@@ -7225,7 +7408,32 @@ impl PgConnection {
             return self.fail_in_flight(e);
         }
 
-        self.read_extended_execute_results(cx).await
+        let result = self.read_extended_execute_results(cx).await;
+        self.forget_unusable_prepared_statement(&result, &stmt.name);
+        result
+    }
+
+    /// A cached statement the server can no longer run is dropped from the
+    /// cache and deallocated, so the next `prepare` of its SQL parses it
+    /// again. 0A000 "cached plan must not change result type" follows
+    /// another session altering a table the statement reads; 26000 means
+    /// the server no longer has it. Before, `prepare` kept returning the
+    /// cached handle and every call failed until the connection was
+    /// recycled.
+    fn forget_unusable_prepared_statement<T>(
+        &mut self,
+        result: &Outcome<T, PgError>,
+        statement_name: &str,
+    ) {
+        if let Outcome::Err(PgError::Server { code, .. }) = result
+            && matches!(code.as_str(), "0A000" | "26000")
+            && self
+                .inner
+                .prepared_cache
+                .remove_by_statement_name(statement_name)
+        {
+            self.enqueue_local_deallocate(statement_name.to_owned());
+        }
     }
 
     /// Close a prepared statement, freeing server-side resources.
@@ -7661,9 +7869,16 @@ impl PgConnection {
                 s.parse()
                     .map_err(|e| PgError::Protocol(format!("invalid int2: {e}")))?,
             ),
-            oid::INT4 | oid::OID => PgValue::Int4(
+            oid::INT4 => PgValue::Int4(
                 s.parse()
                     .map_err(|e| PgError::Protocol(format!("invalid int4: {e}")))?,
+            ),
+            // An OID is unsigned; above 2^31 it keeps the bits, as the binary
+            // decoder below does.
+            oid::OID => PgValue::Int4(
+                s.parse::<u32>()
+                    .map_err(|e| PgError::Protocol(format!("invalid oid: {e}")))?
+                    .cast_signed(),
             ),
             oid::INT8 => PgValue::Int8(
                 s.parse()
@@ -7684,7 +7899,8 @@ impl PgConnection {
                         .map_err(|e| PgError::Protocol(format!("invalid bytea: {e}")))?;
                     PgValue::Bytes(bytes)
                 } else {
-                    PgValue::Bytes(data.to_vec())
+                    // Escape format (bytea_output = 'escape').
+                    PgValue::Bytes(decode_bytea_escape(data)?)
                 }
             }
             _ => PgValue::Text(s.to_string()),
@@ -9060,13 +9276,21 @@ fn render_interval_text(months: i32, days: i32, microseconds: i64) -> String {
     if months != 0 {
         parts.push(format!(
             "{months} {}",
-            if months.abs() == 1 { "mon" } else { "mons" }
+            if months.unsigned_abs() == 1 {
+                "mon"
+            } else {
+                "mons"
+            }
         ));
     }
     if days != 0 {
         parts.push(format!(
             "{days} {}",
-            if days.abs() == 1 { "day" } else { "days" }
+            if days.unsigned_abs() == 1 {
+                "day"
+            } else {
+                "days"
+            }
         ));
     }
 
@@ -9380,7 +9604,17 @@ impl PgTransaction<'_> {
             return Outcome::Err(PgError::TransactionFinished);
         }
         trace_database_transaction(cx, "postgres", "rollback", "start");
-        match self.conn.execute_unchecked(cx, "ROLLBACK").await {
+        // Cleanup runs with cancellation masked for a bounded number of
+        // polls. Under an already-cancelled Cx the ROLLBACK used to stop at
+        // its first checkpoint, leaving the transaction and its locks open.
+        const MASKED_ROLLBACK_POLLS: u32 = 32;
+        match crate::combinator::commit_section(
+            cx,
+            MASKED_ROLLBACK_POLLS,
+            self.conn.execute_unchecked(cx, "ROLLBACK"),
+        )
+        .await
+        {
             Outcome::Ok(_) => {
                 self.finished = true;
                 // Explicit rollback: abort the obligation.
@@ -9392,6 +9626,13 @@ impl PgTransaction<'_> {
             }
             Outcome::Err(e) => {
                 self.mark_finished_if_server_closed_transaction(&e);
+                // Under a cancelled Cx the masked ROLLBACK is best effort.
+                // When it fails, the caller still sees its own cancellation,
+                // as before the masking, and Drop marks the connection.
+                if let Some(reason) = cx.cancel_reason() {
+                    trace_database_transaction(cx, "postgres", "rollback", "cancelled");
+                    return Outcome::Cancelled(reason);
+                }
                 trace_database_transaction(cx, "postgres", "rollback", "err");
                 Outcome::Err(e)
             }

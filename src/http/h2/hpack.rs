@@ -327,6 +327,10 @@ impl Header {
 struct DynamicTableEntry {
     name: std::sync::Arc<str>,
     value: std::sync::Arc<str>,
+    /// RFC 7541 §4.1 size: the name's and value's octets plus 32. It is
+    /// kept rather than recomputed because a value decoded from obs-text
+    /// holds more UTF-8 bytes than the octets the peer sent and counted.
+    size: usize,
     /// Monotonic generation assigned at insert time. Used by the side
     /// indices (see `DynamicTable`) to recover an entry's current
     /// position in O(1) without walking `entries`. See
@@ -336,10 +340,13 @@ struct DynamicTableEntry {
 
 impl DynamicTableEntry {
     /// Construct from owned Strings, paying the allocation once into Arc.
-    fn from_strings(name: String, value: String, generation: u64) -> Self {
+    /// `value_octets` is the value's length on the wire.
+    fn from_strings(name: String, value: String, value_octets: usize, generation: u64) -> Self {
+        let size = name.len().saturating_add(value_octets).saturating_add(32);
         Self {
             name: std::sync::Arc::from(name.into_boxed_str()),
             value: std::sync::Arc::from(value.into_boxed_str()),
+            size,
             generation,
         }
     }
@@ -356,10 +363,7 @@ impl DynamicTableEntry {
     }
 
     fn size(&self) -> usize {
-        self.name
-            .len()
-            .saturating_add(self.value.len())
-            .saturating_add(32)
+        self.size
     }
 }
 
@@ -529,6 +533,14 @@ impl DynamicTable {
 
     /// Insert a new entry at the beginning of the table.
     pub fn insert(&mut self, header: Header) {
+        let value_octets = header.value.len();
+        self.insert_counted(header, value_octets);
+    }
+
+    /// Insert an entry whose value the peer sent as `value_octets` octets.
+    /// RFC 7541 §4.1 sizes the entry by those octets, which a value decoded
+    /// from obs-text exceeds in UTF-8.
+    fn insert_counted(&mut self, header: Header, value_octets: usize) {
         // br-asupersync-d04pmz: convert at the boundary — pays the
         // Arc::from(String) alloc ONCE; subsequent table accesses are
         // refcount bumps.
@@ -536,7 +548,8 @@ impl DynamicTable {
         // generation so the side index can recover its position later
         // in O(1).
         let generation = self.insert_count;
-        let entry = DynamicTableEntry::from_strings(header.name, header.value, generation);
+        let entry =
+            DynamicTableEntry::from_strings(header.name, header.value, value_octets, generation);
         let entry_size = entry.size();
 
         // Evict oldest entries (at back) to make room. Use the
@@ -958,9 +971,10 @@ impl Decoder {
 
         if first & 0x40 != 0 {
             // Literal with incremental indexing
-            let (name, value) = self.decode_literal(src, 6, remaining_budget)?;
+            let (name, value, value_octets) = self.decode_literal(src, 6, remaining_budget)?;
             let header = Header::new(name, value);
-            self.dynamic_table.insert(header.clone());
+            self.dynamic_table
+                .insert_counted(header.clone(), value_octets);
             return Ok(header);
         }
 
@@ -972,12 +986,12 @@ impl Decoder {
 
         if first & 0x10 != 0 {
             // Literal never indexed
-            let (name, value) = self.decode_literal(src, 4, remaining_budget)?;
+            let (name, value, _) = self.decode_literal(src, 4, remaining_budget)?;
             return Ok(Header::new(name, value));
         }
 
         // Literal without indexing
-        let (name, value) = self.decode_literal(src, 4, remaining_budget)?;
+        let (name, value, _) = self.decode_literal(src, 4, remaining_budget)?;
         Ok(Header::new(name, value))
     }
 
@@ -989,12 +1003,15 @@ impl Decoder {
     ///
     /// Rejecting these characters prevents HTTP/1 header injection when H2
     /// frames are forwarded to HTTP/1.1 backends.
+    ///
+    /// Also returns the value's length in octets as sent, which the dynamic
+    /// table counts.
     fn decode_literal(
         &self,
         src: &mut Bytes,
         prefix_bits: u8,
         remaining_budget: usize,
-    ) -> Result<(String, String), H2Error> {
+    ) -> Result<(String, String, usize), H2Error> {
         let index = decode_integer(src, prefix_bits)?;
 
         let name = if index == 0 {
@@ -1006,9 +1023,17 @@ impl Decoder {
         };
 
         let value_budget = remaining_budget.saturating_sub(name.len());
-        let value = decode_string_bounded(src, value_budget)?;
+        // Pseudo-header values (a method, scheme, authority, path or
+        // status) have no obs-text form; they stay UTF-8 only.
+        let (value, value_octets) = if name.starts_with(':') {
+            let value = decode_string_bounded(src, value_budget)?;
+            let value_octets = value.len();
+            (value, value_octets)
+        } else {
+            decode_field_value_bounded(src, value_budget)?
+        };
         validate_header_value(&value)?;
-        Ok((name, value))
+        Ok((name, value, value_octets))
     }
 
     /// Get a header by index from static or dynamic table.
@@ -1275,6 +1300,55 @@ fn decode_string(src: &mut Bytes) -> Result<String, H2Error> {
 /// off or copied, so an attacker cannot force a large allocation by claiming
 /// a length that would later be rejected by `max_header_list_size`.
 fn decode_string_bounded(src: &mut Bytes, max_len: usize) -> Result<String, H2Error> {
+    let (huffman, data) = split_string_literal(src, max_len)?;
+
+    if huffman {
+        decode_huffman(&data)
+    } else {
+        // br-asupersync-73dak3 — validate UTF-8 on the borrowed slice and
+        // allocate exactly once. The previous shape was
+        // `String::from_utf8(data.to_vec())`, which copied the bytes into a
+        // fresh Vec *first* and only then validated; on bad UTF-8 we paid
+        // the alloc + copy before failing. Validating first is also a
+        // single contiguous pass over the bytes (good for the cache).
+        std::str::from_utf8(&data)
+            .map(str::to_owned)
+            .map_err(|_| H2Error::compression("invalid UTF-8 in header"))
+    }
+}
+
+/// Decode an HPACK string literal that holds a field value.
+///
+/// RFC 9110 §5.5 allows obs-text (octets 0x80-0xFF) in field values, so a
+/// value that is not UTF-8 is read one character per octet (Latin-1), as
+/// the HTTP/1 codec reads it, instead of failing the whole connection.
+/// Also returns the value's length in octets before Huffman coding, the
+/// length the dynamic table counts (RFC 7541 §4.1).
+fn decode_field_value_bounded(src: &mut Bytes, max_len: usize) -> Result<(String, usize), H2Error> {
+    let (huffman, data) = split_string_literal(src, max_len)?;
+    let octets = if huffman {
+        decode_huffman_octets(&data)?
+    } else {
+        data.to_vec()
+    };
+    let value_octets = octets.len();
+    let value = String::from_utf8(octets).unwrap_or_else(|not_utf8| {
+        not_utf8
+            .as_bytes()
+            .iter()
+            .map(|&octet| char::from(octet))
+            .collect()
+    });
+    Ok((value, value_octets))
+}
+
+/// Split one HPACK string literal off `src`: its Huffman flag and its
+/// octets as sent.
+///
+/// The length prefix is checked against `max_len` BEFORE any bytes are split
+/// off or copied, so an attacker cannot force a large allocation by claiming
+/// a length that would later be rejected by `max_header_list_size`.
+fn split_string_literal(src: &mut Bytes, max_len: usize) -> Result<(bool, Bytes), H2Error> {
     if src.is_empty() {
         return Err(H2Error::compression("unexpected end of string"));
     }
@@ -1291,21 +1365,7 @@ fn decode_string_bounded(src: &mut Bytes, max_len: usize) -> Result<String, H2Er
         return Err(H2Error::compression("string length exceeds buffer"));
     }
 
-    let data = src.split_to(length);
-
-    if huffman {
-        decode_huffman(&data)
-    } else {
-        // br-asupersync-73dak3 — validate UTF-8 on the borrowed slice and
-        // allocate exactly once. The previous shape was
-        // `String::from_utf8(data.to_vec())`, which copied the bytes into a
-        // fresh Vec *first* and only then validated; on bad UTF-8 we paid
-        // the alloc + copy before failing. Validating first is also a
-        // single contiguous pass over the bytes (good for the cache).
-        std::str::from_utf8(&data)
-            .map(str::to_owned)
-            .map_err(|_| H2Error::compression("invalid UTF-8 in header"))
-    }
+    Ok((huffman, src.split_to(length)))
 }
 
 /// Huffman code table from RFC 7541 Appendix B.
@@ -1598,6 +1658,12 @@ static HUFFMAN_TABLE: [(u32, u8); 257] = [
 /// The table-driven decoder has uniform cost per byte regardless of
 /// code length: 2 array accesses + 2 conditionals.
 pub(crate) fn decode_huffman(src: &Bytes) -> Result<String, H2Error> {
+    String::from_utf8(decode_huffman_octets(src)?)
+        .map_err(|_| H2Error::compression("invalid UTF-8 in huffman"))
+}
+
+/// Decode a Huffman-coded string to its octets, which need not be UTF-8.
+pub(crate) fn decode_huffman_octets(src: &Bytes) -> Result<Vec<u8>, H2Error> {
     // Shortest HPACK code is 5 bits; preallocate to upper bound to avoid
     // growth reallocs on the common case where decoded > encoded length.
     let estimated_symbols = src.len().saturating_mul(8).saturating_add(4) / 5;
@@ -1637,7 +1703,7 @@ pub(crate) fn decode_huffman(src: &Bytes) -> Result<String, H2Error> {
         return Err(H2Error::compression("invalid huffman padding"));
     }
 
-    String::from_utf8(result).map_err(|_| H2Error::compression("invalid UTF-8 in huffman"))
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -1845,12 +1911,17 @@ mod tests {
     fn test_dynamic_table_eviction() {
         let mut table = DynamicTable::with_max_size(100);
 
-        // Insert entries that exceed max size
         table.insert(Header::new("header1", "value1")); // 32 + 7 + 6 = 45
         table.insert(Header::new("header2", "value2")); // 32 + 7 + 6 = 45
+        assert_eq!(table.size(), 90, "both entries fit");
 
-        // First entry should be evicted
-        assert!(table.size() <= 100);
+        // A third entry does not fit beside both: the oldest is evicted.
+        table.insert(Header::new("header3", "value3"));
+        assert_eq!(table.size(), 90);
+        assert_eq!(table.get(1), Some(Header::new("header3", "value3")));
+        assert_eq!(table.get(2), Some(Header::new("header2", "value2")));
+        assert_eq!(table.get(3), None, "header1 was evicted");
+        assert_eq!(table.find("header1", "value1"), None);
     }
 
     /// br-asupersync-4pshog: side-index returns the same HPACK index
@@ -2715,20 +2786,28 @@ mod tests {
 
     #[test]
     fn test_sensitive_header_encoding() {
-        // Test headers that should never be indexed (sensitive data)
+        // encode_sensitive writes every field as a never-indexed literal
+        // (RFC 7541 §6.2.3), even one with an exact static-table match, and
+        // neither side's dynamic table takes it.
         let mut enc = Encoder::new();
+        enc.set_use_huffman(false);
         let mut dec = Decoder::new();
 
-        // Encode with never-index flag for sensitive headers
         let headers = vec![
             Header::new(":method", "GET"),
             Header::new("authorization", "Bearer secret123"),
         ];
 
         let mut buf = BytesMut::new();
-        enc.encode(&headers, &mut buf);
+        enc.encode_sensitive(&headers, &mut buf);
+        // ":method" is one name-index byte, a length byte and "GET", so the
+        // second field starts at byte 5.
+        assert_eq!(buf[0] & 0xF0, 0x10, "first field is never indexed");
+        assert_eq!(buf[5] & 0xF0, 0x10, "second field is never indexed");
+        assert_eq!(enc.dynamic_table_size(), 0);
 
         let headers_out = dec.decode(&mut buf.freeze()).unwrap();
+        assert_eq!(dec.dynamic_table_size(), 0);
         assert_eq!(headers_out.len(), 2);
         assert_eq!(headers_out[1].name, "authorization");
         assert_eq!(headers_out[1].value, "Bearer secret123");
@@ -2892,6 +2971,51 @@ mod tests {
                 let _ = result;
             }
         }
+    }
+
+    #[test]
+    fn obs_text_field_values_decode_as_latin1_and_count_their_octets() {
+        // br-asupersync-h2-client-audit-6hvls9 LOW 4: a field value with an
+        // obs-text octet (RFC 9110 §5.5) was a COMPRESSION_ERROR that closed
+        // the connection. It reads as Latin-1 now, as on HTTP/1, and the
+        // dynamic table counts the octets the peer sent, as the peer does.
+        let mut block = BytesMut::new();
+        // Literal with incremental indexing, new name, plain value "caf\xe9".
+        block.extend_from_slice(&[0x40, 0x07]);
+        block.extend_from_slice(b"x-latin");
+        block.extend_from_slice(&[0x04, b'c', b'a', b'f', 0xe9]);
+        // Literal with incremental indexing, new name, Huffman value "\xff".
+        let huffman = encode_huffman(&[0xff]);
+        block.extend_from_slice(&[0x40, 0x06]);
+        block.extend_from_slice(b"x-huff");
+        block.extend_from_slice(&[0x80 | u8::try_from(huffman.len()).expect("short code")]);
+        block.extend_from_slice(&huffman);
+        // The first entry again: dynamic index 2, HPACK index 63.
+        block.extend_from_slice(&[0x80 | 63]);
+
+        let mut decoder = Decoder::new();
+        let headers = decoder
+            .decode(&mut block.freeze())
+            .expect("obs-text field values decode");
+        assert_eq!(
+            headers,
+            vec![
+                Header::new("x-latin", "caf\u{e9}"),
+                Header::new("x-huff", "\u{ff}"),
+                Header::new("x-latin", "caf\u{e9}"),
+            ]
+        );
+        // (7 + 4 + 32) + (6 + 1 + 32) octets, not the 5- and 2-byte UTF-8
+        // texts, or the next eviction would differ from the peer's table.
+        assert_eq!(decoder.dynamic_table_size(), 43 + 39);
+    }
+
+    #[test]
+    fn pseudo_header_values_stay_utf8_only() {
+        // ":path" (static name index 4), literal without indexing, "/\xff".
+        let mut block = BytesMut::new();
+        block.extend_from_slice(&[0x04, 0x02, b'/', 0xff]);
+        assert_compression_error(Decoder::new().decode(&mut block.freeze()));
     }
 
     #[test]
@@ -3094,9 +3218,13 @@ mod tests {
         data.extend_from_slice(&[0xff, 0xff, 0xff, 0xff]);
         data.push(0x7f); // final byte without continuation
         let mut src = Bytes::from(data);
-        // On 32-bit this MUST error (value would be ~34 GB).
-        // On 64-bit the value fits, so it may succeed, but we verify no panic.
-        let _ = decode_integer(&mut src, 5);
+        // 31 + 127 * (1 + 2^7 + 2^14 + 2^21 + 2^28) = 2^35 + 30: about 34 GB,
+        // which fits a 64-bit usize and must be refused on 32-bit.
+        let decoded = decode_integer(&mut src, 5);
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(decoded.expect("fits in 64 bits"), (1_usize << 35) + 30);
+        #[cfg(target_pointer_width = "32")]
+        assert_compression_error(decoded);
     }
 
     // =========================================================================
@@ -3666,20 +3794,12 @@ mod tests {
         let mut encoded_again = BytesMut::new();
         encoder.encode_sensitive(&sensitive_headers, &mut encoded_again);
 
-        // The encoding should be similar (literal representation, not indexed)
-        // Both encodings should start with 0x10 (never indexed literal) or similar
-        for &byte in &encoded_again[0..3] {
-            // Never indexed literals start with 0001xxxx pattern (0x10-0x1F)
-            let is_never_indexed = (byte & 0xF0) == 0x10;
-            // Or could be literal without indexing 0000xxxx (0x00-0x0F)
-            let is_literal_no_index = (byte & 0xF0) == 0x00;
-
-            assert!(
-                is_never_indexed || is_literal_no_index,
-                "Never-indexed header should not use indexed representation, got 0x{:02x}",
-                byte
-            );
-        }
+        // Never-indexed fields leave the encoder's table alone, so the second
+        // encoding is byte for byte the first, starting with a never-indexed
+        // literal (0001xxxx).
+        assert_eq!(encoded_again, encoded);
+        assert_eq!(encoded_again[0] & 0xF0, 0x10);
+        assert_eq!(encoder.dynamic_table_size(), 0);
 
         // Verify the second encoding decodes to the same values
         let mut src = encoded_again.freeze();

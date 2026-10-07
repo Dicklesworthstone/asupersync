@@ -258,6 +258,13 @@ impl CurrentThreadDriver {
             .spawn_mailbox
             .as_ref()
             .map(|mailbox| ScopedLocalSpawnLaneOwner::new(Arc::clone(mailbox)));
+        // Every return below ends this thread. This runtime's `spawn_local`
+        // requests still on its lane then resolve as cancelled here instead of
+        // being dropped unresolved by thread exit (br-asupersync-01oghn M1).
+        let _cancel_on_exit = worker
+            .spawn_mailbox
+            .as_ref()
+            .map(|mailbox| spawn_mailbox::CancelLocalSpawnsOnExit(Arc::clone(mailbox)));
         on_start();
         let mut worker = Box::new(worker);
         loop {

@@ -577,7 +577,7 @@ impl TransportParameters {
             pos += id_len;
             let (len, len_len) = decode_varint(&input[pos..])?;
             pos += len_len;
-            let len = len as usize;
+            let len = usize::try_from(len).map_err(|_| QuicCoreError::UnexpectedEof)?;
             if input.len().saturating_sub(pos) < len {
                 return Err(QuicCoreError::UnexpectedEof);
             }
@@ -891,7 +891,7 @@ fn decode_long_header_prefix(input: &[u8]) -> Result<ProtectedHeaderPrefix, Quic
     let token = if matches!(packet_type, LongPacketType::Initial) {
         let (token_len, consumed) = decode_varint(&input[pos..])?;
         pos += consumed;
-        let token_len = token_len as usize;
+        let token_len = usize::try_from(token_len).map_err(|_| QuicCoreError::UnexpectedEof)?;
         if input.len().saturating_sub(pos) < token_len {
             return Err(QuicCoreError::UnexpectedEof);
         }
@@ -1614,6 +1614,29 @@ mod tests {
             err,
             QuicCoreError::InvalidTransportParameter(TP_DISABLE_ACTIVE_MIGRATION)
         );
+    }
+
+    /// A transport parameter or Initial token length past the input is
+    /// UnexpectedEof. The length's low 32 bits are 1: on a 32-bit target an
+    /// `as usize` cast truncated it to one byte, which fits.
+    #[test]
+    fn lengths_past_the_input_are_unexpected_eof_not_truncated() {
+        let length = (1u64 << 32) + 1;
+        let mut params = Vec::new();
+        encode_varint(TP_MAX_ACK_DELAY, &mut params).expect("id");
+        encode_varint(length, &mut params).expect("length");
+        params.push(0x19);
+        let err = TransportParameters::decode(&params).expect_err("value past the input");
+        assert_eq!(err, QuicCoreError::UnexpectedEof);
+
+        // Initial, version 1, a 1-byte DCID, no SCID, then the token length.
+        let mut initial = vec![0xc0, 0x00, 0x00, 0x00, 0x01, 0x01, 0xaa, 0x00];
+        encode_varint(length, &mut initial).expect("token length");
+        initial.push(0x00);
+        let err = ProtectedHeaderPrefix::decode(&initial, 0).expect_err("token past the input");
+        assert_eq!(err, QuicCoreError::UnexpectedEof);
+        let err = PacketHeader::decode(&initial, 0).expect_err("token past the input");
+        assert_eq!(err, QuicCoreError::UnexpectedEof);
     }
 
     #[test]

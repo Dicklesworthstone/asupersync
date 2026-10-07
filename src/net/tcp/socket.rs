@@ -126,6 +126,16 @@ impl TcpSocket {
     }
 
     /// Binds this socket to the given local address.
+    ///
+    /// The address is recorded here. The operating-system socket is created
+    /// and bound by [`Self::listen`] or [`Self::connect`], so an OS bind error
+    /// such as an address already in use is returned by that call, not by
+    /// this one.
+    ///
+    /// # Errors
+    ///
+    /// `io::ErrorKind::InvalidInput` when the address family does not match
+    /// the socket's, or when the socket already has an address.
     pub fn bind(&self, addr: SocketAddr) -> io::Result<()> {
         {
             let mut state = self.state.lock();

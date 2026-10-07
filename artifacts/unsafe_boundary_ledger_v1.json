@@ -28,7 +28,8 @@
       "asupersync-1pi7ne M1 (2026-10-05) re-locates the same four src/runtime/builder.rs locators by +12 lines (7236, 10383, 10388, 10413 to 7248, 10395, 10400, 10425): the safe-only shutdown_timeout reaper now waits for the blocking pool's threads after the final drop, and its docs say so. Categories, invariants, evidence, and no-claim boundaries are unchanged.",
       "asupersync-7yq1pv item 2 (2026-10-06) re-locates the same four src/runtime/builder.rs locators by +37 lines (7248, 10395, 10400, 10425 to 7285, 10432, 10437, 10462): the safe-only RuntimeBuilder::scheduler_evidence_sink setting (its field, docs and the hand-off to the workers in RuntimeInner::new) sits above the test module. Categories, invariants, evidence, and no-claim boundaries are unchanged.",
       "SapphireHill d0 (2026-10-07, watchdog heal) re-locates two rows after safe-only line shifts: the fourteen src/channel/mpsc_tests.rs raw_waker_probe locators by +20 lines (1167..1248 to 1187..1268; 8bad2b69d added tests above the probe), and the two src/fs/path_ops.rs uring_submit_one locators by -42 lines (713, 718 to 671, 676; 5c79c0294). Same code, kinds and patterns; categories, invariants, evidence, and no-claim boundaries are unchanged.",
-      "asupersync-issue65-criticisms-kpmoy5.1.15 (2026-10-06) re-locates the same four src/runtime/builder.rs locators (7285, 10432, 10437, 10462 to 7314, 10533, 10538, 10563): the safe-only default blocking pool added a builder field, its default and docs above the test module (+29), and two tests above the env helpers (+72). The new env test reuses the existing with_envs helper and adds no unsafe site. Categories, invariants, evidence, and no-claim boundaries are unchanged."
+      "asupersync-issue65-criticisms-kpmoy5.1.15 (2026-10-06) re-locates the same four src/runtime/builder.rs locators (7285, 10432, 10437, 10462 to 7314, 10533, 10538, 10563): the safe-only default blocking pool added a builder field, its default and docs above the test module (+29), and two tests above the env helpers (+72). The new env test reuses the existing with_envs helper and adds no unsafe site. Categories, invariants, evidence, and no-claim boundaries are unchanged.",
+      "asupersync-r02ssd (2026-10-07) re-locates four src/net/atp/transport_common/metadata.rs locators by +87 lines (2614, 2648, 2897, 2919 to 2701, 2735, 2984, 3006): the safe-only DeferredParentSyncs batch (one parent-directory fsync per committed directory instead of per file) and its plumbing through install_staged_leaf_transactionally sit above them. 232 and 250 are unchanged. No unsafe site is added; categories, invariants, evidence, and no-claim boundaries are unchanged."
     ]
   },
   "required_row_fields": [
@@ -2237,12 +2238,12 @@
         },
         {
           "kind": "allow_unsafe_code",
-          "line": 2614,
+          "line": 2701,
           "pattern": "#[allow(unsafe_code)] // Stable Win32 file identity query over an RAII-owned std::fs::File."
         },
         {
           "kind": "allow_unsafe_code",
-          "line": 2897,
+          "line": 2984,
           "pattern": "#[allow(unsafe_code)] // Win32 metadata update through an RAII-owned file handle."
         },
         {
@@ -2252,12 +2253,12 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 2648,
+          "line": 2735,
           "pattern": "let queried = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2919,
+          "line": 3006,
           "pattern": "if unsafe {"
         }
       ]

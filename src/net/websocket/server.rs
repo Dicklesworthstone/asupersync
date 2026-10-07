@@ -620,6 +620,29 @@ where
     /// Sends a close frame, waits for the peer's response, then shuts down the
     /// transport.
     pub async fn close(&mut self, cx: &crate::cx::Cx, reason: CloseReason) -> Result<(), WsError> {
+        // The close timeout bounds the whole handshake, including writing
+        // our Close and Pong replies to a peer that stopped reading, which
+        // otherwise held close() until cancellation (br-asupersync-fmw87f).
+        // On expiry the connection is closed as when the peer does not
+        // answer.
+        let now = cx
+            .timer_driver()
+            .map_or_else(crate::time::wall_now, |driver| driver.now());
+        let timeout_duration = self.close_handshake.close_timeout();
+        if let Ok(result) =
+            crate::time::timeout(now, timeout_duration, self.close_exchange(cx, reason)).await
+        {
+            return result;
+        }
+        self.close_handshake.force_close(CloseReason::going_away());
+        Ok(())
+    }
+
+    async fn close_exchange(
+        &mut self,
+        cx: &crate::cx::Cx,
+        reason: CloseReason,
+    ) -> Result<(), WsError> {
         self.initiate_close_with_cx(Some(cx), reason).await?;
 
         // Wait for close response (with timeout)
@@ -782,7 +805,12 @@ where
         }
 
         if let Some(frame) = self.close_handshake.initiate(reason) {
-            self.send_frame_with_cx(op_cx, frame).await?;
+            // The Close goes into the retained write buffer before the first
+            // await. The handshake is CloseSent from here on, so a close
+            // dropped before writing would otherwise lose the frame: a retry
+            // only flushes the buffer (br-asupersync-fmw87f M2).
+            self.encode_frame(frame)?;
+            self.flush_write_buf_with_cx(op_cx).await?;
         }
         Ok(())
     }
@@ -2114,6 +2142,113 @@ mod tests {
                 "retrying close must finish the original server close frame without appending another"
             );
         });
+    }
+
+    /// br-asupersync-fmw87f M2: a close() dropped before the first byte of
+    /// its Close frame was written still sends that Close when retried. The
+    /// frame sat in a local buffer, so the retry found the handshake
+    /// CloseSent, flushed an empty buffer and finished without ever sending
+    /// a Close.
+    #[test]
+    fn close_dropped_before_writing_sends_its_close_on_retry() {
+        future::block_on(async {
+            let accept = AcceptResponse {
+                accept_key: String::new(),
+                protocol: None,
+                extensions: Vec::new(),
+            };
+            let peer_close = encode_client_frame(Frame::close(Some(1000), None));
+            let mut ws = ServerWebSocket::from_upgraded(
+                TestIo::with_read_data(peer_close).with_pending_first_write(),
+                WebSocketConfig::default(),
+                accept,
+                &[],
+            );
+            let cx = Cx::for_testing();
+            let expected = encode_server_frame(Frame::close(Some(1001), None));
+            let mut dropped_close = Box::pin(ws.close(&cx, CloseReason::going_away()));
+            let waker = std::task::Waker::noop().clone();
+            let mut poll_cx = std::task::Context::from_waker(&waker);
+            assert!(
+                matches!(dropped_close.as_mut().poll(&mut poll_cx), Poll::Pending),
+                "close parks before its first write"
+            );
+            drop(dropped_close);
+            assert_eq!(ws.close_handshake.state(), CloseState::CloseSent);
+            assert!(ws.io.written.is_empty(), "nothing reached the transport");
+
+            ws.close(&cx, CloseReason::going_away())
+                .await
+                .expect("the retried close finishes");
+            assert!(ws.is_closed());
+            assert_eq!(ws.io.written, expected, "the retry sent the original Close");
+        });
+    }
+
+    /// br-asupersync-fmw87f: close_timeout bounds writing our Close as well
+    /// as waiting for the answer. A peer that stopped reading held close()
+    /// until cancellation, and without cancellation it never returned.
+    #[test]
+    fn close_on_a_stalled_peer_ends_at_the_close_timeout() {
+        struct NeverWritableIo;
+        impl AsyncRead for NeverWritableIo {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                _buf: &mut ReadBuf<'_>,
+            ) -> Poll<io::Result<()>> {
+                Poll::Pending
+            }
+        }
+        impl AsyncWrite for NeverWritableIo {
+            fn poll_write(
+                self: Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                _buf: &[u8],
+            ) -> Poll<io::Result<usize>> {
+                Poll::Pending
+            }
+            fn poll_flush(
+                self: Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+            ) -> Poll<io::Result<()>> {
+                Poll::Pending
+            }
+            fn poll_shutdown(
+                self: Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+            ) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let closer = std::thread::Builder::new()
+            .name("ws-stalled-close-timeout".into())
+            .spawn(move || {
+                let accept = AcceptResponse {
+                    accept_key: String::new(),
+                    protocol: None,
+                    extensions: Vec::new(),
+                };
+                let mut config = WebSocketConfig::default();
+                config.close_config.close_timeout = std::time::Duration::from_millis(100);
+                let outcome = future::block_on(async {
+                    let mut ws =
+                        ServerWebSocket::from_upgraded(NeverWritableIo, config, accept, &[]);
+                    let result = ws.close(&Cx::for_testing(), CloseReason::normal()).await;
+                    (result, ws.is_closed())
+                });
+                let _ = done_tx.send(outcome);
+            })
+            .expect("spawn closer thread");
+
+        let (result, closed) = done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("close() must end at its close timeout; it never returned");
+        closer.join().expect("closer thread");
+        assert!(result.is_ok(), "{result:?}");
+        assert!(closed, "the connection is closed after the timeout");
     }
 
     #[test]

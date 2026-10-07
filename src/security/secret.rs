@@ -6,16 +6,16 @@
 //! scope, the plaintext bytes are wiped from memory rather than left
 //! recoverable from a process snapshot, core dump, or attached debugger.
 //!
-//! # Why a custom type rather than the `zeroize` crate
+//! # How the bytes are wiped
 //!
-//! The asupersync project deliberately does not depend on the `zeroize`
-//! crate (see `security/key.rs`'s `AuthKey` for the project-wide
-//! precedent). Instead it uses a manual zeroize pattern:
-//! `ptr::write_volatile` per byte (which the optimiser cannot prove
-//! observable, so it must emit the writes) followed by a `SeqCst`
-//! `compiler_fence` to bar reordering across the destructor boundary.
-//! `SecretString` is the natural extension of that pattern from
-//! fixed-size key arrays to variable-length credential strings.
+//! `security/key.rs`'s `AuthKey` uses the `zeroize` crate
+//! (`ZeroizeOnDrop`). `SecretString` wipes by hand instead:
+//! `ptr::write_volatile` per byte over the whole allocation, spare
+//! capacity included (the optimiser cannot prove the writes observable,
+//! so it must emit them), then a `SeqCst` `compiler_fence` to bar
+//! reordering across the destructor boundary. The spare capacity counts
+//! because a `String` handed to `from_string` can still hold an earlier,
+//! longer value there.
 //!
 //! # Why bytes-backed instead of `String`-backed
 //!
@@ -30,7 +30,7 @@
 //! `core::ptr::write_volatile` is the entire reason this module needs
 //! `#![allow(unsafe_code)]`: we must defeat dead-store elimination on
 //! the zeroizing writes, and `write_volatile` is the only stable
-//! mechanism for that. The pattern mirrors `security/key.rs` exactly.
+//! mechanism for that without the `zeroize` crate.
 
 #![allow(unsafe_code)]
 
@@ -39,9 +39,9 @@ use core::fmt;
 /// A heap-allocated UTF-8 string whose backing bytes are zeroed on drop.
 ///
 /// **Sensitive material.** The `Drop` impl performs a per-byte
-/// `ptr::write_volatile(0)` followed by a `SeqCst` `compiler_fence`,
-/// which is the project's standard manual-zeroize pattern (see
-/// [`crate::security::AuthKey`] for the precedent).
+/// `ptr::write_volatile(0)` over the whole allocation, spare capacity
+/// included, followed by a `SeqCst` `compiler_fence`
+/// ([`crate::security::AuthKey`] gets the same from `zeroize`).
 ///
 /// # Invariants
 ///
@@ -141,14 +141,14 @@ impl SecretString {
     /// compiler_fence. Shared between [`Self::explicit_zeroize`] and
     /// the `Drop` impl.
     fn zeroize_bytes(&mut self) {
+        // Span the spare capacity too; callers then clear or drop the bytes.
+        self.bytes.resize(self.bytes.capacity(), 0);
         for byte in &mut self.bytes {
-            // SAFETY: `byte` is a valid `&mut u8` to fully-initialised
-            // owned storage; volatile byte writes through it are
-            // well-defined. The compiler cannot prove the writes are
-            // observable, so it must emit them — defeating dead-store
-            // elimination. The `compiler_fence` after the loop bars
-            // reordering of any later operations above the zeroizing
-            // writes.
+            // SAFETY: `byte` is a valid `&mut u8` to fully-initialised owned
+            // storage; volatile byte writes through it are well-defined. The
+            // compiler cannot prove the writes are observable, so it must emit
+            // them, which defeats dead-store elimination. The `compiler_fence`
+            // after the loop bars reordering of later operations above them.
             unsafe {
                 core::ptr::write_volatile(byte, 0);
             }
@@ -346,6 +346,28 @@ mod tests {
             s.bytes
         );
         assert_eq!(s.bytes.len(), b"from_string".len());
+    }
+
+    /// br-asupersync-s45073 L7: the wipe spans the spare capacity, where a
+    /// truncated `String` handed to `from_string` still holds the tail of its
+    /// earlier value. Before, only the first `len` bytes were wiped.
+    #[test]
+    fn zeroize_spans_the_spare_capacity() {
+        let mut source = String::from("short, then a longer secret tail");
+        source.truncate(5);
+        let mut s = SecretString::from_string(source);
+        assert_eq!(s.as_bytes(), b"short");
+        let capacity = s.bytes.capacity();
+        assert!(capacity > 5, "from_string keeps the source allocation");
+
+        s.zeroize_bytes();
+
+        assert_eq!(
+            s.bytes.len(),
+            capacity,
+            "the wipe must cover the whole allocation"
+        );
+        assert!(s.bytes.iter().all(|&b| b == 0));
     }
 
     /// `explicit_zeroize` must wipe the bytes IMMEDIATELY (before drop)

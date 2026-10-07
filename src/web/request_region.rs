@@ -2597,9 +2597,13 @@ mod tests {
         #[test]
         fn hop_handler_sees_request_budget_via_ambient_cx() {
             block_on(async {
-                let budget = Budget::INFINITE.tightened_by_timeout(NOW, Duration::from_secs(30));
+                // The deadline is an instant on the runtime clock, so it is set
+                // from the current time: a fixed NOW (1000 s) put it at 1030 s,
+                // already past when a long test run reached this test.
+                let now = crate::time::wall_now();
+                let budget = Budget::INFINITE.tightened_by_timeout(now, Duration::from_secs(30));
                 let region =
-                    ServerRequestRegion::mint("test", budget, NOW).expect("runtime installed");
+                    ServerRequestRegion::mint("test", budget, now).expect("runtime installed");
                 let outcome = region
                     .run_with_protocol_drain(
                         RequestBudgetSource::ServerConfig,

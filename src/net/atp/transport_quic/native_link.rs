@@ -6822,7 +6822,21 @@ async fn accept(
                     // here) is discarded, RFC 9000 section 12.2. It used to end
                     // the accept of the client still driving it.
                     Err(err) if is_unauthenticated_handshake_packet_error(&err) => continue,
-                    Err(err) => return Err(map_tls_error(err)),
+                    Err(err) => {
+                        // A TLS refusal tells the client (CRYPTO_ERROR), which
+                        // would otherwise retransmit until its flight budget
+                        // runs out.
+                        driver
+                            .send_crypto_error_close(
+                                cx,
+                                &mut endpoint,
+                                packet.src_addr,
+                                server_scid,
+                                &mut server_pn,
+                            )
+                            .await;
+                        return Err(map_tls_error(err));
+                    }
                 };
                 if peer.is_none() {
                     peer = Some((packet.src_addr, client_cid));
@@ -9982,6 +9996,10 @@ async fn commit_staged_entries(
             send_and_flush_native_keep_alive(cx, link, control).await?;
         }
         let mut commit_clock = Instant::now();
+        // Each committed file's directory is fsynced once, after the loop and
+        // before the receipt, instead of after every rename (r02ssd).
+        let mut parent_syncs =
+            crate::net::atp::transport_common::metadata::DeferredParentSyncs::default();
         for (entry, staged_entry) in manifest.entries.iter().zip(staged.iter_mut()) {
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
             quic_rqtrace!(
@@ -10057,11 +10075,9 @@ async fn commit_staged_entries(
                         crate::fs::create_dir_all(parent).await?;
                     }
                     super::reject_quic_destination_symlink_prefix(&base, &write.out_path).await?;
-                    crate::net::atp::transport_common::metadata::commit_staged_regular_file_transactionally(
-                        &write.staging_path,
-                        &write.out_path,
-                    )
-                    .await?;
+                    parent_syncs
+                        .commit_staged_regular_file(&write.staging_path, &write.out_path)
+                        .await?;
                     batch.guards[member_index].disarm();
                     if batch.metadata_deferred[member_index] {
                         super::apply_quic_member_metadata(cx, &write.out_path, member).await?;
@@ -10097,17 +10113,19 @@ async fn commit_staged_entries(
                 super::apply_quic_entry_metadata(cx, &staged_entry.staging_path, entry).await?;
             }
             super::reject_quic_destination_symlink_prefix(&base, &out_path).await?;
-            crate::net::atp::transport_common::metadata::commit_staged_regular_file_transactionally(
-                &staged_entry.staging_path,
-                &out_path,
-            )
-            .await?;
+            parent_syncs
+                .commit_staged_regular_file(&staged_entry.staging_path, &out_path)
+                .await?;
             if metadata_deferred {
                 super::apply_quic_entry_metadata(cx, &out_path, entry).await?;
             }
             committed_paths.push(out_path);
             send_and_flush_native_keep_alive(cx, link, control).await?;
         }
+        keep_peer_alive_while(cx, link, control, async move {
+            parent_syncs.sync().await.map_err(QuicTransportError::from)
+        })
+        .await?;
         super::apply_quic_directory_metadata(cx, &base, manifest).await?;
         send_and_flush_native_keep_alive(cx, link, control).await?;
     }

@@ -502,6 +502,9 @@ struct RegionInner {
     /// Finalizer terminals only; ordinary cancelled children must not masquerade
     /// as failed cleanup when a supervisor decides whether it may restart.
     cleanup_outcome: Option<TaskOutcome>,
+    /// The first panic of a region that closed beneath this one, carried up so
+    /// this region's owner sees a descendant's panic (br-asupersync-b834ta).
+    descendant_panic: Option<crate::types::PanicPayload>,
     limits: RegionLimits,
     pending_obligations: usize,
     /// Accepted checked obligations whose terminal lifecycle has not yet been
@@ -830,6 +833,9 @@ impl Drop for PendingSpawnReservation {
 pub(crate) struct RegionCloseOutcome {
     pub(crate) outcome: TaskOutcome,
     pub(crate) cleanup_outcome: Option<TaskOutcome>,
+    /// This region's own panic, otherwise the first one a descendant region
+    /// passed up.
+    pub(crate) descendant_panic: Option<crate::types::PanicPayload>,
 }
 
 /// Internal record for a region in the runtime.
@@ -881,6 +887,11 @@ pub struct RegionRecord {
     /// race returns, and the region still never outlives its work
     /// (br-asupersync-issue65-criticisms-kpmoy5.2.2).
     sealed: AtomicBool,
+    /// When this region's first cancellation report was dispatched, in
+    /// nanoseconds (`u64::MAX` until then). Region close reports the drain
+    /// time from it. The first cancel creates it, so a region that is never
+    /// cancelled allocates nothing (br-asupersync-x9mmxl).
+    cancel_reported_at: Option<Arc<AtomicU64>>,
     /// Tracing span for region lifecycle (only active with tracing-integration feature).
     #[cfg(feature = "tracing-integration")]
     span: Span,
@@ -979,6 +990,7 @@ impl RegionRecord {
                 cancel_reason: None,
                 close_outcome: None,
                 cleanup_outcome: None,
+                descendant_panic: None,
                 limits: RegionLimits::UNLIMITED,
                 pending_obligations: 0,
                 unapplied_obligations: 0,
@@ -989,6 +1001,7 @@ impl RegionRecord {
             pending_spawns: Arc::new(PendingSpawnCounter::new()),
             pending_obligation_posts: Arc::new(PendingSpawnCounter::new()),
             sealed: AtomicBool::new(false),
+            cancel_reported_at: None,
             span,
         }
     }
@@ -997,6 +1010,20 @@ impl RegionRecord {
     /// non-cancelling close by itself (see [`Self::is_sealed`]).
     pub(crate) fn seal(&self) {
         self.sealed.store(true, Ordering::Release);
+    }
+
+    /// The stamp this region's cancellation report writes when it is
+    /// dispatched, created by the first cancel.
+    pub(crate) fn cancel_report_stamp(&mut self) -> Arc<AtomicU64> {
+        Arc::clone(
+            self.cancel_reported_at
+                .get_or_insert_with(|| Arc::new(AtomicU64::new(u64::MAX))),
+        )
+    }
+
+    /// The cancellation-report stamp, if this region was ever cancelled.
+    pub(crate) fn cancel_reported_at(&self) -> Option<Arc<AtomicU64>> {
+        self.cancel_reported_at.clone()
     }
 
     /// Returns true when the region closes itself once its work is done,
@@ -1142,6 +1169,21 @@ impl RegionRecord {
             .lock()
             .as_ref()
             .and_then(|receipt| receipt.cleanup_outcome.clone())
+    }
+
+    /// Records a panic passed up by a child region as it closed. The first one
+    /// wins, so the result does not depend on which child closed last.
+    pub(crate) fn record_descendant_panic(&self, payload: crate::types::PanicPayload) {
+        self.inner.write().descendant_panic.get_or_insert(payload);
+    }
+
+    /// The panic this closed region passes up: its own, otherwise the first
+    /// one a descendant passed to it.
+    pub(crate) fn closed_descendant_panic(&self) -> Option<crate::types::PanicPayload> {
+        self.close_receipt
+            .lock()
+            .as_ref()
+            .and_then(|receipt| receipt.descendant_panic.clone())
     }
 
     pub(crate) fn shutdown_budget_handle(&self) -> crate::record::finalizer::ShutdownBudget {
@@ -1779,6 +1821,10 @@ impl RegionRecord {
                     .clone()
                     .expect("close outcome set above"),
                 cleanup_outcome: inner.cleanup_outcome.clone(),
+                descendant_panic: match inner.close_outcome.as_ref() {
+                    Some(crate::types::Outcome::Panicked(payload)) => Some(payload.clone()),
+                    _ => inner.descendant_panic.clone(),
+                },
             });
             let waiters = {
                 let mut notify = self.close_notify.lock();

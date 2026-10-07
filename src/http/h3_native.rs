@@ -13,7 +13,8 @@ use std::fmt;
 use std::net::Ipv6Addr;
 
 use super::h2::hpack::{
-    decode_huffman as hpack_decode_huffman, encode_huffman_to_buffer as hpack_encode_huffman,
+    decode_huffman as hpack_decode_huffman, decode_huffman_octets as hpack_decode_huffman_octets,
+    encode_huffman_to_buffer as hpack_encode_huffman,
     huffman_encoded_size as hpack_huffman_encoded_size,
 };
 
@@ -2909,8 +2910,17 @@ pub(crate) fn qpack_decode_field_section_with_context(
                 ));
             }
 
+            let value_name = if is_static {
+                qpack_static_name(name_index)
+            } else {
+                qpack_context.zip(dynamic_base).and_then(|(context, base)| {
+                    let absolute = qpack_relative_to_absolute(base, name_index, false).ok()?;
+                    qpack_dynamic_name(context.dynamic_table(), absolute)
+                })
+            };
             let value_first = *input.get(pos).ok_or(H3NativeError::UnexpectedEof)?;
-            let (value, value_extra) = qpack_decode_string(value_first, 7, &input[pos + 1..])?;
+            let (value, value_extra) =
+                qpack_decode_field_value(value_name, value_first, 7, &input[pos + 1..])?;
             pos += 1 + value_extra;
 
             if is_static {
@@ -2950,7 +2960,8 @@ pub(crate) fn qpack_decode_field_section_with_context(
             pos += 1 + name_extra;
 
             let value_first = *input.get(pos).ok_or(H3NativeError::UnexpectedEof)?;
-            let (value, value_extra) = qpack_decode_string(value_first, 7, &input[pos + 1..])?;
+            let (value, value_extra) =
+                qpack_decode_field_value(Some(name.as_str()), value_first, 7, &input[pos + 1..])?;
             pos += 1 + value_extra;
 
             out.push(QpackFieldPlan::Literal { name, value });
@@ -2990,8 +3001,13 @@ pub(crate) fn qpack_decode_field_section_with_context(
         // Literal field line with post-base name reference: 0000 N NameIndex(3+)
         let (name_index, extra) = qpack_decode_prefixed_int(b, 3, &input[pos + 1..])?;
         pos += 1 + extra;
+        let value_name = qpack_context.and_then(|context| {
+            let absolute = qpack_relative_to_absolute(base, name_index, true).ok()?;
+            qpack_dynamic_name(context.dynamic_table(), absolute)
+        });
         let value_first = *input.get(pos).ok_or(H3NativeError::UnexpectedEof)?;
-        let (value, value_extra) = qpack_decode_string(value_first, 7, &input[pos + 1..])?;
+        let (value, value_extra) =
+            qpack_decode_field_value(value_name, value_first, 7, &input[pos + 1..])?;
         pos += 1 + value_extra;
         let absolute_name_index = qpack_relative_to_absolute(base, name_index, true)?;
         out.push(QpackFieldPlan::DynamicNameLiteral {
@@ -3680,11 +3696,13 @@ fn qpack_encode_string(
     Ok(())
 }
 
-fn qpack_decode_string(
+/// Split one QPACK string literal off `input`: whether it is Huffman-coded,
+/// its octets as sent, and how many bytes of `input` it used.
+fn qpack_split_string(
     first: u8,
     prefix_len: u8,
     input: &[u8],
-) -> Result<(String, usize), H3NativeError> {
+) -> Result<(bool, &[u8], usize), H3NativeError> {
     if prefix_len >= 8 {
         return Err(H3NativeError::InvalidFrame(
             "qpack string prefix length must be less than 8",
@@ -3698,8 +3716,20 @@ fn qpack_decode_string(
     if input.len().saturating_sub(extra) < len {
         return Err(H3NativeError::UnexpectedEof);
     }
-    let bytes = &input[extra..extra + len];
-    let value = if (first & huffman_bit) != 0 {
+    Ok((
+        (first & huffman_bit) != 0,
+        &input[extra..extra + len],
+        extra + len,
+    ))
+}
+
+fn qpack_decode_string(
+    first: u8,
+    prefix_len: u8,
+    input: &[u8],
+) -> Result<(String, usize), H3NativeError> {
+    let (huffman, bytes, consumed) = qpack_split_string(first, prefix_len, input)?;
+    let value = if huffman {
         let encoded = Bytes::copy_from_slice(bytes);
         hpack_decode_huffman(&encoded)
             .map_err(|_| H3NativeError::InvalidFrame("invalid qpack huffman string"))?
@@ -3708,7 +3738,43 @@ fn qpack_decode_string(
             .map_err(|_| H3NativeError::InvalidFrame("qpack string is not valid utf-8"))?
             .to_string()
     };
-    Ok((value, extra + len))
+    Ok((value, consumed))
+}
+
+/// Decode a QPACK string literal that holds the value of the field `name`
+/// in a field section.
+///
+/// RFC 9110 §5.5 allows obs-text (octets 0x80-0xFF) in field values, so a
+/// value that is not UTF-8 is read one character per octet (Latin-1), as the
+/// HTTP/1 codec and the HPACK decoder read it, instead of failing the field
+/// section and, with it, the connection. Pseudo-header values, and values
+/// whose name is not known (`None`), stay UTF-8 only. So do values inserted
+/// through the encoder stream: the dynamic table counts a value's octets
+/// (RFC 9204 §3.2.1), which a Latin-1 `String` no longer gives.
+fn qpack_decode_field_value(
+    name: Option<&str>,
+    first: u8,
+    prefix_len: u8,
+    input: &[u8],
+) -> Result<(String, usize), H3NativeError> {
+    if name.is_none_or(|name| name.starts_with(':')) {
+        return qpack_decode_string(first, prefix_len, input);
+    }
+    let (huffman, bytes, consumed) = qpack_split_string(first, prefix_len, input)?;
+    let octets = if huffman {
+        hpack_decode_huffman_octets(&Bytes::copy_from_slice(bytes))
+            .map_err(|_| H3NativeError::InvalidFrame("invalid qpack huffman string"))?
+    } else {
+        bytes.to_vec()
+    };
+    let value = String::from_utf8(octets).unwrap_or_else(|not_utf8| {
+        not_utf8
+            .as_bytes()
+            .iter()
+            .map(|&octet| char::from(octet))
+            .collect()
+    });
+    Ok((value, consumed))
 }
 
 fn qpack_static_name(index: u64) -> Option<&'static str> {

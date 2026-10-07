@@ -137,6 +137,29 @@ impl PendingTaskCancelTrace {
     }
 }
 
+/// Stamps a cancelled region with the runtime clock when its cancellation
+/// report is dispatched, after the canceller released its locks. The region's
+/// close reports its drain time from that stamp (br-asupersync-x9mmxl).
+pub(crate) struct CancelReportStamp {
+    pub(crate) stamp: Arc<std::sync::atomic::AtomicU64>,
+    /// The runtime's timer driver; without one the runtime's time when the
+    /// cancel was requested.
+    pub(crate) timer: Option<crate::time::TimerDriverHandle>,
+    pub(crate) fallback_now: Time,
+}
+
+impl CancelReportStamp {
+    /// The earliest report wins; a later cancel of the same region keeps it.
+    fn record(&self) {
+        let now = self
+            .timer
+            .as_ref()
+            .map_or(self.fallback_now, crate::time::TimerDriverHandle::now);
+        self.stamp
+            .fetch_min(now.as_nanos(), std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
 enum CancelObserver {
     #[cfg(feature = "tracing-integration")]
     TaskCancelTrace {
@@ -151,6 +174,7 @@ enum CancelObserver {
         metrics: Option<Arc<dyn MetricsProvider>>,
         region_id: RegionId,
         cancel_kind: CancelKind,
+        drain_stamp: Option<CancelReportStamp>,
     },
     CancelProtocolViolation {
         operation: &'static str,
@@ -214,6 +238,7 @@ impl CancelObserver {
                 metrics,
                 region_id,
                 cancel_kind,
+                drain_stamp,
             } => {
                 let metrics = metrics
                     .take()
@@ -221,6 +246,9 @@ impl CancelObserver {
                 let region_id = *region_id;
                 let cancel_kind = *cancel_kind;
                 if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if let Some(drain_stamp) = drain_stamp.as_ref() {
+                        drain_stamp.record();
+                    }
                     metrics.cancellation_requested(region_id, cancel_kind);
                 })) {
                     std::mem::forget(payload);
@@ -373,6 +401,7 @@ impl CancelWakeEffects {
         metrics: Arc<dyn MetricsProvider>,
         region_id: RegionId,
         cancel_kind: CancelKind,
+        drain_stamp: Option<CancelReportStamp>,
     ) {
         self.observers
             .as_mut()
@@ -381,6 +410,7 @@ impl CancelWakeEffects {
                 metrics: Some(metrics),
                 region_id,
                 cancel_kind,
+                drain_stamp,
             });
     }
 
@@ -1435,6 +1465,7 @@ mod tests {
             }),
             RegionId::testing_default(),
             CancelKind::Shutdown,
+            None,
         );
 
         let mut observer_only = CancelWakeEffects::empty();
@@ -1451,6 +1482,7 @@ mod tests {
             }),
             RegionId::testing_default(),
             CancelKind::Shutdown,
+            None,
         );
         assert!(observer_only.is_empty(), "is_empty remains Waker-only");
         effects.merge(observer_only);
@@ -1558,6 +1590,7 @@ mod tests {
             }),
             RegionId::testing_default(),
             CancelKind::Shutdown,
+            None,
         );
         let effects = CancellationEffects::new(value, wakes);
 

@@ -48,7 +48,7 @@ use crate::trace::{TraceBufferHandle, TraceEvent};
 use crate::tracing_compat::{debug, debug_span, trace};
 use crate::types::policy::PolicyAction;
 use crate::types::task_context::{
-    CancelWakeEffects, CancelWaker, CancellationEffects, CxInner, MAX_MASK_DEPTH,
+    CancelReportStamp, CancelWakeEffects, CancelWaker, CancellationEffects, CxInner, MAX_MASK_DEPTH,
 };
 use crate::types::{
     Budget, CancelAttributionConfig, CancelKind, CancelReason, CapabilityBudget,
@@ -632,6 +632,55 @@ impl SupervisionHistoryRecorder {
     }
 }
 
+/// One GenServer reply event for the lab's reply-linearity oracle
+/// (br-asupersync-52hxjz).
+///
+/// Only a runtime whose spawn gateway carries a [`ReplyHistoryRecorder`]
+/// records them (the lab). `call` identifies one `Reply`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReplyHistoryEvent {
+    /// A call reached `handle_call` with its `Reply` on `server`.
+    Created {
+        call: u64,
+        server: TaskId,
+        time: Time,
+    },
+    /// The reply was sent (or its caller had already gone).
+    Sent { call: u64 },
+    /// The reply was aborted: explicitly, or by the server's cancellation or
+    /// panic unwind.
+    Aborted { call: u64 },
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ReplyHistoryRecorder {
+    next_call: AtomicU64,
+    events: parking_lot::Mutex<Vec<ReplyHistoryEvent>>,
+}
+
+pub(crate) type ReplyHistoryHandle = Arc<ReplyHistoryRecorder>;
+
+impl ReplyHistoryRecorder {
+    #[must_use]
+    pub(crate) fn new_handle() -> ReplyHistoryHandle {
+        Arc::new(Self::default())
+    }
+
+    /// A fresh key for one `Reply`.
+    pub(crate) fn next_call(&self) -> u64 {
+        self.next_call.fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub(crate) fn record(&self, event: ReplyHistoryEvent) {
+        self.events.lock().push(event);
+    }
+
+    #[must_use]
+    pub(crate) fn snapshot(&self) -> Vec<ReplyHistoryEvent> {
+        self.events.lock().clone()
+    }
+}
+
 /// Owned direct-observer effects produced by task completion.
 ///
 /// The task cleanup and waiter extraction are complete before this value is
@@ -798,6 +847,8 @@ enum TaskCompletionObserverPayload {
         outcome_label: &'static str,
         duration: Duration,
         waiter_count: usize,
+        /// The task ended cancelled by its deadline.
+        deadline_exceeded: bool,
     },
     UnknownTask {
         task_id: TaskId,
@@ -813,6 +864,7 @@ impl TaskCompletionObserver {
         outcome_label: &'static str,
         duration: Duration,
         waiter_count: usize,
+        deadline_exceeded: bool,
         panic_count: &Arc<AtomicU64>,
     ) -> Self {
         Self {
@@ -824,6 +876,7 @@ impl TaskCompletionObserver {
                 outcome_label,
                 duration,
                 waiter_count,
+                deadline_exceeded,
             }),
             panic_count: Some(Arc::clone(panic_count)),
             retired_cancel_wakers: TaskCompletionRetirements::empty(),
@@ -895,10 +948,14 @@ impl TaskCompletionObserver {
                 outcome_label,
                 duration,
                 waiter_count,
+                deadline_exceeded,
             } => {
                 let callback_result =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         metrics.task_completed(task_id, outcome_kind, duration);
+                        if deadline_exceeded {
+                            metrics.deadline_exceeded(region_id);
+                        }
                         #[cfg(not(feature = "tracing-integration"))]
                         let _ = (region_id, outcome_label, waiter_count);
                         debug!(
@@ -1116,6 +1173,12 @@ impl TaskSpawnEffects {
 
         let callback_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             metrics.task_spawned(region_id, task_id);
+            // The admitted budget's deadline is the one the task's deadline
+            // timer arms; report the time it has left (br-asupersync-x9mmxl).
+            if let Some(deadline) = budget.deadline {
+                let remaining = Duration::from_nanos(deadline.duration_since(spawned_at));
+                metrics.deadline_set(region_id, remaining);
+            }
             if let Some(admitted_seq) = admitted_seq {
                 // This observer event retains its admission-allocated seq;
                 // snapshot() sorts it with any later execution events.
@@ -1500,12 +1563,14 @@ pub(crate) enum RegionLifecycleEffect {
         now: Time,
     },
     /// `RegionCloseComplete` trace event + `region_closed` lifetime metric
-    /// for a completed close; `created_at` was captured before the arena
+    /// (+ `drain_completed` for a cancelled region) for a completed close;
+    /// `created_at` and the cancel stamp were captured before the arena
     /// removal.
     RegionClosed {
         region_id: RegionId,
         parent: Option<RegionId>,
         created_at: Time,
+        cancel_reported_at: Option<Arc<AtomicU64>>,
     },
     /// Retire validator state after the queued close checks and instrumentation.
     RemoveValidator { region_id: RegionId },
@@ -2075,6 +2140,10 @@ pub struct RuntimeState {
     /// (br-asupersync-52hxjz). Only the lab's spawn gateway hands it to
     /// supervisors, so it stays empty on native runtimes.
     supervision_history: SupervisionHistoryHandle,
+    /// GenServer reply evidence for post-run oracle hydration
+    /// (br-asupersync-52hxjz). Only the lab's spawn gateway hands it to
+    /// replies, so it stays empty on native runtimes.
+    reply_history: ReplyHistoryHandle,
     /// Monotonic id source for finalizer registrations.
     next_finalizer_id: u64,
     /// Per-module epoch cursors feeding the runtime epoch tracker.
@@ -2280,6 +2349,7 @@ impl RuntimeState {
             closed_region_history_limit: None,
             loser_drain_history: LoserDrainHistoryRecorder::new_handle(),
             supervision_history: SupervisionHistoryRecorder::new_handle(),
+            reply_history: ReplyHistoryRecorder::new_handle(),
             next_finalizer_id: 0,
             region_table_epoch: EpochId::GENESIS,
             task_table_epoch: EpochId::GENESIS,
@@ -5389,6 +5459,10 @@ impl RuntimeState {
             TaskState::Completed(Outcome::Panicked(_)) => "Panicked",
             _ => "Unknown",
         };
+        let deadline_exceeded = matches!(
+            &task.state,
+            TaskState::Completed(Outcome::Cancelled(reason)) if reason.kind == CancelKind::Deadline
+        );
 
         TaskCompletionObserver::completed(
             Arc::clone(&self.metrics),
@@ -5398,6 +5472,7 @@ impl RuntimeState {
             outcome_label,
             duration,
             waiter_count,
+            deadline_exceeded,
             &self.task_completion_observer_panics,
         )
     }
@@ -7607,10 +7682,14 @@ impl RuntimeState {
                 TraceEvent::region_cancelled(seq, now, rid, region_reason.clone())
             });
 
+            let mut drain_stamp = None;
             if let Some(region) = regions
                 .resolve_mut(&mut self.regions)
                 .get_mut(rid.arena_index())
             {
+                if region.state() != crate::record::region::RegionState::Closed {
+                    drain_stamp = Some(region.cancel_report_stamp());
+                }
                 // Use the properly chained reason.
                 // Try to transition to Closing with the reason.
                 // If already Closing/Draining/etc., strengthen the reason instead.
@@ -7640,10 +7719,17 @@ impl RuntimeState {
                     region.strengthen_cancel_reason(region_reason);
                 }
             }
+            // The drain stamp reads the clock when the report is dispatched,
+            // not here under the state lock (br-asupersync-x9mmxl).
             wakes.push_region_cancellation_metric(
                 Arc::clone(&self.metrics),
                 rid,
                 region_cancel_kind,
+                drain_stamp.map(|stamp| CancelReportStamp {
+                    stamp,
+                    timer: self.timer_driver.clone(),
+                    fallback_now: self.now,
+                }),
             );
         }
 
@@ -9713,6 +9799,7 @@ impl RuntimeState {
         region_id: RegionId,
         parent: Option<RegionId>,
         created_at: Time,
+        cancel_reported_at: Option<Arc<AtomicU64>>,
     ) {
         let now = self.current_runtime_time();
         self.record_trace_event(|seq| {
@@ -9727,7 +9814,23 @@ impl RuntimeState {
             )
         });
         let lifetime = Duration::from_nanos(now.duration_since(created_at));
-        self.metrics.region_closed(region_id, lifetime);
+        // Both hooks run inside the close walk under the runtime lock. A
+        // panicking provider must not unwind through the walk: the region
+        // would stay in the arena, listed under its parent, and the parent
+        // could never close.
+        contain_metrics_hook(|| self.metrics.region_closed(region_id, lifetime));
+        // A cancelled region's drain runs from its first cancellation report
+        // to this close (br-asupersync-x9mmxl). An unset stamp means the
+        // region closed before that report was dispatched: an empty region
+        // closes inside the cancel itself (ChildRegion::close is a cancel
+        // request too), so there was nothing to drain and nothing is reported.
+        if let Some(stamp) = cancel_reported_at
+            .map(|reported_at| reported_at.load(Ordering::Acquire))
+            .filter(|&stamp| stamp != u64::MAX)
+        {
+            let drain = Duration::from_nanos(now.as_nanos().saturating_sub(stamp));
+            contain_metrics_hook(|| self.metrics.drain_completed(region_id, drain));
+        }
     }
 
     /// Deferred validator + instrumentation effects for a freshly minted
@@ -9838,8 +9941,14 @@ impl RuntimeState {
                 region_id,
                 parent,
                 created_at,
+                cancel_reported_at,
             } => {
-                self.dispatch_region_closed_effects(region_id, parent, created_at);
+                self.dispatch_region_closed_effects(
+                    region_id,
+                    parent,
+                    created_at,
+                    cancel_reported_at,
+                );
             }
             RegionLifecycleEffect::RemoveValidator { region_id } => {
                 if self.cancel_protocol_tracking {
@@ -10129,7 +10238,13 @@ impl RuntimeState {
                             let old_state = region.state();
                             let closed = region.complete_close();
                             let new_state = region.state();
-                            (closed, old_state, new_state, region.created_at())
+                            (
+                                closed,
+                                old_state,
+                                new_state,
+                                region.created_at(),
+                                region.cancel_reported_at(),
+                            )
                         };
 
                         // Deferred validator accounting check: fires for any
@@ -10164,6 +10279,7 @@ impl RuntimeState {
                                     region_id,
                                     parent,
                                     created_at: closed.3,
+                                    cancel_reported_at: closed.4,
                                 },
                             );
                             self.resource_monitor.clear_region_priority(region_id);
@@ -10175,10 +10291,18 @@ impl RuntimeState {
                                 .unregister_region_envelope(region_id);
 
                             if let Some(parent_id) = parent {
-                                let cleanup_outcome = regions
+                                // A child's panic reaches its parent apart
+                                // from cleanup outcomes, so the subtree's
+                                // owner sees it (br-asupersync-b834ta).
+                                let (cleanup_outcome, descendant_panic) = regions
                                     .resolve_ref(&self.regions)
                                     .get(region_id.arena_index())
-                                    .and_then(|region| region.closed_cleanup_outcome());
+                                    .map_or((None, None), |region| {
+                                        (
+                                            region.closed_cleanup_outcome(),
+                                            region.closed_descendant_panic(),
+                                        )
+                                    });
                                 // Remove from parent
                                 if let Some(parent_record) = regions
                                     .resolve_ref(&self.regions)
@@ -10186,6 +10310,9 @@ impl RuntimeState {
                                 {
                                     if let Some(outcome) = cleanup_outcome {
                                         parent_record.record_cleanup_receipt(outcome);
+                                    }
+                                    if let Some(payload) = descendant_panic {
+                                        parent_record.record_descendant_panic(payload);
                                     }
                                     parent_record.remove_child(region_id);
                                 }
@@ -10306,6 +10433,16 @@ impl RuntimeState {
     #[must_use]
     pub(crate) fn supervision_history_handle(&self) -> SupervisionHistoryHandle {
         Arc::clone(&self.supervision_history)
+    }
+
+    #[must_use]
+    pub(crate) fn reply_history(&self) -> Vec<ReplyHistoryEvent> {
+        self.reply_history.snapshot()
+    }
+
+    #[must_use]
+    pub(crate) fn reply_history_handle(&self) -> ReplyHistoryHandle {
+        Arc::clone(&self.reply_history)
     }
 
     #[cfg(test)]
@@ -11929,6 +12066,15 @@ pub(crate) mod spawn_observer_test_support {
         fn obligation_discharged(&self, _: RegionId) {}
         fn obligation_leaked(&self, _: RegionId) {}
         fn scheduler_tick(&self, _: usize, _: Duration) {}
+    }
+}
+
+/// Runs a metrics hook that the runtime calls under its own lock, so a
+/// panicking provider cannot unwind through runtime bookkeeping. The payload
+/// is user data whose drop could panic again; it is leaked, as elsewhere here.
+fn contain_metrics_hook(hook: impl FnOnce()) {
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(hook)) {
+        std::mem::forget(payload);
     }
 }
 

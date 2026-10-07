@@ -2449,8 +2449,10 @@ impl LabRuntime {
         ));
         let spawn_liveness = Arc::new(());
         // Managed supervisors record restart history for the supervision
-        // oracle (br-asupersync-52hxjz).
+        // oracle, and GenServer replies their resolution for the
+        // reply-linearity oracle (br-asupersync-52hxjz).
         let supervision_history = state.supervision_history_handle();
+        let reply_history = state.reply_history_handle();
         state.set_spawn_gateway(Arc::new(
             crate::runtime::spawn_mailbox::SpawnGateway::new(
                 Arc::clone(&spawn_mailbox),
@@ -2458,7 +2460,8 @@ impl LabRuntime {
                 state.timer_driver_handle(),
                 Arc::downgrade(&spawn_liveness),
             )
-            .with_supervision_history(supervision_history),
+            .with_supervision_history(supervision_history)
+            .with_reply_history(reply_history),
         ));
         // Obligation mailbox (br-asupersync-bi2462.13): drained at the start
         // of every step next to spawn admissions, so token reserve/commit/

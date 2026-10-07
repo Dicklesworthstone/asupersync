@@ -475,3 +475,169 @@ fn h2_disabled_stream_timeout_preserves_paused_request_body() {
         );
     });
 }
+
+/// What a raw client saw from the server: the keepalive PINGs it received (not
+/// ACKs), and whether, and how long after it connected, the server closed the
+/// connection.
+#[derive(Debug, Default)]
+struct KeepaliveProbe {
+    pings: usize,
+    closed_after: Option<Duration>,
+}
+
+/// Raw client on a std thread: the preface, an empty SETTINGS frame and an ACK
+/// of the server's SETTINGS, then only reads, for at most `observe`. With
+/// `answer` it also ACKs every PING the server sends.
+fn keepalive_probe_client(
+    addr: SocketAddr,
+    answer: bool,
+    observe: Duration,
+) -> std::thread::JoinHandle<KeepaliveProbe> {
+    std::thread::spawn(move || {
+        let mut probe = KeepaliveProbe::default();
+        let mut stream = std::net::TcpStream::connect(addr).expect("client connect");
+        stream
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .expect("set read timeout");
+        let started = std::time::Instant::now();
+        let mut out = BytesMut::new();
+        Frame::Settings(SettingsFrame::new(Vec::new()))
+            .encode(&mut out)
+            .expect("encode client SETTINGS");
+        stream.write_all(CLIENT_PREFACE).expect("write preface");
+        stream.write_all(&out).expect("write SETTINGS");
+        let mut codec = FrameCodec::new();
+        let mut input = BytesMut::new();
+        let mut chunk = [0u8; 4096];
+        while started.elapsed() < observe {
+            while let Some(frame) = codec.decode(&mut input).expect("decode server frame") {
+                let reply = match frame {
+                    Frame::Settings(settings) if !settings.ack => {
+                        Some(Frame::Settings(SettingsFrame::ack()))
+                    }
+                    Frame::Ping(ping) if !ping.ack => {
+                        probe.pings += 1;
+                        answer.then(|| Frame::Ping(PingFrame::ack(ping.opaque_data)))
+                    }
+                    _ => None,
+                };
+                if let Some(reply) = reply {
+                    let mut bytes = BytesMut::new();
+                    reply.encode(&mut bytes).expect("encode reply");
+                    let _ = stream.write_all(&bytes);
+                }
+            }
+            match stream.read(&mut chunk) {
+                Ok(0) => {
+                    probe.closed_after = Some(started.elapsed());
+                    return probe;
+                }
+                Ok(n) => input.extend_from_slice(&chunk[..n]),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(_) => {
+                    probe.closed_after = Some(started.elapsed());
+                    return probe;
+                }
+            }
+        }
+        probe
+    })
+}
+
+/// Serves one keepalive probe client, with the listener's keepalive set to
+/// `(interval, timeout)` when given and no idle timeout.
+fn run_keepalive_probe(
+    keepalive: Option<(Duration, Duration)>,
+    answer: bool,
+    observe: Duration,
+) -> KeepaliveProbe {
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+    runtime.block_on(async move {
+        let mut listener = Http2Listener::bind_with_config(
+            "127.0.0.1:0",
+            |_| async { Response::new(200, "OK", Vec::new()) },
+            Http2ListenerConfig::default()
+                .host_policy(HostPolicy::allow_list(vec!["localhost".to_owned()]))
+                .max_requests_per_connection(None)
+                .idle_timeout(None),
+        )
+        .await
+        .expect("bind listener");
+        if let Some((interval, timeout)) = keepalive {
+            listener = listener.keepalive(interval, timeout);
+        }
+        let addr = listener.local_addr().expect("local addr");
+        let manager = listener.connection_manager().clone();
+        let run = handle
+            .clone()
+            .try_spawn(async move { listener.run(&handle).await })
+            .expect("spawn listener run");
+        let probe = keepalive_probe_client(addr, answer, observe)
+            .join()
+            .expect("probe client");
+        eprintln!("keepalive={keepalive:?} answer={answer} -> {probe:?}");
+        assert!(manager.begin_drain(Duration::from_secs(5)));
+        let _ = run.await.expect("listener run result");
+        probe
+    })
+}
+
+/// br-asupersync-y6naky: with keepalive on, a client that stops answering is
+/// sent a PING after the interval, and the connection is closed when no frame
+/// follows within the timeout.
+#[test]
+fn h2_keepalive_closes_a_connection_whose_client_stops_answering() {
+    let probe = run_keepalive_probe(
+        Some((Duration::from_millis(100), Duration::from_millis(300))),
+        false,
+        Duration::from_secs(10),
+    );
+    assert!(
+        probe.pings >= 1,
+        "a silent client must be PINGed: {probe:?}"
+    );
+    let closed = probe
+        .closed_after
+        .expect("a client that answers no PING must be disconnected within 10 s");
+    // Its last frame (the SETTINGS ACK) came after it connected, so the close
+    // comes at least interval + timeout after that.
+    assert!(
+        closed >= Duration::from_millis(400),
+        "closed before interval + timeout: {probe:?}"
+    );
+}
+
+/// br-asupersync-y6naky: a client that ACKs the keepalive PINGs keeps its
+/// connection, and is PINGed again after each interval of quiet.
+#[test]
+fn h2_keepalive_keeps_a_connection_whose_client_answers() {
+    let probe = run_keepalive_probe(
+        Some((Duration::from_millis(100), Duration::from_secs(1))),
+        true,
+        Duration::from_secs(3),
+    );
+    assert!(
+        probe.closed_after.is_none(),
+        "an answering client must keep its connection: {probe:?}"
+    );
+    assert!(
+        probe.pings >= 5,
+        "an answering client is PINGed once per quiet interval: {probe:?}"
+    );
+}
+
+/// Keepalive is off by default: a silent client is neither PINGed nor closed.
+#[test]
+fn h2_listener_sends_no_keepalive_ping_by_default() {
+    let probe = run_keepalive_probe(None, false, Duration::from_secs(1));
+    assert_eq!(probe.pings, 0, "{probe:?}");
+    assert!(probe.closed_after.is_none(), "{probe:?}");
+}

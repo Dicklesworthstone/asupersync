@@ -331,7 +331,11 @@ impl Http2RequestBuilder {
             let tcp = if let Ok(ip) = host.parse::<IpAddr>() {
                 TcpStream::connect(SocketAddr::new(ip, request.url.port)).await?
             } else {
-                TcpStream::connect((host.to_owned(), request.url.port)).await?
+                crate::net::happy_eyeballs::connect_resolved(
+                    (host.to_owned(), request.url.port),
+                    None,
+                )
+                .await?
             };
             #[cfg(feature = "tls")]
             if request.url.scheme == Scheme::Https {

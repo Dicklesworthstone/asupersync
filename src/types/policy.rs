@@ -1,7 +1,15 @@
 //! Policy trait for region outcome aggregation.
 //!
-//! Policies determine how a region responds to child outcomes and how
-//! multiple child outcomes are aggregated when the region closes.
+//! A policy names a response to each child outcome
+//! ([`Policy::on_child_outcome`]) and a way to aggregate several outcomes
+//! ([`Policy::aggregate_outcomes`], used by the join combinators).
+//!
+//! The runtime does not consult a region's policy when a child task
+//! completes yet: `Scope::region` records no policy, so a failing child does
+//! not cancel its siblings (br-asupersync-mfqmcs). For fail-fast sibling
+//! cancellation, use `JoinSet::try_join_all`, which cancels and drains the
+//! unfinished members on the first error, or fibers, where a panicking fiber
+//! cancels its siblings.
 
 use super::cancel::CancelReason;
 use super::id::TaskId;
@@ -59,9 +67,12 @@ pub trait Policy: Clone + Send + Sync + 'static {
     ) -> AggregateDecision<Self::Error>;
 }
 
-/// Fail-fast policy: cancel siblings on first error.
+/// Fail-fast policy: an error or panic asks to cancel the siblings.
 ///
-/// This is the default policy for most use cases.
+/// This is the default policy for most use cases. Its
+/// [`on_child_outcome`](Policy::on_child_outcome) answers
+/// [`PolicyAction::CancelSiblings`] for an error or panic, but the runtime does
+/// not apply that answer to a region's tasks yet (see the module docs).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FailFast;
 

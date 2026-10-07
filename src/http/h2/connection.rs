@@ -1262,9 +1262,16 @@ impl Connection {
         }
     }
 
+    /// RFC 9113 §6.8: the last-stream identifier in our GOAWAY covers the
+    /// streams our peer initiated. Streams we opened (odd for a client, even
+    /// for a server) keep receiving their frames after our GOAWAY: a client
+    /// that sends GOAWAY still takes the responses to its requests in flight.
     fn stream_exceeds_sent_goaway(&self, stream_id: u32) -> bool {
-        self.sent_goaway_last_stream_id
-            .is_some_and(|last_stream_id| stream_id > last_stream_id)
+        let peer_initiated = stream_id.is_multiple_of(2) == self.is_client;
+        peer_initiated
+            && self
+                .sent_goaway_last_stream_id
+                .is_some_and(|last_stream_id| stream_id > last_stream_id)
     }
 
     fn stream_can_emit_queued_frames(&self, stream_id: u32) -> bool {
@@ -2380,9 +2387,12 @@ impl Connection {
                     header_block,
                     end_headers,
                 } => {
-                    if !self.stream_can_emit_queued_frames(stream_id) {
-                        continue;
-                    }
+                    // A CONTINUATION is queued only once its HEADERS or
+                    // PUSH_PROMISE has gone out without END_HEADERS, so it goes
+                    // out even if the stream was reset since: the peer must see
+                    // the block completed before any other frame (RFC 9113
+                    // §6.10, else a connection error), and its HPACK decoder
+                    // needs the rest of the block.
                     returned_frame = Some(Frame::Continuation(ContinuationFrame {
                         stream_id,
                         header_block,
@@ -4973,6 +4983,60 @@ mod tests {
         assert!(last_end_headers, "last continuation must end headers");
     }
 
+    /// RFC 9113 §6.10: once a HEADERS frame has gone out without END_HEADERS,
+    /// its CONTINUATION frames must follow before any other frame (the peer
+    /// treats anything else as a connection error, and its HPACK decoder needs
+    /// the rest of the block). Resetting the stream in between used to drop
+    /// the queued CONTINUATIONs, so the RST_STREAM followed the incomplete
+    /// HEADERS directly (br-asupersync-dycth8).
+    #[test]
+    fn a_stream_reset_mid_header_block_still_completes_the_block_first() {
+        let mut conn = Connection::client(Settings::client());
+        conn.state = ConnectionState::Open;
+        conn.remote_settings.max_frame_size = 50;
+        let mut headers = test_request_header_vec("/large");
+        for i in 0..10 {
+            headers.push(Header::new(format!("x-large-{i}"), format!("value-{i}")));
+        }
+        let stream_id = conn.open_stream(headers, true).unwrap();
+        match conn.next_frame() {
+            Some(Frame::Headers(headers)) => {
+                assert_eq!(headers.stream_id, stream_id);
+                assert!(
+                    !headers.end_headers,
+                    "the block must need CONTINUATION frames"
+                );
+            }
+            other => panic!("expected the first HEADERS frame, got {other:?}"),
+        }
+
+        conn.reset_stream(stream_id, ErrorCode::Cancel);
+        let mut frames = Vec::new();
+        while let Some(frame) = conn.next_frame() {
+            frames.push(frame);
+        }
+        let (reset, continuations) = frames.split_last().expect("frames after the reset");
+        assert!(!continuations.is_empty(), "{frames:?}");
+        for (index, frame) in continuations.iter().enumerate() {
+            match frame {
+                Frame::Continuation(continuation) => {
+                    assert_eq!(continuation.stream_id, stream_id);
+                    assert_eq!(
+                        continuation.end_headers,
+                        index + 1 == continuations.len(),
+                        "only the last CONTINUATION ends the block: {frames:?}"
+                    );
+                }
+                other => panic!("expected CONTINUATION before any other frame, got {other:?}"),
+            }
+        }
+        assert!(
+            matches!(reset, Frame::RstStream(reset)
+                if reset.stream_id == stream_id && reset.error_code == ErrorCode::Cancel),
+            "the RST_STREAM follows the completed block: {frames:?}"
+        );
+    }
+
     #[test]
     fn send_push_promise_rejects_peer_disabled_push_without_reservation() {
         let mut conn = Connection::server(Settings::server());
@@ -5732,12 +5796,6 @@ mod tests {
             {
                 Ok(())
             }
-            // After our GOAWAY the connection also refuses responses on its
-            // own streams (a separate defect: the GOAWAY boundary should only
-            // cover peer-initiated streams), so this one is decoded and
-            // dropped. A table behind the peer's cannot decode its indexed
-            // field at all, so an Ok here still shows the tables in step.
-            Ok(None) if matches!(refusal, PushRefusalCase::AfterOurGoaway) => Ok(()),
             other => Err(format!("the next response must decode: {other:?}")),
         }
     }
@@ -6075,6 +6133,71 @@ mod tests {
         // Trying to open new streams should fail
         let err = conn.open_stream(headers, false).unwrap_err();
         assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    /// RFC 9113 §6.8: our GOAWAY's last-stream identifier covers streams the
+    /// peer initiated. A client that sends GOAWAY still receives the response
+    /// HEADERS and DATA for a request it had open, and still refuses a push
+    /// promised above the boundary.
+    #[test]
+    fn a_client_that_sent_goaway_still_receives_responses_on_its_own_streams() {
+        let mut settings = Settings::client();
+        settings.enable_push = true;
+        let mut conn = Connection::client(settings);
+        conn.state = ConnectionState::Open;
+        let stream_id = conn
+            .open_stream(test_request_header_vec("/"), true)
+            .unwrap();
+        while conn.next_frame().is_some() {}
+        conn.goaway(ErrorCode::NoError, Bytes::new());
+        while conn.next_frame().is_some() {}
+
+        let mut server = hpack::Encoder::new();
+        let promise = encode_with(
+            &mut server,
+            &[
+                (":method", "GET"),
+                (":scheme", "https"),
+                (":path", "/pushed"),
+                (":authority", "example.com"),
+            ],
+        );
+        let pushed = conn.process_frame(Frame::PushPromise(PushPromiseFrame {
+            stream_id,
+            promised_stream_id: 2,
+            header_block: promise,
+            end_headers: true,
+        }));
+        assert!(matches!(pushed, Ok(None)), "{pushed:?}");
+        assert!(
+            matches!(conn.next_frame(), Some(Frame::RstStream(reset)) if reset.stream_id == 2),
+            "the push above our GOAWAY boundary is refused"
+        );
+
+        let response = encode_with(&mut server, &[(":status", "200")]);
+        let headers = conn.process_frame(Frame::Headers(HeadersFrame::new(
+            stream_id, response, false, true,
+        )));
+        assert!(
+            matches!(
+                headers,
+                Ok(Some(ReceivedFrame::Headers { stream_id: id, .. })) if id == stream_id
+            ),
+            "{headers:?}"
+        );
+        let data = conn.process_frame(Frame::Data(DataFrame::new(
+            stream_id,
+            Bytes::from_static(b"body"),
+            true,
+        )));
+        assert!(
+            matches!(
+                data,
+                Ok(Some(ReceivedFrame::Data { stream_id: id, ref data, end_stream: true }))
+                    if id == stream_id && data.as_ref() == b"body"
+            ),
+            "{data:?}"
+        );
     }
 
     #[test]

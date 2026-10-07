@@ -1020,9 +1020,15 @@ pub trait MetricsProvider: Send + Sync + 'static {
     // === Budget Metrics ===
 
     /// Called when a deadline is set.
+    ///
+    /// The runtime calls this once for each admitted task whose budget has a
+    /// deadline, with the task's region and the time left at admission.
     fn deadline_set(&self, region_id: RegionId, deadline: Duration);
 
     /// Called when a deadline is exceeded.
+    ///
+    /// The runtime calls this once for each task that ends cancelled by its
+    /// deadline ([`CancelKind::Deadline`]), with the task's region.
     fn deadline_exceeded(&self, region_id: RegionId);
 
     // === Deadline Monitoring Metrics ===
@@ -1056,7 +1062,19 @@ pub trait MetricsProvider: Send + Sync + 'static {
     // === Scheduler Metrics ===
 
     /// Called after each scheduler tick.
+    ///
+    /// The three-lane runtime reports each worker's polls in batches:
+    /// `tasks_polled` polls (at most 64) that took `duration` in total, when
+    /// the worker has made 64 polls, goes idle, or stops.
     fn scheduler_tick(&self, tasks_polled: usize, duration: Duration);
+
+    /// Whether the runtime should time polls for [`Self::scheduler_tick`].
+    ///
+    /// Defaults to `true`. [`NoOpMetrics`] returns `false`, so a runtime
+    /// without a metrics provider reads no clock for it (br-asupersync-x9mmxl).
+    fn wants_scheduler_ticks(&self) -> bool {
+        true
+    }
 
     // === Panic Metrics ===
 
@@ -1110,6 +1128,10 @@ impl MetricsProvider for NoOpMetrics {
     fn obligation_leaked(&self, _: RegionId) {}
 
     fn scheduler_tick(&self, _: usize, _: Duration) {}
+
+    fn wants_scheduler_ticks(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

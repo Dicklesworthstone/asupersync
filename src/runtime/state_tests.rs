@@ -10426,3 +10426,395 @@ fn an_untracked_validator_stays_unlocked_and_silent_through_a_region_lifecycle()
         "an_untracked_validator_stays_unlocked_and_silent_through_a_region_lifecycle"
     );
 }
+
+/// The deadline and drain hooks the runtime calls (br-asupersync-x9mmxl).
+#[derive(Default)]
+struct MetricHookLog {
+    set: Mutex<Vec<(RegionId, Duration)>>,
+    exceeded: Mutex<Vec<RegionId>>,
+    drains: Mutex<Vec<(RegionId, Duration)>>,
+    ticks: Mutex<Vec<(usize, Duration)>>,
+}
+
+struct MetricHookMetrics(Arc<MetricHookLog>);
+
+impl MetricsProvider for MetricHookMetrics {
+    fn task_spawned(&self, _: RegionId, _: TaskId) {}
+    fn task_completed(&self, _: TaskId, _: OutcomeKind, _: Duration) {}
+    fn region_created(&self, _: RegionId, _: Option<RegionId>) {}
+    fn region_closed(&self, _: RegionId, _: Duration) {}
+    fn cancellation_requested(&self, _: RegionId, _: CancelKind) {}
+    fn drain_completed(&self, region: RegionId, duration: Duration) {
+        self.0.drains.lock().push((region, duration));
+    }
+    fn deadline_set(&self, region: RegionId, deadline: Duration) {
+        self.0.set.lock().push((region, deadline));
+    }
+    fn deadline_exceeded(&self, region: RegionId) {
+        self.0.exceeded.lock().push(region);
+    }
+    fn deadline_warning(&self, _: &str, _: &'static str, _: Duration) {}
+    fn deadline_violation(&self, _: &str, _: Duration) {}
+    fn deadline_remaining(&self, _: &str, _: Duration) {}
+    fn checkpoint_interval(&self, _: &str, _: Duration) {}
+    fn task_stuck_detected(&self, _: &str) {}
+    fn obligation_created(&self, _: RegionId) {}
+    fn obligation_discharged(&self, _: RegionId) {}
+    fn obligation_leaked(&self, _: RegionId) {}
+    fn scheduler_tick(&self, tasks_polled: usize, duration: Duration) {
+        self.0.ticks.lock().push((tasks_polled, duration));
+    }
+}
+
+/// A native runtime reports its workers' polls to the provider's
+/// `scheduler_tick` in batches of 1 to 64 (br-asupersync-x9mmxl).
+#[test]
+fn worker_polls_reach_the_metrics_provider_as_scheduler_ticks() {
+    use crate::runtime::RuntimeBuilder;
+
+    init_test_logging();
+    let tasks = 200_usize;
+    for workers in [None, Some(2)] {
+        let log = Arc::new(MetricHookLog::default());
+        let builder = match workers {
+            None => RuntimeBuilder::current_thread(),
+            Some(count) => RuntimeBuilder::multi_thread().worker_threads(count),
+        };
+        let runtime = builder
+            .metrics(MetricHookMetrics(Arc::clone(&log)))
+            .build()
+            .expect("build native runtime");
+        runtime.block_on(async move {
+            let cx = crate::cx::Cx::current().expect("block_on installs a Cx");
+            let mut handles = Vec::with_capacity(tasks);
+            for _ in 0..tasks {
+                handles.push(
+                    cx.spawn(|_| async { crate::runtime::yield_now().await })
+                        .expect("spawn a task"),
+                );
+            }
+            for mut handle in handles {
+                let _ = handle.join(&cx).await;
+            }
+        });
+        assert!(
+            runtime.shutdown_timeout(Duration::from_secs(10)),
+            "{workers:?}: the runtime shuts down"
+        );
+
+        let ticks = log.ticks.lock().clone();
+        let polls: usize = ticks.iter().map(|(polled, _)| polled).sum();
+        // Each task yields once, so it is polled at least twice.
+        assert!(
+            polls >= 2 * tasks,
+            "{workers:?}: want at least {} polls reported, got {polls} in {} ticks",
+            2 * tasks,
+            ticks.len()
+        );
+        assert!(
+            ticks.iter().all(|(polled, _)| (1..=64).contains(polled)),
+            "{workers:?}: every report carries 1 to 64 polls: {ticks:?}"
+        );
+    }
+    crate::test_complete!("worker_polls_reach_the_metrics_provider_as_scheduler_ticks");
+}
+
+/// A native runtime reports a task's deadline when it is admitted and again
+/// when the deadline cancels it. A task without a deadline (the root task,
+/// and one aborted by its handle) reports neither.
+#[test]
+fn task_deadlines_reach_the_metrics_provider() {
+    use crate::cx::ChildRegionSpec;
+    use crate::runtime::RuntimeBuilder;
+
+    init_test_logging();
+    let timeout = Duration::from_millis(50);
+    for workers in [None, Some(2)] {
+        let log = Arc::new(MetricHookLog::default());
+        let builder = match workers {
+            None => RuntimeBuilder::current_thread(),
+            Some(count) => RuntimeBuilder::multi_thread().worker_threads(count),
+        };
+        let runtime = builder
+            .metrics(MetricHookMetrics(Arc::clone(&log)))
+            .build()
+            .expect("build native runtime");
+        let (bounded_region, bounded, aborted) = runtime.block_on(async move {
+            let cx = crate::cx::Cx::current().expect("block_on installs a Cx");
+            let mut spec = ChildRegionSpec::inherit();
+            spec.budget = Some(Budget::new().with_timeout(cx.now(), timeout));
+            let child = cx
+                .open_child_region(spec)
+                .await
+                .expect("open child region with a deadline");
+            let bounded_region = child.cx().region_id();
+            let mut bounded = child
+                .cx()
+                .spawn(|task_cx| async move {
+                    let (_hold, mut never) = crate::channel::mpsc::channel::<u32>(1);
+                    let _ = never.recv(&task_cx).await;
+                    task_cx.cancel_reason().map(|reason| reason.kind)
+                })
+                .expect("spawn inside the child region");
+            let mut unbounded = cx
+                .spawn(|task_cx| async move {
+                    let (_hold, mut never) = crate::channel::mpsc::channel::<u32>(1);
+                    let _ = never.recv(&task_cx).await;
+                    task_cx.cancel_reason().map(|reason| reason.kind)
+                })
+                .expect("spawn in the root region");
+            unbounded.abort_with_reason(CancelReason::shutdown());
+            let aborted = unbounded.join(&cx).await;
+            let bounded = bounded.join(&cx).await;
+            let _ = child.close().await;
+            (bounded_region, bounded, aborted)
+        });
+        assert!(
+            runtime.shutdown_timeout(Duration::from_secs(10)),
+            "{workers:?}: the runtime shuts down"
+        );
+
+        // A task that acknowledged its cancel joins with its own value, so
+        // each task reports the cancel it observed.
+        let observed = |joined: &Result<Option<CancelKind>, JoinError>| match joined {
+            Ok(kind) => *kind,
+            Err(JoinError::Cancelled(reason)) => Some(reason.kind),
+            Err(_) => None,
+        };
+        assert_eq!(
+            observed(&bounded),
+            Some(CancelKind::Deadline),
+            "{workers:?}: the deadline ends the bounded task, got {bounded:?}"
+        );
+        assert!(
+            observed(&aborted).is_some_and(|kind| kind != CancelKind::Deadline),
+            "{workers:?}: the abort ends the unbounded task, got {aborted:?}"
+        );
+        // Report every failed check at once.
+        let set = log.set.lock().clone();
+        let exceeded = log.exceeded.lock().clone();
+        let mut failures = Vec::new();
+        if !matches!(set.as_slice(), [(region, left)] if *region == bounded_region && *left <= timeout)
+        {
+            failures.push(format!(
+                "deadline_set: want one report for {bounded_region:?} with at most \
+                 {timeout:?} left, got {set:?}"
+            ));
+        }
+        if exceeded != [bounded_region] {
+            failures.push(format!(
+                "deadline_exceeded: want [{bounded_region:?}], got {exceeded:?}"
+            ));
+        }
+        assert!(failures.is_empty(), "{workers:?}: {failures:#?}");
+    }
+    crate::test_complete!("task_deadlines_reach_the_metrics_provider");
+}
+
+/// A cancelled region reports its drain when it closes: the time from its
+/// cancellation report to the close. That is at least its task's cleanup and
+/// excludes the time the region lived before the cancel. A region with nothing
+/// to drain when it closes (`close` on an empty region) reports none.
+#[test]
+fn cancelled_region_drain_reaches_the_metrics_provider() {
+    use crate::cx::ChildRegionSpec;
+    use crate::runtime::RuntimeBuilder;
+
+    init_test_logging();
+    let cleanup = Duration::from_millis(30);
+    let held = Duration::from_secs(1);
+    for workers in [None, Some(2)] {
+        let log = Arc::new(MetricHookLog::default());
+        let builder = match workers {
+            None => RuntimeBuilder::current_thread(),
+            Some(count) => RuntimeBuilder::multi_thread().worker_threads(count),
+        };
+        let runtime = builder
+            .metrics(MetricHookMetrics(Arc::clone(&log)))
+            .build()
+            .expect("build native runtime");
+        let (cancelled_region, quiet_region) = runtime.block_on(async move {
+            let cx = crate::cx::Cx::current().expect("block_on installs a Cx");
+            let quiet = cx
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .expect("open the quiet region");
+            let quiet_region = quiet.cx().region_id();
+            quiet.close().await.expect("close the quiet region");
+
+            let child = cx
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .expect("open the cancelled region");
+            let cancelled_region = child.cx().region_id();
+            let started = Arc::new(AtomicBool::new(false));
+            let parked = Arc::clone(&started);
+            let mut handle = child
+                .cx()
+                .spawn(move |task_cx| async move {
+                    let (_hold, mut never) = crate::channel::mpsc::channel::<u32>(1);
+                    parked.store(true, Ordering::SeqCst);
+                    let _ = never.recv(&task_cx).await;
+                    // Cleanup the region's drain waits for.
+                    std::thread::sleep(cleanup);
+                })
+                .expect("spawn inside the cancelled region");
+            while !started.load(Ordering::SeqCst) {
+                crate::runtime::yield_now().await;
+            }
+            // Live time before the cancel, which the drain must not include.
+            crate::time::sleep(cx.now(), held).await;
+            child
+                .cancel(CancelReason::shutdown())
+                .expect("cancel the child region");
+            let _ = handle.join(&cx).await;
+            let _ = child.close().await;
+            (cancelled_region, quiet_region)
+        });
+        assert!(
+            runtime.shutdown_timeout(Duration::from_secs(10)),
+            "{workers:?}: the runtime shuts down"
+        );
+
+        // Shutdown may cancel and close the root region too; judge only the
+        // two regions under test.
+        let drains: Vec<_> = log
+            .drains
+            .lock()
+            .iter()
+            .copied()
+            .filter(|(region, _)| *region == cancelled_region || *region == quiet_region)
+            .collect();
+        assert!(
+            matches!(drains.as_slice(), [(region, drain)]
+                if *region == cancelled_region && *drain >= cleanup && *drain < held),
+            "{workers:?}: want one drain for {cancelled_region:?}, at least the {cleanup:?} \
+             cleanup and under the {held:?} it lived before the cancel, and none for \
+             {quiet_region:?}; got {drains:?}"
+        );
+    }
+    crate::test_complete!("cancelled_region_drain_reaches_the_metrics_provider");
+}
+
+/// Region-close hooks that count their calls, then panic when told to.
+#[derive(Default)]
+struct PanickingRegionHooks {
+    panic_on_close: bool,
+    panic_on_drain: bool,
+    closes: AtomicUsize,
+    drains: AtomicUsize,
+}
+
+struct PanickingRegionMetrics(Arc<PanickingRegionHooks>);
+
+impl MetricsProvider for PanickingRegionMetrics {
+    fn task_spawned(&self, _: RegionId, _: TaskId) {}
+    fn task_completed(&self, _: TaskId, _: OutcomeKind, _: Duration) {}
+    fn region_created(&self, _: RegionId, _: Option<RegionId>) {}
+    fn region_closed(&self, _: RegionId, _: Duration) {
+        self.0.closes.fetch_add(1, Ordering::SeqCst);
+        assert!(!self.0.panic_on_close, "provider panic in region_closed");
+    }
+    fn cancellation_requested(&self, _: RegionId, _: CancelKind) {}
+    fn drain_completed(&self, _: RegionId, _: Duration) {
+        self.0.drains.fetch_add(1, Ordering::SeqCst);
+        assert!(!self.0.panic_on_drain, "provider panic in drain_completed");
+    }
+    fn deadline_set(&self, _: RegionId, _: Duration) {}
+    fn deadline_exceeded(&self, _: RegionId) {}
+    fn deadline_warning(&self, _: &str, _: &'static str, _: Duration) {}
+    fn deadline_violation(&self, _: &str, _: Duration) {}
+    fn deadline_remaining(&self, _: &str, _: Duration) {}
+    fn checkpoint_interval(&self, _: &str, _: Duration) {}
+    fn task_stuck_detected(&self, _: &str) {}
+    fn obligation_created(&self, _: RegionId) {}
+    fn obligation_discharged(&self, _: RegionId) {}
+    fn obligation_leaked(&self, _: RegionId) {}
+    fn scheduler_tick(&self, _: usize, _: Duration) {}
+}
+
+/// A provider that panics in `region_closed` or `drain_completed`, which run
+/// inside the close walk under the runtime lock, must not break the close: a
+/// cancelled region with a task closes, a later region opens and closes, and
+/// the runtime shuts down. Each run is bounded, so a hang fails the test.
+#[test]
+fn a_panicking_region_close_hook_does_not_break_the_close() {
+    use crate::cx::ChildRegionSpec;
+    use crate::runtime::RuntimeBuilder;
+
+    init_test_logging();
+    let cleanup = Duration::from_millis(30);
+    for (panic_on_close, panic_on_drain) in [(false, true), (true, false)] {
+        for workers in [None, Some(2)] {
+            let hooks = Arc::new(PanickingRegionHooks {
+                panic_on_close,
+                panic_on_drain,
+                ..PanickingRegionHooks::default()
+            });
+            let provider = PanickingRegionMetrics(Arc::clone(&hooks));
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let builder = match workers {
+                    None => RuntimeBuilder::current_thread(),
+                    Some(count) => RuntimeBuilder::multi_thread().worker_threads(count),
+                };
+                let runtime = builder
+                    .metrics(provider)
+                    .build()
+                    .expect("build native runtime");
+                runtime.block_on(async move {
+                    let cx = crate::cx::Cx::current().expect("block_on installs a Cx");
+                    let child = cx
+                        .open_child_region(ChildRegionSpec::inherit())
+                        .await
+                        .expect("open the cancelled region");
+                    let started = Arc::new(AtomicBool::new(false));
+                    let parked = Arc::clone(&started);
+                    let mut handle = child
+                        .cx()
+                        .spawn(move |task_cx| async move {
+                            let (_hold, mut never) = crate::channel::mpsc::channel::<u32>(1);
+                            parked.store(true, Ordering::SeqCst);
+                            let _ = never.recv(&task_cx).await;
+                            std::thread::sleep(cleanup);
+                        })
+                        .expect("spawn inside the cancelled region");
+                    while !started.load(Ordering::SeqCst) {
+                        crate::runtime::yield_now().await;
+                    }
+                    child
+                        .cancel(CancelReason::shutdown())
+                        .expect("cancel the child region");
+                    let _ = handle.join(&cx).await;
+                    child.close().await.expect("the cancelled region closes");
+                    let later = cx
+                        .open_child_region(ChildRegionSpec::inherit())
+                        .await
+                        .expect("open a region after the panic");
+                    later.close().await.expect("close it");
+                });
+                let _ = done_tx.send(runtime.shutdown_timeout(Duration::from_secs(10)));
+            });
+            let shut_down = done_rx.recv_timeout(Duration::from_secs(30));
+            let label = format!(
+                "panic_on_close={panic_on_close} panic_on_drain={panic_on_drain} \
+                 workers={workers:?}"
+            );
+            assert!(
+                matches!(shut_down, Ok(true)),
+                "{label}: the scenario must finish and the runtime shut down, got {shut_down:?}"
+            );
+            assert!(
+                hooks.closes.load(Ordering::SeqCst) >= 2,
+                "{label}: region_closed ran"
+            );
+            if panic_on_drain {
+                assert!(
+                    hooks.drains.load(Ordering::SeqCst) >= 1,
+                    "{label}: drain_completed ran, so its panic was exercised"
+                );
+            }
+        }
+    }
+    crate::test_complete!("a_panicking_region_close_hook_does_not_break_the_close");
+}

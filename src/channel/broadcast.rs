@@ -240,7 +240,14 @@ impl<T: std::fmt::Debug> std::fmt::Debug for Channel<T> {
     }
 }
 
+/// Ring slots allocated up front; a larger capacity grows as messages arrive.
+const PREALLOCATED_SLOTS: usize = 1024;
+
 /// Creates a new broadcast channel with the given capacity.
+///
+/// The ring allocates at most 1024 slots up front and grows as messages
+/// arrive, so a capacity larger than any backlog (even `usize::MAX`) costs
+/// only what is actually buffered.
 ///
 /// # Panics
 ///
@@ -256,7 +263,7 @@ pub fn channel<T: Clone>(capacity: usize) -> (Sender<T>, Receiver<T>) {
         sender_count: AtomicUsize::new(1),
         receiver_count: AtomicUsize::new(1),
         inner: Mutex::new(Shared {
-            buffer: VecDeque::with_capacity(capacity),
+            buffer: VecDeque::with_capacity(capacity.min(PREALLOCATED_SLOTS)),
             capacity,
             total_sent: 0,
             wakers: Arena::new(),
@@ -3888,6 +3895,23 @@ mod tests {
         // Fourth send evicts the oldest.
         tx.send(&cx, 4).expect("send 4");
         assert_eq!(tx.len(), 3);
+    }
+
+    /// br-asupersync-lh4z78 L1: a capacity larger than any backlog, even
+    /// `usize::MAX`, allocates as messages arrive. It used to panic with
+    /// "capacity overflow" (or abort when a huge allocation failed).
+    #[test]
+    fn huge_capacity_allocates_lazily() {
+        init_test("broadcast_huge_capacity");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>(usize::MAX);
+        for value in 0..3 {
+            tx.send(&cx, value).expect("send");
+        }
+        assert_eq!(tx.len(), 3);
+        for value in 0..3 {
+            assert_eq!(rx.try_recv(), Ok(value));
+        }
     }
 
     #[test]

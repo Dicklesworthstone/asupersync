@@ -1265,6 +1265,24 @@ mod tests {
             .collect()
     }
 
+    /// SHA1(password) XOR SHA1(nonce || SHA1(SHA1(password))).
+    fn mysql_native_scramble(password: &str, nonce: &[u8]) -> Vec<u8> {
+        use sha1::{Digest as _, Sha1};
+
+        let password_hash = Sha1::digest(password.as_bytes());
+        let double_hash = Sha1::digest(password_hash);
+        let mut combined = Vec::with_capacity(nonce.len() + double_hash.len());
+        combined.extend_from_slice(nonce);
+        combined.extend_from_slice(&double_hash);
+        let scramble_hash = Sha1::digest(&combined);
+
+        password_hash
+            .iter()
+            .zip(scramble_hash.iter())
+            .map(|(left, right)| left ^ right)
+            .collect()
+    }
+
     fn connect_options(addr: std::net::SocketAddr) -> MySqlConnectOptions {
         let mut options = MySqlConnectOptions::parse(&format!(
             "mysql://user:pass@{}:{}/db",
@@ -1540,26 +1558,29 @@ mod tests {
                 .expect("write auth switch");
             stream.flush().expect("flush auth switch");
 
-            assert_no_auth_switch_response(&mut stream);
+            let switch_response = read_mysql_packet(&mut stream);
+            assert_eq!(
+                switch_response,
+                mysql_native_scramble("pass", &switch_nonce),
+                "the client answers the switch with the mysql_native_password scramble"
+            );
+            stream.write_all(&ok_packet(4)).expect("write ok");
+            stream.flush().expect("flush ok");
         });
 
+        // Both legacy opt-ins (37f9faa9d) let the server switch to
+        // mysql_native_password. Until then the method was blocked outright,
+        // and this test asserted that block.
         let mut options = connect_options(addr);
         options.insecure_legacy_mysql_native_password = true;
         options.insecure_allow_auth_switch_downgrade = true;
         let outcome = futures_lite::future::block_on(async {
             MySqlConnection::connect_with_options(&Cx::for_testing(), options).await
         });
-
-        match outcome {
-            Outcome::Err(MySqlError::UnsupportedAuthPlugin(message)) => {
-                assert!(
-                    message.contains("permanently blocked")
-                        && message.contains("caching_sha2_password"),
-                    "legacy opt-ins must not bypass the permanent SHA-1 block: {message:?}"
-                );
-            }
-            other => panic!("expected permanent mysql_native auth-switch rejection, got {other:?}"),
-        }
+        assert!(
+            matches!(outcome, Outcome::Ok(_)),
+            "with both legacy opt-ins the switch negotiates, got {outcome:?}"
+        );
 
         server.join().expect("join server");
     }

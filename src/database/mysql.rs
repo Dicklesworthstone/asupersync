@@ -1657,6 +1657,10 @@ impl MySqlConnectOptions {
                 let (raw_key, raw_value) = pair.split_once('=').unwrap_or((pair, ""));
                 let key = percent_decode(raw_key);
                 let value = percent_decode(raw_value);
+                // Key spellings vary (ssl-mode, ssl_mode, sslMode): compare
+                // them case-insensitively with '_' as '-', so a request for
+                // TLS is never silently ignored.
+                let key = key.to_ascii_lowercase().replace('_', "-");
                 match key.as_str() {
                     "ssl-mode" | "sslmode" => {
                         if value.eq_ignore_ascii_case("disabled") {
@@ -1671,7 +1675,7 @@ impl MySqlConnectOptions {
                             )));
                         }
                     }
-                    "connect_timeout" => {
+                    "connect-timeout" => {
                         let secs = value.parse::<u64>().map_err(|_| {
                             MySqlError::InvalidUrl(format!("invalid connect_timeout: {value}"))
                         })?;
@@ -1913,6 +1917,12 @@ struct MySqlConnectionInner {
     /// means the session is at its server-side default (we never set it, or
     /// we restored it with `SET SESSION max_execution_time = DEFAULT`).
     applied_max_execution_time_ms: Option<u64>,
+    /// Set while a `SET SESSION max_execution_time` may or may not have
+    /// reached the server (it was cancelled, dropped or failed), so the next
+    /// query sends one whatever `applied_max_execution_time_ms` says. That
+    /// field's `None` means the server default, so it cannot also stand for
+    /// "unknown".
+    max_execution_time_uncertain: bool,
     /// br-asupersync-server-stack-hardening-eeexl1.1.2: set once the server
     /// rejected `SET SESSION max_execution_time` with
     /// ER_UNKNOWN_SYSTEM_VARIABLE (1193, e.g. MariaDB). Timeout forwarding
@@ -2483,6 +2493,7 @@ impl MySqlConnection {
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
                 max_execution_time_unsupported: false,
+                max_execution_time_uncertain: false,
                 connect_autocommit: true,
             },
             // Stash options so cancel_in_flight_query can reopen a fresh
@@ -2788,6 +2799,9 @@ impl MySqlConnection {
         cx: &Cx,
         sql: &str,
     ) -> Outcome<MySqlStreamHeader, MySqlError> {
+        if let Err(error) = self.forget_prepared_statements_before(cx, sql).await {
+            return outcome_from_error(error);
+        }
         if !Self::is_session_control_statement(sql) {
             match self.apply_statement_timeout(cx).await {
                 Outcome::Ok(()) => {}
@@ -2816,7 +2830,9 @@ impl MySqlConnection {
         }
         let override_timeout = self.inner.statement_timeout_override;
         let effective_ms = crate::database::wire_statement_timeout_ms(cx, override_timeout);
-        if effective_ms == self.inner.applied_max_execution_time_ms {
+        if effective_ms == self.inner.applied_max_execution_time_ms
+            && !self.inner.max_execution_time_uncertain
+        {
             return Outcome::Ok(());
         }
         let remaining_ns = crate::database::remaining_budget(cx)
@@ -2841,11 +2857,15 @@ impl MySqlConnection {
                 "SET SESSION max_execution_time = DEFAULT".to_string()
             }
         };
-        // Session state is uncertain until the exchange completes cleanly.
+        // Session state is uncertain until the exchange completes cleanly. A
+        // SET cancelled before it was written leaves the old limit in force,
+        // so "uncertain" must not read as the server default.
         self.inner.applied_max_execution_time_ms = None;
+        self.inner.max_execution_time_uncertain = true;
         match self.execute_unchecked_inner_impl(cx, &sql).await {
             Outcome::Ok(_) => {
                 self.inner.applied_max_execution_time_ms = effective_ms;
+                self.inner.max_execution_time_uncertain = false;
                 Outcome::Ok(())
             }
             // ER_UNKNOWN_SYSTEM_VARIABLE (1193): the server has no
@@ -2928,6 +2948,13 @@ impl MySqlConnection {
     async fn read_handshake(&mut self) -> Result<Handshake, MySqlError> {
         let (data, seq) = self.read_packet(None).await?;
         self.inner.sequence = seq.wrapping_add(1);
+
+        // A server refusing the connection (1040 "Too many connections",
+        // 1129 "Host ... is blocked") sends an ERR packet instead of the
+        // greeting. Report its code and message, not a malformed handshake.
+        if data.first() == Some(&0xFF) {
+            return Err(Self::parse_error(&data));
+        }
 
         // Security: Reject malformed 0x00-length packets in authentication context
         // A valid MySQL handshake packet has minimum 36 bytes:
@@ -3608,6 +3635,9 @@ impl MySqlConnection {
         if let Err(injection_error) = self.validate_sql_security(sql) {
             return Outcome::Err(injection_error);
         }
+        if let Err(error) = self.forget_prepared_statements_before(cx, sql).await {
+            return outcome_from_error(error);
+        }
 
         // br-asupersync-22i5tn: mark query_in_flight for the duration
         // of this method, cleared at the unique exit point. The OUTER
@@ -3789,7 +3819,11 @@ impl MySqlConnection {
 
             match data[0] {
                 0xFF => {
-                    // ERR packet
+                    // ERR packet: it ends the result set (a KILL QUERY or a
+                    // max_execution_time stop after some rows), so the
+                    // connection is in step and stays usable, as on the
+                    // row stream.
+                    self.inner.closed = false;
                     return Err(Self::parse_error(&data));
                 }
                 _ => {
@@ -3852,7 +3886,11 @@ impl MySqlConnection {
             }
 
             match data[0] {
-                0xFF => return Err(Self::parse_error(&data)),
+                0xFF => {
+                    // The ERR ends the result set; the connection is in step.
+                    self.inner.closed = false;
+                    return Err(Self::parse_error(&data));
+                }
                 _ => {
                     if let Some(values) =
                         Self::parse_binary_row_or_terminator(&data, &columns, deprecate_eof)?
@@ -4441,9 +4479,22 @@ impl MySqlConnection {
             return Ok(MySqlValue::Bytes(data.to_vec()));
         }
 
-        let text = std::str::from_utf8(data)
-            .map_err(|e| MySqlError::Protocol(format!("invalid UTF-8: {e}")))?;
-        Ok(MySqlValue::Text(text.to_string()))
+        match std::str::from_utf8(data) {
+            Ok(text) => Ok(MySqlValue::Text(text.to_string())),
+            // A column type this client does not know (MySQL 9's VECTOR, 242)
+            // with a binary payload comes back as bytes, as on the binary
+            // protocol, instead of failing the query.
+            Err(_) if !Self::is_known_column_type(col.column_type) => {
+                Ok(MySqlValue::Bytes(data.to_vec()))
+            }
+            Err(e) => Err(MySqlError::Protocol(format!("invalid UTF-8: {e}"))),
+        }
+    }
+
+    /// The types in [`column_type`]: 0 to 13, 15, 16 and 245 to 255.
+    #[inline]
+    const fn is_known_column_type(column_type: u8) -> bool {
+        matches!(column_type, 0..=13 | 15 | 16 | 245..=255)
     }
 
     #[inline]
@@ -4508,6 +4559,9 @@ impl MySqlConnection {
         // SECURITY: Validate SQL for potential injection patterns
         if let Err(injection_error) = self.validate_sql_security(sql) {
             return Outcome::Err(injection_error);
+        }
+        if let Err(error) = self.forget_prepared_statements_before(cx, sql).await {
+            return outcome_from_error(error);
         }
         // br-asupersync-22i5tn: mark query_in_flight for the duration
         // of the wire exchange. See `query_unchecked` for the
@@ -5023,6 +5077,40 @@ impl MySqlConnection {
     /// Advance the logical prepared-statement epoch for pooled reuse.
     fn invalidate_prepared_statements_for_pool_return(&mut self) {
         self.inner.prepared_statement_epoch = self.inner.prepared_statement_epoch.wrapping_add(1);
+    }
+
+    /// `USE` and a `SET` of sql_mode change what a prepared statement means:
+    /// MySQL binds a statement to the default database and the parse-time
+    /// sql_mode in effect when it was prepared, and re-binds neither later.
+    fn statement_rebinds_prepared_statements(sql: &str) -> bool {
+        let trimmed = sql.trim_start();
+        let verb = trimmed
+            .split(|c: char| c.is_ascii_whitespace() || c == ';' || c == '`')
+            .next()
+            .unwrap_or("");
+        verb.eq_ignore_ascii_case("USE")
+            || (verb.eq_ignore_ascii_case("SET")
+                && trimmed.to_ascii_lowercase().contains("sql_mode"))
+    }
+
+    /// Before a statement that re-binds prepared statements, empty the
+    /// prepared-statement cache and close its statements. Otherwise
+    /// `prepare` would keep returning a statement bound to the previous
+    /// database, and its reads and writes would silently reach that
+    /// database's tables: after a `USE` on the same checkout, or for the
+    /// next pooled tenant.
+    async fn forget_prepared_statements_before(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+    ) -> Result<(), MySqlError> {
+        if !Self::statement_rebinds_prepared_statements(sql) {
+            return Ok(());
+        }
+        for statement_id in self.inner.prepared_cache.clear_returning_ids() {
+            self.close_prepared_statement_id(cx, statement_id).await?;
+        }
+        Ok(())
     }
 
     /// Returns prepared-statement cache effectiveness counters for this
@@ -6462,6 +6550,15 @@ impl MySqlPreparedStatementCache {
         evicted
     }
 
+    /// Empty the cache, returning the statement ids to close.
+    fn clear_returning_ids(&mut self) -> Vec<u32> {
+        self.lru.clear();
+        self.entries
+            .drain()
+            .map(|(_, stmt)| stmt.statement_id)
+            .collect()
+    }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.entries.len()
@@ -6699,7 +6796,32 @@ impl MySqlTransaction<'_> {
                     .to_string(),
             ));
         }
+        // The server can end the transaction on its own: a DDL statement
+        // commits it implicitly, and InnoDB rolls it back on a deadlock. A
+        // statement after that would autocommit, and a COMMIT would report
+        // the whole unit as committed.
+        if !self.conn.in_transaction() {
+            return Err(MySqlError::Protocol(
+                "the server ended this transaction (an implicit commit or a rollback); \
+                 its statements did not run as one unit"
+                    .to_string(),
+            ));
+        }
         Ok(())
+    }
+
+    /// ER_LOCK_DEADLOCK (1213): InnoDB rolled the whole transaction back
+    /// and ended it. An ERR packet carries no status flags, so the cached
+    /// IN_TRANS bit still reads open; clear it so `check_open` refuses the
+    /// statements and the commit that would otherwise run outside it.
+    fn note_server_rollback<T>(
+        &mut self,
+        outcome: Outcome<T, MySqlError>,
+    ) -> Outcome<T, MySqlError> {
+        if matches!(outcome, Outcome::Err(MySqlError::Server { code: 1213, .. })) {
+            self.conn.inner.status_flags &= !0x0001; // SERVER_STATUS_IN_TRANS
+        }
+        outcome
     }
 
     /// Commit the transaction.
@@ -6797,7 +6919,8 @@ impl MySqlTransaction<'_> {
         if let Err(error) = self.check_open() {
             return Outcome::Err(error);
         }
-        self.conn.query_unchecked_internal(cx, sql).await
+        let outcome = self.conn.query_unchecked_internal(cx, sql).await;
+        self.note_server_rollback(outcome)
     }
 
     /// Execute a simple command within this transaction (DEPRECATED — see
@@ -6818,7 +6941,8 @@ impl MySqlTransaction<'_> {
         if let Err(error) = self.check_open() {
             return Outcome::Err(error);
         }
-        self.conn.execute_unchecked_internal(cx, sql).await
+        let outcome = self.conn.execute_unchecked_internal(cx, sql).await;
+        self.note_server_rollback(outcome)
     }
 
     /// Execute static SQL within transaction (safe wrapper).
@@ -6855,7 +6979,8 @@ impl MySqlTransaction<'_> {
         if let Err(error) = self.check_open() {
             return Outcome::Err(error);
         }
-        self.conn.execute_prepared(cx, stmt, params).await
+        let outcome = self.conn.execute_prepared(cx, stmt, params).await;
+        self.note_server_rollback(outcome)
     }
 
     /// Query a prepared statement within this transaction.
@@ -6868,7 +6993,8 @@ impl MySqlTransaction<'_> {
         if let Err(error) = self.check_open() {
             return Outcome::Err(error);
         }
-        self.conn.query_prepared(cx, stmt, params).await
+        let outcome = self.conn.query_prepared(cx, stmt, params).await;
+        self.note_server_rollback(outcome)
     }
 }
 

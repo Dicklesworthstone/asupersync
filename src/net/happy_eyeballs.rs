@@ -175,6 +175,38 @@ pub(crate) async fn connect_with_time_getter(
     connect_racing(&sorted_addrs, config, time_getter).await
 }
 
+/// Resolves `addr` as [`TcpStream::connect`] does and races the resolved
+/// addresses when there are several, so an address that never answers does
+/// not hold up the next one (br-asupersync-1aqha7). The HTTP/1, HTTP/2 and
+/// WebSocket clients connect to hostnames through this.
+///
+/// `timeout` bounds each attempt and the race as a whole, but not
+/// resolution, the same budget [`TcpStream::connect_timeout`] gives its
+/// sequential attempts. Without it only the OS connect limits apply, and a
+/// single address is a plain connect.
+///
+/// The future is boxed: callers nest it in their own setup futures, and the
+/// race's full type made proving those futures `Send` overflow the trait
+/// solver's recursion limit.
+pub(crate) fn connect_resolved<A>(addr: A, timeout: Option<Duration>) -> ConnectFuture
+where
+    A: std::net::ToSocketAddrs + Send + 'static,
+{
+    Box::pin(async move {
+        let addrs = crate::net::lookup_all(addr).await?;
+        if let ([only], None) = (addrs.as_slice(), timeout) {
+            return TcpStream::connect(*only).await;
+        }
+        let limit = timeout.unwrap_or(Duration::MAX);
+        let config = HappyEyeballsConfig {
+            connect_timeout: limit,
+            overall_timeout: limit,
+            ..HappyEyeballsConfig::default()
+        };
+        connect_with_time_getter(&addrs, &config, timeout_now).await
+    })
+}
+
 async fn connect_single(
     addr: SocketAddr,
     config: &HappyEyeballsConfig,
@@ -259,6 +291,13 @@ type ConnectFuture = Pin<Box<dyn Future<Output = io::Result<TcpStream>> + Send>>
 const RACE_CONNECTIONS_POLLED_AFTER_COMPLETION: &str =
     "Happy Eyeballs RaceConnections polled after completion";
 const OVERALL_CONNECTION_TIMEOUT_MSG: &str = "Happy Eyeballs: overall connection timeout";
+const CONNECT_CANCELLED_MSG: &str = "Happy Eyeballs: connect cancelled";
+
+/// Whether the task that owns the race has been cancelled, by the check
+/// TcpStream::connect applies to its own attempts.
+fn owner_cancelled() -> bool {
+    Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false)
+}
 
 /// Future that races multiple connection attempts, returning the first success.
 ///
@@ -389,6 +428,13 @@ impl RaceConnections {
         )))
     }
 
+    fn finish_cancelled(&mut self) -> Poll<io::Result<TcpStream>> {
+        self.finish(Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            CONNECT_CANCELLED_MSG,
+        )))
+    }
+
     fn poll_with_time(
         &mut self,
         mut now: Time,
@@ -396,6 +442,11 @@ impl RaceConnections {
     ) -> Poll<io::Result<TcpStream>> {
         if self.completed {
             return Poll::Ready(Err(Self::poll_after_completion_error()));
+        }
+        // A cancelled owner ends the race as TcpStream::connect does, with
+        // Interrupted. Polling on would dial the remaining addresses.
+        if owner_cancelled() {
+            return self.finish_cancelled();
         }
 
         loop {
@@ -417,6 +468,9 @@ impl RaceConnections {
                             return self.finish(Ok(stream));
                         }
                         Err(e) => {
+                            if e.kind() == io::ErrorKind::Interrupted && owner_cancelled() {
+                                return self.finish(Err(e));
+                            }
                             self.last_error = Some(e);
                             // If an attempt fails, start the next one immediately (RFC 8305 5.4).
                             if self.addrs.len() > 0 {
@@ -429,8 +483,13 @@ impl RaceConnections {
                 }
             }
 
+            // poll_deadline, not poll: Sleep::poll completes early when its
+            // task is cancelled, which would read as an elapsed delay.
             if self.stagger_active {
-                if Pin::new(&mut self.stagger_sleep).poll(cx).is_ready() {
+                if Pin::new(&mut self.stagger_sleep)
+                    .poll_deadline(cx)
+                    .is_ready()
+                {
                     made_progress = true;
                     self.start_next(now);
                 }
@@ -443,7 +502,12 @@ impl RaceConnections {
             now = (self.time_getter)();
         }
 
-        if Pin::new(&mut self.timeout_sleep).poll(cx).is_ready() {
+        // A race without an overall limit arms no timer.
+        if self.timeout_sleep.deadline() < Time::MAX
+            && Pin::new(&mut self.timeout_sleep)
+                .poll_deadline(cx)
+                .is_ready()
+        {
             return self.finish_overall_timeout();
         }
 
@@ -483,10 +547,16 @@ async fn connect_one(
         ));
     }
 
+    let attempt = Box::pin(TcpStream::connect(addr));
+    // `connect_resolved` without a timeout: no timer for a limit that never
+    // expires.
+    if timeout_duration == Duration::MAX {
+        return attempt.await;
+    }
     let deadline =
         time_getter().saturating_add_nanos(duration_to_nanos_saturating(timeout_duration));
 
-    match future_with_timeout(Box::pin(TcpStream::connect(addr)), deadline, time_getter).await {
+    match future_with_timeout(attempt, deadline, time_getter).await {
         Ok(result) => result,
         Err(_elapsed) => Err(io::Error::new(
             io::ErrorKind::TimedOut,
@@ -1063,35 +1133,7 @@ mod tests {
     fn black_holed_first_address_does_not_block_a_working_second_address() {
         init_test("black_holed_first_address_does_not_block_a_working_second_address");
 
-        // Linux drops SYNs aimed at a listener whose accept queue is full, so
-        // after filling a backlog-0 queue, connects to it hang unanswered.
-        let blackhole = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)
-            .expect("blackhole socket");
-        blackhole
-            .bind(&"127.0.0.1:0".parse::<SocketAddr>().unwrap().into())
-            .expect("bind blackhole");
-        blackhole.listen(0).expect("listen with backlog 0");
-        let blackhole_addr = blackhole
-            .local_addr()
-            .expect("blackhole addr")
-            .as_socket()
-            .expect("inet addr");
-        let _queued: Vec<_> = (0..4)
-            .filter_map(|_| {
-                std::net::TcpStream::connect_timeout(&blackhole_addr, Duration::from_millis(100))
-                    .ok()
-            })
-            .collect();
-        // Witness: the address really black-holes (a direct connect times
-        // out rather than being refused), or this test proves nothing.
-        let probe_started = std::time::Instant::now();
-        let probe =
-            std::net::TcpStream::connect_timeout(&blackhole_addr, Duration::from_millis(300));
-        assert!(
-            matches!(&probe, Err(error) if matches!(error.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock)),
-            "the full-backlog listener must drop SYNs, got {probe:?} after {:?}",
-            probe_started.elapsed()
-        );
+        let (_blackhole, _queued, blackhole_addr) = black_holed_loopback();
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let open_addr = listener.local_addr().unwrap();
@@ -1126,9 +1168,165 @@ mod tests {
         );
     }
 
+    /// br-asupersync-1aqha7: the clients' connect path resolves, then races a
+    /// black-holed first address with a working second one, with and without
+    /// a timeout. A sequential connect would wait out the first address: the
+    /// whole budget with a timeout, the kernel's SYN retries without one.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn connect_resolved_races_past_a_black_holed_first_address() {
+        init_test("connect_resolved_races_past_a_black_holed_first_address");
+
+        let (_blackhole, _queued, blackhole_addr) = black_holed_loopback();
+        let runtime = crate::runtime::RuntimeBuilder::new().build().unwrap();
+        // Report every failed case at once.
+        let mut failures = Vec::new();
+        for timeout in [Some(Duration::from_secs(5)), None] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let open_addr = listener.local_addr().unwrap();
+            let accept_thread = std::thread::spawn(move || {
+                let _ = listener.accept();
+            });
+            // A `'static` slice resolves through `lookup_all` like a hostname.
+            let addrs: &'static [SocketAddr] = Vec::leak(vec![blackhole_addr, open_addr]);
+            let started = std::time::Instant::now();
+            let handle = runtime
+                .handle()
+                .spawn(async move { connect_resolved(addrs, timeout).await });
+            let result = runtime.block_on(handle);
+            let elapsed = started.elapsed();
+            match result {
+                Ok(stream) if stream.peer_addr().ok() == Some(open_addr) => {
+                    if elapsed >= Duration::from_secs(2) {
+                        failures.push(format!(
+                            "{timeout:?}: the second address won only after {elapsed:?}"
+                        ));
+                    }
+                    let _ = accept_thread.join();
+                }
+                // Nothing reached the listener, so its accept never returns:
+                // leave that thread detached rather than join it.
+                other => failures.push(format!(
+                    "{timeout:?}: want a connection to {open_addr}, got {other:?} after {elapsed:?}"
+                )),
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+        crate::test_complete!("connect_resolved_races_past_a_black_holed_first_address");
+    }
+
+    /// A loopback address that never answers. Linux drops SYNs aimed at a
+    /// listener whose accept queue is full, so after filling a backlog-0
+    /// queue, connects to it hang unanswered. Keep the socket and the queued
+    /// connections alive for as long as the address must stay black-holed.
+    #[cfg(target_os = "linux")]
+    fn black_holed_loopback() -> (socket2::Socket, Vec<std::net::TcpStream>, SocketAddr) {
+        let blackhole = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)
+            .expect("blackhole socket");
+        blackhole
+            .bind(&"127.0.0.1:0".parse::<SocketAddr>().unwrap().into())
+            .expect("bind blackhole");
+        blackhole.listen(0).expect("listen with backlog 0");
+        let blackhole_addr = blackhole
+            .local_addr()
+            .expect("blackhole addr")
+            .as_socket()
+            .expect("inet addr");
+        let queued: Vec<_> = (0..4)
+            .filter_map(|_| {
+                std::net::TcpStream::connect_timeout(&blackhole_addr, Duration::from_millis(100))
+                    .ok()
+            })
+            .collect();
+        // Witness: the address really black-holes (a direct connect times
+        // out rather than being refused), or the test proves nothing.
+        let probe_started = std::time::Instant::now();
+        let probe =
+            std::net::TcpStream::connect_timeout(&blackhole_addr, Duration::from_millis(300));
+        assert!(
+            matches!(&probe, Err(error) if matches!(error.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock)),
+            "the full-backlog listener must drop SYNs, got {probe:?} after {:?}",
+            probe_started.elapsed()
+        );
+        (blackhole, queued, blackhole_addr)
+    }
+
     // =======================================================================
     // RaceConnections structural tests
     // =======================================================================
+
+    /// A race whose owner is cancelled reports Interrupted, as
+    /// TcpStream::connect does. Before, its overall-timeout Sleep completed
+    /// on the cancellation and the race reported its timeout instead.
+    #[test]
+    fn a_cancelled_race_reports_interrupted_not_its_timeout() {
+        init_test("a_cancelled_race_reports_interrupted_not_its_timeout");
+        let owner = Cx::for_testing();
+        let _guard = Cx::set_current(Some(owner.clone()));
+        let polls = Arc::new(AtomicUsize::new(0));
+        let attempt: ConnectFuture = Box::pin(PollCountingPendingConnect::new(Arc::clone(&polls)));
+        let deadline = timeout_now().saturating_add_nanos(5_000_000_000);
+        let mut race = RaceConnections::from_futures(
+            vec![attempt],
+            HappyEyeballsConfig::default(),
+            deadline,
+            timeout_now,
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(race.poll_with_time(timeout_now(), &mut cx).is_pending());
+
+        owner.set_cancel_requested(true);
+        let mut result = race.poll_with_time(timeout_now(), &mut cx);
+        for _ in 0..2 {
+            if result.is_ready() {
+                break;
+            }
+            result = race.poll_with_time(timeout_now(), &mut cx);
+        }
+        match result {
+            Poll::Ready(Err(error)) => {
+                assert_eq!(error.kind(), io::ErrorKind::Interrupted, "{error}");
+                assert_eq!(error.to_string(), CONNECT_CANCELLED_MSG);
+            }
+            other => panic!("a cancelled race must end Interrupted, got {other:?}"),
+        }
+        crate::test_complete!("a_cancelled_race_reports_interrupted_not_its_timeout");
+    }
+
+    /// A cancelled race starts no further attempt. Before, each attempt
+    /// failed Interrupted under the cancelled owner and the race started the
+    /// next address at once, one socket and SYN per remaining address.
+    #[test]
+    fn a_cancelled_race_starts_no_further_attempt() {
+        init_test("a_cancelled_race_starts_no_further_attempt");
+        let owner = Cx::for_testing();
+        let _guard = Cx::set_current(Some(owner.clone()));
+        let addrs: Vec<SocketAddr> = (0..4)
+            .map(|_| {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+                listener.local_addr().expect("local addr")
+            })
+            .collect();
+        let deadline = timeout_now().saturating_add_nanos(5_000_000_000);
+        let mut race =
+            RaceConnections::new(addrs, HappyEyeballsConfig::default(), deadline, timeout_now);
+        assert_eq!(race.started_count, 1, "construction starts one attempt");
+
+        owner.set_cancel_requested(true);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let result = race.poll_with_time(timeout_now(), &mut cx);
+        assert!(
+            matches!(&result, Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::Interrupted),
+            "a cancelled race must end Interrupted, got {result:?}"
+        );
+        assert_eq!(
+            race.started_count, 1,
+            "no attempt may start after the owner is cancelled"
+        );
+        crate::test_complete!("a_cancelled_race_starts_no_further_attempt");
+    }
 
     #[test]
     fn race_connections_all_fail() {

@@ -1132,6 +1132,21 @@ pub(crate) fn cancel_local_spawns_for_mailbox(mailbox: &Arc<SpawnMailbox>) {
     }
 }
 
+/// Cancels a runtime's local spawns still queued on this thread when dropped.
+///
+/// A native worker thread holds one while it runs. Its loop ends at shutdown
+/// even when the thread's lane still holds that runtime's unadmitted
+/// `spawn_local` requests, and thread exit would otherwise drop them during
+/// thread-local teardown: their handles never resolve, and their captures are
+/// destroyed where a panic aborts the process (br-asupersync-01oghn M1).
+pub(crate) struct CancelLocalSpawnsOnExit(pub(crate) Arc<SpawnMailbox>);
+
+impl Drop for CancelLocalSpawnsOnExit {
+    fn drop(&mut self) {
+        cancel_local_spawns_for_mailbox(&self.0);
+    }
+}
+
 /// A spawn request travelling through the [`SpawnMailbox`].
 ///
 /// Carries everything admission needs to create the task record under the
@@ -2098,6 +2113,9 @@ pub struct SpawnGateway {
     /// Managed supervisors record their restart history here for the lab's
     /// supervision oracle (br-asupersync-52hxjz). Only the lab sets it.
     supervision_history: Option<crate::runtime::state::SupervisionHistoryHandle>,
+    /// GenServer replies record their resolution here for the lab's
+    /// reply-linearity oracle (br-asupersync-52hxjz). Only the lab sets it.
+    reply_history: Option<crate::runtime::state::ReplyHistoryHandle>,
 }
 
 impl SpawnGateway {
@@ -2120,6 +2138,7 @@ impl SpawnGateway {
                 usize::MAX,
             )),
             supervision_history: None,
+            reply_history: None,
         }
     }
 
@@ -2140,6 +2159,23 @@ impl SpawnGateway {
         &self,
     ) -> Option<&crate::runtime::state::SupervisionHistoryHandle> {
         self.supervision_history.as_ref()
+    }
+
+    /// Hands GenServer replies a history for the lab's reply-linearity
+    /// oracle (br-asupersync-52hxjz).
+    #[must_use]
+    pub(crate) fn with_reply_history(
+        mut self,
+        history: crate::runtime::state::ReplyHistoryHandle,
+    ) -> Self {
+        self.reply_history = Some(history);
+        self
+    }
+
+    /// The reply history, on runtimes that record one (the lab).
+    #[must_use]
+    pub(crate) fn reply_history(&self) -> Option<&crate::runtime::state::ReplyHistoryHandle> {
+        self.reply_history.as_ref()
     }
 
     /// Configures the runtime-wide ceiling for borrowed scoped CPU workers.

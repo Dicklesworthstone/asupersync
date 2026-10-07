@@ -52,14 +52,14 @@ use crate::atp::safety::{
     validate_portable_relative_path,
 };
 use crate::net::atp::transport_common::delta::ATP_DELTA_CHUNK_MANIFEST_SCHEMA;
+use crate::net::atp::transport_common::metadata::{
+    DeferredParentSyncs, HardlinkIdentity, commit_hardlink_transactionally,
+    commit_symlink_transactionally, path_is_link_or_reparse, validate_entry_metadata_for_receive,
+    validate_symlink_metadata_for_receive, write_sparse_zero_runs,
+};
 #[cfg(test)]
 use crate::net::atp::transport_common::metadata::{
     DirectoryMetadataEntry, SymlinkTargetInfo, SymlinkTargetKind, SymlinkTargetSemantics,
-};
-use crate::net::atp::transport_common::metadata::{
-    HardlinkIdentity, commit_hardlink_transactionally, commit_staged_regular_file_transactionally,
-    commit_symlink_transactionally, path_is_link_or_reparse, validate_entry_metadata_for_receive,
-    validate_symlink_metadata_for_receive, write_sparse_zero_runs,
 };
 use crate::net::atp::transport_common::streaming::collect_entries_with_policy;
 use crate::net::atp::transport_common::{
@@ -2535,6 +2535,9 @@ async fn commit_verified_staging(
         reject_entry_destination_link_prefixes(&base, &base, None, false).await?;
         committed_paths.push(base.clone());
     }
+    // Each committed file's directory is fsynced once, after the loop and
+    // before the receipt, instead of after every rename (r02ssd).
+    let mut parent_syncs = DeferredParentSyncs::default();
     for (entry, staging_path) in manifest.entries.iter().zip(staging_paths.iter()) {
         let out_path = if manifest.is_directory {
             join_relative(&base, &entry.rel_path)?
@@ -2629,12 +2632,15 @@ async fn commit_verified_staging(
             continue;
         }
 
-        commit_staged_regular_file_transactionally(staging_path, &out_path).await?;
+        parent_syncs
+            .commit_staged_regular_file(staging_path, &out_path)
+            .await?;
         if let Some(meta) = &entry.metadata {
             apply_entry_metadata_best_effort(cx, &out_path, meta).await;
         }
         committed_paths.push(out_path);
     }
+    parent_syncs.sync().await?;
     mirror_committed_manifest(cx, dest_dir, manifest, config.mirror_policy).await?;
     apply_directory_metadata_best_effort(cx, &base, manifest).await?;
     Ok(committed_paths)
@@ -4032,6 +4038,9 @@ where
                 reject_entry_destination_link_prefixes(&base, &base, None, false).await?;
                 committed_paths.push(base.clone());
             }
+            // Each committed file's directory is fsynced once, after the loop
+            // and before the receipt, instead of after every rename (r02ssd).
+            let mut parent_syncs = DeferredParentSyncs::default();
             for (entry, staging_path) in manifest.entries.iter().zip(staging_paths.iter()) {
                 let out_path = if manifest.is_directory {
                     join_relative(&base, &entry.rel_path)?
@@ -4141,7 +4150,9 @@ where
                     continue;
                 }
 
-                commit_staged_regular_file_transactionally(staging_path, &out_path).await?;
+                parent_syncs
+                    .commit_staged_regular_file(staging_path, &out_path)
+                    .await?;
 
                 // Apply captured metadata (mode/mtime/owner) best-effort; skips
                 // (e.g. chown without privilege) are traced, never fatal.
@@ -4150,6 +4161,7 @@ where
                 }
                 committed_paths.push(out_path);
             }
+            parent_syncs.sync().await?;
             mirror_committed_manifest(cx, dest_dir, &manifest, config.mirror_policy).await?;
             apply_directory_metadata_best_effort(cx, &base, &manifest).await?;
             Ok(())
