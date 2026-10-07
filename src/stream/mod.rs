@@ -505,6 +505,15 @@ pub trait StreamExt: Stream {
     }
 
     /// Collects items into fixed-size chunks.
+    ///
+    /// Each chunk holds `size` items, except the last, which holds whatever
+    /// remains when the stream ends. A chunk allocates as items arrive, so a
+    /// `size` larger than the stream (even `usize::MAX`) yields the whole
+    /// stream as one chunk.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `size` is zero.
     fn chunks(self, size: usize) -> Chunks<Self>
     where
         Self: Sized,
@@ -513,6 +522,13 @@ pub trait StreamExt: Stream {
     }
 
     /// Yields immediately available items up to a maximum chunk size.
+    ///
+    /// A chunk ends when it holds `size` items or when the stream has no item
+    /// ready; it never waits to fill up.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `size` is zero.
     fn ready_chunks(self, size: usize) -> ReadyChunks<Self>
     where
         Self: Sized,

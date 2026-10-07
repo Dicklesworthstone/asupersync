@@ -7,6 +7,11 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 /// Stream that yields when watch value changes.
+///
+/// The stream ends (`None`) when the sender is dropped and also when the
+/// stream's `Cx` is cancelled, including before the initial value is yielded.
+/// A consumer that must tell the two apart checks `cx.is_cancel_requested()`
+/// after the stream ends.
 #[derive(Debug)]
 pub struct WatchStream<T> {
     inner: watch::Receiver<T>,

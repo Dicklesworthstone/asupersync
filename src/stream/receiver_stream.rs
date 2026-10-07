@@ -4,10 +4,13 @@
 //! preserving Asupersync's explicit-capability model. A `Cx` is required
 //! to perform receive operations.
 //!
-//! Phase 0 note: channel receive operations are currently blocking. These
-//! adapters therefore block inside `poll_next` until a message arrives or
-//! the channel closes. This will be replaced by non-blocking waker-based
-//! integration in a later phase.
+//! `poll_next` never blocks the thread: it registers the task's waker with
+//! the receiver and returns `Pending` until a message arrives. The stream
+//! ends (`None`) when the channel is closed and drained, and also when the
+//! adapter's `Cx` is cancelled. A consumer that must tell the two apart
+//! checks `cx.is_cancel_requested()` after the stream ends; on cancellation
+//! the messages still queued stay in the receiver, which
+//! [`ReceiverStream::into_inner`] returns.
 
 use crate::channel::mpsc;
 use crate::channel::mpsc::RecvError;

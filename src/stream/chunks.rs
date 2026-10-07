@@ -15,6 +15,15 @@ use std::task::{Context, Poll};
 /// upstream streams can monopolize an executor turn.
 const CHUNKS_COOPERATIVE_BUDGET: usize = 1024;
 
+/// Reserve room for the next chunk before its first item, but never more
+/// than one poll's budget of items: a chunk size such as `usize::MAX` (a
+/// chunk per stream) must not allocate, or overflow, up front.
+fn reserve_chunk<T>(items: &mut Vec<T>, cap: usize) {
+    if items.capacity() == 0 {
+        items.reserve(cap.min(CHUNKS_COOPERATIVE_BUDGET));
+    }
+}
+
 /// A stream that yields items in fixed-size chunks.
 ///
 /// Created by [`StreamExt::chunks`](super::StreamExt::chunks).
@@ -36,7 +45,7 @@ impl<S: Stream> Chunks<S> {
         assert!(cap > 0, "chunk size must be non-zero");
         Self {
             stream,
-            items: Vec::with_capacity(cap),
+            items: Vec::new(),
             cap,
             done: false,
         }
@@ -81,6 +90,7 @@ where
         loop {
             match this.stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(item)) => {
+                    reserve_chunk(this.items, *this.cap);
                     this.items.push(item);
                     if this.items.len() >= *this.cap {
                         return Poll::Ready(Some(std::mem::take(this.items)));
@@ -136,7 +146,7 @@ impl<S: Stream> ReadyChunks<S> {
         Self {
             stream,
             cap,
-            items: Vec::with_capacity(cap),
+            items: Vec::new(),
             done: false,
         }
     }
@@ -174,17 +184,12 @@ where
         if *this.done {
             return Poll::Ready(None);
         }
-        // Reuse the buffer across polls; ensure capacity after a previous take.
         let cap = *this.cap;
-        let need = cap.saturating_sub(this.items.capacity());
-        if need > 0 {
-            this.items.reserve(need);
-        }
-
         let mut drained_this_poll = 0usize;
         loop {
             match this.stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(item)) => {
+                    reserve_chunk(this.items, cap);
                     this.items.push(item);
                     if this.items.len() >= cap {
                         return Poll::Ready(Some(std::mem::take(this.items)));
@@ -613,6 +618,28 @@ mod tests {
             second
         );
         crate::test_complete!("ready_chunks_flush_after_budget_on_always_ready_stream");
+    }
+
+    /// br-asupersync-526c3g L3: a chunk size larger than any stream, such as
+    /// `usize::MAX` for one chunk per stream, allocates nothing up front. It
+    /// used to panic with "capacity overflow", and a huge but representable
+    /// size aborted the process when the allocation failed.
+    #[test]
+    fn huge_chunk_sizes_allocate_lazily() {
+        init_test("huge_chunk_sizes_allocate_lazily");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut chunks = Chunks::new(iter(vec![1, 2, 3]), usize::MAX);
+        let poll = Pin::new(&mut chunks).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(Some(ref chunk)) if chunk == &vec![1, 2, 3]);
+        crate::assert_with_log!(ok, "one chunk", "Poll::Ready(Some([1,2,3]))", poll);
+
+        let mut ready = ReadyChunks::new(iter(vec![4, 5]), usize::MAX);
+        let poll = Pin::new(&mut ready).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(Some(ref chunk)) if chunk == &vec![4, 5]);
+        crate::assert_with_log!(ok, "one ready chunk", "Poll::Ready(Some([4,5]))", poll);
+        crate::test_complete!("huge_chunk_sizes_allocate_lazily");
     }
 
     // =========================================================================
