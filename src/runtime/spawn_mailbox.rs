@@ -2095,6 +2095,9 @@ pub struct SpawnGateway {
     clock: Option<crate::time::TimerDriverHandle>,
     runtime_liveness: std::sync::Weak<()>,
     scoped_cpu_admission: Arc<crate::cx::scoped_cpu::ScopedCpuAdmission>,
+    /// Managed supervisors record their restart history here for the lab's
+    /// supervision oracle (br-asupersync-52hxjz). Only the lab sets it.
+    supervision_history: Option<crate::runtime::state::SupervisionHistoryHandle>,
 }
 
 impl SpawnGateway {
@@ -2116,7 +2119,27 @@ impl SpawnGateway {
             scoped_cpu_admission: Arc::new(crate::cx::scoped_cpu::ScopedCpuAdmission::new(
                 usize::MAX,
             )),
+            supervision_history: None,
         }
+    }
+
+    /// Hands managed supervisors a history for the lab's supervision oracle
+    /// (br-asupersync-52hxjz).
+    #[must_use]
+    pub(crate) fn with_supervision_history(
+        mut self,
+        history: crate::runtime::state::SupervisionHistoryHandle,
+    ) -> Self {
+        self.supervision_history = Some(history);
+        self
+    }
+
+    /// The supervision history, on runtimes that record one (the lab).
+    #[must_use]
+    pub(crate) fn supervision_history(
+        &self,
+    ) -> Option<&crate::runtime::state::SupervisionHistoryHandle> {
+        self.supervision_history.as_ref()
     }
 
     /// Configures the runtime-wide ceiling for borrowed scoped CPU workers.

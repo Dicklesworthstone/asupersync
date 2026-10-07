@@ -24,9 +24,9 @@
 //!   reject oversized input rather than returning a truncated success
 //!
 //! File I/O retains its inherited blocking-pool placement when task-spawn
-//! authority is restricted. A runtime without a blocking pool uses the existing
-//! inline fallback and can block its async worker on filesystem calls. Configure
-//! `RuntimeBuilder::blocking_threads` when worker responsiveness is required.
+//! authority is restricted. `RuntimeBuilder` configures an on-demand pool by
+//! default; a runtime built with `blocking_threads(0, 0)` has none, uses the
+//! inline fallback, and can block its async worker on filesystem calls.
 //!
 //! # Example
 //!

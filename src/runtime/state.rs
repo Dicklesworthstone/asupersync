@@ -572,6 +572,66 @@ impl LoserDrainHistoryRecorder {
     }
 }
 
+/// One managed-supervisor event for the lab's supervision oracle
+/// (br-asupersync-52hxjz).
+///
+/// Only a runtime whose spawn gateway carries a [`SupervisionHistoryRecorder`]
+/// records them (the lab). The controller publishes each restart batch as one
+/// contiguous run, so log order is causal order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SupervisionHistoryEvent {
+    /// A supervisor run began; its children are its compiled indices.
+    Supervisor {
+        supervisor: u64,
+        restart_policy: crate::supervision::RestartPolicy,
+        max_restarts: u32,
+        escalation: crate::supervision::EscalationPolicy,
+        children: usize,
+    },
+    /// A child failed and its restart batch was allowed.
+    ChildFailed { supervisor: u64, child: usize },
+    /// A child was restarted. `attempt` counts restarts in the current window.
+    Restarted {
+        supervisor: u64,
+        child: usize,
+        attempt: u32,
+    },
+    /// The restart window was exhausted and the supervisor escalated.
+    Escalated { supervisor: u64 },
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct SupervisionHistoryRecorder {
+    next_supervisor: AtomicU64,
+    events: parking_lot::Mutex<Vec<SupervisionHistoryEvent>>,
+}
+
+pub(crate) type SupervisionHistoryHandle = Arc<SupervisionHistoryRecorder>;
+
+impl SupervisionHistoryRecorder {
+    #[must_use]
+    pub(crate) fn new_handle() -> SupervisionHistoryHandle {
+        Arc::new(Self::default())
+    }
+
+    /// A fresh key for one controller run.
+    pub(crate) fn next_supervisor(&self) -> u64 {
+        self.next_supervisor.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Appends `batch` as one contiguous run.
+    pub(crate) fn publish(&self, batch: Vec<SupervisionHistoryEvent>) {
+        if !batch.is_empty() {
+            self.events.lock().extend(batch);
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn snapshot(&self) -> Vec<SupervisionHistoryEvent> {
+        self.events.lock().clone()
+    }
+}
+
 /// Owned direct-observer effects produced by task completion.
 ///
 /// The task cleanup and waiter extraction are complete before this value is
@@ -2011,6 +2071,10 @@ pub struct RuntimeState {
     /// Loser-drain evidence for post-run oracle hydration. Append-only unless
     /// bounded by [`RuntimeState::bound_oracle_histories`] (native runtimes).
     loser_drain_history: LoserDrainHistoryHandle,
+    /// Managed-supervisor restart evidence for post-run oracle hydration
+    /// (br-asupersync-52hxjz). Only the lab's spawn gateway hands it to
+    /// supervisors, so it stays empty on native runtimes.
+    supervision_history: SupervisionHistoryHandle,
     /// Monotonic id source for finalizer registrations.
     next_finalizer_id: u64,
     /// Per-module epoch cursors feeding the runtime epoch tracker.
@@ -2215,6 +2279,7 @@ impl RuntimeState {
             finalizer_history_closed_regions: VecDeque::new(),
             closed_region_history_limit: None,
             loser_drain_history: LoserDrainHistoryRecorder::new_handle(),
+            supervision_history: SupervisionHistoryRecorder::new_handle(),
             next_finalizer_id: 0,
             region_table_epoch: EpochId::GENESIS,
             task_table_epoch: EpochId::GENESIS,
@@ -10231,6 +10296,16 @@ impl RuntimeState {
     #[must_use]
     pub(crate) fn loser_drain_history_handle(&self) -> LoserDrainHistoryHandle {
         Arc::clone(&self.loser_drain_history)
+    }
+
+    #[must_use]
+    pub(crate) fn supervision_history(&self) -> Vec<SupervisionHistoryEvent> {
+        self.supervision_history.snapshot()
+    }
+
+    #[must_use]
+    pub(crate) fn supervision_history_handle(&self) -> SupervisionHistoryHandle {
+        Arc::clone(&self.supervision_history)
     }
 
     #[cfg(test)]

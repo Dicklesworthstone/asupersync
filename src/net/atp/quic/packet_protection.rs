@@ -196,14 +196,23 @@ fn packet_unprotect_parallel_width_for_cx(cx: &Cx, packets: usize) -> usize {
     let Some(pool) = cx.blocking_pool_handle() else {
         return 1;
     };
-    let available_threads = pool
-        .current_max_threads()
-        .saturating_sub(pool.busy_threads())
-        .max(1);
+    let mut cap = pool.current_max_threads();
+    if !pool.is_explicitly_sized() {
+        // The runtime's default pool is sized for blocking I/O (up to 512
+        // threads), not for CPUs (kpmoy5.1.15).
+        cap = cap.min(host_cpu_parallelism());
+    }
+    let available_threads = cap.saturating_sub(pool.busy_threads()).max(1);
     let chunks_by_size = packets
         .div_ceil(PARALLEL_UNPROTECT_TARGET_CHUNK_PACKETS)
         .max(1);
     available_threads.min(chunks_by_size).max(1)
+}
+
+fn host_cpu_parallelism() -> usize {
+    static CORES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CORES
+        .get_or_init(|| std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get))
 }
 
 fn unprotect_packet_chunk(
@@ -1868,6 +1877,32 @@ mod tests {
             packet_unprotect_parallel_width_for_cx(&cx, 64),
             4,
             "width should cap at the receiver blocking-pool capacity"
+        );
+    }
+
+    #[test]
+    fn parallel_unprotect_width_bounds_a_default_sized_pool_by_host_cores() {
+        // br-asupersync-issue65-criticisms-kpmoy5.1.15: the runtime's default
+        // pool caps at 512 threads for blocking I/O, which says nothing about CPUs.
+        let pool = crate::runtime::blocking_pool::BlockingPool::new(0, 512);
+        let cx = Cx::new(
+            RegionId::new_for_test(54, 1),
+            TaskId::new_for_test(54, 0),
+            Budget::INFINITE,
+        )
+        .with_blocking_pool_handle(Some(pool.handle()));
+        let packets = PARALLEL_UNPROTECT_TARGET_CHUNK_PACKETS * 1024;
+        assert_eq!(
+            packet_unprotect_parallel_width_for_cx(&cx, packets),
+            512,
+            "an explicitly sized pool's cap stands in for CPU width"
+        );
+
+        pool.handle().mark_default_sized();
+        assert_eq!(
+            packet_unprotect_parallel_width_for_cx(&cx, packets),
+            host_cpu_parallelism().min(512),
+            "the default pool's width must come from the host's cores"
         );
     }
 

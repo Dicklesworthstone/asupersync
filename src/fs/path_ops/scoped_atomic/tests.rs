@@ -31,7 +31,11 @@ fn bounded(test: impl FnOnce() + Send + 'static) {
 fn runtime(workers: usize, pool: bool) -> Runtime {
     let builder = if workers == 1 { RuntimeBuilder::current_thread() }
         else { RuntimeBuilder::new().worker_threads(workers) };
-    let builder = if pool { builder.blocking_threads(1, 1) } else { builder };
+    let builder = if pool {
+        builder.blocking_threads(1, 1)
+    } else {
+        builder.blocking_threads(0, 0)
+    };
     builder.build().unwrap()
 }
 

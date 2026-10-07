@@ -412,6 +412,79 @@ impl OracleSuite {
             }
         }
 
+        // Managed-supervisor restart history (br-asupersync-52hxjz), replayed
+        // whole on every hydration. A suite fed by hand keeps its events. Each
+        // event's time is its log position: the controller publishes a restart
+        // batch in causal order, while virtual time can give a failure and an
+        // immediate re-crash the same instant and merge their windows.
+        let supervision = state.supervision_history();
+        if !supervision.is_empty() {
+            use crate::runtime::state::SupervisionHistoryEvent;
+            self.supervision.reset();
+            let mut ids: BTreeMap<(u64, Option<usize>), crate::actor::ActorId> = BTreeMap::new();
+            let mut actor = |supervisor: u64, child: Option<usize>| {
+                let next = u32::try_from(ids.len()).unwrap_or(u32::MAX);
+                *ids.entry((supervisor, child)).or_insert_with(|| {
+                    crate::actor::ActorId::from_task(crate::types::TaskId::from_arena(
+                        crate::util::ArenaIndex::new(next, 0),
+                    ))
+                })
+            };
+            for (position, event) in supervision.iter().enumerate() {
+                let time = Time::from_nanos(
+                    u64::try_from(position)
+                        .unwrap_or(u64::MAX)
+                        .saturating_add(1),
+                );
+                match *event {
+                    SupervisionHistoryEvent::Supervisor {
+                        supervisor,
+                        restart_policy,
+                        max_restarts,
+                        escalation,
+                        children,
+                    } => {
+                        let parent = actor(supervisor, None);
+                        self.supervision.register_supervisor(
+                            parent,
+                            restart_policy,
+                            max_restarts,
+                            escalation,
+                        );
+                        for index in 0..children {
+                            self.supervision
+                                .register_child(parent, actor(supervisor, Some(index)));
+                        }
+                    }
+                    SupervisionHistoryEvent::ChildFailed { supervisor, child } => {
+                        self.supervision.on_child_failed(
+                            actor(supervisor, None),
+                            actor(supervisor, Some(child)),
+                            time,
+                            String::from("managed child failed"),
+                        );
+                    }
+                    SupervisionHistoryEvent::Restarted {
+                        supervisor,
+                        child,
+                        attempt,
+                    } => {
+                        self.supervision
+                            .on_restart(actor(supervisor, Some(child)), attempt, time);
+                    }
+                    SupervisionHistoryEvent::Escalated { supervisor } => {
+                        let parent = actor(supervisor, None);
+                        self.supervision.on_escalation(
+                            parent,
+                            parent,
+                            time,
+                            String::from("managed restart window exhausted"),
+                        );
+                    }
+                }
+            }
+        }
+
         // Replayed on every hydration, not only the first: a race in flight
         // at one report completes by the next (br-asupersync-vcu2oz). A suite
         // fed by hand keeps its events; an empty history marks nothing, so

@@ -109,7 +109,7 @@ If you already know tokio, this section maps the primitives you use daily to the
 | `tokio::spawn(fut)` | `cx.spawn(\|cx\| async move { fut.await })` or `cx.spawn_in(&scope, \|cx\| fut)` | Task is owned by a region; the factory receives its own `Cx`. See [`onramp_level2.rs`](./examples/onramp_level2.rs). |
 | `JoinHandle<T>` | `TaskHandle<T>` | `.join(cx).await` returns `Result<T, JoinError>`; cancellation and panic remain distinct. |
 | `tokio::task::JoinSet<T>` | `JoinSet<T, E, P>` | `JoinSet::in_cx(cx)` or `JoinSet::new(&scope)` owns dynamic fan-out in one region; `join_next`, `join_all`, and `cancel_all` always retain drain ownership. |
-| `tokio::spawn_blocking(f)` | `cx.spawn_blocking(\|cx\| f())` | Same idea when the runtime has a blocking pool: `#[main]`/`#[test]` configure one on demand (`blocking = N`, `0` opts out). A bare `RuntimeBuilder::new()` ships with `blocking_threads(0, 0)`, and without a pool the closure runs inline on the async worker. |
+| `tokio::spawn_blocking(f)` | `cx.spawn_blocking(\|cx\| f())` | Same idea: `RuntimeBuilder::new()` and `#[main]`/`#[test]` configure an on-demand pool, `blocking_threads(0, 512)` (`blocking = N` in the macros). With `blocking_threads(0, 0)` (`blocking = 0`) there is no pool, and the closure runs inline on the async worker. |
 | `tokio::select!` | `race!(cx, { move \|child\| a(child), move \|child\| b(child) })` or `cx.race_drained_with(...)` | Returns only after the winner is selected and every loser is protocol-cancelled and drained. Each branch receives its own child `Cx`; pass it to the branch's operations. A prebuilt branch that awaits on the caller's `cx` (for example `rx.recv(&cx)`) never sees its cancellation, so the drain waits for it to finish on its own. Each branch runs in its own child region: tasks a losing branch spawned through its own `Cx` are cancelled and drained before the race returns, while tasks the winner spawned keep running. See [`docs/macro-dsl.md`](./docs/macro-dsl.md#race). |
 | `tokio::join!` | `join!(a, b)`; use `JoinSet::join_all(cx)` for dynamic arity | Inline branches complete together; spawned dynamic members remain region-owned and are collected in spawn order. See [`macros_basic.rs`](./examples/macros_basic.rs). |
 | `FuturesUnordered` / `join_all` over borrowed data | `cx::fiber::scope(\|s\| async move { s.spawn(fut) })` | Fibers run concurrently inside the calling task, may borrow from its stack (no `'static`), and the scope waits for all of them. Each fiber has its own cancellation: the task's cancellation reaches every fiber, `FiberHandle::cancel` stops one, and a panicking fiber cancels its siblings. They are not parallel; use tasks for that. See [`fibers_borrowing.rs`](./examples/fibers_borrowing.rs). |
@@ -337,13 +337,13 @@ The lab runtime provides:
 - **Deterministic scheduling**: same seed → same execution
 - **Trace capture/replay**: debug production issues locally
 - **Schedule exploration**: race-guided deterministic seed exploration with Mazurkiewicz/Foata trace-class deduplication
-- **Invariant oracles**: every `LabRuntime` report checks 9 of the 24 built-in
+- **Invariant oracles**: every `LabRuntime` report checks 10 of the 24 built-in
   oracles from runtime state: task leak, obligation leak, quiescence, loser
   drain, finalizer, region tree, deadline monotonicity, the cancellation
-  protocol and DOWN-message order
+  protocol, DOWN-message order and managed-supervisor restarts
   (`lab::oracle::LAB_RUNTIME_FED_ORACLE_NAMES`). Nothing in the runtime feeds
-  the other 15 yet (channel atomicity, waker dedup, actor and supervision
-  oracles among them); reports list them as passed and count them as not fed
+  the other 14 yet (channel atomicity, waker dedup and the actor oracles among
+  them); reports list them as passed and count them as not fed
   (asupersync-52hxjz).
 
 Concurrency bugs become reproducible test failures.
@@ -1348,8 +1348,8 @@ For structured active refresh, construct `NativeRemoteDiscoveryDriver` with an
 and a finite nonzero polling/retry policy, then await `run(&cx)` in a caller-owned
 region task. The first poll is immediate. Synchronous source polling runs on the
 supplied context's blocking pool and is awaited to completion; a context without
-that authority is refused before polling, so the owning `RuntimeBuilder` must
-configure nonzero `blocking_threads`. Cancellation stops future polls but
+that authority is refused before polling, so the owning runtime needs a pool (the
+`RuntimeBuilder` default, not `blocking_threads(0, 0)`). Cancellation stops future polls but
 can wait for the current source poll, so production sources must bound their own
 poll. Source errors and empty, duplicate, or invalid snapshots retain the
 last-known-good route. A changed valid snapshot atomically replaces only that

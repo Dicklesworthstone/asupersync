@@ -5,8 +5,9 @@
 //! The observable: on a single-worker runtime, a peer task keeps a counter
 //! moving only while the worker is free during the file transfer. With pool
 //! offload, pending 128 KiB chunk hops let the peer advance throughout one
-//! `read_exact` of a 48 MiB buffer (384 chunks). On
-//! a runtime built without a blocking pool (`blocking_threads(0, 0)`) the
+//! `read_exact` of a 48 MiB buffer (384 chunks), on an explicitly sized pool
+//! and on a bare builder's default pool. On a runtime built without a
+//! blocking pool (`blocking_threads(0, 0)`) the
 //! offload degrades to the inline fallback: the only yields left are
 //! `ReadExact`'s cooperative one every 32 polls (about 12 for this file), so
 //! the peer advances an order of magnitude less. That contrast is the planted
@@ -112,11 +113,28 @@ fn read_exact_lets_a_peer_task_run_when_a_blocking_pool_exists() {
     );
 }
 
+/// br-asupersync-issue65-criticisms-kpmoy5.1.15: a builder that names no
+/// blocking pool gets the on-demand default, so file I/O leaves the worker.
+#[test]
+fn read_exact_lets_a_peer_task_run_on_a_bare_builder() {
+    let path = scratch_path("bare");
+    std::fs::write(&path, pattern(BIG)).expect("write fixture");
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("runtime with the default blocking pool");
+    let progress = peer_progress_during_read_exact(runtime, &path);
+    assert!(
+        progress >= 100,
+        "the default pool must offload the read so the peer advances once per 128 KiB chunk (384 chunks); ticks = {progress}"
+    );
+}
+
 #[test]
 fn read_exact_starves_the_peer_without_a_blocking_pool_planted_negative() {
     let path = scratch_path("inline");
     std::fs::write(&path, pattern(BIG)).expect("write fixture");
     let runtime = RuntimeBuilder::current_thread()
+        .blocking_threads(0, 0)
         .build()
         .expect("runtime without a blocking pool");
     let progress = peer_progress_during_read_exact(runtime, &path);

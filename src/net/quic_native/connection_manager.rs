@@ -71,7 +71,6 @@ pub(crate) struct RoutedOutgoingPacket {
 /// socket backpressure. Its sole queued packet is never ordinary stream work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LocalCloseOutput {
-    #[cfg(all(feature = "tls", any(test, feature = "http3")))]
     Requested,
     Queued,
     Sent,
@@ -1375,9 +1374,10 @@ impl ConnectionRouter {
 
     /// A peer frame that broke a transport rule has closed this connection
     /// (`process_packet_frames`). Its transport CONNECTION_CLOSE leaves on the
-    /// next deferred-output turn, as a requested close does.
+    /// next deferred-output turn, as a requested close does, in every build
+    /// (an ATP binary has `tls` without `http3`). A route without packet
+    /// protection has no close to send.
     fn request_peer_violation_close(handle: &mut ConnectionHandle) {
-        #[cfg(all(feature = "tls", any(test, feature = "http3")))]
         if handle.local_close_output.is_none()
             && handle.connection.local_close_frame_type().is_some()
         {
@@ -1385,8 +1385,6 @@ impl ConnectionRouter {
             handle.deferred_spaces = [false; 3];
             handle.next_timer_deadline = None;
         }
-        #[cfg(not(all(feature = "tls", any(test, feature = "http3"))))]
-        let _ = handle;
     }
 
     /// Refresh a connection's PTO deadline from its transport state.
@@ -1706,7 +1704,6 @@ impl ConnectionRouter {
             let now_micros = handle
                 .clock_origin
                 .map_or(now_micros, |origin| instant_micros_from(origin, now));
-            #[cfg(all(feature = "tls", any(test, feature = "http3")))]
             if handle.local_close_output == Some(LocalCloseOutput::Requested) {
                 let origin = handle.clock_origin.unwrap_or(self.clock_origin);
                 match prepare_local_close_packet(cx, connection_id, handle, origin, now).await {

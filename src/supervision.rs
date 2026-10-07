@@ -1802,6 +1802,7 @@ mod managed {
     };
     use crate::cx::registry::{NameLeaseError, NameRegistry};
     use crate::cx::{ChildRegion, ChildRegionError, ChildRegionSpec, Cx};
+    use crate::runtime::state::SupervisionHistoryEvent;
     use crate::runtime::{JoinError, TaskHandle};
     use crate::types::PanicPayload;
     use parking_lot::Mutex;
@@ -2242,6 +2243,62 @@ mod managed {
         }
     }
 
+    /// Feeds the lab's supervision oracle (br-asupersync-52hxjz).
+    ///
+    /// Each allowed restart batch is published whole once it completes, and
+    /// discarded if the run ends partway. The oracle checks the children a
+    /// supervisor started with, so once one of them legitimately stays stopped
+    /// the tap retires and publishes nothing more.
+    struct SupervisionTap {
+        history: crate::runtime::state::SupervisionHistoryHandle,
+        supervisor: u64,
+        batch: Vec<SupervisionHistoryEvent>,
+        retired: bool,
+    }
+
+    impl SupervisionTap {
+        fn begin(&mut self, child: usize) {
+            self.batch.clear();
+            if !self.retired {
+                self.batch.push(SupervisionHistoryEvent::ChildFailed {
+                    supervisor: self.supervisor,
+                    child,
+                });
+            }
+        }
+
+        fn restarted(&mut self, child: usize, attempt: u32) {
+            if !self.retired {
+                self.batch.push(SupervisionHistoryEvent::Restarted {
+                    supervisor: self.supervisor,
+                    child,
+                    attempt,
+                });
+            }
+        }
+
+        fn escalated(&mut self) {
+            if !self.retired {
+                self.batch.push(SupervisionHistoryEvent::Escalated {
+                    supervisor: self.supervisor,
+                });
+                self.publish();
+            }
+        }
+
+        fn publish(&mut self) {
+            let batch = std::mem::take(&mut self.batch);
+            if !self.retired {
+                self.history.publish(batch);
+            }
+        }
+
+        fn retire(&mut self) {
+            self.retired = true;
+            self.batch.clear();
+        }
+    }
+
     struct Controller<E> {
         supervisor: ManagedSupervisor<E>,
         cx: Cx,
@@ -2259,6 +2316,8 @@ mod managed {
         /// termination it already passed.
         terminated: Arc<std::sync::atomic::AtomicUsize>,
         joins_observed: usize,
+        /// `None` unless the runtime records supervision history (the lab).
+        tap: Option<SupervisionTap>,
     }
 
     fn panic_payload(payload: Box<dyn std::any::Any + Send>) -> PanicPayload {
@@ -2271,6 +2330,25 @@ mod managed {
         fn new(supervisor: ManagedSupervisor<E>, cx: &Cx) -> Self {
             let count = supervisor.children.len();
             let tracker = supervisor.config.restart_tracker();
+            let tap = cx
+                .spawn_gateway_handle()
+                .and_then(|gateway| gateway.supervision_history().cloned())
+                .map(|history| {
+                    let key = history.next_supervisor();
+                    history.publish(vec![SupervisionHistoryEvent::Supervisor {
+                        supervisor: key,
+                        restart_policy: supervisor.config.restart_policy,
+                        max_restarts: supervisor.config.max_restarts,
+                        escalation: supervisor.config.escalation,
+                        children: count,
+                    }]);
+                    SupervisionTap {
+                        history,
+                        supervisor: key,
+                        batch: Vec::new(),
+                        retired: false,
+                    }
+                });
             let report = ManagedSupervisorReport {
                 name: supervisor.name.clone(),
                 region: None,
@@ -2296,6 +2374,7 @@ mod managed {
                 report,
                 terminated: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 joins_observed: 0,
+                tap,
             }
         }
 
@@ -3060,12 +3139,15 @@ mod managed {
                             }
                             continue;
                         }
+                        let window_exhausted =
+                            matches!(refusal, super::BudgetRefusal::WindowExhausted { .. });
                         self.report.outcome = Outcome::Err(ManagedSupervisorError::RestartLimit {
                             child: self.supervisor.children[failed].name.clone(),
                             refusal,
                         });
                         if self.supervisor.config.escalation == EscalationPolicy::Escalate {
                             self.escalate(Some(failed));
+                            self.tap_escalation(failed, window_exhausted);
                         }
                         return;
                     }
@@ -3113,6 +3195,23 @@ mod managed {
                             }
                     })
                     .collect();
+                if let Some(tap) = self.tap.as_mut() {
+                    tap.begin(failed);
+                    // The oracle expects every sibling the policy names to
+                    // restart now. One that is not running stays stopped.
+                    let policy = self.supervisor.config.restart_policy;
+                    let not_running = (0..self.running.len()).any(|index| {
+                        self.running[index].is_none()
+                            && match policy {
+                                RestartPolicy::OneForOne => false,
+                                RestartPolicy::OneForAll => index != failed,
+                                RestartPolicy::RestForOne => index > failed,
+                            }
+                    });
+                    if not_running {
+                        tap.retire();
+                    }
+                }
                 // Publish cancellation to every affected sibling before any
                 // join: one child's asynchronous cleanup may require another
                 // sibling to observe cancellation before it can finish.
@@ -3141,10 +3240,17 @@ mod managed {
                                 || mode.eligible(completed))
                     })
                     .collect();
+                if restart.len() != affected.len() {
+                    // A temporary or completed transient child stays stopped.
+                    if let Some(tap) = self.tap.as_mut() {
+                        tap.retire();
+                    }
+                }
                 if !self.backoff(delay).await {
                     return;
                 }
                 let mut counted = false;
+                let mut attempt = 0;
                 for index in restart {
                     if self.cancelled() {
                         self.record_cancel();
@@ -3170,12 +3276,17 @@ mod managed {
                         }
                         // An optional child may stay stopped when a dependency
                         // is unavailable; its skipped restart is still traced.
+                        if let Some(tap) = self.tap.as_mut() {
+                            tap.retire();
+                        }
                         continue;
                     }
                     if !counted {
-                        self.tracker.record(self.cx.now().as_nanos());
+                        let now = self.cx.now().as_nanos();
+                        self.tracker.record(now);
                         self.report.restart_batches += 1;
                         counted = true;
+                        attempt = u32::try_from(self.tracker.recent_count(now)).unwrap_or(u32::MAX);
                     }
                     if let Err(error) = self.start(index).await {
                         if self.supervisor.children[index].required {
@@ -3185,10 +3296,33 @@ mod managed {
                             self.record_error(cleanup);
                             return;
                         }
+                        // An optional child whose start failed stays stopped.
+                        if let Some(tap) = self.tap.as_mut() {
+                            tap.retire();
+                        }
+                    } else if let Some(tap) = self.tap.as_mut() {
+                        tap.restarted(index, attempt);
                     }
                     if !matches!(self.report.outcome, Outcome::Ok(())) {
                         return;
                     }
+                }
+                if let Some(tap) = self.tap.as_mut() {
+                    tap.publish();
+                }
+            }
+        }
+
+        /// Publishes an escalation after the restart window was exhausted. The
+        /// oracle does not model any other refusal, so the tap retires.
+        fn tap_escalation(&mut self, failed: usize, window_exhausted: bool) {
+            let escalated = self.report.escalations == 1;
+            if let Some(tap) = self.tap.as_mut() {
+                if window_exhausted && escalated {
+                    tap.begin(failed);
+                    tap.escalated();
+                } else {
+                    tap.retire();
                 }
             }
         }
@@ -3636,6 +3770,66 @@ mod managed {
                 assert_eq!(report.started, (3 + expected.len()) as u64);
                 assert_eq!(report.joined, report.started);
                 assert_eq!(report.children.len(), 3);
+                clean(&mut lab, root);
+            }
+        }
+
+        /// The lab replays managed restart batches into the supervision oracle
+        /// (br-asupersync-52hxjz): two allowed batches, then an escalation once
+        /// the window is exhausted, all checked against the policy.
+        #[test]
+        fn managed_restart_batches_feed_the_supervision_oracle() {
+            for (policy, restarted_per_batch) in [
+                (RestartPolicy::OneForAll, 3),
+                (RestartPolicy::RestForOne, 2),
+            ] {
+                let mut lab = LabRuntime::new(LabConfig::new(0x34_0052).max_steps(8192));
+                let root = lab.state.create_root_region(Budget::INFINITE);
+                let log: StartedLog = Arc::new(Mutex::new(Vec::new()));
+                let bindings = ["a", "b", "c"]
+                    .into_iter()
+                    .map(|name| parked_binding(name, Arc::clone(&log)))
+                    .collect();
+                let managed = topology(&["a", "b", "c"], policy)
+                    .bind_managed(
+                        bindings,
+                        config(policy, 2).with_escalation(EscalationPolicy::Escalate),
+                    )
+                    .unwrap();
+                let (parent, _join) = lab
+                    .state
+                    .create_task(root, Budget::INFINITE, async move {
+                        let _ = managed.run(&Cx::current().unwrap()).await;
+                    })
+                    .unwrap();
+                lab.scheduler.lock().schedule(parent, 0);
+                lab.run_until_idle();
+                for _ in 0..3 {
+                    let trigger = log
+                        .lock()
+                        .iter()
+                        .rev()
+                        .find(|entry| entry.0 == "b")
+                        .map(|entry| entry.2.clone())
+                        .expect("b is running");
+                    trigger.try_send(()).unwrap();
+                    lab.run_until_idle();
+                }
+                // The oracle's verdict first, so a supervisor that restarts the
+                // wrong children fails here rather than on the start count.
+                let report = lab.run_until_quiescent_with_report();
+                let entry = report
+                    .oracle_report
+                    .entry("supervision")
+                    .expect("supervision is reported");
+                assert!(entry.passed, "{policy:?}: {:?}", entry.violation);
+                // 3 failures, 2 batches of restarts and 1 escalation.
+                assert_eq!(
+                    entry.stats.events_recorded,
+                    3 + 2 * restarted_per_batch + 1,
+                    "{policy:?}"
+                );
+                assert_eq!(log.lock().len(), 3 + 2 * restarted_per_batch);
                 clean(&mut lab, root);
             }
         }

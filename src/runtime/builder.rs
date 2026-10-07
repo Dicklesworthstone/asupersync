@@ -111,7 +111,7 @@
 //! 1. **Config file** — `from_toml`/`from_json` start the builder from the shared typed layer
 //! 2. **Environment** — `with_env_overrides()` replaces what was set before it, presets included
 //! 3. **Programmatic** — `builder.worker_threads(4)` after it, as in the example above
-//! 4. **Defaults** — `RuntimeConfig::default()` fills every field nothing set
+//! 4. **Defaults** — `RuntimeConfig::default()` fills every field nothing set, except that the builder adds an on-demand blocking pool
 //!
 //! # Configuration Reference
 //!
@@ -123,7 +123,7 @@
 //! | [`global_queue_limit`](RuntimeBuilder::global_queue_limit) | 0 (unbounded) | Global queue depth |
 //! | [`steal_batch_size`](RuntimeBuilder::steal_batch_size) | 16 | Work-stealing batch size |
 //! | [`adaptive_ready_batch`](RuntimeBuilder::adaptive_ready_batch) | disabled | Observe-first adaptive ready-lane batch sizing |
-//! | [`blocking_threads`](RuntimeBuilder::blocking_threads) | 0, 0 | Blocking pool min/max |
+//! | [`blocking_threads`](RuntimeBuilder::blocking_threads) | 0, 512 (threads start on demand; 0, 0 on wasm32) | Blocking pool min/max; `0, 0` runs blocking work inline |
 //! | [`enable_parking`](RuntimeBuilder::enable_parking) | true | Park idle workers |
 //! | [`poll_budget`](RuntimeBuilder::poll_budget) | 128 | Self-woken `block_on` root polls before a backoff sleep |
 //! | [`capacity_hints`](RuntimeBuilder::capacity_hints) | auto from `worker_threads` | Initial task/region/obligation table sizing |
@@ -2629,14 +2629,27 @@ pub struct RuntimeBuilder {
     capture_schedules: bool,
     /// Given to every worker before it starts (asupersync-7yq1pv item 2).
     scheduler_evidence_sink: Option<Arc<dyn crate::evidence_sink::EvidenceSink>>,
+    /// Set once the blocking pool's maximum is chosen explicitly. The default
+    /// pool is marked so CPU-bound fan-out ignores its cap (kpmoy5.1.15).
+    blocking_sized: bool,
 }
+
+/// The builder's on-demand blocking pool maximum; wasm32 has no pool threads.
+const DEFAULT_BLOCKING_MAX_THREADS: usize = if cfg!(target_arch = "wasm32") { 0 } else { 512 };
 
 impl RuntimeBuilder {
     /// Create a new builder with default configuration.
+    ///
+    /// On native targets it starts with an on-demand blocking pool,
+    /// `blocking_threads(0, 512)`: threads start on first use and retire when
+    /// idle, so `spawn_blocking` and the `fs` facades leave the async workers.
+    /// `blocking_threads(0, 0)` restores the inline fallback.
     #[must_use]
     pub fn new() -> Self {
+        let mut config = RuntimeConfig::default();
+        config.blocking.max_threads = DEFAULT_BLOCKING_MAX_THREADS;
         Self {
-            config: RuntimeConfig::default(),
+            config,
             scoped_cpu_worker_limit: None,
             reactor: None,
             io_driver: None,
@@ -2648,6 +2661,7 @@ impl RuntimeBuilder {
             current_thread: false,
             capture_schedules: false,
             scheduler_evidence_sink: None,
+            blocking_sized: false,
         }
     }
 
@@ -2826,10 +2840,16 @@ impl RuntimeBuilder {
     }
 
     /// Configure blocking pool thread limits.
+    ///
+    /// The default is `(0, 512)` on native targets: no thread runs until
+    /// first use. `(0, 0)` configures no pool, so blocking work runs inline on
+    /// the calling worker. An explicit maximum also bounds CPU-bound fan-out
+    /// onto the pool, such as ATP's RaptorQ decode; the default's does not.
     #[must_use]
     pub fn blocking_threads(mut self, min: usize, max: usize) -> Self {
         self.config.blocking.min_threads = min;
         self.config.blocking.max_threads = max;
+        self.blocking_sized = true;
         self
     }
 
@@ -3193,13 +3213,15 @@ impl RuntimeBuilder {
     /// See [`env_config`](super::env_config) for the full list of supported variables.
     #[allow(clippy::result_large_err)]
     pub fn with_env_overrides(mut self) -> Result<Self, Error> {
-        crate::runtime::env_config::apply_env_overrides(
-            &mut self.config,
-            &crate::runtime::env_config::SystemEnvReader::new(),
-        )
-        .map_err(|e| {
+        let env = crate::runtime::env_config::SystemEnvReader::new();
+        crate::runtime::env_config::apply_env_overrides(&mut self.config, &env).map_err(|e| {
             Error::new(crate::error::ErrorKind::ConfigError).with_message(e.to_string())
         })?;
+        self.blocking_sized |= crate::runtime::env_config::EnvReader::read_env(
+            &env,
+            crate::runtime::env_config::ENV_BLOCKING_MAX_THREADS,
+        )
+        .is_some();
         Ok(self)
     }
 
@@ -3213,6 +3235,7 @@ impl RuntimeBuilder {
             .map_err(|e| {
                 Error::new(crate::error::ErrorKind::ConfigError).with_message(e.to_string())
             })?;
+        builder.blocking_sized = layer.blocking.max_threads.is_some();
         Ok(builder)
     }
 
@@ -3328,6 +3351,7 @@ impl RuntimeBuilder {
             current_thread,
             capture_schedules,
             scheduler_evidence_sink,
+            blocking_sized,
         } = self;
         #[cfg(target_arch = "wasm32")]
         let _ = (platform_reactor, io_uring_capability_policy);
@@ -3395,6 +3419,11 @@ impl RuntimeBuilder {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .trace_handle();
             runtime.inner.scheduler.enable_schedule_capture(trace);
+        }
+        // The default pool is sized for blocking I/O, so CPU-bound fan-out
+        // must not read its cap as a core count (kpmoy5.1.15).
+        if !blocking_sized && let Some(pool) = runtime.inner.blocking_pool.as_ref() {
+            pool.handle().mark_default_sized();
         }
         if let Some(limit) = scoped_cpu_worker_limit {
             let gateway = {
@@ -4895,7 +4924,7 @@ impl Runtime {
     /// [`Self::shutdown_drained`]: the root stays live until the closure and its
     /// captures retire. The closure receives its actual task `Cx`, and a
     /// started closure's exact result survives cancellation. This requires a
-    /// configured blocking pool and never executes the closure inline.
+    /// blocking pool and never executes the closure inline.
     ///
     /// Cancellation cannot interrupt a running synchronous closure. A bounded
     /// root drain reports timeout and retains unfinished work until it returns.
@@ -9881,6 +9910,78 @@ mod tests {
         assert!(
             runtime.blocking_handle().is_none(),
             "blocking_handle should return None"
+        );
+    }
+
+    /// br-asupersync-issue65-criticisms-kpmoy5.1.15: without a pool,
+    /// `spawn_blocking` runs the closure inline on the thread that polls it.
+    #[test]
+    fn a_bare_builder_runs_blocking_work_on_a_default_pool_thread() {
+        init_test_logging();
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(1)
+            .build()
+            .expect("runtime build");
+        let pool = runtime
+            .blocking_handle()
+            .expect("a bare builder configures an on-demand pool");
+        assert_eq!(pool.current_max_threads(), DEFAULT_BLOCKING_MAX_THREADS);
+        assert_eq!(pool.active_threads(), 0, "no pool thread starts before use");
+        assert!(
+            !pool.is_explicitly_sized(),
+            "the default pool's cap must not stand in for a CPU count"
+        );
+
+        let ran_on = runtime.block_on(crate::runtime::spawn_blocking(|| {
+            std::thread::current().name().map(str::to_owned)
+        }));
+        assert!(
+            ran_on
+                .as_deref()
+                .is_some_and(|name| name.contains("-blocking-")),
+            "the closure must run on a pool thread, not inline: {ran_on:?}"
+        );
+    }
+
+    #[test]
+    fn a_named_blocking_size_marks_the_pool_explicit() {
+        init_test_logging();
+        for builder in [
+            RuntimeBuilder::new().blocking_threads(0, DEFAULT_BLOCKING_MAX_THREADS),
+            RuntimeBuilder::current_thread().blocking_threads(1, 4),
+        ] {
+            let runtime = builder.build().expect("runtime build");
+            let pool = runtime.blocking_handle().expect("a named size > 0");
+            assert!(pool.is_explicitly_sized());
+        }
+        with_envs(
+            &[(crate::runtime::env_config::ENV_BLOCKING_MAX_THREADS, "8")],
+            || {
+                let runtime = RuntimeBuilder::new()
+                    .with_env_overrides()
+                    .expect("env overrides")
+                    .build()
+                    .expect("runtime build");
+                let pool = runtime.blocking_handle().expect("env-sized pool");
+                assert_eq!(pool.current_max_threads(), 8);
+                assert!(pool.is_explicitly_sized());
+            },
+        );
+        with_envs(
+            &[(crate::runtime::env_config::ENV_BLOCKING_MIN_THREADS, "1")],
+            || {
+                let runtime = RuntimeBuilder::new()
+                    .with_env_overrides()
+                    .expect("env overrides")
+                    .build()
+                    .expect("runtime build");
+                let pool = runtime.blocking_handle().expect("default pool");
+                assert_eq!(pool.current_max_threads(), DEFAULT_BLOCKING_MAX_THREADS);
+                assert!(
+                    !pool.is_explicitly_sized(),
+                    "a minimum alone leaves the default maximum"
+                );
+            },
         );
     }
 

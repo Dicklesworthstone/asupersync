@@ -73,8 +73,8 @@ impl KafkaConsumer {
     /// controller retains cleanup. `join()` supplies the native destruction
     /// receipt through the bracket's release outcome.
     ///
-    /// This requires an explicitly configured runtime blocking pool (for example
-    /// `RuntimeBuilder::new().blocking_threads(1, 4)`) and reserves one worker per
+    /// This requires a runtime blocking pool (a `RuntimeBuilder` default; sized
+    /// with, for example, `blocking_threads(1, 4)`) and reserves one worker per
     /// live scoped consumer. Size the pool for simultaneously live consumers,
     /// including nested invocations, plus other blocking work. A missing or
     /// rejecting pool fails acquisition before constructing a native consumer;
@@ -763,7 +763,10 @@ mod tests {
     fn scoped_kafka_refuses_missing_or_rejecting_pool_and_denied_io_before_construction() {
         for (rejected, denied_io) in [(false, false), (true, false), (false, true)] {
             bounded(move || {
-                let runtime = RuntimeBuilder::current_thread().build().unwrap();
+                let runtime = RuntimeBuilder::current_thread()
+                    .blocking_threads(0, 0)
+                    .build()
+                    .unwrap();
                 let shutdown_pool = crate::runtime::blocking_pool::BlockingPool::new(0, 1);
                 shutdown_pool.shutdown();
                 let mut owner = runtime.request_cx_with_budget(Budget::INFINITE);
