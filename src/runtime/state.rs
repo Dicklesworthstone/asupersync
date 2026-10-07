@@ -738,6 +738,8 @@ enum TaskCompletionObserverPayload {
         outcome_label: &'static str,
         duration: Duration,
         waiter_count: usize,
+        /// The task ended cancelled by its deadline.
+        deadline_exceeded: bool,
     },
     UnknownTask {
         task_id: TaskId,
@@ -753,6 +755,7 @@ impl TaskCompletionObserver {
         outcome_label: &'static str,
         duration: Duration,
         waiter_count: usize,
+        deadline_exceeded: bool,
         panic_count: &Arc<AtomicU64>,
     ) -> Self {
         Self {
@@ -764,6 +767,7 @@ impl TaskCompletionObserver {
                 outcome_label,
                 duration,
                 waiter_count,
+                deadline_exceeded,
             }),
             panic_count: Some(Arc::clone(panic_count)),
             retired_cancel_wakers: TaskCompletionRetirements::empty(),
@@ -835,10 +839,14 @@ impl TaskCompletionObserver {
                 outcome_label,
                 duration,
                 waiter_count,
+                deadline_exceeded,
             } => {
                 let callback_result =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         metrics.task_completed(task_id, outcome_kind, duration);
+                        if deadline_exceeded {
+                            metrics.deadline_exceeded(region_id);
+                        }
                         #[cfg(not(feature = "tracing-integration"))]
                         let _ = (region_id, outcome_label, waiter_count);
                         debug!(
@@ -1056,6 +1064,12 @@ impl TaskSpawnEffects {
 
         let callback_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             metrics.task_spawned(region_id, task_id);
+            // The admitted budget's deadline is the one the task's deadline
+            // timer arms; report the time it has left (br-asupersync-x9mmxl).
+            if let Some(deadline) = budget.deadline {
+                let remaining = Duration::from_nanos(deadline.duration_since(spawned_at));
+                metrics.deadline_set(region_id, remaining);
+            }
             if let Some(admitted_seq) = admitted_seq {
                 // This observer event retains its admission-allocated seq;
                 // snapshot() sorts it with any later execution events.
@@ -5324,6 +5338,10 @@ impl RuntimeState {
             TaskState::Completed(Outcome::Panicked(_)) => "Panicked",
             _ => "Unknown",
         };
+        let deadline_exceeded = matches!(
+            &task.state,
+            TaskState::Completed(Outcome::Cancelled(reason)) if reason.kind == CancelKind::Deadline
+        );
 
         TaskCompletionObserver::completed(
             Arc::clone(&self.metrics),
@@ -5333,6 +5351,7 @@ impl RuntimeState {
             outcome_label,
             duration,
             waiter_count,
+            deadline_exceeded,
             &self.task_completion_observer_panics,
         )
     }

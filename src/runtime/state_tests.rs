@@ -10426,3 +10426,128 @@ fn an_untracked_validator_stays_unlocked_and_silent_through_a_region_lifecycle()
         "an_untracked_validator_stays_unlocked_and_silent_through_a_region_lifecycle"
     );
 }
+
+/// The deadline hooks the runtime calls (br-asupersync-x9mmxl).
+#[derive(Default)]
+struct DeadlineHookLog {
+    set: Mutex<Vec<(RegionId, Duration)>>,
+    exceeded: Mutex<Vec<RegionId>>,
+}
+
+struct DeadlineHookMetrics(Arc<DeadlineHookLog>);
+
+impl MetricsProvider for DeadlineHookMetrics {
+    fn task_spawned(&self, _: RegionId, _: TaskId) {}
+    fn task_completed(&self, _: TaskId, _: OutcomeKind, _: Duration) {}
+    fn region_created(&self, _: RegionId, _: Option<RegionId>) {}
+    fn region_closed(&self, _: RegionId, _: Duration) {}
+    fn cancellation_requested(&self, _: RegionId, _: CancelKind) {}
+    fn drain_completed(&self, _: RegionId, _: Duration) {}
+    fn deadline_set(&self, region: RegionId, deadline: Duration) {
+        self.0.set.lock().push((region, deadline));
+    }
+    fn deadline_exceeded(&self, region: RegionId) {
+        self.0.exceeded.lock().push(region);
+    }
+    fn deadline_warning(&self, _: &str, _: &'static str, _: Duration) {}
+    fn deadline_violation(&self, _: &str, _: Duration) {}
+    fn deadline_remaining(&self, _: &str, _: Duration) {}
+    fn checkpoint_interval(&self, _: &str, _: Duration) {}
+    fn task_stuck_detected(&self, _: &str) {}
+    fn obligation_created(&self, _: RegionId) {}
+    fn obligation_discharged(&self, _: RegionId) {}
+    fn obligation_leaked(&self, _: RegionId) {}
+    fn scheduler_tick(&self, _: usize, _: Duration) {}
+}
+
+/// A native runtime reports a task's deadline when it is admitted and again
+/// when the deadline cancels it. A task without a deadline (the root task,
+/// and one aborted by its handle) reports neither.
+#[test]
+fn task_deadlines_reach_the_metrics_provider() {
+    use crate::cx::ChildRegionSpec;
+    use crate::runtime::RuntimeBuilder;
+
+    init_test_logging();
+    let timeout = Duration::from_millis(50);
+    for workers in [None, Some(2)] {
+        let log = Arc::new(DeadlineHookLog::default());
+        let builder = match workers {
+            None => RuntimeBuilder::current_thread(),
+            Some(count) => RuntimeBuilder::multi_thread().worker_threads(count),
+        };
+        let runtime = builder
+            .metrics(DeadlineHookMetrics(Arc::clone(&log)))
+            .build()
+            .expect("build native runtime");
+        let (bounded_region, bounded, aborted) = runtime.block_on(async move {
+            let cx = crate::cx::Cx::current().expect("block_on installs a Cx");
+            let mut spec = ChildRegionSpec::inherit();
+            spec.budget = Some(Budget::new().with_timeout(cx.now(), timeout));
+            let child = cx
+                .open_child_region(spec)
+                .await
+                .expect("open child region with a deadline");
+            let bounded_region = child.cx().region_id();
+            let mut bounded = child
+                .cx()
+                .spawn(|task_cx| async move {
+                    let (_hold, mut never) = crate::channel::mpsc::channel::<u32>(1);
+                    let _ = never.recv(&task_cx).await;
+                    task_cx.cancel_reason().map(|reason| reason.kind)
+                })
+                .expect("spawn inside the child region");
+            let mut unbounded = cx
+                .spawn(|task_cx| async move {
+                    let (_hold, mut never) = crate::channel::mpsc::channel::<u32>(1);
+                    let _ = never.recv(&task_cx).await;
+                    task_cx.cancel_reason().map(|reason| reason.kind)
+                })
+                .expect("spawn in the root region");
+            unbounded.abort_with_reason(CancelReason::shutdown());
+            let aborted = unbounded.join(&cx).await;
+            let bounded = bounded.join(&cx).await;
+            let _ = child.close().await;
+            (bounded_region, bounded, aborted)
+        });
+        assert!(
+            runtime.shutdown_timeout(Duration::from_secs(10)),
+            "{workers:?}: the runtime shuts down"
+        );
+
+        // A task that acknowledged its cancel joins with its own value, so
+        // each task reports the cancel it observed.
+        let observed = |joined: &Result<Option<CancelKind>, JoinError>| match joined {
+            Ok(kind) => *kind,
+            Err(JoinError::Cancelled(reason)) => Some(reason.kind),
+            Err(_) => None,
+        };
+        assert_eq!(
+            observed(&bounded),
+            Some(CancelKind::Deadline),
+            "{workers:?}: the deadline ends the bounded task, got {bounded:?}"
+        );
+        assert!(
+            observed(&aborted).is_some_and(|kind| kind != CancelKind::Deadline),
+            "{workers:?}: the abort ends the unbounded task, got {aborted:?}"
+        );
+        // Report every failed check at once.
+        let set = log.set.lock().clone();
+        let exceeded = log.exceeded.lock().clone();
+        let mut failures = Vec::new();
+        if !matches!(set.as_slice(), [(region, left)] if *region == bounded_region && *left <= timeout)
+        {
+            failures.push(format!(
+                "deadline_set: want one report for {bounded_region:?} with at most \
+                 {timeout:?} left, got {set:?}"
+            ));
+        }
+        if exceeded != [bounded_region] {
+            failures.push(format!(
+                "deadline_exceeded: want [{bounded_region:?}], got {exceeded:?}"
+            ));
+        }
+        assert!(failures.is_empty(), "{workers:?}: {failures:#?}");
+    }
+    crate::test_complete!("task_deadlines_reach_the_metrics_provider");
+}

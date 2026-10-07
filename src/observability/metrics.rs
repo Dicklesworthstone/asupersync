@@ -1020,9 +1020,15 @@ pub trait MetricsProvider: Send + Sync + 'static {
     // === Budget Metrics ===
 
     /// Called when a deadline is set.
+    ///
+    /// The runtime calls this once for each admitted task whose budget has a
+    /// deadline, with the task's region and the time left at admission.
     fn deadline_set(&self, region_id: RegionId, deadline: Duration);
 
     /// Called when a deadline is exceeded.
+    ///
+    /// The runtime calls this once for each task that ends cancelled by its
+    /// deadline ([`CancelKind::Deadline`]), with the task's region.
     fn deadline_exceeded(&self, region_id: RegionId);
 
     // === Deadline Monitoring Metrics ===
