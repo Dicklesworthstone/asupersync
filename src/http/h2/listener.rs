@@ -2636,6 +2636,7 @@ async fn next_driver_event(
     #[cfg(feature = "http2-streaming")] incoming: &mut Option<StreamingRequests>,
     produced_bodies: &mut BTreeMap<u32, ActiveProducedBody>,
     produced_poll_after: &mut Option<u32>,
+    read_turn: &mut bool,
     task_cx: &Cx,
     signal: &ShutdownSignal,
     watch_drain: bool,
@@ -2750,10 +2751,23 @@ async fn next_driver_event(
         if let Poll::Ready(event) = request_owners.poll_event(recv_fut.as_mut(), cx) {
             return Poll::Ready(event);
         }
+        // After a produced frame the reader goes first. A producer that
+        // always has a frame ready would otherwise hold off the peer's
+        // RST_STREAM, PING, SETTINGS, WINDOW_UPDATE and new requests until
+        // it ran out of send credit (br-asupersync-dx72q4 F4).
+        let reader_first = *read_turn;
+        if reader_first && let Poll::Ready(item) = Pin::new(&mut *framed).poll_next(cx) {
+            *read_turn = false;
+            return Poll::Ready(DriverEvent::Frame(item));
+        }
         if let Poll::Ready(item) =
             poll_produced_body_event(conn, produced_bodies, produced_poll_after, cx)
         {
+            *read_turn = true;
             return Poll::Ready(DriverEvent::ProducedBody(item));
+        }
+        if reader_first {
+            return Poll::Pending;
         }
         match Pin::new(&mut *framed).poll_next(cx) {
             Poll::Ready(item) => Poll::Ready(DriverEvent::Frame(item)),
@@ -3313,6 +3327,7 @@ where
         let mut dispatched_streams: HashSet<u32> = HashSet::new();
         let mut peer_reset_before_response: HashSet<u32> = HashSet::new();
         let mut produced_poll_after = None;
+        let mut read_turn = false;
         let mut associated_pushes: HashMap<u32, Vec<u32>> = HashMap::new();
         // br-asupersync-mfqfst L4: count requests dispatched to the handler on
         // this connection so it can be recycled once the configured budget is
@@ -3466,6 +3481,7 @@ where
                 &mut incoming,
                 &mut produced_bodies,
                 &mut produced_poll_after,
+                &mut read_turn,
                 &task_cx,
                 &shutdown_signal,
                 watch_drain,
@@ -6660,6 +6676,129 @@ mod tests {
         ))
         .expect("connection credit update accepted");
         assert_eq!(conn.available_send_capacity(1), 3);
+    }
+
+    #[test]
+    fn a_ready_producer_does_not_hold_off_the_peers_frames() {
+        // br-asupersync-dx72q4 F4: the driver polled produced bodies before
+        // the transport, so while a producer had frames ready the peer's
+        // frames waited until the stream ran out of send credit.
+        crate::test_utils::run_test(|| async {
+            use crate::io::AsyncWriteExt as _;
+
+            let cx = Cx::current().expect("test runtime installs Cx");
+            let tcp = TcpListener::bind("127.0.0.1:0").await.expect("bind tcp");
+            let addr = tcp.local_addr().expect("listener address");
+            let mut client = TcpStream::connect(addr).await.expect("connect");
+            let (server, _) = tcp.accept().await.expect("accept");
+            let mut framed = listener_framed(
+                H2Transport::Plain(H2Socket {
+                    stream: server,
+                    bytes_written: 0,
+                }),
+                crate::http::h2::frame::DEFAULT_MAX_FRAME_SIZE,
+            );
+            // Two PINGs in one write: once the first is read, the second has
+            // arrived, so the driver can read it whenever it polls.
+            let ping = [0, 0, 8, 0x6, 0, 0, 0, 0, 0, 7, 7, 7, 7, 7, 7, 7, 7];
+            client
+                .write_all(&[ping, ping].concat())
+                .await
+                .expect("PINGs written");
+            let first =
+                std::future::poll_fn(|task_cx| Pin::new(&mut framed).poll_next(task_cx)).await;
+            assert!(
+                matches!(first, Some(Ok(DecodedFrame::Frame(Frame::Ping(_))))),
+                "expected the first PING, got {first:?}",
+            );
+
+            let mut conn = Connection::server(Settings::default());
+            conn.process_frame(Frame::Settings(crate::http::h2::frame::SettingsFrame::new(
+                Vec::new(),
+            )))
+            .expect("initial settings accepted");
+            expect_settings_ack(&mut conn);
+            establish_h2_response_stream(&mut conn, 1, "/ready-producer");
+
+            let (inner, body) = OutgoingBody::channel_with_capacity(&cx, BodyKind::Chunked, 2);
+            let mut sender = Http2BodySender {
+                inner,
+                max_frame_bytes: NonZeroUsize::new(8).expect("non-zero limit"),
+                terminal: Http2ProducerTerminal::Open,
+            };
+            for chunk in [b"a", b"b"] {
+                sender
+                    .send_bytes(&cx, crate::bytes::Bytes::from_static(chunk))
+                    .await
+                    .expect("DATA queues in the producer channel");
+            }
+            let mut produced_bodies = BTreeMap::from([(
+                1,
+                ActiveProducedBody {
+                    body,
+                    cancellation: ProducedCancellationGuard::new(Cx::for_testing()),
+                    guard: Some(Arc::new(InFlightRequestGuard::acquire(None))),
+                    producer_outcome: None,
+                    emitted_bytes: 0,
+                    body_eof: false,
+                    pending_trailers: None,
+                    failure_drain_deadline: None,
+                    receive: ProducedReceive::Live,
+                },
+            )]);
+
+            let (_funnel_tx, mut resp_rx) = mpsc::channel::<FunnelItem>(1);
+            let signal = ShutdownSignal::new();
+            let mut request_owners = H2RequestOwners::new(&cx)
+                .await
+                .expect("request owners open");
+            #[cfg(feature = "http2-streaming")]
+            let mut incoming: Option<StreamingRequests> = None;
+            let mut poll_after = None;
+            let mut read_turn = false;
+            let mut order = Vec::new();
+            for _ in 0..3 {
+                let event = next_driver_event(
+                    &mut framed,
+                    &mut resp_rx,
+                    #[cfg(not(feature = "http2-streaming"))]
+                    &conn,
+                    #[cfg(feature = "http2-streaming")]
+                    &mut conn,
+                    #[cfg(feature = "http2-streaming")]
+                    &mut incoming,
+                    &mut produced_bodies,
+                    &mut poll_after,
+                    &mut read_turn,
+                    &cx,
+                    &signal,
+                    false,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    &mut request_owners,
+                )
+                .await;
+                order.push(match event {
+                    DriverEvent::ProducedBody(ProducedBodyEvent::Frame {
+                        stream_id: 1,
+                        frame: Ok(BodyFrame::Data(_)),
+                    }) => "DATA",
+                    DriverEvent::Frame(Some(Ok(DecodedFrame::Frame(Frame::Ping(_))))) => "PING",
+                    _ => "other",
+                });
+            }
+            assert_eq!(order, ["DATA", "PING", "DATA"]);
+
+            drop(sender);
+            request_owners
+                .close(CancelReason::user("test complete"))
+                .await
+                .expect("request owners close");
+        });
     }
 
     #[test]
