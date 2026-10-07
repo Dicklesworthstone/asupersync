@@ -18,6 +18,8 @@
 //! ## Read operations
 //! - `poll_read` is cancel-safe (partial data is discarded by the caller).
 //! - `read_exact` is **not** cancel-safe (partial state is retained).
+//! - `ReadExactSession::run` retains the filled prefix and offset across future
+//!   drop and cooperative cancellation; keep the session to resume safely.
 //! - `read_to_end` is cancel-safe (collected bytes remain in the buffer).
 //! - `read_to_string` is **not** fully cancel-safe (bytes are preserved, but a partial UTF-8 sequence at the end may be lost if cancelled).
 //! - `read_line` is cancel-safe for bytes already appended to the `String`; a
@@ -66,6 +68,7 @@ mod read_line;
 mod seek;
 mod split;
 mod stream_adapters;
+pub mod transfer_session;
 mod write;
 mod write_permit;
 
@@ -91,6 +94,7 @@ pub use read_buf::ReadBuf;
 pub use seek::AsyncSeek;
 pub use split::{ReadHalf, SplitStream, WriteHalf, split};
 pub use stream_adapters::{ReaderStream, StreamReader};
+pub use transfer_session::ReadExactSession;
 pub use write::{AsyncWrite, AsyncWriteVectored};
 pub use write_permit::WritePermit;
 
