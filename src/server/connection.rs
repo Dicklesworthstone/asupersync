@@ -110,7 +110,7 @@ pub struct ConnectionManager {
     /// br-asupersync-368gxk: idle-connection timeout. `None` disables
     /// idle eviction (legacy behaviour); `Some(d)` makes
     /// `drop_idle_connections()` flag every connection whose
-    /// `last_activity` is older than `d` minus the grace window.
+    /// `last_activity` is at least `max(d, MIN_IDLE_GRACE)` old.
     idle_timeout: Option<Duration>,
     time_getter: fn() -> Time,
     shutdown_signal: ShutdownSignal,
@@ -286,8 +286,8 @@ impl ConnectionManager {
 
     /// br-asupersync-368gxk: scan the registry and return the
     /// `ConnectionId` of every connection whose `last_activity` is
-    /// older than `idle_timeout - MIN_IDLE_GRACE`. Returns an empty
-    /// vec when `idle_timeout` is `None` or every connection is
+    /// at least `max(idle_timeout, MIN_IDLE_GRACE)` old. Returns an
+    /// empty vec when `idle_timeout` is `None` or every connection is
     /// active.
     ///
     /// This method does NOT remove the connections from the registry
@@ -311,7 +311,9 @@ impl ConnectionManager {
         };
         let effective = timeout.max(MIN_IDLE_GRACE);
         let now_nanos = time_to_nanos((self.time_getter)());
-        let threshold_nanos = effective.as_nanos() as u64;
+        // A timeout past u64 nanoseconds (~584 years) means "never idle"; a
+        // truncating cast made it a fraction of a second.
+        let threshold_nanos = u64::try_from(effective.as_nanos()).unwrap_or(u64::MAX);
 
         let connections = self.state.lock();
         let mut idle = Vec::new();
@@ -1715,6 +1717,22 @@ mod tests {
         // after a long elapsed virtual time.
         let _g1 = manager.register(test_addr(1)).expect("g1");
         set_test_time(3600 * 1_000_000_000);
+        assert!(manager.drop_idle_connections().is_empty());
+    }
+
+    /// A timeout past u64 nanoseconds (~584 years) never flags a
+    /// connection. The truncating cast made 18_446_744_074 s a threshold
+    /// of about 0.29 s.
+    #[test]
+    fn idle_timeout_past_u64_nanos_never_flags_a_connection() {
+        init_test("idle_timeout_past_u64_nanos_never_flags_a_connection");
+        let _time_guard = lock_test_time();
+        let signal = ShutdownSignal::new();
+        set_test_time(0);
+        let manager = ConnectionManager::with_time_getter(None, signal, test_time)
+            .with_idle_timeout(Some(Duration::from_secs(18_446_744_074)));
+        let _g1 = manager.register(test_addr(1)).expect("g1");
+        set_test_time(10 * 1_000_000_000);
         assert!(manager.drop_idle_connections().is_empty());
     }
 
