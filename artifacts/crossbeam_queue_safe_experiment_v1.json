@@ -14,7 +14,8 @@
     "transitions": [
       {"path":"Cargo.toml","previous_sha256":"541ed6be1f748cd2897f18ba2679c6d34ff84a57d480db5a11c40ff007f1f1c7","review":"Release versions, package exclusions, unrelated features and lint policy changed; the crossbeam-queue edge remains unchanged."},
       {"path":"Cargo.lock","previous_sha256":"95d3aaec0e58be196f08e4b30792f90129213af86ae8e34d2c5862b9feb15880","review":"Workspace versions and unrelated packages changed; crossbeam-queue 0.3.13 and crossbeam-utils 0.8.22 retain their checksums."},
-      {"path":"src/channel/mpsc.rs","previous_sha256":"fbf7913778316a4bb8e92402d4429fc820f979c6385f788989d74a41d21c0966","review":"Checked obligation admission was added and inline tests moved to mpsc_tests.rs. The channel still uses a single mutex and VecDeque, with no crossbeam queue edge. All five production crossbeam owners and the measured exporter benchmark are byte-identical to their recorded pins."}
+      {"path":"src/channel/mpsc.rs","previous_sha256":"fbf7913778316a4bb8e92402d4429fc820f979c6385f788989d74a41d21c0966","review":"Checked obligation admission was added and inline tests moved to mpsc_tests.rs. The channel still uses a single mutex and VecDeque, with no crossbeam queue edge. All five production crossbeam owners and the measured exporter benchmark are byte-identical to their recorded pins."},
+      {"path":"src/runtime/epoch_gc.rs","previous_sha256":"d9195dc225c6ba3af5ffcc1c399fa48be397aa1929b27f4d3603a26120072627","review":"2026-10-06, asupersync-7yq1pv item 5: a seven-line module-doc Status section only (nothing in the runtime uses the module; its performance goals were never measured). The SegQueue code is unchanged."}
     ]
   },
   "production_behavior_change_made": false,
@@ -298,8 +299,8 @@
     },
     {
       "path": "src/runtime/epoch_gc.rs",
-      "sha256": "d9195dc225c6ba3af5ffcc1c399fa48be397aa1929b27f4d3603a26120072627",
-      "line_count": 1638
+      "sha256": "ebf8e844c1ebde1d1dc80e2085cad1be9b42620a6ff972bc5352de3243b71574",
+      "line_count": 1645
     },
     {
       "path": "src/runtime/epoch_tracking.rs",

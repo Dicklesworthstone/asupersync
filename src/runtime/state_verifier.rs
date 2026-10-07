@@ -1,11 +1,20 @@
 //! Runtime State Machine Transition Verifier
 //!
-//! Validates that all runtime state transitions (task states, region states, obligation states)
-//! follow legal paths and don't skip required intermediate states. Provides centralized
-//! monitoring and error handling for invalid state transitions across all runtime components.
+//! Checks a task, region or obligation state transition that a caller passes
+//! in against the legal transitions of its state type, and counts the checks
+//! and the violations.
 //!
-//! The verifier enforces the state machine contracts defined in each state type and provides
-//! debugging capabilities to detect illegal state transitions early during development.
+//! The runtime does not pass its own transitions through it. The verifier that
+//! [`RuntimeState::state_verifier`](crate::runtime::RuntimeState::state_verifier)
+//! returns counts only what callers validate through it, so with no caller its
+//! statistics stay at zero (asupersync-7yq1pv item 3). The runtime's own
+//! transitions are checked where they happen instead:
+//! - a task phase change is a `debug_assert!` in the task record;
+//! - a region's lifecycle steps (`begin_close`, `begin_drain`,
+//!   `begin_finalize`, `complete_close`) each check the state they start
+//!   from (`set_state` stores without a check; the lab and snapshot restore
+//!   use it);
+//! - an obligation panics if it is resolved twice.
 
 use crate::record::{ObligationState, region::RegionState, task::TaskPhase};
 use crate::types::{ObligationId, RegionId, TaskId};

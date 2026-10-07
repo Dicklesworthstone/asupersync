@@ -37,7 +37,10 @@
 //!
 //! # Integration Points
 //!
-//! The verifier hooks into existing runtime infrastructure:
+//! None yet. The runtime does not call the verifier, and region close does
+//! not consult it (asupersync-7yq1pv item 5): it checks only the resources a
+//! caller registers with a [`ResourceCleanupVerifier`]. The design meant it
+//! to hook into existing runtime infrastructure:
 //! - **Resource Monitor** - Leverages existing resource tracking
 //! - **State Verifier** - Integrates with state transition validation
 //! - **Region Table** - Hooks region close events

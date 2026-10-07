@@ -5,6 +5,13 @@
 //! cleanup work synchronously during cancellation, work is queued and performed
 //! in batches at safe points.
 //!
+//! # Status
+//!
+//! Nothing in the runtime uses this module. No cancellation or region-close
+//! path defers its cleanup through it, and the performance goals below were
+//! never measured: they are design targets (asupersync-7yq1pv item 5). The
+//! module stays public because v0.4.3 exported it.
+//!
 //! # Design
 //!
 //! The epoch GC uses epoch counters to track cleanup generations and defer

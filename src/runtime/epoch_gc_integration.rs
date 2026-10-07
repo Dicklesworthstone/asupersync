@@ -3,6 +3,9 @@
 //! This module provides the integration layer between the epoch GC system and
 //! the various runtime components that need cleanup, ensuring that cleanup
 //! operations are properly deferred and batched for optimal performance.
+//!
+//! No runtime component calls this layer; see the status of
+//! [`epoch_gc`](super::epoch_gc).
 
 #![allow(missing_docs)]
 
