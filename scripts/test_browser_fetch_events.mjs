@@ -342,3 +342,170 @@ test("option getter failures cannot forge success or run error presentation hook
   assert.equal((await fetch.read()).outcome, "ok");
   await fetch.cancel();
 });
+
+// JSON-lines uses the same owner with a distinct delimiter/UTF-8/EOF policy.
+async function jsonFixture(t, chunks = ['{"ok":true}\n'], extra = {}) {
+  return fixture(t, { body: bodyOf(chunks), headers: { "content-type": "application/x-ndjson" }, ...extra });
+}
+function jsonRecords(f, fetch = f.start().value, options) {
+  const result = f.jsonLines(fetch, options);
+  assert.equal(result.outcome, "ok");
+  return result.value;
+}
+
+test("JSON-lines decodes all JSON value kinds across every byte boundary", { timeout: 10000 }, async (t) => {
+  const values = [{ text: "😀\né", list: [false, null] }, null, true, 17.5, "string", [1, 2]];
+  const wire = bytes("\ufeff" + values.map((value) => JSON.stringify(value) + "\r\n").join(""));
+  for (let cut = 0; cut <= wire.length; cut += 1) {
+    const f = await jsonFixture(t, [wire.slice(0, cut), wire.slice(cut)]);
+    const records = jsonRecords(f), actual = await all(records);
+    assert.deepEqual(JSON.parse(JSON.stringify(actual)), values.map((value, index) => ({ lineNumber: index + 1, value })), `split ${cut}`);
+    assert.equal((await records.closed).outcome, "ok");
+  }
+});
+
+test("JSON-lines emits one record per demand without eagerly parsing coalesced errors", { timeout: 3000 }, async (t) => {
+  const counters = {}, gate = deferred();
+  const f = await jsonFixture(t, [], { body: bodyOf(['{"first":1}\ninvalid-secret-payload\n'], counters, () => gate.promise) });
+  f.cleanups.push(gate.resolve);
+  const records = jsonRecords(f);
+  await turn();
+  assert.equal(counters.pulls ?? 0, 0);
+  const reader = records.readable.getReader();
+  assert.equal((await reader.read()).value.value.first, 1);
+  await turn();
+  assert.equal(counters.cancels ?? 0, 0);
+  assert.equal(counters.pulls, 1);
+  let returned = false;
+  const rejected = assert.rejects(reader.read(), (error) => {
+    returned = true;
+    assert.equal(error.cause.failure.code, "decode_failure");
+    assert.equal(error.message, "invalid JSON record at line 2");
+    assert.equal(JSON.stringify(error.cause).includes("secret"), false);
+    return true;
+  });
+  await turn();
+  assert.equal(returned, false);
+  assert.equal(counters.cancels, 1);
+  gate.resolve();
+  await rejected;
+  assert.equal((await records.closed).outcome, "err");
+});
+
+for (const wire of ['{"complete":true}', '{"partial":', 'null', '17\r']) {
+  test(`strict JSON-lines EOF refuses missing final LF: ${wire}`, { timeout: 3000 }, async (t) => {
+    const f = await jsonFixture(t, [wire]), records = jsonRecords(f);
+    await expectFailure(all(records), /unterminated final JSON record/);
+    assert.equal((await records.closed).outcome, "err");
+  });
+}
+
+test("allowFinalRecord explicitly accepts a complete tail without losing null", { timeout: 3000 }, async (t) => {
+  const f = await jsonFixture(t, ['{"a":1}\nnull']), records = jsonRecords(f, f.start().value, { allowFinalRecord: true });
+  const output = await all(records);
+  assert.equal(output.length, 2);
+  assert.equal(output[1].value, null);
+  assert.equal(output[1].lineNumber, 2);
+  assert.equal((await records.closed).outcome, "ok");
+});
+
+test("allowFinalRecord does not accept truncated JSON", { timeout: 3000 }, async (t) => {
+  const f = await jsonFixture(t, ['{"a":']), records = jsonRecords(f, f.start().value, { allowFinalRecord: true });
+  await expectFailure(all(records), /invalid JSON record at line 1/);
+});
+
+for (const bad of [new Uint8Array([34, 0xff, 34, 10]), new Uint8Array([34, 0xf0, 0x9f])]) {
+  test(`invalid JSON UTF-8 is fatal rather than replacement decoded (${bad.length})`, { timeout: 3000 }, async (t) => {
+    const f = await jsonFixture(t, [bad]), records = jsonRecords(f, f.start().value, { allowFinalRecord: true });
+    await expectFailure(all(records), /invalid UTF-8/);
+  });
+}
+
+test("empty lines are configurable and count toward physical line numbers", { timeout: 3000 }, async (t) => {
+  const f = await jsonFixture(t, ["\n\r\n1\n\nfalse\n"]), records = jsonRecords(f);
+  const output = await all(records);
+  assert.deepEqual(output.map((record) => record.lineNumber), [3, 5]);
+  const strict = await jsonFixture(t, ["\n"]);
+  await expectFailure(all(jsonRecords(strict, strict.start().value, { allowEmptyLines: false })), /invalid JSON record at line 1/);
+});
+
+for (const wire of [' \t\n', '{\r}\n', '1\r2\n', '1\n\ufeff2\n', '[\n1\n]\n']) {
+  test(`JSON-lines rejects nonrecords and non-NDJSON delimiters ${JSON.stringify(wire)}`, { timeout: 3000 }, async (t) => {
+    const f = await jsonFixture(t, [wire]);
+    await expectFailure(all(jsonRecords(f)), /invalid JSON record|bare CR/);
+  });
+}
+
+test("maxRecords rejects the next record, not empty lines or exact EOF", { timeout: 3000 }, async (t) => {
+  const f = await jsonFixture(t, ['1\n\n2\n']), records = jsonRecords(f, f.start().value, { maxRecords: 1 });
+  const reader = records.readable.getReader();
+  assert.equal((await reader.read()).value.value, 1);
+  await expectFailure(reader.read(), /maxRecords exceeded at line 3/);
+  const exact = await jsonFixture(t, ['1\n\n']);
+  assert.equal((await all(jsonRecords(exact, exact.start().value, { maxRecords: 1 }))).length, 1);
+});
+
+test("JSON-lines byte cap spans chunks and includes optional CR, without whole-body buffering", { timeout: 3000 }, async (t) => {
+  const f = await jsonFixture(t, ['"é', 'é"\n']);
+  await expectFailure(all(jsonRecords(f, f.start().value, { maxLineBytes: 5 })), /maxLineBytes/);
+  const exact = await jsonFixture(t, ['null\r', '\n']);
+  assert.equal((await all(jsonRecords(exact, exact.start().value, { maxLineBytes: 5 })))[0].value, null);
+});
+
+for (const policy of [{ allowEmptyLines: null }, { allowFinalRecord: "yes" }, { maxRecords: 0 }, { maxLineBytes: null }, { maxLineBytes: 16_777_217 }]) {
+  test(`invalid JSON-lines policy refuses before taking body ownership ${JSON.stringify(policy)}`, { timeout: 3000 }, async (t) => {
+    const f = await jsonFixture(t), fetch = f.start().value;
+    assert.equal(f.jsonLines(fetch, policy).outcome, "err");
+    assert.equal((await fetch.read()).outcome, "ok");
+    await fetch.cancel();
+  });
+}
+
+test("application/json is not silently treated as NDJSON; alias media type is accepted", { timeout: 3000 }, async (t) => {
+  const f = await jsonFixture(t, ['{}\n'], { headers: { "content-type": "application/json" } }), records = jsonRecords(f);
+  await expectFailure(all(records), /Content-Type/);
+  const alias = await jsonFixture(t, ['{}\n'], { headers: { "content-type": "APPLICATION/NDJSON; charset=utf-8" } });
+  assert.equal((await all(jsonRecords(alias))).length, 1);
+});
+
+test("JSON __proto__ is plain payload data, not a prototype mutation", { timeout: 3000 }, async (t) => {
+  const f = await jsonFixture(t, ['{"__proto__":{"polluted":true}}\n']), records = await all(jsonRecords(f));
+  const object = records[0].value;
+  assert.equal(Object.hasOwn(object, "__proto__"), true);
+  assert.equal(object.polluted, undefined);
+  assert.equal({}.polluted, undefined);
+});
+
+test("scope cancellation reaches a JSON parser parked in a partial record", { timeout: 3000 }, async (t) => {
+  const f = await jsonFixture(t, [], { body: new ReadableStream({ start(c) { c.enqueue(bytes('{"pending":')); } }) });
+  const records = jsonRecords(f), reader = records.readable.getReader();
+  const rejected = assert.rejects(reader.read(), (error) => error.cause?.outcome === "cancelled");
+  await turn();
+  assert.equal((await f.manager.drainScopes(new Set([f.scopeKey]), "scope_close")).outcome, "ok");
+  await rejected;
+  assert.equal((await records.closed).cancellation.kind, "scope_close");
+});
+
+test("real NDJSON HTTP response is incremental and early cancellation closes peer", { timeout: 5000 }, async (t) => {
+  const peerClosed = deferred(), releaseSecond = deferred();
+  const server = createServer(async (_request, response) => {
+    response.on("close", peerClosed.resolve);
+    response.writeHead(200, { "content-type": "application/x-ndjson" });
+    response.write('{"sequence":1}\n');
+    await releaseSecond.promise;
+    if (!response.destroyed) response.write('{"sequence":2}\n');
+  });
+  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+  t.after(async () => { releaseSecond.resolve(); server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); });
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const f = await jsonFixture(t, [], { origin, fetch: (url, init) => fetch(url, init) });
+  const records = jsonRecords(f), reader = records.readable.getReader();
+  assert.equal((await reader.read()).value.value.sequence, 1);
+  releaseSecond.resolve();
+  assert.equal((await reader.read()).value.value.sequence, 2);
+  await reader.cancel();
+  await peerClosed.promise;
+  assert.equal((await records.closed).outcome, "cancelled");
+  assert.equal(f.calls.spawn.length, 1);
+  assert.equal(f.calls.join.length, 1);
+});

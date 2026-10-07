@@ -106,3 +106,89 @@ export function serverSentEvents(fetch: FetchStreamHandle, options: ServerSentEv
     return recordException(error, "invalid server-sent event options");
   }
 }
+
+export const JSON_LINE_LIMITS = Object.freeze({
+  maxLineBytes: 1_048_576,
+  maxConfiguredLineBytes: 16_777_216,
+  maxRecords: 1_000_000,
+});
+
+export interface JsonLine {
+  /** One-based physical line, including ignored empty lines. */
+  readonly lineNumber: number;
+  /** Native JSON.parse semantics. Validate/narrow unknown before using it. */
+  readonly value: unknown;
+}
+
+export interface JsonLinesOptions {
+  /** Raw bytes before LF, including the optional CR of CRLF. */
+  maxLineBytes?: number;
+  /** Maximum emitted records; empty lines do not count. */
+  maxRecords?: number;
+  /** Ignore truly empty lines (not whitespace-only lines). Default true. */
+  allowEmptyLines?: boolean;
+  /** Accept a valid final JSON value without LF. Default false to detect truncation. */
+  allowFinalRecord?: boolean;
+}
+
+const PARSE_JSON = JSON.parse;
+
+/**
+ * Transfer an owned HTTP 200 application/x-ndjson (or application/ndjson)
+ * response into individually decoded JSON records with physical line numbers.
+ * Each pull emits at most one record; one input chunk and one bounded line are
+ * retained, not a whole response or parsed-record queue. UTF-8 is strict, one
+ * leading BOM is tolerated, and CRLF/LF delimiters are accepted. Bare CR inside
+ * a record is rejected. Payloads are never echoed into parse-error messages.
+ *
+ * Default EOF policy requires every record to end in LF. allowFinalRecord is
+ * an explicit opt-in for JSON-lines producers that omit the final delimiter;
+ * it does not accept invalid/truncated JSON. Parsing uses native JSON.parse,
+ * including its number precision and duplicate-key semantics, not a schema or
+ * lossless-number codec. The caller owns validation and downstream buffering.
+ *
+ * Shares serverSentEvents' exclusive body ownership, cancellation and cleanup
+ * barriers. It does not retry, issue another fetch or change fetch authority.
+ * https://github.com/ndjson/ndjson-spec
+ */
+export function jsonLines(fetch: FetchStreamHandle, options: JsonLinesOptions = {}): Outcome<FetchRecordStream<JsonLine>> {
+  try {
+    const { maxLineBytes: suppliedBytes = JSON_LINE_LIMITS.maxLineBytes,
+      maxRecords: suppliedRecords = JSON_LINE_LIMITS.maxRecords,
+      allowEmptyLines = true, allowFinalRecord = false } = options;
+    const maxLineBytes = positiveLimit(suppliedBytes, JSON_LINE_LIMITS.maxConfiguredLineBytes, "maxLineBytes");
+    const maxRecords = positiveLimit(suppliedRecords, Number.MAX_SAFE_INTEGER, "maxRecords");
+    if (typeof allowEmptyLines !== "boolean" || typeof allowFinalRecord !== "boolean") {
+      throw recordError(recordFailure("JSON-lines policy options must be booleans", "compatibility_rejected"));
+    }
+    let lineNumber = 0;
+    let emitted = 0;
+    function line(text: string): JsonLine | null {
+      lineNumber += 1;
+      if (!Number.isSafeInteger(lineNumber)) throw recordError(recordFailure("JSON-lines line number exceeds safe range"));
+      if (text === "" && allowEmptyLines) return null;
+      if (text.includes("\r")) throw recordError(recordFailure(`bare CR in JSON record at line ${lineNumber}`));
+      if (emitted >= maxRecords) throw recordError(recordFailure(`JSON-lines maxRecords exceeded at line ${lineNumber}`));
+      let value: unknown;
+      try { value = PARSE_JSON(text); }
+      catch { throw recordError(recordFailure(`invalid JSON record at line ${lineNumber}`)); }
+      emitted += 1;
+      return Object.freeze({ lineNumber, value });
+    }
+    return createFetchRecordStream<JsonLine>(fetch, {
+      maxLineBytes, crLines: false, fatalUtf8: true,
+      validate: (head) => requireMediaType(head, ["application/x-ndjson", "application/ndjson"]),
+      parser: {
+        line,
+        end(tail) {
+          if (tail === undefined) return null;
+          if (!allowFinalRecord) throw recordError(recordFailure(`unterminated final JSON record at line ${lineNumber + 1}`));
+          return line(tail);
+        },
+        clear() { /* No record payload is retained across lines. */ },
+      },
+    });
+  } catch (error) {
+    return recordException(error, "invalid JSON-lines options");
+  }
+}

@@ -93,6 +93,72 @@ failures are adapter outcomes; the existing task still reports its own fetch
 cancellation or terminal outcome. A host operation that never settles cannot
 be forcibly drained by JavaScript.
 
+## JSON-lines / NDJSON
+
+```ts
+import { jsonLines } from "@asupersync/browser/streams";
+
+// After scope.fetch(...) returns an owned FetchStreamHandle:
+const decoded = jsonLines(fetchHandle, {
+  maxLineBytes: 1_048_576,
+  maxRecords: 100_000,
+  allowEmptyLines: true,
+  allowFinalRecord: false,
+});
+if (decoded.outcome !== "ok") {
+  await fetchHandle.cancel("JSON-lines setup refused");
+  throw new Error("JSON-lines setup refused");
+}
+const records = decoded.value;
+try {
+  const reader = records.readable.getReader();
+  try {
+    for (;;) {
+      const item = await reader.read();
+      if (item.done) break;
+      // value is unknown: validate against your application schema here.
+      console.log(item.value.lineNumber, item.value.value);
+    }
+  } finally {
+    await records.cancel("consumer finished");
+    reader.releaseLock();
+  }
+} finally {
+  console.log(await records.closed);
+}
+```
+
+Requires HTTP 200 and `application/x-ndjson` (or the `application/ndjson`
+alias). An `application/json` response is not silently reinterpreted as
+NDJSON. LF and CRLF delimit records; bare CR inside a record is rejected.
+UTF-8 errors are fatal rather than replacement-decoded. One leading BOM is
+tolerated. Physical line numbers include empty lines, which are skipped by
+default and may be rejected with `allowEmptyLines: false`. Whitespace-only
+lines are not considered empty.
+
+Every record must end in LF by default: even an apparently valid JSON value
+without its final delimiter is a truncation error. `allowFinalRecord: true`
+explicitly permits that one complete final value, but never invalid JSON.
+This cannot detect a producer that truncates exactly at a record boundary;
+it is not a completeness signature or transaction protocol. Previously emitted
+records cannot be rolled back if a later record fails.
+
+`maxLineBytes` defaults to 1 MiB and may be configured up to 16 MiB. It counts
+raw bytes before LF, including the optional preceding CR. `maxRecords` defaults
+to 1,000,000 and counts emitted records, not empty lines. No array of decoded
+records is retained: each pull emits at most one `{ lineNumber, value }`.
+The line wrapper is frozen; its parsed value belongs to the caller and is not
+retained by the parser. `null`, primitives, arrays and objects are all valid
+values. Parsing uses native `JSON.parse` semantics, including duplicate-key
+handling and number precision; it does not promise lossless large integers or
+schema validation. Parse error messages contain line numbers, not payload
+excerpts that could expose credentials or application data.
+
+The ownership, backpressure and cancellation rules above apply unchanged.
+Record failure drains the original fetch before surfacing, including when
+source cleanup is slow. A task-publication refusal is never converted into a
+successful parsing outcome. Protocol reference: https://github.com/ndjson/ndjson-spec
+
 ## Verification
 
 Run `node --experimental-vm-modules --test scripts/test_browser_fetch_events.mjs`
