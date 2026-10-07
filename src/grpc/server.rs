@@ -468,7 +468,10 @@ pub struct ServerConfig {
     /// ([`Server::bind_http2`] and the other `bind_*http2` methods): after
     /// this long without a frame from a client, the server sends it a PING.
     /// `None` (the default) sends none. Values under one second are raised to
-    /// one second, as grpc-go does.
+    /// one second, as grpc-go does. A client must read its connection to
+    /// answer: this crate's native streaming client reads only while its call
+    /// is polled, so a call left unpolled longer than the interval plus the
+    /// timeout is disconnected.
     pub keepalive_interval_ms: Option<u64>,
     /// How long the server waits for any frame after a keepalive PING before
     /// it closes the connection. `None` or `0` means 20 seconds, grpc-go's
