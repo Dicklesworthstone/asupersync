@@ -29,6 +29,8 @@
 //! ## Write operations
 //! - `poll_write` is cancel-safe (partial writes are OK).
 //! - `write_all` is **not** cancel-safe (partial writes may occur).
+//! - `WriteAllSession::run` retains the accepted offset across future drop and
+//!   cancellation, so retry sends only the remaining suffix, without duplication.
 //! - `WritePermit` is cancel-safe (uncommitted data is discarded on drop).
 //! - `flush` and `shutdown` are cancel-safe (can retry).
 //!
@@ -94,7 +96,7 @@ pub use read_buf::ReadBuf;
 pub use seek::AsyncSeek;
 pub use split::{ReadHalf, SplitStream, WriteHalf, split};
 pub use stream_adapters::{ReaderStream, StreamReader};
-pub use transfer_session::ReadExactSession;
+pub use transfer_session::{ReadExactSession, WriteAllSession};
 pub use write::{AsyncWrite, AsyncWriteVectored};
 pub use write_permit::WritePermit;
 
