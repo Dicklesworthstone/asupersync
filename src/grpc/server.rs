@@ -464,10 +464,15 @@ pub struct ServerConfig {
     /// [`ConnectionRegistry::enforce_stream_limits`] for non-H2 adapters that
     /// opt into the legacy accounting helper.
     pub max_concurrent_streams: u32,
-    /// Keep-alive interval. Not applied yet: the server sends no keep-alive
-    /// PINGs whatever the value.
+    /// Keepalive interval for the native HTTP/2 listeners this server binds
+    /// ([`Server::bind_http2`] and the other `bind_*http2` methods): after
+    /// this long without a frame from a client, the server sends it a PING.
+    /// `None` (the default) sends none. Values under one second are raised to
+    /// one second, as grpc-go does.
     pub keepalive_interval_ms: Option<u64>,
-    /// Keep-alive timeout. Not applied yet, like `keepalive_interval_ms`.
+    /// How long the server waits for any frame after a keepalive PING before
+    /// it closes the connection. `None` or `0` means 20 seconds, grpc-go's
+    /// default. Used only with `keepalive_interval_ms`.
     pub keepalive_timeout_ms: Option<u64>,
     /// Default timeout applied when the client omits `grpc-timeout` or sends
     /// a malformed value.
@@ -1045,7 +1050,7 @@ impl ServerBuilder {
         self
     }
 
-    /// Set the keep-alive interval. Not applied yet (see
+    /// Set the keepalive interval (see
     /// [`ServerConfig::keepalive_interval_ms`]).
     #[must_use]
     pub fn keepalive_interval(mut self, ms: u64) -> Self {
@@ -1053,7 +1058,7 @@ impl ServerBuilder {
         self
     }
 
-    /// Set the keep-alive timeout. Not applied yet (see
+    /// Set the keepalive timeout (see
     /// [`ServerConfig::keepalive_timeout_ms`]).
     #[must_use]
     pub fn keepalive_timeout(mut self, ms: u64) -> Self {
@@ -1369,6 +1374,28 @@ impl Server {
         Ok(())
     }
 
+    /// Applies [`ServerConfig::keepalive_interval_ms`] and
+    /// [`ServerConfig::keepalive_timeout_ms`] to a native listener this server
+    /// binds (br-asupersync-y6naky).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn with_http2_keepalive<F>(&self, listener: Http2Listener<F>) -> Http2Listener<F> {
+        // grpc-go's floor for the server interval and its default timeout.
+        const MIN_INTERVAL_MS: u64 = 1_000;
+        const DEFAULT_TIMEOUT_MS: u64 = 20_000;
+        let Some(interval_ms) = self.config.keepalive_interval_ms else {
+            return listener;
+        };
+        let timeout_ms = self
+            .config
+            .keepalive_timeout_ms
+            .filter(|&ms| ms > 0)
+            .unwrap_or(DEFAULT_TIMEOUT_MS);
+        listener.keepalive(
+            Duration::from_millis(interval_ms.max(MIN_INTERVAL_MS)),
+            Duration::from_millis(timeout_ms),
+        )
+    }
+
     /// Bind the production native HTTP/2 transport and decode unary gRPC
     /// requests before invoking `handler`.
     ///
@@ -1402,7 +1429,9 @@ impl Server {
             let handler = Arc::clone(&handler);
             Box::pin(async move { server.dispatch_http2_unary(request, handler).await })
         };
-        Http2Listener::bind_with_config(addr, transport_handler, config).await
+        Http2Listener::bind_with_config(addr, transport_handler, config)
+            .await
+            .map(|listener| self.with_http2_keepalive(listener))
     }
 
     /// Bind the production native HTTP/2 transport to this server's registered
@@ -1443,7 +1472,9 @@ impl Server {
             let server = Arc::clone(&server);
             Box::pin(async move { server.dispatch_http2_registered_unary(request).await })
         };
-        Http2Listener::bind_with_config(addr, transport_handler, config).await
+        Http2Listener::bind_with_config(addr, transport_handler, config)
+            .await
+            .map(|listener| self.with_http2_keepalive(listener))
     }
 
     /// Bind and run the registered-service native HTTP/2 listener.

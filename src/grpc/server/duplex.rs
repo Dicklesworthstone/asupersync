@@ -347,7 +347,9 @@ impl Server {
             let config = config.clone();
             Box::pin(async move { server.dispatch_http2_duplex(request, config).await })
         };
-        Http2Listener::bind_streaming_produced_with_config(addr, handler, input).await
+        Http2Listener::bind_streaming_produced_with_config(addr, handler, input)
+            .await
+            .map(|listener| self.with_http2_keepalive(listener))
     }
 
     /// Bind and run the native registered duplex listener through shutdown.

@@ -27,7 +27,7 @@ use crate::http::h2::connection::{
     CLIENT_PREFACE, Connection, DecodedFrame, ListenerFrameCodec, ReceivedFrame,
 };
 use crate::http::h2::error::{ErrorCode, H2Error};
-use crate::http::h2::frame::Frame;
+use crate::http::h2::frame::{Frame, PingFrame};
 use crate::http::h2::hpack::Header;
 use crate::http::h2::settings::Settings;
 use crate::http::h2::stream::StreamState;
@@ -101,6 +101,7 @@ struct H2TransportTimeouts {
     preface: Duration,
     write_progress: Duration,
     flow_control: Duration,
+    keepalive: Option<H2Keepalive>,
 }
 
 impl Default for H2TransportTimeouts {
@@ -111,8 +112,59 @@ impl Default for H2TransportTimeouts {
             preface: Duration::from_secs(10),
             write_progress: Duration::from_secs(10),
             flow_control: Duration::from_secs(10),
+            keepalive: None,
         }
     }
+}
+
+/// Server keepalive ([`Http2Listener::keepalive`]): PING the client after
+/// `interval` without a frame from it, and close the connection when no frame
+/// arrives within `timeout` of that PING.
+#[derive(Clone, Copy)]
+struct H2Keepalive {
+    interval: Duration,
+    timeout: Duration,
+}
+
+/// One connection's keepalive clock: when it last read a frame, and when its
+/// outstanding PING was written.
+struct H2KeepaliveState {
+    config: H2Keepalive,
+    read_at: Time,
+    ping_sent_at: Option<Time>,
+    pings_sent: u64,
+}
+
+impl H2KeepaliveState {
+    fn new(config: H2Keepalive, now: Time) -> Self {
+        Self {
+            config,
+            read_at: now,
+            ping_sent_at: None,
+            pings_sent: 0,
+        }
+    }
+
+    /// When to send the next PING, or, with one outstanding, when to give up.
+    fn deadline(&self) -> Time {
+        match self.ping_sent_at {
+            None => self.read_at + self.config.interval,
+            Some(sent_at) => sent_at + self.config.timeout,
+        }
+    }
+
+    /// Any frame from the client shows it is alive, as in gRPC.
+    fn frame_read(&mut self, now: Time) {
+        self.read_at = now;
+        self.ping_sent_at = None;
+    }
+}
+
+/// The clock the connection driver arms its deadlines on.
+fn h2_driver_now() -> Time {
+    Cx::current()
+        .and_then(|cx| cx.timer_driver())
+        .map_or_else(crate::time::wall_now, |timer| timer.now())
 }
 
 /// Count socket writes beneath TLS, where flushing encrypted records can make
@@ -2290,6 +2342,9 @@ enum DriverEvent {
     /// The connection was fully quiescent past its idle budget: close it with
     /// a NO_ERROR GOAWAY (br-asupersync-mfqfst L4).
     IdleTimeout,
+    /// The keepalive deadline passed: send a PING, or, with one outstanding,
+    /// close the connection.
+    KeepaliveDue,
     /// An incomplete HEADERS/PUSH_PROMISE CONTINUATION sequence stalled past
     /// the configured budget with no further frame: close it with a
     /// PROTOCOL_ERROR GOAWAY (br-asupersync-mfqfst L4).
@@ -2642,6 +2697,7 @@ async fn next_driver_event(
     watch_drain: bool,
     finalize_deadline: Option<Time>,
     idle_deadline: Option<Time>,
+    keepalive_deadline: Option<Time>,
     continuation_deadline: Option<Time>,
     stream_idle_deadline: Option<(u32, Time)>,
     produced_failure_deadline: Option<(u32, Time)>,
@@ -2671,6 +2727,12 @@ async fn next_driver_event(
     // even when no frame ever arrives (the frame-arrival-independent backstop).
     let mut idle_fut = std::pin::pin!(async move {
         match idle_deadline {
+            Some(deadline) => crate::time::sleep_until(deadline).await,
+            None => std::future::pending::<()>().await,
+        }
+    });
+    let mut keepalive_fut = std::pin::pin!(async move {
+        match keepalive_deadline {
             Some(deadline) => crate::time::sleep_until(deadline).await,
             None => std::future::pending::<()>().await,
         }
@@ -2766,13 +2828,15 @@ async fn next_driver_event(
             *read_turn = true;
             return Poll::Ready(DriverEvent::ProducedBody(item));
         }
-        if reader_first {
-            return Poll::Pending;
+        if !reader_first && let Poll::Ready(item) = Pin::new(&mut *framed).poll_next(cx) {
+            return Poll::Ready(DriverEvent::Frame(item));
         }
-        match Pin::new(&mut *framed).poll_next(cx) {
-            Poll::Ready(item) => Poll::Ready(DriverEvent::Frame(item)),
-            Poll::Pending => Poll::Pending,
+        // Judged after the reader: a frame that has already arrived renews the
+        // keepalive clock first, so a prompt PING ACK is never read too late.
+        if keepalive_deadline.is_some() && keepalive_fut.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(DriverEvent::KeepaliveDue);
         }
+        Poll::Pending
     })
     .await
 }
@@ -3337,6 +3401,9 @@ where
         // connection becomes fully quiescent and cleared as soon as activity
         // resumes (kept fixed in between so it is not pushed forward by wake-ups).
         let mut idle_at: Option<Time> = None;
+        let mut keepalive = transport_timeouts
+            .keepalive
+            .map(|config| H2KeepaliveState::new(config, h2_driver_now()));
         let mut flow_control_progress = H2FlowControlProgress::new(transport_timeouts.flow_control);
 
         loop {
@@ -3487,6 +3554,7 @@ where
                 watch_drain,
                 finalize_at,
                 idle_at,
+                keepalive.as_ref().map(H2KeepaliveState::deadline),
                 continuation_at,
                 stream_idle_at,
                 produced_failure_at,
@@ -3494,6 +3562,9 @@ where
                 &mut request_owners,
             )
             .await;
+            if let (Some(state), DriverEvent::Frame(Some(Ok(_)))) = (&mut keepalive, &event) {
+                state.frame_read(h2_driver_now());
+            }
 
             match event {
                 DriverEvent::RequestRetired(stream_id, result) => {
@@ -3584,6 +3655,35 @@ where
                         "HTTP/2 connection idle timeout",
                     );
                     return Ok(());
+                }
+                DriverEvent::KeepaliveDue => {
+                    let Some(state) = &mut keepalive else {
+                        continue;
+                    };
+                    if state.ping_sent_at.is_some() {
+                        // No frame at all since the PING: the client is gone.
+                        // Drop the transport, as gRPC servers do; a GOAWAY
+                        // would only wait on a peer that does not read.
+                        task_cx.trace("h2_keepalive_timeout");
+                        cancel_all_produced_bodies(
+                            &mut produced_bodies,
+                            "HTTP/2 keepalive PING not answered",
+                        );
+                        return Ok(());
+                    }
+                    state.pings_sent += 1;
+                    bounded_h2_write(
+                        &mut framed,
+                        &shutdown_signal,
+                        transport_timeouts.write_progress,
+                        H2WriteOperation::Ready,
+                    )
+                    .await?;
+                    framed
+                        .start_send(Frame::Ping(PingFrame::new(state.pings_sent.to_be_bytes())))
+                        .map_err(io::Error::other)?;
+                    // The timeout runs from the write: the next pump flushes it.
+                    state.ping_sent_at = Some(h2_driver_now());
                 }
                 DriverEvent::ContinuationTimeout => {
                     // br-asupersync-mfqfst L4: a header block was left incomplete
@@ -5051,6 +5151,21 @@ impl<F> Http2Listener<F> {
     #[must_use]
     pub fn flow_control_progress_timeout(mut self, timeout: Duration) -> Self {
         self.transport_timeouts.flow_control = timeout;
+        self
+    }
+
+    /// Sends a PING after `interval` without any frame from the client, and
+    /// closes the connection when no frame arrives within `timeout` of that
+    /// PING. Any frame counts, not only the PING's ACK. This is gRPC's server
+    /// keepalive; it applies to busy and idle connections alike. Off by
+    /// default. Zero durations are raised to one millisecond.
+    #[must_use]
+    pub fn keepalive(mut self, interval: Duration, timeout: Duration) -> Self {
+        let floor = Duration::from_millis(1);
+        self.transport_timeouts.keepalive = Some(H2Keepalive {
+            interval: interval.max(floor),
+            timeout: timeout.max(floor),
+        });
         self
     }
 
@@ -6773,6 +6888,7 @@ mod tests {
                     &cx,
                     &signal,
                     false,
+                    None,
                     None,
                     None,
                     None,
