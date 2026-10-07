@@ -1018,12 +1018,13 @@ impl NativeQuicConnection {
     ) -> Result<(), NativeQuicConnectionError> {
         checkpoint(cx)?;
         self.ensure_data_state()?;
+        let len = data.len() as u64;
         let result = self.streams.write_stream_bytes(id, data, fin);
         if let Err(StreamTableError::Stream(QuicStreamError::Flow(FlowControlError::Exhausted {
             ..
         }))) = &result
         {
-            self.queue_stream_data_blocked(id);
+            self.queue_blocked_frame(id, len);
         }
         result.map_err(map_stream_table_error)?;
         Ok(())
@@ -1135,18 +1136,7 @@ impl NativeQuicConnection {
     ) -> Result<(), NativeQuicConnectionError> {
         checkpoint(cx)?;
         self.ensure_data_state()?;
-        let limit = self.streams.stream_send_limit(id).unwrap_or(0);
-        self.pending_control_frames.retain(|frame| {
-            !matches!(
-                frame,
-                QuicFrame::StreamDataBlocked { stream_id, .. } if stream_id.value() == id.0
-            )
-        });
-        self.pending_control_frames
-            .push_back(QuicFrame::StreamDataBlocked {
-                stream_id: VarInt::from_u64_unchecked(id.0),
-                maximum_stream_data: VarInt::from_u64_unchecked(limit),
-            });
+        self.queue_stream_data_blocked(id);
         Ok(())
     }
 
@@ -3653,8 +3643,32 @@ impl NativeQuicConnection {
         Ok(frames)
     }
 
+    /// RFC 9000 19.12 and 19.13: name the limit that refused a write, the
+    /// stream's (STREAM_DATA_BLOCKED) or else the connection's (DATA_BLOCKED).
+    fn queue_blocked_frame(&mut self, id: StreamId, len: u64) {
+        if self.streams.stream_send_credit_remaining(id) < len {
+            self.queue_stream_data_blocked(id);
+        } else if self.streams.connection_send_remaining() < len {
+            let limit = self.streams.connection_send_limit();
+            self.pending_control_frames
+                .retain(|frame| !matches!(frame, QuicFrame::DataBlocked { .. }));
+            self.pending_control_frames
+                .push_back(QuicFrame::DataBlocked {
+                    maximum_data: VarInt::from_u64_unchecked(limit),
+                });
+        }
+    }
+
+    /// Queue at most one STREAM_DATA_BLOCKED per stream, carrying the current
+    /// limit: a writer retrying while blocked adds no frames.
     fn queue_stream_data_blocked(&mut self, id: StreamId) {
         let limit = self.streams.stream_send_limit(id).unwrap_or(0);
+        self.pending_control_frames.retain(|frame| {
+            !matches!(
+                frame,
+                QuicFrame::StreamDataBlocked { stream_id, .. } if stream_id.value() == id.0
+            )
+        });
         self.pending_control_frames
             .push_back(QuicFrame::StreamDataBlocked {
                 stream_id: VarInt::from_u64_unchecked(id.0),
@@ -4704,6 +4718,59 @@ mod tests {
                 maximum_stream_data: VarInt(64),
             }],
             "a repeated report replaces the pending frame instead of stacking"
+        );
+    }
+
+    /// br-asupersync-tzjbn9 F9: every refused write queued another
+    /// STREAM_DATA_BLOCKED, and one refused by the connection limit named the
+    /// stream instead of sending DATA_BLOCKED (RFC 9000 19.12, 19.13).
+    #[test]
+    fn a_refused_write_names_the_binding_limit_once() {
+        let cx = test_cx();
+        let blocked_frames = |conn: &NativeQuicConnection| -> Vec<QuicFrame> {
+            conn.pending_control_frames
+                .iter()
+                .filter(|frame| {
+                    matches!(
+                        frame,
+                        QuicFrame::StreamDataBlocked { .. } | QuicFrame::DataBlocked { .. }
+                    )
+                })
+                .cloned()
+                .collect()
+        };
+
+        let mut conn = established_conn();
+        let stream = conn.open_local_bidi(&cx).expect("open");
+        conn.set_fresh_stream_send_limit(&cx, stream, 8)
+            .expect("stream cap");
+        for _ in 0..3 {
+            conn.write_stream_bytes(&cx, stream, Bytes::from_static(&[1u8; 16]), false)
+                .expect_err("16 bytes exceed the stream's 8");
+        }
+        assert_eq!(
+            blocked_frames(&conn),
+            vec![QuicFrame::StreamDataBlocked {
+                stream_id: VarInt(stream.0),
+                maximum_stream_data: VarInt(8),
+            }],
+            "three refused writes queue one STREAM_DATA_BLOCKED"
+        );
+
+        let mut conn = established_conn();
+        let stream = conn.open_local_bidi(&cx).expect("open");
+        conn.constrain_connection_send_limit_for_testing(&cx, 8)
+            .expect("connection cap");
+        for _ in 0..3 {
+            conn.write_stream_bytes(&cx, stream, Bytes::from_static(&[1u8; 16]), false)
+                .expect_err("16 bytes exceed the connection's 8");
+        }
+        assert_eq!(
+            blocked_frames(&conn),
+            vec![QuicFrame::DataBlocked {
+                maximum_data: VarInt(8),
+            }],
+            "a write refused by the connection limit queues one DATA_BLOCKED"
         );
     }
 
