@@ -6656,6 +6656,153 @@ mod tests {
         );
     }
 
+    /// One in-memory connection on a one-thread pool, with a progress
+    /// handler that reports, every 1000 VM steps, that a statement is
+    /// executing (no statement timeout is armed, so the runner leaves the
+    /// handler alone).
+    fn connection_with_progress_witness(
+        pool: &BlockingPool,
+    ) -> (SqliteConnection, std::sync::mpsc::Receiver<()>) {
+        let raw = rusqlite::Connection::open_in_memory().expect("open test connection");
+        configure_connection_defaults(&raw, false).expect("configure test connection");
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        raw.progress_handler(
+            1000,
+            Some(move || {
+                let _ = started_tx.send(());
+                false
+            }),
+        )
+        .expect("install the progress witness");
+        let interrupt = Arc::new(raw.get_interrupt_handle());
+        let conn = SqliteConnection {
+            inner: Arc::new(Mutex::new(SqliteConnectionInner::new(raw))),
+            pool: pool.handle(),
+            stream_pool: Some(pool.handle()),
+            stream_pool_owner: None,
+            transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
+            transaction_generation: Arc::new(AtomicU64::new(0)),
+            interrupt,
+            statement_timeout_override: None,
+        };
+        (conn, started_rx)
+    }
+
+    /// br-asupersync-sqlite-pool-audit-r10-dj4uhx M2: a one-shot query whose
+    /// future was dropped while its statement ran (a lost `timeout()` or
+    /// `select!`) ran to the end, holding the connection and a pool thread
+    /// for as long as the statement took. A statement that started outside a
+    /// transaction is interrupted now, as a cancelled receive interrupts it.
+    #[test]
+    fn a_running_statement_dropped_outside_a_transaction_is_interrupted() {
+        let cx = create_test_cx();
+        let pool = BlockingPool::new(1, 1);
+        let (conn, started) = connection_with_progress_witness(&pool);
+
+        // Counts to 10^12 unless interrupted: hours of work.
+        let mut runaway = Box::pin(conn.query(
+            &cx,
+            "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c \
+             WHERE x < 1000000000000) SELECT count(*) AS n FROM c",
+            &[],
+        ));
+        let waker = std::task::Waker::noop();
+        let mut task_cx = std::task::Context::from_waker(waker);
+        assert!(
+            std::future::Future::poll(runaway.as_mut(), &mut task_cx).is_pending(),
+            "the query runs on the pool"
+        );
+        started
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the statement is executing before its future is dropped");
+        drop(runaway);
+
+        // The interrupted statement ends, which frees the only worker and the
+        // connection: a follow-up query runs at once.
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let _ = done_tx.send(block_on(conn.query(&cx, "SELECT 1 AS one", &[])));
+            });
+            match done_rx.recv_timeout(Duration::from_secs(10)) {
+                Ok(Outcome::Ok(rows)) => {
+                    assert_eq!(rows[0].get_i64("one").expect("one column"), 1);
+                }
+                Ok(other) => panic!("the follow-up query failed: {other:?}"),
+                Err(_) => {
+                    // Free the worker so the scope can end, then fail.
+                    conn.interrupt();
+                    panic!("the dropped statement still held the connection after 10 s");
+                }
+            }
+        });
+        assert!(
+            conn.inner
+                .lock()
+                .get()
+                .expect("connection remains open")
+                .is_autocommit(),
+            "no transaction is left open"
+        );
+    }
+
+    /// The other half of M2's rule: inside a transaction a dropped statement
+    /// is left to finish. An interrupted INSERT would roll back the caller's
+    /// whole transaction under it (SQLite's documented behaviour), so the
+    /// statement runs to the end and the transaction stays open.
+    #[test]
+    fn a_running_statement_dropped_inside_a_transaction_is_left_to_finish() {
+        let cx = create_test_cx();
+        let pool = BlockingPool::new(1, 1);
+        let (conn, started) = connection_with_progress_witness(&pool);
+        match block_on(conn.execute_batch(&cx, "CREATE TABLE t (v INTEGER)")) {
+            Outcome::Ok(()) => {}
+            other => panic!("CREATE TABLE failed: {other:?}"),
+        }
+        match block_on(conn.execute_unchecked(&cx, "BEGIN", &[])) {
+            Outcome::Ok(_) => {}
+            other => panic!("BEGIN failed: {other:?}"),
+        }
+        while started.try_recv().is_ok() {}
+
+        let mut insert = Box::pin(conn.execute_unchecked(
+            &cx,
+            "INSERT INTO t WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c \
+             WHERE x < 2000000) SELECT x FROM c",
+            &[],
+        ));
+        let waker = std::task::Waker::noop();
+        let mut task_cx = std::task::Context::from_waker(waker);
+        assert!(
+            std::future::Future::poll(insert.as_mut(), &mut task_cx).is_pending(),
+            "the INSERT runs on the pool"
+        );
+        started
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the statement is executing before its future is dropped");
+        drop(insert);
+
+        // One worker: this count runs after the dropped INSERT is done.
+        let rows = match block_on(conn.query(&cx, "SELECT COUNT(*) AS n FROM t", &[])) {
+            Outcome::Ok(rows) => rows,
+            other => panic!("count failed: {other:?}"),
+        };
+        assert_eq!(
+            rows[0].get_i64("n").expect("count column"),
+            2_000_000,
+            "the dropped INSERT inside the transaction ran to the end"
+        );
+        assert!(
+            !conn
+                .inner
+                .lock()
+                .get()
+                .expect("connection remains open")
+                .is_autocommit(),
+            "the caller's transaction is still open"
+        );
+    }
+
     /// br-asupersync-sqlite-pool-audit-r10-dj4uhx L4: when the Cx was
     /// cancelled while the body finished, commit() refused and the helper
     /// returned at once, leaving the rollback merely scheduled. It contradicts

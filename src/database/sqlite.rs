@@ -2558,11 +2558,19 @@ enum SqliteConnectionOpCompletion<R, E> {
 /// running, whether still queued in the pool or parked on the connection
 /// mutex, is skipped, so the dropped operation has no effect later: an
 /// INSERT that runs after its caller gave up, or a COMMIT that lands after
-/// the next pool borrower's BEGIN. A running job is left to finish, since it
-/// may be a COMMIT or DDL whose outcome must not be torn.
+/// the next pool borrower's BEGIN. A running statement that started outside
+/// a transaction is interrupted, as a cancelled receive interrupts it:
+/// SQLite then rolls back only that statement, so a runaway query no longer
+/// holds the connection and a pool thread after its caller gave up. A
+/// running job inside a transaction is left to finish, since it may be a
+/// COMMIT or DDL whose outcome must not be torn.
 struct ConnectionOpDropGuard {
     phase: Arc<Mutex<SqliteConnectionOpPhase>>,
     handle: Option<crate::runtime::blocking_pool::BlockingTaskHandle>,
+    interrupt: Arc<rusqlite::InterruptHandle>,
+    /// Set by the worker just before the statement runs when the connection
+    /// was in autocommit mode then.
+    interruptible: Arc<AtomicBool>,
 }
 
 impl ConnectionOpDropGuard {
@@ -2580,8 +2588,18 @@ impl Drop for ConnectionOpDropGuard {
         }
         {
             let mut phase = self.phase.lock();
-            if *phase == SqliteConnectionOpPhase::Queued {
-                *phase = SqliteConnectionOpPhase::CancelRequested;
+            match *phase {
+                SqliteConnectionOpPhase::Queued => {
+                    *phase = SqliteConnectionOpPhase::CancelRequested;
+                }
+                SqliteConnectionOpPhase::Running if self.interruptible.load(Ordering::Acquire) => {
+                    *phase = SqliteConnectionOpPhase::CancelRequested;
+                    // Under the phase lock, as on a cancelled receive: the
+                    // worker cannot publish Completed and hand the connection
+                    // to another operation while the interrupt is raised.
+                    self.interrupt.interrupt();
+                }
+                _ => {}
             }
         }
         self.cancel_job();
@@ -2828,6 +2846,8 @@ impl SqliteConnection {
         let transaction_generation = Arc::clone(&self.transaction_generation);
         let phase = Arc::new(Mutex::new(SqliteConnectionOpPhase::Queued));
         let worker_phase = Arc::clone(&phase);
+        let interruptible = Arc::new(AtomicBool::new(false));
+        let worker_interruptible = Arc::clone(&interruptible);
         let (tx, mut rx) = crate::channel::oneshot::channel();
         let permit = match tx.reserve(cx) {
             Ok(permit) => permit,
@@ -2906,6 +2926,9 @@ impl SqliteConnection {
                             )
                         })?;
                     }
+                    // A dropped operation may interrupt only a statement that
+                    // starts outside a transaction (see ConnectionOpDropGuard).
+                    worker_interruptible.store(conn.is_autocommit(), Ordering::Release);
                     let result = f(conn);
                     if timeout.is_some() {
                         // Best-effort disarm; failure here implies a broken db
@@ -2940,6 +2963,8 @@ impl SqliteConnection {
         let mut drop_guard = ConnectionOpDropGuard {
             phase: Arc::clone(&phase),
             handle: Some(handle),
+            interrupt: Arc::clone(&self.interrupt),
+            interruptible,
         };
 
         let received = rx.recv(cx).await;
