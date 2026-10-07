@@ -632,6 +632,55 @@ impl SupervisionHistoryRecorder {
     }
 }
 
+/// One GenServer reply event for the lab's reply-linearity oracle
+/// (br-asupersync-52hxjz).
+///
+/// Only a runtime whose spawn gateway carries a [`ReplyHistoryRecorder`]
+/// records them (the lab). `call` identifies one `Reply`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReplyHistoryEvent {
+    /// A call reached `handle_call` with its `Reply` on `server`.
+    Created {
+        call: u64,
+        server: TaskId,
+        time: Time,
+    },
+    /// The reply was sent (or its caller had already gone).
+    Sent { call: u64 },
+    /// The reply was aborted: explicitly, or by the server's cancellation or
+    /// panic unwind.
+    Aborted { call: u64 },
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ReplyHistoryRecorder {
+    next_call: AtomicU64,
+    events: parking_lot::Mutex<Vec<ReplyHistoryEvent>>,
+}
+
+pub(crate) type ReplyHistoryHandle = Arc<ReplyHistoryRecorder>;
+
+impl ReplyHistoryRecorder {
+    #[must_use]
+    pub(crate) fn new_handle() -> ReplyHistoryHandle {
+        Arc::new(Self::default())
+    }
+
+    /// A fresh key for one `Reply`.
+    pub(crate) fn next_call(&self) -> u64 {
+        self.next_call.fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub(crate) fn record(&self, event: ReplyHistoryEvent) {
+        self.events.lock().push(event);
+    }
+
+    #[must_use]
+    pub(crate) fn snapshot(&self) -> Vec<ReplyHistoryEvent> {
+        self.events.lock().clone()
+    }
+}
+
 /// Owned direct-observer effects produced by task completion.
 ///
 /// The task cleanup and waiter extraction are complete before this value is
@@ -2091,6 +2140,10 @@ pub struct RuntimeState {
     /// (br-asupersync-52hxjz). Only the lab's spawn gateway hands it to
     /// supervisors, so it stays empty on native runtimes.
     supervision_history: SupervisionHistoryHandle,
+    /// GenServer reply evidence for post-run oracle hydration
+    /// (br-asupersync-52hxjz). Only the lab's spawn gateway hands it to
+    /// replies, so it stays empty on native runtimes.
+    reply_history: ReplyHistoryHandle,
     /// Monotonic id source for finalizer registrations.
     next_finalizer_id: u64,
     /// Per-module epoch cursors feeding the runtime epoch tracker.
@@ -2296,6 +2349,7 @@ impl RuntimeState {
             closed_region_history_limit: None,
             loser_drain_history: LoserDrainHistoryRecorder::new_handle(),
             supervision_history: SupervisionHistoryRecorder::new_handle(),
+            reply_history: ReplyHistoryRecorder::new_handle(),
             next_finalizer_id: 0,
             region_table_epoch: EpochId::GENESIS,
             task_table_epoch: EpochId::GENESIS,
@@ -10375,6 +10429,16 @@ impl RuntimeState {
     #[must_use]
     pub(crate) fn supervision_history_handle(&self) -> SupervisionHistoryHandle {
         Arc::clone(&self.supervision_history)
+    }
+
+    #[must_use]
+    pub(crate) fn reply_history(&self) -> Vec<ReplyHistoryEvent> {
+        self.reply_history.snapshot()
+    }
+
+    #[must_use]
+    pub(crate) fn reply_history_handle(&self) -> ReplyHistoryHandle {
+        Arc::clone(&self.reply_history)
     }
 
     #[cfg(test)]

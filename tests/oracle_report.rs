@@ -159,7 +159,6 @@ const LAB_UNFED_ORACLES: &[&str] = &[
     "actor_leak",
     "mailbox",
     "rref_access",
-    "reply_linearity",
     "registry_lease",
     "supervisor_quiescence",
 ];
