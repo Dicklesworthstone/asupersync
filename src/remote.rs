@@ -38,7 +38,7 @@
 //! process-local. V1/V2 computations remain one-request/one-response; V3 owns a
 //! child region until handler completion, expiry, explicit cancellation, or
 //! transport loss has drained to quiescence. Native TLS builds also expose
-//! [`NativeRemoteRuntime`], which maps the synchronous [`RemoteRuntime`] trait
+//! `NativeRemoteRuntime` (feature `tls`), which maps the synchronous [`RemoteRuntime`] trait
 //! onto runtime-owned V3 session tasks without blocking the caller or detaching
 //! network work from runtime shutdown.
 

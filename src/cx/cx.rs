@@ -2525,7 +2525,7 @@ impl<Caps> Cx<Caps> {
     /// that [`Self::is_cancel_requested`] performs.
     ///
     /// For every cancellation that flows through the runtime mutation paths
-    /// ([`Self::set_cancel_requested`], [`Self::cancel`], [`Self::cancel_with`],
+    /// ([`Self::set_cancel_requested`], [`Self::cancel_with_reason`], [`Self::cancel_with`],
     /// [`Self::cancel_fast`], task-handle and budget producers), this returns
     /// the same value as [`Self::is_cancel_requested`], observed with Acquire
     /// ordering. The only divergence window is the legacy v0.4.3 compatibility
@@ -4327,14 +4327,14 @@ impl<Caps> Cx<Caps> {
     /// principal [`Cx`] carrying the met budget and pending-spawn credits.
     /// Parent linkage uses this context's region, so parent cancellation
     /// propagates through the standard region-tree protocol while the child
-    /// stays independently cancellable via [`ChildRegion::cancel`].
+    /// stays independently cancellable via [`ChildRegion::cancel`](crate::cx::ChildRegion::cancel).
     ///
     /// # Errors
     ///
-    /// Fails closed with [`ChildRegionError::NoRuntimeGateway`] when this
+    /// Fails closed with [`ChildRegionError::NoRuntimeGateway`](crate::cx::ChildRegionError::NoRuntimeGateway) when this
     /// context was built without runtime wiring; detached contexts never
     /// invent ambient authority. A runtime mask without spawning authority
-    /// returns [`ChildRegionError::RuntimeUnavailable`] before enqueueing.
+    /// returns [`ChildRegionError::RuntimeUnavailable`](crate::cx::ChildRegionError::RuntimeUnavailable) before enqueueing.
     /// The derived context preserves this context's runtime capability mask.
     /// Scheduler and capability budgets meet both this context's limits and
     /// the owning region's limits, even when the request supplies an override.

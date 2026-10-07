@@ -1687,7 +1687,7 @@ impl BranchRegionSlot {
     }
 }
 
-/// One-shot slot the worker fills when a [`RegionCommand::Create`] resolves.
+/// One-shot slot the worker fills when a `RegionCommand::Create` resolves.
 ///
 /// Mirrors the publish-after-admission discipline of [`AdmittedTaskSlot`]:
 /// producers enqueue with the slot attached, workers publish exactly once,
