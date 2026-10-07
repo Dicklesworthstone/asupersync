@@ -291,6 +291,13 @@ type ConnectFuture = Pin<Box<dyn Future<Output = io::Result<TcpStream>> + Send>>
 const RACE_CONNECTIONS_POLLED_AFTER_COMPLETION: &str =
     "Happy Eyeballs RaceConnections polled after completion";
 const OVERALL_CONNECTION_TIMEOUT_MSG: &str = "Happy Eyeballs: overall connection timeout";
+const CONNECT_CANCELLED_MSG: &str = "Happy Eyeballs: connect cancelled";
+
+/// Whether the task that owns the race has been cancelled, by the check
+/// TcpStream::connect applies to its own attempts.
+fn owner_cancelled() -> bool {
+    Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false)
+}
 
 /// Future that races multiple connection attempts, returning the first success.
 ///
@@ -421,6 +428,13 @@ impl RaceConnections {
         )))
     }
 
+    fn finish_cancelled(&mut self) -> Poll<io::Result<TcpStream>> {
+        self.finish(Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            CONNECT_CANCELLED_MSG,
+        )))
+    }
+
     fn poll_with_time(
         &mut self,
         mut now: Time,
@@ -428,6 +442,11 @@ impl RaceConnections {
     ) -> Poll<io::Result<TcpStream>> {
         if self.completed {
             return Poll::Ready(Err(Self::poll_after_completion_error()));
+        }
+        // A cancelled owner ends the race as TcpStream::connect does, with
+        // Interrupted. Polling on would dial the remaining addresses.
+        if owner_cancelled() {
+            return self.finish_cancelled();
         }
 
         loop {
@@ -449,6 +468,9 @@ impl RaceConnections {
                             return self.finish(Ok(stream));
                         }
                         Err(e) => {
+                            if e.kind() == io::ErrorKind::Interrupted && owner_cancelled() {
+                                return self.finish(Err(e));
+                            }
                             self.last_error = Some(e);
                             // If an attempt fails, start the next one immediately (RFC 8305 5.4).
                             if self.addrs.len() > 0 {
@@ -461,8 +483,13 @@ impl RaceConnections {
                 }
             }
 
+            // poll_deadline, not poll: Sleep::poll completes early when its
+            // task is cancelled, which would read as an elapsed delay.
             if self.stagger_active {
-                if Pin::new(&mut self.stagger_sleep).poll(cx).is_ready() {
+                if Pin::new(&mut self.stagger_sleep)
+                    .poll_deadline(cx)
+                    .is_ready()
+                {
                     made_progress = true;
                     self.start_next(now);
                 }
@@ -477,7 +504,9 @@ impl RaceConnections {
 
         // A race without an overall limit arms no timer.
         if self.timeout_sleep.deadline() < Time::MAX
-            && Pin::new(&mut self.timeout_sleep).poll(cx).is_ready()
+            && Pin::new(&mut self.timeout_sleep)
+                .poll_deadline(cx)
+                .is_ready()
         {
             return self.finish_overall_timeout();
         }
@@ -1225,6 +1254,79 @@ mod tests {
     // =======================================================================
     // RaceConnections structural tests
     // =======================================================================
+
+    /// A race whose owner is cancelled reports Interrupted, as
+    /// TcpStream::connect does. Before, its overall-timeout Sleep completed
+    /// on the cancellation and the race reported its timeout instead.
+    #[test]
+    fn a_cancelled_race_reports_interrupted_not_its_timeout() {
+        init_test("a_cancelled_race_reports_interrupted_not_its_timeout");
+        let owner = Cx::for_testing();
+        let _guard = Cx::set_current(Some(owner.clone()));
+        let polls = Arc::new(AtomicUsize::new(0));
+        let attempt: ConnectFuture = Box::pin(PollCountingPendingConnect::new(Arc::clone(&polls)));
+        let deadline = timeout_now().saturating_add_nanos(5_000_000_000);
+        let mut race = RaceConnections::from_futures(
+            vec![attempt],
+            HappyEyeballsConfig::default(),
+            deadline,
+            timeout_now,
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(race.poll_with_time(timeout_now(), &mut cx).is_pending());
+
+        owner.set_cancel_requested(true);
+        let mut result = race.poll_with_time(timeout_now(), &mut cx);
+        for _ in 0..2 {
+            if result.is_ready() {
+                break;
+            }
+            result = race.poll_with_time(timeout_now(), &mut cx);
+        }
+        match result {
+            Poll::Ready(Err(error)) => {
+                assert_eq!(error.kind(), io::ErrorKind::Interrupted, "{error}");
+                assert_eq!(error.to_string(), CONNECT_CANCELLED_MSG);
+            }
+            other => panic!("a cancelled race must end Interrupted, got {other:?}"),
+        }
+        crate::test_complete!("a_cancelled_race_reports_interrupted_not_its_timeout");
+    }
+
+    /// A cancelled race starts no further attempt. Before, each attempt
+    /// failed Interrupted under the cancelled owner and the race started the
+    /// next address at once, one socket and SYN per remaining address.
+    #[test]
+    fn a_cancelled_race_starts_no_further_attempt() {
+        init_test("a_cancelled_race_starts_no_further_attempt");
+        let owner = Cx::for_testing();
+        let _guard = Cx::set_current(Some(owner.clone()));
+        let addrs: Vec<SocketAddr> = (0..4)
+            .map(|_| {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+                listener.local_addr().expect("local addr")
+            })
+            .collect();
+        let deadline = timeout_now().saturating_add_nanos(5_000_000_000);
+        let mut race =
+            RaceConnections::new(addrs, HappyEyeballsConfig::default(), deadline, timeout_now);
+        assert_eq!(race.started_count, 1, "construction starts one attempt");
+
+        owner.set_cancel_requested(true);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let result = race.poll_with_time(timeout_now(), &mut cx);
+        assert!(
+            matches!(&result, Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::Interrupted),
+            "a cancelled race must end Interrupted, got {result:?}"
+        );
+        assert_eq!(
+            race.started_count, 1,
+            "no attempt may start after the owner is cancelled"
+        );
+        crate::test_complete!("a_cancelled_race_starts_no_further_attempt");
+    }
 
     #[test]
     fn race_connections_all_fail() {
