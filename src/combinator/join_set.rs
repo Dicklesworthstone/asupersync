@@ -85,7 +85,12 @@ use crate::runtime::state::SpawnError;
 use crate::types::policy::FailFast;
 use crate::types::{CancelReason, Outcome, PanicPayload, Policy, Severity};
 
+mod collector;
 mod owner;
+use collector::CollectorWait;
+
+#[cfg(test)]
+mod waker_tests;
 
 /// A dynamically-sized collection of tasks spawned into a single region, whose
 /// results are collected as four-valued [`Outcome`]s.
@@ -121,7 +126,8 @@ struct Member<T, E> {
 #[derive(Default)]
 struct ReadyMembers {
     candidates: parking_lot::Mutex<BTreeSet<u64>>,
-    waiter: parking_lot::Mutex<Option<Waker>>,
+    // Arc clones under this mutex never invoke an executor's RawWaker clone.
+    waiter: parking_lot::Mutex<Option<Arc<Waker>>>,
 }
 
 impl ReadyMembers {
@@ -146,7 +152,8 @@ impl Wake for MemberWake {
         self.ready.candidates.lock().insert(self.index);
         let waiter = self.ready.waiter.lock().clone();
         if let Some(waiter) = waiter {
-            waiter.wake();
+            // Invoke and retire the Arc-owned executor waker only after unlock.
+            waiter.wake_by_ref();
         }
     }
 }
@@ -324,19 +331,14 @@ where
             return Some(outcome);
         }
 
+        // Only this borrowing wait owns the executor's subscription. Member
+        // registrations remain installed when the wait completes or is dropped.
+        let mut collector = CollectorWait::new(Arc::clone(&self.ready));
         std::future::poll_fn(|task_cx| {
             if self.members.is_empty() {
                 return Poll::Ready(None);
             }
-            {
-                let mut waiter = self.ready.waiter.lock();
-                if !waiter
-                    .as_ref()
-                    .is_some_and(|waker| waker.will_wake(task_cx.waker()))
-                {
-                    *waiter = Some(task_cx.waker().clone());
-                }
-            }
+            collector.refresh(task_cx.waker());
 
             // Poll each candidate, in spawn order, through its handle's own
             // long-lived receiver with the member's own waker, so every pending

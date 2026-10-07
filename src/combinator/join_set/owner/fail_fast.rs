@@ -1,6 +1,6 @@
 //! Fail-fast collection with failure attribution retained through sibling drain.
 
-use super::super::{JoinSet, MemberWake, join_to_outcome};
+use super::super::{CollectorWait, JoinSet, MemberWake, join_to_outcome};
 use crate::cx::Cx;
 use crate::types::{CancelReason, Outcome, Policy};
 use std::collections::BTreeMap;
@@ -130,16 +130,12 @@ where
         let mut cancelled = pin!(cx.cancelled());
         let mut owner_observed = false;
         let mut scan_from = 0;
+        let mut collector = CollectorWait::new(Arc::clone(&self.ready));
         poll_fn(|task| {
             if self.members.is_empty() {
                 return Poll::Ready(());
             }
-
-            // Clone and retire caller wakers outside the waiter mutex: these
-            // are user callbacks, including the last-reference destructor.
-            let incoming = task.waker().clone();
-            let previous = self.ready.waiter.lock().replace(incoming);
-            drop(previous);
+            collector.refresh(task.waker());
 
             let mut from = Some(scan_from);
             for _ in 0..CANDIDATES_PER_POLL {
@@ -195,6 +191,7 @@ where
             }
             Poll::Pending
         }).await;
+        drop(collector);
         collected.finish()
     }
 }
