@@ -298,6 +298,13 @@ race!(cx, timeout: Duration::from_secs(5), { f1, f2 })
 - Branches and their outputs must be `Send + 'static`, and `cx` must carry spawn
   authority (a runtime-wired context).
 - Semantics: the winner returns first; every loser is cancelled and drained.
+- Each branch runs in its own child region of the caller's region. Once the
+  race resolves, everything a losing branch spawned through its own context
+  (and their descendants) is cancelled and awaited before the race returns;
+  on a failed race (owner cancellation, admission failure) that covers every
+  branch. Tasks the winner spawned keep running, and the winner's region
+  closes by itself once they finish. A caller region with admission limits
+  keeps branches directly in that region, so its limits still apply.
 - **A branch must use its own context to observe loser cancellation.** Loser
   cancellation targets the branch's task. A prebuilt future that awaits a
   cancel-aware operation on the caller's `cx` (for example `rx.recv(&cx)`) never

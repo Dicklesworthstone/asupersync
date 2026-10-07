@@ -63,6 +63,7 @@ use crate::types::policy::FailFast;
 use crate::types::{CancelReason, Outcome, PanicPayload};
 use std::convert::Infallible;
 use std::future::{Future, poll_fn};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::{Pin, pin};
 use std::task::Poll;
 
@@ -141,6 +142,13 @@ where
 /// exception: if a member panics while being drained, the panic is reported
 /// instead, because a panic is never an expected consequence of the
 /// cancellation this function itself requested.
+///
+/// A panic from source polling or cloning the item factory also stops admission
+/// and takes the same explicit drain path. It is reported as `Panicked`, never
+/// retried against potentially inconsistent source/factory state. Panicking
+/// destructors, abort-on-panic builds, and callbacks that do not return remain
+/// outside this unwind-based guarantee. Dropping this function's future requests
+/// cancellation but leaves asynchronous joining to the enclosing region.
 ///
 /// # Scheduler cooperation
 ///
@@ -251,10 +259,11 @@ where
                     if cx.is_cancel_requested() {
                         return Poll::Ready(Admission::Cancelled);
                     }
-                    match Pin::new(&mut stream).poll_next(task) {
-                        Poll::Ready(Some(item)) => Poll::Ready(Admission::Item(item)),
-                        Poll::Ready(None) => Poll::Ready(Admission::SourceDone),
-                        Poll::Pending => Poll::Pending,
+                    match catch_unwind(AssertUnwindSafe(|| Pin::new(&mut stream).poll_next(task))) {
+                        Ok(Poll::Ready(Some(item))) => Poll::Ready(Admission::Item(item)),
+                        Ok(Poll::Ready(None)) => Poll::Ready(Admission::SourceDone),
+                        Ok(Poll::Pending) => Poll::Pending,
+                        Err(payload) => Poll::Ready(Admission::Panicked(caught_panic(payload))),
                     }
                 })
                 .await
@@ -272,8 +281,18 @@ where
                 }
                 // The check at the top of the loop reports it.
                 Admission::Cancelled => continue 'drive,
+                Admission::Panicked(payload) => {
+                    terminal = Some(Outcome::Panicked(payload));
+                    break 'drive;
+                }
                 Admission::Item(item) => {
-                    let mut make = f.clone();
+                    let mut make = match catch_unwind(AssertUnwindSafe(|| f.clone())) {
+                        Ok(make) => make,
+                        Err(payload) => {
+                            terminal = Some(Outcome::Panicked(caught_panic(payload)));
+                            break 'drive;
+                        }
+                    };
                     if let Err(err) = set.spawn(cx, move |item_cx| make(item_cx, item)) {
                         // A member could not be admitted to the region. This is
                         // structural misuse (no spawn gateway on this `Cx`),
@@ -368,6 +387,26 @@ enum Admission<T, E> {
     Finished(Outcome<(), E>),
     /// The caller was cancelled.
     Cancelled,
+    /// Source polling panicked before it could produce an item.
+    Panicked(PanicPayload),
+}
+
+/// Retain a diagnostic, not an arbitrary panic payload across drain.
+/// Retiring that payload is itself user code: a secondary destructor panic
+/// must not prevent already-owned tasks from receiving cancellation and joining.
+fn caught_panic(payload: Box<dyn std::any::Any + Send>) -> PanicPayload {
+    let message = if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else {
+        "stream admission panicked with a non-string payload".to_owned()
+    };
+    if let Err(secondary) = catch_unwind(AssertUnwindSafe(|| drop(payload))) {
+        // Even the secondary payload may panic on drop. Do not double-unwind.
+        std::mem::forget(secondary);
+    }
+    PanicPayload::new(message)
 }
 
 /// Clears the wait's cancellation-waker registration when the wait ends.
@@ -429,4 +468,207 @@ fn finish<E>(terminal: Option<Outcome<(), E>>, drained: Vec<Outcome<(), E>>) -> 
     // empty here, so this only fires if a member resolved non-`Ok` between the
     // final reap and the drain.
     drain_failure.unwrap_or(Outcome::ok(()))
+}
+
+#[cfg(test)]
+mod admission_panic_tests {
+    #![allow(clippy::pedantic, clippy::nursery, clippy::future_not_send)]
+
+    use super::*;
+    use crate::channel::mpsc;
+    use crate::combinator::try_map_collect_concurrent;
+    use crate::lab::run_async_under_lab;
+    use parking_lot::Mutex;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::task::{Context, Waker};
+
+    #[derive(Clone, Copy)]
+    enum Fault {
+        Source,
+        FactoryClone,
+        PayloadDrop,
+    }
+
+    #[derive(Default)]
+    struct Signal {
+        holding: AtomicBool,
+        waker: Mutex<Option<Waker>>,
+        source_failures: AtomicUsize,
+        payload_drops: AtomicUsize,
+    }
+
+    struct HostilePayload(Arc<Signal>);
+
+    impl Drop for HostilePayload {
+        fn drop(&mut self) {
+            self.0.payload_drops.fetch_add(1, Ordering::SeqCst);
+            panic!("secondary panic while retiring source payload");
+        }
+    }
+
+    struct Source {
+        phase: u8,
+        signal: Arc<Signal>,
+        fault: Fault,
+    }
+
+    impl Stream for Source {
+        type Item = u8;
+
+        fn poll_next(mut self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<Option<u8>> {
+            if self.phase == 0 {
+                self.phase = 1;
+                return Poll::Ready(Some(0));
+            }
+            if self.phase == 2 {
+                return Poll::Ready(None);
+            }
+            // The failure is armed only AFTER the first child owns its checked
+            // send permit. No source event or spin rescues the child later.
+            let incoming = task.waker().clone();
+            let mut registered = self.signal.waker.lock();
+            if !self.signal.holding.load(Ordering::SeqCst) {
+                let retired = registered.replace(incoming);
+                drop(registered);
+                drop(retired);
+                return Poll::Pending;
+            }
+            drop(registered);
+            drop(incoming);
+            match self.fault {
+                Fault::Source => {
+                    self.signal.source_failures.fetch_add(1, Ordering::SeqCst);
+                    panic!("source poll panic");
+                }
+                Fault::PayloadDrop => {
+                    self.signal.source_failures.fetch_add(1, Ordering::SeqCst);
+                    std::panic::panic_any(HostilePayload(Arc::clone(&self.signal)));
+                }
+                Fault::FactoryClone => {
+                    self.phase = 2;
+                    Poll::Ready(Some(1))
+                }
+            }
+        }
+    }
+
+    struct CloneBomb {
+        calls: Arc<AtomicUsize>,
+        armed: bool,
+    }
+
+    impl Clone for CloneBomb {
+        fn clone(&self) -> Self {
+            let index = self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.armed && index == 1 {
+                panic!("factory clone panic");
+            }
+            Self { calls: Arc::clone(&self.calls), armed: self.armed }
+        }
+    }
+
+    impl CloneBomb {
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    fn panic_message<T, E>(outcome: Outcome<T, E>) -> String {
+        match outcome {
+            Outcome::Panicked(payload) => format!("{payload:?}"),
+            _ => panic!("admission failure must be reported as Panicked"),
+        }
+    }
+
+    async fn journey(cx: Cx, fault: Fault, collect: bool, cleanup_panics: bool) {
+        let signal = Arc::new(Signal::default());
+        let cleaned = Arc::new(AtomicUsize::new(0));
+        let clones = Arc::new(AtomicUsize::new(0));
+        let source = Source { phase: 0, signal: Arc::clone(&signal), fault };
+        let (sender, mut receiver) = mpsc::channel::<u8>(1);
+        let child_sender = sender.clone();
+        let child_signal = Arc::clone(&signal);
+        let child_cleaned = Arc::clone(&cleaned);
+        let bomb = CloneBomb { calls: Arc::clone(&clones), armed: matches!(fault, Fault::FactoryClone) };
+        let factory = move |child: Cx, item| {
+            // Capture the complete CloneBomb, not just one of its fields.
+            assert!(bomb.calls() > 0);
+            assert_eq!(item, 0, "no item may be admitted after the armed failure");
+            let sender = child_sender.clone();
+            let signal = Arc::clone(&child_signal);
+            let cleaned = Arc::clone(&child_cleaned);
+            async move {
+                let permit = sender.reserve_checked(&child).await.unwrap();
+                signal.holding.store(true, Ordering::SeqCst);
+                let wake = signal.waker.lock().take();
+                if let Some(wake) = wake { wake.wake(); }
+                child.cancelled().await;
+                assert!(child.checkpoint().is_err());
+                // Cleanup is asynchronous: abort-and-return without joining
+                // cannot satisfy the counter and capacity assertions below.
+                yield_now().await;
+                yield_now().await;
+                drop(permit);
+                cleaned.fetch_add(1, Ordering::SeqCst);
+                if cleanup_panics { panic!("cleanup panic wins"); }
+                Err::<(), _>("child drained")
+            }
+        };
+        let message = if collect {
+            panic_message(try_map_collect_concurrent(&cx, source, 2, factory).await)
+        } else {
+            panic_message(try_for_each_concurrent(&cx, source, 2, factory).await)
+        };
+        assert!(signal.holding.load(Ordering::SeqCst));
+        assert_eq!(cleaned.load(Ordering::SeqCst), 1, "checked before parent region teardown");
+        assert!(matches!(receiver.try_recv(), Err(mpsc::RecvError::Empty)));
+        assert_eq!(sender.telemetry_snapshot(1).reserved_uncommitted_obligations, 0);
+        sender.try_reserve().expect("the child's capacity was returned").abort();
+        let expected = if cleanup_panics {
+            "cleanup panic wins"
+        } else {
+            match fault {
+                Fault::Source => "source poll panic",
+                Fault::FactoryClone => "factory clone panic",
+                Fault::PayloadDrop => "non-string payload",
+            }
+        };
+        assert!(message.contains(expected), "{message}");
+        assert_eq!(clones.load(Ordering::SeqCst), if matches!(fault, Fault::FactoryClone) { 2 } else { 1 });
+        assert_eq!(signal.source_failures.load(Ordering::SeqCst), usize::from(!matches!(fault, Fault::FactoryClone)));
+        assert_eq!(signal.payload_drops.load(Ordering::SeqCst), usize::from(matches!(fault, Fault::PayloadDrop)));
+    }
+
+    #[test]
+    fn source_and_factory_panics_drain_checked_members_in_lab() {
+        for fault in [Fault::Source, Fault::FactoryClone, Fault::PayloadDrop] {
+            for collect in [false, true] {
+                let ((), report) = run_async_under_lab(0xC020, move |cx| journey(cx, fault, collect, false));
+                assert!(report.quiescent && report.invariant_violations.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn cleanup_panic_takes_precedence_after_admission_panic() {
+        for collect in [false, true] {
+            let ((), report) = run_async_under_lab(0xC021, move |cx| journey(cx, Fault::Source, collect, true));
+            assert!(report.quiescent && report.invariant_violations.is_empty());
+        }
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn source_and_factory_panics_drain_checked_members_on_native_runtime() {
+        for fault in [Fault::Source, Fault::FactoryClone, Fault::PayloadDrop] {
+            for collect in [false, true] {
+                let runtime = crate::runtime::RuntimeBuilder::current_thread().build().unwrap();
+                runtime.block_on(runtime.handle().spawn(async move {
+                    let cx = Cx::current().expect("native parent context");
+                    journey(cx, fault, collect, false).await;
+                }));
+            }
+        }
+    }
 }

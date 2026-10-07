@@ -4523,6 +4523,16 @@ impl Cx<cap::All> {
     /// invariant headline: resources held by a losing branch (obligations,
     /// finalizers, file handles) are resolved, not abandoned.
     ///
+    /// Each branch runs in its own child region of this context's region, so
+    /// the drain covers everything a losing branch spawned through its own
+    /// context (for example via [`Cx::current`]), not only the branch task:
+    /// those descendants are cancelled and awaited before this returns. The
+    /// winner's region closes by itself once the winner's descendants finish,
+    /// so work the winner started keeps running after the race, still owned
+    /// by this context's region (br-asupersync-issue65-criticisms-kpmoy5.2.2).
+    /// If the runtime refuses the child region (region limits or resource
+    /// pressure), the branch runs directly in this context's region as before.
+    ///
     /// Because branches run as spawned tasks, each must be `Send + 'static` and
     /// the output `T` must be `Send + 'static`, and this context must be
     /// runtime-wired (carry a spawn gateway). A branch that fails admission
@@ -4564,9 +4574,14 @@ impl Cx<cap::All> {
 
         let scope = self.scope();
         let mut handles = Vec::with_capacity(futures.len());
+        let mut regions =
+            crate::cx::race_factory::BranchRegions::new(self.spawn_gateway_handle(), futures.len());
         for future in futures {
-            match self.spawn_in(&scope, move |_child| future) {
-                Ok(handle) => handles.push(handle),
+            match self.spawn_race_branch_in(&scope, move |_child| future) {
+                Ok((handle, region)) => {
+                    handles.push(handle);
+                    regions.push(region);
+                }
                 Err(_spawn_err) => {
                     // Fail closed, and ask the branches that did spawn to
                     // cancel: dropping a TaskHandle does not cancel its task.
@@ -4580,15 +4595,15 @@ impl Cx<cap::All> {
                     for handle in &handles {
                         handle.abort_with_reason(reason.clone());
                     }
+                    regions.settle(None, reason.clone(), false).await;
                     return Err(JoinError::Cancelled(reason));
                 }
             }
         }
 
-        scope
-            .race_all(self, handles)
-            .await
-            .map(|(value, _index)| value)
+        let result = scope.race_all(self, handles).await;
+        crate::cx::race_factory::settle_branch_regions(regions, &result).await;
+        result.map(|(value, _index)| value)
     }
 
     /// Races multiple **named** inline futures with loser-drain semantics.
@@ -5415,6 +5430,88 @@ where
         Fut: Future + Send + 'static,
         Fut::Output: Send + 'static,
     {
+        self.spawn_via_gateway_in_branch(
+            region,
+            budget,
+            capability_budget,
+            gateway,
+            pending,
+            completion_policy,
+            None,
+            f,
+        )
+    }
+
+    /// Spawns one race branch into `scope`'s region, asking admission to run
+    /// it in a fresh sealed child region of that region
+    /// (br-asupersync-issue65-criticisms-kpmoy5.2.2).
+    ///
+    /// Everything the branch spawns through its own context lands in that
+    /// child region, so the race can cancel and drain a losing branch's whole
+    /// subtree. The region closes by itself once the branch and its
+    /// descendants finish, so a winner's descendants keep running after the
+    /// race returns. The returned slot names the region once admission has
+    /// minted it; it stays empty if the mint was refused, in which case the
+    /// branch runs in `scope`'s region as before.
+    pub(crate) fn spawn_race_branch_in<F, Fut, P>(
+        &self,
+        scope: &crate::cx::Scope<'_, P>,
+        f: F,
+    ) -> Result<
+        (
+            crate::runtime::TaskHandle<Fut::Output>,
+            Arc<crate::runtime::spawn_mailbox::BranchRegionSlot>,
+        ),
+        crate::runtime::state::SpawnError,
+    >
+    where
+        P: crate::types::Policy,
+        F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,
+        Fut: Future + Send + 'static,
+        Fut::Output: Send + 'static,
+    {
+        let Some(gateway) = self.spawn_gateway_handle() else {
+            return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
+        };
+        let pending = scope.pending_spawn_counter_handle().or_else(|| {
+            (scope.region_id() == self.region_id())
+                .then(|| self.pending_spawn_counter_handle())
+                .flatten()
+        });
+        let Some(pending) = pending else {
+            return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
+        };
+        let branch = Arc::new(crate::runtime::spawn_mailbox::BranchRegionSlot::new());
+        let handle = self.spawn_via_gateway_in_branch(
+            scope.region_id(),
+            scope.budget(),
+            scope.capability_budget(),
+            &gateway,
+            &pending,
+            crate::runtime::task_handle::SpawnCompletionPolicy::PreserveAcknowledgedCancellationResult,
+            Some(Arc::clone(&branch)),
+            f,
+        )?;
+        Ok((handle, branch))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_via_gateway_in_branch<F, Fut>(
+        &self,
+        region: RegionId,
+        budget: Budget,
+        capability_budget: crate::types::CapabilityBudget,
+        gateway: &Arc<crate::runtime::spawn_mailbox::SpawnGateway>,
+        pending: &Arc<crate::record::region::PendingSpawnCounter>,
+        completion_policy: crate::runtime::task_handle::SpawnCompletionPolicy,
+        branch_region: Option<Arc<crate::runtime::spawn_mailbox::BranchRegionSlot>>,
+        f: F,
+    ) -> Result<crate::runtime::TaskHandle<Fut::Output>, crate::runtime::state::SpawnError>
+    where
+        F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,
+        Fut: Future + Send + 'static,
+        Fut::Output: Send + 'static,
+    {
         use crate::runtime::spawn_mailbox::{AdmittedTaskSlot, SpawnFactoryFn, SpawnRequest};
         use crate::runtime::task_handle::JoinError;
 
@@ -5436,11 +5533,13 @@ where
         // owner from observing completion — and closing its region — before the
         // record is committed (br-asupersync-yhueis).
         let barrier = crate::runtime::task_handle::RetirementBarrier::pending();
-        let admitted_slot = Arc::new(
-            AdmittedTaskSlot::new_with_cancel_gateway(Arc::clone(gateway))
-                .with_runtime_mask(self.runtime_mask)
-                .with_retirement_barrier(Arc::clone(&barrier)),
-        );
+        let mut admitted_slot = AdmittedTaskSlot::new_with_cancel_gateway(Arc::clone(gateway))
+            .with_runtime_mask(self.runtime_mask)
+            .with_retirement_barrier(Arc::clone(&barrier));
+        if let Some(branch_region) = branch_region {
+            admitted_slot = admitted_slot.with_branch_region(branch_region);
+        }
+        let admitted_slot = Arc::new(admitted_slot);
         let (result_tx, handle) = crate::runtime::task_handle::pending_task_handle_channel::<
             Fut::Output,
         >(provisional, Arc::clone(&admitted_slot));

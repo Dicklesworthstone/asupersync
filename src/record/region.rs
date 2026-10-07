@@ -874,6 +874,13 @@ pub struct RegionRecord {
     /// The same increment-before-visibility shape as `pending_spawns`, so
     /// drain gating sees a reservation between its post and its application.
     pending_obligation_posts: Arc<PendingSpawnCounter>,
+    /// A sealed region closes itself, without cancelling anything, once it
+    /// has no tasks, children, pending spawns or pending obligation posts.
+    /// Its own tasks may still spawn into it while it is open. Race branches
+    /// run in sealed regions so a winner's descendants keep running after the
+    /// race returns, and the region still never outlives its work
+    /// (br-asupersync-issue65-criticisms-kpmoy5.2.2).
+    sealed: AtomicBool,
     /// Tracing span for region lifecycle (only active with tracing-integration feature).
     #[cfg(feature = "tracing-integration")]
     span: Span,
@@ -981,8 +988,22 @@ impl RegionRecord {
             double_resolve_count: AtomicU64::new(0),
             pending_spawns: Arc::new(PendingSpawnCounter::new()),
             pending_obligation_posts: Arc::new(PendingSpawnCounter::new()),
+            sealed: AtomicBool::new(false),
             span,
         }
+    }
+
+    /// Marks this region sealed: once it holds no live work it begins a
+    /// non-cancelling close by itself (see [`Self::is_sealed`]).
+    pub(crate) fn seal(&self) {
+        self.sealed.store(true, Ordering::Release);
+    }
+
+    /// Returns true when the region closes itself once its work is done,
+    /// instead of waiting for an explicit close or cancel.
+    #[must_use]
+    pub(crate) fn is_sealed(&self) -> bool {
+        self.sealed.load(Ordering::Acquire)
     }
 
     /// Returns the logical time when the region was created.

@@ -1418,6 +1418,9 @@ pub(crate) enum RegionLifecycleEffect {
         priority: RegionPriority,
         budget: Budget,
         capability_budget: CapabilityBudget,
+        /// False for a race branch's region, which is not a governed
+        /// workload (kpmoy5.2.2).
+        register_envelope: bool,
     },
     /// Finalize-boundary validator transition (+ verdict logging and
     /// snapshot-cache invalidation on violation).
@@ -1428,6 +1431,14 @@ pub(crate) enum RegionLifecycleEffect {
     },
     /// Close-completion finalized-accounting check.
     CloseValidation { region_id: RegionId },
+    /// `RegionCloseBegin` trace event for a sealed region that began its
+    /// non-cancelling close because its work finished
+    /// (br-asupersync-issue65-criticisms-kpmoy5.2.2).
+    SealedCloseBegin {
+        region_id: RegionId,
+        parent: Option<RegionId>,
+        now: Time,
+    },
     /// `RegionCloseComplete` trace event + `region_closed` lifetime metric
     /// for a completed close; `created_at` was captured before the arena
     /// removal.
@@ -3891,9 +3902,47 @@ impl RuntimeState {
                 priority,
                 budget,
                 capability_budget,
+                register_envelope: true,
             },
         );
 
+        Ok(id)
+    }
+
+    /// Mints the sealed child region of one race branch
+    /// (br-asupersync-issue65-criticisms-kpmoy5.2.2).
+    ///
+    /// A branch region is not separately admitted work: it only decides where
+    /// an already-requested branch task runs, and a refused mint leaves the
+    /// task in `parent` anyway. So it skips the region-admission pressure
+    /// check (which cannot change whether the work runs, and was about 60% of
+    /// a child region's creation cost) and registers no resource envelope
+    /// with the swarm pressure governor (it is not a governed workload). The
+    /// record is sealed before anything can advance it. Validator tracking,
+    /// the trace event, metrics and the epoch advance are those of every
+    /// child region.
+    fn create_race_branch_region(&mut self, parent: RegionId) -> Result<RegionId, RegionCreateError> {
+        let now = self.current_runtime_time();
+        let id = self.regions.create_child_with_capability_budget(
+            parent,
+            Budget::INFINITE,
+            CapabilityBudget::UNSPECIFIED,
+            CapabilityBudgetRequirements::NONE,
+            now,
+        )?;
+        self.regions
+            .get(id.arena_index())
+            .expect("the branch region was minted above")
+            .seal();
+        self.dispatch_region_lifecycle_effect(RegionLifecycleEffect::CreatedChild {
+            region_id: id,
+            parent,
+            now,
+            priority: RegionPriority::Normal,
+            budget: Budget::INFINITE,
+            capability_budget: CapabilityBudget::UNSPECIFIED,
+            register_envelope: false,
+        });
         Ok(id)
     }
 
@@ -4408,7 +4457,7 @@ impl RuntimeState {
     /// the acquisition order is the canonical B → A.
     pub(crate) fn admit_spawn_request_in(
         &mut self,
-        parts: crate::runtime::spawn_mailbox::SpawnRequestParts,
+        mut parts: crate::runtime::spawn_mailbox::SpawnRequestParts,
         tasks: &mut AdmissionTaskTarget<'_>,
         regions: &AdmissionRegionTarget<'_>,
     ) -> SpawnAdmission {
@@ -4422,7 +4471,6 @@ impl RuntimeState {
             };
             return SpawnAdmission::Denied { parts, error };
         }
-        let region = parts.region;
         let budget = parts.budget;
         let runtime_mask = parts
             .admitted_slot
@@ -4432,6 +4480,14 @@ impl RuntimeState {
             .admitted_slot
             .as_ref()
             .and_then(|slot| slot.retirement_barrier());
+        let branch = self.mint_branch_region_in(&parts, regions);
+        if let Some((child, _)) = &branch {
+            // From here on the request belongs to the branch region: spawn
+            // observers, the trace and a denial's region re-advance all name
+            // the region that owns (or would have owned) the task.
+            parts.region = *child;
+        }
+        let region = parts.region;
         let (task_id, cx, now) = match self.admit_spawn_record_in(
             region,
             budget,
@@ -4441,9 +4497,56 @@ impl RuntimeState {
             regions,
         ) {
             Ok(admitted) => admitted,
+            // A minted branch region is sealed and still empty here. Every
+            // scheduler re-advances a denied request's region, which closes
+            // it and then re-advances the requested parent.
             Err(error) => return SpawnAdmission::Denied { parts, error },
         };
+        if let Some((child, slot)) = branch {
+            let close_notify = regions
+                .resolve_ref(&self.regions)
+                .get(child.arena_index())
+                .map(|record| Arc::clone(&record.close_notify))
+                .expect("the branch region holds the task just admitted");
+            slot.publish(child, close_notify);
+        }
         self.finish_send_spawn_admission_in(parts, task_id, &cx, now, tasks)
+    }
+
+    /// Mints the sealed child region a race-branch spawn requested, under the
+    /// requested region (br-asupersync-issue65-criticisms-kpmoy5.2.2).
+    ///
+    /// Returns `None` when no branch region was requested, when the requested
+    /// region carries admission limits, or when the mint is refused (parent
+    /// closed or missing, or an external region table). The task is
+    /// then admitted into the requested region exactly as before, so a
+    /// refusal never changes whether the spawn itself is admitted. A region
+    /// with limits keeps the branch in the region so the branch and its work
+    /// still count against those limits; limits are per region and a child
+    /// region would not inherit them.
+    fn mint_branch_region_in(
+        &mut self,
+        parts: &crate::runtime::spawn_mailbox::SpawnRequestParts,
+        regions: &AdmissionRegionTarget<'_>,
+    ) -> Option<(
+        RegionId,
+        Arc<crate::runtime::spawn_mailbox::BranchRegionSlot>,
+    )> {
+        let slot = Arc::clone(parts.admitted_slot.as_ref()?.branch_region()?);
+        if !matches!(regions, AdmissionRegionTarget::Embedded) {
+            return None;
+        }
+        let limits = self.regions.limits(parts.region)?;
+        if limits.max_children.is_some()
+            || limits.max_tasks.is_some()
+            || limits.max_obligations.is_some()
+            || limits.max_heap_bytes.is_some()
+            || limits.curve_budget.is_some()
+        {
+            return None;
+        }
+        let child = self.create_race_branch_region(parts.region).ok()?;
+        Some((child, slot))
     }
 
     /// Payload-agnostic core of mailbox spawn admission, shared by the
@@ -9592,8 +9695,7 @@ impl RuntimeState {
         parent: RegionId,
         now: Time,
         priority: RegionPriority,
-        budget: Budget,
-        capability_budget: CapabilityBudget,
+        envelope_budgets: Option<(Budget, CapabilityBudget)>,
     ) {
         self.resource_monitor
             .engine()
@@ -9606,8 +9708,9 @@ impl RuntimeState {
         self.metrics.region_created(region_id, Some(parent));
 
         // Register resource envelope with swarm pressure governor
-        if let Ok(envelope) =
-            self.create_resource_envelope_for_region(region_id, &budget, &capability_budget)
+        if let Some((budget, capability_budget)) = envelope_budgets
+            && let Ok(envelope) =
+                self.create_resource_envelope_for_region(region_id, &budget, &capability_budget)
         {
             self.swarm_pressure_governor
                 .register_region_envelope(region_id, envelope);
@@ -9633,14 +9736,14 @@ impl RuntimeState {
                 priority,
                 budget,
                 capability_budget,
+                register_envelope,
             } => {
                 self.dispatch_region_created_child_effects(
                     region_id,
                     parent,
                     now,
                     priority,
-                    budget,
-                    capability_budget,
+                    register_envelope.then_some((budget, capability_budget)),
                 );
             }
             RegionLifecycleEffect::FinalizeValidation {
@@ -9652,6 +9755,23 @@ impl RuntimeState {
             }
             RegionLifecycleEffect::CloseValidation { region_id } => {
                 self.dispatch_region_close_validation(region_id);
+            }
+            RegionLifecycleEffect::SealedCloseBegin {
+                region_id,
+                parent,
+                now,
+            } => {
+                self.record_trace_event(|seq| {
+                    TraceEvent::new(
+                        seq,
+                        now,
+                        TraceEventKind::RegionCloseBegin,
+                        TraceData::Region {
+                            region: region_id,
+                            parent,
+                        },
+                    )
+                });
             }
             RegionLifecycleEffect::RegionClosed {
                 region_id,
@@ -10038,7 +10158,44 @@ impl RuntimeState {
                         }
                     }
                 }
-                _ => {}
+                crate::record::region::RegionState::Open => {
+                    // A sealed region closes itself once its work is done,
+                    // without cancelling anything: nothing is left to cancel
+                    // (br-asupersync-issue65-criticisms-kpmoy5.2.2). Every task
+                    // completion and child close re-drives this walk, so the
+                    // check runs at the moment the last piece of work retires.
+                    let sealed_and_idle = regions
+                        .resolve_ref(&self.regions)
+                        .get(region_id.arena_index())
+                        .is_some_and(|region| {
+                            region.is_sealed() && region.pending_obligation_post_count() == 0
+                        })
+                        && self.can_region_finalize_in(&*regions, tasks, region_id);
+                    if !sealed_and_idle {
+                        break;
+                    }
+                    let began = regions
+                        .resolve_ref(&self.regions)
+                        .get(region_id.arena_index())
+                        .is_some_and(|region| region.begin_close_without_subscriber(None));
+                    if !began {
+                        break;
+                    }
+                    let now = self.current_runtime_time();
+                    self.emit_region_lifecycle_effect(
+                        effects,
+                        RegionLifecycleEffect::SealedCloseBegin {
+                            region_id,
+                            parent,
+                            now,
+                        },
+                    );
+                    self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::RegionTable);
+                    // Re-process as Closing: with no live work it finalizes
+                    // and closes in the following iterations.
+                    current = Some(region_id);
+                }
+                crate::record::region::RegionState::Closed => {}
             }
         }
     }
