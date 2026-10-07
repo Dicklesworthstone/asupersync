@@ -1132,6 +1132,21 @@ pub(crate) fn cancel_local_spawns_for_mailbox(mailbox: &Arc<SpawnMailbox>) {
     }
 }
 
+/// Cancels a runtime's local spawns still queued on this thread when dropped.
+///
+/// A native worker thread holds one while it runs. Its loop ends at shutdown
+/// even when the thread's lane still holds that runtime's unadmitted
+/// `spawn_local` requests, and thread exit would otherwise drop them during
+/// thread-local teardown: their handles never resolve, and their captures are
+/// destroyed where a panic aborts the process (br-asupersync-01oghn M1).
+pub(crate) struct CancelLocalSpawnsOnExit(pub(crate) Arc<SpawnMailbox>);
+
+impl Drop for CancelLocalSpawnsOnExit {
+    fn drop(&mut self) {
+        cancel_local_spawns_for_mailbox(&self.0);
+    }
+}
+
 /// A spawn request travelling through the [`SpawnMailbox`].
 ///
 /// Carries everything admission needs to create the task record under the

@@ -395,7 +395,7 @@ impl NativeThreadHostServices {
                                 callback();
                             }
                             let mut worker = worker;
-                            worker.run_loop();
+                            worker.run_worker_thread();
                         }
                     }
                     if let Some(callback) = on_stop.as_ref() {
@@ -13693,6 +13693,50 @@ worker_threads = 16
         assert!(
             ended.load(Ordering::SeqCst),
             "teardown completed before the blocking job ended"
+        );
+    }
+
+    /// br-asupersync-01oghn M1: a `spawn_local` request still queued on a
+    /// worker thread's lane when the runtime stops resolves as cancelled on
+    /// that thread before it exits. This holds for a multi-thread worker and
+    /// for the current-thread runtime's background thread. Before, thread
+    /// exit dropped the request unresolved, and its handle never finished.
+    #[test]
+    fn a_local_spawn_queued_when_its_worker_stops_resolves_cancelled() {
+        let mut unresolved = Vec::new();
+        for current_thread in [false, true] {
+            let runtime = if current_thread {
+                RuntimeBuilder::current_thread().build()
+            } else {
+                RuntimeBuilder::new().worker_threads(1).build()
+            }
+            .expect("build runtime");
+            let stopping = runtime.inner.scheduler.shutdown_signal_for_test();
+            let (local_tx, local_rx) = std::sync::mpsc::channel();
+            let _pin = runtime.handle().spawn(async move {
+                let local = Cx::current()
+                    .expect("task cx")
+                    .spawn_local(|_| async { 7_u8 })
+                    .expect("queue a local spawn on this worker");
+                local_tx.send(local).expect("test thread takes the handle");
+                // The dispatch loop checks shutdown before it drains the
+                // local spawn lane, so the request above stays queued.
+                while !stopping.load(Ordering::Acquire) {
+                    std::thread::yield_now();
+                }
+            });
+            let mut local = local_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the worker runs the pinning task");
+            drop(runtime);
+            let joined = local.try_join();
+            if !matches!(joined, Err(crate::runtime::JoinError::Cancelled(_))) {
+                unresolved.push(format!("current_thread={current_thread}: {joined:?}"));
+            }
+        }
+        assert!(
+            unresolved.is_empty(),
+            "queued local spawns did not resolve cancelled: {unresolved:?}"
         );
     }
 }
