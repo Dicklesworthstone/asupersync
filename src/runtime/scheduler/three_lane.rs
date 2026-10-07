@@ -2368,6 +2368,7 @@ impl ThreeLaneScheduler {
                 timer_driver: timer_driver.clone(),
                 steal_buffer: Vec::new(),
                 stranded_local_tasks: std::collections::BTreeSet::new(),
+                scheduler_ticks: SchedulerTicks::default(),
                 steal_batch_size,
                 enable_parking,
                 empty_backoff: 0,
@@ -3484,6 +3485,80 @@ impl StealerLocality {
 /// in release builds (br-asupersync-issue65-criticisms-kpmoy5.1.6).
 const SCHEDULER_VERIFICATION_DEFAULT: bool = cfg!(any(test, debug_assertions));
 
+/// One worker's polls and poll time since its last report to the runtime's
+/// metrics provider (`MetricsProvider::scheduler_tick`,
+/// br-asupersync-x9mmxl). The provider is read when the worker's loop first
+/// starts and kept only if it wants ticks, so a runtime without metrics times
+/// no polls.
+#[derive(Default)]
+struct SchedulerTicks {
+    resolved: bool,
+    provider: Option<Arc<dyn crate::observability::metrics::MetricsProvider>>,
+    polls: usize,
+    poll_nanos: u64,
+}
+
+impl std::fmt::Debug for SchedulerTicks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SchedulerTicks")
+            .field("timing", &self.provider.is_some())
+            .field("polls", &self.polls)
+            .field("poll_nanos", &self.poll_nanos)
+            .finish()
+    }
+}
+
+impl SchedulerTicks {
+    /// Polls per report.
+    const BATCH: usize = 64;
+
+    fn resolve(&mut self, state: &Arc<ContendedMutex<RuntimeState>>) {
+        if std::mem::replace(&mut self.resolved, true) {
+            return;
+        }
+        let provider = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .metrics_provider();
+        if provider.wants_scheduler_ticks() {
+            self.provider = Some(provider);
+        }
+    }
+
+    fn timing(&self) -> bool {
+        self.provider.is_some()
+    }
+
+    fn record(&mut self, nanos: u64) {
+        self.polls += 1;
+        self.poll_nanos = self.poll_nanos.saturating_add(nanos);
+    }
+
+    fn flush_if_full(&mut self) {
+        if self.polls >= Self::BATCH {
+            self.flush();
+        }
+    }
+
+    /// Reports the polls since the last report. Callers hold no runtime lock;
+    /// a panicking provider is contained like the runtime's other metrics
+    /// callbacks.
+    fn flush(&mut self) {
+        if self.polls == 0 {
+            return;
+        }
+        let polls = std::mem::take(&mut self.polls);
+        let nanos = std::mem::take(&mut self.poll_nanos);
+        if let Some(provider) = &self.provider
+            && let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                provider.scheduler_tick(polls, Duration::from_nanos(nanos));
+            }))
+        {
+            std::mem::forget(payload);
+        }
+    }
+}
+
 /// A worker thread for the 3-lane scheduler.
 #[derive(Debug)]
 pub struct ThreeLaneWorker {
@@ -3679,6 +3754,8 @@ pub struct ThreeLaneWorker {
     /// task, never capped) until the thread that owns the task runs this
     /// worker and re-schedules it.
     stranded_local_tasks: std::collections::BTreeSet<TaskId>,
+    /// Polls not yet reported to the metrics provider's `scheduler_tick`.
+    scheduler_ticks: SchedulerTicks,
 }
 
 /// Worker-local counters for preferred-vs-remote steal outcomes.
@@ -5518,6 +5595,7 @@ impl ThreeLaneWorker {
         // GH#58: local tasks whose future lives on this thread but that were
         // woken while the worker ran elsewhere are runnable again here.
         self.rescue_stranded_local_tasks();
+        self.scheduler_ticks.resolve(&self.state);
         let lifo_was_enabled = std::mem::replace(&mut self.lifo_enabled, true);
 
         'dispatch: loop {
@@ -5537,12 +5615,14 @@ impl ThreeLaneWorker {
             if let Some(task) = self.next_task() {
                 self.reset_empty_backoff();
                 self.execute(task);
+                self.scheduler_ticks.flush_if_full();
                 self.publish_preemption_fairness_certificate_if_due();
                 self.poll_busy_io_if_due();
                 continue;
             }
 
             self.publish_preemption_fairness_certificate_before_idle();
+            self.scheduler_ticks.flush();
 
             if self.schedule_ready_finalizers() {
                 continue;
@@ -5764,6 +5844,7 @@ impl ThreeLaneWorker {
             self.global.inject_ready(task, priority);
             self.coordinator.wake_one();
         }
+        self.scheduler_ticks.flush();
         self.publish_preemption_fairness_certificate();
     }
 
@@ -7726,13 +7807,16 @@ impl ThreeLaneWorker {
         // A self-waking root calls this even when no child task is runnable.
         // Keep the budget on the worker so repeated single turns cannot reset it.
         self.poll_busy_io_if_due();
+        self.scheduler_ticks.resolve(&self.state);
         if let Some(task) = self.next_task() {
             self.execute(task);
+            self.scheduler_ticks.flush_if_full();
             self.publish_preemption_fairness_certificate_if_due();
             return true;
         }
 
         self.publish_preemption_fairness_certificate_before_idle();
+        self.scheduler_ticks.flush();
         false
     }
 
@@ -8515,6 +8599,9 @@ impl ThreeLaneWorker {
             .lifo_enabled
             .then(|| ExecutingTask::enter(&self.coordinator, task_id));
 
+        // Poll time for `MetricsProvider::scheduler_tick`, only when the
+        // provider wants it (br-asupersync-x9mmxl).
+        let tick_start = self.scheduler_ticks.timing().then(|| self.capture_now());
         // The worker dispatch quantum is one `Future::poll`. Do not loop on a
         // self-woken task here: returning to `next_task()` is what lets cancel,
         // timed, and ready lanes re-evaluate their fairness gates.
@@ -8535,6 +8622,7 @@ impl ThreeLaneWorker {
                 .expect("executing task storage")
                 .poll(&mut cx)
         }));
+        let poll_nanos = tick_start.map(|start| self.capture_now().duration_since(start));
 
         let mut credit_adaptive_epoch = true;
         match poll_result {
@@ -8726,6 +8814,10 @@ impl ThreeLaneWorker {
             }
         }
         drop(guard);
+        // `guard` borrowed the worker, so the poll is counted only now.
+        if let Some(nanos) = poll_nanos {
+            self.scheduler_ticks.record(nanos);
+        }
         if credit_adaptive_epoch {
             self.adaptive_on_dispatch();
         } else {
