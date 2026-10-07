@@ -5463,6 +5463,17 @@ impl ThreeLaneWorker {
         self.run_loop_until(&mut || false, false);
     }
 
+    /// A native worker thread's whole run: [`Self::run_loop`] until shutdown.
+    /// Then, on this thread and before it exits, this runtime's `spawn_local`
+    /// requests still queued on the thread's lane resolve as cancelled, also
+    /// when the loop unwinds (br-asupersync-01oghn M1).
+    pub(crate) fn run_worker_thread(&mut self) {
+        let _cancel_on_exit = self.spawn_mailbox.as_ref().map(|mailbox| {
+            crate::runtime::spawn_mailbox::CancelLocalSpawnsOnExit(Arc::clone(mailbox))
+        });
+        self.run_loop();
+    }
+
     /// [`Self::run_loop`] with additional stop conditions (GH#58: the
     /// current-thread driver borrows the worker for `Runtime::block_on`).
     ///

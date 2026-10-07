@@ -145,12 +145,28 @@ pub(crate) fn is_stale_handshake_packet_error(error: &QuicTlsError) -> bool {
 
 /// A datagram's first packet declared a Length past the datagram's end.
 pub(crate) const PACKET_LENGTH_OVERRUN_CODE: &str = "packet_length_overrun";
+/// A packet's Source Connection ID is not the one the peer's first accepted
+/// packet carried. RFC 9000 section 7.2 says such a packet is discarded.
+pub(crate) const PEER_CONNECTION_ID_CHANGED_CODE: &str = "peer_connection_id_changed";
+/// An Initial packet held a frame that does not decode.
+pub(crate) const INITIAL_FRAME_DECODE_CODE: &str = "initial_frame_decode";
+/// CRYPTO reassembly refused an Initial packet's bytes: they differ from
+/// bytes already buffered at the same offsets, or exceed the offset, byte or
+/// range limits.
+pub(crate) const INITIAL_CRYPTO_REJECTED_CODE: &str = "initial_crypto_rejected";
 
 /// True for a packet that failed to authenticate under live keys or was not
 /// even well-formed enough to try: a forgery from anyone who saw the
 /// cleartext Initial, a bit-flipped datagram, or a stray. RFC 9000 §12.2
 /// requires such packets to be discarded; they must never end a handshake
 /// that an authenticated peer is still driving.
+///
+/// Anyone who saw the client's first Initial can derive the Initial keys from
+/// its Destination Connection ID, so an Initial that authenticates can still
+/// be forged. Such a packet is discarded too when it has a frame that does
+/// not decode (none of its frames takes effect) or CRYPTO bytes reassembly
+/// refuses (the packet ends at that frame). So is a packet in any space whose
+/// Source Connection ID changed.
 pub(crate) fn is_unauthenticated_handshake_packet_error(error: &QuicTlsError) -> bool {
     matches!(
         error,
@@ -158,6 +174,8 @@ pub(crate) fn is_unauthenticated_handshake_packet_error(error: &QuicTlsError) ->
             if *provider == "rustls-quic-handshake"
                 && matches!(*code,
                     PACKET_UNPROTECT_CODE | PACKET_LENGTH_OVERRUN_CODE
+                        | PEER_CONNECTION_ID_CHANGED_CODE | INITIAL_FRAME_DECODE_CODE
+                        | INITIAL_CRYPTO_REJECTED_CODE
                         | "packet_header_decode" | "packet_body_too_short"
                         | "expected_long_header" | "unexpected_long_packet_type"
                         | "unexpected_crypto_packet_space")
@@ -1112,10 +1130,15 @@ impl QuicHandshakeDriver {
         let space_index = handshake_packet_space_index(space)
             .ok_or_else(|| handshake_failure("unexpected_crypto_packet_space"))?;
 
-        match self.peer_connection_id {
-            None => self.peer_connection_id = Some(peer_src_cid),
-            Some(expected) if expected == peer_src_cid => {}
-            Some(_) => return Err(handshake_failure("peer_connection_id_changed")),
+        // RFC 9000 section 7.2: a packet whose Source Connection ID is not the
+        // one the peer's first accepted packet carried is discarded. The ID is
+        // pinned only when a packet is accepted, so a refused forgery cannot
+        // pin its own.
+        if self
+            .peer_connection_id
+            .is_some_and(|expected| expected != peer_src_cid)
+        {
+            return Err(handshake_failure(PEER_CONNECTION_ID_CHANGED_CODE));
         }
 
         // A packet number is only a replay key after the packet authenticates.
@@ -1137,21 +1160,45 @@ impl QuicHandshakeDriver {
 
         // asupersync's frame codec decodes over a `&[u8]` (which implements the
         // crate `Buf`), advancing the slice; mirror `NativeQuicConnection::decode_frames`.
+        // Every frame decodes before any takes effect. Anyone can derive the
+        // Initial keys, so a malformed Initial is discarded; under Handshake
+        // keys it is the peer's protocol error.
+        let initial = matches!(space, PacketProtectionSpace::Initial);
+        let mut crypto = Vec::new();
         let mut buf: &[u8] = &plaintext;
         while !buf.is_empty() {
-            match QuicFrame::decode(&mut buf).map_err(|_| handshake_failure("frame_decode"))? {
-                Some(QuicFrame::Crypto { offset, data }) => {
-                    let ready = self.handshake_crypto_reassembly[space_index]
-                        .push(offset.value(), data.as_ref())?;
-                    for contiguous in ready {
-                        self.read_handshake(&contiguous)?;
-                    }
-                }
+            match QuicFrame::decode(&mut buf) {
+                Ok(Some(QuicFrame::Crypto { offset, data })) => crypto.push((offset, data)),
                 // ACK/PADDING/PING and any other handshake-coalesced frames carry
                 // no TLS data; ignore them here (loss recovery handled elsewhere).
-                Some(_) => {}
-                None => break,
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(_) if initial => return Err(handshake_failure(INITIAL_FRAME_DECODE_CODE)),
+                Err(_) => return Err(handshake_failure("frame_decode")),
             }
+        }
+        for (offset, data) in crypto {
+            let ready = match self.handshake_crypto_reassembly[space_index]
+                .push(offset.value(), data.as_ref())
+            {
+                Ok(ready) => ready,
+                // A refused Initial CRYPTO frame ends the packet there. Bytes
+                // its earlier frames added are bytes a forger could have sent
+                // in a packet of their own. A broken reassembly invariant
+                // still fails the handshake.
+                Err(QuicTlsError::CryptoProviderFailure { code, .. })
+                    if initial && code != "crypto_reassembly_state" =>
+                {
+                    return Err(handshake_failure(INITIAL_CRYPTO_REJECTED_CODE));
+                }
+                Err(err) => return Err(err),
+            };
+            for contiguous in ready {
+                self.read_handshake(&contiguous)?;
+            }
+        }
+        if self.peer_connection_id.is_none() {
+            self.peer_connection_id = Some(peer_src_cid);
         }
         self.handshake_recv_packet_numbers[space_index].insert(header.packet_number);
         let largest = &mut self.handshake_recv_largest_packet_number[space_index];
@@ -4604,5 +4651,263 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
             .expect_err("two stale packets");
         assert_eq!(failure_code(&err), PACKET_KEYS_DISCARDED_CODE);
         assert!(is_stale_handshake_packet_error(&err));
+    }
+
+    /// Encode a long header for `plaintext` and protect the packet with
+    /// `driver`'s send keys, as anyone holding those keys could.
+    fn protect_forged_long_packet(
+        driver: &mut QuicHandshakeDriver,
+        packet_type: LongPacketType,
+        dst_cid: ConnectionId,
+        src_cid: ConnectionId,
+        packet_number: u64,
+        plaintext: &[u8],
+    ) -> Vec<u8> {
+        let space = long_packet_type_space(packet_type).expect("long-header space");
+        let header = PacketHeader::Long(LongHeader {
+            packet_type,
+            version: 1,
+            dst_cid,
+            src_cid,
+            token: Vec::new(),
+            payload_length: u64::from(HANDSHAKE_PACKET_NUMBER_LEN)
+                + plaintext.len() as u64
+                + QUIC_AEAD_TAG_LEN as u64,
+            packet_number,
+            packet_number_len: HANDSHAKE_PACKET_NUMBER_LEN,
+        });
+        let mut header_bytes = Vec::new();
+        header
+            .encode(&mut header_bytes)
+            .expect("encode long header");
+        driver
+            .protect_long_header_packet(space, &header_bytes, packet_number, plaintext)
+            .expect("protect forged packet")
+    }
+
+    fn assert_discarded(server: &mut QuicHandshakeDriver, packet: &[u8], code: &str) {
+        let err = server.recv_handshake_packet(packet).expect_err(code);
+        assert_eq!(failure_code(&err), code);
+        assert!(
+            is_unauthenticated_handshake_packet_error(&err),
+            "{code}: the drive loops must discard it"
+        );
+        assert!(
+            !is_stale_handshake_packet_error(&err),
+            "{code}: a forgery must not earn a retransmission"
+        );
+    }
+
+    /// A client, the server, and a second client for the same Destination
+    /// Connection ID: it derives the same Initial keys, as an attacker who saw
+    /// the client's first Initial can. Returns them with the client's
+    /// ClientHello split into two halves, the first sent at offset 0.
+    fn forgery_setup() -> (
+        QuicHandshakeDriver,
+        QuicHandshakeDriver,
+        QuicHandshakeDriver,
+        HandshakeSegment,
+        HandshakeSegment,
+    ) {
+        let (mut client, server) = protected_pair();
+        let (forger, _) = protected_pair();
+        let client_hello = client
+            .pump_outbound()
+            .expect("client flight")
+            .into_iter()
+            .find(|segment| segment.level == HandshakeLevel::Initial)
+            .expect("ClientHello");
+        let split = client_hello.data.len() / 2;
+        let first_half = HandshakeSegment {
+            level: HandshakeLevel::Initial,
+            data: client_hello.data[..split].to_vec(),
+        };
+        let second_half = HandshakeSegment {
+            level: HandshakeLevel::Initial,
+            data: client_hello.data[split..].to_vec(),
+        };
+        (client, server, forger, first_half, second_half)
+    }
+
+    /// `segment`'s bytes in a CRYPTO frame at `offset`, then a frame that
+    /// does not decode (a CRYPTO type byte with no fields).
+    fn crypto_then_undecodable_frame(segment: &HandshakeSegment, offset: u64) -> Vec<u8> {
+        let mut payload = BytesMut::new();
+        QuicFrame::Crypto {
+            offset: VarInt::from_u64_unchecked(offset),
+            data: Bytes::copy_from_slice(&segment.data),
+        }
+        .encode(&mut payload)
+        .expect("encode CRYPTO");
+        let mut plaintext = payload.to_vec();
+        plaintext.push(0x06);
+        plaintext
+    }
+
+    const CLIENT_SCID: &[u8] = &[0x11, 0x22, 0x33, 0x44];
+    const FORGED_SCID: &[u8] = &[0x99, 0x99, 0x99, 0x99];
+
+    /// br-asupersync-5f1fcj LOW 4 (RFC 9000 section 7.2): a forged Initial that
+    /// arrives first and is refused does not pin its Source Connection ID, so
+    /// the real client's packets are still accepted. A later packet under
+    /// another Source Connection ID is discarded.
+    #[test]
+    fn a_refused_forged_initial_does_not_pin_its_source_connection_id() {
+        let (mut client, mut server, mut forger, first_half, second_half) = forgery_setup();
+        let dcid = ConnectionId::new(DCID_BYTES).expect("dcid");
+        let client_scid = ConnectionId::new(CLIENT_SCID).expect("client scid");
+        let forged_scid = ConnectionId::new(FORGED_SCID).expect("forged scid");
+
+        let forged = protect_forged_long_packet(
+            &mut forger,
+            LongPacketType::Initial,
+            dcid,
+            forged_scid,
+            0,
+            &crypto_then_undecodable_frame(&first_half, 0),
+        );
+        let err = server
+            .recv_handshake_packet(&forged)
+            .expect_err("malformed forged first Initial");
+        assert!(
+            server.peer_connection_id().is_none(),
+            "a refused packet must not pin its Source Connection ID"
+        );
+        assert_eq!(failure_code(&err), INITIAL_FRAME_DECODE_CODE);
+
+        for (segment, packet_number) in [(&first_half, 0), (&second_half, 1)] {
+            let packet = client
+                .assemble_handshake_packet(segment, dcid, client_scid, packet_number)
+                .expect("client Initial");
+            assert_eq!(
+                server.recv_handshake_packet(&packet).expect("real Initial"),
+                client_scid
+            );
+        }
+        assert_eq!(server.peer_connection_id(), Some(client_scid));
+
+        let forged = forger
+            .assemble_handshake_packet_at(&first_half, 0, dcid, forged_scid, 5)
+            .expect("forged Initial with another source CID");
+        assert_discarded(&mut server, &forged, PEER_CONNECTION_ID_CHANGED_CODE);
+        assert_eq!(server.peer_connection_id(), Some(client_scid));
+        drive_to_completion(&mut client, &mut server);
+    }
+
+    /// br-asupersync-5f1fcj LOW 4: a forged Initial whose CRYPTO bytes
+    /// contradict bytes the server holds behind a gap is discarded, and the
+    /// real handshake completes.
+    #[test]
+    fn a_forged_initial_contradicting_buffered_crypto_is_discarded() {
+        let (mut client, mut server, mut forger, first_half, second_half) = forgery_setup();
+        let dcid = ConnectionId::new(DCID_BYTES).expect("dcid");
+        let client_scid = ConnectionId::new(CLIENT_SCID).expect("client scid");
+        let first = client
+            .assemble_handshake_packet(&first_half, dcid, client_scid, 0)
+            .expect("first Initial");
+        let second = client
+            .assemble_handshake_packet(&second_half, dcid, client_scid, 1)
+            .expect("second Initial");
+        server
+            .recv_handshake_packet(&second)
+            .expect("buffered behind the gap");
+
+        let mut contradicting = second_half.clone();
+        contradicting.data[0] ^= 0xff;
+        let offset = u64::try_from(first_half.data.len()).expect("offset");
+        let forged = forger
+            .assemble_handshake_packet_at(&contradicting, offset, dcid, client_scid, 6)
+            .expect("forged Initial contradicting buffered bytes");
+        assert_discarded(&mut server, &forged, INITIAL_CRYPTO_REJECTED_CODE);
+        assert_eq!(
+            server.received_handshake_packet_numbers(HandshakeLevel::Initial),
+            vec![1]
+        );
+
+        server
+            .recv_handshake_packet(&first)
+            .expect("real first half");
+        drive_to_completion(&mut client, &mut server);
+    }
+
+    /// br-asupersync-5f1fcj LOW 4: a forged Initial with a frame that does not
+    /// decode is discarded before any of its frames takes effect, even a valid
+    /// CRYPTO frame ahead of the bad one that would complete the ClientHello.
+    #[test]
+    fn a_malformed_forged_initial_applies_none_of_its_frames() {
+        let (mut client, mut server, mut forger, first_half, second_half) = forgery_setup();
+        let dcid = ConnectionId::new(DCID_BYTES).expect("dcid");
+        let client_scid = ConnectionId::new(CLIENT_SCID).expect("client scid");
+        let first = client
+            .assemble_handshake_packet(&first_half, dcid, client_scid, 0)
+            .expect("first Initial");
+        let second = client
+            .assemble_handshake_packet(&second_half, dcid, client_scid, 1)
+            .expect("second Initial");
+        server
+            .recv_handshake_packet(&second)
+            .expect("buffered behind the gap");
+
+        let forged = protect_forged_long_packet(
+            &mut forger,
+            LongPacketType::Initial,
+            dcid,
+            client_scid,
+            7,
+            &crypto_then_undecodable_frame(&first_half, 0),
+        );
+        let err = server
+            .recv_handshake_packet(&forged)
+            .expect_err("malformed forged Initial");
+        assert!(
+            server
+                .pump_outbound()
+                .expect("pump after the forgery")
+                .is_empty(),
+            "the forged packet's CRYPTO frame must not reach TLS"
+        );
+        assert_eq!(failure_code(&err), INITIAL_FRAME_DECODE_CODE);
+        assert!(is_unauthenticated_handshake_packet_error(&err));
+        assert_eq!(
+            server.received_handshake_packet_numbers(HandshakeLevel::Initial),
+            vec![1]
+        );
+
+        server
+            .recv_handshake_packet(&first)
+            .expect("real first half");
+        drive_to_completion(&mut client, &mut server);
+    }
+
+    /// Handshake keys are known only to the peers, so an undecodable frame in a
+    /// Handshake packet is the peer's protocol error and still fails the call.
+    #[test]
+    fn a_malformed_handshake_packet_still_fails_the_handshake() {
+        let (mut client, mut server, _, first_half, second_half) = forgery_setup();
+        let dcid = ConnectionId::new(DCID_BYTES).expect("dcid");
+        let client_scid = ConnectionId::new(CLIENT_SCID).expect("client scid");
+        let server_scid = ConnectionId::new(&[0x55, 0x66, 0x77, 0x88]).expect("server scid");
+        for (segment, packet_number) in [(&first_half, 0), (&second_half, 1)] {
+            let packet = client
+                .assemble_handshake_packet(segment, dcid, client_scid, packet_number)
+                .expect("client Initial");
+            server.recv_handshake_packet(&packet).expect("real Initial");
+        }
+        drive_to_completion(&mut client, &mut server);
+
+        // Four PINGs, then a CRYPTO type byte with no fields.
+        let packet = protect_forged_long_packet(
+            &mut client,
+            LongPacketType::Handshake,
+            server_scid,
+            client_scid,
+            9,
+            &[0x01, 0x01, 0x01, 0x01, 0x06],
+        );
+        let err = server
+            .recv_handshake_packet(&packet)
+            .expect_err("malformed Handshake packet");
+        assert_eq!(failure_code(&err), "frame_decode");
+        assert!(!is_unauthenticated_handshake_packet_error(&err));
     }
 }

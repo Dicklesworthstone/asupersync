@@ -155,7 +155,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     },
     AmbientFinding {
         file: "net/atp/transport_common/metadata.rs",
-        line: 2546,
+        line: 2633,
         evidence_pattern: "std::fs::metadata",
         category: AmbientCategory::Io,
         severity: Severity::Low,

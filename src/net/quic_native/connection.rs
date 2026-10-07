@@ -2483,6 +2483,34 @@ fn peer_violation_code(error: &NativeQuicConnectionError) -> Option<u64> {
     }
 }
 
+/// Copies a STREAM, CRYPTO or DATAGRAM payload that uses less than a quarter
+/// of its `datagram_len`-byte datagram, so holding it does not keep the whole
+/// datagram allocated (see [`NativeQuicConnection::decode_frames_bytes`]).
+fn unpin_small_payload(frame: QuicFrame, datagram_len: usize) -> QuicFrame {
+    let small = |data: &Bytes| data.len().saturating_mul(4) < datagram_len;
+    match frame {
+        QuicFrame::Stream {
+            stream_id,
+            offset,
+            data,
+            fin,
+        } if small(&data) => QuicFrame::Stream {
+            stream_id,
+            offset,
+            data: Bytes::copy_from_slice(&data),
+            fin,
+        },
+        QuicFrame::Crypto { offset, data } if small(&data) => QuicFrame::Crypto {
+            offset,
+            data: Bytes::copy_from_slice(&data),
+        },
+        QuicFrame::Datagram { data } if small(&data) => QuicFrame::Datagram {
+            data: Bytes::copy_from_slice(&data),
+        },
+        other => other,
+    }
+}
+
 /// The wire type of a decoded frame, for the Frame Type field of a transport
 /// CONNECTION_CLOSE. STREAM reports its OFF and FIN bits; the decoded frame
 /// does not keep the LEN bit.
@@ -3626,6 +3654,14 @@ impl NativeQuicConnection {
     /// STREAM/DATAGRAM frame payloads become zero-copy slices of `payload`
     /// (via the `BytesCursor` `copy_to_bytes` override), so the hot receive
     /// path pays no per-frame allocation or memcpy.
+    ///
+    /// A slice keeps the whole datagram allocated for as long as it is held,
+    /// and a receive buffer can hold an out-of-order fragment indefinitely.
+    /// So a STREAM, CRYPTO or DATAGRAM payload that uses less than a quarter
+    /// of the datagram is copied instead: otherwise a peer could pin up to a
+    /// 64 KiB datagram per one-byte fragment. Resident memory then stays
+    /// within four times the bytes held, and a frame that fills its datagram
+    /// (bulk transfer) stays zero-copy.
     pub fn decode_frames_bytes(
         payload: &Bytes,
     ) -> Result<Vec<QuicFrame>, NativeQuicConnectionError> {
@@ -3634,7 +3670,7 @@ impl NativeQuicConnection {
 
         while cursor.has_remaining() {
             if let Some(frame) = QuicFrame::decode(&mut cursor)? {
-                frames.push(frame);
+                frames.push(unpin_small_payload(frame, payload.len()));
             } else {
                 break;
             }
@@ -7120,6 +7156,40 @@ mod tests {
             };
             assert!(renewed.is_ok());
             assert!(unchanged.is_err());
+        }
+    }
+
+    /// br-asupersync-tzjbn9 (suspected item, confirmed): a held slice keeps its
+    /// whole datagram allocated, so a STREAM payload that uses under a quarter
+    /// of its datagram is copied out, while one that fills most of it stays a
+    /// zero-copy slice of the datagram.
+    #[test]
+    fn decode_frames_bytes_copies_small_payloads_and_slices_large_ones() {
+        let slices = |data: &Bytes, datagram: &Bytes| {
+            let start = datagram.as_ptr() as usize;
+            let at = data.as_ptr() as usize;
+            at >= start && at < start + datagram.len()
+        };
+        for (data_len, zero_copy) in [(1_usize, false), (3_000, true)] {
+            let mut encoded = BytesMut::new();
+            QuicFrame::Stream {
+                stream_id: VarInt::from_u64_unchecked(0),
+                offset: Some(VarInt::from_u64_unchecked(7)),
+                data: Bytes::from(vec![0xab; data_len]),
+                fin: false,
+            }
+            .encode(&mut encoded)
+            .expect("encode STREAM");
+            // PADDING out to a 4 KiB datagram.
+            encoded.resize(4096, 0);
+            let datagram = encoded.freeze();
+
+            let frames = NativeQuicConnection::decode_frames_bytes(&datagram).expect("decode");
+            let QuicFrame::Stream { data, .. } = &frames[0] else {
+                panic!("expected STREAM first, got {:?}", frames[0]);
+            };
+            assert_eq!(data.len(), data_len);
+            assert_eq!(slices(data, &datagram), zero_copy, "data_len={data_len}");
         }
     }
 
