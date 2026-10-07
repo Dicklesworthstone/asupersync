@@ -2387,9 +2387,12 @@ impl Connection {
                     header_block,
                     end_headers,
                 } => {
-                    if !self.stream_can_emit_queued_frames(stream_id) {
-                        continue;
-                    }
+                    // A CONTINUATION is queued only once its HEADERS or
+                    // PUSH_PROMISE has gone out without END_HEADERS, so it goes
+                    // out even if the stream was reset since: the peer must see
+                    // the block completed before any other frame (RFC 9113
+                    // §6.10, else a connection error), and its HPACK decoder
+                    // needs the rest of the block.
                     returned_frame = Some(Frame::Continuation(ContinuationFrame {
                         stream_id,
                         header_block,
@@ -4978,6 +4981,60 @@ mod tests {
             "large PUSH_PROMISE should emit CONTINUATION"
         );
         assert!(last_end_headers, "last continuation must end headers");
+    }
+
+    /// RFC 9113 §6.10: once a HEADERS frame has gone out without END_HEADERS,
+    /// its CONTINUATION frames must follow before any other frame (the peer
+    /// treats anything else as a connection error, and its HPACK decoder needs
+    /// the rest of the block). Resetting the stream in between used to drop
+    /// the queued CONTINUATIONs, so the RST_STREAM followed the incomplete
+    /// HEADERS directly (br-asupersync-dycth8).
+    #[test]
+    fn a_stream_reset_mid_header_block_still_completes_the_block_first() {
+        let mut conn = Connection::client(Settings::client());
+        conn.state = ConnectionState::Open;
+        conn.remote_settings.max_frame_size = 50;
+        let mut headers = test_request_header_vec("/large");
+        for i in 0..10 {
+            headers.push(Header::new(format!("x-large-{i}"), format!("value-{i}")));
+        }
+        let stream_id = conn.open_stream(headers, true).unwrap();
+        match conn.next_frame() {
+            Some(Frame::Headers(headers)) => {
+                assert_eq!(headers.stream_id, stream_id);
+                assert!(
+                    !headers.end_headers,
+                    "the block must need CONTINUATION frames"
+                );
+            }
+            other => panic!("expected the first HEADERS frame, got {other:?}"),
+        }
+
+        conn.reset_stream(stream_id, ErrorCode::Cancel);
+        let mut frames = Vec::new();
+        while let Some(frame) = conn.next_frame() {
+            frames.push(frame);
+        }
+        let (reset, continuations) = frames.split_last().expect("frames after the reset");
+        assert!(!continuations.is_empty(), "{frames:?}");
+        for (index, frame) in continuations.iter().enumerate() {
+            match frame {
+                Frame::Continuation(continuation) => {
+                    assert_eq!(continuation.stream_id, stream_id);
+                    assert_eq!(
+                        continuation.end_headers,
+                        index + 1 == continuations.len(),
+                        "only the last CONTINUATION ends the block: {frames:?}"
+                    );
+                }
+                other => panic!("expected CONTINUATION before any other frame, got {other:?}"),
+            }
+        }
+        assert!(
+            matches!(reset, Frame::RstStream(reset)
+                if reset.stream_id == stream_id && reset.error_code == ErrorCode::Cancel),
+            "the RST_STREAM follows the completed block: {frames:?}"
+        );
     }
 
     #[test]
