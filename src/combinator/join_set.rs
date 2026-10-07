@@ -90,6 +90,8 @@ mod owner;
 use collector::CollectorWait;
 
 #[cfg(test)]
+mod candidate_tests;
+#[cfg(test)]
 mod waker_tests;
 
 /// A dynamically-sized collection of tasks spawned into a single region, whose
@@ -263,21 +265,15 @@ where
     /// [`join_next`](Self::join_next): if several members are already ready,
     /// the earliest spawned ready member is returned first. Pending handles are
     /// left owned by the set and are not cancelled by the readiness scan.
+    ///
+    /// Pending members retain an internal completion waker even when no async
+    /// join has been polled. Repeated calls therefore revisit only newly woken
+    /// candidates, not every sleeping member. This does not subscribe the caller
+    /// to notifications; use `join_next` to wait for an actual completion.
     pub fn try_join_next(&mut self) -> Option<Outcome<T, E>> {
-        // Only candidates can be complete: every other member parked a waker
-        // in an earlier `join_next` poll that has not fired. Candidates stay
-        // candidates here because `try_join` registers no waker.
         let mut from = 0;
         while let Some(member_index) = self.ready.next_candidate(from) {
-            let outcome = match self.members.get_mut(&member_index) {
-                Some(member) => try_join_to_outcome(member.handle.try_join()),
-                None => {
-                    self.ready.candidates.lock().remove(&member_index);
-                    None
-                }
-            };
-            if let Some(outcome) = outcome {
-                self.take_member(member_index, &outcome);
+            if let Some(outcome) = self.poll_candidate(member_index) {
                 return Some(outcome);
             }
             let Some(next) = member_index.checked_add(1) else {
@@ -287,6 +283,29 @@ where
         }
 
         None
+    }
+
+    /// Poll one candidate and arm its persistent member registration if pending.
+    /// Both synchronous and asynchronous collection use this readiness boundary.
+    fn poll_candidate(&mut self, member_index: u64) -> Option<Outcome<T, E>> {
+        // Remove BEFORE polling: a completion or a permitted spurious wake
+        // during poll_join puts the member back, and must not be erased afterward.
+        self.ready.candidates.lock().remove(&member_index);
+        let outcome = self.members.get_mut(&member_index).and_then(|member| {
+            let Member { handle, waker } = member;
+            let waker = waker.get_or_insert_with(|| {
+                Waker::from(Arc::new(MemberWake {
+                    index: member_index,
+                    ready: Arc::clone(&self.ready),
+                }))
+            });
+            match handle.poll_join(&mut Context::from_waker(waker)) {
+                Poll::Ready(joined) => try_join_to_outcome(joined.map(Some)),
+                Poll::Pending => None,
+            }
+        })?;
+        self.take_member(member_index, &outcome);
+        Some(outcome)
     }
 
     /// Waits for every member to complete and returns their outcomes in spawn
@@ -350,23 +369,7 @@ where
             // and its waker puts it back when its result is published.
             let mut from = 0;
             while let Some(member_index) = self.ready.next_candidate(from) {
-                self.ready.candidates.lock().remove(&member_index);
-                let joined = self.members.get_mut(&member_index).and_then(|member| {
-                    let Member { handle, waker } = member;
-                    let waker = waker.get_or_insert_with(|| {
-                        Waker::from(Arc::new(MemberWake {
-                            index: member_index,
-                            ready: Arc::clone(&self.ready),
-                        }))
-                    });
-                    match handle.poll_join(&mut Context::from_waker(waker)) {
-                        Poll::Ready(joined) => Some(joined),
-                        Poll::Pending => None,
-                    }
-                });
-                if let Some(joined) = joined {
-                    let outcome = join_to_outcome(joined);
-                    self.take_member(member_index, &outcome);
+                if let Some(outcome) = self.poll_candidate(member_index) {
                     return Poll::Ready(Some(outcome));
                 }
                 let Some(next) = member_index.checked_add(1) else {
