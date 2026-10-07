@@ -1563,7 +1563,14 @@ fn test_function() {
     // marked #[cfg(test)], which the whole file already is, so pristine cx
     // stays empty. No production code, scanner exemption or detection
     // pattern changed.
-    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 826;
+    // 826 -> 821 (br-asupersync-1aqha7): the HTTP/1 (direct and SOCKS5
+    // proxy), HTTP/2 and WebSocket clients connect to hostnames through
+    // net::happy_eyeballs::connect_resolved, which races the resolved
+    // addresses. Six client connect sites move into its one plain connect
+    // for a single address. connect_one's connect keeps its site with a new
+    // excerpt. Literal-address connects are unchanged. No scanner exemption
+    // or detection pattern changed.
+    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 821;
 
     fn src_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src")

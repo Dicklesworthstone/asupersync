@@ -1320,12 +1320,9 @@ impl WebSocket<TcpStream> {
         } else {
             format!("{}:{}", parsed.host, parsed.port)
         };
-        let tcp = if let Some(timeout) = config.connect_timeout {
-            TcpStream::connect_timeout(addr, timeout).await
-        } else {
-            TcpStream::connect(addr).await
-        }
-        .map_err(|err| map_tcp_connect_error(cx, err))?;
+        let tcp = crate::net::happy_eyeballs::connect_resolved(addr, config.connect_timeout)
+            .await
+            .map_err(|err| map_tcp_connect_error(cx, err))?;
 
         if config.nodelay {
             let _ = tcp.set_nodelay(true);
@@ -1423,7 +1420,11 @@ impl WebSocket<TlsStream<TcpStream>> {
             let result = if let Ok(ip) = parsed.host.parse::<std::net::IpAddr>() {
                 TcpStream::connect(std::net::SocketAddr::new(ip, parsed.port)).await
             } else {
-                TcpStream::connect((parsed.host.clone(), parsed.port)).await
+                crate::net::happy_eyeballs::connect_resolved(
+                    (parsed.host.clone(), parsed.port),
+                    None,
+                )
+                .await
             };
             result.map_err(|error| map_tcp_connect_error(cx, error))
         }).await?;

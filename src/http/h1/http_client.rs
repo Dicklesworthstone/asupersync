@@ -2303,7 +2303,7 @@ impl HttpClient {
                 .map_err(ClientError::ConnectError)?
         } else {
             let addr = format!("{}:{}", parsed.host, parsed.port);
-            TcpStream::connect(addr)
+            crate::net::happy_eyeballs::connect_resolved(addr, None)
                 .await
                 .map_err(ClientError::ConnectError)?
         };
@@ -2893,7 +2893,7 @@ async fn connect_via_socks5(
 ) -> Result<TcpStream, ClientError> {
     check_cx(cx)?;
     let addr = format!("{}:{}", proxy.host, proxy.port);
-    let mut stream = TcpStream::connect(addr)
+    let mut stream = crate::net::happy_eyeballs::connect_resolved(addr, None)
         .await
         .map_err(ClientError::ConnectError)?;
 
@@ -6949,6 +6949,103 @@ mod tests {
             "configured HTTPS proxy path must preserve the CONNECT port: {request_text:?}"
         );
         assert!(request_text.contains("\r\nHost: example.com:443\r\n"));
+    }
+
+    /// br-asupersync-1aqha7: when a hostname's first resolved address never
+    /// answers, the client connects through the next one instead of waiting
+    /// out the kernel's SYN retries. `localhost` supplies the two addresses,
+    /// so the test needs both loopback families. Where `localhost` lacks one,
+    /// it says so and returns.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn hostname_connect_races_past_a_black_holed_first_address() {
+        use std::io::{Read, Write};
+        use std::net::{SocketAddr, ToSocketAddrs};
+        use std::time::{Duration, Instant};
+
+        let resolved: Vec<SocketAddr> = ("localhost", 0)
+            .to_socket_addrs()
+            .map(Iterator::collect)
+            .unwrap_or_default();
+        let Some((first, second)) = resolved.first().and_then(|first| {
+            resolved
+                .iter()
+                .find(|addr| addr.is_ipv4() != first.is_ipv4())
+                .map(|second| (*first, *second))
+        }) else {
+            eprintln!("skipping: localhost resolves to {resolved:?}, not both loopback families");
+            return;
+        };
+
+        // Linux drops SYNs aimed at a listener whose accept queue is full, so
+        // after filling a backlog-0 queue, connects to it hang unanswered.
+        let blackhole = socket2::Socket::new(
+            socket2::Domain::for_address(first),
+            socket2::Type::STREAM,
+            None,
+        )
+        .expect("blackhole socket");
+        if first.is_ipv6() {
+            blackhole.set_only_v6(true).expect("IPv6-only blackhole");
+        }
+        blackhole
+            .bind(&SocketAddr::new(first.ip(), 0).into())
+            .expect("bind blackhole");
+        blackhole.listen(0).expect("listen with backlog 0");
+        let port = blackhole
+            .local_addr()
+            .ok()
+            .and_then(|addr| addr.as_socket())
+            .expect("blackhole address")
+            .port();
+        let black_holed = SocketAddr::new(first.ip(), port);
+        let _queued: Vec<_> = (0..4)
+            .filter_map(|_| {
+                std::net::TcpStream::connect_timeout(&black_holed, Duration::from_millis(100)).ok()
+            })
+            .collect();
+        let probe = std::net::TcpStream::connect_timeout(&black_holed, Duration::from_millis(300));
+        assert!(
+            matches!(&probe, Err(error) if matches!(error.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock)),
+            "the full-backlog listener must drop SYNs, got {probe:?}"
+        );
+
+        let listener = TcpListener::bind(SocketAddr::new(second.ip(), port))
+            .expect("bind the live listener on the other family");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept the client");
+            let mut request = Vec::new();
+            let mut buf = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let n = stream.read(&mut buf).expect("read request");
+                assert!(n > 0, "the request head arrives before the client closes");
+                request.extend_from_slice(&buf[..n]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .expect("write response");
+        });
+
+        let client = HttpClient::builder()
+            .request_timeout(Duration::from_secs(5))
+            .build();
+        let cx = Cx::for_testing();
+        let started = Instant::now();
+        let result = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime")
+            .block_on(client.send_get(&cx, &format!("http://localhost:{port}/race")));
+        let elapsed = started.elapsed();
+        let response = result.unwrap_or_else(|error| {
+            panic!("connect through {second} after black-holed {black_holed}: {error:?} after {elapsed:?}")
+        });
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"ok");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the live address wins after one stagger delay, not after {elapsed:?}"
+        );
+        server.join().expect("server thread should join");
     }
 
     // --- br-asupersync-server-stack-hardening-eeexl1.1.3: outbound ---
