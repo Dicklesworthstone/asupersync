@@ -519,6 +519,16 @@ mod sqlite {
                     rollback_before_propagating(tx, cx).await;
                     return Outcome::Err(rollback_required_error());
                 }
+                // A Cx cancelled while the body finished refuses the commit,
+                // and dropping the transaction would only schedule its
+                // rollback: finish that rollback before returning.
+                if cx.checkpoint().is_err() {
+                    rollback_before_propagating(tx, cx).await;
+                    return Outcome::Cancelled(
+                        cx.cancel_reason()
+                            .unwrap_or_else(|| crate::types::CancelReason::user("cancelled")),
+                    );
+                }
                 match tx.commit(cx).await {
                     Outcome::Ok(()) => Outcome::Ok(value),
                     Outcome::Err(e) => Outcome::Err(e),
@@ -567,6 +577,16 @@ mod sqlite {
                 if tx.requires_rollback_before_commit() {
                     rollback_before_propagating(tx, cx).await;
                     return Outcome::Err(rollback_required_error());
+                }
+                // A Cx cancelled while the body finished refuses the commit,
+                // and dropping the transaction would only schedule its
+                // rollback: finish that rollback before returning.
+                if cx.checkpoint().is_err() {
+                    rollback_before_propagating(tx, cx).await;
+                    return Outcome::Cancelled(
+                        cx.cancel_reason()
+                            .unwrap_or_else(|| crate::types::CancelReason::user("cancelled")),
+                    );
                 }
                 match tx.commit(cx).await {
                     Outcome::Ok(()) => Outcome::Ok(value),

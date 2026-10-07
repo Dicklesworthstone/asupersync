@@ -186,7 +186,9 @@ impl BeginAttempt {
         }
     }
 
-    fn abandon(&self) {
+    /// Returns the transaction's generation when the worker already opened
+    /// it, so the caller can schedule its rollback.
+    fn abandon(&self) -> Option<u64> {
         // Keep the lifecycle lock through the mirror poison so the async
         // consumer and blocking worker form one ordered handoff. If the worker
         // already opened the transaction, this attempt owns the physical state
@@ -202,6 +204,7 @@ impl BeginAttempt {
         {
             *state = TransactionState::NeedsRollback;
         }
+        lifecycle.generation.filter(|_| owns_current_generation)
     }
 
     fn finish_worker(
@@ -470,19 +473,21 @@ impl Drop for TransactionFinishEffect {
     }
 }
 
-struct BeginDropGuard {
+struct BeginDropGuard<'conn> {
     attempt: BeginAttempt,
     armed: bool,
+    conn: &'conn SqliteConnection,
 }
 
-impl BeginDropGuard {
-    fn new(
-        transaction_state: Arc<Mutex<TransactionState>>,
-        transaction_generation: Arc<AtomicU64>,
-    ) -> Self {
+impl<'conn> BeginDropGuard<'conn> {
+    fn new(conn: &'conn SqliteConnection) -> Self {
         Self {
-            attempt: BeginAttempt::new(transaction_state, transaction_generation),
+            attempt: BeginAttempt::new(
+                Arc::clone(&conn.transaction_state),
+                Arc::clone(&conn.transaction_generation),
+            ),
             armed: true,
+            conn,
         }
     }
 
@@ -498,14 +503,22 @@ impl BeginDropGuard {
         self.attempt.lifecycle.lock().generation
     }
 
+    /// When the worker already opened the transaction, its rollback is
+    /// scheduled right away, as for a dropped `SqliteTransaction`. A poisoned
+    /// mirror alone left the RESERVED or EXCLUSIVE lock of a dropped
+    /// `begin_immediate` (a `timeout()` that expired just after BEGIN, or a
+    /// lost `select!`) held until the connection's next operation, and every
+    /// other writer failed with SQLITE_BUSY meanwhile.
     fn abandon(&mut self) {
-        if std::mem::replace(&mut self.armed, false) {
-            self.attempt.abandon();
+        if std::mem::replace(&mut self.armed, false)
+            && let Some(generation) = self.attempt.abandon()
+        {
+            self.conn.schedule_dropped_transaction_rollback(generation);
         }
     }
 }
 
-impl Drop for BeginDropGuard {
+impl Drop for BeginDropGuard<'_> {
     fn drop(&mut self) {
         self.abandon();
     }
@@ -2540,6 +2553,41 @@ enum SqliteConnectionOpCompletion<R, E> {
     Cancelled,
 }
 
+/// Cancels a connection operation whose future is dropped before it took
+/// the job's completion (a lost `timeout()` or `select!`). A job not yet
+/// running, whether still queued in the pool or parked on the connection
+/// mutex, is skipped, so the dropped operation has no effect later: an
+/// INSERT that runs after its caller gave up, or a COMMIT that lands after
+/// the next pool borrower's BEGIN. A running job is left to finish, since it
+/// may be a COMMIT or DDL whose outcome must not be torn.
+struct ConnectionOpDropGuard {
+    phase: Arc<Mutex<SqliteConnectionOpPhase>>,
+    handle: Option<crate::runtime::blocking_pool::BlockingTaskHandle>,
+}
+
+impl ConnectionOpDropGuard {
+    fn cancel_job(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.cancel();
+        }
+    }
+}
+
+impl Drop for ConnectionOpDropGuard {
+    fn drop(&mut self) {
+        if self.handle.is_none() {
+            return;
+        }
+        {
+            let mut phase = self.phase.lock();
+            if *phase == SqliteConnectionOpPhase::Queued {
+                *phase = SqliteConnectionOpPhase::CancelRequested;
+            }
+        }
+        self.cancel_job();
+    }
+}
+
 trait SqliteConnectionOpError: Send + 'static {
     fn from_legacy(operation: SqliteOperation, error: SqliteError) -> Self;
     fn from_rusqlite(operation: SqliteOperation, error: rusqlite::Error) -> Self;
@@ -2889,8 +2937,17 @@ impl SqliteConnection {
             })();
             let _ = permit.send(completion);
         });
+        let mut drop_guard = ConnectionOpDropGuard {
+            phase: Arc::clone(&phase),
+            handle: Some(handle),
+        };
 
-        match rx.recv(cx).await {
+        let received = rx.recv(cx).await;
+        if !matches!(received, Err(crate::channel::oneshot::RecvError::Cancelled)) {
+            // The job finished or was dropped by the pool: nothing to cancel.
+            drop_guard.handle = None;
+        }
+        match received {
             Ok(SqliteConnectionOpCompletion::Finished(Ok(result))) => Outcome::Ok(result),
             Ok(SqliteConnectionOpCompletion::Finished(Err(e))) => Outcome::Err(e),
             Ok(SqliteConnectionOpCompletion::Cancelled) => Outcome::Cancelled(
@@ -2918,7 +2975,7 @@ impl SqliteConnection {
                     }
                     observed
                 };
-                handle.cancel();
+                drop_guard.cancel_job();
                 // br-asupersync-server-stack-hardening-eeexl1.1.2: wire-level
                 // cancel in the drain phase. `sqlite3_interrupt` aborts the
                 // in-flight statement promptly; the masked re-receive then
@@ -4194,10 +4251,7 @@ impl SqliteConnection {
         operation: &'static str,
     ) -> Outcome<SqliteTransaction<'conn>, SqliteError> {
         trace_database_transaction(cx, "sqlite", operation, "start");
-        let mut drop_guard = BeginDropGuard::new(
-            Arc::clone(&self.transaction_state),
-            Arc::clone(&self.transaction_generation),
-        );
+        let mut drop_guard = BeginDropGuard::new(self);
         let effect = TransactionWorkerEffect::Begin(drop_guard.attempt());
 
         match self.execute_transaction_control(cx, sql, effect).await {
@@ -4244,10 +4298,7 @@ impl SqliteConnection {
         trace_operation: &'static str,
     ) -> Outcome<SqliteTransaction<'conn>, SqliteOperationError> {
         trace_database_transaction(cx, "sqlite", trace_operation, "start");
-        let mut drop_guard = BeginDropGuard::new(
-            Arc::clone(&self.transaction_state),
-            Arc::clone(&self.transaction_generation),
-        );
+        let mut drop_guard = BeginDropGuard::new(self);
         let effect = TransactionWorkerEffect::Begin(drop_guard.attempt());
 
         match self

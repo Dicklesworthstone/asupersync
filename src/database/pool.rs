@@ -1262,11 +1262,8 @@ impl<M: ConnectionManager> DbPool<M> {
         // br-asupersync-mlojr9: Check and update per-client retry state
         let (current_attempts, should_delay) = {
             let mut inner = self.inner.lock();
-            let (attempts, last_retry) = inner
-                .client_retry_state
-                .get(&client_id_owned)
-                .copied()
-                .unwrap_or((0, now));
+            let previous = inner.client_retry_state.get(&client_id_owned).copied();
+            let (attempts, last_retry) = previous.unwrap_or((0, now));
 
             // Check if client has exceeded maximum retry attempts
             if attempts >= self.config.max_retry_attempts_per_client {
@@ -1280,18 +1277,22 @@ impl<M: ConnectionManager> DbPool<M> {
                 });
             }
 
-            // Check if minimum delay has elapsed since last retry
+            // Check if minimum delay has elapsed since last retry. A client
+            // with no recorded call has nothing to space from: defaulting its
+            // last retry to `now` made every first call sleep the whole delay.
             let min_delay_ms = self.config.min_retry_delay_per_client_ms;
             let time_since_last_retry = now.duration_since(last_retry);
-            let should_delay =
-                if min_delay_ms > 0 && time_since_last_retry < min_delay_ms * 1_000_000 {
-                    Some(
-                        Duration::from_millis(min_delay_ms)
-                            .saturating_sub(Duration::from_nanos(time_since_last_retry)),
-                    )
-                } else {
-                    None
-                };
+            let should_delay = if previous.is_some()
+                && min_delay_ms > 0
+                && time_since_last_retry < min_delay_ms * 1_000_000
+            {
+                Some(
+                    Duration::from_millis(min_delay_ms)
+                        .saturating_sub(Duration::from_nanos(time_since_last_retry)),
+                )
+            } else {
+                None
+            };
 
             // Increment attempt counter and update last retry time
             let new_attempts = attempts + 1;
@@ -5939,5 +5940,30 @@ mod tests {
                 })
             );
         });
+    }
+
+    /// br-asupersync-sqlite-pool-audit-r10-dj4uhx L2 (91hka0 item 12): a
+    /// client with no recorded call had its last retry defaulted to `now`,
+    /// so every first call slept the whole per-client minimum delay before
+    /// even trying. A 5 s minimum delay makes the old sleep unmistakable.
+    #[test]
+    fn get_with_retry_for_client_first_attempt_is_immediate() {
+        let pool = DbPool::new(
+            TestManager::new(),
+            DbPoolConfig::default().min_retry_delay_per_client_ms(5_000),
+        );
+        let policy = RetryPolicy::fixed_delay(Duration::from_millis(10), 3);
+        for call in 0..2 {
+            let started = crate::time::wall_now();
+            let conn = pool
+                .get_with_retry_for_client("c1", &policy)
+                .expect("an idle pool hands out a connection");
+            let waited = Duration::from_nanos(crate::time::wall_now().duration_since(started));
+            assert!(
+                waited < Duration::from_secs(2),
+                "call {call} waited {waited:?} before its first attempt"
+            );
+            drop(conn);
+        }
     }
 }
