@@ -485,6 +485,60 @@ impl OracleSuite {
             }
         }
 
+        // GenServer reply history (br-asupersync-52hxjz), replayed whole on
+        // every hydration. A suite fed by hand keeps its events. Each `Reply`
+        // gets its own synthetic task, so calls to one server do not share an
+        // entry. A reply still unresolved while its server runs is in flight,
+        // not dropped, so a mid-run report leaves it out.
+        let replies = state.reply_history();
+        if !replies.is_empty() {
+            use crate::runtime::state::ReplyHistoryEvent;
+            self.reply_linearity.reset();
+            let resolved: std::collections::BTreeSet<u64> = replies
+                .iter()
+                .filter_map(|event| match *event {
+                    ReplyHistoryEvent::Sent { call } | ReplyHistoryEvent::Aborted { call } => {
+                        Some(call)
+                    }
+                    ReplyHistoryEvent::Created { .. } => None,
+                })
+                .collect();
+            let call_task = |call: u64| {
+                crate::types::TaskId::from_arena(crate::util::ArenaIndex::new(
+                    u32::try_from(call).unwrap_or(u32::MAX),
+                    0,
+                ))
+            };
+            let mut servers: BTreeMap<u64, crate::actor::ActorId> = BTreeMap::new();
+            for event in &replies {
+                match *event {
+                    ReplyHistoryEvent::Created { call, server, time } => {
+                        let in_flight = !resolved.contains(&call)
+                            && state
+                                .task(server)
+                                .is_some_and(|task| !task.state.is_terminal());
+                        if !in_flight {
+                            let server = crate::actor::ActorId::from_task(server);
+                            servers.insert(call, server);
+                            self.reply_linearity
+                                .on_reply_created(server, call_task(call), time);
+                        }
+                    }
+                    ReplyHistoryEvent::Sent { call } => {
+                        if let Some(&server) = servers.get(&call) {
+                            self.reply_linearity.on_reply_sent(server, call_task(call));
+                        }
+                    }
+                    ReplyHistoryEvent::Aborted { call } => {
+                        if let Some(&server) = servers.get(&call) {
+                            self.reply_linearity
+                                .on_reply_aborted(server, call_task(call));
+                        }
+                    }
+                }
+            }
+        }
+
         // Replayed on every hydration, not only the first: a race in flight
         // at one report completes by the next (br-asupersync-vcu2oz). A suite
         // fed by hand keeps its events; an empty history marks nothing, so

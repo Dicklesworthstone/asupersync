@@ -536,7 +536,9 @@ pub trait GenServer: Send + 'static {
     /// Handle a call (request-response).
     ///
     /// The `reply` handle **must** be consumed by calling `reply.send(value)`.
-    /// Dropping it without sending is detected as an obligation leak in lab mode.
+    /// Dropping it without sending panics the server. A `LabRuntime` report's
+    /// `reply_linearity` oracle also flags it, even when a restarting
+    /// supervisor absorbs the panic.
     fn handle_call(
         &mut self,
         cx: &Cx,
@@ -615,13 +617,37 @@ pub trait GenServer: Send + 'static {
 pub struct Reply<R> {
     cx: Cx,
     permit: Option<TrackedOneshotPermit<R>>,
+    /// Where this reply's resolution is recorded for the lab's
+    /// reply-linearity oracle, and its key there (br-asupersync-52hxjz).
+    history: Option<(crate::runtime::state::ReplyHistoryHandle, u64)>,
+}
+
+impl<R> Reply<R> {
+    fn record(&self, event: fn(u64) -> crate::runtime::state::ReplyHistoryEvent) {
+        if let Some((history, call)) = &self.history {
+            history.record(event(*call));
+        }
+    }
 }
 
 impl<R: Send + 'static> Reply<R> {
     fn new(cx: &Cx, permit: TrackedOneshotPermit<R>) -> Self {
+        let history = cx
+            .spawn_gateway_handle()
+            .and_then(|gateway| gateway.reply_history().cloned())
+            .map(|history| {
+                let call = history.next_call();
+                history.record(crate::runtime::state::ReplyHistoryEvent::Created {
+                    call,
+                    server: cx.task_id(),
+                    time: cx.now_for_observability(),
+                });
+                (history, call)
+            });
         Self {
             cx: cx.clone(),
             permit: Some(permit),
+            history,
         }
     }
 
@@ -634,6 +660,7 @@ impl<R: Send + 'static> Reply<R> {
             .permit
             .take()
             .expect("Reply::send called after reply was already consumed");
+        self.record(|call| crate::runtime::state::ReplyHistoryEvent::Sent { call });
         match permit.send(value) {
             Ok(proof) => {
                 self.cx.trace("gen_server::reply_committed");
@@ -655,6 +682,7 @@ impl<R: Send + 'static> Reply<R> {
     #[must_use]
     pub fn abort(mut self) -> AbortedProof<SendPermit> {
         self.cx.trace("gen_server::reply_aborted");
+        self.record(|call| crate::runtime::state::ReplyHistoryEvent::Aborted { call });
         self.permit
             .take()
             .expect("Reply::abort called after reply was already consumed")
@@ -680,6 +708,7 @@ impl<R> Drop for Reply<R> {
         if std::thread::panicking() {
             // Preserve the original panic instead of detonating the reply
             // drop-bomb during unwind.
+            self.record(|call| crate::runtime::state::ReplyHistoryEvent::Aborted { call });
             let _ = permit.abort();
         } else if self.cx.is_cancel_requested() {
             // Async cancellation: the handler future is being dropped
@@ -692,11 +721,14 @@ impl<R> Drop for Reply<R> {
             // cancellation. The caller's recv future observes the same
             // RecvError::Closed it would have seen on Reply::abort().
             self.cx.trace("gen_server::reply_aborted_on_cancel");
+            self.record(|call| crate::runtime::state::ReplyHistoryEvent::Aborted { call });
             let _ = permit.abort();
         } else {
             // Genuine programmer bug: handler returned without send/abort
             // while the cx was healthy. Let the linearity drop-bomb fire
-            // so the supervisor surfaces the leak.
+            // so the supervisor surfaces the leak. Nothing is recorded, so
+            // the lab's reply-linearity oracle reports the drop even when a
+            // restarting supervisor absorbs the panic.
             drop(permit);
         }
     }
@@ -3305,6 +3337,133 @@ mod tests {
         assert_eq!(result, 5);
 
         crate::test_complete!("gen_server_spawn_and_call");
+    }
+
+    /// What `ReplyOrDrop` does with a call's reply.
+    #[derive(Clone, Copy, Debug)]
+    enum ReplyMode {
+        Send,
+        Drop,
+        Park,
+    }
+
+    /// Sends, drops or parks on each call's reply, as the call asks.
+    struct ReplyOrDrop;
+
+    impl GenServer for ReplyOrDrop {
+        type Call = ReplyMode;
+        type Reply = u8;
+        type Cast = ();
+        type Info = SystemMsg;
+
+        fn handle_call(
+            &mut self,
+            cx: &Cx,
+            mode: ReplyMode,
+            reply: Reply<u8>,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            match mode {
+                ReplyMode::Send => {
+                    let _ = reply.send(1);
+                    Box::pin(async {})
+                }
+                ReplyMode::Drop => {
+                    drop(reply);
+                    Box::pin(async {})
+                }
+                // Holds the reply until the server is cancelled; it is then
+                // dropped under cancellation, which aborts it.
+                ReplyMode::Park => {
+                    let cx = cx.clone();
+                    Box::pin(async move {
+                        cx.cancelled().await;
+                        drop(reply);
+                    })
+                }
+            }
+        }
+    }
+
+    /// The lab's `reply_linearity` oracle sees how each `Reply` was resolved
+    /// (br-asupersync-52hxjz). A sent reply passes. A dropped one fails, though
+    /// it is resolved enough for the obligation oracles. A reply still in
+    /// flight passes a mid-run report and, once its server is cancelled, the
+    /// final one.
+    #[test]
+    fn lab_reports_check_reply_linearity() {
+        init_test("lab_reports_check_reply_linearity");
+        for mode in [ReplyMode::Send, ReplyMode::Drop, ReplyMode::Park] {
+            let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(0x52_0052));
+            let region = runtime.state.create_root_region(Budget::INFINITE);
+            let cx = lab_spawn_cx(&mut runtime, region, Budget::INFINITE);
+            let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
+            let (handle, stored) = scope
+                .spawn_gen_server(&mut runtime.state, &cx, ReplyOrDrop, 4)
+                .expect("spawn the server");
+            let server = handle.task_id();
+            runtime.state.store_spawned_task(server, stored);
+            let server_ref = handle.server_ref();
+            let mut client = cx
+                .spawn(move |cx| async move { server_ref.call(&cx, mode).await.ok() })
+                .expect("spawn the client");
+            runtime.scheduler.lock().schedule(server, 0);
+            runtime.run_until_idle();
+
+            if matches!(mode, ReplyMode::Park) {
+                let mid_run = runtime.report();
+                let entry = mid_run
+                    .oracle_report
+                    .entry("reply_linearity")
+                    .expect("reply_linearity is reported");
+                assert!(
+                    entry.passed && entry.stats.entities_tracked == 0,
+                    "a reply in flight is not a drop: {entry:?}"
+                );
+                let (tasks, wakes) = runtime
+                    .state
+                    .cancel_request(region, &CancelReason::user("test done"), None)
+                    .into_parts();
+                {
+                    let mut scheduler = runtime.scheduler.lock();
+                    for (task, priority) in tasks {
+                        scheduler.schedule_cancel(task, priority);
+                    }
+                }
+                wakes.dispatch();
+                runtime.run_until_idle();
+            }
+            let replied = futures_lite::future::block_on(client.join(&cx)).unwrap_or(None);
+            drop(handle);
+            let report = runtime.run_until_quiescent_with_report();
+            let entry = report
+                .oracle_report
+                .entry("reply_linearity")
+                .expect("reply_linearity is reported");
+            match mode {
+                ReplyMode::Send => {
+                    assert_eq!(replied, Some(1));
+                    assert!(entry.passed, "{:?}", entry.violation);
+                    assert_eq!(entry.stats.entities_tracked, 1);
+                }
+                ReplyMode::Drop => {
+                    assert_eq!(replied, None, "a dropped reply never arrives");
+                    assert!(
+                        !entry.passed
+                            && entry
+                                .violation
+                                .as_deref()
+                                .is_some_and(|violation| violation.contains("dropped")),
+                        "a dropped reply fails the oracle: {entry:?}"
+                    );
+                }
+                ReplyMode::Park => {
+                    assert_eq!(replied, None, "the cancelled call gets no reply");
+                    assert!(entry.passed, "{:?}", entry.violation);
+                    assert_eq!(entry.stats.entities_tracked, 1, "the aborted reply");
+                }
+            }
+        }
+        crate::test_complete!("lab_reports_check_reply_linearity");
     }
 
     /// asupersync-0ex6x0: a caller task in the root region used to panic with

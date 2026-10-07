@@ -2113,6 +2113,9 @@ pub struct SpawnGateway {
     /// Managed supervisors record their restart history here for the lab's
     /// supervision oracle (br-asupersync-52hxjz). Only the lab sets it.
     supervision_history: Option<crate::runtime::state::SupervisionHistoryHandle>,
+    /// GenServer replies record their resolution here for the lab's
+    /// reply-linearity oracle (br-asupersync-52hxjz). Only the lab sets it.
+    reply_history: Option<crate::runtime::state::ReplyHistoryHandle>,
 }
 
 impl SpawnGateway {
@@ -2135,6 +2138,7 @@ impl SpawnGateway {
                 usize::MAX,
             )),
             supervision_history: None,
+            reply_history: None,
         }
     }
 
@@ -2155,6 +2159,23 @@ impl SpawnGateway {
         &self,
     ) -> Option<&crate::runtime::state::SupervisionHistoryHandle> {
         self.supervision_history.as_ref()
+    }
+
+    /// Hands GenServer replies a history for the lab's reply-linearity
+    /// oracle (br-asupersync-52hxjz).
+    #[must_use]
+    pub(crate) fn with_reply_history(
+        mut self,
+        history: crate::runtime::state::ReplyHistoryHandle,
+    ) -> Self {
+        self.reply_history = Some(history);
+        self
+    }
+
+    /// The reply history, on runtimes that record one (the lab).
+    #[must_use]
+    pub(crate) fn reply_history(&self) -> Option<&crate::runtime::state::ReplyHistoryHandle> {
+        self.reply_history.as_ref()
     }
 
     /// Configures the runtime-wide ceiling for borrowed scoped CPU workers.
