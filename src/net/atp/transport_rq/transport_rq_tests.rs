@@ -4551,13 +4551,29 @@ fn source_streaming_staging_cache_policy_batches_small_tree_entries() {
 #[cfg(target_os = "linux")]
 #[test]
 fn e14_source_streaming_does_not_retain_one_staging_fd_per_entry() {
-    fn fd_count() -> usize {
+    // Count only descriptors open on files under this test's staging
+    // directory. A process-wide count also saw the sockets and files of
+    // tests running in parallel, so a full lib run could exceed the bound
+    // with no staging descriptor retained.
+    fn staging_fd_count(dir: &std::path::Path) -> usize {
         std::fs::read_dir("/proc/self/fd")
             .expect("read /proc/self/fd")
+            .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
+            .filter(|target| target.starts_with(dir))
             .count()
     }
 
     let dir = tempfile::tempdir().expect("tempdir");
+    let staging_dir = dir.path().canonicalize().expect("canonical staging dir");
+    // The count sees a descriptor this test opens itself.
+    let probe = std::fs::File::create(staging_dir.join("fd-probe")).expect("probe file");
+    assert_eq!(
+        staging_fd_count(&staging_dir),
+        1,
+        "the count sees an open staging file"
+    );
+    drop(probe);
+    let fd_count = || staging_fd_count(&staging_dir);
     let symbol_size = 1u16;
     let parsed = ParsedDatagram {
         entry: 0,
