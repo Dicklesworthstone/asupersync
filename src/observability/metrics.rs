@@ -1063,9 +1063,9 @@ pub trait MetricsProvider: Send + Sync + 'static {
 
     /// Called after each scheduler tick.
     ///
-    /// The three-lane runtime reports each worker's polls in batches:
-    /// `tasks_polled` polls (at most 64) that took `duration` in total, when
-    /// the worker has made 64 polls, goes idle, or stops.
+    /// The three-lane runtime calls it once per task poll, with `tasks_polled`
+    /// 1 and that poll's duration, so a poll-time histogram holds one sample
+    /// per poll. Each call runs on the polling worker, after the poll.
     fn scheduler_tick(&self, tasks_polled: usize, duration: Duration);
 
     /// Whether the runtime should time polls for [`Self::scheduler_tick`].
