@@ -10639,3 +10639,126 @@ fn cancelled_region_drain_reaches_the_metrics_provider() {
     }
     crate::test_complete!("cancelled_region_drain_reaches_the_metrics_provider");
 }
+
+/// Region-close hooks that count their calls, then panic when told to.
+#[derive(Default)]
+struct PanickingRegionHooks {
+    panic_on_close: bool,
+    panic_on_drain: bool,
+    closes: AtomicUsize,
+    drains: AtomicUsize,
+}
+
+struct PanickingRegionMetrics(Arc<PanickingRegionHooks>);
+
+impl MetricsProvider for PanickingRegionMetrics {
+    fn task_spawned(&self, _: RegionId, _: TaskId) {}
+    fn task_completed(&self, _: TaskId, _: OutcomeKind, _: Duration) {}
+    fn region_created(&self, _: RegionId, _: Option<RegionId>) {}
+    fn region_closed(&self, _: RegionId, _: Duration) {
+        self.0.closes.fetch_add(1, Ordering::SeqCst);
+        assert!(!self.0.panic_on_close, "provider panic in region_closed");
+    }
+    fn cancellation_requested(&self, _: RegionId, _: CancelKind) {}
+    fn drain_completed(&self, _: RegionId, _: Duration) {
+        self.0.drains.fetch_add(1, Ordering::SeqCst);
+        assert!(!self.0.panic_on_drain, "provider panic in drain_completed");
+    }
+    fn deadline_set(&self, _: RegionId, _: Duration) {}
+    fn deadline_exceeded(&self, _: RegionId) {}
+    fn deadline_warning(&self, _: &str, _: &'static str, _: Duration) {}
+    fn deadline_violation(&self, _: &str, _: Duration) {}
+    fn deadline_remaining(&self, _: &str, _: Duration) {}
+    fn checkpoint_interval(&self, _: &str, _: Duration) {}
+    fn task_stuck_detected(&self, _: &str) {}
+    fn obligation_created(&self, _: RegionId) {}
+    fn obligation_discharged(&self, _: RegionId) {}
+    fn obligation_leaked(&self, _: RegionId) {}
+    fn scheduler_tick(&self, _: usize, _: Duration) {}
+}
+
+/// A provider that panics in `region_closed` or `drain_completed`, which run
+/// inside the close walk under the runtime lock, must not break the close: a
+/// cancelled region with a task closes, a later region opens and closes, and
+/// the runtime shuts down. Each run is bounded, so a hang fails the test.
+#[test]
+fn a_panicking_region_close_hook_does_not_break_the_close() {
+    use crate::cx::ChildRegionSpec;
+    use crate::runtime::RuntimeBuilder;
+
+    init_test_logging();
+    let cleanup = Duration::from_millis(30);
+    for (panic_on_close, panic_on_drain) in [(false, true), (true, false)] {
+        for workers in [None, Some(2)] {
+            let hooks = Arc::new(PanickingRegionHooks {
+                panic_on_close,
+                panic_on_drain,
+                ..PanickingRegionHooks::default()
+            });
+            let provider = PanickingRegionMetrics(Arc::clone(&hooks));
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let builder = match workers {
+                    None => RuntimeBuilder::current_thread(),
+                    Some(count) => RuntimeBuilder::multi_thread().worker_threads(count),
+                };
+                let runtime = builder
+                    .metrics(provider)
+                    .build()
+                    .expect("build native runtime");
+                runtime.block_on(async move {
+                    let cx = crate::cx::Cx::current().expect("block_on installs a Cx");
+                    let child = cx
+                        .open_child_region(ChildRegionSpec::inherit())
+                        .await
+                        .expect("open the cancelled region");
+                    let started = Arc::new(AtomicBool::new(false));
+                    let parked = Arc::clone(&started);
+                    let mut handle = child
+                        .cx()
+                        .spawn(move |task_cx| async move {
+                            let (_hold, mut never) = crate::channel::mpsc::channel::<u32>(1);
+                            parked.store(true, Ordering::SeqCst);
+                            let _ = never.recv(&task_cx).await;
+                            std::thread::sleep(cleanup);
+                        })
+                        .expect("spawn inside the cancelled region");
+                    while !started.load(Ordering::SeqCst) {
+                        crate::runtime::yield_now().await;
+                    }
+                    child
+                        .cancel(CancelReason::shutdown())
+                        .expect("cancel the child region");
+                    let _ = handle.join(&cx).await;
+                    child.close().await.expect("the cancelled region closes");
+                    let later = cx
+                        .open_child_region(ChildRegionSpec::inherit())
+                        .await
+                        .expect("open a region after the panic");
+                    later.close().await.expect("close it");
+                });
+                let _ = done_tx.send(runtime.shutdown_timeout(Duration::from_secs(10)));
+            });
+            let shut_down = done_rx.recv_timeout(Duration::from_secs(30));
+            let label = format!(
+                "panic_on_close={panic_on_close} panic_on_drain={panic_on_drain} \
+                 workers={workers:?}"
+            );
+            assert!(
+                matches!(shut_down, Ok(true)),
+                "{label}: the scenario must finish and the runtime shut down, got {shut_down:?}"
+            );
+            assert!(
+                hooks.closes.load(Ordering::SeqCst) >= 2,
+                "{label}: region_closed ran"
+            );
+            if panic_on_drain {
+                assert!(
+                    hooks.drains.load(Ordering::SeqCst) >= 1,
+                    "{label}: drain_completed ran, so its panic was exercised"
+                );
+            }
+        }
+    }
+    crate::test_complete!("a_panicking_region_close_hook_does_not_break_the_close");
+}
