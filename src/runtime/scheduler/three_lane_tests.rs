@@ -12752,3 +12752,52 @@ fn production_poll_quota_keeps_a_cancellation_already_requested_on_the_cx() {
         "an exhausted quota must not rewrite the requested reason"
     );
 }
+
+/// A deferred cancellation batch stamps its regions' drain start before it
+/// publishes their tasks (br-asupersync-x9mmxl). Before, only the batch's
+/// dispatch, after publication, wrote the stamp: another worker could run a
+/// published task, finish the drain and close the region first, and a batch
+/// whose publication failed was suppressed without ever writing it. Here the
+/// task leaves the table before the worker drains the batch, so publication
+/// fails and the stamp must still be written.
+#[test]
+fn deferred_cancel_batch_stamps_drains_before_publishing() {
+    let mut runtime = RuntimeState::new();
+    let root = runtime.create_root_region(Budget::INFINITE);
+    let child = runtime
+        .create_child_region(root, Budget::INFINITE)
+        .expect("child region");
+    let (task, _handle) = runtime
+        .create_task(child, Budget::INFINITE, async {})
+        .expect("task create");
+    let (tasks, wakes) = runtime
+        .cancel_request(child, &CancelReason::shutdown(), None)
+        .into_parts();
+    assert!(
+        tasks.iter().any(|(id, _)| *id == task),
+        "the cancel routes the task to the cancel lane: {tasks:?}"
+    );
+    runtime.defer_cancel_dispatch(crate::types::task_context::CancellationEffects::new(
+        tasks, wakes,
+    ));
+    let stamp = runtime
+        .region(child)
+        .expect("child region record")
+        .cancel_reported_at()
+        .expect("a cancelled region has a drain stamp");
+    assert_eq!(
+        stamp.load(Ordering::Acquire),
+        u64::MAX,
+        "nothing is stamped under the state lock"
+    );
+    assert!(runtime.remove_task(task).is_some());
+
+    let state = Arc::new(ContendedMutex::new("runtime_state", runtime));
+    let scheduler = ThreeLaneScheduler::new(1, &state);
+    scheduler.workers[0].drain_deferred_cancel_dispatches();
+    assert_ne!(
+        stamp.load(Ordering::Acquire),
+        u64::MAX,
+        "the drain stamp is written before (and whatever the outcome of) publication"
+    );
+}

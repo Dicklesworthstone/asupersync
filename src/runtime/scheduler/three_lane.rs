@@ -3512,7 +3512,17 @@ impl SchedulerTicks {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .metrics_provider();
-        if provider.wants_scheduler_ticks() {
+        // User code: a panicking provider gets no ticks, and the worker lives.
+        let wants = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            provider.wants_scheduler_ticks()
+        })) {
+            Ok(wants) => wants,
+            Err(payload) => {
+                std::mem::forget(payload);
+                false
+            }
+        };
+        if wants {
             self.provider = Some(provider);
         }
     }
@@ -6185,6 +6195,7 @@ impl ThreeLaneWorker {
             }
         }
         for (task_id, priority, task_wakes, admitted_slot) in tasks {
+            task_wakes.stamp_drains();
             if self.publish_deferred_cancel_task(task_id, priority) {
                 wakes_to_dispatch.push(task_wakes);
                 if let Some(admitted_slot) = admitted_slot
@@ -6211,6 +6222,7 @@ impl ThreeLaneWorker {
         // An already-awake worker may pop the queue entry, but it cannot remove
         // or poll the task until this record critical section completes.
         for (task_id, requested_priority, reason, mut task_wakes, admitted_slot) in delegated {
+            task_wakes.stamp_drains();
             let mut lane_error = None;
             let effects = if self.task_table.is_some() {
                 self.with_task_table(|tt| {
@@ -6327,6 +6339,8 @@ impl ThreeLaneWorker {
         let mut wakes = Vec::with_capacity(batches.len());
         for batch in batches {
             let (tasks, batch_wakes) = batch.into_parts();
+            // Before the tasks can run elsewhere and close their region.
+            batch_wakes.stamp_drains();
             let mut batch_published = true;
             for (task_id, priority) in tasks {
                 batch_published &= self.publish_deferred_cancel_task(task_id, priority);

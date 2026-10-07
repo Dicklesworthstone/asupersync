@@ -10833,3 +10833,89 @@ fn a_panicking_region_close_hook_does_not_break_the_close() {
     }
     crate::test_complete!("a_panicking_region_close_hook_does_not_break_the_close");
 }
+
+/// A provider whose `wants_scheduler_ticks` panics, counting its ticks.
+#[derive(Default)]
+struct PanickingTickGate {
+    ticks: AtomicUsize,
+}
+
+struct PanickingTickGateMetrics(Arc<PanickingTickGate>);
+
+impl MetricsProvider for PanickingTickGateMetrics {
+    fn task_spawned(&self, _: RegionId, _: TaskId) {}
+    fn task_completed(&self, _: TaskId, _: OutcomeKind, _: Duration) {}
+    fn region_created(&self, _: RegionId, _: Option<RegionId>) {}
+    fn region_closed(&self, _: RegionId, _: Duration) {}
+    fn cancellation_requested(&self, _: RegionId, _: CancelKind) {}
+    fn drain_completed(&self, _: RegionId, _: Duration) {}
+    fn deadline_set(&self, _: RegionId, _: Duration) {}
+    fn deadline_exceeded(&self, _: RegionId) {}
+    fn deadline_warning(&self, _: &str, _: &'static str, _: Duration) {}
+    fn deadline_violation(&self, _: &str, _: Duration) {}
+    fn deadline_remaining(&self, _: &str, _: Duration) {}
+    fn checkpoint_interval(&self, _: &str, _: Duration) {}
+    fn task_stuck_detected(&self, _: &str) {}
+    fn obligation_created(&self, _: RegionId) {}
+    fn obligation_discharged(&self, _: RegionId) {}
+    fn obligation_leaked(&self, _: RegionId) {}
+    fn scheduler_tick(&self, _: usize, _: Duration) {
+        self.0.ticks.fetch_add(1, Ordering::SeqCst);
+    }
+    fn wants_scheduler_ticks(&self) -> bool {
+        panic!("provider panic in wants_scheduler_ticks");
+    }
+}
+
+/// `wants_scheduler_ticks` is user code that every worker calls once. A
+/// provider that panics there gets no ticks, and the workers keep running
+/// tasks (br-asupersync-x9mmxl). Each run is bounded, so a dead worker or a
+/// panicking `block_on` fails the test instead of hanging it.
+#[test]
+fn a_panicking_tick_gate_leaves_the_workers_running() {
+    use crate::runtime::RuntimeBuilder;
+
+    init_test_logging();
+    for workers in [None, Some(2)] {
+        let gate = Arc::new(PanickingTickGate::default());
+        let provider = PanickingTickGateMetrics(Arc::clone(&gate));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let builder = match workers {
+                None => RuntimeBuilder::current_thread(),
+                Some(count) => RuntimeBuilder::multi_thread().worker_threads(count),
+            };
+            let runtime = builder.metrics(provider).build().expect("build runtime");
+            let joined = runtime.block_on(async move {
+                let cx = crate::cx::Cx::current().expect("block_on installs a Cx");
+                let mut handles = Vec::new();
+                for value in 0..8_u32 {
+                    handles.push(
+                        cx.spawn(move |_| async move { value })
+                            .expect("spawn a task"),
+                    );
+                }
+                let mut joined = 0;
+                for mut handle in handles {
+                    if handle.join(&cx).await.is_ok() {
+                        joined += 1;
+                    }
+                }
+                joined
+            });
+            let shut_down = runtime.shutdown_timeout(Duration::from_secs(10));
+            let _ = done_tx.send((joined, shut_down));
+        });
+        let outcome = done_rx.recv_timeout(Duration::from_secs(30));
+        assert!(
+            matches!(outcome, Ok((8, true))),
+            "{workers:?}: all eight tasks must join and the runtime shut down, got {outcome:?}"
+        );
+        assert_eq!(
+            gate.ticks.load(Ordering::SeqCst),
+            0,
+            "{workers:?}: a provider whose gate panicked gets no ticks"
+        );
+    }
+    crate::test_complete!("a_panicking_tick_gate_leaves_the_workers_running");
+}

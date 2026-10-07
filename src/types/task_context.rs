@@ -509,6 +509,24 @@ impl CancelWakeEffects {
         }
     }
 
+    /// Stamps the drain start of every cancelled region this token reports,
+    /// running no callback. A scheduler that makes cancelled tasks runnable
+    /// before it dispatches this token calls it first: otherwise another
+    /// worker could finish the drain and close the region before its stamp
+    /// is written, and the drain would go unreported (br-asupersync-x9mmxl).
+    /// The dispatch that follows keeps the earlier stamp.
+    pub(crate) fn stamp_drains(&self) {
+        for observer in self.observers.iter().flatten() {
+            if let CancelObserver::RegionCancellationMetric {
+                drain_stamp: Some(stamp),
+                ..
+            } = observer
+            {
+                stamp.record();
+            }
+        }
+    }
+
     /// Explicitly abandons callbacks when no post-lock dispatch boundary is
     /// available (for example, panic-unwind Drop cleanup).
     pub fn suppress(mut self) {
