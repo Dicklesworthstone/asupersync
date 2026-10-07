@@ -5129,7 +5129,8 @@ where
     /// return value also runs on the pool and precedes retirement. Once a result
     /// is published to a live handle, it belongs to that handle's caller.
     ///
-    /// This requires an explicitly configured blocking pool. A queued cancelled
+    /// This requires a blocking pool; `RuntimeBuilder` adds one on native
+    /// targets unless `blocking_threads(0, 0)` opts out. A queued cancelled
     /// closure stays owned until a worker destroys its captures; if every pool
     /// worker is blocked, region shutdown can time out while retaining the
     /// unfinished task. Hard runtime teardown retains its existing semantics.

@@ -4924,7 +4924,7 @@ impl Runtime {
     /// [`Self::shutdown_drained`]: the root stays live until the closure and its
     /// captures retire. The closure receives its actual task `Cx`, and a
     /// started closure's exact result survives cancellation. This requires a
-    /// configured blocking pool and never executes the closure inline.
+    /// blocking pool and never executes the closure inline.
     ///
     /// Cancellation cannot interrupt a running synchronous closure. A bounded
     /// root drain reports timeout and retains unfinished work until it returns.
