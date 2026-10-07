@@ -445,12 +445,15 @@ impl<T> Arena<T> {
 
     /// Drains all occupied values, leaving the arena empty.
     ///
-    /// Yields ownership of each value without cloning. All slots become
-    /// vacant and are linked into the free list.
+    /// Yields ownership of each value without cloning, in index order. All
+    /// slots become vacant and are linked into the free list ahead of the
+    /// slots already free, lowest index first, so the next inserts reuse the
+    /// lowest indices. The scan stops at the last occupied slot.
     pub fn drain_values(&mut self) -> DrainValues<'_, T> {
         DrainValues {
             arena: self,
             pos: 0,
+            last_drained: None,
         }
     }
 
@@ -519,13 +522,20 @@ impl<T> Arena<T> {
 pub struct DrainValues<'a, T> {
     arena: &'a mut Arena<T>,
     pos: usize,
+    /// The last slot this drain linked into the free list; the next drained
+    /// slot is linked right after it.
+    last_drained: Option<u32>,
 }
 
 impl<T> Iterator for DrainValues<'_, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<T> {
-        while self.pos < self.arena.slots.len() {
+        // br-asupersync-lh4z78 L3: an arena that once held many entries is
+        // not rescanned past its last occupied slot. Broadcast drains its
+        // waker arena on every send, so the scan used to cost the arena's
+        // historical peak even with one waiter or none.
+        while self.arena.len > 0 && self.pos < self.arena.slots.len() {
             let i = self.pos;
             self.pos += 1;
 
@@ -541,19 +551,34 @@ impl<T> Iterator for DrainValues<'_, T> {
                     );
                 }
                 let new_gen = cur_gen.wrapping_add(1);
+                let index = u32::try_from(i).expect("arena slot index overflows u32");
+                // Drained slots join the free list in ascending order ahead
+                // of the slots already free, so inserts after the drain take
+                // the lowest indices and the next drain stops early. Each
+                // step leaves the list consistent.
+                let next_free = if retire_slot {
+                    None
+                } else if let Some(previous) = self.last_drained {
+                    match &mut self.arena.slots[previous as usize] {
+                        Slot::Vacant { next_free, .. } => next_free.replace(index),
+                        Slot::Occupied { .. } => {
+                            unreachable!(
+                                "a drained slot stays vacant while the drain holds the arena"
+                            )
+                        }
+                    }
+                } else {
+                    self.arena.free_head.replace(index)
+                };
                 let old = core::mem::replace(
                     &mut self.arena.slots[i],
                     Slot::Vacant {
-                        next_free: if retire_slot {
-                            None
-                        } else {
-                            self.arena.free_head
-                        },
+                        next_free,
                         generation: new_gen,
                     },
                 );
                 if !retire_slot {
-                    self.arena.free_head = Some(i as u32);
+                    self.last_drained = Some(index);
                 }
                 self.arena.len -= 1;
                 if let Slot::Occupied { value, .. } = old {
@@ -884,6 +909,42 @@ mod tests {
             // drop drain - should drain remaining
         }
         assert!(arena.is_empty());
+    }
+
+    /// br-asupersync-lh4z78 L3: a drain hands the lowest indices out first
+    /// and stops scanning at the last occupied slot, so an arena that once
+    /// held many entries does not cost its peak size on every later drain.
+    #[test]
+    fn drain_reuses_the_lowest_indices_and_stops_at_the_last_value() {
+        let mut arena = Arena::new();
+        let peak: Vec<_> = (0..64).map(|value| arena.insert(value)).collect();
+        assert_eq!(arena.drain_values().count(), 64);
+
+        let first = arena.insert(100);
+        let second = arena.insert(101);
+        assert_eq!(
+            (first.index(), second.index()),
+            (0, 1),
+            "lowest slots first"
+        );
+
+        let mut drain = arena.drain_values();
+        assert_eq!(drain.next(), Some(100));
+        assert_eq!(drain.next(), Some(101));
+        assert_eq!(drain.next(), None);
+        assert_eq!(
+            drain.pos, 2,
+            "the scan stopped after slot 1, not at slot 63"
+        );
+        drop(drain);
+
+        assert!(peak.iter().all(|index| arena.get(*index).is_none()));
+        let reused: Vec<u32> = (0..64).map(|value| arena.insert(value).index()).collect();
+        assert_eq!(
+            reused,
+            (0..64).collect::<Vec<u32>>(),
+            "every slot is reusable"
+        );
     }
 
     /// br-asupersync-rvz1tq — generation-overflow safety: removing a slot
