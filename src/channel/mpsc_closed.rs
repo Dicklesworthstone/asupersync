@@ -195,6 +195,8 @@ mod tests {
     }
 
     struct CloseOnDrop(Sender<u8>);
+    // The waker's Drop is the point: it closes the receiver.
+    #[allow(clippy::manual_noop_waker)]
     impl Wake for CloseOnDrop { fn wake(self: Arc<Self>) {} }
     impl Drop for CloseOnDrop {
         fn drop(&mut self) { self.0.close_receiver(); }
