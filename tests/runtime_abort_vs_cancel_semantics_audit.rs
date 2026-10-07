@@ -1651,6 +1651,24 @@ fn mailbox_and_scope_spawn_paths_classify_before_terminal_publication() {
             "src/combinator/join_set/owner/fail_fast.rs|TaskHandle::new(".to_owned(),
             1,
         ),
+        // Classified (5f8303a12, b3d54ec0f; ov3xtg): `#[cfg(test)]` fixtures
+        // in the JoinSet collector-wake and nonblocking-collection tests. Each
+        // builds a handle over a hand-held oneshot (`new_pending` adds a test
+        // retirement barrier) so the test completes members at will. They are
+        // not spawn adapters; production members spawn through `Cx` spawn
+        // paths, whose pair factories are counted under src/cx/cx.rs.
+        (
+            "src/combinator/join_set/candidate_tests.rs|TaskHandle::new(".to_owned(),
+            1,
+        ),
+        (
+            "src/combinator/join_set/candidate_tests.rs|TaskHandle::new_pending(".to_owned(),
+            1,
+        ),
+        (
+            "src/combinator/join_set/waker_tests.rs|TaskHandle::new(".to_owned(),
+            1,
+        ),
         // Classified (27a96729f, bi2462.102): a `#[cfg(test)]` fixture in the
         // HTTP/2 request-owner tests that builds a handle over a hand-held
         // oneshot to publish a terminal between two probes. It is not a spawn
