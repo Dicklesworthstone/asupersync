@@ -25,6 +25,11 @@
       "types": "./dist/tracing.d.ts",
       "import": "./dist/tracing.js",
       "default": "./dist/tracing.js"
+    },
+    "./streams": {
+      "types": "./dist/fetch-events.d.ts",
+      "import": "./dist/fetch-events.js",
+      "default": "./dist/fetch-events.js"
     }
   },
   "files": [
