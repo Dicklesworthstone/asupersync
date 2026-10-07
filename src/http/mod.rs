@@ -20,6 +20,7 @@
 
 pub mod body;
 pub mod compress;
+mod decode;
 pub mod h1;
 pub mod h2;
 
