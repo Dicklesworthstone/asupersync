@@ -6822,7 +6822,21 @@ async fn accept(
                     // here) is discarded, RFC 9000 section 12.2. It used to end
                     // the accept of the client still driving it.
                     Err(err) if is_unauthenticated_handshake_packet_error(&err) => continue,
-                    Err(err) => return Err(map_tls_error(err)),
+                    Err(err) => {
+                        // A TLS refusal tells the client (CRYPTO_ERROR), which
+                        // would otherwise retransmit until its flight budget
+                        // runs out.
+                        driver
+                            .send_crypto_error_close(
+                                cx,
+                                &mut endpoint,
+                                packet.src_addr,
+                                server_scid,
+                                &mut server_pn,
+                            )
+                            .await;
+                        return Err(map_tls_error(err));
+                    }
                 };
                 if peer.is_none() {
                     peer = Some((packet.src_addr, client_cid));

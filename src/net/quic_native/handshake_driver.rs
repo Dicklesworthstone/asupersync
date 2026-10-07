@@ -154,6 +154,15 @@ pub(crate) const INITIAL_FRAME_DECODE_CODE: &str = "initial_frame_decode";
 /// bytes already buffered at the same offsets, or exceed the offset, byte or
 /// range limits.
 pub(crate) const INITIAL_CRYPTO_REJECTED_CODE: &str = "initial_crypto_rejected";
+/// Failure code: the peer closed the connection with CRYPTO_ERROR during the
+/// handshake, i.e. its TLS stack sent an alert (RFC 9001 section 4.8).
+/// [`QuicHandshakeDriver::peer_close_error_code`] has the exact code.
+pub(crate) const PEER_CRYPTO_ERROR_CLOSE_CODE: &str = "peer_closed_crypto_error";
+/// Failure code: the peer closed the connection during the handshake with an
+/// error code other than CRYPTO_ERROR.
+pub(crate) const PEER_CLOSE_CODE: &str = "peer_closed";
+/// RFC 9001 section 4.8: CRYPTO_ERROR codes are this base plus the TLS alert.
+const CRYPTO_ERROR_BASE: u64 = 0x0100;
 
 /// True for a packet that failed to authenticate under live keys or was not
 /// even well-formed enough to try: a forgery from anyone who saw the
@@ -729,6 +738,9 @@ pub struct QuicHandshakeDriver {
     /// already-complete client drops those long-header packets — a mutual
     /// wedge until both idle timeouts (br-asupersync-jmri58).
     final_flight: Vec<OutgoingPacket>,
+    /// The error code of a CONNECTION_CLOSE the peer sent in an Initial or
+    /// Handshake packet, which ended this handshake.
+    peer_close_error_code: Option<u64>,
     /// Wall-clock path round-trip measured during the handshake (client side:
     /// flight sent → first response batch received; re-stamped on handshake
     /// retransmits, so loss inflates rather than deflates the sample). The
@@ -834,6 +846,7 @@ impl QuicHandshakeDriver {
             ],
             staged_segments: Vec::new(),
             final_flight: Vec::new(),
+            peer_close_error_code: None,
             path_rtt_estimate_micros: None,
         }
     }
@@ -898,13 +911,6 @@ impl QuicHandshakeDriver {
         src_cid: ConnectionId,
         packet_number: u64,
     ) -> Result<Vec<u8>, QuicTlsError> {
-        let packet_type = match segment.level {
-            HandshakeLevel::Initial => LongPacketType::Initial,
-            HandshakeLevel::Handshake => LongPacketType::Handshake,
-            HandshakeLevel::OneRtt => return Err(handshake_failure("onertt_is_not_long_header")),
-        };
-        let space = level_protection_space(segment.level);
-
         let mut payload = BytesMut::new();
         QuicFrame::Crypto {
             offset: VarInt::from_u64_unchecked(offset),
@@ -912,9 +918,36 @@ impl QuicHandshakeDriver {
         }
         .encode(&mut payload)
         .map_err(|_| handshake_failure("crypto_frame_encode"))?;
-        let mut plaintext = payload.to_vec();
+        self.assemble_long_header_packet(
+            segment.level,
+            payload.to_vec(),
+            true,
+            dst_cid,
+            src_cid,
+            packet_number,
+        )
+    }
 
-        if matches!(packet_type, LongPacketType::Initial) {
+    /// Protect `plaintext` (encoded frames) as one Initial or Handshake packet.
+    /// With `pad_initial`, an Initial packet is padded to the RFC 9000 section
+    /// 14.1 minimum datagram size.
+    fn assemble_long_header_packet(
+        &mut self,
+        level: HandshakeLevel,
+        mut plaintext: Vec<u8>,
+        pad_initial: bool,
+        dst_cid: ConnectionId,
+        src_cid: ConnectionId,
+        packet_number: u64,
+    ) -> Result<Vec<u8>, QuicTlsError> {
+        let packet_type = match level {
+            HandshakeLevel::Initial => LongPacketType::Initial,
+            HandshakeLevel::Handshake => LongPacketType::Handshake,
+            HandshakeLevel::OneRtt => return Err(handshake_failure("onertt_is_not_long_header")),
+        };
+        let space = level_protection_space(level);
+
+        if pad_initial && matches!(packet_type, LongPacketType::Initial) {
             // RFC 9000 §14.1 (GH#68): every Initial packet leaves here as its
             // own datagram, so expand the packet itself to the 1200-byte
             // minimum with PADDING frames inside the AEAD envelope. The header
@@ -966,7 +999,7 @@ impl QuicHandshakeDriver {
         header
             .encode(&mut header_bytes)
             .map_err(|_| handshake_failure("long_header_encode"))?;
-        if packet_type == LongPacketType::Initial && payload_length < 64 {
+        if pad_initial && packet_type == LongPacketType::Initial && payload_length < 64 {
             // A long Retry token can leave fewer than 64 bytes for the
             // Length-covered payload. Keep the two-byte Length width used by
             // the padding probe: minimal encoding would shrink the datagram
@@ -1165,10 +1198,14 @@ impl QuicHandshakeDriver {
         // keys it is the peer's protocol error.
         let initial = matches!(space, PacketProtectionSpace::Initial);
         let mut crypto = Vec::new();
+        let mut peer_close = None;
         let mut buf: &[u8] = &plaintext;
         while !buf.is_empty() {
             match QuicFrame::decode(&mut buf) {
                 Ok(Some(QuicFrame::Crypto { offset, data })) => crypto.push((offset, data)),
+                Ok(Some(QuicFrame::ConnectionClose { error_code, .. })) => {
+                    peer_close = Some(error_code.value());
+                }
                 // ACK/PADDING/PING and any other handshake-coalesced frames carry
                 // no TLS data; ignore them here (loss recovery handled elsewhere).
                 Ok(Some(_)) => {}
@@ -1176,6 +1213,20 @@ impl QuicHandshakeDriver {
                 Err(_) if initial => return Err(handshake_failure(INITIAL_FRAME_DECODE_CODE)),
                 Err(_) => return Err(handshake_failure("frame_decode")),
             }
+        }
+        // RFC 9000 section 10.2: a peer that closed answers no further flight,
+        // so the handshake ends now instead of retransmitting until its flight
+        // budget runs out. A TLS refusal arrives this way (RFC 9001 section
+        // 4.8), usually in an Initial packet, because the refusing server has
+        // no Handshake keys yet.
+        if let Some(code) = peer_close {
+            self.peer_close_error_code = Some(code);
+            let crypto_error = (CRYPTO_ERROR_BASE..CRYPTO_ERROR_BASE + 0x100).contains(&code);
+            return Err(handshake_failure(if crypto_error {
+                PEER_CRYPTO_ERROR_CLOSE_CODE
+            } else {
+                PEER_CLOSE_CODE
+            }));
         }
         for (offset, data) in crypto {
             let ready = match self.handshake_crypto_reassembly[space_index]
@@ -1194,7 +1245,12 @@ impl QuicHandshakeDriver {
                 Err(err) => return Err(err),
             };
             for contiguous in ready {
-                self.read_handshake(&contiguous)?;
+                if let Err(err) = self.read_handshake(&contiguous) {
+                    // The CONNECTION_CLOSE reporting a TLS alert goes to the
+                    // packet that drew it, and the handshake ends here.
+                    self.peer_connection_id.get_or_insert(peer_src_cid);
+                    return Err(err);
+                }
             }
         }
         if self.peer_connection_id.is_none() {
@@ -1458,6 +1514,18 @@ impl QuicHandshakeDriver {
         self.tls.alpn_protocol()
     }
 
+    /// The error code of the CONNECTION_CLOSE that ended this handshake, when
+    /// the peer sent one in an Initial or Handshake packet.
+    ///
+    /// The handshake then failed with the stable code
+    /// `peer_closed_crypto_error` (a code in `0x0100..=0x01ff`: the peer's TLS
+    /// stack sent the alert `code - 0x0100`, RFC 9001 section 4.8) or
+    /// `peer_closed` (any other code).
+    #[must_use]
+    pub fn peer_close_error_code(&self) -> Option<u64> {
+        self.peer_close_error_code
+    }
+
     /// Borrow the packet-protection provider holding the installed keys.
     #[must_use]
     pub fn provider(&self) -> &RustlsQuicCryptoProvider {
@@ -1659,6 +1727,88 @@ impl QuicHandshakeDriver {
         )
     }
 
+    /// The CONNECTION_CLOSE packets that tell the peer this endpoint's TLS
+    /// stack raised an alert.
+    ///
+    /// The error code is CRYPTO_ERROR, `0x0100` plus the alert (RFC 9001
+    /// section 4.8). It travels in a transport close (type 0x1c, the only one
+    /// RFC 9000 section 10.2.3 allows before 1-RTT) that names the CRYPTO
+    /// frame. Empty when TLS raised no alert.
+    ///
+    /// RFC 9000 section 10.2.3 picks the spaces. A client sends in the
+    /// highest space it has keys for: a client with Handshake keys has the
+    /// server's Initial, so the server has them too. A server whose client may
+    /// still lack Handshake keys sends in Initial and Handshake. Only a
+    /// client's Initial is padded (RFC 9000 section 14.1); a close is not
+    /// ack-eliciting.
+    pub(crate) fn assemble_crypto_error_close(
+        &mut self,
+        peer: SocketAddr,
+        src_cid: ConnectionId,
+        packet_number: &mut u64,
+    ) -> Vec<OutgoingPacket> {
+        let (Some(alert), Some(dst_cid)) = (self.tls.alert(), self.peer_connection_id) else {
+            return Vec::new();
+        };
+        let mut payload = BytesMut::new();
+        let encoded = QuicFrame::ConnectionClose {
+            error_code: VarInt::from_u64_unchecked(CRYPTO_ERROR_BASE + u64::from(u8::from(alert))),
+            // The CRYPTO frame type: its data drew the alert.
+            frame_type: Some(VarInt::from_u64_unchecked(0x06)),
+            reason_phrase: Bytes::new(),
+        }
+        .encode(&mut payload);
+        if encoded.is_err() {
+            return Vec::new();
+        }
+        let server = self.is_server();
+        let mut levels = Vec::with_capacity(2);
+        if !self.handshake_keys_installed || (server && !self.has_authenticated_handshake_packet())
+        {
+            levels.push(HandshakeLevel::Initial);
+        }
+        if self.handshake_keys_installed {
+            levels.push(HandshakeLevel::Handshake);
+        }
+        let mut packets = Vec::with_capacity(levels.len());
+        for level in levels {
+            // A space whose keys are gone is skipped; the other can still
+            // reach the peer.
+            if let Ok(data) = self.assemble_long_header_packet(
+                level,
+                payload.to_vec(),
+                !server,
+                dst_cid,
+                src_cid,
+                *packet_number,
+            ) {
+                *packet_number += 1;
+                packets.push(OutgoingPacket {
+                    dst_addr: peer,
+                    data,
+                    send_time: None,
+                });
+            }
+        }
+        packets
+    }
+
+    /// Send [`Self::assemble_crypto_error_close`]'s packets. The handshake has
+    /// already failed, so a send error changes nothing and is not reported.
+    pub(crate) async fn send_crypto_error_close(
+        &mut self,
+        cx: &Cx,
+        endpoint: &mut QuicUdpEndpoint,
+        peer: SocketAddr,
+        src_cid: ConnectionId,
+        packet_number: &mut u64,
+    ) {
+        let packets = self.assemble_crypto_error_close(peer, src_cid, packet_number);
+        if !packets.is_empty() {
+            let _ = endpoint.send_batch(cx, &packets).await;
+        }
+    }
+
     /// Acknowledge authenticated client Finished packets before handing the
     /// server's completed handshake to the application-data owner.
     async fn send_final_handshake_ack(
@@ -1740,7 +1890,13 @@ struct SentHandshakeFlight {
 ///
 /// This talks to `server_addr`. The connect-side handshake derives Initial keys from
 /// the client's original `dcid`, sends the ClientHello, and exchanges flights until
-/// Drive a client QUIC/TLS-1.3 handshake to completion over `endpoint`.
+/// the handshake completes.
+///
+/// A TLS refusal on either side ends the handshake at once: this side's alert
+/// is sent to the server as CONNECTION_CLOSE with CRYPTO_ERROR, and a
+/// CONNECTION_CLOSE from the server fails the handshake with
+/// `peer_closed_crypto_error` or `peer_closed`
+/// ([`QuicHandshakeDriver::peer_close_error_code`] has the code).
 ///
 /// Returns any early 1-RTT packets buffered during the handshake flight so
 /// they can be processed by the application-data connection.
@@ -1907,7 +2063,20 @@ pub async fn client_handshake_over_udp(
                 // 9000 §12.2) without a retransmit: the PTO clock below still
                 // bounds a handshake the real peer stopped driving.
                 Err(err) if is_unauthenticated_handshake_packet_error(&err) => continue,
-                Err(err) => return Err(err),
+                Err(err) => {
+                    // A TLS refusal tells the server, which would otherwise
+                    // retransmit to a client that has stopped listening.
+                    driver
+                        .send_crypto_error_close(
+                            cx,
+                            endpoint,
+                            server_addr,
+                            client_scid,
+                            &mut packet_number,
+                        )
+                        .await;
+                    return Err(err);
+                }
             };
             accepted_batch = true;
             if consumed < packet.data.len()
@@ -1964,6 +2133,11 @@ pub async fn client_handshake_over_udp(
 /// (read from the first Initial packet by the caller), learns the client's address
 /// and source CID from the first received packet, and exchanges flights until the
 /// handshake completes. Returns the validated client peer address.
+///
+/// A TLS refusal on either side ends the handshake at once: this side's alert
+/// is sent to the client as CONNECTION_CLOSE with CRYPTO_ERROR (within the
+/// anti-amplification limit), and a CONNECTION_CLOSE from the client fails the
+/// handshake with `peer_closed_crypto_error` or `peer_closed`.
 pub async fn server_handshake_over_udp(
     cx: &Cx,
     endpoint: &mut QuicUdpEndpoint,
@@ -2138,30 +2312,45 @@ pub(crate) async fn server_handshake_over_udp_with_early_data(
             if peer.is_none() && packet.data.len() < MIN_INITIAL_DATAGRAM_BYTES {
                 continue;
             }
-            let (peer_scid, consumed) = match driver.recv_handshake_packet_with_consumed(&packet.data) {
-                Ok(res) => res,
-                Err(err) if is_stale_handshake_packet_error(&err) => {
-                    let now = cx.now();
-                    if peer.is_some() && stale_resend_at.is_none_or(|at| now >= at) {
-                        stale_resend_at = Some(now + HANDSHAKE_PTO);
-                        let _ = budget.queue_retransmit(
-                            driver,
-                            &mut last_flight,
-                            &mut packet_number,
-                        )?;
+            let (peer_scid, consumed) =
+                match driver.recv_handshake_packet_with_consumed(&packet.data) {
+                    Ok(res) => res,
+                    Err(err) if is_stale_handshake_packet_error(&err) => {
+                        let now = cx.now();
+                        if peer.is_some() && stale_resend_at.is_none_or(|at| now >= at) {
+                            stale_resend_at = Some(now + HANDSHAKE_PTO);
+                            let _ = budget.queue_retransmit(
+                                driver,
+                                &mut last_flight,
+                                &mut packet_number,
+                            )?;
+                        }
+                        budget.flush(cx, endpoint).await?;
+                        continue;
                     }
-                    budget.flush(cx, endpoint).await?;
-                    continue;
-                }
-                // A forged, corrupted or stray datagram is discarded (RFC
-                // 9000 §12.2) without a retransmit: the PTO clock still
-                // bounds a handshake the real peer stopped driving.
-                Err(err) if is_unauthenticated_handshake_packet_error(&err) => {
-                    budget.flush(cx, endpoint).await?;
-                    continue;
-                }
-                Err(err) => return Err(err),
-            };
+                    // A forged, corrupted or stray datagram is discarded (RFC
+                    // 9000 §12.2) without a retransmit: the PTO clock still
+                    // bounds a handshake the real peer stopped driving.
+                    Err(err) if is_unauthenticated_handshake_packet_error(&err) => {
+                        budget.flush(cx, endpoint).await?;
+                        continue;
+                    }
+                    Err(err) => {
+                        // Only a datagram that authenticated reaches this arm, so
+                        // its bytes fund the close that reports a TLS refusal,
+                        // which replaces any flight still held back.
+                        if !from_peer {
+                            budget.received = budget.received.saturating_add(packet.data.len());
+                        }
+                        budget.held = driver.assemble_crypto_error_close(
+                            packet.src_addr,
+                            server_scid,
+                            &mut packet_number,
+                        );
+                        let _ = budget.flush(cx, endpoint).await;
+                        return Err(err);
+                    }
+                };
             if consumed < packet.data.len()
                 && packet.data[consumed..].iter().any(|&b| b != 0)
                 && early_one_rtt.len() < MAX_EARLY_ONE_RTT_PACKETS
@@ -4909,5 +5098,264 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
             .expect_err("malformed Handshake packet");
         assert_eq!(failure_code(&err), "frame_decode");
         assert!(!is_unauthenticated_handshake_packet_error(&err));
+    }
+
+    /// TLS alert 120, no_application_protocol (RFC 7301 section 3.2), as a
+    /// QUIC CRYPTO_ERROR (RFC 9001 section 4.8).
+    const NO_APPLICATION_PROTOCOL_CLOSE: u64 = 0x0100 + 120;
+
+    /// A client offering ATP's ALPN and a server offering only `server_alpn`.
+    fn alpn_pair(server_alpn: &[u8]) -> (QuicHandshakeDriver, QuicHandshakeDriver) {
+        let client = QuicHandshakeDriver::client(
+            client_config(vec![ca_cert()], vec![ATP_QUIC_ALPN.to_vec()]).expect("client config"),
+            ServerName::try_from("localhost").expect("server name"),
+            Vec::new(),
+        )
+        .expect("client driver");
+        let server = QuicHandshakeDriver::server(
+            server_config(vec![leaf_cert()], leaf_key(), vec![server_alpn.to_vec()])
+                .expect("server config"),
+            Vec::new(),
+        )
+        .expect("server driver");
+        (client, server)
+    }
+
+    /// br-asupersync-2eqmd2 M3: a server that refuses the client's ALPN tells
+    /// it with CONNECTION_CLOSE (CRYPTO_ERROR) in an Initial packet, and the
+    /// client's handshake ends on that close.
+    #[test]
+    fn an_alpn_refusal_reaches_the_client_as_a_crypto_error_close() {
+        let (mut client, mut server) = alpn_pair(b"h3");
+        client
+            .install_initial_keys(DCID_BYTES)
+            .expect("client keys");
+        server
+            .install_initial_keys(DCID_BYTES)
+            .expect("server keys");
+        let dcid = ConnectionId::new(DCID_BYTES).expect("dcid");
+        let client_scid = ConnectionId::new(&[0x11; 8]).expect("client scid");
+        let server_scid = ConnectionId::new(&[0x55; 8]).expect("server scid");
+        let peer: SocketAddr = "127.0.0.1:4433".parse().expect("address");
+
+        let segments = client.pump_outbound().expect("client pump");
+        let hello = client
+            .assemble_handshake_packet(&segments[0], dcid, client_scid, 0)
+            .expect("ClientHello");
+        let refused = server
+            .recv_handshake_packet(&hello)
+            .expect_err("no common ALPN");
+        assert_eq!(failure_code(&refused), "read_hs_fatal_alert");
+
+        let mut server_packet_number = 0;
+        let close =
+            server.assemble_crypto_error_close(peer, server_scid, &mut server_packet_number);
+        assert_eq!(close.len(), 1, "no Handshake keys: Initial only");
+        assert_eq!(server_packet_number, 1);
+        assert_eq!(close[0].dst_addr, peer);
+        let prefix = long_prefix(&close[0].data);
+        assert_eq!(prefix.packet_type, LongPacketType::Initial);
+        assert_eq!(
+            prefix.dst_cid, client_scid,
+            "addressed to the refused packet's source"
+        );
+        assert_eq!(prefix.src_cid, server_scid);
+
+        let closed = client
+            .recv_handshake_packet(&close[0].data)
+            .expect_err("the server closed");
+        assert_eq!(failure_code(&closed), PEER_CRYPTO_ERROR_CLOSE_CODE);
+        assert!(!is_unauthenticated_handshake_packet_error(&closed));
+        assert!(!is_stale_handshake_packet_error(&closed));
+        assert_eq!(
+            client.peer_close_error_code(),
+            Some(NO_APPLICATION_PROTOCOL_CLOSE)
+        );
+        assert!(
+            client
+                .assemble_crypto_error_close(peer, client_scid, &mut 0)
+                .is_empty(),
+            "a peer's close raises no alert here, so it is not answered"
+        );
+    }
+
+    /// br-asupersync-2eqmd2 M3: a client that rejects the server's certificate
+    /// already holds Handshake keys, so it closes in Handshake space only, and
+    /// the server's handshake ends on that close with the client's alert.
+    #[test]
+    fn a_rejected_certificate_reaches_the_server_as_a_handshake_space_close() {
+        let alpn = vec![ATP_QUIC_ALPN.to_vec()];
+        let mut client = QuicHandshakeDriver::client(
+            // No trust anchor, so the server's chain fails verification.
+            client_config(Vec::new(), alpn.clone()).expect("client config"),
+            ServerName::try_from("localhost").expect("server name"),
+            Vec::new(),
+        )
+        .expect("client driver");
+        let mut server = QuicHandshakeDriver::server(
+            server_config(vec![leaf_cert()], leaf_key(), alpn).expect("server config"),
+            Vec::new(),
+        )
+        .expect("server driver");
+        client
+            .install_initial_keys(DCID_BYTES)
+            .expect("client keys");
+        server
+            .install_initial_keys(DCID_BYTES)
+            .expect("server keys");
+        let dcid = ConnectionId::new(DCID_BYTES).expect("dcid");
+        let client_scid = ConnectionId::new(&[0x11; 8]).expect("client scid");
+        let server_scid = ConnectionId::new(&[0x55; 8]).expect("server scid");
+        let server_addr: SocketAddr = "127.0.0.1:4433".parse().expect("address");
+
+        let segments = client.pump_outbound().expect("client pump");
+        let hello = client
+            .assemble_handshake_packet(&segments[0], dcid, client_scid, 0)
+            .expect("ClientHello");
+        server.recv_handshake_packet(&hello).expect("ClientHello");
+        let mut refused = None;
+        let flight = server.pump_outbound().expect("server pump");
+        let long_header = flight
+            .iter()
+            .filter(|segment| segment.level != HandshakeLevel::OneRtt);
+        for (packet_number, segment) in (0..).zip(long_header) {
+            let packet = server
+                .assemble_handshake_packet(segment, client_scid, server_scid, packet_number)
+                .expect("server packet");
+            match client.recv_handshake_packet(&packet) {
+                // Install the Handshake keys the ServerHello unlocked.
+                Ok(_) => {
+                    client.pump_outbound().expect("client pump");
+                }
+                Err(err) => {
+                    refused = Some(err);
+                    break;
+                }
+            }
+        }
+        let refused = refused.expect("the client rejects the untrusted chain");
+        assert_eq!(failure_code(&refused), "read_hs_fatal_alert");
+        let alert = client.tls.alert().expect("TLS raised an alert");
+
+        let mut client_packet_number = 1;
+        let close =
+            client.assemble_crypto_error_close(server_addr, client_scid, &mut client_packet_number);
+        assert_eq!(close.len(), 1, "Handshake keys: Handshake space only");
+        let prefix = long_prefix(&close[0].data);
+        assert_eq!(prefix.packet_type, LongPacketType::Handshake);
+        assert_eq!(prefix.dst_cid, server_scid);
+
+        let closed = server
+            .recv_handshake_packet(&close[0].data)
+            .expect_err("the client closed");
+        assert_eq!(failure_code(&closed), PEER_CRYPTO_ERROR_CLOSE_CODE);
+        assert_eq!(
+            server.peer_close_error_code(),
+            Some(0x0100 + u64::from(u8::from(alert)))
+        );
+    }
+
+    /// br-asupersync-2eqmd2 M3, over UDP: a refused ALPN ends both handshake
+    /// loops within a round trip. The client used to retransmit for its whole
+    /// flight budget (64 PTOs of 1.5 s, 96 s); this test allows 10 s.
+    #[test]
+    fn a_refused_alpn_ends_both_udp_handshakes_promptly() {
+        let original_cid = ConnectionId::new(DCID_BYTES).unwrap();
+        let client_scid = ConnectionId::new(&[0x21; 8]).unwrap();
+        let server_scid = ConnectionId::new(&[0x22; 8]).unwrap();
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .with_reactor(crate::runtime::reactor::create_reactor().unwrap())
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let cx = Cx::current().expect("native context");
+            let mut server_endpoint = loopback_endpoint(&cx).await;
+            let mut client_endpoint = loopback_endpoint(&cx).await;
+            let server_addr = server_endpoint.local_addr();
+            let (mut client, mut server) = alpn_pair(b"h3");
+            let (served, connected) = join_within(
+                &cx,
+                Duration::from_secs(10),
+                server_handshake_over_udp(
+                    &cx,
+                    &mut server_endpoint,
+                    &mut server,
+                    original_cid,
+                    server_scid,
+                ),
+                client_handshake_over_udp(
+                    &cx,
+                    &mut client_endpoint,
+                    server_addr,
+                    &mut client,
+                    original_cid,
+                    client_scid,
+                ),
+            )
+            .await;
+            let served = served
+                .expect("the server's handshake ends within the bound")
+                .expect_err("refused ALPN");
+            assert_eq!(failure_code(&served), "read_hs_fatal_alert");
+            let connected = connected
+                .expect("the client's handshake ends long before its flight budget")
+                .expect_err("refused ALPN");
+            assert_eq!(failure_code(&connected), PEER_CRYPTO_ERROR_CLOSE_CODE);
+            assert_eq!(
+                client.peer_close_error_code(),
+                Some(NO_APPLICATION_PROTOCOL_CLOSE)
+            );
+        });
+    }
+
+    async fn loopback_endpoint(cx: &Cx) -> QuicUdpEndpoint {
+        QuicUdpEndpoint::bind(
+            cx,
+            "127.0.0.1:0".parse().unwrap(),
+            crate::net::quic_native::QuicUdpEndpointConfig::default(),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// Polls `a` and `b` in one task until both finish or `limit` passes, and
+    /// returns the results that arrived.
+    async fn join_within<A: std::future::Future, B: std::future::Future>(
+        cx: &Cx,
+        limit: Duration,
+        a: A,
+        b: B,
+    ) -> (Option<A::Output>, Option<B::Output>) {
+        let mut a = std::pin::pin!(a);
+        let mut b = std::pin::pin!(b);
+        let mut a_out = None;
+        let mut b_out = None;
+        let _ = crate::time::timeout(
+            cx.now(),
+            limit,
+            std::future::poll_fn(|task_cx| {
+                if a_out.is_none() {
+                    if let std::task::Poll::Ready(out) =
+                        std::future::Future::poll(a.as_mut(), task_cx)
+                    {
+                        a_out = Some(out);
+                    }
+                }
+                if b_out.is_none() {
+                    if let std::task::Poll::Ready(out) =
+                        std::future::Future::poll(b.as_mut(), task_cx)
+                    {
+                        b_out = Some(out);
+                    }
+                }
+                if a_out.is_some() && b_out.is_some() {
+                    std::task::Poll::Ready(())
+                } else {
+                    std::task::Poll::Pending
+                }
+            }),
+        )
+        .await;
+        (a_out, b_out)
     }
 }

@@ -282,6 +282,36 @@ impl PendingAuthenticatedAccept {
         Ok(bytes)
     }
 
+    /// The CONNECTION_CLOSE that reports a TLS refusal to the client
+    /// (CRYPTO_ERROR, RFC 9001 section 4.8), cut to what the RFC 9000 section
+    /// 8.1 anti-amplification limit still allows. Empty when TLS raised no
+    /// alert.
+    fn crypto_error_close(&mut self) -> Vec<OutgoingPacket> {
+        let mut packets = self.driver.assemble_crypto_error_close(
+            self.peer,
+            self.local_cid,
+            &mut self.packet_number,
+        );
+        let mut allowance = if self.address_validated {
+            u64::MAX
+        } else {
+            self.authenticated_received_bytes
+                .saturating_mul(3)
+                .saturating_sub(self.sent_bytes)
+        };
+        let mut fits = 0;
+        for packet in &packets {
+            let bytes = packet.data.len() as u64;
+            if bytes > allowance {
+                break;
+            }
+            allowance -= bytes;
+            fits += 1;
+        }
+        packets.truncate(fits);
+        packets
+    }
+
     fn queue_flight(&mut self, packets: &[OutgoingPacket]) -> Result<(), ManagedEndpointError> {
         let bytes = self.check_flight(packets)?;
         self.outstanding_packets += packets.len();
@@ -418,7 +448,14 @@ impl PendingAuthenticatedAccept {
             {
                 return Ok(());
             }
-            Err(error) => return Err(accept_error(error)),
+            Err(error) => {
+                // Only a datagram that authenticated reaches this arm, so its
+                // bytes fund the close that reports a TLS refusal.
+                self.authenticated_received_bytes = self
+                    .authenticated_received_bytes
+                    .saturating_add(packet.data.len() as u64);
+                return Err(accept_error(error));
+            }
         };
         // Only an authenticated packet counts toward the accepted bound.
         self.received_packets += 1;
@@ -1696,6 +1733,8 @@ impl ManagedQuicEndpoint {
             .map_err(|_| ManagedEndpointError::Cancelled)?;
         if result.is_ok() && pending.received_packets != 0 {
             self.pending_authenticated_accept.push_back(pending);
+        } else if result.is_err() {
+            self.queue_crypto_error_close(&mut pending);
         }
         Ok(true)
     }
@@ -1735,17 +1774,43 @@ impl ManagedQuicEndpoint {
 
     #[cfg(feature = "tls")]
     fn fail_authenticated_accept_at(&mut self, index: usize, error: ManagedEndpointError) {
-        if let Some(pending) = self.pending_authenticated_accept.remove(index) {
+        if let Some(mut pending) = self.pending_authenticated_accept.remove(index) {
             self.pending_outgoing
                 .retain(|packet| packet.connection_id != pending.local_cid);
             self.pending_incoming
                 .retain(|packet| !pending.owns_packet(&packet.packet));
+            self.queue_crypto_error_close(&mut pending);
             self.authenticated_accept_result
                 .push_back(AuthenticatedAcceptResult {
                     initial_cid: pending.initial_cid,
                     local_cid: pending.local_cid,
                     result: Err(error),
                 });
+        }
+    }
+
+    /// Queue the close that tells the client a refused admission's TLS alert.
+    ///
+    /// Like a Retry, it has no admission left to wait in, so it shares the
+    /// Retry's [`RETRY_QUEUE_SLACK`] past a full send batch. Past that bound,
+    /// as under a flood of refused handshakes, the close is dropped and the
+    /// client's handshake times out.
+    #[cfg(feature = "tls")]
+    fn queue_crypto_error_close(&mut self, pending: &mut PendingAuthenticatedAccept) {
+        let bound = self
+            .config
+            .packet_batch_size
+            .saturating_add(RETRY_QUEUE_SLACK);
+        for packet in pending.crypto_error_close() {
+            if self.pending_outgoing.len() >= bound {
+                break;
+            }
+            self.pending_outgoing.push_back(RoutedOutgoingPacket {
+                connection_id: pending.local_cid,
+                packet,
+                final_handshake_flight: false,
+                ack_eliciting: false,
+            });
         }
     }
 
@@ -5907,6 +5972,105 @@ mod tests {
                 assert!(server_parameters.unknown.iter().any(|parameter| parameter.id == 0x10));
                 assert!(server.pending_authenticated_accept.is_empty(), "the spoofed admission was displaced");
                 assert!(server.take_authenticated_accept_result().is_none(), "displacement publishes nothing");
+                server.shutdown(&cx).await.unwrap();
+            }));
+        }
+
+        /// br-asupersync-2eqmd2 M3: an automatic admission whose TLS refuses
+        /// the client's ALPN sends CONNECTION_CLOSE with CRYPTO_ERROR, so the
+        /// client's handshake ends at once instead of retransmitting for its
+        /// whole flight budget (96 s).
+        #[test]
+        fn managed_alpn_refusal_closes_the_client_handshake() {
+            use super::super::super::handshake_driver::{
+                PEER_CRYPTO_ERROR_CLOSE_CODE, client_config, client_handshake_over_udp,
+                server_config,
+                tests::{CA_CERT_PEM, LEAF_CERT_PEM, leaf_key, parse_one_cert},
+            };
+
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .build()
+                .unwrap();
+            runtime.block_on(runtime.handle().spawn(async {
+                let cx = Cx::current().unwrap();
+                let mut server = ManagedQuicEndpoint::bind(
+                    &cx,
+                    "127.0.0.1:0".parse().unwrap(),
+                    ManagedEndpointConfig {
+                        is_server: true,
+                        ..ManagedEndpointConfig::default()
+                    },
+                )
+                .await
+                .unwrap();
+                let mut parameters = Vec::new();
+                crate::net::quic_core::TransportParameters::default()
+                    .encode(&mut parameters)
+                    .unwrap();
+                let tls = server_config(
+                    vec![parse_one_cert(LEAF_CERT_PEM)],
+                    leaf_key(),
+                    vec![b"atp/1".to_vec()],
+                )
+                .unwrap();
+                server
+                    .configure_authenticated_server(&cx, tls, parameters, b"atp/1")
+                    .unwrap();
+                let server_addr = server.local_addr();
+                let mut client_endpoint = QuicUdpEndpoint::bind(
+                    &cx,
+                    "127.0.0.1:0".parse().unwrap(),
+                    QuicUdpEndpointConfig::default(),
+                )
+                .await
+                .unwrap();
+                let mut client = QuicHandshakeDriver::client(
+                    client_config(vec![parse_one_cert(CA_CERT_PEM)], vec![b"h3".to_vec()]).unwrap(),
+                    rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+                    Vec::new(),
+                )
+                .unwrap();
+                let (outcome, client_done) = {
+                    let mut handshake = std::pin::pin!(client_handshake_over_udp(
+                        &cx,
+                        &mut client_endpoint,
+                        server_addr,
+                        &mut client,
+                        ConnectionId::new(&[0x71; 8]).unwrap(),
+                        ConnectionId::new(&[0x72; 8]).unwrap(),
+                    ));
+                    let mut client_done = None;
+                    let outcome = crate::time::timeout(
+                        cx.now(),
+                        Duration::from_secs(10),
+                        server.run_event_loop_with_application(&cx, |_, _, task_cx| {
+                            if let Poll::Ready(result) = handshake.as_mut().poll(task_cx) {
+                                client_done = Some(result);
+                                Poll::Ready(Ok(()))
+                            } else {
+                                Poll::Pending
+                            }
+                        }),
+                    )
+                    .await;
+                    (outcome, client_done)
+                };
+                assert!(
+                    matches!(outcome, Ok(Ok(()))),
+                    "the client's handshake must end long before its flight budget: {outcome:?}"
+                );
+                let refused = client_done.unwrap().expect_err("no common ALPN");
+                assert!(
+                    matches!(
+                        refused,
+                        crate::net::quic_native::QuicTlsError::CryptoProviderFailure { code, .. }
+                            if code == PEER_CRYPTO_ERROR_CLOSE_CODE
+                    ),
+                    "{refused:?}"
+                );
+                // TLS alert 120, no_application_protocol.
+                assert_eq!(client.peer_close_error_code(), Some(0x0100 + 120));
+                assert!(server.pending_authenticated_accept.is_empty());
                 server.shutdown(&cx).await.unwrap();
             }));
         }
