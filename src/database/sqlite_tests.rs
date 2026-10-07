@@ -793,7 +793,10 @@ mod tests {
 
     /// P5: the row-stream worker has the same queued/running distinction as a
     /// one-shot operation. Cancelling it before it owns the connection must not
-    /// interrupt an abandoned-but-still-running predecessor.
+    /// interrupt an abandoned-but-still-running predecessor. The predecessor
+    /// runs inside a transaction: an abandoned statement that started outside
+    /// one is interrupted by its own drop (dj4uhx M2), so only inside a
+    /// transaction does it keep running.
     #[test]
     fn sqlite_p5_queued_stream_cancel_does_not_interrupt_connection_owner() {
         init_test_logging();
@@ -805,6 +808,10 @@ mod tests {
                 other => panic!("open_in_memory failed: {other:?}"),
             }
         });
+        match block_on(conn.execute_unchecked(&owner_cx, "BEGIN", &[])) {
+            Outcome::Ok(_) => {}
+            other => panic!("BEGIN failed: {other:?}"),
+        }
 
         let owner_interrupt = Arc::clone(&conn.interrupt);
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
