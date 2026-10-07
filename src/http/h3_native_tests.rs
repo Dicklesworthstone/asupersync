@@ -6710,4 +6710,152 @@ mod tests {
             H3NativeError::QpackPolicy("decoded field section exceeds maximum size limit")
         );
     }
+
+    /// Appends a QPACK string literal with a 7-bit length prefix (a field
+    /// value), Huffman-coded when `huffman` is set.
+    fn push_qpack_value(wire: &mut Vec<u8>, octets: &[u8], huffman: bool) {
+        if huffman {
+            let mut encoded = BytesMut::new();
+            hpack_encode_huffman(&mut encoded, octets);
+            qpack_encode_prefixed_int(wire, 0x80, 7, encoded.len() as u64).expect("value len");
+            wire.extend_from_slice(&encoded);
+        } else {
+            qpack_encode_prefixed_int(wire, 0x00, 7, octets.len() as u64).expect("value len");
+            wire.extend_from_slice(octets);
+        }
+    }
+
+    /// Appends a literal field line with a literal name (001 N H NameLen(3+)).
+    fn push_qpack_literal_name(wire: &mut Vec<u8>, name: &[u8], value: &[u8], huffman: bool) {
+        qpack_encode_prefixed_int(wire, 0x20, 3, name.len() as u64).expect("name len");
+        wire.extend_from_slice(name);
+        push_qpack_value(wire, value, huffman);
+    }
+
+    #[test]
+    fn obs_text_field_values_decode_as_latin1() {
+        let mut wire = vec![0x00u8, 0x00];
+        // Literal with static name reference: content-disposition (index 3).
+        qpack_encode_prefixed_int(&mut wire, 0x50, 4, 3).expect("name ref");
+        push_qpack_value(&mut wire, b"attachment; filename=\xe9t\xe9.txt", false);
+        push_qpack_literal_name(&mut wire, b"x-latin", b"caf\xe9", true);
+        // A UTF-8 value is still read as UTF-8, not one character per octet.
+        push_qpack_literal_name(&mut wire, b"x-utf8", "caf\u{e9}".as_bytes(), false);
+
+        let plan = qpack_decode_field_section(&wire, H3QpackMode::StaticOnly)
+            .expect("obs-text values decode");
+        assert_eq!(
+            plan,
+            vec![
+                QpackFieldPlan::Literal {
+                    name: "content-disposition".to_string(),
+                    value: "attachment; filename=\u{e9}t\u{e9}.txt".to_string(),
+                },
+                QpackFieldPlan::Literal {
+                    name: "x-latin".to_string(),
+                    value: "caf\u{e9}".to_string(),
+                },
+                QpackFieldPlan::Literal {
+                    name: "x-utf8".to_string(),
+                    value: "caf\u{e9}".to_string(),
+                },
+            ]
+        );
+
+        // The same section behind :status 200 (static index 25) is a valid
+        // response whose head keeps the header.
+        let mut response = vec![0x00u8, 0x00, 0xc0 | 25];
+        response.extend_from_slice(&wire[2..]);
+        let head = qpack_decode_response_field_section(&response, H3QpackMode::StaticOnly, None)
+            .expect("response with an obs-text value decodes");
+        assert_eq!(head.status, 200);
+        assert_eq!(
+            head.headers[0],
+            (
+                "content-disposition".to_string(),
+                "attachment; filename=\u{e9}t\u{e9}.txt".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn pseudo_header_values_and_names_stay_utf8_only() {
+        let not_utf8 = H3NativeError::InvalidFrame("qpack string is not valid utf-8");
+        let decode = |wire: &[u8]| qpack_decode_field_section(wire, H3QpackMode::StaticOnly);
+
+        // :path (static index 1) with an obs-text value, raw and Huffman-coded.
+        let mut wire = vec![0x00u8, 0x00];
+        qpack_encode_prefixed_int(&mut wire, 0x50, 4, 1).expect("name ref");
+        push_qpack_value(&mut wire, b"/\xe9", false);
+        assert_eq!(decode(&wire), Err(not_utf8.clone()));
+
+        let mut wire = vec![0x00u8, 0x00];
+        qpack_encode_prefixed_int(&mut wire, 0x50, 4, 1).expect("name ref");
+        push_qpack_value(&mut wire, b"/\xe9", true);
+        assert_eq!(
+            decode(&wire),
+            Err(H3NativeError::InvalidFrame("invalid qpack huffman string"))
+        );
+
+        // A literal pseudo-header name, and a name that is not UTF-8.
+        let mut wire = vec![0x00u8, 0x00];
+        push_qpack_literal_name(&mut wire, b":path", b"/\xe9", false);
+        assert_eq!(decode(&wire), Err(not_utf8.clone()));
+
+        let mut wire = vec![0x00u8, 0x00];
+        push_qpack_literal_name(&mut wire, b"x-\xe9", b"v", false);
+        assert_eq!(decode(&wire), Err(not_utf8));
+    }
+
+    #[test]
+    fn dynamic_name_references_decode_obs_text_values_by_their_name() {
+        let mut context = QpackContext::new(4096);
+        for (name, value) in [("x-old", "old"), ("x-middle", "middle"), ("x-new", "new")] {
+            context
+                .insert_dynamic_entry(name.to_string(), value.to_string())
+                .expect("insert entry");
+        }
+        // EncRIC=4 => ReqInsertCount=3; S=1, DeltaBase=0 => Base=2.
+        let mut wire = vec![0x04u8, 0x80];
+        // Literal with dynamic name reference, relative 0 => absolute 1 (x-middle).
+        wire.push(0x40);
+        push_qpack_value(&mut wire, b"mid\xe9", false);
+        // Literal with post-base name reference, index 0 => absolute 2 (x-new).
+        wire.push(0x00);
+        push_qpack_value(&mut wire, b"tai\xe9", true);
+
+        let plan = qpack_decode_field_section_with_context(
+            &wire,
+            H3QpackMode::DynamicTableAllowed,
+            Some(&context),
+        )
+        .expect("obs-text values decode");
+        let headers = qpack_plan_to_header_fields(&plan, Some(&context)).expect("resolve");
+        assert_eq!(
+            headers,
+            vec![
+                ("x-middle".to_string(), "mid\u{e9}".to_string()),
+                ("x-new".to_string(), "tai\u{e9}".to_string()),
+            ]
+        );
+
+        // A dynamic :path entry keeps its value UTF-8 only.
+        let mut context = QpackContext::new(4096);
+        context
+            .insert_dynamic_entry(":path".to_string(), "/".to_string())
+            .expect("insert :path");
+        // EncRIC=2 => ReqInsertCount=1; S=0, DeltaBase=0 => Base=1; relative 0 => absolute 0.
+        let mut wire = vec![0x02u8, 0x00, 0x40];
+        push_qpack_value(&mut wire, b"/\xe9", false);
+        assert_eq!(
+            qpack_decode_field_section_with_context(
+                &wire,
+                H3QpackMode::DynamicTableAllowed,
+                Some(&context),
+            ),
+            Err(H3NativeError::InvalidFrame(
+                "qpack string is not valid utf-8"
+            ))
+        );
+    }
 }

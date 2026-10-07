@@ -1663,7 +1663,7 @@ pub(crate) fn decode_huffman(src: &Bytes) -> Result<String, H2Error> {
 }
 
 /// Decode a Huffman-coded string to its octets, which need not be UTF-8.
-fn decode_huffman_octets(src: &Bytes) -> Result<Vec<u8>, H2Error> {
+pub(crate) fn decode_huffman_octets(src: &Bytes) -> Result<Vec<u8>, H2Error> {
     // Shortest HPACK code is 5 bits; preallocate to upper bound to avoid
     // growth reallocs on the common case where decoded > encoded length.
     let estimated_symbols = src.len().saturating_mul(8).saturating_add(4) / 5;
