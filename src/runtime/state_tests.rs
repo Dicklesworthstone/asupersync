@@ -10433,6 +10433,7 @@ struct MetricHookLog {
     set: Mutex<Vec<(RegionId, Duration)>>,
     exceeded: Mutex<Vec<RegionId>>,
     drains: Mutex<Vec<(RegionId, Duration)>>,
+    ticks: Mutex<Vec<(usize, Duration)>>,
 }
 
 struct MetricHookMetrics(Arc<MetricHookLog>);
@@ -10460,7 +10461,62 @@ impl MetricsProvider for MetricHookMetrics {
     fn obligation_created(&self, _: RegionId) {}
     fn obligation_discharged(&self, _: RegionId) {}
     fn obligation_leaked(&self, _: RegionId) {}
-    fn scheduler_tick(&self, _: usize, _: Duration) {}
+    fn scheduler_tick(&self, tasks_polled: usize, duration: Duration) {
+        self.0.ticks.lock().push((tasks_polled, duration));
+    }
+}
+
+/// A native runtime reports its workers' polls to the provider's
+/// `scheduler_tick` in batches of 1 to 64 (br-asupersync-x9mmxl).
+#[test]
+fn worker_polls_reach_the_metrics_provider_as_scheduler_ticks() {
+    use crate::runtime::RuntimeBuilder;
+
+    init_test_logging();
+    let tasks = 200_usize;
+    for workers in [None, Some(2)] {
+        let log = Arc::new(MetricHookLog::default());
+        let builder = match workers {
+            None => RuntimeBuilder::current_thread(),
+            Some(count) => RuntimeBuilder::multi_thread().worker_threads(count),
+        };
+        let runtime = builder
+            .metrics(MetricHookMetrics(Arc::clone(&log)))
+            .build()
+            .expect("build native runtime");
+        runtime.block_on(async move {
+            let cx = crate::cx::Cx::current().expect("block_on installs a Cx");
+            let mut handles = Vec::with_capacity(tasks);
+            for _ in 0..tasks {
+                handles.push(
+                    cx.spawn(|_| async { crate::runtime::yield_now().await })
+                        .expect("spawn a task"),
+                );
+            }
+            for mut handle in handles {
+                let _ = handle.join(&cx).await;
+            }
+        });
+        assert!(
+            runtime.shutdown_timeout(Duration::from_secs(10)),
+            "{workers:?}: the runtime shuts down"
+        );
+
+        let ticks = log.ticks.lock().clone();
+        let polls: usize = ticks.iter().map(|(polled, _)| polled).sum();
+        // Each task yields once, so it is polled at least twice.
+        assert!(
+            polls >= 2 * tasks,
+            "{workers:?}: want at least {} polls reported, got {polls} in {} ticks",
+            2 * tasks,
+            ticks.len()
+        );
+        assert!(
+            ticks.iter().all(|(polled, _)| (1..=64).contains(polled)),
+            "{workers:?}: every report carries 1 to 64 polls: {ticks:?}"
+        );
+    }
+    crate::test_complete!("worker_polls_reach_the_metrics_provider_as_scheduler_ticks");
 }
 
 /// A native runtime reports a task's deadline when it is admitted and again
