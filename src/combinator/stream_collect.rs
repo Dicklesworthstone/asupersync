@@ -255,37 +255,144 @@ where
     T: Send + 'static,
     E: Send + 'static,
 {
-    let results = Arc::new(Mutex::new(Vec::<Option<T>>::new()));
-    let writer = Arc::clone(&results);
+    let results = Results::new();
+    let writer = results.clone();
     let outcome = try_for_each_concurrent(cx, stream.enumerate(), limit, move |item_cx, (index, item)| {
-        let writer = Arc::clone(&writer);
+        let writer = writer.clone();
         let future = f(item_cx, item);
         async move {
-            let value = future.await?;
-            {
-                let mut slots = writer.lock();
-                if slots.len() <= index {
-                    slots.resize_with(index.checked_add(1).expect("stream result index overflow"), || None);
-                }
-                // Each Enumerate index is admitted once. No previous T is
-                // destroyed here; there are no public writers to these slots.
-                assert!(slots[index].is_none(), "duplicate stream result index");
-                slots[index] = Some(value);
-            }
+            writer.store(index, future.await?);
             Ok(())
         }
     })
     .await;
-    // Take the values out before visiting or destroying any of them. A T may
-    // have a reentrant destructor, and no user destructor belongs under a lock.
-    let slots = std::mem::take(&mut *results.lock());
-    match outcome {
-        Outcome::Ok(()) => Outcome::Ok(slots.into_iter().map(|slot| {
-            slot.expect("successful stream collection has every admitted result")
-        }).collect()),
-        Outcome::Err(error) => Outcome::Err(error),
-        Outcome::Cancelled(reason) => Outcome::Cancelled(reason),
-        Outcome::Panicked(payload) => Outcome::Panicked(payload),
+    results.finish(outcome)
+}
+
+/// Maps and collects in source order, then closes the complete work subtree.
+///
+/// This combines [`try_map_collect_concurrent`]'s ordering with
+/// [`try_for_each_concurrent_scoped`]'s descendant/finalizer barrier. Successful
+/// values stay owned by the collector during cleanup. They are returned only
+/// if both direct work and cleanup succeed; otherwise they are dropped AFTER
+/// cleanup, outside the result lock. A successful mapper cannot hide a later
+/// descendant or finalizer panic behind its already-staged value.
+///
+/// `limit` bounds direct tasks, not result memory or descendants: N successful
+/// inputs retain O(N) values. Returned values must remain valid after their
+/// item's task AND this operation's region have closed. Returning a value does
+/// not transfer live obligations or extend a region-owned resource's lifetime.
+/// Dropping this future requests subtree close but cannot synchronously drain.
+///
+/// ```no_run
+/// # async fn example(cx: &asupersync::Cx) {
+/// use asupersync::combinator::stream_collect::try_map_collect_concurrent_scoped;
+/// use asupersync::stream::iter;
+/// use asupersync::Outcome;
+/// let result = try_map_collect_concurrent_scoped(cx, iter([3, 1, 2]), 2,
+///     |_child, n| async move { Ok::<_, &'static str>(n * 10) }).await;
+/// assert!(matches!(result, Outcome::Ok(values) if values == [30, 10, 20]));
+/// # }
+/// ```
+///
+/// # Panics
+/// Panics if `limit` is zero. Source/clone unwind containment and cleanup
+/// precedence follow [`try_for_each_concurrent_scoped`].
+pub async fn try_map_collect_concurrent_scoped<S, F, Fut, T, E>(
+    cx: &Cx,
+    stream: S,
+    limit: usize,
+    mut f: F,
+) -> Outcome<Vec<T>, ScopedStreamError<E>>
+where
+    S: Stream + Unpin,
+    S::Item: Send + 'static,
+    F: FnMut(Cx, S::Item) -> Fut + Clone + Send + 'static,
+    Fut: Future<Output = Result<T, E>> + Send + 'static,
+    T: Send + 'static,
+    E: Send + 'static,
+{
+    let results = Results::new();
+    let writer = results.clone();
+    let outcome = try_for_each_concurrent_scoped(
+        cx,
+        stream.enumerate(),
+        limit,
+        move |child, (index, item)| {
+            let writer = writer.clone();
+            let future = f(child, item);
+            async move {
+                writer.store(index, future.await?);
+                Ok(())
+            }
+        },
+    ).await;
+    results.finish(outcome)
+}
+
+/// Infallible mapping with ordered results and complete subtree cleanup.
+///
+/// See [`try_map_collect_concurrent_scoped`] for result lifetime and memory
+/// bounds. Runtime admission and cleanup can fail even if mapping is infallible.
+///
+/// # Panics
+/// Panics if `limit` is zero.
+pub async fn map_collect_concurrent_scoped<S, F, Fut, T>(
+    cx: &Cx,
+    stream: S,
+    limit: usize,
+    mut f: F,
+) -> Outcome<Vec<T>, ScopedStreamError<Infallible>>
+where
+    S: Stream + Unpin,
+    S::Item: Send + 'static,
+    F: FnMut(Cx, S::Item) -> Fut + Clone + Send + 'static,
+    Fut: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    try_map_collect_concurrent_scoped(cx, stream, limit, move |child, item| {
+        let future = f(child, item);
+        async move { Ok(future.await) }
+    }).await
+}
+
+// Both collection modes use this one result-placement and retirement path.
+// Cloning the handle shares storage; it never adds a Clone bound to T.
+struct Results<T>(Arc<Mutex<Vec<Option<T>>>>);
+
+impl<T> Clone for Results<T> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl<T> Results<T> {
+    fn new() -> Self {
+        Self(Arc::new(Mutex::new(Vec::new())))
+    }
+
+    fn store(&self, index: usize, value: T) {
+        let mut slots = self.0.lock();
+        if slots.len() <= index {
+            slots.resize_with(index.checked_add(1).expect("stream result index overflow"), || None);
+        }
+        // Each source index is admitted once. Never overwrite a previous T.
+        assert!(slots[index].is_none(), "duplicate stream result index");
+        slots[index] = Some(value);
+    }
+
+    fn finish<E>(self, outcome: Outcome<(), E>) -> Outcome<Vec<T>, E> {
+        // No user destructor may run under the result lock. Callers finish only
+        // after their selected task-only or full-subtree barrier has resolved.
+        let slots = std::mem::take(&mut *self.0.lock());
+        match outcome {
+            Outcome::Ok(()) => Outcome::Ok(slots.into_iter().map(|slot| {
+                slot.expect("successful stream collection has every admitted result")
+            }).collect()),
+            Outcome::Err(error) => Outcome::Err(error),
+            Outcome::Cancelled(reason) => Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => Outcome::Panicked(payload),
+        }
     }
 }
 
@@ -693,6 +800,196 @@ mod scoped_tests {
         }));
         let mut task = std::task::Context::from_waker(std::task::Waker::noop());
         assert!(matches!(work.as_mut().poll(&mut task), std::task::Poll::Ready(Outcome::Err(ScopedStreamError::Region(_)))));
+        drop(work);
+        assert_eq!(polls.get(), 0);
+    }
+
+    async fn scoped_collection_journey(cx: Cx) {
+        struct Value(usize); // Deliberately not Clone.
+        let progress: Arc<Vec<Arc<Progress>>> = Arc::new(
+            (0..4).map(|_| Arc::new(Progress::default())).collect(),
+        );
+        let retained: Arc<Mutex<Vec<TaskHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let (sender, _receiver) = mpsc::channel(4);
+        let signals = Arc::clone(&progress);
+        let keep = Arc::clone(&retained);
+        let later_completed = Arc::clone(&completed);
+        let send = sender.clone();
+        let outcome = map_collect_concurrent_scoped(&cx, iter(0..4), 2, move |child, index| {
+            let progress = Arc::clone(&signals[index]);
+            let keep = Arc::clone(&keep);
+            let completed = Arc::clone(&later_completed);
+            let sender = send.clone();
+            async move {
+                let handle = child.spawn({
+                    let progress = Arc::clone(&progress);
+                    move |desc| descendant(desc, sender, progress, false)
+                }).unwrap();
+                progress.changed.wait_until(|| progress.holding.load(Ordering::SeqCst)).await;
+                keep.lock().push(handle);
+                if index == 0 {
+                    while completed.load(Ordering::SeqCst) == 0 { yield_now().await; }
+                }
+                completed.fetch_add(1, Ordering::SeqCst);
+                Value(index * 10)
+            }
+        }).await;
+        let Outcome::Ok(values) = outcome else { panic!("scoped collection failed") };
+        assert_eq!(values.into_iter().map(|value| value.0).collect::<Vec<_>>(), [0, 10, 20, 30]);
+        assert_eq!(completed.load(Ordering::SeqCst), 4);
+        assert!(progress.iter().all(|p| p.holding.load(Ordering::SeqCst)));
+        assert!(progress.iter().all(|p| p.finished.load(Ordering::SeqCst) == 1));
+        assert_eq!(sender.telemetry_snapshot(1).reserved_uncommitted_obligations, 0);
+        for handle in retained.lock().iter_mut() {
+            assert!(!matches!(handle.try_join(), Ok(None)), "all descendants retired before output");
+        }
+    }
+
+    #[test]
+    fn scoped_collection_preserves_order_and_drains_every_descendant() {
+        for seed in [0x5C014, 0x5C015] {
+            let ((), report) = run_async_under_lab(seed, scoped_collection_journey);
+            assert!(report.quiescent && report.invariant_violations.is_empty());
+        }
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn scoped_ordered_collection_has_a_native_cleanup_barrier() {
+        let passed = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&passed);
+        let runtime = crate::runtime::RuntimeBuilder::current_thread().build().unwrap();
+        runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().unwrap();
+            crate::time::timeout(cx.now(), std::time::Duration::from_secs(10),
+                scoped_collection_journey(cx)).await.expect("scoped collection timed out");
+            observed.store(true, Ordering::SeqCst);
+        }));
+        assert!(passed.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn scoped_outputs_are_discarded_only_after_failed_subtree_cleanup() {
+        struct Value {
+            progress: Arc<Progress>,
+            finalized: Arc<AtomicBool>,
+            early: Arc<AtomicBool>,
+            drops: Arc<AtomicUsize>,
+        }
+        impl Drop for Value {
+            fn drop(&mut self) {
+                if self.progress.finished.load(Ordering::SeqCst) != 1
+                    || !self.finalized.load(Ordering::SeqCst)
+                {
+                    self.early.store(true, Ordering::SeqCst);
+                }
+                self.drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        for panic_finalizer in [false, true] {
+            let ((), report) = run_async_under_lab(0x5C016, move |cx| async move {
+                let progress = Arc::new(Progress::default());
+                let finalized = Arc::new(AtomicBool::new(false));
+                let early = Arc::new(AtomicBool::new(false));
+                let drops = Arc::new(AtomicUsize::new(0));
+                let value_ready = Arc::new(AtomicBool::new(false));
+                let changed = Arc::new(Notify::new());
+                let retained = Arc::new(Mutex::new(None));
+                let (sender, _receiver) = mpsc::channel(1);
+                let signals = (Arc::clone(&progress), Arc::clone(&finalized),
+                    Arc::clone(&early), Arc::clone(&drops), Arc::clone(&retained));
+                let outcome = try_map_collect_concurrent_scoped(
+                    &cx, iter(0..if panic_finalizer { 1 } else { 2 }), 2,
+                    move |child, index| {
+                        let (progress, finalized, early, drops, retained) = signals.clone();
+                        let sender = sender.clone();
+                        let ready = Arc::clone(&value_ready);
+                        let changed = Arc::clone(&changed);
+                        async move {
+                            if index == 1 {
+                                changed.wait_until(|| ready.load(Ordering::SeqCst)).await;
+                                return Err("scoped map failed");
+                            }
+                            let handle = child.spawn({
+                                let progress = Arc::clone(&progress);
+                                move |desc| descendant(desc, sender, progress, false)
+                            }).unwrap();
+                            *retained.lock() = Some(handle);
+                            progress.changed.wait_until(|| progress.holding.load(Ordering::SeqCst)).await;
+                            let (ack, mut acknowledged) = oneshot::channel();
+                            let finish = Arc::clone(&finalized);
+                            let request = RegisterRegionFinalizer::new(child.region_id(), move || {
+                                finish.store(true, Ordering::SeqCst);
+                                if panic_finalizer { panic!("collected value finalizer failed"); }
+                            }, ack);
+                            child.spawn_gateway_handle().unwrap()
+                                .enqueue_region_command(RegionCommand::RegisterFinalizer(request)).unwrap();
+                            acknowledged.recv_uninterruptible().await.unwrap().unwrap();
+                            let value = Value { progress, finalized, early, drops };
+                            ready.store(true, Ordering::SeqCst);
+                            changed.notify_waiters();
+                            Ok(value)
+                        }
+                    },
+                ).await;
+                if panic_finalizer {
+                    assert!(matches!(outcome, Outcome::Panicked(_)));
+                } else {
+                    assert!(matches!(outcome, Outcome::Err(ScopedStreamError::Item("scoped map failed"))));
+                }
+                assert_eq!(progress.finished.load(Ordering::SeqCst), 1);
+                assert!(finalized.load(Ordering::SeqCst));
+                assert_eq!(drops.load(Ordering::SeqCst), 1);
+                assert!(!early.load(Ordering::SeqCst), "output survived through descendant and finalizer cleanup");
+                assert!(!matches!(retained.lock().as_mut().unwrap().try_join(), Ok(None)));
+            });
+            assert!(report.quiescent && report.invariant_violations.is_empty());
+        }
+    }
+
+    #[test]
+    fn scoped_source_panic_cancels_descendants_before_waiting_for_their_parent() {
+        let ((), report) = run_async_under_lab(0x5C017, |cx| async move {
+            let progress = Arc::new(Progress::default());
+            let source_signal = Arc::clone(&progress);
+            let source = iter([0, 1]).then(move |index| {
+                let progress = Arc::clone(&source_signal);
+                Box::pin(async move {
+                    if index == 1 {
+                        progress.changed.wait_until(|| progress.holding.load(Ordering::SeqCst)).await;
+                        panic!("scoped source failed with a parked subtree");
+                    }
+                })
+            });
+            let (sender, _receiver) = mpsc::channel(1);
+            let child_signal = Arc::clone(&progress);
+            let outcome = try_map_collect_concurrent_scoped(&cx, source, 2, move |item, ()| {
+                let progress = Arc::clone(&child_signal);
+                let sender = sender.clone();
+                async move {
+                    let mut nested = item.spawn(move |desc| descendant(desc, sender, progress, false)).unwrap();
+                    let _ = poll_fn(|task| nested.poll_join(task)).await;
+                    Ok::<_, ()>(7)
+                }
+            }).await;
+            assert!(matches!(outcome, Outcome::Panicked(ref p) if format!("{p:?}").contains("scoped source failed")));
+            assert!(progress.holding.load(Ordering::SeqCst));
+            assert_eq!(progress.finished.load(Ordering::SeqCst), 1);
+        });
+        assert!(report.quiescent && report.invariant_violations.is_empty());
+    }
+
+    #[test]
+    fn scoped_collection_pre_cancel_refuses_before_source_poll() {
+        let cx = Cx::for_testing();
+        cx.cancel_fast(crate::types::CancelKind::User);
+        let polls = std::cell::Cell::new(0);
+        let source = iter([7]).inspect(|_| polls.set(polls.get() + 1));
+        let mut work = Box::pin(map_collect_concurrent_scoped(&cx, source, 1,
+            |_child, item| async move { item }));
+        let mut task = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(matches!(work.as_mut().poll(&mut task), std::task::Poll::Ready(Outcome::Cancelled(_))));
         drop(work);
         assert_eq!(polls.get(), 0);
     }

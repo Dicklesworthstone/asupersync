@@ -408,15 +408,13 @@ where
     // Cancel the whole subtree BEFORE joining direct members, otherwise that
     // descendant may never receive cancellation and the direct join can hang.
     // Legacy callers share a region and deliberately do not take this path.
-    if terminal.is_some() {
-        if let Some(boundary) = boundary {
-            let reason = cx.cancel_reason().unwrap_or_else(|| {
-                CancelReason::user("scoped stream: draining work subtree")
-            });
-            // Runtime loss is reported by the owner's subsequent close. Never
-            // bypass direct handle retirement because cancellation enqueue failed.
-            let _ = boundary.cancel(reason);
-        }
+    if let Some(boundary) = boundary.filter(|_| terminal.is_some()) {
+        let reason = cx.cancel_reason().unwrap_or_else(|| {
+            CancelReason::user("scoped stream: draining work subtree")
+        });
+        // Runtime loss is reported by the owner's subsequent close. Never
+        // bypass direct handle retirement because cancellation enqueue failed.
+        let _ = boundary.cancel(reason);
     }
 
     // DRAIN. Whatever the exit path, every member the set still owns is
