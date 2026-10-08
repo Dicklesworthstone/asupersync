@@ -1075,6 +1075,109 @@ fn mysql_real_trusted_sql_runs_statements_the_static_heuristic_refuses() {
     });
 }
 
+/// `execute_prepared_result` and `execute_trusted_sql_result` report the
+/// `AUTO_INCREMENT` value an INSERT generated (the OK packet's
+/// last-insert-id, which `execute_prepared` discards), on a connection and in
+/// a transaction; an explicit key reports that key, and a statement that
+/// stores none reports 0.
+#[test]
+fn mysql_real_exec_results_carry_the_generated_auto_increment_id() {
+    let cfg = RealMySqlConfig::from_env();
+    let test_name = "mysql_real_exec_results_carry_the_generated_auto_increment_id";
+    if skip_if_disabled(&cfg, test_name) {
+        return;
+    }
+    let log = MySqlTestLogger::new("mysql_real", test_name);
+
+    run_test_with_cx(|cx| async move {
+        let mut conn = unwrap_mysql(connect_test_server(&cx, &cfg.url).await, "connect", &log);
+        unwrap_mysql(
+            conn.execute_trusted_sql(
+                &cx,
+                "CREATE TEMPORARY TABLE asupersync_ids \
+                 (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, name VARCHAR(32))",
+            )
+            .await,
+            "create_temp_table",
+            &log,
+        );
+
+        log.phase("prepared");
+        let insert = unwrap_mysql(
+            conn.prepare(&cx, "INSERT INTO asupersync_ids (name) VALUES (?)")
+                .await,
+            "prepare",
+            &log,
+        );
+        let first = unwrap_mysql(
+            conn.execute_prepared_result(&cx, &insert, &[&"alpha"])
+                .await,
+            "insert_alpha",
+            &log,
+        );
+        assert_eq!((first.affected_rows, first.last_insert_id), (1, 1));
+        let second = unwrap_mysql(
+            conn.execute_prepared_result(&cx, &insert, &[&"beta"]).await,
+            "insert_beta",
+            &log,
+        );
+        assert_eq!(second.last_insert_id, 2);
+
+        log.phase("trusted_multi_row");
+        let multi = unwrap_mysql(
+            conn.execute_trusted_sql_result(
+                &cx,
+                "INSERT INTO asupersync_ids (name) VALUES ('c'), ('d'), ('e')",
+            )
+            .await,
+            "insert_multi",
+            &log,
+        );
+        // The first generated value of a multi-row INSERT.
+        assert_eq!((multi.affected_rows, multi.last_insert_id), (3, 3));
+        let update = unwrap_mysql(
+            conn.execute_trusted_sql_result(
+                &cx,
+                "UPDATE asupersync_ids SET name = 'z' WHERE id = 1",
+            )
+            .await,
+            "update",
+            &log,
+        );
+        assert_eq!((update.affected_rows, update.last_insert_id), (1, 0));
+
+        log.phase("transaction");
+        let mut tx = unwrap_mysql(conn.begin(&cx).await, "begin", &log);
+        let in_tx = unwrap_mysql(
+            tx.execute_prepared_result(&cx, &insert, &[&"in-tx"]).await,
+            "tx_insert",
+            &log,
+        );
+        assert_eq!(in_tx.last_insert_id, 6);
+        let explicit = unwrap_mysql(
+            tx.execute_trusted_sql_result(
+                &cx,
+                "INSERT INTO asupersync_ids (id, name) VALUES (100, 'explicit')",
+            )
+            .await,
+            "tx_explicit_id",
+            &log,
+        );
+        // As mysql_insert_id() reports, an explicit key is the stored value.
+        assert_eq!(explicit.last_insert_id, 100);
+        unwrap_mysql(tx.commit(&cx).await, "commit", &log);
+
+        // The plain form still returns the affected rows.
+        let affected = unwrap_mysql(
+            conn.execute_prepared(&cx, &insert, &[&"plain"]).await,
+            "plain_insert",
+            &log,
+        );
+        assert_eq!(affected, 1);
+        log.end("pass");
+    });
+}
+
 /// A host that is an absolute path is the server's Unix-domain socket file.
 /// Set `MYSQL_SOCKET` (for example `/var/run/mysqld/mysqld.sock`); the test
 /// connects with the credentials of `MYSQL_URL` through it and checks that the

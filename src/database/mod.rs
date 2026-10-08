@@ -67,8 +67,8 @@ pub use postgres::{
 #[cfg(feature = "mysql")]
 pub use mysql::{
     MySqlColumn, MySqlConnectOptions, MySqlConnection, MySqlConnectionManager, MySqlError,
-    MySqlPreparedCacheStats, MySqlRow, MySqlTransaction, MySqlValue, SslMode as MySqlSslMode,
-    column_type as mysql_column_type,
+    MySqlExecResult, MySqlPreparedCacheStats, MySqlRow, MySqlTransaction, MySqlValue,
+    SslMode as MySqlSslMode, column_type as mysql_column_type,
 };
 
 /// Remaining wall/virtual time before the ambient [`Cx`] budget deadline.

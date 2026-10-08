@@ -1753,8 +1753,28 @@ struct Handshake {
     auth_plugin_name: String,
 }
 
+/// The OK-packet report of a statement that returns no rows.
+///
+/// It carries the rows the statement changed and the `AUTO_INCREMENT` key it
+/// stored. Returned by
+/// [`MySqlConnection::execute_prepared_result`] and
+/// [`MySqlConnection::execute_trusted_sql_result`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MySqlExecResult {
+    /// Rows the statement changed (with `CLIENT_FOUND_ROWS`, rows it
+    /// matched), as `execute_prepared` returns.
+    pub affected_rows: u64,
+    /// The `AUTO_INCREMENT` value the statement stored, as
+    /// `mysql_insert_id()` reports it: the generated key (for a multi-row
+    /// INSERT, the first row's), an explicitly inserted key, or 0 when the
+    /// statement stored none.
+    pub last_insert_id: u64,
+}
+
 struct OkPacket {
     affected_rows: u64,
+    last_insert_id: u64,
     status_flags: u16,
 }
 
@@ -3638,6 +3658,18 @@ impl MySqlConnection {
     /// bind every value derived from external input through the
     /// prepared-statement APIs ([`Self::prepare`], [`Self::execute_prepared`]).
     pub async fn execute_trusted_sql(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, MySqlError> {
+        self.execute_sql_exchange(cx, sql)
+            .await
+            .map(|result| result.affected_rows)
+    }
+
+    /// [`Self::execute_trusted_sql`], returning the generated
+    /// `AUTO_INCREMENT` value with the affected rows.
+    pub async fn execute_trusted_sql_result(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+    ) -> Outcome<MySqlExecResult, MySqlError> {
         self.execute_sql_exchange(cx, sql).await
     }
 
@@ -4437,12 +4469,13 @@ impl MySqlConnection {
 
         let mut reader = PacketReader::new(&data[1..]);
         let affected_rows = reader.read_lenenc_int()?;
-        let _last_insert_id = reader.read_lenenc_int()?;
+        let last_insert_id = reader.read_lenenc_int()?;
         let status_flags = reader.read_u16_le()?;
         let _warning_count = reader.read_u16_le()?;
 
         Ok(OkPacket {
             affected_rows,
+            last_insert_id,
             status_flags,
         })
     }
@@ -4686,12 +4719,18 @@ impl MySqlConnection {
         if let Err(injection_error) = self.validate_sql_security(sql) {
             return Outcome::Err(injection_error);
         }
-        self.execute_sql_exchange(cx, sql).await
+        self.execute_sql_exchange(cx, sql)
+            .await
+            .map(|result| result.affected_rows)
     }
 
     /// The COM_QUERY exchange behind [`Self::execute_static_sql`] (after its
     /// SQL heuristic) and [`Self::execute_trusted_sql`] (which has none).
-    async fn execute_sql_exchange(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, MySqlError> {
+    async fn execute_sql_exchange(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+    ) -> Outcome<MySqlExecResult, MySqlError> {
         if self.inner.closed {
             return Outcome::Err(MySqlError::ConnectionClosed);
         }
@@ -4737,7 +4776,7 @@ impl MySqlConnection {
         &mut self,
         cx: &Cx,
         sql: &str,
-    ) -> Outcome<u64, MySqlError> {
+    ) -> Outcome<MySqlExecResult, MySqlError> {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
@@ -4788,7 +4827,10 @@ impl MySqlConnection {
                     Ok(ok) => {
                         self.inner.status_flags = ok.status_flags;
                         self.inner.closed = false;
-                        Outcome::Ok(ok.affected_rows)
+                        Outcome::Ok(MySqlExecResult {
+                            affected_rows: ok.affected_rows,
+                            last_insert_id: ok.last_insert_id,
+                        })
                     }
                     Err(e) => {
                         // OK packet was fully received; connection protocol
@@ -4815,7 +4857,10 @@ impl MySqlConnection {
                 match self.read_result_set(cx, &data).await {
                     Ok(_) => {
                         self.inner.closed = false;
-                        Outcome::Ok(0)
+                        Outcome::Ok(MySqlExecResult {
+                            affected_rows: 0,
+                            last_insert_id: 0,
+                        })
                     }
                     Err(MySqlError::Cancelled(r)) => Outcome::Cancelled(r),
                     Err(e) => outcome_from_error(e),
@@ -5647,6 +5692,20 @@ impl MySqlConnection {
         stmt: &MySqlStatement,
         params: &[&dyn ToSql],
     ) -> Outcome<u64, MySqlError> {
+        self.execute_prepared_result(cx, stmt, params)
+            .await
+            .map(|result| result.affected_rows)
+    }
+
+    /// [`Self::execute_prepared`], returning the generated `AUTO_INCREMENT`
+    /// value with the affected rows, so an INSERT learns its new key without
+    /// a second `SELECT LAST_INSERT_ID()` round trip.
+    pub async fn execute_prepared_result(
+        &mut self,
+        cx: &Cx,
+        stmt: &MySqlStatement,
+        params: &[&dyn ToSql],
+    ) -> Outcome<MySqlExecResult, MySqlError> {
         if self.inner.closed {
             return Outcome::Err(MySqlError::ConnectionClosed);
         }
@@ -5669,7 +5728,7 @@ impl MySqlConnection {
         cx: &Cx,
         stmt: &MySqlStatement,
         params: &[&dyn ToSql],
-    ) -> Outcome<u64, MySqlError> {
+    ) -> Outcome<MySqlExecResult, MySqlError> {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
@@ -5767,7 +5826,10 @@ impl MySqlConnection {
             };
             self.inner.status_flags = ok_packet.status_flags;
             self.inner.closed = false;
-            return Outcome::Ok(ok_packet.affected_rows);
+            return Outcome::Ok(MySqlExecResult {
+                affected_rows: ok_packet.affected_rows,
+                last_insert_id: ok_packet.last_insert_id,
+            });
         }
 
         Outcome::Err(MySqlError::InvalidPacket(
@@ -7101,6 +7163,18 @@ impl MySqlTransaction<'_> {
     /// [`MySqlConnection::execute_trusted_sql`] for what that heuristic
     /// refuses and the caller's obligation).
     pub async fn execute_trusted_sql(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, MySqlError> {
+        self.execute_trusted_sql_result(cx, sql)
+            .await
+            .map(|result| result.affected_rows)
+    }
+
+    /// [`Self::execute_trusted_sql`], returning the generated
+    /// `AUTO_INCREMENT` value with the affected rows.
+    pub async fn execute_trusted_sql_result(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+    ) -> Outcome<MySqlExecResult, MySqlError> {
         if let Err(error) = self.check_open() {
             return Outcome::Err(error);
         }
@@ -7137,10 +7211,23 @@ impl MySqlTransaction<'_> {
         stmt: &MySqlStatement,
         params: &[&dyn ToSql],
     ) -> Outcome<u64, MySqlError> {
+        self.execute_prepared_result(cx, stmt, params)
+            .await
+            .map(|result| result.affected_rows)
+    }
+
+    /// [`Self::execute_prepared`], returning the generated `AUTO_INCREMENT`
+    /// value with the affected rows.
+    pub async fn execute_prepared_result(
+        &mut self,
+        cx: &Cx,
+        stmt: &MySqlStatement,
+        params: &[&dyn ToSql],
+    ) -> Outcome<MySqlExecResult, MySqlError> {
         if let Err(error) = self.check_open() {
             return Outcome::Err(error);
         }
-        let outcome = self.conn.execute_prepared(cx, stmt, params).await;
+        let outcome = self.conn.execute_prepared_result(cx, stmt, params).await;
         self.note_server_rollback(outcome)
     }
 
