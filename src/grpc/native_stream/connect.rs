@@ -47,6 +47,31 @@ pub struct NativeStreamEndpoint {
 enum Destination {
     Address(SocketAddr),
     Host(String, u16),
+    /// A Unix-domain socket, for `unix:` channel targets.
+    #[cfg(unix)]
+    Unix(std::path::PathBuf),
+}
+
+/// A connected socket, before any TLS upgrade.
+#[derive(Debug)]
+pub enum DialedStream {
+    Tcp(TcpStream),
+    #[cfg(unix)]
+    Unix(crate::net::unix::UnixStream),
+}
+
+impl DialedStream {
+    /// The TCP stream of an endpoint made by a public constructor, which
+    /// always dials TCP.
+    fn into_tcp(self) -> Result<TcpStream, Status> {
+        match self {
+            Self::Tcp(stream) => Ok(stream),
+            #[cfg(unix)]
+            Self::Unix(_) => Err(Status::invalid_argument(
+                "a Unix-domain gRPC endpoint has no TCP transport",
+            )),
+        }
+    }
 }
 
 impl NativeStreamEndpoint {
@@ -131,17 +156,42 @@ impl NativeStreamEndpoint {
         Ok(endpoint)
     }
 
-    async fn dial(&self, setup: &mut Setup) -> Result<TcpStream, Status> {
+    /// An endpoint on a Unix-domain socket (`unix:` channel targets). The
+    /// setup deadline bounds the connect like a TCP dial.
+    #[cfg(unix)]
+    pub(crate) fn unix(
+        path: std::path::PathBuf,
+        authority: impl Into<String>,
+        setup_timeout: Duration,
+    ) -> Result<Self, Status> {
+        let mut endpoint = Self::new(
+            SocketAddr::from(([127, 0, 0, 1], 1)),
+            authority,
+            setup_timeout,
+        )?;
+        endpoint.destination = Destination::Unix(path);
+        Ok(endpoint)
+    }
+
+    async fn dial(&self, setup: &mut Setup) -> Result<DialedStream, Status> {
         let remaining = setup.remaining();
         setup
             .run(async {
                 match &self.destination {
                     Destination::Address(address) => {
-                        TcpStream::connect_timeout(*address, remaining).await
+                        TcpStream::connect_timeout(*address, remaining)
+                            .await
+                            .map(DialedStream::Tcp)
                     }
                     Destination::Host(host, port) => {
-                        TcpStream::connect_timeout((host.clone(), *port), remaining).await
+                        TcpStream::connect_timeout((host.clone(), *port), remaining)
+                            .await
+                            .map(DialedStream::Tcp)
                     }
+                    #[cfg(unix)]
+                    Destination::Unix(path) => crate::net::unix::UnixStream::connect(path)
+                        .await
+                        .map(DialedStream::Unix),
                 }
                 .map_err(io_status)
             })
@@ -202,7 +252,7 @@ impl NativeStreamEndpoint {
         }
         self.connect_with_transport(
             cx, path, request, codec, config, NativeStreamWindows::default(), None,
-            |io| async move { Ok(io) },
+            |dialed| async move { dialed.into_tcp() },
         )
         .await
     }
@@ -285,7 +335,8 @@ impl NativeStreamEndpoint {
             .map_err(|_| Status::invalid_argument("invalid gRPC TLS server name"))?;
         self.connect_with_transport(
             cx, path, request, codec, config, NativeStreamWindows::default(), None,
-            |tcp| async move {
+            |dialed| async move {
+                let tcp = dialed.into_tcp()?;
                 let tls = connector
                     .connect(server_name, tcp)
                     .await
@@ -328,7 +379,7 @@ impl NativeStreamEndpoint {
         }
         self.connect_duplex_with_transport(
             cx, path, request, codec, config, NativeStreamWindows::default(), None,
-            |io| async move { Ok(io) },
+            |dialed| async move { dialed.into_tcp() },
         )
         .await
     }
@@ -361,7 +412,8 @@ impl NativeStreamEndpoint {
             .map_err(|_| Status::invalid_argument("invalid gRPC TLS server name"))?;
         self.connect_duplex_with_transport(
             cx, path, request, codec, config, NativeStreamWindows::default(), None,
-            |tcp| async move {
+            |dialed| async move {
+                let tcp = dialed.into_tcp()?;
                 let tls = connector
                     .connect(server_name, tcp)
                     .await
@@ -395,13 +447,13 @@ impl NativeStreamEndpoint {
     where
         C: Codec,
         IO: AsyncRead + AsyncWrite + Unpin,
-        Upgrade: FnOnce(TcpStream) -> UpgradeFuture,
+        Upgrade: FnOnce(DialedStream) -> UpgradeFuture,
         UpgradeFuture: Future<Output = Result<IO, Status>>,
     {
         windows.validate()?;
         let (admitted, mut setup) = self.admit_started(cx, path, &request, &config, started)?;
-        let tcp = self.dial(&mut setup).await?;
-        let io = setup.run(async { upgrade(tcp).await }).await?;
+        let dialed = self.dial(&mut setup).await?;
+        let io = setup.run(async { upgrade(dialed).await }).await?;
         let mut stream = setup
             .run(async {
                 NativeServerStream::new_request_with_windows(
@@ -439,13 +491,13 @@ impl NativeStreamEndpoint {
     where
         C: Codec,
         IO: AsyncRead + AsyncWrite + Unpin,
-        Upgrade: FnOnce(TcpStream) -> UpgradeFuture,
+        Upgrade: FnOnce(DialedStream) -> UpgradeFuture,
         UpgradeFuture: Future<Output = Result<IO, Status>>,
     {
         windows.validate()?;
         let (admitted, mut setup) = self.admit_started(cx, path, &request, &config, started)?;
-        let tcp = self.dial(&mut setup).await?;
-        let io = setup.run(async { upgrade(tcp).await }).await?;
+        let dialed = self.dial(&mut setup).await?;
+        let io = setup.run(async { upgrade(dialed).await }).await?;
         let mut stream = setup
             .run(async {
                 NativeDuplexStream::new_admitted_with_windows(

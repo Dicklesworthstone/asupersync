@@ -38,8 +38,8 @@ use crate::tls::TlsStream;
 use super::codec::{Codec, FramedCodec, IdentityCodec};
 #[cfg(not(target_arch = "wasm32"))]
 use super::native_stream::{
-    CallDeadline, NativeDuplexStream, NativeServerStream, NativeStreamConfig, NativeStreamEndpoint,
-    NativeStreamKeepalive, NativeStreamWindows,
+    CallDeadline, DialedStream, NativeDuplexStream, NativeServerStream, NativeStreamConfig,
+    NativeStreamEndpoint, NativeStreamKeepalive, NativeStreamWindows,
 };
 use super::status::{Code, GrpcError, Status, TransportErrorKind};
 use super::streaming::{
@@ -904,7 +904,7 @@ impl<C: Codec> GrpcClient<C> {
             setup.config,
             setup.windows,
             Some(setup.deadline),
-            |tcp| native_h2_transport(tcp, &setup.target, connector),
+            |dialed| native_h2_transport(dialed, &setup.target, connector),
         ).await?;
         match setup.keepalive {
             Some(keepalive) => stream.with_keepalive(keepalive),
@@ -985,7 +985,7 @@ impl<C: Codec> GrpcClient<C> {
             setup.config,
             setup.windows,
             Some(setup.deadline),
-            |tcp| native_h2_transport(tcp, &setup.target, connector),
+            |dialed| native_h2_transport(dialed, &setup.target, connector),
         ).await?;
         match setup.keepalive {
             Some(keepalive) => stream.with_keepalive(keepalive),
@@ -1046,6 +1046,12 @@ impl<C: Codec> GrpcClient<C> {
             }
             NativeH2Destination::Host(host, port) => NativeStreamEndpoint::from_host(
                 host.clone(), *port, target.authority.clone(), config.connect_timeout,
+            )?,
+            #[cfg(unix)]
+            NativeH2Destination::Unix(path) => NativeStreamEndpoint::unix(
+                path.clone(),
+                target.authority.clone(),
+                config.connect_timeout,
             )?,
         };
         let stream_config = NativeStreamConfig {
@@ -1403,7 +1409,7 @@ impl<C: Codec> GrpcClient<C> {
                 setup.config,
                 setup.windows,
                 Some(setup.deadline),
-                |tcp| native_h2_transport(tcp, &setup.target, connector),
+                |dialed| native_h2_transport(dialed, &setup.target, connector),
             )
             .await?;
         if let Some(keepalive) = setup.keepalive {
@@ -1437,7 +1443,7 @@ impl<C: Codec> GrpcClient<C> {
                 setup.config,
                 setup.windows,
                 Some(setup.deadline),
-                |tcp| native_h2_transport(tcp, &setup.target, connector),
+                |dialed| native_h2_transport(dialed, &setup.target, connector),
             )
             .await?;
         if let Some(keepalive) = setup.keepalive {
@@ -1487,6 +1493,8 @@ struct NativeClientSetup {
 enum NativeH2Destination {
     Address(SocketAddr),
     Host(String, u16),
+    #[cfg(unix)]
+    Unix(std::path::PathBuf),
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1499,6 +1507,9 @@ impl NativeH2Target {
     ) -> Result<Self, Status> {
         let target = parse_channel_uri(uri)
             .map_err(|error| Status::unavailable(format!("invalid gRPC channel target: {error}")))?;
+        if let Some(path) = target.unix_path {
+            return Self::unix(path, use_tls, dial_addr);
+        }
         let use_tls = use_tls || target.use_tls;
         let host = target.host;
         let port = target.port.unwrap_or(if use_tls { 443 } else { 80 });
@@ -1531,17 +1542,49 @@ impl NativeH2Target {
         })
     }
 
-    async fn connect(&self, timeout: Duration) -> Result<TcpStream, Status> {
+    /// A `unix:` target: cleartext HTTP/2 with the `localhost` authority.
+    fn unix(path: &str, use_tls: bool, dial_addr: Option<SocketAddr>) -> Result<Self, Status> {
+        if use_tls || dial_addr.is_some() {
+            return Err(Status::failed_precondition(
+                "unix: gRPC channel targets support neither TLS nor an explicit dial address",
+            ));
+        }
+        #[cfg(unix)]
+        {
+            Ok(Self {
+                authority: "localhost".to_owned(),
+                destination: NativeH2Destination::Unix(std::path::PathBuf::from(path)),
+                server_name: "localhost".to_owned(),
+                scheme: "http",
+                use_tls: false,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            Err(Status::unavailable(
+                "unix: gRPC channel targets need a Unix platform",
+            ))
+        }
+    }
+
+    async fn connect(&self, timeout: Duration) -> Result<DialedStream, Status> {
         // Share the same offloaded, cancellation-aware system resolver used by
         // NativeStreamEndpoint. The caller's outer setup timeout also covers
         // resolution and TLS, so neither can restart the connection budget.
         match &self.destination {
-            NativeH2Destination::Address(address) => {
-                TcpStream::connect_timeout(*address, timeout).await
-            }
+            NativeH2Destination::Address(address) => TcpStream::connect_timeout(*address, timeout)
+                .await
+                .map(DialedStream::Tcp),
             NativeH2Destination::Host(host, port) => {
-                TcpStream::connect_timeout((host.clone(), *port), timeout).await
+                TcpStream::connect_timeout((host.clone(), *port), timeout)
+                    .await
+                    .map(DialedStream::Tcp)
             }
+            #[cfg(unix)]
+            NativeH2Destination::Unix(path) => crate::net::unix::UnixStream::connect(path)
+                .await
+                .map(DialedStream::Unix),
         }
         .map_err(|error| transport_status("connect", error))
     }
@@ -1551,6 +1594,8 @@ impl NativeH2Target {
 #[derive(Debug)]
 enum NativeH2Io {
     Plain(TcpStream),
+    #[cfg(unix)]
+    Unix(crate::net::unix::UnixStream),
     #[cfg(feature = "tls")]
     Tls(TlsStream<TcpStream>),
 }
@@ -1564,6 +1609,8 @@ impl AsyncRead for NativeH2Io {
     ) -> Poll<io::Result<()>> {
         match &mut *self {
             Self::Plain(stream) => Pin::new(stream).poll_read(cx, buf),
+            #[cfg(unix)]
+            Self::Unix(stream) => Pin::new(stream).poll_read(cx, buf),
             #[cfg(feature = "tls")]
             Self::Tls(stream) => Pin::new(stream).poll_read(cx, buf),
         }
@@ -1579,6 +1626,8 @@ impl AsyncWrite for NativeH2Io {
     ) -> Poll<io::Result<usize>> {
         match &mut *self {
             Self::Plain(stream) => Pin::new(stream).poll_write(cx, data),
+            #[cfg(unix)]
+            Self::Unix(stream) => Pin::new(stream).poll_write(cx, data),
             #[cfg(feature = "tls")]
             Self::Tls(stream) => Pin::new(stream).poll_write(cx, data),
         }
@@ -1587,6 +1636,8 @@ impl AsyncWrite for NativeH2Io {
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match &mut *self {
             Self::Plain(stream) => Pin::new(stream).poll_flush(cx),
+            #[cfg(unix)]
+            Self::Unix(stream) => Pin::new(stream).poll_flush(cx),
             #[cfg(feature = "tls")]
             Self::Tls(stream) => Pin::new(stream).poll_flush(cx),
         }
@@ -1595,6 +1646,8 @@ impl AsyncWrite for NativeH2Io {
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match &mut *self {
             Self::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
+            #[cfg(unix)]
+            Self::Unix(stream) => Pin::new(stream).poll_shutdown(cx),
             #[cfg(feature = "tls")]
             Self::Tls(stream) => Pin::new(stream).poll_shutdown(cx),
         }
@@ -2012,10 +2065,16 @@ fn pool_after_success(pool: &UnaryConnectionPool, conn: NativeH2Conn, stream_id:
 
 #[cfg(not(target_arch = "wasm32"))]
 async fn native_h2_transport(
-    stream: TcpStream,
+    stream: DialedStream,
     target: &NativeH2Target,
     tls_connector: Option<TlsConnector>,
 ) -> Result<NativeH2Io, Status> {
+    let stream = match stream {
+        DialedStream::Tcp(stream) => stream,
+        // `unix:` targets never use TLS (NativeH2Target::unix).
+        #[cfg(unix)]
+        DialedStream::Unix(stream) => return Ok(NativeH2Io::Unix(stream)),
+    };
     if !target.use_tls {
         return Ok(NativeH2Io::Plain(stream));
     }
@@ -2348,11 +2407,24 @@ struct ChannelUri<'a> {
     host: &'a str,
     port: Option<u16>,
     use_tls: bool,
+    /// The socket path of a `unix:` target.
+    unix_path: Option<&'a str>,
 }
 
 fn parse_channel_uri(uri: &str) -> Result<ChannelUri<'_>, GrpcError> {
     if uri.is_empty() {
         return Err(GrpcError::transport("channel URI cannot be empty"));
+    }
+    // A Unix-domain socket carries HTTP/2 with the `localhost` authority, as
+    // grpc-go and grpc-java send for these targets.
+    if let Some(path) = unix_target_path(uri) {
+        return Ok(ChannelUri {
+            authority: "localhost",
+            host: "localhost",
+            port: None,
+            use_tls: false,
+            unix_path: Some(path?),
+        });
     }
     let (scheme, remainder) = uri
         .split_once("://")
@@ -2472,7 +2544,33 @@ fn parse_channel_uri(uri: &str) -> Result<ChannelUri<'_>, GrpcError> {
         host,
         port,
         use_tls: scheme.eq_ignore_ascii_case("https"),
+        unix_path: None,
     })
+}
+
+/// The socket path of a gRPC `unix:` target: `unix:path` (relative or
+/// absolute) or `unix:///absolute/path`, as gRPC's naming documentation
+/// spells them. `None` for any other URI.
+fn unix_target_path(uri: &str) -> Option<Result<&str, GrpcError>> {
+    let rest = uri
+        .get(..5)
+        .filter(|scheme| scheme.eq_ignore_ascii_case("unix:"))
+        .map(|_| &uri[5..])?;
+    let path = match rest.strip_prefix("//") {
+        Some(absolute) if absolute.starts_with('/') => absolute,
+        Some(_) => {
+            return Some(Err(GrpcError::transport(
+                "unix:// channel URIs need an absolute path (unix:///path/to/socket)",
+            )));
+        }
+        None => rest,
+    };
+    if path.is_empty() || path.contains('\0') {
+        return Some(Err(GrpcError::transport(
+            "unix: channel URI needs a socket path without NUL bytes",
+        )));
+    }
+    Some(Ok(path))
 }
 
 fn validate_channel_security(
@@ -2481,6 +2579,21 @@ fn validate_channel_security(
     has_tls_connector: bool,
     has_explicit_dial_addr: bool,
 ) -> Result<(), GrpcError> {
+    if unix_target_path(uri).is_some() {
+        if config.use_tls || has_tls_connector {
+            return Err(GrpcError::transport_kind(
+                TransportErrorKind::ProtocolViolation,
+                "gRPC TLS is not available on unix: channel targets",
+            ));
+        }
+        if has_explicit_dial_addr {
+            return Err(GrpcError::transport_kind(
+                TransportErrorKind::ProtocolViolation,
+                "unix: channel targets cannot use an explicit dial address",
+            ));
+        }
+        return Ok(());
+    }
     let (scheme, _) = uri
         .split_once("://")
         .ok_or_else(|| GrpcError::transport("channel URI is missing a scheme separator"))?;

@@ -315,3 +315,114 @@ fn registered_grpc_duplex_lane_serves_on_a_unix_socket() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn channel_unix_targets_reach_a_unix_socket_server() {
+    use asupersync::grpc::{Channel, GrpcClient};
+
+    let path = socket_path("grpc-channel");
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+    let task_handle = handle.clone();
+    let server_path = path.clone();
+    let target = format!("unix://{}", path.display());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let server = echo_server(&calls);
+    runtime.block_on(handle.spawn(async move {
+        let unix = UnixListener::bind(&server_path)
+            .await
+            .expect("bind Unix socket");
+        // The mixed unary/server-streaming lane serves both client paths.
+        let listener = server
+            .bind_registered_streaming_http2_unix(
+                unix,
+                localhost(),
+                ServerStreamingConfig {
+                    frame_capacity: NonZeroUsize::new(4).unwrap(),
+                    max_frame_bytes: NonZeroUsize::new(4096).unwrap(),
+                    max_trailer_bytes: 1024,
+                    terminal_timeout: Duration::from_secs(5),
+                },
+            )
+            .expect("bind registered streaming lane");
+        let manager = listener.connection_manager().clone();
+        let run_runtime = task_handle.clone();
+        let run = task_handle
+            .try_spawn(async move { listener.run_produced(&run_runtime).await })
+            .expect("spawn listener");
+
+        let channel = Channel::builder(target.clone())
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(10))
+            .connect()
+            .await
+            .expect("unix: channel");
+        let mut client = GrpcClient::new(channel.clone());
+        for payload in [&b"one"[..], b"two"] {
+            let response = client
+                .unary::<Bytes, Bytes>(
+                    "/test.Echo/Unary",
+                    Request::new(Bytes::copy_from_slice(payload)),
+                )
+                .await
+                .expect("unary call over the unix: channel");
+            let mut expected = b"pong:".to_vec();
+            expected.extend_from_slice(payload);
+            assert_eq!(response.get_ref().as_ref(), expected.as_slice());
+        }
+
+        let cx = Cx::current().expect("runtime Cx");
+        let mut stream = GrpcClient::new(channel)
+            .into_native_server_streaming(
+                &cx,
+                "/test.Echo/Unary",
+                Request::new(Bytes::from_static(b"three")),
+            )
+            .await
+            .expect("native stream over the unix: channel");
+        assert_eq!(
+            stream.message().await.expect("reply").as_deref(),
+            Some(b"pong:three".as_slice())
+        );
+        assert_eq!(stream.message().await.expect("end of stream"), None);
+
+        assert!(manager.begin_drain(Duration::from_secs(5)));
+        let _ = run.await.expect("listener run");
+    }));
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn unix_channel_targets_are_parsed_and_refuse_tls() {
+    use asupersync::grpc::Channel;
+
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build runtime");
+    runtime.block_on(async {
+        for accepted in [
+            "unix:///run/app.sock",
+            "unix:relative.sock",
+            "UNIX:/abs.sock",
+        ] {
+            Channel::connect(accepted)
+                .await
+                .unwrap_or_else(|error| panic!("{accepted}: {error}"));
+        }
+        for refused in ["unix://relative.sock", "unix:", "unix://"] {
+            assert!(Channel::connect(refused).await.is_err(), "{refused}");
+        }
+        assert!(
+            Channel::builder("unix:///run/app.sock")
+                .tls()
+                .connect()
+                .await
+                .is_err(),
+            "TLS is refused on unix: targets"
+        );
+    });
+}

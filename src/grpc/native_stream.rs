@@ -73,6 +73,7 @@ mod response;
 use response::ResponseHead;
 pub(crate) use response::http_fallback;
 mod connect;
+pub(crate) use connect::DialedStream;
 pub use connect::NativeStreamEndpoint;
 mod duplex;
 pub use duplex::{NativeDuplexEvent, NativeDuplexStream};
