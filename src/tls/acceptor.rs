@@ -57,6 +57,196 @@ impl rustls::server::ResolvesServerCert for RequireSniResolver {
     }
 }
 
+/// Server certificates that can change while an acceptor serves them.
+///
+/// An acceptor built with [`TlsAcceptorBuilder::from_certificates`] looks
+/// its certificate up here at every handshake: the certificate stored for the
+/// client's SNI name, then the one for a matching wildcard (`*.example.com`
+/// covers `api.example.com`), then the default. Changes apply to the next
+/// handshake without rebuilding the acceptor or restarting its listener:
+/// renew a certificate by replacing it, add a tenant by inserting one.
+/// Established connections keep the certificate they negotiated.
+///
+/// Clones share one table. Every certificate is checked when it is stored:
+/// the chain must be non-empty and currently valid, and the key must belong
+/// to the leaf certificate.
+///
+/// ```ignore
+/// let certificates = TlsCertificates::with_default(chain, key)?;
+/// certificates.insert("api.example.com", api_chain, api_key)?;
+/// let acceptor = TlsAcceptorBuilder::from_certificates(certificates.clone()).build()?;
+/// // Later, from a renewal task:
+/// certificates.set_default(renewed_chain, renewed_key)?;
+/// ```
+#[cfg(feature = "tls")]
+#[derive(Clone, Default)]
+pub struct TlsCertificates {
+    table: Arc<parking_lot::RwLock<CertificateTable>>,
+}
+
+#[cfg(feature = "tls")]
+#[derive(Default)]
+struct CertificateTable {
+    default: Option<Arc<rustls::sign::CertifiedKey>>,
+    by_name: std::collections::HashMap<String, Arc<rustls::sign::CertifiedKey>>,
+}
+
+#[cfg(feature = "tls")]
+impl TlsCertificates {
+    /// An empty table: handshakes find no certificate until one is stored.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A table whose default certificate is `chain` with `key`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TlsError::Configuration`] when the certificate is rejected;
+    /// see [`Self::set_default`].
+    pub fn with_default(chain: CertificateChain, key: PrivateKey) -> Result<Self, TlsError> {
+        let certificates = Self::new();
+        certificates.set_default(chain, key)?;
+        Ok(certificates)
+    }
+
+    /// Serves `chain` with `key` to clients whose SNI name has no
+    /// certificate of its own, and to clients that send no SNI.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TlsError::Configuration`] when the chain is empty, malformed
+    /// or outside its validity period, or the key does not match the leaf
+    /// certificate. The table is unchanged then.
+    pub fn set_default(&self, chain: CertificateChain, key: PrivateKey) -> Result<(), TlsError> {
+        let certified = certified_key(chain, key)?;
+        self.table.write().default = Some(certified);
+        Ok(())
+    }
+
+    /// Removes the default certificate: clients whose SNI name matches no
+    /// stored certificate are then refused during the handshake.
+    pub fn clear_default(&self) {
+        self.table.write().default = None;
+    }
+
+    /// Whether a default certificate is stored.
+    #[must_use]
+    pub fn has_default(&self) -> bool {
+        self.table.read().default.is_some()
+    }
+
+    /// Serves `chain` with `key` to clients that ask for `server_name`,
+    /// replacing any certificate stored for it. `server_name` is a DNS name,
+    /// or `*.` followed by one for a wildcard; it is matched without regard
+    /// to case.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TlsError::Configuration`] when the name is empty or the
+    /// certificate is rejected (see [`Self::set_default`]). The table is
+    /// unchanged then.
+    pub fn insert(
+        &self,
+        server_name: &str,
+        chain: CertificateChain,
+        key: PrivateKey,
+    ) -> Result<(), TlsError> {
+        let name = normalize_server_name(server_name)?;
+        let certified = certified_key(chain, key)?;
+        self.table.write().by_name.insert(name, certified);
+        Ok(())
+    }
+
+    /// Removes the certificate stored for `server_name`; returns whether one
+    /// was stored.
+    pub fn remove(&self, server_name: &str) -> bool {
+        normalize_server_name(server_name)
+            .is_ok_and(|name| self.table.write().by_name.remove(&name).is_some())
+    }
+
+    /// The server names with a certificate of their own, sorted.
+    #[must_use]
+    pub fn server_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.table.read().by_name.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    fn resolve_name(&self, server_name: Option<&str>) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        let table = self.table.read();
+        if let Some(name) = server_name {
+            let name = name.trim_end_matches('.').to_ascii_lowercase();
+            if let Some(certified) = table.by_name.get(&name) {
+                return Some(Arc::clone(certified));
+            }
+            if let Some((_, parent)) = name.split_once('.')
+                && let Some(certified) = table.by_name.get(&format!("*.{parent}"))
+            {
+                return Some(Arc::clone(certified));
+            }
+        }
+        table.default.clone()
+    }
+}
+
+#[cfg(feature = "tls")]
+impl std::fmt::Debug for TlsCertificates {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TlsCertificates")
+            .field("has_default", &self.has_default())
+            .field("server_names", &self.server_names())
+            .finish()
+    }
+}
+
+#[cfg(feature = "tls")]
+fn normalize_server_name(server_name: &str) -> Result<String, TlsError> {
+    let name = server_name.trim_end_matches('.').to_ascii_lowercase();
+    let host = name.strip_prefix("*.").unwrap_or(&name);
+    if host.is_empty() || host.contains('*') {
+        return Err(TlsError::Configuration(
+            "a TLS server name must be a DNS name or *. followed by one".into(),
+        ));
+    }
+    Ok(name)
+}
+
+/// Loads and checks one certificate for [`TlsCertificates`].
+#[cfg(feature = "tls")]
+fn certified_key(
+    chain: CertificateChain,
+    key: PrivateKey,
+) -> Result<Arc<rustls::sign::CertifiedKey>, TlsError> {
+    TlsAcceptorBuilder::validate_certificate_chain(&chain)?;
+    let provider = super::resolve_crypto_provider(None)?;
+    let signing_key = provider
+        .key_provider
+        .load_private_key(key.clone_inner())
+        .map_err(|e| TlsError::Configuration(format!("unusable private key: {e}")))?;
+    let certified = rustls::sign::CertifiedKey::new(chain.into_inner(), signing_key);
+    certified
+        .keys_match()
+        .map_err(|e| TlsError::Configuration(format!("key does not match certificate: {e}")))?;
+    Ok(Arc::new(certified))
+}
+
+/// The resolver of an acceptor built from [`TlsCertificates`].
+#[cfg(feature = "tls")]
+#[derive(Debug)]
+struct TableResolver(TlsCertificates);
+
+#[cfg(feature = "tls")]
+impl rustls::server::ResolvesServerCert for TableResolver {
+    fn resolve(
+        &self,
+        client_hello: rustls::server::ClientHello<'_>,
+    ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        self.0.resolve_name(client_hello.server_name())
+    }
+}
+
 /// Server-side TLS acceptor.
 ///
 /// This is typically configured once and reused to accept many connections.
@@ -529,6 +719,10 @@ pub struct TlsAcceptorBuilder {
     /// `None` resolves as the `tls` module documentation describes.
     #[cfg(feature = "tls")]
     crypto_provider: Option<Arc<rustls::crypto::CryptoProvider>>,
+    /// Set by [`Self::from_certificates`]: certificates are looked up here at
+    /// each handshake instead of `cert_chain` / `key`.
+    #[cfg(feature = "tls")]
+    certificates: Option<TlsCertificates>,
 }
 
 impl TlsAcceptorBuilder {
@@ -666,7 +860,28 @@ impl TlsAcceptorBuilder {
             early_data_replay_protection: EarlyDataReplayProtection::None,
             #[cfg(feature = "tls")]
             crypto_provider: None,
+            #[cfg(feature = "tls")]
+            certificates: None,
         }
+    }
+
+    /// A builder whose acceptor takes its certificates from `certificates`
+    /// at every handshake, by SNI name, so they can be renewed or added while
+    /// it serves; see [`TlsCertificates`].
+    ///
+    /// The other settings apply as with [`Self::new`]. Certificates are
+    /// checked when they are stored, so [`Self::require_full_chain`] and
+    /// [`Self::disable_strict_cert_validation`] do not apply; `build` refuses
+    /// `require_full_chain`.
+    #[cfg(feature = "tls")]
+    #[must_use]
+    pub fn from_certificates(certificates: TlsCertificates) -> Self {
+        let mut builder = Self::new(
+            CertificateChain::new(),
+            PrivateKey::from_pkcs8_der(Vec::new()),
+        );
+        builder.certificates = Some(certificates);
+        builder
     }
 
     /// br-asupersync-vu10zb — require that incoming ClientHello
@@ -1061,7 +1276,7 @@ impl TlsAcceptorBuilder {
         // expiration and integrity before passing to rustls. This
         // prevents deployment of expired certificates that would fail
         // in production but might not be caught during configuration.
-        if self.strict_cert_validation {
+        if self.strict_cert_validation && self.certificates.is_none() {
             Self::validate_certificate_chain(&self.cert_chain)?;
         }
 
@@ -1155,7 +1370,14 @@ impl TlsAcceptorBuilder {
         // typed error reliably enough for downstream callers, so we
         // surface the misconfiguration here before any handshake
         // attempt.
-        if self.cert_chain.is_empty() {
+        if self.certificates.is_some() && self.require_full_chain {
+            return Err(TlsError::Configuration(
+                "require_full_chain applies to the certificate given to new(); \
+                 check chains before storing them in TlsCertificates"
+                    .into(),
+            ));
+        }
+        if self.cert_chain.is_empty() && self.certificates.is_none() {
             return Err(TlsError::Configuration(
                 "with_single_cert called with empty certificate chain".into(),
             ));
@@ -1275,9 +1497,12 @@ impl TlsAcceptorBuilder {
             }
         };
 
-        let mut config = builder
-            .with_single_cert(self.cert_chain.into_inner(), self.key.clone_inner())
-            .map_err(|e| TlsError::Configuration(e.to_string()))?;
+        let mut config = match self.certificates {
+            Some(certificates) => builder.with_cert_resolver(Arc::new(TableResolver(certificates))),
+            None => builder
+                .with_single_cert(self.cert_chain.into_inner(), self.key.clone_inner())
+                .map_err(|e| TlsError::Configuration(e.to_string()))?,
+        };
 
         // Refuse a hello without SNI before the certificate is sent, not
         // after the handshake completed (br-asupersync-2dxusr item 5).

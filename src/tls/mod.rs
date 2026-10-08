@@ -75,6 +75,8 @@ fn timeout_now() -> Time {
 }
 
 pub use acceptor::EarlyDataReplayProtection;
+#[cfg(feature = "tls")]
+pub use acceptor::TlsCertificates;
 pub use acceptor::{ClientAuth, TlsAcceptor, TlsAcceptorBuilder};
 pub use connector::{TlsConnector, TlsConnectorBuilder};
 pub use error::TlsError;
