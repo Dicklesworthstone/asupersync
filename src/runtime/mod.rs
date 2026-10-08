@@ -195,6 +195,7 @@ pub mod state;
 pub mod state_verifier;
 pub mod stored_task;
 pub mod task_handle;
+pub mod task_local;
 pub mod task_table;
 pub mod timer;
 pub mod waker;
