@@ -74,6 +74,7 @@ expression: inventory
 1	Io	grpc/server/duplex/tests.rs	TcpStream::
 2	Io	grpc/server/duplex/tests.rs	std::net::TcpStream
 1	Io	grpc/server/server_streaming/tests.rs	TcpStream::
+1	Io	http/auto.rs	TcpListener::
 1	Io	http/h1/http_client.rs	TcpStream::
 4	Io	http/h1/listener.rs	TcpListener::
 1	Io	http/h2/client.rs	TcpStream::
@@ -153,7 +154,7 @@ expression: inventory
 10	Output	channel/verification_suite.rs	println!(
 2	Output	decoding.rs	eprintln!(
 1	Output	grpc/native_stream/duplex/tests.rs	eprintln!(
-1	Output	grpc/server/duplex/tests.rs	eprintln!(
+2	Output	grpc/server/duplex/tests.rs	eprintln!(
 1	Output	messaging/kafka.rs	eprintln!(
 1	Output	net/atp/bonding/receiver.rs	eprintln!(
 2	Output	net/atp/transport_quic/mod.rs	eprintln!(
@@ -385,10 +386,10 @@ expression: inventory
 1	Io	atp/mailbox/storage.rs	std::fs::read(	std::fs::read(&chunk_path).map_err(|e| MailboxError::NetworkError {
 1	Io	atp/mailbox/storage.rs	std::fs::write(	if let Err(error) = std::fs::write(&full_path, &prepared.bytes) {
 1	Io	atp/writer.rs	File::open(	let mut file = match File::open(path).await {
-1	Io	database/mysql.rs	TcpStream::	let stream = match TcpStream::connect(addr).await {
+1	Io	database/mysql.rs	TcpStream::	match TcpStream::connect(addr).await {
 1	Io	database/postgres.rs	TcpStream::	TcpStream::connect(addr).await
 1	Io	database/postgres.rs	TcpStream::	TcpStream::connect_timeout(addr, timeout).await
-1	Io	database/postgres.rs	TcpStream::	let mut stream = crate::net::TcpStream::connect_timeout(addr, target.connect_timeout)
+1	Io	database/postgres.rs	TcpStream::	let stream = crate::net::TcpStream::connect_timeout(addr, target.connect_timeout)
 1	Io	database/postgres.rs	TcpStream::	let stream = match crate::net::TcpStream::from_std(std_stream) {
 1	Io	database/postgres.rs	std::net::TcpListener	let listener = match std::net::TcpListener::bind() {
 1	Io	database/postgres.rs	std::net::TcpStream	fn fuzz_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
@@ -396,11 +397,11 @@ expression: inventory
 1	Io	distributed/membership/durable/runtime/tests.rs	std::fs::OpenOptions	use std::fs::OpenOptions;
 1	Io	distributed/membership/durable/tests.rs	std::fs::OpenOptions	use std::fs::OpenOptions;
 1	Io	distributed/symbol_service/durable/tests.rs	std::fs::OpenOptions	use std::fs::OpenOptions;
-1	Io	grpc/client.rs	TcpStream::	TcpStream::connect_timeout((host.clone(), *port), timeout).await
-1	Io	grpc/client.rs	TcpStream::	TcpStream::connect_timeout(*address, timeout).await
+1	Io	grpc/client.rs	TcpStream::	NativeH2Destination::Address(address) => TcpStream::connect_timeout(*address, timeout)
+1	Io	grpc/client.rs	TcpStream::	TcpStream::connect_timeout((host.clone(), *port), timeout)
 1	Io	grpc/health_rpc/tests/native.rs	TcpStream::	let socket = TcpStream::connect_timeout(&address, Duration::from_secs(3)).unwrap();
-1	Io	grpc/native_stream/connect.rs	TcpStream::	TcpStream::connect_timeout((host.clone(), *port), remaining).await
-1	Io	grpc/native_stream/connect.rs	TcpStream::	TcpStream::connect_timeout(*address, remaining).await
+1	Io	grpc/native_stream/connect.rs	TcpStream::	TcpStream::connect_timeout((host.clone(), *port), remaining)
+1	Io	grpc/native_stream/connect.rs	TcpStream::	TcpStream::connect_timeout(*address, remaining)
 1	Io	grpc/native_stream/connect/tests.rs	std::net::TcpListener	let listener = std::net::TcpListener::bind().unwrap();
 2	Io	grpc/native_stream/duplex/tests.rs	TcpListener::	let listener = TcpListener::bind().unwrap();
 1	Io	grpc/native_stream/duplex/tests.rs	TcpStream::	let io = TcpStream::connect_timeout(address, LIMIT).await.unwrap();
@@ -421,6 +422,7 @@ expression: inventory
 1	Io	grpc/server/duplex/tests.rs	std::net::TcpStream	let socket = std::net::TcpStream::connect_timeout(&address, LIMIT).unwrap();
 1	Io	grpc/server/duplex/tests.rs	std::net::TcpStream	socket: std::net::TcpStream,
 1	Io	grpc/server/server_streaming/tests.rs	TcpStream::	let socket = TcpStream::connect_timeout(&addr, Duration::from_secs(3))
+1	Io	http/auto.rs	TcpListener::	let listener = TcpListener::bind(addr).await?;
 1	Io	http/h1/http_client.rs	TcpStream::	TcpStream::connect_socket_addr(socket_addr)
 4	Io	http/h1/listener.rs	TcpListener::	let tcp_listener = TcpListener::bind(addr).await?;
 1	Io	http/h2/client.rs	TcpStream::	TcpStream::connect(SocketAddr::new(ip, request.url.port)).await?
@@ -530,6 +532,7 @@ expression: inventory
 2	Output	decoding.rs	eprintln!(	eprintln!(
 1	Output	grpc/native_stream/duplex/tests.rs	eprintln!(	eprintln!(
 1	Output	grpc/server/duplex/tests.rs	eprintln!(	eprintln!(
+1	Output	grpc/server/duplex/tests.rs	eprintln!(	eprintln!();
 1	Output	messaging/kafka.rs	eprintln!(	eprintln!(
 1	Output	net/atp/bonding/receiver.rs	eprintln!(	eprintln!();
 2	Output	net/atp/transport_quic/mod.rs	eprintln!(	eprintln!();

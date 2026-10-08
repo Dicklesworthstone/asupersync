@@ -1581,7 +1581,15 @@ fn test_function() {
     // most limits.max_input_bytes. It is the same authority as trace/file.rs's
     // and trace/compat.rs's File::open of a caller's path. No scanner
     // exemption or detection pattern changed.
-    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 823;
+    // 823 -> 825 (re-blessed 2026-10-08 after the API lane's 8ca9aead8 and
+    // the HttpAutoListener commit landed without the inventory):
+    // http/auto.rs binds its listener with TcpListener::bind, the same
+    // authority as the blessed h1/h2 listener binds. grpc/server/duplex/tests.rs
+    // (a plain tests.rs, scanned as production) gained a second eprintln!.
+    // The connect sites in mysql.rs, postgres.rs, grpc/client.rs and
+    // grpc/native_stream/connect.rs only changed their quoted line text.
+    // No scanner exemption or detection pattern changed.
+    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 825;
 
     fn src_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
