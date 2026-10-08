@@ -1123,3 +1123,207 @@ fn native_duplex_listener_preserves_unary_server_streaming_and_auth_refusal() {
         )
     });
 }
+
+/// The legacy `GrpcClient` streaming methods over a real connection: each
+/// handle shape against the registered duplex listener (br-asupersync-6pc7xg).
+fn legacy_client_case(workers: usize, case: LegacyCase) {
+    use crate::grpc::{Channel, GrpcClient, Streaming};
+    let runtime = if workers == 1 {
+        RuntimeBuilder::current_thread()
+    } else {
+        RuntimeBuilder::new().worker_threads(workers)
+    }
+    .build()
+    .unwrap();
+    let handle = runtime.handle().clone();
+    let task_handle = runtime.handle().clone();
+    let (server, probe, _starts, retirements) = service();
+    let inspected = Arc::clone(&probe);
+    runtime.block_on(runtime.handle().spawn(async move {
+        let listener = server
+            .bind_registered_duplex_http2(
+                "127.0.0.1:0",
+                HostPolicy::allow_all(),
+                ServerDuplexConfig::default(),
+            )
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stop = Stop(listener.shutdown_signal());
+        let client = async move {
+            let _stop = stop;
+            let channel = Channel::builder(format!("http://127.0.0.1:{}", addr.port()))
+                .connect_timeout(LIMIT)
+                .timeout(LIMIT)
+                .max_send_message_size(PAYLOAD)
+                .max_recv_message_size(PAYLOAD)
+                .connect()
+                .await
+                .unwrap();
+            let mut client = GrpcClient::new(channel);
+            let next = |stream: &mut crate::grpc::ResponseStream<Bytes>| {
+                let mut stream = stream.clone();
+                async move { poll_fn(|task| Pin::new(&mut stream).poll_next(task)).await }
+            };
+            match case {
+                LegacyCase::ClientStreaming => {
+                    let (mut sink, response) = client
+                        .client_streaming::<Bytes, Bytes>("/native.Duplex/Aggregate")
+                        .await
+                        .expect("legacy client streaming dials the server");
+                    // A message over the send limit is refused before it is
+                    // queued; the request slot stays usable.
+                    let oversize = sink
+                        .send(Bytes::from(vec![9; PAYLOAD + 1]))
+                        .await
+                        .expect_err("over the channel's send limit");
+                    assert_ne!(oversize.code(), Code::Ok);
+                    assert_eq!(sink.sent_count(), 0);
+                    // Each message is twice the 64 KiB default stream window:
+                    // every send after the first waits for peer credit.
+                    for marker in 0..3_u8 {
+                        sink.send(Bytes::from(vec![marker; PAYLOAD])).await.unwrap();
+                    }
+                    sink.close().await.unwrap();
+                    assert_eq!(sink.sent_count(), 3);
+                    let response = response.await.expect("aggregate response");
+                    assert_eq!(
+                        response.get_ref().as_ref(),
+                        (3_u64 * PAYLOAD as u64).to_be_bytes()
+                    );
+                    assert!(matches!(
+                        response.metadata().get("x-terminal"),
+                        Some(crate::grpc::MetadataValue::Ascii(value)) if value == "aggregate"
+                    ));
+                    assert_eq!(inspected.messages.load(Ordering::SeqCst), 3);
+                }
+                LegacyCase::Bidi => {
+                    let (mut sink, mut stream) = client
+                        .bidi_streaming::<Bytes, Bytes>("/native.Duplex/Echo")
+                        .await
+                        .expect("legacy bidi dials the server");
+                    // Lockstep: each echo arrives before the request side closes.
+                    for marker in 0..3_u8 {
+                        sink.send(Bytes::from(vec![marker; PAYLOAD])).await.unwrap();
+                        let echo = next(&mut stream).await.expect("echo").unwrap();
+                        assert_eq!(echo.len(), PAYLOAD);
+                        assert!(echo.iter().all(|byte| *byte == marker));
+                    }
+                    sink.close().await.unwrap();
+                    assert!(next(&mut stream).await.is_none());
+                    assert!(matches!(
+                        stream.terminal_metadata().get("x-terminal"),
+                        Some(crate::grpc::MetadataValue::Ascii(value)) if value == "echo"
+                    ));
+                }
+                LegacyCase::BidiReaderTask => {
+                    let (mut sink, mut stream) = client
+                        .bidi_streaming::<Bytes, Bytes>("/native.Duplex/Echo")
+                        .await
+                        .expect("legacy bidi dials the server");
+                    // The responses are read by another task while this one
+                    // uploads: both park on the same connection.
+                    let reader = task_handle.spawn(async move {
+                        let mut seen = Vec::new();
+                        while let Some(echo) =
+                            poll_fn(|task| Pin::new(&mut stream).poll_next(task)).await
+                        {
+                            let echo = echo.unwrap();
+                            assert_eq!(echo.len(), PAYLOAD);
+                            seen.push(echo[0]);
+                        }
+                        seen
+                    });
+                    for marker in 0..4_u8 {
+                        sink.send(Bytes::from(vec![marker; PAYLOAD])).await.unwrap();
+                    }
+                    sink.close().await.unwrap();
+                    assert_eq!(reader.await, vec![0, 1, 2, 3]);
+                }
+                LegacyCase::ServerStreaming => {
+                    let response = client
+                        .server_streaming::<Bytes, Bytes>(
+                            "/native.Duplex/Watch",
+                            Request::new(Bytes::from_static(b"watch me")),
+                        )
+                        .await
+                        .expect("legacy server streaming dials the server");
+                    let mut stream = response.into_inner();
+                    let first = next(&mut stream).await.expect("one response").unwrap();
+                    assert_eq!(first.as_ref(), b"watch me");
+                    assert!(next(&mut stream).await.is_none());
+                    assert!(next(&mut stream).await.is_none());
+                }
+                LegacyCase::DroppedResponseCancels => {
+                    let (mut sink, response) = client
+                        .client_streaming::<Bytes, Bytes>("/native.Duplex/Aggregate")
+                        .await
+                        .unwrap();
+                    sink.send(Bytes::from(vec![7; PAYLOAD])).await.unwrap();
+                    // While the call lives, its codec is shared: a consuming
+                    // native call on the same client refuses before dialing.
+                    let cx = Cx::current().unwrap();
+                    let refusal = client
+                        .into_native_duplex(&cx, "/native.Duplex/Aggregate", Request::new(()))
+                        .await
+                        .expect_err("codec still shared with the live call");
+                    assert_eq!(refusal.code(), Code::FailedPrecondition);
+                    drop(response);
+                    let status = sink
+                        .send(Bytes::from(vec![8; PAYLOAD]))
+                        .await
+                        .expect_err("a dropped response future cancels the call");
+                    assert_eq!(status.code(), Code::Cancelled);
+                    let closed = sink.close().await.expect_err("close reports the cancel");
+                    assert_eq!(closed.code(), Code::Cancelled);
+                }
+            }
+        };
+        let (served, ()) =
+            futures_lite::future::zip(listener.run_streaming_produced(&handle), client).await;
+        served.unwrap();
+    }));
+    // Every probed handler, finished or abandoned by the client, retired.
+    if case.expected_handler_calls() > 0 {
+        retirements.recv_timeout(LIMIT).unwrap();
+    }
+    assert_eq!(probe.calls.load(Ordering::SeqCst), case.expected_handler_calls());
+    assert_eq!(probe.drops.load(Ordering::SeqCst), case.expected_handler_calls());
+    shutdown_native(runtime);
+    eprintln!("grpc_legacy_client_native workers={workers} case={case:?} ok");
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LegacyCase {
+    ClientStreaming,
+    Bidi,
+    BidiReaderTask,
+    ServerStreaming,
+    DroppedResponseCancels,
+}
+
+impl LegacyCase {
+    fn expected_handler_calls(self) -> usize {
+        // The probe counts client-streaming and bidi handler entries; the
+        // server-streaming handler does not record one.
+        match self {
+            Self::ServerStreaming => 0,
+            _ => 1,
+        }
+    }
+}
+
+#[test]
+fn legacy_grpc_client_streaming_methods_cross_native_http2_on_one_and_two_workers() {
+    for workers in [1, 2] {
+        for case in [
+            LegacyCase::ClientStreaming,
+            LegacyCase::Bidi,
+            LegacyCase::BidiReaderTask,
+            LegacyCase::ServerStreaming,
+            LegacyCase::DroppedResponseCancels,
+        ] {
+            bounded_case(move || legacy_client_case(workers, case));
+        }
+    }
+}

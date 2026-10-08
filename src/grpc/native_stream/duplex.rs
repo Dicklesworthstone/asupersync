@@ -262,7 +262,7 @@ where
         self.inner.cancel();
     }
 
-    fn poll_event(
+    pub(crate) fn poll_event(
         &mut self,
         task: &mut Context<'_>,
     ) -> Poll<Option<Result<NativeDuplexEvent<C::Decode>, Status>>> {

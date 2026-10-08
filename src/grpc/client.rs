@@ -26,7 +26,7 @@ use crate::codec::Decoder as _;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::http::h2::connection::{CLIENT_PREFACE, ReceivedFrame};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::http::h2::{Connection, FrameCodec, Header, SettingsBuilder};
+use crate::http::h2::{Connection, ConnectionState, ErrorCode, FrameCodec, Header, SettingsBuilder};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf};
 #[cfg(not(target_arch = "wasm32"))]
@@ -45,6 +45,84 @@ use super::status::{Code, GrpcError, Status, TransportErrorKind};
 use super::streaming::{
     MAX_STREAM_BUFFERED, Metadata, MetadataValue, Request, Response, Streaming,
 };
+
+#[cfg(not(target_arch = "wasm32"))]
+mod legacy_native;
+#[cfg(not(target_arch = "wasm32"))]
+use legacy_native::{
+    LegacyNativeCall, LegacyResponseHandle, LegacyShape, downcast_native_response,
+};
+
+/// The client's codec, shared with the native calls started by the legacy
+/// `&mut self` streaming methods. Each call owns a clone for its lifetime; the
+/// lock is held only while one message is encoded or decoded.
+struct SharedCodec<C> {
+    inner: Arc<Mutex<C>>,
+}
+
+impl<C> SharedCodec<C> {
+    fn new(codec: C) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(codec)),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn share(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+
+    /// Recover the codec for a consuming native call. Fails while a legacy
+    /// streaming call started by this client is still alive.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn into_owned(self) -> Result<C, Status> {
+        Arc::try_unwrap(self.inner)
+            .map(|codec| codec.into_inner().unwrap_or_else(PoisonError::into_inner))
+            .map_err(|_| {
+                Status::failed_precondition(
+                    "the client's codec is still used by a streaming call it started; drop that call first",
+                )
+            })
+    }
+}
+
+impl<C: fmt::Debug> fmt::Debug for SharedCodec<C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&*lock_unpoisoned(&self.inner), f)
+    }
+}
+
+impl<C: Codec> Codec for SharedCodec<C> {
+    type Encode = C::Encode;
+    type Decode = C::Decode;
+    type Error = C::Error;
+
+    fn encode(&mut self, item: &Self::Encode) -> Result<Bytes, Self::Error> {
+        lock_unpoisoned(&self.inner).encode(item)
+    }
+
+    fn decode(&mut self, buf: &Bytes) -> Result<Self::Decode, Self::Error> {
+        lock_unpoisoned(&self.inner).decode(buf)
+    }
+
+    fn set_max_encode_message_size(&mut self, max_size: usize) {
+        lock_unpoisoned(&self.inner).set_max_encode_message_size(max_size);
+    }
+
+    fn set_max_decode_message_size(&mut self, max_size: usize) {
+        lock_unpoisoned(&self.inner).set_max_decode_message_size(max_size);
+    }
+
+    fn map_encode_error(error: Self::Error) -> GrpcError {
+        C::map_encode_error(error)
+    }
+
+    fn map_decode_error(error: Self::Error) -> GrpcError {
+        C::map_decode_error(error)
+    }
+}
 
 /// Supported gRPC message compression encodings for channel negotiation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,6 +281,9 @@ pub struct ChannelBuilder {
     /// Explicit native TCP destination, separate from the logical authority.
     #[cfg(not(target_arch = "wasm32"))]
     dial_addr: Option<SocketAddr>,
+    /// Idle unary connections to keep for reuse; 0 keeps none.
+    #[cfg(not(target_arch = "wasm32"))]
+    reuse_connections: usize,
 }
 
 impl ChannelBuilder {
@@ -222,6 +303,8 @@ impl ChannelBuilder {
             tls_server_name: None,
             #[cfg(not(target_arch = "wasm32"))]
             dial_addr: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            reuse_connections: 0,
         }
     }
 
@@ -358,9 +441,32 @@ impl ChannelBuilder {
         self
     }
 
+    /// Keep up to `max_idle` HTTP/2 connections open after unary calls, so
+    /// later unary calls on this channel, or any clone of it, reuse them
+    /// instead of dialing (and TLS-handshaking) again. `0`, the default,
+    /// keeps the original behavior: each unary call owns a fresh connection.
+    ///
+    /// A pooled connection carries one call at a time; concurrent calls use
+    /// separate connections, and at most `max_idle` are kept between calls.
+    /// Before reuse, whatever the server sent while the connection was idle
+    /// is processed: a connection the server closed or sent GOAWAY on, or one
+    /// idle for over 30 seconds, is dropped instead. If a reused connection
+    /// turns out to be gone before the server could act on the call (the
+    /// request could not be written, the stream was refused, or GOAWAY
+    /// excludes it), the call is retried once on a fresh connection. A close
+    /// after the request was sent is reported as `UNAVAILABLE`, as it is
+    /// without reuse. Streaming calls are unaffected.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn reuse_connections(mut self, max_idle: usize) -> Self {
+        self.reuse_connections = max_idle;
+        self
+    }
+
     /// Build the channel.
     pub async fn connect(self) -> Result<Channel, GrpcError> {
-        Channel::connect_with_transport(
+        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
+        let mut channel = Channel::connect_with_transport(
             &self.uri,
             self.config,
             self.tls_connector,
@@ -368,7 +474,12 @@ impl ChannelBuilder {
             #[cfg(not(target_arch = "wasm32"))]
             self.dial_addr,
         )
-        .await
+        .await?;
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.reuse_connections > 0 {
+            channel.unary_pool = Some(Arc::new(UnaryConnectionPool::new(self.reuse_connections)));
+        }
+        Ok(channel)
     }
 }
 
@@ -398,6 +509,10 @@ pub struct Channel {
     /// Explicit native TCP destination distinct from the logical authority.
     #[cfg(not(target_arch = "wasm32"))]
     dial_addr: Option<SocketAddr>,
+    /// Idle unary connections kept for reuse, shared by clones
+    /// ([`ChannelBuilder::reuse_connections`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    unary_pool: Option<Arc<UnaryConnectionPool>>,
 }
 
 impl Channel {
@@ -473,6 +588,8 @@ impl Channel {
             tls_server_name,
             #[cfg(not(target_arch = "wasm32"))]
             dial_addr,
+            #[cfg(not(target_arch = "wasm32"))]
+            unary_pool: None,
         })
     }
 
@@ -508,8 +625,8 @@ impl Channel {
 pub struct GrpcClient<C = IdentityCodec> {
     /// The underlying channel.
     channel: Channel,
-    /// The codec for message serialization.
-    codec: FramedCodec<C>,
+    /// The codec for message serialization, shared with streaming calls.
+    codec: FramedCodec<SharedCodec<C>>,
     /// Client interceptor chain.
     client_interceptors: Vec<Arc<dyn ClientInterceptor>>,
 }
@@ -531,7 +648,7 @@ impl GrpcClient<IdentityCodec> {
     /// Create a new client with an identity codec.
     #[must_use]
     pub fn new(channel: Channel) -> Self {
-        let framed_codec = client_framed_codec(&channel, IdentityCodec);
+        let framed_codec = client_framed_codec(&channel, SharedCodec::new(IdentityCodec));
         Self {
             channel,
             codec: framed_codec,
@@ -544,7 +661,7 @@ impl<C: Codec> GrpcClient<C> {
     /// Create a new client with a custom codec.
     #[must_use]
     pub fn with_codec(channel: Channel, codec: C) -> Self {
-        let framed_codec = client_framed_codec(&channel, codec);
+        let framed_codec = client_framed_codec(&channel, SharedCodec::new(codec));
         Self {
             channel,
             codec: framed_codec,
@@ -783,7 +900,7 @@ impl<C: Codec> GrpcClient<C> {
             cx,
             path,
             request,
-            self.codec.into_inner(),
+            self.codec.into_inner().into_owned()?,
             setup.config,
             setup.windows,
             Some(setup.deadline),
@@ -864,7 +981,7 @@ impl<C: Codec> GrpcClient<C> {
             cx,
             path,
             request,
-            self.codec.into_inner(),
+            self.codec.into_inner().into_owned()?,
             setup.config,
             setup.windows,
             Some(setup.deadline),
@@ -1045,14 +1162,26 @@ impl<C: Codec> GrpcClient<C> {
         }
     }
 
-    /// Start a server streaming RPC call on a deterministic `loopback` channel.
+    /// Start a server streaming RPC call.
     ///
-    /// This legacy entry point never contacts a server. On a channel whose
-    /// host is `loopback` it returns a stream holding the request itself as
-    /// the single response, which needs `Req` and `Resp` to be the same type
-    /// (`FAILED_PRECONDITION` otherwise). Every network channel gets
-    /// `UNIMPLEMENTED`. For a real server-streaming call over HTTP/2 use
-    /// `GrpcClient::into_native_server_streaming`.
+    /// On a network channel this dials the server over native HTTP/2, sends
+    /// the request (`Req` must be the codec's `Encode` type), and waits for
+    /// the response headers, which become the returned metadata. The stream
+    /// yields each decoded response (`Resp` must be the codec's `Decode`
+    /// type), then the terminal error if the call failed; after the end,
+    /// [`ResponseStream::terminal_metadata`] holds the trailers. The call must
+    /// run inside a runtime task: its `Cx`, current at this call, supplies I/O
+    /// authority, cancellation and the deadline (which, with the channel's
+    /// connect timeout, covers setup and every later read). The stream has no
+    /// background task; polling it drives the connection, and dropping it
+    /// cancels the call. Channel configuration (TLS, limits, compression,
+    /// windows, keepalive) and interceptors apply as in
+    /// [`Self::into_native_server_streaming`], which offers the same call as
+    /// one owner without type erasure.
+    ///
+    /// On a channel whose host is `loopback` no server is contacted: the
+    /// stream holds the request itself as the single response, which needs
+    /// `Req` and `Resp` to be the same type (`FAILED_PRECONDITION` otherwise).
     #[allow(clippy::unused_async)]
     pub async fn server_streaming<Req, Resp>(
         &mut self,
@@ -1067,9 +1196,18 @@ impl<C: Codec> GrpcClient<C> {
         enforce_deadline_budget(self.channel.config.timeout)?;
 
         if !channel_target_is_loopback(self.channel.uri()) {
-            return Err(Status::unimplemented(
-                "native HTTP/2 server-streaming client transport is not wired yet",
-            ));
+            #[cfg(target_arch = "wasm32")]
+            {
+                let _ = request;
+                return Err(Status::unimplemented(
+                    "native HTTP/2 gRPC client transport is unavailable on wasm32",
+                ));
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let (call, metadata) = self.start_legacy_server_stream(path, request).await?;
+                return Ok(Response::with_metadata(ResponseStream::native(call), metadata));
+            }
         }
 
         let metadata = self.build_outbound_metadata(&request, path)?;
@@ -1081,14 +1219,27 @@ impl<C: Codec> GrpcClient<C> {
         Ok(Response::with_metadata(stream, metadata))
     }
 
-    /// Start a client streaming RPC call on a deterministic `loopback` channel.
+    /// Start a client streaming RPC call.
     ///
-    /// This legacy entry point never contacts a server. On a channel whose
-    /// host is `loopback` the response is the one message sent through the
-    /// sink, which needs `Req` and `Resp` to be the same type; more than one
-    /// message is `FAILED_PRECONDITION`. Every network channel gets
-    /// `UNIMPLEMENTED`. For a real upload over HTTP/2 use
-    /// `GrpcClient::into_native_duplex`.
+    /// On a network channel this dials the server over native HTTP/2 and
+    /// flushes the request headers; it does not wait for response headers.
+    /// Each [`RequestSink::send`] waits until the previous message has left
+    /// the local write queues, then queues the next one (`Req` must be the
+    /// codec's `Encode` type). [`RequestSink::close`] half-closes the request
+    /// stream. The [`ResponseFuture`] resolves to the single response (`Resp`
+    /// must be the codec's `Decode` type) with the response headers and
+    /// trailers as metadata, or to the call's error. The handles have no
+    /// background task: whichever is polled drives the connection in both
+    /// directions. Dropping the sink before `close`, or the future before it
+    /// resolves, cancels the call. The `Cx` current at this call supplies I/O
+    /// authority, cancellation and the deadline. Channel configuration and
+    /// interceptors apply as in [`Self::into_native_duplex`], which offers the
+    /// same call as one owner without type erasure.
+    ///
+    /// On a channel whose host is `loopback` no server is contacted: the
+    /// response is the one message sent through the sink, which needs `Req`
+    /// and `Resp` to be the same type; more than one message is
+    /// `FAILED_PRECONDITION`.
     #[allow(clippy::unused_async)]
     pub async fn client_streaming<Req, Resp>(
         &mut self,
@@ -1102,9 +1253,22 @@ impl<C: Codec> GrpcClient<C> {
         enforce_deadline_budget(self.channel.config.timeout)?;
 
         if !channel_target_is_loopback(self.channel.uri()) {
-            return Err(Status::unimplemented(
-                "native HTTP/2 client-streaming client transport is not wired yet",
-            ));
+            #[cfg(target_arch = "wasm32")]
+            {
+                return Err(Status::unimplemented(
+                    "native HTTP/2 gRPC client transport is unavailable on wasm32",
+                ));
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let call = self
+                    .start_legacy_duplex(path, LegacyShape::ClientStreaming)
+                    .await?;
+                return Ok((
+                    RequestSink::native(Arc::clone(&call)),
+                    ResponseFuture::native(call),
+                ));
+            }
         }
 
         let request = Request::new(Bytes::new());
@@ -1129,14 +1293,27 @@ impl<C: Codec> GrpcClient<C> {
         Ok((sink, future))
     }
 
-    /// Start a bidirectional streaming RPC call on a deterministic `loopback`
-    /// channel.
+    /// Start a bidirectional streaming RPC call.
     ///
-    /// This legacy entry point never contacts a server. On a channel whose
-    /// host is `loopback` every message sent through the sink comes back on
-    /// the response stream, which needs `Req` and `Resp` to be the same type.
-    /// Every network channel gets `UNIMPLEMENTED`. For a real bidirectional
-    /// call over HTTP/2 use `GrpcClient::into_native_duplex`.
+    /// On a network channel this dials the server over native HTTP/2 and
+    /// flushes the request headers. Messages sent through the sink (`Req`
+    /// must be the codec's `Encode` type) and responses read from the stream
+    /// (`Resp` must be the codec's `Decode` type) flow independently: the
+    /// server may answer before the request side is closed. A sink waits for
+    /// each message to leave the local write queues before queuing the next,
+    /// and for the response side to drain once `MAX_STREAM_BUFFERED` unread
+    /// responses are held. The stream ends with the terminal error, if any;
+    /// its trailers are then in [`ResponseStream::terminal_metadata`]. The
+    /// handles may live in different tasks and have no background task:
+    /// whichever is polled drives the connection. Dropping the sink before
+    /// `close`, or the last clone of the stream, cancels the call. The `Cx`
+    /// current at this call supplies I/O authority, cancellation and the
+    /// deadline. Channel configuration and interceptors apply as in
+    /// [`Self::into_native_duplex`].
+    ///
+    /// On a channel whose host is `loopback` no server is contacted: every
+    /// message sent through the sink comes back on the response stream,
+    /// which needs `Req` and `Resp` to be the same type.
     #[allow(clippy::unused_async)]
     pub async fn bidi_streaming<Req, Resp>(
         &mut self,
@@ -1150,9 +1327,20 @@ impl<C: Codec> GrpcClient<C> {
         enforce_deadline_budget(self.channel.config.timeout)?;
 
         if !channel_target_is_loopback(self.channel.uri()) {
-            return Err(Status::unimplemented(
-                "native HTTP/2 bidirectional-streaming client transport is not wired yet",
-            ));
+            #[cfg(target_arch = "wasm32")]
+            {
+                return Err(Status::unimplemented(
+                    "native HTTP/2 gRPC client transport is unavailable on wasm32",
+                ));
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let call = self.start_legacy_duplex(path, LegacyShape::Bidi).await?;
+                return Ok((
+                    RequestSink::native(Arc::clone(&call)),
+                    ResponseStream::native(call),
+                ));
+            }
         }
 
         let request = Request::new(Bytes::new());
@@ -1187,6 +1375,86 @@ impl<C: Codec> GrpcClient<C> {
         );
         Ok((sink, stream))
     }
+
+    /// Dial a native server-streaming call for [`Self::server_streaming`] and
+    /// wait for its response headers.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn start_legacy_server_stream<Req: Send + 'static>(
+        &mut self,
+        path: &str,
+        request: Request<Req>,
+    ) -> Result<(Arc<LegacyNativeCall>, Metadata), Status> {
+        let cx = legacy_native_cx()?;
+        let metadata = request.metadata().clone();
+        let message = legacy_native::downcast_native_request::<C::Encode>(Box::new(
+            request.into_inner(),
+        ))?;
+        let request = Request::with_metadata(message, metadata);
+        let setup = self.prepare_native_stream(&cx, path, &request)?;
+        let connector = self.channel.tls_connector().cloned();
+        let request = Request::with_metadata(request.into_inner(), setup.metadata);
+        let mut stream = setup
+            .endpoint
+            .connect_with_transport(
+                &cx,
+                path,
+                request,
+                self.codec.inner().share(),
+                setup.config,
+                setup.windows,
+                Some(setup.deadline),
+                |tcp| native_h2_transport(tcp, &setup.target, connector),
+            )
+            .await?;
+        if let Some(keepalive) = setup.keepalive {
+            stream = stream.with_keepalive(keepalive)?;
+        }
+        let initial = stream.headers().await?.clone();
+        Ok((
+            LegacyNativeCall::new(Box::new(stream), LegacyShape::ServerStreaming),
+            initial,
+        ))
+    }
+
+    /// Dial a native duplex call for [`Self::client_streaming`] or
+    /// [`Self::bidi_streaming`]. Only the request headers are flushed.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn start_legacy_duplex(
+        &mut self,
+        path: &str,
+        shape: LegacyShape,
+    ) -> Result<Arc<LegacyNativeCall>, Status> {
+        let cx = legacy_native_cx()?;
+        let setup = self.prepare_native_stream(&cx, path, &Request::new(()))?;
+        let connector = self.channel.tls_connector().cloned();
+        let mut stream = setup
+            .endpoint
+            .connect_duplex_with_transport(
+                &cx,
+                path,
+                Request::with_metadata((), setup.metadata),
+                self.codec.inner().share(),
+                setup.config,
+                setup.windows,
+                Some(setup.deadline),
+                |tcp| native_h2_transport(tcp, &setup.target, connector),
+            )
+            .await?;
+        if let Some(keepalive) = setup.keepalive {
+            stream = stream.with_keepalive(keepalive)?;
+        }
+        Ok(LegacyNativeCall::new(Box::new(stream), shape))
+    }
+}
+
+/// The `Cx` a legacy streaming call runs under: the caller's ambient one.
+#[cfg(not(target_arch = "wasm32"))]
+fn legacy_native_cx() -> Result<crate::cx::Cx, Status> {
+    crate::cx::Cx::current().ok_or_else(|| {
+        Status::failed_precondition(
+            "native HTTP/2 gRPC calls require an ambient runtime Cx capability",
+        )
+    })
 }
 
 fn channel_target_is_loopback(uri: &str) -> bool {
@@ -1369,7 +1637,8 @@ async fn native_h2_unary(
     )?;
     let config = channel.config().clone();
     let tls_connector = channel.tls_connector().cloned();
-    let io = native_h2_unary_io(target, config, tls_connector, path, &metadata, body);
+    let pool = channel.unary_pool.clone();
+    let io = native_h2_unary_io(target, config, tls_connector, pool, path, &metadata, body);
     let Some(timeout) = effective_native_call_timeout(&metadata) else {
         return io.await;
     };
@@ -1404,91 +1673,340 @@ fn effective_native_call_timeout(metadata: &Metadata) -> Option<Duration> {
     }
 }
 
+/// How long a pooled unary connection may sit idle before it is dropped
+/// instead of reused. Shorter than common proxy and load-balancer idle
+/// timeouts (60 s and up), so a reused connection is rarely one a middlebox
+/// has silently forgotten.
+#[cfg(not(target_arch = "wasm32"))]
+const UNARY_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Idle HTTP/2 connections a channel keeps for later unary calls
+/// ([`ChannelBuilder::reuse_connections`]). Shared by the channel's clones.
+#[cfg(not(target_arch = "wasm32"))]
+struct UnaryConnectionPool {
+    max_idle: usize,
+    idle: Mutex<Vec<NativeH2Conn>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl fmt::Debug for UnaryConnectionPool {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UnaryConnectionPool")
+            .field("max_idle", &self.max_idle)
+            .field("idle", &lock_unpoisoned(&self.idle).len())
+            .finish()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl UnaryConnectionPool {
+    fn new(max_idle: usize) -> Self {
+        Self {
+            max_idle,
+            idle: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The most recently used connection that has not idled too long.
+    fn take(&self, now: crate::types::Time) -> Option<NativeH2Conn> {
+        let mut expired = Vec::new();
+        let taken = {
+            let mut idle = lock_unpoisoned(&self.idle);
+            loop {
+                let Some(conn) = idle.pop() else { break None };
+                let idle_nanos = now.as_nanos().saturating_sub(conn.idle_since.as_nanos());
+                if u128::from(idle_nanos) <= UNARY_POOL_IDLE_TIMEOUT.as_nanos() {
+                    break Some(conn);
+                }
+                expired.push(conn);
+            }
+        };
+        // Close expired transports outside the lock.
+        drop(expired);
+        taken
+    }
+
+    fn put(&self, mut conn: NativeH2Conn, now: crate::types::Time) {
+        conn.idle_since = now;
+        let mut idle = lock_unpoisoned(&self.idle);
+        if idle.len() < self.max_idle {
+            idle.push(conn);
+        }
+    }
+}
+
+/// A unary attempt that failed. `unprocessed` means the server provably did
+/// not act on the request (it refused the stream, sent GOAWAY below it, or
+/// never received it), so the call may be retried on another connection.
+#[cfg(not(target_arch = "wasm32"))]
+struct UnaryFailure {
+    status: Status,
+    unprocessed: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl UnaryFailure {
+    fn processed(status: Status) -> Self {
+        Self {
+            status,
+            unprocessed: false,
+        }
+    }
+
+    fn unprocessed(status: Status) -> Self {
+        Self {
+            status,
+            unprocessed: true,
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_now() -> crate::types::Time {
+    crate::cx::Cx::with_current(|cx| {
+        cx.timer_driver()
+            .map_or_else(crate::time::wall_now, |timer| timer.now())
+    })
+    .unwrap_or_else(crate::time::wall_now)
+}
+
+/// One client HTTP/2 connection used for unary calls, one call at a time.
+#[cfg(not(target_arch = "wasm32"))]
+struct NativeH2Conn {
+    io: NativeH2Io,
+    connection: Connection,
+    codec: FrameCodec,
+    inbound: BytesMut,
+    idle_since: crate::types::Time,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeH2Conn {
+    /// Connect (and TLS-handshake) within the channel's connect timeout, then
+    /// write the client preface. SETTINGS go out with the first request.
+    async fn dial(
+        target: &NativeH2Target,
+        config: &ChannelConfig,
+        tls_connector: Option<TlsConnector>,
+    ) -> Result<Self, Status> {
+        let connect_timeout = config.connect_timeout;
+        let mut io = match crate::time::timeout(native_now(), connect_timeout, async {
+            let stream = target.connect(connect_timeout).await?;
+            native_h2_transport(stream, target, tls_connector).await
+        })
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(Status::unavailable(format!(
+                    "native gRPC connection establishment exceeded its {connect_timeout:?} timeout"
+                )));
+            }
+        };
+
+        let settings = SettingsBuilder::client()
+            .initial_window_size(config.initial_stream_window_size)
+            .build();
+        let mut connection = Connection::client(settings);
+        // RFC 9113 requires the connection preface's first frame to be SETTINGS.
+        // Queue it before expanding the connection receive window, because the
+        // latter emits WINDOW_UPDATE when the configured window exceeds 65,535.
+        connection.queue_initial_settings();
+        connection
+            .set_initial_connection_recv_window(config.initial_connection_window_size)
+            .map_err(|error| Status::internal(format!("invalid HTTP/2 receive window: {error}")))?;
+        io.write_all(CLIENT_PREFACE)
+            .await
+            .map_err(|error| transport_status("write HTTP/2 client preface", error))?;
+        Ok(Self {
+            io,
+            connection,
+            codec: FrameCodec::new(),
+            inbound: BytesMut::new(),
+            idle_since: native_now(),
+        })
+    }
+
+    /// Before reuse: take in whatever the server sent while the connection
+    /// sat idle, without waiting, and answer it (PING, SETTINGS). Fails when
+    /// the server closed the connection or announced GOAWAY.
+    async fn refresh(&mut self) -> Result<(), Status> {
+        let mut chunk = [0_u8; 4 * 1024];
+        loop {
+            while let Some(frame) = self
+                .codec
+                .decode(&mut self.inbound)
+                .map_err(|error| Status::internal(format!("decode HTTP/2 frame: {error}")))?
+            {
+                self.connection
+                    .process_frame(frame)
+                    .map_err(|error| Status::internal(format!("process HTTP/2 frame: {error}")))?;
+            }
+            if !self.reusable() {
+                return Err(Status::unavailable("pooled HTTP/2 connection is draining"));
+            }
+            let io = &mut self.io;
+            let read = std::future::poll_fn(|task| {
+                let mut buf = ReadBuf::new(&mut chunk);
+                match Pin::new(&mut *io).poll_read(task, &mut buf) {
+                    Poll::Ready(Ok(())) => Poll::Ready(Some(Ok(buf.filled().len()))),
+                    Poll::Ready(Err(error)) => Poll::Ready(Some(Err(error))),
+                    Poll::Pending => Poll::Ready(None),
+                }
+            })
+            .await;
+            match read {
+                None => break,
+                Some(Ok(0)) => return Err(Status::unavailable("pooled HTTP/2 connection closed")),
+                Some(Ok(read)) => self.inbound.extend_from_slice(&chunk[..read]),
+                Some(Err(error)) => return Err(transport_status("read pooled HTTP/2", error)),
+            }
+        }
+        flush_native_h2_frames(&mut self.connection, &mut self.io).await
+    }
+
+    /// Whether another call may open a stream here.
+    fn reusable(&self) -> bool {
+        self.connection.state() == ConnectionState::Open
+            && !self.connection.goaway_received()
+            && !self.connection.goaway_sent()
+    }
+
+    /// Run one unary call on a new stream of this connection.
+    async fn exchange(
+        &mut self,
+        headers: Vec<Header>,
+        request_body: Bytes,
+        max_recv_message_size: usize,
+    ) -> Result<(NativeUnaryWireResponse, u32), UnaryFailure> {
+        // A stream refused locally (GOAWAY seen, identifiers exhausted) never
+        // reached the server.
+        let stream_id = self.connection.open_stream(headers, false).map_err(|error| {
+            UnaryFailure::unprocessed(Status::unavailable(format!(
+                "open HTTP/2 request stream: {error}"
+            )))
+        })?;
+        self.connection
+            .send_data(stream_id, request_body, true)
+            .map_err(|error| {
+                UnaryFailure::processed(Status::internal(format!(
+                    "queue HTTP/2 request body: {error}"
+                )))
+            })?;
+        // A unary handler runs only on the complete request, so a write that
+        // fails cannot have reached one.
+        flush_native_h2_frames(&mut self.connection, &mut self.io)
+            .await
+            .map_err(UnaryFailure::unprocessed)?;
+
+        let mut accumulator = NativeUnaryAccumulator::new(max_recv_message_size);
+        let mut chunk = [0_u8; 16 * 1024];
+        loop {
+            while let Some(frame) = self
+                .codec
+                .decode(&mut self.inbound)
+                .map_err(|error| {
+                    UnaryFailure::processed(Status::internal(format!(
+                        "decode HTTP/2 frame: {error}"
+                    )))
+                })?
+            {
+                let received = self.connection.process_frame(frame).map_err(|error| {
+                    UnaryFailure::processed(Status::internal(format!(
+                        "process HTTP/2 frame: {error}"
+                    )))
+                })?;
+                if let Some(received) = received {
+                    let refused = match &received {
+                        ReceivedFrame::Reset {
+                            stream_id: reset,
+                            error_code,
+                        } => *reset == stream_id && *error_code == ErrorCode::RefusedStream,
+                        ReceivedFrame::GoAway { last_stream_id, .. } => {
+                            *last_stream_id < stream_id
+                        }
+                        _ => false,
+                    };
+                    accumulator.observe(stream_id, received).map_err(|status| {
+                        if refused {
+                            UnaryFailure::unprocessed(status)
+                        } else {
+                            UnaryFailure::processed(status)
+                        }
+                    })?;
+                }
+                flush_native_h2_frames(&mut self.connection, &mut self.io)
+                    .await
+                    .map_err(UnaryFailure::processed)?;
+                if accumulator.is_complete() {
+                    return accumulator
+                        .finish()
+                        .map(|response| (response, stream_id))
+                        .map_err(UnaryFailure::processed);
+                }
+            }
+
+            let read = self.io.read(&mut chunk).await.map_err(|error| {
+                UnaryFailure::processed(transport_status("read HTTP/2 response", error))
+            })?;
+            if read == 0 {
+                return Err(UnaryFailure::processed(Status::unavailable(
+                    "HTTP/2 peer closed before the unary gRPC response completed",
+                )));
+            }
+            self.inbound.extend_from_slice(&chunk[..read]);
+        }
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 async fn native_h2_unary_io(
     target: NativeH2Target,
     config: ChannelConfig,
     tls_connector: Option<TlsConnector>,
+    pool: Option<Arc<UnaryConnectionPool>>,
     path: &str,
     metadata: &Metadata,
     request_body: Bytes,
 ) -> Result<NativeUnaryWireResponse, Status> {
-    let connect_timeout = config.connect_timeout;
-    let now = crate::cx::Cx::with_current(|cx| {
-        cx.timer_driver()
-            .map_or_else(crate::time::wall_now, |timer| timer.now())
-    })
-    .unwrap_or_else(crate::time::wall_now);
-    let mut stream = match crate::time::timeout(now, connect_timeout, async {
-        let stream = target.connect(connect_timeout).await?;
-        native_h2_transport(stream, &target, tls_connector).await
-    })
-    .await
-    {
-        Ok(result) => result?,
-        Err(_) => {
-            return Err(Status::unavailable(format!(
-                "native gRPC connection establishment exceeded its {connect_timeout:?} timeout"
-            )));
-        }
-    };
-
-    let settings = SettingsBuilder::client()
-        .initial_window_size(config.initial_stream_window_size)
-        .build();
-    let mut connection = Connection::client(settings);
-    // RFC 9113 requires the connection preface's first frame to be SETTINGS.
-    // Queue it before expanding the connection receive window, because the
-    // latter emits WINDOW_UPDATE when the configured window exceeds 65,535.
-    connection.queue_initial_settings();
-    connection
-        .set_initial_connection_recv_window(config.initial_connection_window_size)
-        .map_err(|error| Status::internal(format!("invalid HTTP/2 receive window: {error}")))?;
     let headers = native_h2_request_headers(&target.authority, target.scheme, path, metadata)?;
-    let stream_id = connection
-        .open_stream(headers, false)
-        .map_err(|error| Status::internal(format!("open HTTP/2 request stream: {error}")))?;
-    connection
-        .send_data(stream_id, request_body, true)
-        .map_err(|error| Status::internal(format!("queue HTTP/2 request body: {error}")))?;
-
-    stream
-        .write_all(CLIENT_PREFACE)
+    let max_recv = config.max_recv_message_size;
+    if let Some(pool) = &pool {
+        // Stale idle connections are dropped; a call the server provably did
+        // not process on a reused connection is retried once, on a fresh one.
+        while let Some(mut conn) = pool.take(native_now()) {
+            if conn.refresh().await.is_err() {
+                continue;
+            }
+            match conn
+                .exchange(headers.clone(), request_body.clone(), max_recv)
+                .await
+            {
+                Ok((response, stream_id)) => {
+                    pool_after_success(pool, conn, stream_id);
+                    return Ok(response);
+                }
+                Err(failure) if failure.unprocessed => break,
+                Err(failure) => return Err(failure.status),
+            }
+        }
+    }
+    let mut conn = NativeH2Conn::dial(&target, &config, tls_connector).await?;
+    let (response, stream_id) = conn
+        .exchange(headers, request_body, max_recv)
         .await
-        .map_err(|error| transport_status("write HTTP/2 client preface", error))?;
-    flush_native_h2_frames(&mut connection, &mut stream).await?;
+        .map_err(|failure| failure.status)?;
+    if let Some(pool) = &pool {
+        pool_after_success(pool, conn, stream_id);
+    }
+    Ok(response)
+}
 
-    let mut codec = FrameCodec::new();
-    let mut inbound = BytesMut::new();
-    let mut accumulator = NativeUnaryAccumulator::new(config.max_recv_message_size);
-    let mut chunk = [0_u8; 16 * 1024];
-    loop {
-        while let Some(frame) = codec
-            .decode(&mut inbound)
-            .map_err(|error| Status::internal(format!("decode HTTP/2 frame: {error}")))?
-        {
-            let received = connection
-                .process_frame(frame)
-                .map_err(|error| Status::internal(format!("process HTTP/2 frame: {error}")))?;
-            if let Some(received) = received {
-                accumulator.observe(stream_id, received)?;
-            }
-            flush_native_h2_frames(&mut connection, &mut stream).await?;
-            if accumulator.is_complete() {
-                return accumulator.finish();
-            }
-        }
-
-        let read = stream
-            .read(&mut chunk)
-            .await
-            .map_err(|error| transport_status("read HTTP/2 response", error))?;
-        if read == 0 {
-            return Err(Status::unavailable(
-                "HTTP/2 peer closed before the unary gRPC response completed",
-            ));
-        }
-        inbound.extend_from_slice(&chunk[..read]);
+/// Keep a connection whose call completed cleanly for the next unary call.
+#[cfg(not(target_arch = "wasm32"))]
+fn pool_after_success(pool: &UnaryConnectionPool, conn: NativeH2Conn, stream_id: u32) {
+    if conn.reusable() && !conn.connection.has_pending_frames_for_stream(stream_id) {
+        pool.put(conn, native_now());
     }
 }
 
@@ -2206,6 +2724,26 @@ impl<T> ResponseStreamState<T> {
 pub struct ResponseStream<T> {
     state: Arc<Mutex<ResponseStreamState<T>>>,
     on_cancel: Option<Arc<Mutex<CloseHook>>>,
+    /// The network call this stream reads, for a legacy streaming call.
+    #[cfg(not(target_arch = "wasm32"))]
+    native: Option<NativeResponses<T>>,
+}
+
+/// The response side of a native legacy call, typed for one response type.
+#[cfg(not(target_arch = "wasm32"))]
+struct NativeResponses<T> {
+    handle: Arc<LegacyResponseHandle>,
+    convert: fn(Box<dyn Any + Send>) -> Result<T, Status>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<T> Clone for NativeResponses<T> {
+    fn clone(&self) -> Self {
+        Self {
+            handle: Arc::clone(&self.handle),
+            convert: self.convert,
+        }
+    }
 }
 
 impl<T> Clone for ResponseStream<T> {
@@ -2213,6 +2751,8 @@ impl<T> Clone for ResponseStream<T> {
         Self {
             state: Arc::clone(&self.state),
             on_cancel: self.on_cancel.as_ref().map(Arc::clone),
+            #[cfg(not(target_arch = "wasm32"))]
+            native: self.native.clone(),
         }
     }
 }
@@ -2233,6 +2773,8 @@ impl<T> ResponseStream<T> {
         Self {
             state: Arc::new(Mutex::new(ResponseStreamState::closed())),
             on_cancel: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            native: None,
         }
     }
 
@@ -2242,6 +2784,8 @@ impl<T> ResponseStream<T> {
         Self {
             state: Arc::new(Mutex::new(ResponseStreamState::open())),
             on_cancel: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            native: None,
         }
     }
 
@@ -2249,7 +2793,28 @@ impl<T> ResponseStream<T> {
         Self {
             state: Arc::new(Mutex::new(ResponseStreamState::open())),
             on_cancel: Some(Arc::new(Mutex::new(on_cancel))),
+            #[cfg(not(target_arch = "wasm32"))]
+            native: None,
         }
+    }
+
+    /// A stream reading the responses of a native legacy call. Cancelling
+    /// the stream cancels the call; dropping its last clone does too.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn native(call: Arc<LegacyNativeCall>) -> Self
+    where
+        T: Send + 'static,
+    {
+        let cancel_call = Arc::clone(&call);
+        let mut stream = Self::open_with_cancel_hook(Box::new(move || {
+            cancel_call.cancel(Status::cancelled("response stream cancelled by client"));
+            Ok(())
+        }));
+        stream.native = Some(NativeResponses {
+            handle: Arc::new(LegacyResponseHandle::new(call)),
+            convert: downcast_native_response::<T>,
+        });
+        stream
     }
 
     /// Push a response item into the stream.
@@ -2447,8 +3012,43 @@ impl<T: Send> Streaming for ResponseStream<T> {
         if state.closed {
             return Poll::Ready(None);
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(native) = &self.native {
+            drop(state);
+            return self.poll_native(native, cx);
+        }
         state.register_waiter(cx.waker());
         Poll::Pending
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<T> ResponseStream<T> {
+    /// Read the next response of a native call. Its end closes this stream
+    /// (sharing the end with every clone) and records the trailers.
+    fn poll_native(
+        &self,
+        native: &NativeResponses<T>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<T, Status>>> {
+        let call = native.handle.call();
+        let end = match call.poll_message(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Some(Ok(message))) => return Poll::Ready(Some((native.convert)(message))),
+            Poll::Ready(Some(Err(status))) => Some(Err(status)),
+            Poll::Ready(None) => None,
+        };
+        let trailers = call.trailers().unwrap_or_default();
+        let waiters = {
+            let mut state = lock_unpoisoned(&self.state);
+            state.closed = true;
+            state.terminal_metadata = trailers;
+            state.take_waiters()
+        };
+        for waker in waiters {
+            waker.wake();
+        }
+        Poll::Ready(end)
     }
 }
 
@@ -2490,6 +3090,9 @@ pub struct RequestSink<T> {
     on_send: Option<SendHook<T>>,
     on_close: Option<CloseHook>,
     on_cancel: Option<CloseHook>,
+    /// The network call this sink writes, for a legacy streaming call.
+    #[cfg(not(target_arch = "wasm32"))]
+    native: Option<Arc<LegacyNativeCall>>,
 }
 
 fn send_closed_error(close_state: &RequestSinkCloseState) -> Option<Status> {
@@ -2528,6 +3131,8 @@ impl<T> RequestSink<T> {
             on_send: None,
             on_close: None,
             on_cancel: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            native: None,
         }
     }
 
@@ -2543,7 +3148,17 @@ impl<T> RequestSink<T> {
             on_send: None,
             on_close: None,
             on_cancel: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            native: None,
         }
+    }
+
+    /// A sink writing the request side of a native legacy call.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn native(call: Arc<LegacyNativeCall>) -> Self {
+        let mut sink = Self::from_state(Arc::new(Mutex::new(RequestSinkState::new())));
+        sink.native = Some(call);
+        sink
     }
 
     #[cfg(test)]
@@ -2571,15 +3186,33 @@ impl<T> RequestSink<T> {
             on_send,
             on_close,
             on_cancel,
+            #[cfg(not(target_arch = "wasm32"))]
+            native: None,
         }
     }
 
     /// Send a request message.
+    ///
+    /// For a network call this waits until the previous message has left
+    /// the local write queues (and, for a bidirectional call, until unread
+    /// responses fall below the stream's buffer), then queues `message`.
     #[allow(clippy::unused_async)]
     pub async fn send(&mut self, message: T) -> Result<(), Status>
     where
         T: Send + 'static,
     {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(call) = self.native.clone() {
+            let closed_error = send_closed_error(&lock_unpoisoned(&self.state).close_state);
+            if let Some(status) = closed_error {
+                return Err(status);
+            }
+            let mut message = Some(Box::new(message) as Box<dyn Any + Send>);
+            std::future::poll_fn(|task| call.poll_send(task, &mut message)).await?;
+            let mut state = lock_unpoisoned(&self.state);
+            state.sent_count = state.sent_count.saturating_add(1);
+            return Ok(());
+        }
         if self.on_send.is_none() {
             let closed_error = {
                 let mut state = self
@@ -2629,6 +3262,9 @@ impl<T> RequestSink<T> {
     }
 
     /// Close the sink, signaling no more requests.
+    ///
+    /// For a network call this half-closes the request stream once the last
+    /// queued message has left the local write queues.
     #[allow(clippy::unused_async)]
     pub async fn close(&mut self) -> Result<(), Status> {
         {
@@ -2644,6 +3280,15 @@ impl<T> RequestSink<T> {
                     return Err(status.clone());
                 }
             }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(call) = self.native.clone() {
+            let result = std::future::poll_fn(|task| call.poll_close(task)).await;
+            lock_unpoisoned(&self.state).close_state = match &result {
+                Ok(()) => RequestSinkCloseState::Graceful,
+                Err(status) => RequestSinkCloseState::Failed(status.clone()),
+            };
+            return result;
         }
         if let Some(hook) = self.on_close.as_mut() {
             if let Err(status) = hook() {
@@ -2684,6 +3329,10 @@ impl<T> Drop for RequestSink<T> {
             if !state.close_state.is_open() {
                 (None, false, false)
             } else {
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(call) = &self.native {
+                    call.cancel(cancel_status.clone());
+                }
                 state.close_state = RequestSinkCloseState::Cancelled(cancel_status);
                 (
                     state.waiter.take(),
@@ -2735,6 +3384,9 @@ impl<T> Default for RequestSink<T> {
 pub struct ResponseFuture<T> {
     state: Arc<Mutex<RequestSinkState>>,
     resolver: Option<ResponseResolver<T>>,
+    /// The network call this future awaits, for a legacy streaming call.
+    #[cfg(not(target_arch = "wasm32"))]
+    native: Option<NativeResponses<T>>,
 }
 
 type ResponseResolver<T> =
@@ -2768,6 +3420,8 @@ impl<T> ResponseFuture<T> {
                     "response future is not linked to a request sink",
                 ))
             })),
+            #[cfg(not(target_arch = "wasm32"))]
+            native: None,
         }
     }
 
@@ -2778,6 +3432,28 @@ impl<T> ResponseFuture<T> {
         Self {
             state,
             resolver: Some(Box::new(resolver)),
+            #[cfg(not(target_arch = "wasm32"))]
+            native: None,
+        }
+    }
+
+    /// A future for the single response of a native client-streaming call.
+    /// Once it resolves, polling again reports that it already completed.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn native(call: Arc<LegacyNativeCall>) -> Self
+    where
+        T: Send + 'static,
+    {
+        Self {
+            state: Arc::new(Mutex::new(RequestSinkState {
+                close_state: RequestSinkCloseState::Graceful,
+                ..RequestSinkState::new()
+            })),
+            resolver: None,
+            native: Some(NativeResponses {
+                handle: Arc::new(LegacyResponseHandle::new(call)),
+                convert: downcast_native_response::<T>,
+            }),
         }
     }
 }
@@ -2793,6 +3469,17 @@ impl<T: Send> Future for ResponseFuture<T> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(native) = &this.native {
+            let output = match native.handle.call().poll_single_response(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Ok((message, metadata))) => (native.convert)(message)
+                    .map(|message| Response::with_metadata(message, metadata)),
+                Poll::Ready(Err(status)) => Err(status),
+            };
+            this.native = None;
+            return Poll::Ready(output);
+        }
         let mut state = lock_unpoisoned(&this.state);
         if state.close_state.is_open() {
             if !state
@@ -3937,12 +4624,12 @@ mod tests {
     #[test]
     fn request_sink_close_hook_failure_propagates_to_response_future() {
         let state = Arc::new(Mutex::new(RequestSinkState::new()));
-        let mut sink: RequestSink<u32> = RequestSink {
-            state: Arc::clone(&state),
-            on_send: None,
-            on_close: Some(Box::new(|| Err(Status::internal("close failed")))),
-            on_cancel: None,
-        };
+        let mut sink: RequestSink<u32> = RequestSink::with_state_and_hooks(
+            Arc::clone(&state),
+            None,
+            Some(Box::new(|| Err(Status::internal("close failed")))),
+            None,
+        );
         let future = ResponseFuture::with_resolver(state, |_| {
             Ok(Response::with_metadata(7_u32, Metadata::new()))
         });

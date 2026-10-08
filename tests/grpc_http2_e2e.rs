@@ -229,25 +229,39 @@ fn http2_grpc_server_streaming_localhost_fails_closed() {
         json!({
             "test_name": "http2_grpc_server_streaming_localhost_fails_closed",
             "server_port": port,
-            "call_type": "server_streaming",
-            "expected_outcomes": ["typed_unimplemented_refusal", "no_loopback_fallback"]
+            "call_type": "server_streaming+client_streaming+bidi_streaming",
+            "expected_outcomes": ["no_loopback_fallback", "ambient_cx_required"]
         }),
     );
 
+    // The legacy streaming methods dial the server over native HTTP/2
+    // (br-asupersync-6pc7xg). Outside a runtime task there is no Cx to carry
+    // I/O authority, so each refuses before any network I/O, as unary does.
     futures_lite::future::block_on(async {
         let uri = format!("http://localhost:{}", port);
         let channel = Channel::connect(&uri).await.unwrap();
         let mut client = GrpcClient::new(channel);
 
         test_section!("initiate_server_streaming");
-        let request = Request::new("stream_request".to_string());
-        let response_result = client
-            .server_streaming::<String, String>("/test.Service/StreamMethod", request)
-            .await;
+        let request = Request::new(Bytes::from_static(b"stream_request"));
+        let status = client
+            .server_streaming::<Bytes, Bytes>("/test.Service/StreamMethod", request)
+            .await
+            .expect_err("localhost must not fall back to in-memory success");
+        assert_eq!(status.code(), Code::FailedPrecondition);
+        assert!(status.message().contains("ambient runtime Cx"));
 
-        let status = response_result.expect_err("native streaming is not wired yet");
-        assert_eq!(status.code(), Code::Unimplemented);
-        assert!(status.message().contains("not wired yet"));
+        test_section!("initiate_client_and_bidi_streaming");
+        let status = client
+            .client_streaming::<Bytes, Bytes>("/test.Service/Upload")
+            .await
+            .expect_err("client streaming needs an ambient Cx");
+        assert_eq!(status.code(), Code::FailedPrecondition);
+        let status = client
+            .bidi_streaming::<Bytes, Bytes>("/test.Service/Chat")
+            .await
+            .expect_err("bidi streaming needs an ambient Cx");
+        assert_eq!(status.code(), Code::FailedPrecondition);
         test_complete!("http2_grpc_server_streaming_localhost_fails_closed");
     });
 }
@@ -2774,4 +2788,473 @@ fn grpc_server_keepalive_pings_then_disconnects_a_silent_client() {
         assert!(manager.begin_drain(Duration::from_secs(5)));
         let _ = run_handle.await.expect("listener run join");
     });
+}
+
+// ============================================================================
+// Unary connection reuse (ChannelBuilder::reuse_connections)
+// ============================================================================
+
+/// What the raw echo peer does after answering a connection's first call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReusePeer {
+    /// Answer every call on every connection.
+    Serve,
+    /// Send GOAWAY and close.
+    GoAwayAfterFirst,
+    /// Close without GOAWAY.
+    CloseAfterFirst,
+    /// Refuse every later stream with REFUSED_STREAM.
+    RefuseAfterFirst,
+}
+
+/// A raw HTTP/2 gRPC echo server counting the TCP connections it accepts.
+fn unary_reuse_peer(mode: ReusePeer) -> (SocketAddr, Arc<AtomicUsize>, mpsc::Receiver<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let (settled, settled_rx) = mpsc::channel();
+    let accepts = Arc::clone(&accepted);
+    std::thread::spawn(move || {
+        for socket in listener.incoming() {
+            let Ok(socket) = socket else { break };
+            accepts.fetch_add(1, Ordering::SeqCst);
+            let settled = settled.clone();
+            std::thread::spawn(move || serve_unary_reuse_connection(socket, mode, &settled));
+        }
+    });
+    (address, accepted, settled_rx)
+}
+
+/// Serve one connection: echo each complete request message back with
+/// `grpc-status: 0`, then act on `mode`. Signals `settled` once the answer
+/// (and any GOAWAY or close that follows it) has been written.
+fn serve_unary_reuse_connection(
+    mut socket: std::net::TcpStream,
+    mode: ReusePeer,
+    settled: &mpsc::Sender<()>,
+) {
+    socket.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    let mut connection = Connection::server(Settings::server());
+    connection.queue_initial_settings();
+    write_owned_h2_frames(&mut socket, &mut connection);
+    let mut preface = [0; 24];
+    if socket.read_exact(&mut preface).is_err() {
+        return;
+    }
+    assert_eq!(&preface, CLIENT_PREFACE);
+    let mut frames = FrameCodec::new();
+    let mut inbound = BytesMut::new();
+    let mut bodies: HashMap<u32, BytesMut> = HashMap::new();
+    let mut answered = 0_usize;
+    loop {
+        let mut bytes = [0; 16 * 1024];
+        let read = match socket.read(&mut bytes) {
+            Ok(0) | Err(_) => return,
+            Ok(read) => read,
+        };
+        inbound.extend_from_slice(&bytes[..read]);
+        while let Some(frame) = frames.decode(&mut inbound).unwrap() {
+            let (stream_id, end_stream) = match connection.process_frame(frame).unwrap() {
+                Some(ReceivedFrame::Headers {
+                    stream_id,
+                    end_stream,
+                    ..
+                }) => {
+                    bodies.entry(stream_id).or_default();
+                    (stream_id, end_stream)
+                }
+                Some(ReceivedFrame::Data {
+                    stream_id,
+                    data,
+                    end_stream,
+                }) => {
+                    bodies.entry(stream_id).or_default().extend_from_slice(&data);
+                    (stream_id, end_stream)
+                }
+                _ => continue,
+            };
+            if !end_stream {
+                continue;
+            }
+            if mode == ReusePeer::RefuseAfterFirst && answered > 0 {
+                connection.reset_stream(stream_id, asupersync::http::h2::ErrorCode::RefusedStream);
+                write_owned_h2_frames(&mut socket, &mut connection);
+                settled.send(()).unwrap();
+                continue;
+            }
+            // The framed request message is echoed as the framed response.
+            let body = bodies.remove(&stream_id).unwrap_or_default().freeze();
+            connection
+                .send_headers(
+                    stream_id,
+                    vec![
+                        Header::new(":status", "200"),
+                        Header::new("content-type", "application/grpc"),
+                    ],
+                    false,
+                )
+                .unwrap();
+            connection.send_data(stream_id, body, false).unwrap();
+            connection
+                .send_headers(stream_id, vec![Header::new("grpc-status", "0")], true)
+                .unwrap();
+            answered += 1;
+            match mode {
+                ReusePeer::GoAwayAfterFirst => {
+                    connection.goaway(asupersync::http::h2::ErrorCode::NoError, Bytes::new());
+                    write_owned_h2_frames(&mut socket, &mut connection);
+                    let _ = socket.shutdown(std::net::Shutdown::Both);
+                    settled.send(()).unwrap();
+                    return;
+                }
+                ReusePeer::CloseAfterFirst => {
+                    write_owned_h2_frames(&mut socket, &mut connection);
+                    let _ = socket.shutdown(std::net::Shutdown::Both);
+                    settled.send(()).unwrap();
+                    return;
+                }
+                ReusePeer::Serve | ReusePeer::RefuseAfterFirst => {
+                    write_owned_h2_frames(&mut socket, &mut connection);
+                    settled.send(()).unwrap();
+                }
+            }
+        }
+        write_owned_h2_frames(&mut socket, &mut connection);
+    }
+}
+
+/// Make `calls` sequential unary calls; return the connections accepted.
+fn unary_reuse_case(mode: ReusePeer, reuse: usize, calls: usize) -> usize {
+    let (address, accepted, settled) = unary_reuse_peer(mode);
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("unary reuse runtime");
+    let handle = runtime.handle();
+    runtime.block_on(handle.spawn(async move {
+        let channel = Channel::builder(format!("http://127.0.0.1:{}", address.port()))
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(10))
+            .reuse_connections(reuse)
+            .connect()
+            .await
+            .expect("unary reuse channel");
+        let mut client = GrpcClient::new(channel);
+        for call in 0..calls {
+            let payload = Bytes::from(format!("reuse call {call}"));
+            let response = client
+                .unary::<Bytes, Bytes>("/test.Reuse/Echo", Request::new(payload.clone()))
+                .await
+                .unwrap_or_else(|status| panic!("{mode:?} reuse={reuse} call {call}: {status}"));
+            assert_eq!(response.get_ref(), &payload);
+            // The peer finished answering (and any GOAWAY or close after it).
+            // Loopback delivers those bytes before the next call looks.
+            while settled.recv_timeout(Duration::from_millis(200)).is_ok() {}
+        }
+    }));
+    drop(handle);
+    assert!(runtime.shutdown_timeout(Duration::from_secs(10)));
+    let accepted = accepted.load(Ordering::SeqCst);
+    log_test_event(
+        "unary_connection_reuse",
+        json!({ "mode": format!("{mode:?}"), "reuse": reuse, "calls": calls, "accepted": accepted }),
+    );
+    accepted
+}
+
+#[test]
+fn unary_calls_dial_per_call_by_default_and_reuse_when_enabled() {
+    init_test("unary_calls_dial_per_call_by_default_and_reuse_when_enabled");
+    // Default: each unary call owns a fresh connection, as documented.
+    assert_eq!(unary_reuse_case(ReusePeer::Serve, 0, 3), 3);
+    // Opted in: one connection carries all three sequential calls.
+    assert_eq!(unary_reuse_case(ReusePeer::Serve, 2, 3), 1);
+    test_complete!("unary_calls_dial_per_call_by_default_and_reuse_when_enabled");
+}
+
+#[test]
+fn unary_reuse_replaces_connections_the_server_ended_or_refused() {
+    init_test("unary_reuse_replaces_connections_the_server_ended_or_refused");
+    // GOAWAY or a plain close while idle: the stale connection is dropped
+    // before use and the next call dials.
+    assert_eq!(unary_reuse_case(ReusePeer::GoAwayAfterFirst, 2, 2), 2);
+    assert_eq!(unary_reuse_case(ReusePeer::CloseAfterFirst, 2, 2), 2);
+    // REFUSED_STREAM on the reused connection: the server did not process
+    // the call, so it is retried once on a fresh connection.
+    assert_eq!(unary_reuse_case(ReusePeer::RefuseAfterFirst, 2, 2), 2);
+    test_complete!("unary_reuse_replaces_connections_the_server_ended_or_refused");
+}
+
+// ============================================================================
+// Legacy GrpcClient streaming methods over native HTTP/2 (br-asupersync-6pc7xg)
+// ============================================================================
+
+#[cfg(feature = "http2-streaming")]
+mod legacy_streaming {
+    use super::*;
+    use asupersync::grpc::server::{RegisteredRequestStream, ServerDuplexConfig};
+    use asupersync::grpc::service::ServiceHandlerFuture;
+
+    const PAYLOAD: usize = 96 * 1024;
+    const LIMIT: Duration = Duration::from_secs(10);
+    static METHODS: &[MethodDescriptor] = &[
+        MethodDescriptor::client_streaming("Sum", "/legacy.Streams/Sum"),
+        MethodDescriptor::bidi_streaming("Echo", "/legacy.Streams/Echo"),
+        MethodDescriptor::server_streaming("Repeat", "/legacy.Streams/Repeat"),
+    ];
+    static DESCRIPTOR: ServiceDescriptor = ServiceDescriptor::new("Streams", "legacy", METHODS);
+
+    struct Streams;
+
+    impl NamedService for Streams {
+        const NAME: &'static str = "legacy.Streams";
+    }
+
+    struct EchoBack(RegisteredRequestStream);
+
+    impl Streaming for EchoBack {
+        type Message = Bytes;
+
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            task: &mut Context<'_>,
+        ) -> Poll<Option<Result<Bytes, Status>>> {
+            Pin::new(&mut self.0).poll_next(task)
+        }
+    }
+
+    /// Three copies of the request, then the trailers.
+    struct Repeat {
+        message: Bytes,
+        left: usize,
+    }
+
+    impl Streaming for Repeat {
+        type Message = Bytes;
+
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            _task: &mut Context<'_>,
+        ) -> Poll<Option<Result<Bytes, Status>>> {
+            if self.left == 0 {
+                return Poll::Ready(None);
+            }
+            self.left -= 1;
+            Poll::Ready(Some(Ok(self.message.clone())))
+        }
+    }
+
+    impl ServiceHandler for Streams {
+        fn descriptor(&self) -> &ServiceDescriptor {
+            &DESCRIPTOR
+        }
+
+        fn method_names(&self) -> Vec<&str> {
+            METHODS.iter().map(|method| method.name).collect()
+        }
+
+        fn call_client_streaming<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _path: &'a str,
+            request: Request<RegisteredRequestStream>,
+        ) -> ServiceHandlerFuture<'a> {
+            Box::pin(async move {
+                let mut input = request.into_inner();
+                let mut total = 0_u64;
+                while let Some(message) = input.message().await? {
+                    total += message.len() as u64;
+                }
+                let mut trailers = Metadata::new();
+                assert!(trailers.insert("x-sum", "done"));
+                Ok(Response::with_metadata(
+                    Bytes::from(total.to_be_bytes().to_vec()),
+                    trailers,
+                ))
+            })
+        }
+
+        fn call_bidirectional_streaming<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _path: &'a str,
+            request: Request<RegisteredRequestStream>,
+        ) -> ServiceStreamingFuture<'a> {
+            Box::pin(async move {
+                let mut trailers = Metadata::new();
+                assert!(trailers.insert("x-echo", "done"));
+                Ok(RegisteredServerStream::new(EchoBack(request.into_inner()))
+                    .with_trailers(trailers))
+            })
+        }
+
+        fn call_server_streaming<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _path: &'a str,
+            request: Request<Bytes>,
+            _trailers: Metadata,
+        ) -> ServiceStreamingFuture<'a> {
+            Box::pin(async move {
+                Ok(RegisteredServerStream::new(Repeat {
+                    message: request.into_inner(),
+                    left: 3,
+                }))
+            })
+        }
+    }
+
+    async fn next_response(
+        stream: &mut asupersync::grpc::ResponseStream<Bytes>,
+    ) -> Option<Result<Bytes, Status>> {
+        poll_fn(|task| Pin::new(&mut *stream).poll_next(task)).await
+    }
+
+    fn run_case(workers: usize, reader_task: bool) {
+        let runtime = if workers == 1 {
+            RuntimeBuilder::current_thread()
+        } else {
+            RuntimeBuilder::new().worker_threads(workers)
+        }
+        .build()
+        .expect("legacy streaming runtime");
+        let handle = runtime.handle();
+        let task_handle = handle.clone();
+        runtime.block_on(handle.spawn(async move {
+            let mut server = Server::builder()
+                .max_recv_message_size(PAYLOAD)
+                .max_send_message_size(PAYLOAD)
+                .add_service(Streams)
+                .build();
+            let server = Arc::new(server);
+            let listener = server
+                .bind_registered_duplex_http2(
+                    "127.0.0.1:0",
+                    HostPolicy::allow_all(),
+                    ServerDuplexConfig::default(),
+                )
+                .await
+                .expect("bind legacy streaming listener");
+            let address = listener.local_addr().unwrap();
+            let manager = listener.connection_manager().clone();
+            let listener_runtime = task_handle.clone();
+            let serving = task_handle
+                .spawn(async move { listener.run_streaming_produced(&listener_runtime).await });
+
+            let channel = Channel::builder(format!("http://127.0.0.1:{}", address.port()))
+                .connect_timeout(LIMIT)
+                .timeout(LIMIT)
+                .max_send_message_size(PAYLOAD)
+                .max_recv_message_size(PAYLOAD)
+                .connect()
+                .await
+                .expect("legacy streaming channel");
+            let mut client = GrpcClient::new(channel);
+
+            // Client streaming: each message is larger than the default
+            // 64 KiB stream window, so each send waits for peer credit.
+            let (mut sink, response) = client
+                .client_streaming::<Bytes, Bytes>("/legacy.Streams/Sum")
+                .await
+                .expect("client streaming dials the server");
+            let oversize = sink
+                .send(Bytes::from(vec![0; PAYLOAD + 1]))
+                .await
+                .expect_err("over the send limit");
+            assert_ne!(oversize.code(), Code::Ok);
+            for marker in 0..3_u8 {
+                sink.send(Bytes::from(vec![marker; PAYLOAD])).await.unwrap();
+            }
+            sink.close().await.unwrap();
+            let response = response.await.expect("client streaming response");
+            assert_eq!(response.get_ref().as_ref(), (3 * PAYLOAD as u64).to_be_bytes());
+            assert!(matches!(
+                response.metadata().get("x-sum"),
+                Some(MetadataValue::Ascii(value)) if value == "done"
+            ));
+
+            // Bidirectional, lockstep: each echo arrives before half-close.
+            let (mut sink, mut responses) = client
+                .bidi_streaming::<Bytes, Bytes>("/legacy.Streams/Echo")
+                .await
+                .expect("bidi dials the server");
+            if reader_task {
+                let reader = task_handle.spawn(async move {
+                    let mut markers = Vec::new();
+                    while let Some(echo) = next_response(&mut responses).await {
+                        let echo = echo.expect("echo");
+                        assert_eq!(echo.len(), PAYLOAD);
+                        markers.push(echo[0]);
+                    }
+                    assert!(matches!(
+                        responses.terminal_metadata().get("x-echo"),
+                        Some(MetadataValue::Ascii(value)) if value == "done"
+                    ));
+                    markers
+                });
+                for marker in 0..4_u8 {
+                    sink.send(Bytes::from(vec![marker; PAYLOAD])).await.unwrap();
+                }
+                sink.close().await.unwrap();
+                assert_eq!(reader.await, vec![0, 1, 2, 3]);
+            } else {
+                for marker in 0..3_u8 {
+                    sink.send(Bytes::from(vec![marker; PAYLOAD])).await.unwrap();
+                    let echo = next_response(&mut responses).await.expect("echo").unwrap();
+                    assert!(echo.iter().all(|byte| *byte == marker));
+                }
+                sink.close().await.unwrap();
+                assert!(next_response(&mut responses).await.is_none());
+            }
+
+            // Server streaming.
+            let response = client
+                .server_streaming::<Bytes, Bytes>(
+                    "/legacy.Streams/Repeat",
+                    Request::new(Bytes::from_static(b"again")),
+                )
+                .await
+                .expect("server streaming dials the server");
+            let mut repeated = response.into_inner();
+            for _ in 0..3 {
+                let message = next_response(&mut repeated).await.expect("repeat").unwrap();
+                assert_eq!(message.as_ref(), b"again");
+            }
+            assert!(next_response(&mut repeated).await.is_none());
+
+            // A dropped response future cancels its call; the sink then
+            // reports the cancellation.
+            let (mut sink, response) = client
+                .client_streaming::<Bytes, Bytes>("/legacy.Streams/Sum")
+                .await
+                .unwrap();
+            sink.send(Bytes::from(vec![7; 16])).await.unwrap();
+            drop(response);
+            let status = sink
+                .send(Bytes::from(vec![8; 16]))
+                .await
+                .expect_err("cancelled call");
+            assert_eq!(status.code(), Code::Cancelled);
+            drop(sink);
+
+            assert!(manager.begin_drain(Duration::from_secs(5)));
+            serving.await.expect("legacy streaming listener drain");
+            log_test_event(
+                "legacy_streaming_methods_cross_native_h2",
+                json!({ "bead": "asupersync-6pc7xg", "workers": workers, "reader_task": reader_task }),
+            );
+        }));
+        drop(handle);
+        assert!(runtime.shutdown_timeout(LIMIT));
+    }
+
+    #[test]
+    fn legacy_client_server_and_bidi_streaming_cross_native_http2() {
+        init_test("legacy_client_server_and_bidi_streaming_cross_native_http2");
+        for workers in [1, 2] {
+            for reader_task in [false, true] {
+                owned_stream_watchdog(move || run_case(workers, reader_task));
+            }
+        }
+        test_complete!("legacy_client_server_and_bidi_streaming_cross_native_http2");
+    }
 }

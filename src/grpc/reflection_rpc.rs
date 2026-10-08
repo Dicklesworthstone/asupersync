@@ -161,7 +161,7 @@ impl ReflectionRpcService {
             }
             None => None,
         };
-        self.shared.active.fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+        self.shared.active.try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
             active.checked_add(1).filter(|next| *next <= self.shared.config.max_streams)
         }).map_err(|_| Status::resource_exhausted("reflection stream capacity exhausted"))?;
         let slot = Slot(Arc::clone(&self.shared));
