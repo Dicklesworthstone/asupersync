@@ -29,7 +29,8 @@
       "asupersync-7yq1pv item 2 (2026-10-06) re-locates the same four src/runtime/builder.rs locators by +37 lines (7248, 10395, 10400, 10425 to 7285, 10432, 10437, 10462): the safe-only RuntimeBuilder::scheduler_evidence_sink setting (its field, docs and the hand-off to the workers in RuntimeInner::new) sits above the test module. Categories, invariants, evidence, and no-claim boundaries are unchanged.",
       "SapphireHill d0 (2026-10-07, watchdog heal) re-locates two rows after safe-only line shifts: the fourteen src/channel/mpsc_tests.rs raw_waker_probe locators by +20 lines (1167..1248 to 1187..1268; 8bad2b69d added tests above the probe), and the two src/fs/path_ops.rs uring_submit_one locators by -42 lines (713, 718 to 671, 676; 5c79c0294). Same code, kinds and patterns; categories, invariants, evidence, and no-claim boundaries are unchanged.",
       "asupersync-issue65-criticisms-kpmoy5.1.15 (2026-10-06) re-locates the same four src/runtime/builder.rs locators (7285, 10432, 10437, 10462 to 7314, 10533, 10538, 10563): the safe-only default blocking pool added a builder field, its default and docs above the test module (+29), and two tests above the env helpers (+72). The new env test reuses the existing with_envs helper and adds no unsafe site. Categories, invariants, evidence, and no-claim boundaries are unchanged.",
-      "asupersync-r02ssd (2026-10-07) re-locates four src/net/atp/transport_common/metadata.rs locators by +87 lines (2614, 2648, 2897, 2919 to 2701, 2735, 2984, 3006): the safe-only DeferredParentSyncs batch (one parent-directory fsync per committed directory instead of per file) and its plumbing through install_staged_leaf_transactionally sit above them. 232 and 250 are unchanged. No unsafe site is added; categories, invariants, evidence, and no-claim boundaries are unchanged."
+      "asupersync-r02ssd (2026-10-07) re-locates four src/net/atp/transport_common/metadata.rs locators by +87 lines (2614, 2648, 2897, 2919 to 2701, 2735, 2984, 3006): the safe-only DeferredParentSyncs batch (one parent-directory fsync per committed directory instead of per file) and its plumbing through install_staged_leaf_transactionally sit above them. 232 and 250 are unchanged. No unsafe site is added; categories, invariants, evidence, and no-claim boundaries are unchanged.",
+      "SapphireHill (2026-10-07, main-red heal) re-locates the twenty src/sync/mutex.rs locators after d7ba86cfe (wake blocked mutex acquisition on context cancellation) added safe-only code above them: 108, 109 by +4 and the nineteen from 683 on by +51 (25 is unchanged). Each locator keeps its pattern and its occurrence index. No unsafe site is added or removed; categories, invariants, evidence, and no-claim boundaries are unchanged."
     ]
   },
   "required_row_fields": [
@@ -4902,102 +4903,102 @@
         },
         {
           "kind": "unsafe_block",
-        "line": 696,
+        "line": 747,
           "pattern": "unsafe { &*self.mutex.data.get() }"
         },
         {
           "kind": "unsafe_block",
-        "line": 703,
+        "line": 754,
           "pattern": "unsafe { &mut *self.mutex.data.get() }"
         },
         {
           "kind": "unsafe_block",
-        "line": 786,
+        "line": 837,
           "pattern": "unsafe { self.data.as_ref() }"
         },
         {
           "kind": "unsafe_block",
-        "line": 793,
+        "line": 844,
           "pattern": "unsafe { self.data.as_mut() }"
         },
         {
           "kind": "unsafe_block",
-        "line": 907,
+        "line": 958,
           "pattern": "let mutex = unsafe { std::ptr::read(&self.mutex) };"
         },
         {
           "kind": "unsafe_block",
-        "line": 927,
+        "line": 978,
           "pattern": "let mutex = unsafe { std::ptr::read(&self.mutex) };"
         },
         {
           "kind": "unsafe_block",
-        "line": 946,
+        "line": 997,
           "pattern": "unsafe { &*self.mutex.data.get() }"
         },
         {
           "kind": "unsafe_block",
-        "line": 953,
+        "line": 1004,
           "pattern": "unsafe { &mut *self.mutex.data.get() }"
         },
         {
           "kind": "unsafe_block",
-        "line": 992,
+        "line": 1043,
           "pattern": "unsafe { self.data.as_ref() }"
         },
         {
           "kind": "unsafe_block",
-        "line": 999,
+        "line": 1050,
           "pattern": "unsafe { self.data.as_mut() }"
         },
         {
           "kind": "unsafe_block",
-        "line": 1041,
+        "line": 1092,
           "pattern": "let mutex = unsafe { std::ptr::read(&self.mutex) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1021,
+          "line": 1072,
           "pattern": "let mutex = unsafe { std::ptr::read(&self.mutex) };"
         },
         {
           "kind": "unsafe_impl",
-          "line": 108,
+          "line": 112,
           "pattern": "unsafe impl<T: Send> Send for Mutex<T> {}"
         },
         {
           "kind": "unsafe_impl",
-          "line": 109,
+          "line": 113,
           "pattern": "unsafe impl<T: Send> Sync for Mutex<T> {}"
         },
         {
           "kind": "unsafe_impl",
-        "line": 683,
+        "line": 734,
           "pattern": "unsafe impl<T: Sync> Sync for MutexGuard<'_, T> {}"
         },
         {
           "kind": "unsafe_impl",
-        "line": 771,
+        "line": 822,
           "pattern": "unsafe impl<T, U: ?Sized + Sync> Sync for MappedMutexGuard<'_, T, U> {}"
         },
         {
           "kind": "unsafe_impl",
-        "line": 857,
+        "line": 908,
           "pattern": "unsafe impl<T: Send> Send for OwnedMutexGuard<T> {}"
         },
         {
           "kind": "unsafe_impl",
-        "line": 858,
+        "line": 909,
           "pattern": "unsafe impl<T: Sync> Sync for OwnedMutexGuard<T> {}"
         },
         {
           "kind": "unsafe_impl",
-        "line": 976,
+        "line": 1027,
           "pattern": "unsafe impl<T: Send, U: ?Sized + Send> Send for OwnedMappedMutexGuard<T, U> {}"
         },
         {
           "kind": "unsafe_impl",
-        "line": 977,
+        "line": 1028,
           "pattern": "unsafe impl<T: Send, U: ?Sized + Sync> Sync for OwnedMappedMutexGuard<T, U> {}"
         }
       ]
