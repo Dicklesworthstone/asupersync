@@ -3314,6 +3314,11 @@ impl Drop for PgConnectionInner {
     }
 }
 
+    /// Set when a pool that resets sessions took this connection back
+    /// ([`PgConnectionManager::reset_session_on_return`]): the next request
+    /// first runs `DISCARD ALL`, so the previous borrower's session state
+    /// cannot reach the next one.
+    pending_session_reset: bool,
 #[cfg(any(test, feature = "test-internals"))]
 fn test_cancel_target() -> CancelTarget {
     CancelTarget {
@@ -3888,6 +3893,16 @@ fn backend_message_body_len(len_i32: i32) -> Result<usize, PgError> {
             "invalid message length: {len_i32}"
         )));
     }
+        // A resetting pool's next borrower must not receive the previous
+        // borrower's notifications either.
+        if self.connection.inner.pending_session_reset {
+            match self.connection.reset_pooled_session(cx).await {
+                Outcome::Ok(()) => {}
+                Outcome::Err(err) => return Outcome::Err(PgNotificationError::Database(err)),
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+            }
+        }
     Ok(len_i32 as usize - 4)
 }
 
@@ -4342,12 +4357,61 @@ impl PgConnection {
         Ok(NotificationResponseFields {
             process_id,
             channel,
+        if self.inner.pending_session_reset {
+            match self.reset_pooled_session(cx).await {
+                Outcome::Ok(()) => {}
+                Outcome::Err(err) => return Outcome::Err(err),
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+            }
+        }
             payload,
         })
     }
 
     fn handle_notification_response(&mut self, data: &[u8]) -> Result<(), PgError> {
         let fields = Self::parse_notification_response_fields(data)?;
+    /// `DISCARD ALL` for a connection a resetting pool handed out again:
+    /// session settings (including `set_config` values and the role),
+    /// temporary tables, `LISTEN` registrations, session advisory locks, open
+    /// cursors and prepared statements all end with the previous borrower.
+    /// The client forgets what DISCARD removed: prepared statements (held
+    /// handles re-prepare on use), subscriptions, buffered notifications and
+    /// the applied `statement_timeout`. A connection that is closed needs no
+    /// DISCARD: its transparent reconnect opens a fresh session, and it no
+    /// longer replays the previous borrower's `LISTEN` channels.
+    async fn reset_pooled_session(&mut self, cx: &Cx) -> Outcome<(), PgError> {
+        if !self.inner.closed {
+            // The minimal simple-Query exchange, which deliberately skips the
+            // command-tag reactions (DISCARD would otherwise mark this
+            // connection for discard).
+            match self
+                .run_managed_statement_timeout_set(cx, "DISCARD ALL")
+                .await
+            {
+                Outcome::Ok(()) => {}
+                other => return other,
+            }
+        }
+        // Includes notifications that arrived during the DISCARD exchange.
+        self.inner.subscribed_channels.clear();
+        self.inner.notifications = NotificationBuffer::default();
+        if self.inner.closed {
+            self.inner.pending_session_reset = false;
+            return Outcome::Ok(());
+        }
+        // The server deallocated every prepared statement: forget them
+        // without sending DEALLOCATE, and make held handles re-prepare.
+        let _ = self.inner.prepared_cache.clear_returning_names();
+        self.inner.deallocate_retry_queue.clear();
+        self.inner.session_generation = self.inner.session_generation.wrapping_add(1);
+        self.inner.applied_statement_timeout_ms = None;
+        self.inner.statement_timeout_uncertain = false;
+        self.inner.statement_timeout_set_in_block = false;
+        self.inner.pending_session_reset = false;
+        Outcome::Ok(())
+    }
+
         self.inner.notifications.push(fields);
         Ok(())
     }
@@ -4719,6 +4783,7 @@ impl PgConnection {
                         return Poll::Ready(Err(cancelled_error(cx)));
                     }
                     cancel_wake.refresh(task_cx.waker());
+                pending_session_reset: false,
                     match Pin::new(&mut tcp).poll_write(task_cx, &ssl_request[pos..]) {
                         Poll::Ready(Ok(written)) => Poll::Ready(Ok(written)),
                         Poll::Ready(Err(err)) => Poll::Ready(Err(PgError::Io(err))),
@@ -10002,6 +10067,8 @@ fn fuzz_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
     (
         PgConnection {
             inner: PgConnectionInner {
+    /// Whether a returned connection runs `DISCARD ALL` before its next use.
+    reset_session_on_return: bool,
                 stream: PgStream::Plain(stream),
                 options: test_pg_connect_options(),
                 tls_options: PgTlsOptions::default(),
@@ -10009,6 +10076,7 @@ fn fuzz_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
                 secret_key: 0,
                 cancel_target: test_cancel_target(),
                 parameters: BTreeMap::new(),
+            .field("reset_session_on_return", &self.reset_session_on_return)
                 transaction_status: b'I',
                 closed: false,
                 explicitly_closed: false,
@@ -10020,9 +10088,30 @@ fn fuzz_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
                 prepared_cache: PreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
                 deallocate_retry_queue: VecDeque::new(),
                 consecutive_deallocate_failures: 0,
+            reset_session_on_return: false,
                 unhealthy: false,
                 subscribed_channels: BTreeSet::new(),
                 notifications: NotificationBuffer::default(),
+    /// Reset each connection's server session between pool borrowers.
+    ///
+    /// When enabled, a connection returned to the pool runs `DISCARD ALL`
+    /// before the next borrower's first request (one extra round trip per
+    /// checkout that is used), the way PgBouncer's `server_reset_query` does.
+    /// Without it, which is the default, session state a borrower creates
+    /// survives into the next borrower of the same connection: `set_config`
+    /// values (the usual row-level-security tenant setting), session
+    /// `SET`s made outside this client's tracking, temporary tables, `LISTEN`
+    /// registrations, session advisory locks, `DECLARE ... WITH HOLD`
+    /// cursors and SQL-level `PREPARE`d statements. Enable it when borrowers
+    /// must not observe one another's session. A reset also clears the
+    /// returning borrower's
+    /// [`PgConnection::set_statement_timeout_override`].
+    #[must_use]
+    pub fn reset_session_on_return(mut self, enabled: bool) -> Self {
+        self.reset_session_on_return = enabled;
+        self
+    }
+
                 backend_frame: BackendFrame::default(),
                 statement_timeout_override: None,
                 applied_statement_timeout_ms: None,
@@ -10106,6 +10195,13 @@ pub fn fuzz_parse_error_response(data: &[u8]) -> Result<PgError, PgError> {
 pub fn fuzz_parse_parameter_description(data: &[u8]) -> Result<Vec<u32>, PgError> {
     PgConnection::parse_parameter_description(data)
 }
+        if self.reset_session_on_return {
+            // The next borrower also starts from the manager's statement
+            // timeout, not this borrower's override (mysql audit r10 M3 notes
+            // the same gap); the next query's reconciliation sends it.
+            conn.inner.statement_timeout_override = None;
+            conn.inner.pending_session_reset = true;
+        }
 
 /// Fuzz-target re-exporter for CopyOutResponse body parsing.
 #[cfg(feature = "test-internals")]
@@ -10167,6 +10263,7 @@ pub fn fuzz_parse_command_complete_tag(data: &[u8]) -> Result<u64, PgError> {
 
 /// Fuzz-target re-exporter for frontend StartupMessage parsing.
 #[cfg(feature = "test-internals")]
+                pending_session_reset: false,
 #[doc(hidden)]
 pub fn fuzz_parse_startup_message(data: &[u8]) -> Result<FuzzStartupMessage, PgError> {
     parse_startup_message(data).map(|message| FuzzStartupMessage {

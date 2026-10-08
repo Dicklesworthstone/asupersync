@@ -1265,3 +1265,133 @@ fn pg_real_prepare_and_query_prepared_reuse_observed_in_pg_stat_ikskzn() {
         log.end("pass");
     });
 }
+
+/// A pool built with `PgConnectionManager::reset_session_on_return(true)`
+/// hands its next borrower a clean server session on the same backend: no
+/// `set_config` tenant value, temporary table, session advisory lock or
+/// `LISTEN` registration or statement-timeout override of the previous
+/// borrower survives, and a statement handle prepared before the reset
+/// re-prepares transparently. The default
+/// manager keeps the session, which the control pass pins as documented.
+#[test]
+fn pg_real_pool_session_reset_isolates_borrowers() {
+    use asupersync::database::pool::{AsyncDbPool, DbPoolConfig};
+    use asupersync::database::postgres::{PgConnectionManager, ToSql};
+
+    let cfg = RealPgConfig::from_env();
+    if skip_if_disabled(&cfg, "pg_real_pool_session_reset_isolates_borrowers") {
+        return;
+    }
+    let log = PgTestLogger::new(
+        "postgres_real",
+        "pg_real_pool_session_reset_isolates_borrowers",
+    );
+
+    run_test_with_cx(|cx| async move {
+        for reset in [false, true] {
+            log.phase(if reset { "reset_pool" } else { "default_pool" });
+            let options = PgConnectOptions::parse(&cfg.url).expect("parse POSTGRES_URL");
+            let manager = PgConnectionManager::new(options).reset_session_on_return(reset);
+            let pool = AsyncDbPool::new(manager, DbPoolConfig::with_max_size(1));
+            let lock_key = if reset { 7_340_101 } else { 7_340_100 };
+
+            let (backend, stmt) = {
+                let mut conn = pool.get(&cx).await.expect("first borrow");
+                let rows = unwrap_pg(
+                    conn.query_unchecked(
+                        &cx,
+                        &format!(
+                            "SELECT pg_backend_pid()::int4 AS pid, \
+                             set_config('app.tenant', 'acme', false) AS tenant, \
+                             pg_try_advisory_lock({lock_key}) AS locked"
+                        ),
+                    )
+                    .await,
+                    &log,
+                    "session_state",
+                );
+                assert!(rows[0].get_bool("locked").expect("locked"));
+                unwrap_pg(
+                    conn.execute_unchecked(&cx, "CREATE TEMP TABLE borrower_scratch (v int4)")
+                        .await,
+                    &log,
+                    "temp_table",
+                );
+                unwrap_pg(conn.listen(&cx, "borrower_a_events").await, &log, "listen");
+                conn.set_statement_timeout_override(Some(Duration::from_secs(30)));
+                let stmt = unwrap_pg(
+                    conn.prepare(&cx, "SELECT $1::int4 AS v").await,
+                    &log,
+                    "prepare",
+                );
+                (rows[0].get_i32("pid").expect("pid"), stmt)
+            };
+
+            let mut conn = pool.get(&cx).await.expect("second borrow");
+            let rows = unwrap_pg(
+                conn.query_unchecked(
+                    &cx,
+                    "SELECT pg_backend_pid()::int4 AS pid, \
+                     coalesce(current_setting('app.tenant', true), '') AS tenant, \
+                     (SELECT count(*)::int4 FROM pg_locks \
+                      WHERE locktype = 'advisory' AND pid = pg_backend_pid()) AS locks, \
+                     (SELECT count(*)::int4 FROM pg_listening_channels()) AS listening, \
+                     to_regclass('pg_temp.borrower_scratch') IS NOT NULL AS has_temp",
+                )
+                .await,
+                &log,
+                "inspect_session",
+            );
+            let row = &rows[0];
+            assert_eq!(
+                row.get_i32("pid").expect("pid"),
+                backend,
+                "same backend reused"
+            );
+            let tenant = row.get_str("tenant").expect("tenant");
+            let locks = row.get_i32("locks").expect("locks");
+            let listening = row.get_i32("listening").expect("listening");
+            let has_temp = row.get_bool("has_temp").expect("has_temp");
+            log.line(
+                "second_borrower_session",
+                &[
+                    ("reset", &reset.to_string()),
+                    ("tenant", tenant),
+                    ("locks", &locks.to_string()),
+                    ("listening", &listening.to_string()),
+                    ("has_temp", &has_temp.to_string()),
+                ],
+            );
+            if reset {
+                assert_eq!((tenant, locks, listening, has_temp), ("", 0, 0, false));
+            } else {
+                assert_eq!((tenant, locks, listening, has_temp), ("acme", 1, 1, true));
+            }
+
+            assert_eq!(
+                conn.statement_timeout_override(),
+                (!reset).then_some(Duration::from_secs(30)),
+                "a reset also clears the previous borrower's timeout override"
+            );
+
+            let seven = 7_i32;
+            let params: &[&dyn ToSql] = &[&seven];
+            let rows = unwrap_pg(
+                conn.query_prepared(&cx, &stmt, params).await,
+                &log,
+                "held_stmt",
+            );
+            assert_eq!(rows[0].get_i32("v").expect("v"), 7);
+            if !reset {
+                unwrap_pg(
+                    conn.query_unchecked(&cx, "SELECT pg_advisory_unlock_all()")
+                        .await,
+                    &log,
+                    "unlock",
+                );
+            }
+        }
+        log.end("pass");
+    });
+}
+

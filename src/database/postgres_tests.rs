@@ -1184,6 +1184,7 @@ mod tests {
                 applied_statement_timeout_ms: None,
                 statement_timeout_uncertain: false,
                 statement_timeout_set_in_block: false,
+                pending_session_reset: false,
             },
         }
     }
@@ -1225,6 +1226,7 @@ mod tests {
                     applied_statement_timeout_ms: None,
                     statement_timeout_uncertain: false,
                     statement_timeout_set_in_block: false,
+                    pending_session_reset: false,
                 },
             },
             peer_stream,
@@ -9464,6 +9466,30 @@ mod tests {
         // Exercise PgTransaction::drop (br-asupersync-yl4gu1 path).
         conn.inner.needs_discard = true;
         assert!(!mgr.release_check(&mut conn), "needs_discard must reject");
+    }
+
+    /// A resetting pool clears the returning borrower's statement-timeout
+    /// override and schedules the session reset; the default pool keeps both
+    /// as before.
+    #[test]
+    fn release_check_with_session_reset_clears_the_borrowers_timeout_override() {
+        use crate::database::pool::AsyncConnectionManager;
+        let options = PgConnectOptions::parse("postgres://localhost/testdb").unwrap();
+        let override_ms = Some(std::time::Duration::from_millis(150));
+
+        let mgr = PgConnectionManager::new(options.clone());
+        let mut conn = make_test_connection();
+        conn.set_statement_timeout_override(override_ms);
+        assert!(mgr.release_check(&mut conn));
+        assert_eq!(conn.statement_timeout_override(), override_ms);
+        assert!(!conn.inner.pending_session_reset);
+
+        let mgr = PgConnectionManager::new(options).reset_session_on_return(true);
+        let mut conn = make_test_connection();
+        conn.set_statement_timeout_override(override_ms);
+        assert!(mgr.release_check(&mut conn));
+        assert_eq!(conn.statement_timeout_override(), None);
+        assert!(conn.inner.pending_session_reset);
     }
 
     /// br-asupersync-t4wfzb: PgConnectionManager::release_check must

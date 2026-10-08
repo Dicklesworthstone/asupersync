@@ -56,6 +56,7 @@ fn make_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
                 applied_statement_timeout_ms: None,
                 statement_timeout_uncertain: false,
                 statement_timeout_set_in_block: false,
+                pending_session_reset: false,
             },
         },
         peer_stream,
