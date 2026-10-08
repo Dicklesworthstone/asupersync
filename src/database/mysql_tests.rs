@@ -6324,4 +6324,48 @@ mod tests {
         server.join().expect("server thread");
         assert!(!conn.inner.closed, "the connection is in step and reusable");
     }
+
+    /// br-asupersync-sqlite-pool-audit-r10-dj4uhx L4: a body that cancelled
+    /// its Cx and returned Ok made commit() refuse at its first checkpoint;
+    /// the helper then returned at once with the rollback only scheduled, so
+    /// the transaction and its locks outlived the helper. The helper now
+    /// finishes the rollback first.
+    #[test]
+    fn transaction_helper_rolls_back_before_returning_when_its_cx_was_cancelled_before_commit() {
+        const SERVER_STATUS_IN_TRANS: u16 = 0x0001;
+
+        init_test("mysql_transaction_helper_rolls_back_before_returning_when_cancelled");
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let cx = Cx::for_testing();
+
+        let server = std::thread::spawn(move || {
+            peer.set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+            assert_eq!(
+                command_sql(&read_client_command(&mut peer)),
+                "START TRANSACTION"
+            );
+            write_response_packet(&mut peer, 1, ok_packet_payload(0, SERVER_STATUS_IN_TRANS));
+            assert_eq!(command_sql(&read_client_command(&mut peer)), "ROLLBACK");
+            write_response_packet(&mut peer, 1, ok_packet_payload(0, 0));
+        });
+
+        let outcome = run(crate::database::transaction::with_mysql_transaction(
+            &mut conn,
+            &cx,
+            |_tx: &mut MySqlTransaction<'_>, cx: &Cx| {
+                cx.cancel_fast(CancelKind::User);
+                async { Outcome::<(), MySqlError>::Ok(()) }
+            },
+        ));
+        match outcome {
+            Outcome::Cancelled(reason) => assert_eq!(reason.kind, CancelKind::User),
+            other => panic!("the caller's cancellation is returned, got {other:?}"),
+        }
+        // Checked before joining: the rollback must have completed, not
+        // merely been scheduled for the next operation.
+        assert!(!conn.inner.needs_rollback, "no rollback is left for later");
+        assert!(!conn.in_transaction(), "the transaction ended");
+        server.join().expect("the ROLLBACK reached the server");
+    }
 }
