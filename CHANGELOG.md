@@ -164,6 +164,22 @@ pass `--allow-plaintext` to accept the risk. An SSH-bootstrapped send forwards
 the flag to the remote receiver, so an older remote `atp` rejects the unknown
 flag and has to be upgraded (`asupersync-bi2462.126`).
 
+### Breaking change — `QuicFrame` gained three variants and is non-exhaustive
+
+`net::atp::protocol::QuicFrame` gained `NewConnectionId`,
+`RetireConnectionId` and `NewToken`, which the native QUIC stack decodes for
+connection ID management and key updates. A `match` on `QuicFrame` outside
+this crate that listed every variant no longer compiles. The enum is now
+`#[non_exhaustive]`, so such a `match` needs a wildcard arm once, and later
+frame types will not break it again.
+
+`net::quic_native::client_handshake_over_udp` keeps its v0.5.0 signature,
+`Result<(), QuicTlsError>`. During 0.6.0 development it briefly returned the
+1-RTT packets that arrive before the handshake completes; the new
+`client_handshake_over_udp_with_early_data` returns them, like
+`server_handshake_over_udp_with_early_data` on the server side
+(`asupersync-nao6pg`, GitHub #77).
+
 ### Behavior change — the legacy ATP SDK session refuses work it cannot do
 
 `asupersync::atp::sdk::AtpSession` has no transport and no object store.

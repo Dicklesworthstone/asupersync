@@ -131,7 +131,12 @@ impl QuicFrameType {
 }
 
 /// QUIC Frame definitions
+///
+/// Non-exhaustive: QUIC defines more frame types than this enum decodes, and
+/// support for one adds a variant. A `match` outside this crate needs a
+/// wildcard arm.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum QuicFrame {
     /// PADDING frame
     Padding {

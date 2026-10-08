@@ -20,12 +20,12 @@ use asupersync::cx::Cx;
 use asupersync::net::atp::quic::{AtpPacketProtection, AtpPacketProtectionConfig};
 use asupersync::net::quic_core::ConnectionId;
 use asupersync::net::quic_native::handshake_driver::{
-    ATP_QUIC_ALPN, QuicHandshakeDriver, client_config, client_handshake_over_udp, server_config,
-    server_handshake_over_udp,
+    ATP_QUIC_ALPN, QuicHandshakeDriver, client_config, client_handshake_over_udp,
+    client_handshake_over_udp_with_early_data, server_config, server_handshake_over_udp,
 };
 use asupersync::net::quic_native::{
     ConnectionRouter, NativeQuicConnection, NativeQuicConnectionConfig, NativeQuicConnectionError,
-    QuicUdpEndpoint, QuicUdpEndpointConfig, RoutingResult, StreamId,
+    QuicTlsError, QuicUdpEndpoint, QuicUdpEndpointConfig, ReceivedPacket, RoutingResult, StreamId,
 };
 use asupersync::time::{timeout, wall_now};
 use futures_lite::future::{block_on, zip};
@@ -1185,6 +1185,42 @@ fn datagram_and_stream_cross_real_udp_after_real_handshake() {
 #[test]
 fn managed_keys_rotate_repeatedly_over_real_udp_after_real_handshake() {
     datagram_and_stream_exchange(true);
+}
+
+/// v0.5.0 compatibility (GitHub #77 item 2, asupersync-nao6pg): the plain
+/// client handshake still resolves to `Result<(), QuicTlsError>`, and the
+/// early 1-RTT packets come from `client_handshake_over_udp_with_early_data`.
+/// A change to either signature fails to compile here.
+#[test]
+fn client_handshake_over_udp_keeps_its_v0_5_0_signature() {
+    fn plain<'a>(
+        cx: &'a Cx,
+        endpoint: &'a mut QuicUdpEndpoint,
+        server_addr: SocketAddr,
+        driver: &'a mut QuicHandshakeDriver,
+        dcid: ConnectionId,
+        client_scid: ConnectionId,
+    ) -> impl std::future::Future<Output = Result<(), QuicTlsError>> + 'a {
+        client_handshake_over_udp(cx, endpoint, server_addr, driver, dcid, client_scid)
+    }
+    fn with_early_data<'a>(
+        cx: &'a Cx,
+        endpoint: &'a mut QuicUdpEndpoint,
+        server_addr: SocketAddr,
+        driver: &'a mut QuicHandshakeDriver,
+        dcid: ConnectionId,
+        client_scid: ConnectionId,
+    ) -> impl std::future::Future<Output = Result<Vec<ReceivedPacket>, QuicTlsError>> + 'a {
+        client_handshake_over_udp_with_early_data(
+            cx,
+            endpoint,
+            server_addr,
+            driver,
+            dcid,
+            client_scid,
+        )
+    }
+    let _signatures = (plain, with_early_data);
 }
 
 fn datagram_and_stream_exchange(rotate_keys: bool) {

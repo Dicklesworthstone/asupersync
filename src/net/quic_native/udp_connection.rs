@@ -44,7 +44,8 @@ use super::endpoint::{
 };
 use super::endpoint_api::QuicConnection;
 use super::handshake_driver::{
-    QuicHandshakeDriver, client_handshake_over_udp, server_handshake_over_udp_with_early_data,
+    QuicHandshakeDriver, client_handshake_over_udp_with_early_data,
+    server_handshake_over_udp_with_early_data,
 };
 use super::managed_endpoint::{ManagedEndpointConfig, ManagedEndpointError, ManagedQuicEndpoint};
 use super::streams::{StreamRole, StreamWindows};
@@ -425,7 +426,7 @@ impl NativeQuicUdpConnection {
             return Err(NativeQuicUdpConnectionError::Cancelled);
         }
         let mut endpoint = endpoint;
-        let early_one_rtt_packets = match client_handshake_over_udp(
+        let early_one_rtt_packets = match client_handshake_over_udp_with_early_data(
             cx,
             &mut endpoint,
             peer_addr,

@@ -1906,9 +1906,25 @@ struct SentHandshakeFlight {
 /// `peer_closed_crypto_error` or `peer_closed`
 /// ([`QuicHandshakeDriver::peer_close_error_code`] has the code).
 ///
-/// Returns any early 1-RTT packets buffered during the handshake flight so
-/// they can be processed by the application-data connection.
+/// 1-RTT packets that arrive before the handshake completes are dropped, as
+/// in v0.5.0. [`client_handshake_over_udp_with_early_data`] returns them.
 pub async fn client_handshake_over_udp(
+    cx: &Cx,
+    endpoint: &mut QuicUdpEndpoint,
+    server_addr: SocketAddr,
+    driver: &mut QuicHandshakeDriver,
+    dcid: ConnectionId,
+    client_scid: ConnectionId,
+) -> Result<(), QuicTlsError> {
+    client_handshake_over_udp_with_early_data(cx, endpoint, server_addr, driver, dcid, client_scid)
+        .await
+        .map(|_early_one_rtt_packets| ())
+}
+
+/// Like [`client_handshake_over_udp`], and returns the 1-RTT packets that
+/// arrived before the handshake completed, so the application-data
+/// connection can process them.
+pub async fn client_handshake_over_udp_with_early_data(
     cx: &Cx,
     endpoint: &mut QuicUdpEndpoint,
     server_addr: SocketAddr,
@@ -5522,7 +5538,7 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
                 &cx,
                 Duration::from_secs(20),
                 scripted,
-                client_handshake_over_udp(
+                client_handshake_over_udp_with_early_data(
                     &cx,
                     &mut client_endpoint,
                     server_addr,
