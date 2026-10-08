@@ -3,8 +3,11 @@
 //! Construct one [`TracedHttpClient`] and reuse it across requests. Each request
 //! supplies its parent context explicitly and gets a new child span ID from its
 //! [`Cx`]'s entropy when prepared or sent. There is no thread-local trace, global
-//! client, or new runtime task. The underlying client still owns pooling,
-//! cancellation, request deadlines, retries, and response decoding.
+//! client, or new runtime task. Buffered requests retain the underlying client
+//! pooling, cancellation, request deadlines, retries, and response decoding.
+//! [`TracedHttpClient::get_streaming`] returns the native incremental response
+//! body instead, preserving the existing streaming path's connection ownership
+//! and response-head deadline contract.
 //!
 //! Trace context is sent only to the origin the caller selects: this client
 //! follows same-origin redirects only, including when its configuration asks for
@@ -30,6 +33,10 @@
 //! # Ok(())
 //! # }
 //! ```
+
+mod streaming;
+
+pub use streaming::{TracedStreamingRequestBuilder, TracedStreamingResponse};
 
 use std::collections::HashMap;
 use std::fmt;

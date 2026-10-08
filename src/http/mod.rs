@@ -105,4 +105,5 @@ pub use h3_native::{
 pub use pool::{Pool, PoolConfig, PoolKey, PoolStats, PooledConnectionMeta, PooledConnectionState};
 pub use trace_client::{
     TracedClientError, TracedClientRequestBuilder, TracedHttpClient, TracedResponse,
+    TracedStreamingRequestBuilder, TracedStreamingResponse,
 };
