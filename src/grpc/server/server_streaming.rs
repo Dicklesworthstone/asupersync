@@ -186,6 +186,42 @@ impl Server {
     where
         A: ToSocketAddrs + Send + 'static,
     {
+        let handler = self.registered_streaming_handler(streaming)?;
+        Http2Listener::bind_produced_with_config(
+            addr,
+            handler,
+            self.http2_listener_config(host_policy),
+        )
+        .await
+        .map(|listener| self.with_http2_keepalive(listener))
+    }
+
+    /// [`Self::bind_registered_streaming_http2`] on a Unix-domain socket
+    /// listener; drive it with `Http2Listener::run_produced`. See
+    /// [`Server::bind_registered_http2_unix`] for the transport's terms.
+    ///
+    /// # Errors
+    /// The same refusals as the TCP form, before any connection is accepted.
+    #[cfg(unix)]
+    pub fn bind_registered_streaming_http2_unix(
+        self: &Arc<Self>,
+        listener: crate::net::unix::UnixListener,
+        host_policy: HostPolicy,
+        streaming: ServerStreamingConfig,
+    ) -> io::Result<Http2Listener<impl Fn(HttpRequest) -> ProducedGrpcFuture + Send + Sync + 'static>>
+    {
+        let handler = self.registered_streaming_handler(streaming)?;
+        Ok(self.with_http2_keepalive(Http2Listener::from_unix_listener(
+            listener,
+            handler,
+            self.http2_listener_config(host_policy),
+        )))
+    }
+
+    fn registered_streaming_handler(
+        self: &Arc<Self>,
+        streaming: ServerStreamingConfig,
+    ) -> io::Result<impl Fn(HttpRequest) -> ProducedGrpcFuture + Send + Sync + 'static> {
         streaming.validate()?;
         self.validate_http2_transport_config()?;
         if self.services.is_empty() {
@@ -197,17 +233,10 @@ impl Server {
         self.streaming_output_codec(self.config.send_compression)
             .map_err(io::Error::other)?;
         let server = Arc::clone(self);
-        let handler = move |request: HttpRequest| -> ProducedGrpcFuture {
+        Ok(move |request: HttpRequest| -> ProducedGrpcFuture {
             let server = Arc::clone(&server);
             Box::pin(async move { server.dispatch_http2_streaming(request, streaming).await })
-        };
-        Http2Listener::bind_produced_with_config(
-            addr,
-            handler,
-            self.http2_listener_config(host_policy),
-        )
-        .await
-        .map(|listener| self.with_http2_keepalive(listener))
+        })
     }
 
     /// Bind and run the mixed unary/server-streaming registered-service lane.

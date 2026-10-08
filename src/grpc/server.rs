@@ -1464,6 +1464,45 @@ impl Server {
     where
         A: std::net::ToSocketAddrs + Send + 'static,
     {
+        let (transport_handler, config) = self.registered_http2_handler(host_policy)?;
+        Http2Listener::bind_with_config(addr, transport_handler, config)
+            .await
+            .map(|listener| self.with_http2_keepalive(listener))
+    }
+
+    /// [`Self::bind_registered_http2`] on a Unix-domain socket listener, the
+    /// usual transport of node-local gRPC services (CSI and device plugins,
+    /// container runtimes, sidecars). Clients dial `unix:` targets with
+    /// HTTP/2 prior knowledge; most send `:authority` `localhost`, which
+    /// `host_policy` must admit. Drive the listener with
+    /// [`Http2Listener::run`]. Requests carry no peer address, and TLS is not
+    /// available on this transport (see [`Http2Listener::from_unix_listener`]).
+    ///
+    /// # Errors
+    /// Refuses a server without services or with invalid transport limits.
+    #[cfg(unix)]
+    pub fn bind_registered_http2_unix(
+        self: &Arc<Self>,
+        listener: crate::net::unix::UnixListener,
+        host_policy: HostPolicy,
+    ) -> io::Result<Http2Listener<impl Fn(HttpRequest) -> GrpcHttp2Future + Send + Sync + 'static>>
+    {
+        let (transport_handler, config) = self.registered_http2_handler(host_policy)?;
+        Ok(self.with_http2_keepalive(Http2Listener::from_unix_listener(
+            listener,
+            transport_handler,
+            config,
+        )))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn registered_http2_handler(
+        self: &Arc<Self>,
+        host_policy: HostPolicy,
+    ) -> io::Result<(
+        impl Fn(HttpRequest) -> GrpcHttp2Future + Send + Sync + 'static,
+        Http2ListenerConfig,
+    )> {
         if self.services.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1477,9 +1516,7 @@ impl Server {
             let server = Arc::clone(&server);
             Box::pin(async move { server.dispatch_http2_registered_unary(request).await })
         };
-        Http2Listener::bind_with_config(addr, transport_handler, config)
-            .await
-            .map(|listener| self.with_http2_keepalive(listener))
+        Ok((transport_handler, config))
     }
 
     /// Bind and run the registered-service native HTTP/2 listener.

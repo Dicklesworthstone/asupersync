@@ -34,6 +34,8 @@ use crate::http::h2::stream::StreamState;
 use crate::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, ReadBuf};
 use crate::net::tcp::listener::TcpListener;
 use crate::net::tcp::stream::TcpStream;
+#[cfg(unix)]
+use crate::net::unix::{UnixListener, UnixStream};
 use crate::runtime::{JoinError, JoinHandle, RuntimeHandle, SpawnError, TaskHandle};
 use crate::server::connection::ConnectionManager;
 use crate::server::shutdown::{
@@ -169,12 +171,12 @@ fn h2_driver_now() -> Time {
 
 /// Count socket writes beneath TLS, where flushing encrypted records can make
 /// progress after the framed plaintext buffer has already emptied.
-struct H2Socket {
-    stream: TcpStream,
+struct H2Socket<S = TcpStream> {
+    stream: S,
     bytes_written: u64,
 }
 
-impl AsyncRead for H2Socket {
+impl<S: AsyncRead + Unpin> AsyncRead for H2Socket<S> {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -184,7 +186,7 @@ impl AsyncRead for H2Socket {
     }
 }
 
-impl AsyncWrite for H2Socket {
+impl<S: AsyncWrite + Unpin> AsyncWrite for H2Socket<S> {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -225,6 +227,8 @@ impl AsyncWrite for H2Socket {
 /// Keep the frame pump identical for cleartext and authenticated TLS listeners.
 enum H2Transport {
     Plain(H2Socket),
+    #[cfg(unix)]
+    Unix(H2Socket<UnixStream>),
     #[cfg(feature = "tls")]
     Tls(Box<TlsStream<H2Socket>>),
 }
@@ -233,6 +237,8 @@ impl H2Transport {
     fn bytes_written(&self) -> u64 {
         match self {
             Self::Plain(socket) => socket.bytes_written,
+            #[cfg(unix)]
+            Self::Unix(socket) => socket.bytes_written,
             #[cfg(feature = "tls")]
             Self::Tls(stream) => stream.get_ref().bytes_written,
         }
@@ -247,6 +253,8 @@ impl AsyncRead for H2Transport {
     ) -> Poll<io::Result<()>> {
         match self.get_mut() {
             Self::Plain(stream) => Pin::new(stream).poll_read(cx, buf),
+            #[cfg(unix)]
+            Self::Unix(stream) => Pin::new(stream).poll_read(cx, buf),
             #[cfg(feature = "tls")]
             Self::Tls(stream) => Pin::new(stream.as_mut()).poll_read(cx, buf),
         }
@@ -261,6 +269,8 @@ impl AsyncWrite for H2Transport {
     ) -> Poll<io::Result<usize>> {
         match self.get_mut() {
             Self::Plain(stream) => Pin::new(stream).poll_write(cx, buf),
+            #[cfg(unix)]
+            Self::Unix(stream) => Pin::new(stream).poll_write(cx, buf),
             #[cfg(feature = "tls")]
             Self::Tls(stream) => Pin::new(stream.as_mut()).poll_write(cx, buf),
         }
@@ -273,6 +283,8 @@ impl AsyncWrite for H2Transport {
     ) -> Poll<io::Result<usize>> {
         match self.get_mut() {
             Self::Plain(stream) => Pin::new(stream).poll_write_vectored(cx, bufs),
+            #[cfg(unix)]
+            Self::Unix(stream) => Pin::new(stream).poll_write_vectored(cx, bufs),
             #[cfg(feature = "tls")]
             Self::Tls(stream) => Pin::new(stream.as_mut()).poll_write_vectored(cx, bufs),
         }
@@ -281,6 +293,8 @@ impl AsyncWrite for H2Transport {
     fn is_write_vectored(&self) -> bool {
         match self {
             Self::Plain(stream) => stream.is_write_vectored(),
+            #[cfg(unix)]
+            Self::Unix(stream) => stream.is_write_vectored(),
             #[cfg(feature = "tls")]
             Self::Tls(stream) => stream.is_write_vectored(),
         }
@@ -289,6 +303,8 @@ impl AsyncWrite for H2Transport {
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match self.get_mut() {
             Self::Plain(stream) => Pin::new(stream).poll_flush(cx),
+            #[cfg(unix)]
+            Self::Unix(stream) => Pin::new(stream).poll_flush(cx),
             #[cfg(feature = "tls")]
             Self::Tls(stream) => Pin::new(stream.as_mut()).poll_flush(cx),
         }
@@ -297,8 +313,68 @@ impl AsyncWrite for H2Transport {
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match self.get_mut() {
             Self::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
+            #[cfg(unix)]
+            Self::Unix(stream) => Pin::new(stream).poll_shutdown(cx),
             #[cfg(feature = "tls")]
             Self::Tls(stream) => Pin::new(stream.as_mut()).poll_shutdown(cx),
+        }
+    }
+}
+
+/// A connection the listener accepted.
+enum H2Accepted {
+    Tcp(TcpStream),
+    #[cfg(unix)]
+    Unix(UnixStream),
+}
+
+/// The socket a listener accepts connections on.
+enum H2AcceptSource {
+    Tcp(TcpListener),
+    #[cfg(unix)]
+    Unix(UnixListener),
+}
+
+/// Stands in for a Unix-domain peer in the connection manager, which keys its
+/// per-IP accounting by socket address: every local peer of a Unix-domain
+/// listener shares this one entry. Requests from such a peer carry no
+/// `peer_addr`.
+#[cfg(unix)]
+const UNIX_PEER_PLACEHOLDER: SocketAddr =
+    SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0);
+
+impl H2AcceptSource {
+    async fn accept(&self) -> io::Result<(H2Accepted, Option<SocketAddr>)> {
+        match self {
+            Self::Tcp(listener) => listener
+                .accept()
+                .await
+                .map(|(stream, addr)| (H2Accepted::Tcp(stream), Some(addr))),
+            #[cfg(unix)]
+            Self::Unix(listener) => listener
+                .accept()
+                .await
+                .map(|(stream, _)| (H2Accepted::Unix(stream), None)),
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        match self {
+            Self::Tcp(listener) => listener.local_addr(),
+            #[cfg(unix)]
+            Self::Unix(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a Unix-domain HTTP/2 listener has no socket address",
+            )),
+        }
+    }
+
+    #[cfg_attr(not(feature = "tls"), allow(dead_code))]
+    const fn is_unix(&self) -> bool {
+        match self {
+            Self::Tcp(_) => false,
+            #[cfg(unix)]
+            Self::Unix(_) => true,
         }
     }
 }
@@ -3260,10 +3336,57 @@ fn listener_framed<T>(io: T, max_frame_size: u32) -> Framed<T, ListenerFrameCode
     Framed::new(io, frame_codec_for(max_frame_size)).with_max_buffer_len(max_buffer_len)
 }
 
+/// The transport for an accepted TCP connection: TLS when the listener has an
+/// acceptor (handshake bounded and refused without h2 ALPN), else cleartext.
+/// `None` when force-close interrupted the handshake.
+async fn h2_tcp_transport(
+    task_cx: &Cx,
+    socket: H2Socket,
+    #[cfg(feature = "tls")] tls_acceptor: Option<TlsAcceptor>,
+    shutdown_signal: &ShutdownSignal,
+    transport_timeouts: H2TransportTimeouts,
+) -> io::Result<Option<H2Transport>> {
+    #[cfg(feature = "tls")]
+    if let Some(acceptor) = tls_acceptor {
+        // Handshakes remain in the connection-owned task, so a silent peer
+        // cannot block accepting siblings. Dropping a timed-out or cancelled
+        // handshake also drops its socket and releases its connection slot.
+        let handshake = crate::time::timeout(
+            task_cx.now(),
+            transport_timeouts.tls_handshake,
+            acceptor.accept(socket),
+        );
+        let tls = match race_force_close(shutdown_signal, handshake).await {
+            Some(Ok(result)) => result.map_err(io::Error::other)?,
+            Some(Err(_)) => {
+                task_cx.trace("h2_transport_tls_handshake_deadline_expired");
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "HTTP/2 TLS handshake deadline expired",
+                ));
+            }
+            None => return Ok(None),
+        };
+        // The acceptor may also serve HTTP/1.1 or allow absent ALPN. This
+        // listener only speaks h2 and must reject those outcomes before the
+        // preface, SETTINGS, or any request handler can reach the wire.
+        if tls.alpn_protocol() != Some(b"h2".as_slice()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "HTTP/2 TLS requires h2 ALPN negotiation",
+            ));
+        }
+        return Ok(Some(H2Transport::Tls(Box::new(tls))));
+    }
+    #[cfg(not(feature = "tls"))]
+    let _ = (task_cx, shutdown_signal, transport_timeouts);
+    Ok(Some(H2Transport::Plain(socket)))
+}
+
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
 async fn serve_h2_connection<F, Fut>(
-    stream: TcpStream,
+    stream: H2Accepted,
     #[cfg(feature = "tls")] tls_acceptor: Option<TlsAcceptor>,
     peer_addr: Option<SocketAddr>,
     handler: Arc<F>,
@@ -3292,46 +3415,33 @@ where
 {
     let task_cx = Cx::current()
         .ok_or_else(|| io::Error::other("h2 connection task requires a runtime Cx"))?;
-    let socket = H2Socket {
-        stream,
-        bytes_written: 0,
-    };
-    #[cfg(feature = "tls")]
-    let mut stream = if let Some(acceptor) = tls_acceptor {
-        // Handshakes remain in the connection-owned task, so a silent peer
-        // cannot block accepting siblings. Dropping a timed-out or cancelled
-        // handshake also drops its socket and releases its connection slot.
-        let handshake = crate::time::timeout(
-            task_cx.now(),
-            transport_timeouts.tls_handshake,
-            acceptor.accept(socket),
-        );
-        let tls = match race_force_close(&shutdown_signal, handshake).await {
-            Some(Ok(result)) => result.map_err(io::Error::other)?,
-            Some(Err(_)) => {
-                task_cx.trace("h2_transport_tls_handshake_deadline_expired");
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "HTTP/2 TLS handshake deadline expired",
-                ));
-            }
-            None => return Ok(()),
-        };
-        // The acceptor may also serve HTTP/1.1 or allow absent ALPN. This
-        // listener only speaks h2 and must reject those outcomes before the
-        // preface, SETTINGS, or any request handler can reach the wire.
-        if tls.alpn_protocol() != Some(b"h2".as_slice()) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "HTTP/2 TLS requires h2 ALPN negotiation",
-            ));
+    let mut stream = match stream {
+        H2Accepted::Tcp(stream) => {
+            let socket = H2Socket {
+                stream,
+                bytes_written: 0,
+            };
+            let transport = h2_tcp_transport(
+                &task_cx,
+                socket,
+                #[cfg(feature = "tls")]
+                tls_acceptor,
+                &shutdown_signal,
+                transport_timeouts,
+            )
+            .await?;
+            let Some(transport) = transport else {
+                return Ok(());
+            };
+            transport
         }
-        H2Transport::Tls(Box::new(tls))
-    } else {
-        H2Transport::Plain(socket)
+        // `run` refuses TLS on a Unix-domain listener before accepting.
+        #[cfg(unix)]
+        H2Accepted::Unix(stream) => H2Transport::Unix(H2Socket {
+            stream,
+            bytes_written: 0,
+        }),
     };
-    #[cfg(not(feature = "tls"))]
-    let mut stream = H2Transport::Plain(socket);
     let mut request_owners = H2RequestOwners::new(&task_cx).await?;
     #[cfg(feature = "http2-streaming")]
     let mut incoming = streaming.map(StreamingRequests::new);
@@ -4772,7 +4882,7 @@ fn h2_shutdown_signal_for_time_getter(time_getter: fn() -> Time) -> ShutdownSign
 ///
 /// [`Http1Listener`]: crate::http::h1::listener::Http1Listener
 pub struct Http2Listener<F> {
-    tcp_listener: TcpListener,
+    listener: H2AcceptSource,
     #[cfg(feature = "tls")]
     tls_acceptor: Option<TlsAcceptor>,
     handler: Arc<F>,
@@ -4805,7 +4915,11 @@ where
         config: Http2ListenerConfig,
     ) -> io::Result<Self> {
         let tcp_listener = TcpListener::bind(addr).await?;
-        Ok(Self::from_parts(tcp_listener, handler, config))
+        Ok(Self::from_parts(
+            H2AcceptSource::Tcp(tcp_listener),
+            handler,
+            config,
+        ))
     }
 
     /// Create from an existing [`TcpListener`] with custom configuration.
@@ -4815,7 +4929,7 @@ where
         handler: F,
         config: Http2ListenerConfig,
     ) -> Self {
-        Self::from_parts(tcp_listener, handler, config)
+        Self::from_parts(H2AcceptSource::Tcp(tcp_listener), handler, config)
     }
 
     /// Run the accept loop until shutdown, then drain with request-aware
@@ -4921,7 +5035,11 @@ impl<F> Http2Listener<F> {
         Fut: Future<Output = R> + Send + 'static,
         R: IntoHttp2Response + Send + 'static,
     {
-        let mut listener = Self::from_parts(tcp_listener, handler, config.listener.clone());
+        let mut listener = Self::from_parts(
+            H2AcceptSource::Tcp(tcp_listener),
+            handler,
+            config.listener.clone(),
+        );
         listener.streaming_config = Some(config);
         listener
     }
@@ -4992,7 +5110,11 @@ impl<F> Http2Listener<F> {
         F: Fn(crate::http::h1::stream::StreamingServerRequest) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Http2ProducedResponse> + Send + 'static,
     {
-        let mut listener = Self::from_parts(tcp_listener, handler, config.listener.clone());
+        let mut listener = Self::from_parts(
+            H2AcceptSource::Tcp(tcp_listener),
+            handler,
+            config.listener.clone(),
+        );
         listener.streaming_config = Some(config);
         listener
     }
@@ -5054,7 +5176,11 @@ impl<F> Http2Listener<F> {
         Fut: Future<Output = Http2ProducedResponse> + Send + 'static,
     {
         let tcp_listener = TcpListener::bind(addr).await?;
-        Ok(Self::from_parts(tcp_listener, handler, config))
+        Ok(Self::from_parts(
+            H2AcceptSource::Tcp(tcp_listener),
+            handler,
+            config,
+        ))
     }
 
     /// Create a produced-response listener from an existing TCP listener.
@@ -5068,10 +5194,47 @@ impl<F> Http2Listener<F> {
         F: Fn(Request) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Http2ProducedResponse> + Send + 'static,
     {
-        Self::from_parts(tcp_listener, handler, config)
+        Self::from_parts(H2AcceptSource::Tcp(tcp_listener), handler, config)
     }
 
-    fn from_parts(tcp_listener: TcpListener, handler: F, config: Http2ListenerConfig) -> Self {
+    /// Serve on a Unix-domain socket listener instead of TCP, for any handler
+    /// kind: drive it with [`Self::run`], [`Self::run_produced`] or the
+    /// streaming runs, as for the matching TCP constructor.
+    ///
+    /// Clients connect with HTTP/2 prior knowledge, as on a cleartext TCP
+    /// listener. Requests carry no `peer_addr`, and every peer shares one
+    /// entry in the connection manager's per-address accounting. TLS is not
+    /// applied: a listener given `with_tls` refuses to run. Access
+    /// control is the socket file's permissions.
+    #[cfg(unix)]
+    #[must_use]
+    pub fn from_unix_listener(
+        listener: UnixListener,
+        handler: F,
+        config: Http2ListenerConfig,
+    ) -> Self {
+        Self::from_parts(H2AcceptSource::Unix(listener), handler, config)
+    }
+
+    /// The live request-body form of [`Self::from_unix_listener`], for
+    /// [`Self::run_streaming`] and [`Self::run_streaming_produced`].
+    #[cfg(all(unix, feature = "http2-streaming"))]
+    #[must_use]
+    pub fn from_unix_listener_streaming(
+        listener: UnixListener,
+        handler: F,
+        config: Http2StreamingListenerConfig,
+    ) -> Self {
+        let mut listener = Self::from_parts(
+            H2AcceptSource::Unix(listener),
+            handler,
+            config.listener.clone(),
+        );
+        listener.streaming_config = Some(config);
+        listener
+    }
+
+    fn from_parts(listener: H2AcceptSource, handler: F, config: Http2ListenerConfig) -> Self {
         let shutdown_signal = h2_shutdown_signal_for_time_getter(config.time_getter);
         let connection_manager = ConnectionManager::with_time_getter(
             config.max_connections,
@@ -5080,7 +5243,7 @@ impl<F> Http2Listener<F> {
         );
         let stats = Arc::new(Http2ListenerStats::new(config.time_getter));
         Self {
-            tcp_listener,
+            listener,
             #[cfg(feature = "tls")]
             tls_acceptor: None,
             handler: Arc::new(handler),
@@ -5213,8 +5376,11 @@ impl<F> Http2Listener<F> {
     }
 
     /// Returns the local address this listener is bound to.
+    ///
+    /// A listener made with [`Self::from_unix_listener`] has no socket
+    /// address and returns an `InvalidInput` error.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.tcp_listener.local_addr()
+        self.listener.local_addr()
     }
 
     /// Run the accept loop with an output type that may defer a bounded body
@@ -5281,6 +5447,15 @@ impl<F> Http2Listener<F> {
         MFut: Future<Output = H2DispatchResponse> + Send + 'static,
     {
         let owner_cancel = owner.clone();
+        // TLS is applied to TCP connections only; refuse rather than serve a
+        // Unix-domain socket in cleartext that was configured for TLS.
+        #[cfg(feature = "tls")]
+        if self.tls_acceptor.is_some() && self.listener.is_unix() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Http2Listener::with_tls is not supported on a Unix-domain listener",
+            ));
+        }
         // An acceptor that cannot negotiate h2 would complete a full handshake
         // with every client and then reject it: refuse it at startup instead.
         #[cfg(feature = "tls")]
@@ -5306,7 +5481,7 @@ impl<F> Http2Listener<F> {
         let mut shutdown_rx = self.shutdown_signal.subscribe();
 
         enum AcceptOrShutdown {
-            Accept(io::Result<(TcpStream, SocketAddr)>),
+            Accept(io::Result<(H2Accepted, Option<SocketAddr>)>),
             Shutdown,
         }
 
@@ -5318,7 +5493,7 @@ impl<F> Http2Listener<F> {
             }
 
             let result = {
-                let accept_fut = self.tcp_listener.accept();
+                let accept_fut = self.listener.accept();
                 let shutdown_fut = shutdown_rx.wait();
                 let mut accept_fut = core::pin::pin!(accept_fut);
                 let mut shutdown_fut = core::pin::pin!(shutdown_fut);
@@ -5363,7 +5538,14 @@ impl<F> Http2Listener<F> {
                 AcceptOrShutdown::Accept(Err(e)) => return Err(e),
             };
 
-            let Some(guard) = self.connection_manager.register(addr) else {
+            #[cfg(unix)]
+            let registered_addr = addr.unwrap_or(UNIX_PEER_PLACEHOLDER);
+            #[cfg(not(unix))]
+            let Some(registered_addr) = addr else {
+                drop(stream);
+                continue;
+            };
+            let Some(guard) = self.connection_manager.register(registered_addr) else {
                 drop(stream);
                 continue;
             };
@@ -5394,7 +5576,7 @@ impl<F> Http2Listener<F> {
             // Check the connection's Send boundary once before the runtime's
             // nested task wrappers instantiate it for each handler type.
             let connection: Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async move {
-                let peer_addr = Some(addr);
+                let peer_addr = addr;
                 if let Err(err) = serve_h2_connection(
                     stream,
                     #[cfg(feature = "tls")]
@@ -5455,10 +5637,7 @@ impl<F> Http2Listener<F> {
         }
 
         // Drain phase: socket lifetime is explicit (h1 D2.4 AC5 parity).
-        let parked_socket = self
-            .config
-            .lb_compat_keep_socket
-            .then_some(self.tcp_listener);
+        let parked_socket = self.config.lb_compat_keep_socket.then_some(self.listener);
 
         if self.shutdown_signal.phase() == ShutdownPhase::Running {
             let _ = self

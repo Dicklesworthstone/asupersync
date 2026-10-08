@@ -319,6 +319,44 @@ impl Server {
     where
         A: ToSocketAddrs + Send + 'static,
     {
+        let (handler, input) = self.registered_duplex_handler(host_policy, config)?;
+        Http2Listener::bind_streaming_produced_with_config(addr, handler, input)
+            .await
+            .map(|listener| self.with_http2_keepalive(listener))
+    }
+
+    /// [`Self::bind_registered_duplex_http2`] on a Unix-domain socket
+    /// listener; drive it with `Http2Listener::run_streaming_produced`. See
+    /// [`Server::bind_registered_http2_unix`] for the transport's terms.
+    ///
+    /// # Errors
+    /// The same refusals as the TCP form, before any connection is accepted.
+    #[cfg(unix)]
+    pub fn bind_registered_duplex_http2_unix(
+        self: &Arc<Self>,
+        listener: crate::net::unix::UnixListener,
+        host_policy: HostPolicy,
+        config: ServerDuplexConfig,
+    ) -> io::Result<
+        Http2Listener<impl Fn(StreamingServerRequest) -> DuplexFuture + Send + Sync + 'static>,
+    > {
+        // The input configuration is checked when the listener starts running.
+        let (handler, input) = self.registered_duplex_handler(host_policy, config)?;
+        Ok(
+            self.with_http2_keepalive(Http2Listener::from_unix_listener_streaming(
+                listener, handler, input,
+            )),
+        )
+    }
+
+    fn registered_duplex_handler(
+        self: &Arc<Self>,
+        host_policy: HostPolicy,
+        config: ServerDuplexConfig,
+    ) -> io::Result<(
+        impl Fn(StreamingServerRequest) -> DuplexFuture + Send + Sync + 'static,
+        Http2StreamingListenerConfig,
+    )> {
         config.response.validate()?;
         self.validate_http2_transport_config()?;
         self.streaming_output_codec(self.config.send_compression)
@@ -347,9 +385,7 @@ impl Server {
             let config = config.clone();
             Box::pin(async move { server.dispatch_http2_duplex(request, config).await })
         };
-        Http2Listener::bind_streaming_produced_with_config(addr, handler, input)
-            .await
-            .map(|listener| self.with_http2_keepalive(listener))
+        Ok((handler, input))
     }
 
     /// Bind and run the native registered duplex listener through shutdown.
