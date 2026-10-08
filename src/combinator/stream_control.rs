@@ -132,18 +132,15 @@ where
         Ok(close) => close,
         Err(error) => return Outcome::Err(ScopedStreamError::Region(error)),
     };
-    // Same scoped severity rules: intentional descendant cancellation during
-    // close does not fabricate a failure, but failed cleanup cannot be success.
-    let outcome = match (work, close.outcome, close.cleanup_outcome) {
-        (_, _, Some(Outcome::Panicked(payload)))
-        | (_, Outcome::Panicked(payload), _)
-        | (Outcome::Panicked(payload), _, _) => Outcome::Panicked(payload),
-        (_, _, Some(Outcome::Cancelled(reason))) => Outcome::Cancelled(reason),
-        (_, _, Some(Outcome::Err(error))) => Outcome::Err(ScopedStreamError::Cleanup(error)),
-        (Outcome::Ok(()), Outcome::Err(error), _) => Outcome::Err(ScopedStreamError::Cleanup(error)),
-        (work, _, _) => scope_error(work),
-    };
-    if outcome.is_ok() && cx.is_cancel_requested() {
+    // The same scoped severity rules, from the same function: intentional
+    // descendant cancellation during close does not fabricate a failure,
+    // failed cleanup cannot be success, and a panic in a nested descendant
+    // region is surfaced (br-asupersync-b834ta). This match used to ignore
+    // that last part, so a nested region's panic was reported as Ok.
+    let outcome = super::stream_collect::scoped_outcome(work, close);
+    // As in try_for_each_concurrent_scoped: a cancelled owner gets its own
+    // reason back, not the driver's generic one.
+    if matches!(outcome, Outcome::Ok(()) | Outcome::Cancelled(_)) && cx.is_cancel_requested() {
         Outcome::Cancelled(owner_reason(cx))
     } else {
         outcome

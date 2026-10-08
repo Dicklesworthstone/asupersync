@@ -105,7 +105,11 @@ where
         Err(error) => return Outcome::Err(ScopedStreamError::Region(error)),
     };
     let outcome = scoped_outcome(work, close);
-    if outcome.is_ok() && cx.is_cancel_requested() {
+    // A cancelled owner gets its own reason back, also when the stream driver
+    // saw the cancellation while items ran: the driver reports that one with a
+    // generic reason, so the same cancellation read differently depending on
+    // whether it landed before the call, during the run or during close.
+    if matches!(outcome, Outcome::Ok(()) | Outcome::Cancelled(_)) && cx.is_cancel_requested() {
         Outcome::Cancelled(scoped_cancel_reason(cx))
     } else {
         outcome
@@ -145,7 +149,7 @@ fn scoped_cancel_reason(cx: &Cx) -> crate::types::CancelReason {
     })
 }
 
-fn scoped_outcome<E>(
+pub(super) fn scoped_outcome<E>(
     work: Outcome<(), E>,
     close: crate::record::region::RegionCloseOutcome,
 ) -> Outcome<(), ScopedStreamError<E>> {
@@ -1000,5 +1004,52 @@ mod scoped_tests {
         assert!(matches!(work.as_mut().poll(&mut task), std::task::Poll::Ready(Outcome::Cancelled(_))));
         drop(work);
         assert_eq!(polls.get(), 0);
+    }
+
+    /// An owner cancelled while an item runs gets its own reason back, as it
+    /// does when cancelled before the call. The stream driver used to report
+    /// that case as a generic User cancellation.
+    #[test]
+    fn scoped_owner_cancelled_mid_run_gets_its_own_reason() {
+        let ((), report) = run_async_under_lab(0x5C016, |cx| async move {
+            let parked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let observed = Arc::new(Mutex::new(None));
+            let (park, record) = (Arc::clone(&parked), Arc::clone(&observed));
+            let mut driver = cx
+                .spawn(move |owner| async move {
+                    let result = try_for_each_concurrent_scoped(
+                        &owner,
+                        iter([()]),
+                        1,
+                        move |item_cx, ()| {
+                            let parked = Arc::clone(&park);
+                            async move {
+                                parked.store(true, Ordering::SeqCst);
+                                item_cx.cancelled().await;
+                                Ok::<(), ()>(())
+                            }
+                        },
+                    )
+                    .await;
+                    *record.lock() = Some(match result {
+                        Outcome::Cancelled(reason) => Ok(reason.kind()),
+                        other => Err(format!("{other:?}")),
+                    });
+                })
+                .unwrap();
+            while !parked.load(Ordering::SeqCst) {
+                yield_now().await;
+            }
+            driver.abort_with_reason(crate::types::CancelReason::new(
+                crate::types::CancelKind::Shutdown,
+            ));
+            let _ = driver.join(&cx).await;
+            assert_eq!(
+                observed.lock().take(),
+                Some(Ok(crate::types::CancelKind::Shutdown)),
+                "the owner's own reason, not the driver's generic one"
+            );
+        });
+        assert!(report.quiescent && report.invariant_violations.is_empty());
     }
 }

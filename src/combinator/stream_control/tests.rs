@@ -293,3 +293,94 @@ fn stop_during_error_drain_does_not_replace_the_selected_item_failure() {
     assert!(report.quiescent && report.invariant_violations.is_empty());
 }
 }
+
+/// A panic in a region nested under an item is reported even though the item
+/// itself succeeded. This function's close used to skip the descendant-panic
+/// half of the scoped rules (br-asupersync-b834ta's fix in stream_collect), so
+/// it returned Ok.
+#[test]
+fn nested_region_panic_is_not_hidden_by_a_successful_item() {
+    let ((), report) = run_async_under_lab(0x5706, |cx| async move {
+        let kept = Arc::new(parking_lot::Mutex::new((Vec::new(), Vec::new())));
+        let keep = Arc::clone(&kept);
+        let outcome = try_for_each_concurrent_scoped_until(
+            &cx,
+            iter([()]),
+            1,
+            std::future::pending::<&'static str>(),
+            move |child, ()| {
+                let keep = Arc::clone(&keep);
+                async move {
+                    let nested = child
+                        .open_child_region(ChildRegionSpec::inherit())
+                        .await
+                        .unwrap();
+                    let handle = nested
+                        .cx()
+                        .spawn(|_| async {
+                            panic!("nested descendant panic");
+                        })
+                        .unwrap();
+                    // Kept outside the item, so only the scoped close retires them.
+                    let mut kept = keep.lock();
+                    kept.0.push(handle);
+                    kept.1.push(nested);
+                    Ok(())
+                }
+            },
+        )
+        .await;
+        assert!(
+            matches!(outcome, Outcome::Panicked(ref p) if p.message().contains("nested descendant panic")),
+            "{outcome:?}"
+        );
+        drop(kept);
+    });
+    assert!(report.quiescent && report.invariant_violations.is_empty());
+}
+
+/// An owner cancelled while an item runs gets its own reason back, as it does
+/// when cancelled before the call. The stream driver used to report that case
+/// as a generic User cancellation.
+#[test]
+fn owner_cancelled_mid_run_gets_its_own_reason() {
+    let ((), report) = run_async_under_lab(0x5707, |cx| async move {
+        let parked = Arc::new(AtomicBool::new(false));
+        let observed = Arc::new(parking_lot::Mutex::new(None));
+        let (park, record) = (Arc::clone(&parked), Arc::clone(&observed));
+        let mut producer = cx
+            .spawn(move |owner| async move {
+                let result = try_for_each_concurrent_scoped_until(
+                    &owner,
+                    iter([()]),
+                    1,
+                    std::future::pending::<&'static str>(),
+                    move |child, ()| {
+                        let parked = Arc::clone(&park);
+                        async move {
+                            parked.store(true, Ordering::SeqCst);
+                            child.cancelled().await;
+                            Ok(())
+                        }
+                    },
+                )
+                .await;
+                *record.lock() = Some(match result {
+                    Outcome::Cancelled(reason) => Ok(reason.kind()),
+                    other => Err(format!("{other:?}")),
+                });
+            })
+            .unwrap();
+        while !parked.load(Ordering::SeqCst) {
+            yield_now().await;
+        }
+        producer.abort_with_reason(CancelReason::new(crate::types::CancelKind::Shutdown));
+        let _ = producer.join(&cx).await;
+        assert_eq!(
+            observed.lock().take(),
+            Some(Ok(crate::types::CancelKind::Shutdown)),
+            "the owner's own reason, not the driver's generic one"
+        );
+    });
+    assert!(report.quiescent && report.invariant_violations.is_empty());
+}
