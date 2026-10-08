@@ -1059,6 +1059,42 @@ impl<T: FromSql> FromSql for Option<T> {
     }
 }
 
+// ---- Untyped text ----
+
+/// A text parameter whose type the server infers from the statement, as libpq
+/// sends parameters by default.
+///
+/// `str` and `String` bind as `text`, which PostgreSQL does not convert to
+/// most other types implicitly, so `"6f1c…"` bound for a `uuid` column fails
+/// with "column is of type uuid but expression is of type text" unless the
+/// SQL casts it (`$1::uuid`). `Untyped` leaves the type unspecified: the
+/// server reads the text with the input function of whatever type the
+/// position needs (a `uuid`, `numeric`, `inet`, `date` or `interval`
+/// column, or the other side of a comparison).
+///
+/// Where nothing in the statement fixes a type (a bare `SELECT $1`, or an
+/// overloaded function such as `length($1)`), PostgreSQL resolves the
+/// parameter as `text` or reports it ambiguous; cast it in the SQL there.
+///
+/// ```ignore
+/// conn.execute_params(&cx, "INSERT INTO users (id) VALUES ($1)", &[&Untyped(id)]).await;
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Untyped<'a>(pub &'a str);
+
+impl ToSql for Untyped<'_> {
+    fn to_sql(&self, buf: &mut Vec<u8>) -> Result<IsNull, PgError> {
+        buf.extend_from_slice(self.0.as_bytes());
+        Ok(IsNull::No)
+    }
+    fn type_oid(&self) -> u32 {
+        0
+    }
+    fn format(&self) -> Format {
+        Format::Text
+    }
+}
+
 // ---- Timestamps ----
 
 /// Microseconds from the Unix epoch to PostgreSQL's epoch, 2000-01-01 UTC.

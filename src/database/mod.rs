@@ -61,7 +61,7 @@ pub use postgres::{
     DEFAULT_NOTIFICATION_CAPACITY, Format as PgFormat, FromSql as PgFromSql, IsNull as PgIsNull,
     PgArrayElement, PgColumn, PgConnectOptions, PgConnection, PgError, PgNotification,
     PgNotificationError, PgNotifications, PgRow, PgStatement, PgTransaction, PgValue,
-    PreparedCacheStats, SslMode, ToSql as PgToSql, oid as pg_oid,
+    PreparedCacheStats, SslMode, ToSql as PgToSql, Untyped as PgUntyped, oid as pg_oid,
 };
 
 #[cfg(feature = "mysql")]

@@ -1736,3 +1736,114 @@ fn pg_real_timestamps_and_json_bind_and_decode() {
         log.end("pass");
     });
 }
+
+/// `Untyped` text binds into columns whose types `text` does not convert to
+/// (uuid, numeric, inet, date, interval) and into a comparison, on the
+/// unprepared and the prepared path; the same value bound as `&str` is
+/// refused, which is what `Untyped` exists for.
+#[test]
+fn pg_real_untyped_text_binds_where_the_server_infers_the_type() {
+    use asupersync::database::postgres::{ToSql, Untyped};
+
+    let cfg = RealPgConfig::from_env();
+    if skip_if_disabled(
+        &cfg,
+        "pg_real_untyped_text_binds_where_the_server_infers_the_type",
+    ) {
+        return;
+    }
+    let log = PgTestLogger::new(
+        "postgres_real",
+        "pg_real_untyped_text_binds_where_the_server_infers_the_type",
+    );
+
+    run_test_with_cx(|cx| async move {
+        let mut conn = unwrap_pg(PgConnection::connect(&cx, &cfg.url).await, &log, "connect");
+        unwrap_pg(
+            conn.execute_unchecked(
+                &cx,
+                "CREATE TEMP TABLE asupersync_untyped \
+                 (id uuid, amount numeric(10, 2), addr inet, day date, span interval)",
+            )
+            .await,
+            &log,
+            "create",
+        );
+        let insert = "INSERT INTO asupersync_untyped VALUES ($1, $2, $3, $4, $5)";
+
+        log.phase("typed_text_refused");
+        let id = "6f1c2d3e-4b5a-4c6d-8e7f-0123456789ab";
+        let params: &[&dyn ToSql] = &[&id, &"12.50", &"10.0.0.1", &"2026-10-08", &"1 day"];
+        match conn.execute_params(&cx, insert, params).await {
+            Outcome::Err(PgError::Server { code, .. }) => assert_eq!(code, "42804"),
+            other => panic!("text into uuid must be refused: {other:?}"),
+        }
+
+        log.phase("unprepared");
+        let params: &[&dyn ToSql] = &[
+            &Untyped(id),
+            &Untyped("12.50"),
+            &Untyped("10.0.0.1"),
+            &Untyped("2026-10-08"),
+            &Untyped("1 day 02:00:00"),
+        ];
+        unwrap_pg(
+            conn.execute_params(&cx, insert, params).await,
+            &log,
+            "insert",
+        );
+
+        log.phase("prepared");
+        let stmt = unwrap_pg(conn.prepare(&cx, insert).await, &log, "prepare");
+        let second = "00000000-0000-0000-0000-000000000002";
+        let params: &[&dyn ToSql] = &[
+            &Untyped(second),
+            &Untyped("0.05"),
+            &Untyped("::1"),
+            &Untyped("1999-12-31"),
+            &Untyped("-3 hours"),
+        ];
+        unwrap_pg(
+            conn.execute_prepared(&cx, &stmt, params).await,
+            &log,
+            "execute_prepared",
+        );
+
+        log.phase("compare");
+        let params: &[&dyn ToSql] = &[&Untyped(id)];
+        let rows = unwrap_pg(
+            conn.query_params(
+                &cx,
+                "SELECT id::text AS id, amount::text AS amount, addr::text AS addr, \
+                 day::text AS day, span::text AS span FROM asupersync_untyped WHERE id = $1",
+                params,
+            )
+            .await,
+            &log,
+            "select",
+        );
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.get_str("id").expect("id"), id);
+        assert_eq!(row.get_str("amount").expect("amount"), "12.50");
+        assert_eq!(row.get_str("addr").expect("addr"), "10.0.0.1/32");
+        assert_eq!(row.get_str("day").expect("day"), "2026-10-08");
+        assert_eq!(row.get_str("span").expect("span"), "1 day 02:00:00");
+        // Text output of these types also decodes into String directly.
+        let rows = unwrap_pg(
+            conn.query_unchecked(
+                &cx,
+                "SELECT id, amount FROM asupersync_untyped ORDER BY day",
+            )
+            .await,
+            &log,
+            "select_native",
+        );
+        assert_eq!(rows[0].get_typed::<String>("id").expect("uuid"), second);
+        assert_eq!(
+            rows[0].get_typed::<String>("amount").expect("numeric"),
+            "0.05"
+        );
+        log.end("pass");
+    });
+}
