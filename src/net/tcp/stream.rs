@@ -674,6 +674,148 @@ impl TcpStream {
     }
 }
 
+/// Readiness, peeking and non-blocking I/O, for protocol code that sniffs a
+/// connection before choosing a handler, or drives the socket itself.
+#[cfg(not(target_arch = "wasm32"))]
+impl TcpStream {
+    /// Receives bytes into `buf` without removing them from the socket's
+    /// receive queue: the next read returns them again. Waits until at least
+    /// one byte arrives; returns `0` at end-of-stream.
+    ///
+    /// A listener can peek at the first bytes of a connection to tell, say,
+    /// a TLS `ClientHello` from plaintext, then hand the untouched stream to
+    /// the matching protocol.
+    pub async fn peek(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        std::future::poll_fn(|cx| self.poll_peek(cx, &mut ReadBuf::new(buf))).await
+    }
+
+    /// Poll form of [`Self::peek`]: fills `buf` with queued bytes without
+    /// consuming them and returns how many.
+    pub fn poll_peek(
+        &mut self,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<usize>> {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
+        match self.inner.peek(buf.unfilled()) {
+            Ok(n) => {
+                buf.advance(n);
+                Poll::Ready(Ok(n))
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                self.register_interest(cx, Interest::READABLE)?;
+                Poll::Pending
+            }
+            Err(e) => Poll::Ready(Err(e)),
+        }
+    }
+
+    /// Waits until the stream may be readable, for use with
+    /// [`Self::try_read`].
+    ///
+    /// Readiness can be spurious: `try_read` may still return
+    /// [`io::ErrorKind::WouldBlock`], and the caller waits again.
+    pub async fn readable(&mut self) -> io::Result<()> {
+        self.ready_for(Interest::READABLE).await
+    }
+
+    /// Waits until the stream may be writable, for use with
+    /// [`Self::try_write`]. Readiness can be spurious, as with
+    /// [`Self::readable`].
+    pub async fn writable(&mut self) -> io::Result<()> {
+        self.ready_for(Interest::WRITABLE).await
+    }
+
+    /// Reads what is available without waiting, or fails with
+    /// [`io::ErrorKind::WouldBlock`]. Returns `0` at end-of-stream.
+    pub fn try_read(&self, buf: &mut [u8]) -> io::Result<usize> {
+        (&*self.inner).read(buf)
+    }
+
+    /// Vectored form of [`Self::try_read`].
+    pub fn try_read_vectored(&self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
+        (&*self.inner).read_vectored(bufs)
+    }
+
+    /// Writes what the socket accepts without waiting, or fails with
+    /// [`io::ErrorKind::WouldBlock`].
+    pub fn try_write(&self, buf: &[u8]) -> io::Result<usize> {
+        (&*self.inner).write(buf)
+    }
+
+    /// Vectored form of [`Self::try_write`].
+    pub fn try_write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        (&*self.inner).write_vectored(bufs)
+    }
+
+    /// `SO_LINGER`: `None` lets close return at once; `Some(duration)` makes
+    /// it wait up to `duration` for unsent data, and `Some(Duration::ZERO)`
+    /// resets the connection on close.
+    pub fn linger(&self) -> io::Result<Option<Duration>> {
+        socket2::SockRef::from(&*self.inner).linger()
+    }
+
+    /// Sets `SO_LINGER`; see [`Self::linger`].
+    pub fn set_linger(&self, linger: Option<Duration>) -> io::Result<()> {
+        socket2::SockRef::from(&*self.inner).set_linger(linger)
+    }
+
+    /// Takes the socket's pending error (`SO_ERROR`), if any.
+    pub fn take_error(&self) -> io::Result<Option<io::Error>> {
+        self.inner.take_error()
+    }
+
+    /// Resolves once a readiness event for `interest` arrives (or, with no
+    /// reactor for the socket, after a short backoff).
+    async fn ready_for(&mut self, interest: Interest) -> io::Result<()> {
+        let flag = Arc::new(ReadinessFlag::default());
+        std::future::poll_fn(|cx| {
+            if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
+                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            }
+            if flag.ready.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                return Poll::Ready(Ok(()));
+            }
+            *flag.task.lock() = Some(cx.waker().clone());
+            let waker = std::task::Waker::from(Arc::clone(&flag));
+            if self.registration.arm(&*self.inner, interest, &waker)? == Armed::SelfWake {
+                // No reactor reports readiness: report it after a backoff and
+                // let `try_read` / `try_write` find out.
+                flag.ready.store(true, std::sync::atomic::Ordering::Release);
+                fallback_rewake(cx);
+            }
+            Poll::Pending
+        })
+        .await
+    }
+}
+
+/// The waker `ready_for` arms the registration with: it records the event,
+/// then wakes the waiting task.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct ReadinessFlag {
+    ready: std::sync::atomic::AtomicBool,
+    task: parking_lot::Mutex<Option<std::task::Waker>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::task::Wake for ReadinessFlag {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.ready.store(true, std::sync::atomic::Ordering::Release);
+        let task = self.task.lock().take();
+        if let Some(task) = task {
+            task.wake();
+        }
+    }
+}
+
 #[cfg(any(
     target_os = "android",
     target_os = "dragonfly",
