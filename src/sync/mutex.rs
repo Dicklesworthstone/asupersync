@@ -217,10 +217,10 @@ impl<T> Mutex<T> {
             cx,
             cancelled: None,
             waiter_id: None,
-            deadline_sleep: Some(cx.timer_driver().map_or_else(
+            deadline_sleep: Some(Box::new(cx.timer_driver().map_or_else(
                 || Sleep::new(deadline),
                 |timer| Sleep::with_timer_driver(deadline, timer),
-            )),
+            ))),
             completed: false,
         }
     }
@@ -433,10 +433,10 @@ pub struct LockFuture<'a, 'b, T, Caps = crate::cx::cap::All> {
     cx: &'b Cx<Caps>,
     /// Installed lazily on contention, separately from the FIFO wakeup.
     cancelled: Option<crate::cx::Cancelled<'b, Caps>>,
-    /// Slab index of this waiter's slot in the parent mutex's
-    /// `WaiterChain` (br-asupersync-wlf0xh).
+    /// Slab index of this waiter's `WaiterChain` slot (br-asupersync-wlf0xh).
     waiter_id: Option<crate::sync::waiter::WaiterId>,
-    deadline_sleep: Option<Sleep>,
+    /// Boxed: only `lock_until` sets one, so `lock` carries no inline `Sleep`.
+    deadline_sleep: Option<Box<Sleep>>,
     completed: bool,
 }
 
@@ -445,7 +445,7 @@ impl<T, Caps> LockFuture<'_, '_, T, Caps> {
     fn poll_deadline_sleep(&mut self, context: &mut Context<'_>) -> Option<Time> {
         let sleep = self.deadline_sleep.as_mut()?;
         let deadline = sleep.deadline();
-        match Pin::new(&mut *sleep).poll(context) {
+        match Pin::new(&mut **sleep).poll(context) {
             Poll::Ready(()) => Some(deadline),
             Poll::Pending => None,
         }

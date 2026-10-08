@@ -2436,14 +2436,14 @@ mod tests {
         // Target: ≤256 bytes to avoid excessive stack usage.
         //
         // LockFuture contains:
-        // - mutex: &'a Mutex<T>          (8 bytes - reference)
-        // - cx: &'b Cx                   (8 bytes - reference)
-        // - waiter_id: Option<WaiterId>  (16 bytes)
-        // - deadline_sleep: Option<Sleep> (the bulk; carries a timer registration)
-        // - completed: bool              (1 byte + padding)
-        // The deadline_sleep field (added for lock-acquire deadlines) dominates
-        // the size; the future is currently ~96 bytes, which is still small and
-        // well within the 256-byte hard limit below.
+        // - mutex, cx: two references           (16 bytes)
+        // - cancelled: Option<Cancelled>        (40 bytes; lazy cancel subscription)
+        // - waiter_id: Option<WaiterId>         (16 bytes)
+        // - deadline_sleep: Option<Box<Sleep>>  (8 bytes; only lock_until sets it)
+        // - completed: bool                     (1 byte + padding)
+        // With an inline Sleep, the cancel subscription pushed the future past
+        // the 128-byte pin below, so lock_until boxes its Sleep
+        // (br-asupersync-d0369z).
 
         init_test("audit_lock_future_state_machine_size");
 
@@ -2515,9 +2515,9 @@ mod tests {
         );
 
         // Additional check: future should be small for stack usage. The
-        // deadline_sleep timer-registration field puts the future near ~96
-        // bytes, so the "optimal" band is 128 bytes (still well under the
-        // 256-byte hard limit).
+        // "optimal" band is 128 bytes (still well under the 256-byte hard
+        // limit); the cancel subscription and a boxed deadline Sleep fit
+        // inside it.
         const OPTIMAL_SIZE_BYTES: usize = 128;
         let is_optimal_size = i32_future_size <= OPTIMAL_SIZE_BYTES;
 
