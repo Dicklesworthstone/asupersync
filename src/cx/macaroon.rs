@@ -1249,6 +1249,25 @@ impl MacaroonToken {
         &self.signature
     }
 
+    /// A key for replay caches and use counters: SHA-256 of the identifier
+    /// followed by the signature.
+    ///
+    /// Do not key on [`to_binary`](Self::to_binary) bytes. The top-level
+    /// location and the third-party caveat locations are unsigned hints, as
+    /// in the macaroon design, so one signed token has many byte encodings
+    /// that all verify. The signature covers the identifier and every caveat,
+    /// so tokens with equal keys carry the same capability. The key is a hash
+    /// because the signature is the bearer secret: a key stored in a shared
+    /// cache or written to a log must not be enough to rebuild the token.
+    #[must_use]
+    pub fn replay_key(&self) -> [u8; 32] {
+        use sha2::Digest;
+        let mut hasher = Sha256::new();
+        hasher.update(self.identifier.as_bytes());
+        hasher.update(self.signature.as_bytes());
+        hasher.finalize().into()
+    }
+
     /// Serialize to binary format (schema v2).
     #[must_use]
     #[allow(clippy::cast_possible_truncation)]
@@ -1299,6 +1318,10 @@ impl MacaroonToken {
     }
 
     /// Deserialize from binary format (schema v2).
+    ///
+    /// The locations in the encoding are not signed, so different bytes can
+    /// decode to the same signed token; key replay caches on
+    /// [`replay_key`](Self::replay_key), not on these bytes.
     ///
     /// # Errors
     ///
@@ -1361,9 +1384,9 @@ impl MacaroonToken {
                     if pos + pred_len > data.len() {
                         return None;
                     }
-                    // The frame holds exactly one predicate. Extra bytes in it
-                    // would give one token many encodings, each with the same
-                    // signature, and defeat byte-keyed replay caches.
+                    // The frame holds exactly one predicate. Locations are
+                    // unsigned hints, though, so token bytes are still no
+                    // replay key; callers use `replay_key`.
                     let (predicate, consumed) =
                         CaveatPredicate::from_bytes(&data[pos..pos + pred_len])?;
                     if consumed != pred_len {
@@ -2355,8 +2378,8 @@ mod tests {
         }
     }
 
-    /// br-asupersync-s45073 L1: a token has exactly one binary encoding. A
-    /// first-party caveat frame longer than its predicate, or a caveat count
+    /// br-asupersync-s45073 L1: a caveat list has exactly one binary encoding.
+    /// A first-party caveat frame longer than its predicate, or a caveat count
     /// that disagrees with the caveats present, is refused. Before, the extra
     /// frame bytes were skipped, and the padded token decoded with the same
     /// signature.
@@ -2391,6 +2414,36 @@ mod tests {
         let mut overcount = bytes.clone();
         overcount[count_at..count_at + 2].copy_from_slice(&2u16.to_le_bytes());
         assert!(MacaroonToken::from_binary(&overcount).is_none());
+    }
+
+    /// d0's review of 03c5b5055 (s45073 L1): the top-level and third-party
+    /// locations are unsigned, so one signed token has many byte encodings.
+    /// `replay_key` names the signed content instead.
+    #[test]
+    fn replay_key_ignores_unsigned_locations_and_follows_the_signed_content() {
+        let key = test_root_key();
+        let caveat_key = AuthKey::from_seed(7);
+        let token = |location: &str, tp_location: &str| {
+            MacaroonToken::mint(&key, "cap", location)
+                .add_caveat(CaveatPredicate::MaxUses(3))
+                .add_third_party_caveat(tp_location, "tp", &caveat_key)
+        };
+        let issued = token("loc", "auth");
+        let relocated = MacaroonToken::from_binary(&token("elsewhere", "other").to_binary())
+            .expect("a relocated token decodes");
+        assert_ne!(issued.to_binary(), relocated.to_binary());
+        assert_eq!(
+            issued.signature().as_bytes(),
+            relocated.signature().as_bytes()
+        );
+        assert_eq!(issued.replay_key(), relocated.replay_key());
+
+        let narrower = issued.clone().add_caveat(CaveatPredicate::MaxUses(1));
+        assert_ne!(narrower.replay_key(), issued.replay_key());
+        assert_ne!(
+            MacaroonToken::mint(&key, "other", "loc").replay_key(),
+            MacaroonToken::mint(&key, "cap", "loc").replay_key()
+        );
     }
 
     // --- Predicate serialization ---
