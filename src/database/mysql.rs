@@ -1376,7 +1376,13 @@ fn caching_sha2_auth(password: &str, nonce: &[u8]) -> Result<Vec<u8>, MySqlError
 /// Parsed MySQL connection URL.
 #[derive(Clone)]
 pub struct MySqlConnectOptions {
-    /// Host name or IP address.
+    /// Host name or IP address, or the path of the server's Unix-domain socket
+    /// file when it is an absolute path (for example
+    /// `/var/run/mysqld/mysqld.sock`; `port` is then unused). The MySQL server
+    /// treats a socket as a secure transport, and so does this client:
+    /// `ssl_mode` does not apply to it, and `caching_sha2_password` may send
+    /// the password over it for a full authentication, as libmysqlclient does.
+    /// Unix-domain sockets are available on Unix platforms only.
     pub host: String,
     /// Port number (default 3306).
     pub port: u16,
@@ -1643,9 +1649,14 @@ impl MySqlConnectOptions {
                 None => (host_port, 3306),
             }
         };
-        if host.is_empty() {
-            return Err(MySqlError::InvalidUrl("missing host".to_string()));
-        }
+        // A socket path percent-encoded as the host:
+        // `mysql://user@%2Fvar%2Frun%2Fmysqld%2Fmysqld.sock/db`.
+        let mut host = if host.starts_with("%2F") || host.starts_with("%2f") {
+            percent_decode(host)
+        } else {
+            host.to_string()
+        };
+        let mut socket = None;
 
         let mut connect_timeout = None;
         let mut ssl_mode = SslMode::Disabled;
@@ -1685,6 +1696,10 @@ impl MySqlConnectOptions {
                         // Store requested charset for validation during handshake
                         requested_charset = Some(value);
                     }
+                    // `mysql://user@/db?socket=/var/run/mysqld/mysqld.sock`. It
+                    // is read only when the URL names no host, which used to
+                    // be refused as a missing host.
+                    "socket" => socket = Some(value),
                     _ => {
                         // Unknown parameters are silently ignored for forward-compat.
                     }
@@ -1692,8 +1707,14 @@ impl MySqlConnectOptions {
             }
         }
 
+        if host.is_empty() {
+            host = socket
+                .filter(|socket| !socket.is_empty())
+                .ok_or_else(|| MySqlError::InvalidUrl("missing host".to_string()))?;
+        }
+
         Ok(Self {
-            host: host.to_string(),
+            host,
             port,
             database,
             user,
@@ -1741,6 +1762,9 @@ struct OkPacket {
 /// preserves the caller's trust roots, certificate pins, and client identity.
 enum MySqlStream {
     Plain(TcpStream),
+    /// A Unix-domain socket (a host given as the socket file's path).
+    #[cfg(unix)]
+    Unix(crate::net::unix::UnixStream),
     #[cfg(feature = "tls")]
     Tls {
         stream: Box<TlsStream<TcpStream>>,
@@ -1760,6 +1784,8 @@ impl MySqlStream {
     fn shutdown(&self, how: std::net::Shutdown) -> io::Result<()> {
         match self {
             Self::Plain(stream) => stream.shutdown(how),
+            #[cfg(unix)]
+            Self::Unix(stream) => stream.shutdown(how),
             #[cfg(feature = "tls")]
             Self::Tls { stream, .. } => stream.get_ref().shutdown(how),
             #[cfg(feature = "tls")]
@@ -1778,11 +1804,26 @@ impl MySqlStream {
         }
     }
 
+    /// A Unix-domain socket counts as a secure transport, as for the MySQL
+    /// server and libmysqlclient: TLS is not used over it.
+    fn is_unix(&self) -> bool {
+        #[cfg(unix)]
+        {
+            matches!(self, Self::Unix(_))
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
     #[cfg(feature = "tls")]
     fn connector(&self) -> Option<TlsConnector> {
         match self {
             Self::Tls { connector, .. } => Some(connector.clone()),
             Self::Plain(_) | Self::Upgrading => None,
+            #[cfg(unix)]
+            Self::Unix(_) => None,
         }
     }
 }
@@ -1795,6 +1836,8 @@ impl AsyncRead for MySqlStream {
     ) -> Poll<io::Result<()>> {
         match self.get_mut() {
             Self::Plain(stream) => Pin::new(stream).poll_read(cx, buf),
+            #[cfg(unix)]
+            Self::Unix(stream) => Pin::new(stream).poll_read(cx, buf),
             #[cfg(feature = "tls")]
             Self::Tls { stream, .. } => Pin::new(stream.as_mut()).poll_read(cx, buf),
             #[cfg(feature = "tls")]
@@ -1814,6 +1857,8 @@ impl AsyncWrite for MySqlStream {
     ) -> Poll<io::Result<usize>> {
         match self.get_mut() {
             Self::Plain(stream) => Pin::new(stream).poll_write(cx, buf),
+            #[cfg(unix)]
+            Self::Unix(stream) => Pin::new(stream).poll_write(cx, buf),
             #[cfg(feature = "tls")]
             Self::Tls { stream, .. } => Pin::new(stream.as_mut()).poll_write(cx, buf),
             #[cfg(feature = "tls")]
@@ -1827,6 +1872,8 @@ impl AsyncWrite for MySqlStream {
     fn poll_flush(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<io::Result<()>> {
         match self.get_mut() {
             Self::Plain(stream) => Pin::new(stream).poll_flush(cx),
+            #[cfg(unix)]
+            Self::Unix(stream) => Pin::new(stream).poll_flush(cx),
             #[cfg(feature = "tls")]
             Self::Tls { stream, .. } => Pin::new(stream.as_mut()).poll_flush(cx),
             #[cfg(feature = "tls")]
@@ -1843,6 +1890,8 @@ impl AsyncWrite for MySqlStream {
     ) -> Poll<io::Result<()>> {
         match self.get_mut() {
             Self::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
+            #[cfg(unix)]
+            Self::Unix(stream) => Pin::new(stream).poll_shutdown(cx),
             #[cfg(feature = "tls")]
             Self::Tls { stream, .. } => Pin::new(stream.as_mut()).poll_shutdown(cx),
             #[cfg(feature = "tls")]
@@ -2455,6 +2504,22 @@ impl MySqlConnection {
         .await
     }
 
+    #[cfg(unix)]
+    async fn connect_unix(path: &str) -> Result<MySqlStream, MySqlError> {
+        crate::net::unix::UnixStream::connect(path)
+            .await
+            .map(MySqlStream::Unix)
+            .map_err(MySqlError::Io)
+    }
+
+    #[cfg(not(unix))]
+    async fn connect_unix(_path: &str) -> Result<MySqlStream, MySqlError> {
+        Err(MySqlError::Io(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Unix-domain sockets are not supported on this platform",
+        )))
+    }
+
     async fn connect_inner(
         options: MySqlConnectOptions,
         #[cfg(feature = "tls")] connector: Option<TlsConnector>,
@@ -2468,15 +2533,24 @@ impl MySqlConnection {
         }
 
         // The outer deadline covers TCP, TLS, and authentication together.
-        let addr = format!("{}:{}", options.host, options.port);
-        let stream = match TcpStream::connect(addr).await {
-            Ok(s) => s,
-            Err(e) => return Outcome::Err(MySqlError::Io(e)),
+        // A host that is an absolute path is the server's Unix-domain socket.
+        let stream = if options.host.starts_with('/') {
+            match Self::connect_unix(&options.host).await {
+                Ok(stream) => stream,
+                Err(error) => return Outcome::Err(error),
+            }
+        } else {
+            let addr = format!("{}:{}", options.host, options.port);
+            match TcpStream::connect(addr).await {
+                Ok(s) => MySqlStream::Plain(s),
+                Err(e) => return Outcome::Err(MySqlError::Io(e)),
+            }
         };
+        let over_socket = stream.is_unix();
 
         let mut conn = Self {
             inner: MySqlConnectionInner {
-                stream: stream.into(),
+                stream,
                 connection_id: 0,
                 capabilities: 0,
                 charset: 0,
@@ -2515,12 +2589,15 @@ impl MySqlConnection {
         conn.inner.status_flags = handshake.status_flags;
         conn.inner.server_version = handshake.server_version.clone();
 
-        if Self::should_fail_closed_without_tls(options.ssl_mode, handshake.capabilities) {
+        // A Unix-domain socket is a secure transport: ssl_mode does not apply.
+        if !over_socket
+            && Self::should_fail_closed_without_tls(options.ssl_mode, handshake.capabilities)
+        {
             return Outcome::Err(MySqlError::TlsRequired);
         }
 
         #[cfg(feature = "tls")]
-        if options.ssl_mode != SslMode::Disabled {
+        if !over_socket && options.ssl_mode != SslMode::Disabled {
             let connector = match connector.map_or_else(Self::default_tls_connector, Ok) {
                 Ok(connector) => connector,
                 Err(error) => return outcome_from_error(error),
@@ -3420,7 +3497,9 @@ impl MySqlConnection {
         &mut self,
         options: &MySqlConnectOptions,
     ) -> Result<(), MySqlError> {
-        if !self.inner.stream.is_tls() {
+        // As in libmysqlclient, a Unix-domain socket is secure enough for the
+        // clear password; plaintext TCP is not.
+        if !self.inner.stream.is_tls() && !self.inner.stream.is_unix() {
             return Err(MySqlError::AuthenticationFailed(
                 "caching_sha2_password full auth requires secure connection".to_string(),
             ));

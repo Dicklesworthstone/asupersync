@@ -67,6 +67,8 @@ fn mysql_url_host_is_local(url: &str) -> bool {
         Ok(opts) => {
             opts.host.eq_ignore_ascii_case("localhost")
                 || matches!(opts.host.as_str(), "127.0.0.1" | "::1")
+                // A Unix-domain socket path is local by construction.
+                || opts.host.starts_with('/')
         }
         Err(_) => false,
     }
@@ -1069,6 +1071,71 @@ fn mysql_real_trusted_sql_runs_statements_the_static_heuristic_refuses() {
             &log,
         );
         assert_eq!(rows[0].get_str("name").expect("name"), "it's");
+        log.end("pass");
+    });
+}
+
+/// A host that is an absolute path is the server's Unix-domain socket file.
+/// Set `MYSQL_SOCKET` (for example `/var/run/mysqld/mysqld.sock`); the test
+/// connects with the credentials of `MYSQL_URL` through it and checks that the
+/// server sees a socket client (its processlist host has no port). Setting
+/// `MYSQL_URL` itself to `mysql://user:password@/db?socket=<path>` runs every
+/// test of this suite over the socket.
+#[test]
+fn mysql_real_unix_socket_host_connects_over_the_socket() {
+    let cfg = RealMySqlConfig::from_env();
+    let test_name = "mysql_real_unix_socket_host_connects_over_the_socket";
+    if skip_if_disabled(&cfg, test_name) {
+        return;
+    }
+    let Ok(socket) = std::env::var("MYSQL_SOCKET") else {
+        eprintln!(
+            r#"{{"suite":"mysql_real","test":"{test_name}","event":"skip","reason":"MYSQL_SOCKET not set"}}"#
+        );
+        return;
+    };
+    let log = MySqlTestLogger::new("mysql_real", test_name);
+
+    // The URL spellings that name a socket.
+    let encoded = socket.replace('/', "%2F");
+    let by_host = MySqlConnectOptions::parse(&format!("mysql://u@{encoded}/db")).expect("encoded");
+    assert_eq!(by_host.host, socket);
+    let by_param =
+        MySqlConnectOptions::parse(&format!("mysql://u@/db?socket={socket}")).expect("param");
+    assert_eq!(by_param.host, socket);
+    assert!(
+        MySqlConnectOptions::parse("mysql://u@/db").is_err(),
+        "still no host"
+    );
+
+    run_test_with_cx(|cx| async move {
+        let mut options = MySqlConnectOptions::parse(&cfg.url).expect("parse MYSQL_URL");
+        options.host = socket.clone();
+        if std::env::var("MYSQL_ALLOW_NATIVE_PASSWORD").is_ok_and(|value| value == "true") {
+            options.insecure_legacy_mysql_native_password = true;
+        }
+        let mut conn = unwrap_mysql(
+            MySqlConnection::connect_with_options(&cx, options).await,
+            "connect",
+            &log,
+        );
+        assert!(!conn.is_tls(), "TLS is not used over a socket");
+        let rows = unwrap_mysql(
+            conn.query_static_sql(
+                &cx,
+                "SELECT HOST AS client FROM information_schema.PROCESSLIST WHERE ID = CONNECTION_ID()",
+            )
+            .await,
+            "processlist",
+            &log,
+        );
+        let client = rows[0].get_str("client").expect("client").to_string();
+        log.line("socket_client", &[("host", client.clone())]);
+        assert!(
+            !client.contains(':'),
+            "a socket client has no port: {client}"
+        );
+        conn.close().await.expect("close");
         log.end("pass");
     });
 }
