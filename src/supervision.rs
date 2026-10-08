@@ -2051,6 +2051,13 @@ mod managed {
         pub restart_batches: u64,
         /// Successful parent-region escalation publications (zero or one).
         pub escalations: u8,
+        /// Whether the restart storm detector set by
+        /// [`SupervisionConfig::with_storm_threshold`] flagged a storm (its
+        /// intensity window or its e-process alert) when a restart batch was
+        /// recorded. Always false without a threshold. The first detection is
+        /// also traced as `action=restart_storm`; restart decisions do not
+        /// change.
+        pub restart_storm_detected: bool,
     }
 
     /// Retained factories and validated compiled supervisor metadata.
@@ -2360,6 +2367,7 @@ mod managed {
                 joined: 0,
                 restart_batches: 0,
                 escalations: 0,
+                restart_storm_detected: false,
             };
             Self {
                 supervisor,
@@ -3285,6 +3293,16 @@ mod managed {
                         let now = self.cx.now().as_nanos();
                         self.tracker.record(now);
                         self.report.restart_batches += 1;
+                        if !self.report.restart_storm_detected
+                            && (self.tracker.is_storm() || self.tracker.is_intensity_storm(now))
+                        {
+                            self.report.restart_storm_detected = true;
+                            let identity = self.latest[failed]
+                                .as_ref()
+                                .expect("drained generation")
+                                .generation;
+                            self.trace("restart_storm", failed, identity);
+                        }
                         counted = true;
                         attempt = u32::try_from(self.tracker.recent_count(now)).unwrap_or(u32::MAX);
                     }
@@ -3468,6 +3486,7 @@ mod managed {
                 joined: 0,
                 restart_batches: 0,
                 escalations: 0,
+                restart_storm_detected: false,
             };
             std::mem::replace(&mut controller.report, empty)
         }
@@ -3771,6 +3790,40 @@ mod managed {
                 assert_eq!(report.joined, report.started);
                 assert_eq!(report.children.len(), 3);
                 clean(&mut lab, root);
+            }
+        }
+
+        /// A storm detector set by `with_storm_threshold` is reported once its
+        /// threshold is crossed; before, it recorded restarts but nothing read
+        /// it. Three restart batches in the 60 s window are 0.05 restarts/s.
+        #[test]
+        fn managed_restart_storm_is_reported_when_its_threshold_is_crossed() {
+            for (threshold, expected) in [(None, false), (Some(1.0), false), (Some(0.03), true)] {
+                let report = run_case(move |cx| async move {
+                    let binding = ManagedChildBinding::new(
+                        "child",
+                        ManagedRestartMode::Transient,
+                        move |_child: Cx, generation: ManagedGeneration| async move {
+                            if generation.number <= 3 {
+                                Outcome::Err(String::from("crash"))
+                            } else {
+                                Outcome::Ok(())
+                            }
+                        },
+                    );
+                    let mut config = config(RestartPolicy::OneForOne, 10);
+                    if let Some(threshold) = threshold {
+                        config = config.with_storm_threshold(threshold);
+                    }
+                    let managed = topology(&["child"], RestartPolicy::OneForOne)
+                        .bind_managed(vec![binding], config)
+                        .unwrap();
+                    let mut handle = managed.spawn(&cx).unwrap();
+                    handle.join().await.unwrap()
+                });
+                assert!(matches!(report.outcome, Outcome::Ok(())), "{threshold:?}");
+                assert_eq!(report.restart_batches, 3, "{threshold:?}");
+                assert_eq!(report.restart_storm_detected, expected, "{threshold:?}");
             }
         }
 
