@@ -23,14 +23,14 @@ fn a_megabyte_crosses_a_small_buffer_in_both_directions() {
         .expect("runtime");
     let handle = runtime.handle();
     runtime.block_on(async move {
-        let (left, right) = duplex(64);
+        let ends: [_; 2] = duplex(64).into();
         let sent = pattern(1 << 20);
 
         // Each end writes the pattern and reads the other's, concurrently,
         // so both directions are full at once.
         let mut writers = Vec::new();
         let mut readers = Vec::new();
-        for end in [left, right] {
+        for end in ends {
             let (mut reader, mut writer) = split_owned(end);
             let data = sent.clone();
             writers.push(handle.spawn(async move {
