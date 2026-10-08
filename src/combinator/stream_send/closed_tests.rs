@@ -258,3 +258,108 @@ fn closure_during_region_mint_is_observed_before_source_admission() {
     });
     assert!(report.quiescent && report.invariant_violations.is_empty());
 }
+
+/// A queue source whose items can become ready while the producer is parked.
+struct QueueSource {
+    queue: Arc<parking_lot::Mutex<std::collections::VecDeque<usize>>>,
+    waker: Arc<parking_lot::Mutex<Option<Waker>>>,
+    reads: Arc<AtomicUsize>,
+}
+
+impl Stream for QueueSource {
+    type Item = usize;
+
+    fn poll_next(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<Option<usize>> {
+        if let Some(item) = self.queue.lock().pop_front() {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            return Poll::Ready(Some(item));
+        }
+        *self.waker.lock() = Some(task.waker().clone());
+        Poll::Pending
+    }
+}
+
+/// An item that becomes ready in the same turn as the receiver closes stays in
+/// the source (br-asupersync-buy8cp). The producer used to poll its work before
+/// its closure stop, so it took the item, and could run its mapper, only to
+/// drop it with `DestinationClosed`; up to `limit` items of a borrowed source
+/// were lost to their caller that way.
+#[test]
+fn an_item_ready_when_the_receiver_closes_stays_in_the_source() {
+    for ordered in [false, true] {
+        let ((), report) = run_async_under_lab(0x5805, move |cx| async move {
+            let queue = Arc::new(parking_lot::Mutex::new(std::collections::VecDeque::new()));
+            let waker = Arc::new(parking_lot::Mutex::new(None::<Waker>));
+            let reads = Arc::new(AtomicUsize::new(0));
+            let mapped = Arc::new(AtomicUsize::new(0));
+            let source = QueueSource {
+                queue: Arc::clone(&queue),
+                waker: Arc::clone(&waker),
+                reads: Arc::clone(&reads),
+            };
+            let (sender, mut receiver) = mpsc::channel(2);
+            let destination = sender.clone();
+            let mapper_calls = Arc::clone(&mapped);
+            let mut producer = cx
+                .spawn(move |owner| async move {
+                    drive(
+                        &owner,
+                        source,
+                        2,
+                        &destination,
+                        move |_child, item| {
+                            mapper_calls.fetch_add(1, Ordering::SeqCst);
+                            async move { Ok::<_, ()>(item) }
+                        },
+                        ordered,
+                    )
+                    .await
+                })
+                .unwrap();
+            let mut parked = false;
+            for _ in 0..1000 {
+                if waker.lock().is_some() {
+                    parked = true;
+                    break;
+                }
+                yield_now().await;
+            }
+            assert!(parked, "the producer waits on its empty source");
+            // In one turn: an item becomes ready, its waker fires, and the
+            // receiver closes.
+            queue.lock().push_back(5);
+            let pending = waker.lock().take();
+            if let Some(pending) = pending {
+                pending.wake();
+            }
+            receiver.close();
+            let outcome = producer.join(&cx).await.unwrap();
+            assert!(matches!(
+                outcome,
+                Outcome::Err(ScopedStreamError::Item(StreamSendError::DestinationClosed))
+            ));
+            assert_eq!(
+                reads.load(Ordering::SeqCst),
+                0,
+                "no source item was taken after the close"
+            );
+            assert_eq!(
+                mapped.load(Ordering::SeqCst),
+                0,
+                "no mapper ran after the close"
+            );
+            assert_eq!(
+                queue.lock().pop_front(),
+                Some(5),
+                "the item is still in the source"
+            );
+            assert_eq!(
+                sender
+                    .telemetry_snapshot(1)
+                    .reserved_uncommitted_obligations,
+                0
+            );
+        });
+        assert!(report.quiescent && report.invariant_violations.is_empty());
+    }
+}

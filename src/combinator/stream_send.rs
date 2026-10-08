@@ -236,6 +236,10 @@ where
     };
     let sender = sender.clone();
     let mut previous = None;
+    let stream = UntilClosed {
+        inner: stream,
+        destination: sender.clone(),
+    };
     let stream = stream.map(move |item| {
         let published = ordered.then(|| Arc::new(Published::default()));
         let predecessor = std::mem::replace(&mut previous, published.clone());
@@ -267,6 +271,40 @@ where
         }
     })
     .await
+}
+
+/// The source as `drive` sees it: once the destination has closed, it is not
+/// polled again. An item taken then could only be dropped, and an item already
+/// waiting in a borrowed source would be lost to its caller. The closure stop
+/// is polled in the same poll, after the work, and is then ready; so this
+/// Pending cannot stall the drive. It is Pending, not the end of the source,
+/// so the work cannot finish with Ok ahead of `DestinationClosed`.
+struct UntilClosed<S, T> {
+    inner: S,
+    destination: Sender<T>,
+}
+
+impl<S: Stream + Unpin, T> Stream for UntilClosed<S, T> {
+    type Item = S::Item;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        task: &mut std::task::Context<'_>,
+    ) -> Poll<Option<S::Item>> {
+        let this = self.get_mut();
+        if this.destination.is_closed() {
+            return Poll::Pending;
+        }
+        std::pin::Pin::new(&mut this.inner).poll_next(task)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.destination.is_closed() {
+            (0, None)
+        } else {
+            self.inner.size_hint()
+        }
+    }
 }
 
 #[cfg(test)]
