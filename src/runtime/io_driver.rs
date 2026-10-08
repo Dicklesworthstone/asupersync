@@ -658,13 +658,14 @@ impl IoDriverHandle {
         interest: Interest,
         waker: Waker,
     ) -> io::Result<IoRegistration> {
-        // Always nudge the reactor before mutating registrations. Relying on a
-        // sampled `is_polling` flag is racy: a poller can transition into the
-        // blocking wait right after this load, which is especially harmful for
-        // io_uring because register/modify also need access to the shared ring.
-        let _ = self.reactor.wake();
         let token = {
             let mut driver = self.inner.lock();
+            // Wake only after acquiring the driver gate. Otherwise a poller
+            // can consume the wake and re-enter a blocking io_uring wait while
+            // we are still waiting for this lock. Holding it prevents another
+            // turn from taking its events buffer until the mutation finishes.
+            // Do not sample is_polling: a poll may be about to enter its wait.
+            let _ = self.reactor.wake();
             driver.register(source, interest, waker)?
         };
         Ok(IoRegistration::new(
@@ -866,9 +867,10 @@ impl IoRegistration {
     }
 
     fn wake_polling_reactor(&self) {
-        // Mutations must wake unconditionally. A concurrent poll can enter its
-        // blocking wait after any sampled visibility check but before we submit
-        // the fresh register/modify/deregister operation.
+        // Call while holding the driver gate, including on every retry.
+        // Waking before acquiring it lets a poller consume the wake and start
+        // another ring wait before the mutation owns the gate (8ynh18).
+        // A sampled is_polling check would also miss a poll about to block.
         let _ = self.reactor.wake();
     }
 
@@ -903,7 +905,6 @@ impl IoRegistration {
 
     /// Updates the interest set for this registration.
     pub fn set_interest(&mut self, interest: Interest) -> io::Result<()> {
-        self.wake_polling_reactor_for_interest_change();
         let Some(driver) = self.driver.upgrade() else {
             return Err(io::Error::new(
                 io::ErrorKind::NotConnected,
@@ -912,6 +913,7 @@ impl IoRegistration {
         };
         {
             let mut guard = driver.lock();
+            self.wake_polling_reactor_for_interest_change();
             guard.modify_interest(self.token, interest)?;
         }
         self.interest = interest;
@@ -962,7 +964,6 @@ impl IoRegistration {
         waker: &Waker,
         accumulate: bool,
     ) -> io::Result<bool> {
-        self.wake_polling_reactor_for_interest_change();
         let Some(driver) = self.driver.upgrade() else {
             return Err(io::Error::new(
                 io::ErrorKind::NotConnected,
@@ -970,6 +971,7 @@ impl IoRegistration {
             ));
         };
         let mut guard = driver.lock();
+        self.wake_polling_reactor_for_interest_change();
 
         // Re-arm reactor (oneshot semantics require this on every poll).
         self.interest = if accumulate {
@@ -999,10 +1001,10 @@ impl IoRegistration {
 
     /// Explicitly deregisters without waiting for drop.
     pub fn deregister(mut self) -> io::Result<()> {
-        self.wake_polling_reactor();
         if let Some(driver) = self.driver.upgrade() {
             let first = {
                 let mut guard = driver.lock();
+                self.wake_polling_reactor();
                 guard.deregister(self.token)
             };
             match first {
@@ -1018,6 +1020,7 @@ impl IoRegistration {
                     // Best-effort retry for transient deregistration failures.
                     let second = {
                         let mut guard = driver.lock();
+                        self.wake_polling_reactor();
                         guard.deregister(self.token)
                     };
                     match second {
@@ -1045,12 +1048,12 @@ impl Drop for IoRegistration {
         if self.deregistered {
             return;
         }
-        self.wake_polling_reactor();
         if let Some(driver) = self.driver.upgrade() {
             // Best-effort cleanup: retry once on non-NotFound errors to reduce
             // stale-registration risk if the first deregister attempt fails transiently.
             let first = {
                 let mut guard = driver.lock();
+                self.wake_polling_reactor();
                 guard.deregister(self.token)
             };
             if first
@@ -1058,6 +1061,7 @@ impl Drop for IoRegistration {
                 .is_err_and(|err| err.kind() != io::ErrorKind::NotFound)
             {
                 let mut guard = driver.lock();
+                self.wake_polling_reactor();
                 let _ = guard.deregister(self.token);
             }
         }
@@ -1997,7 +2001,6 @@ mod tests {
         init_test("io_driver_turn_handles_unknown_tokens");
         let reactor = Arc::new(LabReactor::new());
         let source = TestFdSource;
-
         // Register source directly with reactor (no waker in driver)
         let polling_token = Token::new(999);
         reactor
@@ -3523,3 +3526,7 @@ mod io_driver_conformance_integration {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "io_driver/mutation_wake_tests.rs"]
+mod mutation_wake_tests;
