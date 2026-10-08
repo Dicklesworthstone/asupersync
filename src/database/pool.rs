@@ -1955,6 +1955,28 @@ struct AsyncValidationGuard<'a, M: AsyncConnectionManager> {
     client_id: Option<String>,
 }
 
+impl<M: AsyncConnectionManager> AsyncValidationGuard<'_, M> {
+    /// Discards a connection that failed validation as the guard's drop does,
+    /// but the caller keeps its FIFO turn
+    /// (`requeue_async_pool_waiter_at_front_locked`, before the wake).
+    fn discard_keeping_turn(mut self, waiter_slot: &mut Option<Arc<AsyncPoolWaiter>>) {
+        if let Some(conn) = self.conn.take() {
+            let mut inner = self.pool.inner.lock();
+            inner.total = inner.total.saturating_sub(1);
+            AsyncDbPool::<M>::release_client_quota_locked(&mut inner, self.client_id.as_deref());
+            self.pool
+                .requeue_async_pool_waiter_at_front_locked(&mut inner, waiter_slot);
+            self.pool.wake_next_async_pool_waiter_locked(&mut inner);
+            drop(inner);
+            self.pool
+                .stats
+                .total_discards
+                .fetch_add(1, Ordering::Relaxed);
+            self.pool.safe_disconnect(conn);
+        }
+    }
+}
+
 impl<M: AsyncConnectionManager> Drop for AsyncValidationGuard<'_, M> {
     fn drop(&mut self) {
         if let Some(conn) = self.conn.take() {
@@ -2220,6 +2242,39 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         self.wake_next_async_pool_waiter_locked(inner);
     }
 
+    /// The caller was granted an idle connection it could not use (expired,
+    /// stale, invalid, or authenticated for someone else) and has dropped it
+    /// from the pool's count. It keeps its turn: a waiter is queued for it at
+    /// the front, ahead of the callers that queued while it held the turn,
+    /// and the wake that follows (the discard freed capacity) readies it. It
+    /// used to re-queue at the back, so each unusable connection it drew cost
+    /// it its place. Called before that wake; a no-op on a closed pool.
+    fn requeue_async_pool_waiter_at_front_locked(
+        &self,
+        inner: &mut PoolInner<M::Connection>,
+        waiter_slot: &mut Option<Arc<AsyncPoolWaiter>>,
+    ) {
+        if inner.closed {
+            return;
+        }
+        let waiter = match waiter_slot.take() {
+            Some(waiter) => {
+                self.remove_async_pool_waiter_locked(inner, &waiter);
+                waiter
+            }
+            None => Arc::new(AsyncPoolWaiter::new()),
+        };
+        // Only the front waiter may be ready. The one this pushes back may
+        // have been readied (by the grant's wake, when more idle connections
+        // were left); still ready behind this one, its wait would return at
+        // once and its acquire loop would retry without ever parking.
+        if let Some(front) = inner.waiters.front() {
+            front.ready.store(false, Ordering::Release);
+        }
+        inner.waiters.push_front(Arc::clone(&waiter));
+        *waiter_slot = Some(waiter);
+    }
+
     fn wake_next_async_pool_waiter_locked(&self, inner: &mut PoolInner<M::Connection>) {
         self.prune_cancelled_async_pool_waiters_locked(inner);
 
@@ -2268,11 +2323,16 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         }
     }
 
+    /// Parks until the caller's waiter holds the FIFO turn. `deadline` is the
+    /// whole acquire's: an acquire that waits more than once (its turn given
+    /// back, or a granted idle connection discarded) does not restart its
+    /// `connection_timeout` budget.
     async fn wait_for_async_pool_turn(
         &self,
         cx: &Cx,
         waiter_slot: &mut Option<Arc<AsyncPoolWaiter>>,
         client_scope: &'static str,
+        deadline: Time,
     ) -> Result<(), AsyncAcquireFailure<M::Error>> {
         const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -2292,7 +2352,6 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
             trace_async_pool_event(cx, "wait", "full", client_scope);
             return Err(DbPoolError::Full.into());
         }
-        let deadline = cx.now() + self.config.connection_timeout;
 
         let waiter = if let Some(waiter) = waiter_slot.as_ref() {
             Arc::clone(waiter)
@@ -2395,6 +2454,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         cx: &Cx,
     ) -> Result<AsyncPooledConnection<'_, M>, AsyncAcquireFailure<M::Error>> {
         trace_async_pool_event(cx, "acquire", "start", "anonymous");
+        let wait_deadline = cx.now() + self.config.connection_timeout;
         let mut waiter_guard = AsyncWaiterGuard {
             pool: self,
             slot: None,
@@ -2432,8 +2492,13 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
 
             let idle = match step {
                 AsyncAcquireStep::Wait => {
-                    self.wait_for_async_pool_turn(cx, &mut waiter_guard.slot, "anonymous")
-                        .await?;
+                    self.wait_for_async_pool_turn(
+                        cx,
+                        &mut waiter_guard.slot,
+                        "anonymous",
+                        wait_deadline,
+                    )
+                    .await?;
                     continue;
                 }
                 AsyncAcquireStep::Idle(idle) => idle,
@@ -2494,6 +2559,10 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                     {
                         let mut inner = self.inner.lock();
                         inner.total = inner.total.saturating_sub(1);
+                        self.requeue_async_pool_waiter_at_front_locked(
+                            &mut inner,
+                            &mut waiter_guard.slot,
+                        );
                         self.wake_next_async_pool_waiter_locked(&mut inner);
                     }
                     self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
@@ -2513,6 +2582,10 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                     {
                         let mut inner = self.inner.lock();
                         inner.total = inner.total.saturating_sub(1);
+                        self.requeue_async_pool_waiter_at_front_locked(
+                            &mut inner,
+                            &mut waiter_guard.slot,
+                        );
                         self.wake_next_async_pool_waiter_locked(&mut inner);
                     }
                     self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
@@ -2548,6 +2621,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                             .total_validation_failures
                             .fetch_add(1, Ordering::Relaxed);
                         trace_async_pool_event(cx, "validation", "failed", "anonymous");
+                        guard.discard_keeping_turn(&mut waiter_guard.slot);
                         continue;
                     }
 
@@ -2609,6 +2683,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         }
 
         let client_id_owned = client_id.to_string();
+        let wait_deadline = cx.now() + self.config.connection_timeout;
         let mut waiter_guard = AsyncWaiterGuard {
             pool: self,
             slot: None,
@@ -2674,6 +2749,11 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                     }
 
                     if let Some(conn) = discard {
+                        self.requeue_async_pool_waiter_at_front_locked(
+                            &mut inner,
+                            &mut waiter_guard.slot,
+                        );
+                        self.wake_next_async_pool_waiter_locked(&mut inner);
                         AsyncAcquireStep::Discard(conn)
                     } else if let Some(idle) = candidate {
                         let granted_waiter = waiter_guard.slot.take();
@@ -2710,8 +2790,13 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
             };
             let idle = match step {
                 AsyncAcquireStep::Wait => {
-                    self.wait_for_async_pool_turn(cx, &mut waiter_guard.slot, "client")
-                        .await?;
+                    self.wait_for_async_pool_turn(
+                        cx,
+                        &mut waiter_guard.slot,
+                        "client",
+                        wait_deadline,
+                    )
+                    .await?;
                     continue;
                 }
                 AsyncAcquireStep::Idle(idle) => idle,
@@ -2779,6 +2864,10 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                             quota_guard.client_id.take().as_deref(),
                         );
                         inner.total = inner.total.saturating_sub(1);
+                        self.requeue_async_pool_waiter_at_front_locked(
+                            &mut inner,
+                            &mut waiter_guard.slot,
+                        );
                         self.wake_next_async_pool_waiter_locked(&mut inner);
                     }
                     self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
@@ -2814,6 +2903,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                             .total_validation_failures
                             .fetch_add(1, Ordering::Relaxed);
                         trace_async_pool_event(cx, "validation", "failed", "client");
+                        guard.discard_keeping_turn(&mut waiter_guard.slot);
                         continue;
                     }
 
@@ -2862,6 +2952,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                                         "authentication_clear_failed",
                                         "client",
                                     );
+                                    guard.discard_keeping_turn(&mut waiter_guard.slot);
                                     continue;
                                 }
                             }
@@ -5965,5 +6056,159 @@ mod tests {
             );
             drop(conn);
         }
+    }
+
+    /// br-asupersync-sqlite-pool-audit-r10-dj4uhx L3: an async waiter whose
+    /// turn handed it an idle connection that failed validation went back to
+    /// the end of the queue, behind the callers that queued after it, and the
+    /// slot the discard freed went to the next of them. It keeps its place
+    /// now: in the same poll it opens a connection in the freed slot, and the
+    /// second waiter is still queued. Both acquire paths are checked.
+    #[test]
+    fn async_waiter_handed_an_invalid_idle_connection_keeps_its_fifo_place() {
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::task::Poll;
+
+        type Acquire<'a> = Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            AsyncPooledConnection<'a, AsyncTestManager>,
+                            DbPoolError<TestError>,
+                        >,
+                    > + 'a,
+            >,
+        >;
+
+        fn acquire<'a>(
+            pool: &'a AsyncDbPool<AsyncTestManager>,
+            cx: &'a Cx,
+            client: Option<&'a str>,
+        ) -> Acquire<'a> {
+            match client {
+                Some(client) => Box::pin(pool.get_for_client(cx, client)),
+                None => Box::pin(pool.get(cx)),
+            }
+        }
+
+        init_test("async_waiter_handed_an_invalid_idle_connection_keeps_its_fifo_place");
+        for (first_client, second_client) in [(None, None), (Some("first"), Some("second"))] {
+            let pool = AsyncDbPool::new(
+                AsyncTestManager::new(),
+                DbPoolConfig::with_max_size(1).validate_on_checkout(true),
+            );
+            let waker = std::task::Waker::noop();
+            let mut ctx = std::task::Context::from_waker(waker);
+            let holder_cx = Cx::for_testing();
+            let first_cx = Cx::for_testing();
+            let second_cx = Cx::for_testing();
+            let holder = block_on(pool.get(&holder_cx)).expect("the holder takes the only slot");
+            let mut first = acquire(&pool, &first_cx, first_client);
+            let mut second = acquire(&pool, &second_cx, second_client);
+            assert!(
+                first.as_mut().poll(&mut ctx).is_pending(),
+                "the first waiter queues"
+            );
+            assert!(
+                second.as_mut().poll(&mut ctx).is_pending(),
+                "the second waiter queues behind it"
+            );
+            assert_eq!(pool.stats().pending_waiters, 2);
+
+            // The connection the holder returns fails the first waiter's
+            // validation (new connections are not validated).
+            pool.manager.valid.store(false, Ordering::SeqCst);
+            holder.return_to_pool();
+            let first_lease = match first.as_mut().poll(&mut ctx) {
+                Poll::Ready(Ok(lease)) => lease,
+                Poll::Ready(Err(err)) => panic!("{first_client:?}: the first waiter failed: {err}"),
+                Poll::Pending => panic!(
+                    "{first_client:?}: the first waiter, handed an invalid connection, lost its \
+                     place to the second"
+                ),
+            };
+            assert!(
+                second.as_mut().poll(&mut ctx).is_pending(),
+                "{second_client:?}: the second waiter still waits for its turn"
+            );
+            let stats = pool.stats();
+            assert_eq!(stats.pending_waiters, 1, "only the second waiter is queued");
+            assert_eq!(stats.total_validation_failures, 1);
+            assert_eq!(stats.total_discards, 1);
+            assert_eq!(
+                stats.total_creates, 2,
+                "the first waiter opened the freed slot"
+            );
+
+            pool.manager.valid.store(true, Ordering::SeqCst);
+            first_lease.return_to_pool();
+            match second.as_mut().poll(&mut ctx) {
+                Poll::Ready(Ok(lease)) => lease.return_to_pool(),
+                Poll::Ready(Err(err)) => {
+                    panic!("{second_client:?}: the second waiter failed: {err}")
+                }
+                Poll::Pending => panic!(
+                    "{second_client:?}: the second waiter gets the connection the first returned"
+                ),
+            }
+            assert_eq!(pool.stats().pending_waiters, 0);
+        }
+    }
+
+    /// br-asupersync-sqlite-pool-audit-r10-dj4uhx L3: an async acquire that
+    /// waited again (here its turn came, but a shrink took the capacity back
+    /// before it ran) restarted its `connection_timeout` budget, so it could
+    /// wait far longer than the budget. One deadline covers the whole acquire
+    /// now. The second wait starts 450 ms into a 600 ms budget, so with the
+    /// restart the acquire could not fail before 1050 ms.
+    #[test]
+    fn async_acquire_that_waits_again_keeps_its_deadline() {
+        use std::future::Future;
+
+        init_test("async_acquire_that_waits_again_keeps_its_deadline");
+        let pool = AsyncDbPool::new(
+            AsyncTestManager::new(),
+            DbPoolConfig::with_max_size(2)
+                .validate_on_checkout(false)
+                .connection_timeout(Duration::from_millis(600)),
+        );
+        let holder_cx = Cx::for_testing();
+        let first_holder = block_on(pool.get(&holder_cx)).expect("the first slot");
+        let second_holder = block_on(pool.get(&holder_cx)).expect("the second slot");
+
+        let waker = std::task::Waker::noop();
+        let mut ctx = std::task::Context::from_waker(waker);
+        let waiter_cx = Cx::for_testing();
+        let started = Instant::now();
+        let mut waiter = std::pin::pin!(pool.get(&waiter_cx));
+        assert!(
+            waiter.as_mut().poll(&mut ctx).is_pending(),
+            "the waiter queues on a full pool"
+        );
+
+        std::thread::sleep(Duration::from_millis(450));
+        // The discard frees a slot and readies the waiter; the shrink takes
+        // the capacity back before it runs, so it gives its turn back and
+        // waits again.
+        first_holder.discard();
+        assert_eq!(pool.set_max_size(1), 1);
+
+        let outcome = block_on(waiter.as_mut());
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(outcome, Err(DbPoolError::AcquireTimeout)),
+            "the acquire runs out of its budget"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(550),
+            "the acquire gave up after {elapsed:?}, before its 600 ms budget"
+        );
+        assert!(
+            elapsed < Duration::from_millis(900),
+            "the acquire waited {elapsed:?}: its second wait restarted the 600 ms budget"
+        );
+        assert_eq!(pool.stats().total_timeouts, 1);
+        second_holder.return_to_pool();
     }
 }
