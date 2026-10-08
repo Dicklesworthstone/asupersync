@@ -185,7 +185,7 @@ impl From<ProcessError> for io::Error {
     fn from(err: ProcessError) -> Self {
         match err {
             ProcessError::Io(inner) => inner,
-            other => Self::other(other.to_string()),
+            other => Self::new(other.io_error_kind(), other),
         }
     }
 }
@@ -2160,7 +2160,7 @@ impl Command {
         }
 
         let mut child = cmd.spawn().map_err(|e| match e.kind() {
-            io::ErrorKind::NotFound => {
+            io::ErrorKind::NotFound if !self.current_dir_is_missing() => {
                 ProcessError::NotFound(self.program.to_string_lossy().into_owned())
             }
             io::ErrorKind::PermissionDenied => {
@@ -2277,11 +2277,11 @@ impl Command {
         child.wait_with_output()
     }
 
-    /// Async variant of [`output`](Self::output).
-    ///
-    /// Uses cooperative polling to avoid blocking the runtime thread while
-    /// waiting for process exit and draining pipes. (br-asupersync-nhk8ur)
+    /// Async variant of [`output`](Self::output). It polls cooperatively, never
+    /// blocking the runtime thread (br-asupersync-nhk8ur), and a `cx` that is
+    /// already cancelled refuses before the program starts (asupersync-7tg3di).
     pub async fn output_async(&mut self, cx: &Cx) -> Result<Output, ProcessError> {
+        cx.checkpoint().map_err(|_| process_cancelled())?;
         let child = self.spawn_with_temporary_stdio(Stdio::Null, Stdio::Pipe, Stdio::Pipe)?;
         child.wait_with_output_async(cx).await
     }
@@ -2310,12 +2310,12 @@ impl Command {
         child.wait()
     }
 
-    /// Async variant of [`status`](Self::status).
-    ///
-    /// Uses cooperative polling to avoid blocking the runtime thread while
-    /// waiting for process exit. (br-asupersync-nhk8ur)
+    /// Async variant of [`status`](Self::status). It polls cooperatively, never
+    /// blocking the runtime thread (br-asupersync-nhk8ur), and a `cx` that is
+    /// already cancelled refuses before the program starts (asupersync-7tg3di).
     pub async fn status_async(&mut self, cx: &Cx) -> Result<ExitStatus, ProcessError> {
         // As in std, the configured stdio applies; unset streams are inherited.
+        cx.checkpoint().map_err(|_| process_cancelled())?;
         let mut child = self.spawn()?;
         child.wait_async(cx).await
     }
@@ -2564,10 +2564,10 @@ impl Child {
 
             while status.is_none() || !stdout_done || !stderr_done {
                 if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
-                    return Err(ProcessError::Io(io::Error::new(
-                        io::ErrorKind::Interrupted,
-                        "cancelled",
-                    )));
+                    // Terminate and reap the child first, as wait_async does:
+                    // never report Cancelled while it still runs (7tg3di).
+                    child.cancel_drain_child_blocking();
+                    return Err(process_cancelled());
                 }
 
                 let mut progressed = false;
@@ -5357,6 +5357,98 @@ mod tests {
         );
         crate::test_complete!("cancelled_wait_kills_the_rest_of_the_process_group");
     }
+
+    /// asupersync-7tg3di finding 2: a missing program converts to an
+    /// io::Error of kind NotFound, as std's spawn error is, and a missing
+    /// working directory keeps the OS error instead of blaming the program.
+    #[test]
+    fn spawn_errors_keep_their_io_error_kind() {
+        init_test("spawn_errors_keep_their_io_error_kind");
+        let missing: io::Error = Command::new("/nonexistent/asupersync-no-such-binary")
+            .spawn()
+            .expect_err("a missing program cannot start")
+            .into();
+        assert_eq!(missing.kind(), io::ErrorKind::NotFound, "{missing}");
+        assert!(
+            missing.to_string().contains("process not found"),
+            "{missing}"
+        );
+
+        let missing_dir = Command::new("true")
+            .current_dir("/nonexistent/asupersync-no-such-dir")
+            .spawn()
+            .expect_err("a missing working directory cannot be entered");
+        assert!(
+            matches!(missing_dir, ProcessError::Io(ref error) if error.kind() == io::ErrorKind::NotFound),
+            "the working directory, not the program, is missing: {missing_dir:?}"
+        );
+        crate::test_complete!("spawn_errors_keep_their_io_error_kind");
+    }
+
+    /// asupersync-7tg3di finding 4: a cancelled `cx` refuses before the
+    /// program starts. A missing program shows it: spawning would report
+    /// NotFound.
+    #[test]
+    fn async_output_and_status_refuse_a_cancelled_cx_before_spawning() {
+        init_test("async_output_and_status_refuse_a_cancelled_cx_before_spawning");
+        let cx = Cx::for_testing();
+        cx.cancel_with(
+            crate::types::CancelKind::User,
+            Some("cancelled before spawn"),
+        );
+        let status = futures_lite::future::block_on(
+            Command::new("/nonexistent/asupersync-no-such-binary").status_async(&cx),
+        );
+        assert!(
+            matches!(status, Err(ProcessError::Io(ref error)) if error.kind() == io::ErrorKind::Interrupted),
+            "{status:?}"
+        );
+        let output = futures_lite::future::block_on(
+            Command::new("/nonexistent/asupersync-no-such-binary").output_async(&cx),
+        );
+        assert!(
+            matches!(output, Err(ProcessError::Io(ref error)) if error.kind() == io::ErrorKind::Interrupted),
+            "{output:?}"
+        );
+        crate::test_complete!("async_output_and_status_refuse_a_cancelled_cx_before_spawning");
+    }
+
+    /// asupersync-7tg3di finding 3: the synchronous wait_with_output, cancelled
+    /// through the ambient Cx, terminates and reaps its child before it
+    /// returns Interrupted, as wait_async does.
+    #[test]
+    fn a_cancelled_wait_with_output_terminates_and_reaps_the_child() {
+        init_test("a_cancelled_wait_with_output_terminates_and_reaps_the_child");
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdout(Stdio::Pipe)
+            .spawn()
+            .expect("spawn sleep");
+        let pid = nix::unistd::Pid::from_raw(
+            i32::try_from(child.id().expect("running child has a pid")).expect("pid fits i32"),
+        );
+        let cx = Cx::for_testing();
+        cx.cancel_with(crate::types::CancelKind::User, Some("cancel the wait"));
+        let result = {
+            let _guard = Cx::set_current(Some(cx));
+            child.wait_with_output()
+        };
+        assert!(
+            matches!(result, Err(ProcessError::Io(ref error)) if error.kind() == io::ErrorKind::Interrupted),
+            "{result:?}"
+        );
+        // ESRCH: the child exited and was reaped. A running child, or an
+        // unreaped zombie, would still answer.
+        let gone = nix::sys::signal::kill(pid, None) == Err(nix::errno::Errno::ESRCH);
+        if !gone {
+            let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+        }
+        assert!(
+            gone,
+            "the cancelled wait left its child running or unreaped"
+        );
+        crate::test_complete!("a_cancelled_wait_with_output_terminates_and_reaps_the_child");
+    }
 }
 
 #[cfg(all(test, windows))]
@@ -5466,5 +5558,72 @@ mod windows_exact_image_tests {
             matches!(error, ProcessError::InvalidConfiguration(_)),
             "unexpected refusal: {error}"
         );
+    }
+}
+
+// Helpers for asupersync-7tg3di. They sit after the unsafe-ledger line
+// locators above, so those keep their lines.
+
+/// What a process operation returns when its `Cx` is cancelled.
+fn process_cancelled() -> ProcessError {
+    ProcessError::Io(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))
+}
+
+impl ProcessError {
+    /// The `io::ErrorKind` this error converts to. A missing program is
+    /// `NotFound`, as std's spawn error is.
+    fn io_error_kind(&self) -> io::ErrorKind {
+        match self {
+            Self::Io(error) => error.kind(),
+            Self::NotFound(_) => io::ErrorKind::NotFound,
+            Self::PermissionDenied(_) => io::ErrorKind::PermissionDenied,
+            Self::Unsupported(_) => io::ErrorKind::Unsupported,
+            Self::InvalidConfiguration(_) => io::ErrorKind::InvalidInput,
+            Self::Signaled(_) => io::ErrorKind::Other,
+        }
+    }
+}
+
+impl Command {
+    /// Whether the configured working directory is missing or not a
+    /// directory. Entering it is what then failed with `NotFound`, so `spawn`
+    /// reports the OS error rather than blaming the program.
+    fn current_dir_is_missing(&self) -> bool {
+        self.current_dir.as_deref().is_some_and(|dir| !dir.is_dir())
+    }
+}
+
+impl Child {
+    /// Blocking twin of [`Self::cancel_drain_child`] for the synchronous
+    /// [`Self::wait_with_output`]: SIGTERM, a grace window of about 2 s,
+    /// SIGKILL, then reap. A process-group target is killed as a group.
+    #[cfg(not(windows))]
+    fn cancel_drain_child_blocking(&mut self) {
+        'drain: {
+            #[cfg(unix)]
+            let _ = self.signal(libc::SIGTERM);
+            #[cfg(not(unix))]
+            let _ = self.kill();
+            let mut backoff_ms = 1u64;
+            for _ in 0..GRACEFUL_KILL_POLLS {
+                // Exited, or the child is gone or already reaped.
+                if !matches!(self.try_wait(), Ok(None)) {
+                    break 'drain;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+                backoff_ms = (backoff_ms * 2).min(GRACEFUL_KILL_POLL_MAX_BACKOFF_MS);
+            }
+            let _ = self.kill();
+            for _ in 0..REAP_AFTER_KILL_POLLS {
+                if !matches!(self.try_wait(), Ok(None)) {
+                    break 'drain;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+        #[cfg(unix)]
+        if matches!(self.signal_target, ChildSignalTarget::ProcessGroup(_)) {
+            let _ = self.signal_target.send(libc::SIGKILL);
+        }
     }
 }
