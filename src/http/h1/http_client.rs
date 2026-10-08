@@ -54,7 +54,7 @@ use memchr::memmem;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::fmt::Write;
-use std::future::poll_fn;
+use std::future::{Future, poll_fn};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
@@ -201,13 +201,7 @@ async fn drive_with_budget_deadline<T>(
     per_call: Option<std::time::Duration>,
     fut: impl std::future::Future<Output = Result<T, ClientError>>,
 ) -> Result<T, ClientError> {
-    // Prefer the caller's timer driver, then the ambient one, so `now`
-    // shares a timeline with the `Sleep` inside `timeout` (which binds the
-    // ambient driver); wall clock is the last resort.
-    let now = cx
-        .timer_driver()
-        .or_else(|| Cx::with_current(|ambient| ambient.timer_driver()).flatten())
-        .map_or_else(crate::time::wall_now, |timer| timer.now());
+    let now = client_timer_now(cx);
     let remaining = cx
         .budget()
         .deadline
@@ -231,6 +225,15 @@ async fn drive_with_budget_deadline<T>(
         Ok(result) => cancellation_reported_as_cancelled(cx, result),
         Err(_elapsed) => Err(ClientError::DeadlineExceeded),
     }
+}
+
+/// The clock client timeouts are measured on: the caller's timer driver, then
+/// the ambient one, so `now` shares a timeline with the `Sleep` inside
+/// `timeout` (which binds the ambient driver); wall clock is the last resort.
+fn client_timer_now(cx: &Cx) -> Time {
+    cx.timer_driver()
+        .or_else(|| Cx::with_current(|ambient| ambient.timer_driver()).flatten())
+        .map_or_else(crate::time::wall_now, |timer| timer.now())
 }
 
 /// Cancelling the `Cx` interrupts a socket operation parked on it, which
@@ -686,6 +689,21 @@ impl HttpClientBuilder {
         self
     }
 
+    /// Lets a request wait up to `timeout` for a pooled connection when the
+    /// per-host or total connection limit is reached, instead of failing at
+    /// once with [`ClientError::PoolExhausted`] (the default).
+    ///
+    /// A waiting request takes the first connection another request releases
+    /// or closes; waiters are not served in FIFO order. The wait counts
+    /// toward the request's total timeout and budget deadline, and a
+    /// cancelled caller stops waiting. A request still without a connection
+    /// when `timeout` elapses fails with [`ClientError::PoolExhausted`].
+    #[must_use]
+    pub fn pool_wait_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.config.pool_wait_timeout = Some(timeout);
+        self
+    }
+
     /// Sets idle timeout for pooled connections.
     #[must_use]
     pub fn idle_timeout(mut self, timeout: std::time::Duration) -> Self {
@@ -962,6 +980,9 @@ pub struct HttpClientConfig {
     /// Whether buffered requests ask for, and decode, gzip and br responses
     /// (see [`HttpClientBuilder::response_decompression`]).
     response_decompression: bool,
+    /// How long a request waits for a pooled connection at the connection
+    /// limit (see [`HttpClientBuilder::pool_wait_timeout`]).
+    pool_wait_timeout: Option<std::time::Duration>,
 }
 
 impl Default for HttpClientConfig {
@@ -980,6 +1001,7 @@ impl Default for HttpClientConfig {
             tls_root_certificates: Vec::new(),
             time_getter: wall_clock_now,
             response_decompression: false,
+            pool_wait_timeout: None,
         }
     }
 }
@@ -996,6 +1018,21 @@ impl HttpClientConfig {
     #[must_use]
     pub const fn time_getter(&self) -> fn() -> Time {
         self.time_getter
+    }
+
+    /// Sets how long a request waits for a pooled connection at the
+    /// connection limit (see [`HttpClientBuilder::pool_wait_timeout`]).
+    #[must_use]
+    pub const fn with_pool_wait_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
+        self.pool_wait_timeout = timeout;
+        self
+    }
+
+    /// Returns how long a request waits for a pooled connection at the
+    /// connection limit; `None` fails at once.
+    #[must_use]
+    pub const fn pool_wait_timeout(&self) -> Option<std::time::Duration> {
+        self.pool_wait_timeout
     }
 
     /// Sets whether buffered requests ask for, and decode, gzip and br
@@ -1208,7 +1245,9 @@ impl<'a> ClientRequestBuilder<'a> {
 /// # Connection Pooling
 ///
 /// Connections are tracked in a [`Pool`] and reused when possible. The pool
-/// enforces per-host and total connection limits.
+/// enforces per-host and total connection limits: a request at a limit fails
+/// with [`ClientError::PoolExhausted`] unless
+/// [`HttpClientBuilder::pool_wait_timeout`] lets it wait for a connection.
 ///
 /// # Redirects
 ///
@@ -1219,6 +1258,10 @@ pub struct HttpClient {
     config: Arc<HttpClientConfig>,
     pool: Arc<Mutex<Pool>>,
     idle_connections: Arc<Mutex<HashMap<PoolKey, Vec<(u64, ClientIo)>>>>,
+    /// Signalled whenever a pooled connection is released or closed, for
+    /// requests waiting at the connection limit
+    /// ([`HttpClientBuilder::pool_wait_timeout`]).
+    pool_released: Arc<crate::sync::Notify>,
     cookies: Arc<Mutex<HashMap<String, Vec<StoredCookie>>>>,
     /// asupersync-bo2caw: the TLS connector, built once per client (shared by
     /// clones) on first HTTPS use. Building it loads and parses the root
@@ -1252,6 +1295,7 @@ impl HttpClient {
             config: Arc::new(config),
             pool: Arc::new(Mutex::new(Pool::with_config(pool_config))),
             idle_connections: Arc::new(Mutex::new(HashMap::new())),
+            pool_released: Arc::new(crate::sync::Notify::new()),
             cookies: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "tls")]
             tls_connector: Arc::new(std::sync::OnceLock::new()),
@@ -2474,77 +2518,122 @@ impl HttpClient {
             fn drop(&mut self) {
                 if let Some(id) = self.id {
                     self.client.pool.lock().remove(&self.key, id);
+                    self.client.pool_released.notify_waiters();
                 }
             }
         }
 
         let key = parsed.pool_key();
-        let now = self.pool_now();
-        self.cleanup_expired_idle_connections(now);
+        let exhausted = || ClientError::PoolExhausted {
+            host: parsed.host.clone(),
+            port: parsed.port,
+        };
+        // Set by the first wait at the connection limit
+        // (`HttpClientBuilder::pool_wait_timeout`).
+        let mut wait_until: Option<Time> = None;
+        let mut observe_cancel = true;
+        let fresh_id = loop {
+            // Armed before the pool is inspected, so a connection released
+            // between the inspection and the wait below still wakes it.
+            let mut released = std::pin::pin!(self.pool_released.notified());
+            released.as_mut().enable();
 
-        if reuse_idle {
-            loop {
-                let taken = {
-                    let mut pool = self.pool.lock();
-                    let mut idle = self.idle_connections.lock();
-                    let Some(pool_id) = pool.try_acquire(&key, now) else {
-                        break;
+            let now = self.pool_now();
+            self.cleanup_expired_idle_connections(now);
+
+            if reuse_idle {
+                loop {
+                    let taken = {
+                        let mut pool = self.pool.lock();
+                        let mut idle = self.idle_connections.lock();
+                        let Some(pool_id) = pool.try_acquire(&key, now) else {
+                            break;
+                        };
+                        let Some(io) = Self::take_idle_connection_locked(&mut idle, &key, pool_id)
+                        else {
+                            // Metadata can be stale if a prior request failed before reinserting.
+                            pool.remove(&key, pool_id);
+                            break;
+                        };
+                        (pool_id, io)
                     };
-                    let Some(io) = Self::take_idle_connection_locked(&mut idle, &key, pool_id)
-                    else {
-                        // Metadata can be stale if a prior request failed before reinserting.
-                        pool.remove(&key, pool_id);
-                        break;
-                    };
-                    (pool_id, io)
-                };
-                let (pool_id, mut io) = taken;
-                if idle_connection_is_reusable(&mut io) {
-                    return Ok(AcquiredConnection {
-                        pool_id: Some(pool_id),
-                        io,
-                        fresh: false,
-                    });
+                    let (pool_id, mut io) = taken;
+                    if idle_connection_is_reusable(&mut io) {
+                        return Ok(AcquiredConnection {
+                            pool_id: Some(pool_id),
+                            io,
+                            fresh: false,
+                        });
+                    }
+                    // The server closed it, or sent something, while it was idle.
+                    self.pool.lock().remove(&key, pool_id);
+                    self.pool_released.notify_waiters();
                 }
-                // The server closed it, or sent something, while it was idle.
-                self.pool.lock().remove(&key, pool_id);
             }
-        }
 
-        let fresh_id = {
-            let mut pool = self.pool.lock();
-            // Idle connections to other hosts must not lock this host out of
-            // a full pool: close the least recently used one to make room.
-            if let Some((evicted_key, evicted_id)) = pool.evict_idle_for(&key, now) {
-                let mut idle = self.idle_connections.lock();
-                Self::remove_idle_connection_locked(&mut idle, &evicted_key, evicted_id);
+            let fresh_id = {
+                let mut pool = self.pool.lock();
+                // Idle connections to other hosts must not lock this host out of
+                // a full pool: close the least recently used one to make room.
+                if let Some((evicted_key, evicted_id)) = pool.evict_idle_for(&key, now) {
+                    let mut idle = self.idle_connections.lock();
+                    Self::remove_idle_connection_locked(&mut idle, &evicted_key, evicted_id);
+                }
+                if pool.can_create_connection(&key, now) {
+                    Some(pool.register_connecting(key.clone(), now, 1))
+                } else {
+                    None
+                }
+            };
+            if let Some(id) = fresh_id {
+                break id;
             }
-            if pool.can_create_connection(&key, now) {
-                Some(pool.register_connecting(key.clone(), now, 1))
-            } else {
-                None
+
+            // At the connection limit: fail at once, or wait for another
+            // request to release or close a connection.
+            let Some(wait) = self.config.pool_wait_timeout else {
+                return Err(exhausted());
+            };
+            let timer_now = client_timer_now(cx);
+            let until = *wait_until.get_or_insert(timer_now + wait);
+            let remaining = std::time::Duration::from_nanos(until.duration_since(timer_now));
+            if remaining.is_zero() {
+                return Err(exhausted());
+            }
+            let observe = observe_cancel;
+            let mut cancelled = std::pin::pin!(cx.cancelled());
+            let woken = poll_fn(move |task| {
+                if released.as_mut().poll(task).is_ready() {
+                    return Poll::Ready(true);
+                }
+                if observe && cancelled.as_mut().poll(task).is_ready() {
+                    return Poll::Ready(false);
+                }
+                Poll::Pending
+            });
+            match crate::time::timeout(timer_now, remaining, std::pin::pin!(woken)).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    check_cx(cx)?;
+                    // Cancellation is masked: keep waiting for a connection.
+                    observe_cancel = false;
+                }
+                Err(_elapsed) => return Err(exhausted()),
             }
         };
 
         let mut guard = ConnectGuard {
             client: self,
             key: key.clone(),
-            id: fresh_id,
+            id: Some(fresh_id),
         };
-
-        if fresh_id.is_none() {
-            return Err(ClientError::PoolExhausted {
-                host: parsed.host.clone(),
-                port: parsed.port,
-            });
-        }
 
         let io = self.connect_io(cx, parsed).await?;
 
         guard.id = None; // defuse the guard upon success
 
         Ok(AcquiredConnection {
-            pool_id: fresh_id,
+            pool_id: Some(fresh_id),
             io,
             fresh: true,
         })
@@ -2568,6 +2657,8 @@ impl HttpClient {
                 let mut idle = self.idle_connections.lock();
                 Self::remove_idle_connection_locked(&mut idle, key, id);
             }
+            drop(pool);
+            self.pool_released.notify_waiters();
         }
     }
 
@@ -2575,6 +2666,7 @@ impl HttpClient {
         if let Some(id) = pool_id {
             self.pool.lock().remove(key, id);
             self.remove_idle_connection(key, id);
+            self.pool_released.notify_waiters();
         }
     }
 
