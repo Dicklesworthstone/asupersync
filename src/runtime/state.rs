@@ -4065,10 +4065,17 @@ impl RuntimeState {
             CapabilityBudgetRequirements::NONE,
             now,
         )?;
+        // A nested race's branch falls back past its sealed parent, to the
+        // same unsealed region its parent falls back to.
+        let spawn_fallback = self
+            .regions
+            .get(parent.arena_index())
+            .and_then(RegionRecord::spawn_fallback)
+            .unwrap_or(parent);
         self.regions
             .get(id.arena_index())
             .expect("the branch region was minted above")
-            .seal();
+            .seal(spawn_fallback);
         self.dispatch_region_lifecycle_effect(RegionLifecycleEffect::CreatedChild {
             region_id: id,
             parent,
@@ -4606,6 +4613,8 @@ impl RuntimeState {
             };
             return SpawnAdmission::Denied { parts, error };
         }
+        parts.region =
+            self.spawn_target_region(parts.region, parts.admitted_slot.as_deref(), regions);
         let budget = parts.budget;
         let branch = self.mint_branch_region_in(&parts, regions);
         if let Some((child, _)) = &branch {
@@ -4637,6 +4646,31 @@ impl RuntimeState {
             slot.publish(child, close_notify);
         }
         self.finish_send_spawn_admission_in(parts, task_id, &cx, now, tasks)
+    }
+
+    /// The region a spawn is admitted into: the requested one or, once that
+    /// region has closed for good and the spawn came from a context of that
+    /// sealed race-branch region, its fallback, the nearest unsealed ancestor
+    /// (br-asupersync-k27oxe). A race winner's context kept past the race so
+    /// keeps spawning where it did when branches ran in the caller's region.
+    /// A region still closing, such as a race loser being drained, keeps
+    /// denying the spawn, so no work escapes its drain.
+    fn spawn_target_region(
+        &self,
+        requested: RegionId,
+        slot: Option<&crate::runtime::spawn_mailbox::AdmittedTaskSlot>,
+        regions: &AdmissionRegionTarget<'_>,
+    ) -> RegionId {
+        let Some(fallback) =
+            slot.and_then(crate::runtime::spawn_mailbox::AdmittedTaskSlot::spawn_fallback)
+        else {
+            return requested;
+        };
+        let closed = regions
+            .resolve_ref(&self.regions)
+            .get(requested.arena_index())
+            .is_none_or(|record| record.state() == crate::record::region::RegionState::Closed);
+        if closed { fallback } else { requested }
     }
 
     /// Mints the sealed child region a race-branch spawn requested, under the
@@ -4699,6 +4733,7 @@ impl RuntimeState {
         if !region_record.state().can_accept_work() {
             return Err(SpawnError::RegionClosed(region));
         }
+        let spawn_fallback = region_record.spawn_fallback();
 
         let now = self.current_runtime_time();
         let idx = tasks
@@ -4823,6 +4858,11 @@ impl RuntimeState {
         );
         if let Some(inherited) = inherited {
             cx.adopt_inherited_handles(inherited);
+        }
+        // A sealed region's task can keep its context past the region; its
+        // spawns then go to the fallback (br-asupersync-k27oxe).
+        if spawn_fallback.is_some() {
+            cx.set_spawn_fallback_region(spawn_fallback);
         }
         // The scheduler must install the inherited authority for the entire
         // task lifetime, including factory construction and panic cleanup.
@@ -5162,7 +5202,7 @@ impl RuntimeState {
     /// production caller.
     pub(crate) fn admit_local_spawn_request_in(
         &mut self,
-        request: crate::runtime::spawn_mailbox::LocalSpawnRequest,
+        mut request: crate::runtime::spawn_mailbox::LocalSpawnRequest,
         tasks: &mut AdmissionTaskTarget<'_>,
         regions: &AdmissionRegionTarget<'_>,
     ) -> LocalSpawnAdmission {
@@ -5182,6 +5222,8 @@ impl RuntimeState {
             };
             return LocalSpawnAdmission::Denied { request, error };
         }
+        request.region =
+            self.spawn_target_region(request.region, request.admitted_slot.as_deref(), regions);
         let region = request.region;
         let budget = request.budget;
         let (task_id, cx, now) = match self.admit_spawn_record_in(

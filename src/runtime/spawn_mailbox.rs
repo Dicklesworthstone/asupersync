@@ -282,6 +282,10 @@ pub struct AdmittedTaskSlot {
     /// spawns stay inside a subtree the race can cancel and drain
     /// (br-asupersync-issue65-criticisms-kpmoy5.2.2).
     branch_region: Option<Arc<BranchRegionSlot>>,
+    /// The spawner's fallback region, when the spawn names its context's own
+    /// sealed region: admission uses it once that region has closed for good
+    /// (br-asupersync-k27oxe).
+    spawn_fallback: Option<RegionId>,
     /// Authoritative one-shot observer receipt for managed pre-admission
     /// aborts. Every repeat abort command carries this slot, so whichever
     /// consumer wins first-lane publication also wins this receipt.
@@ -319,6 +323,7 @@ impl AdmittedTaskSlot {
             retirement_barrier: None,
             pending_cancel_reason: OnceLock::new(),
             branch_region: None,
+            spawn_fallback: None,
             spawn_effects: Mutex::new(SpawnEffectHandoff::new()),
             inherited: Mutex::new(None),
         }
@@ -335,6 +340,7 @@ impl AdmittedTaskSlot {
             retirement_barrier: None,
             pending_cancel_reason: OnceLock::new(),
             branch_region: None,
+            spawn_fallback: None,
             spawn_effects: Mutex::new(SpawnEffectHandoff::new()),
             inherited: Mutex::new(None),
         }
@@ -355,6 +361,18 @@ impl AdmittedTaskSlot {
     /// The branch-region request, when the producer made one.
     pub(crate) fn branch_region(&self) -> Option<&Arc<BranchRegionSlot>> {
         self.branch_region.as_ref()
+    }
+
+    /// Carries the spawner's fallback region (see
+    /// `RegionRecord::spawn_fallback`).
+    pub(crate) fn with_spawn_fallback(mut self, region: Option<RegionId>) -> Self {
+        self.spawn_fallback = region;
+        self
+    }
+
+    /// The region admission uses when the requested one has closed.
+    pub(crate) fn spawn_fallback(&self) -> Option<RegionId> {
+        self.spawn_fallback
     }
 
     /// Moves the spawner's inherited handles into the slot. Admission takes

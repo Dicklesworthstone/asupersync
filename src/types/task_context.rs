@@ -965,6 +965,10 @@ pub struct CxInner {
     /// not yet wired — those deliver immediately as before.
     pub(crate) retirement_barrier:
         Option<std::sync::Arc<crate::runtime::task_handle::RetirementBarrier>>,
+    /// For a task admitted into a sealed (race-branch) region, the region
+    /// that admits a spawn from this context once that region has closed
+    /// (br-asupersync-k27oxe).
+    pub(crate) spawn_fallback_region: Option<RegionId>,
 }
 
 impl CxInner {
@@ -1002,6 +1006,7 @@ impl CxInner {
             fast_path_count: std::sync::atomic::AtomicU64::new(0),
             fast_path_last_checkpoint_ns: std::sync::atomic::AtomicU64::new(0),
             retirement_barrier: None,
+            spawn_fallback_region: None,
         }
     }
 
