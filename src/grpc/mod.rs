@@ -56,6 +56,7 @@
 //! - [`client`]: Client infrastructure
 //! - [`health`]: gRPC Health Checking Protocol
 //! - [`health_rpc`]: Authenticated, bounded Check/Watch registered RPC adapter
+//! - [`reflection_descriptor`]: Exact protobuf descriptor catalogs and dependency lookup
 //! - [`interceptor`]: Interceptor middleware and layers
 //! - [`web`]: gRPC-Web protocol support (HTTP/1.1, base64 text mode)
 
@@ -72,6 +73,7 @@ pub mod native_streaming;
 pub mod native_upload;
 pub mod protobuf;
 pub mod reflection;
+pub mod reflection_descriptor;
 #[cfg(test)]
 pub mod reflection_method_list_audit;
 pub mod server;
@@ -127,6 +129,7 @@ pub use reflection::{
     ReflectionDescribeServiceResponse, ReflectionListServicesRequest,
     ReflectionListServicesResponse, ReflectionService,
 };
+pub use reflection_descriptor::ReflectionDescriptorSet;
 #[cfg(not(target_arch = "wasm32"))]
 pub use server::GrpcTransportRequest;
 pub use server::{
