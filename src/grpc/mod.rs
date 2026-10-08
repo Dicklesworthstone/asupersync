@@ -57,6 +57,7 @@
 //! - [`health`]: gRPC Health Checking Protocol
 //! - [`health_rpc`]: Authenticated, bounded Check/Watch registered RPC adapter
 //! - [`reflection_descriptor`]: Exact protobuf descriptor catalogs and dependency lookup
+//! - `reflection_rpc`: Native v1/v1alpha reflection (`http2-streaming` feature)
 //! - [`interceptor`]: Interceptor middleware and layers
 //! - [`web`]: gRPC-Web protocol support (HTTP/1.1, base64 text mode)
 
@@ -74,6 +75,8 @@ pub mod native_upload;
 pub mod protobuf;
 pub mod reflection;
 pub mod reflection_descriptor;
+#[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+pub mod reflection_rpc;
 #[cfg(test)]
 pub mod reflection_method_list_audit;
 pub mod server;
@@ -130,6 +133,8 @@ pub use reflection::{
     ReflectionListServicesResponse, ReflectionService,
 };
 pub use reflection_descriptor::ReflectionDescriptorSet;
+#[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+pub use reflection_rpc::{ReflectionRpcConfig, ReflectionRpcService, ReflectionRpcV1AlphaService};
 #[cfg(not(target_arch = "wasm32"))]
 pub use server::GrpcTransportRequest;
 pub use server::{
