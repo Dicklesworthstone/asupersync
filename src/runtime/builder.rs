@@ -2632,6 +2632,9 @@ pub struct RuntimeBuilder {
     /// Set once the blocking pool's maximum is chosen explicitly. The default
     /// pool is marked so CPU-bound fan-out ignores its cap (kpmoy5.1.15).
     blocking_sized: bool,
+    /// Set by [`RuntimeBuilder::resource_sampling`]: how often a sampler
+    /// thread refreshes resource pressure (asupersync-1ir2em).
+    resource_sampling: Option<Duration>,
 }
 
 /// The builder's on-demand blocking pool maximum; wasm32 has no pool threads.
@@ -2662,6 +2665,7 @@ impl RuntimeBuilder {
             capture_schedules: false,
             scheduler_evidence_sink: None,
             blocking_sized: false,
+            resource_sampling: None,
         }
     }
 
@@ -2713,6 +2717,33 @@ impl RuntimeBuilder {
         sink: Arc<dyn crate::evidence_sink::EvidenceSink>,
     ) -> Self {
         self.scheduler_evidence_sink = Some(sink);
+        self
+    }
+
+    /// Samples resource pressure every `interval` on a background thread, so
+    /// child region admission and [`Cx::pressure`](crate::cx::Cx::pressure)
+    /// react to load (asupersync-1ir2em). Off by default.
+    ///
+    /// The thread runs
+    /// [`ResourceMonitor::process_current_state`](crate::runtime::resource_monitor::ResourceMonitor::process_current_state)
+    /// on [`Runtime::resource_monitor`] every interval (at least 100 ms; 1 s
+    /// suits most uses) and stops when the runtime is dropped. While it runs:
+    /// - every task context the runtime builds carries the monitor's pressure,
+    ///   so `Cx::pressure()` reports its headroom instead of `None`;
+    /// - child region creation consults the sampled levels: under pressure
+    ///   `Low` and `BestEffort` regions are refused, and at `Emergency`
+    ///   `Normal` ones too. `Critical` and `High` regions are always admitted.
+    ///
+    /// The probes read host-wide signals (on Linux, the load average per
+    /// online host CPU and every socket of the network namespace). In a
+    /// container they describe the host, not the container's CPU quota, so a
+    /// busy shared host can reach `Emergency` and refuse `Normal`-priority
+    /// regions, the default for `open_child_region`. Sampling also makes a run
+    /// depend on real load, so it does not combine with schedule capture for
+    /// replay. On wasm32 it does nothing.
+    #[must_use]
+    pub fn resource_sampling(mut self, interval: Duration) -> Self {
+        self.resource_sampling = Some(interval);
         self
     }
 
@@ -3352,9 +3383,12 @@ impl RuntimeBuilder {
             capture_schedules,
             scheduler_evidence_sink,
             blocking_sized,
+            resource_sampling,
         } = self;
         #[cfg(target_arch = "wasm32")]
         let _ = (platform_reactor, io_uring_capability_policy);
+        #[cfg(target_arch = "wasm32")]
+        let _ = resource_sampling;
         // br-asupersync-1ajbtl: default builds construct the platform reactor
         // so socket I/O uses readiness wakeups instead of the 1ms timer-paced
         // fallback re-poll path. Explicit with_reactor / with_io_driver
@@ -3437,6 +3471,10 @@ impl RuntimeBuilder {
             if let Some(gateway) = gateway {
                 gateway.set_scoped_cpu_worker_limit(limit);
             }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(interval) = resource_sampling {
+            runtime.inner.start_resource_sampling(interval);
         }
         Ok(runtime)
     }
@@ -5579,6 +5617,10 @@ struct RuntimeInner {
     deadline_monitor_shutdown: Option<std::sync::mpsc::Sender<()>>,
     /// Deadline monitor background thread handle.
     deadline_monitor_thread: Option<std::thread::JoinHandle<()>>,
+    /// Resource pressure sampler started by
+    /// [`RuntimeBuilder::resource_sampling`]; stopped in `Drop`.
+    #[cfg(not(target_arch = "wasm32"))]
+    resource_sampler: std::sync::OnceLock<crate::runtime::resource_monitor::ResourceSampler>,
     /// Per-runtime monotonic counter for request-scoped task IDs.
     ///
     /// br-asupersync-3lk5n2: every request-scoped Cx built via
@@ -5860,6 +5902,33 @@ impl Drop for CallerTaskRegistration {
 }
 
 impl RuntimeInner {
+    /// Starts the resource sampler; from then on every task context the
+    /// runtime builds carries its pressure (asupersync-1ir2em). A sampler that
+    /// cannot start leaves `Cx::pressure()` unset instead of frozen.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn start_resource_sampling(&self, interval: Duration) {
+        let monitor = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .resource_monitor();
+        let Some(sampler) =
+            crate::runtime::resource_monitor::ResourceSampler::start(monitor, interval)
+        else {
+            crate::tracing_compat::warn!(
+                "resource sampling did not start; region admission and Cx::pressure() stay unsampled"
+            );
+            return;
+        };
+        let pressure = sampler.system_pressure();
+        if self.resource_sampler.set(sampler).is_ok() {
+            self.state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .set_task_pressure(Some(pressure));
+        }
+    }
+
     fn spawn_liveness_guard(&self) -> Result<Arc<()>, SpawnError> {
         self.spawn_liveness
             .lock()
@@ -6239,6 +6308,8 @@ impl RuntimeInner {
                 blocking_pool,
                 deadline_monitor_shutdown: deadline_monitor.shutdown,
                 deadline_monitor_thread: deadline_monitor.thread,
+                #[cfg(not(target_arch = "wasm32"))]
+                resource_sampler: std::sync::OnceLock::new(),
                 request_task_counter: std::sync::atomic::AtomicU32::new(1),
                 shutdown_completion: Arc::new(RuntimeShutdownCompletion::new()),
                 current_thread_driver: std::sync::OnceLock::new(),
@@ -6654,6 +6725,8 @@ impl Drop for RuntimeInner {
             .iter()
             .any(|handle| handle.thread().id() == current_thread);
         let deadline_monitor = self.deadline_monitor_thread.take();
+        #[cfg(not(target_arch = "wasm32"))]
+        let resource_sampler = self.resource_sampler.take();
         let blocking_pool = self.blocking_pool.take();
         if let Some(pool) = &blocking_pool {
             pool.close_admission();
@@ -6667,6 +6740,9 @@ impl Drop for RuntimeInner {
             if let Some(thread) = deadline_monitor {
                 let _ = thread.join();
             }
+            // Dropping the sampler stops and joins its thread.
+            #[cfg(not(target_arch = "wasm32"))]
+            drop(resource_sampler);
             let blocking_pool =
                 blocking_pool.inspect(crate::runtime::blocking_pool::BlockingPool::shutdown);
             for handle in handles {
@@ -7260,6 +7336,7 @@ fn build_request_cx_from_inner(inner: &Arc<RuntimeInner>, budget: Budget) -> cra
         loser_drain_history,
         spawn_gateway,
         pending_spawns,
+        task_pressure,
     ) = {
         let guard = inner
             .state
@@ -7282,6 +7359,7 @@ fn build_request_cx_from_inner(inner: &Arc<RuntimeInner>, budget: Budget) -> cra
             guard
                 .region(inner.root_region)
                 .map(crate::record::RegionRecord::pending_spawn_handle),
+            guard.task_pressure(),
         )
     };
 
@@ -7305,6 +7383,11 @@ fn build_request_cx_from_inner(inner: &Arc<RuntimeInner>, budget: Budget) -> cra
     .with_logical_clock(logical_clock)
     .with_spawn_gateway(spawn_gateway)
     .with_pending_spawn_counter(pending_spawns);
+    // While resource sampling runs, the block_on body sees its pressure too.
+    let request_cx = match task_pressure {
+        Some(pressure) => request_cx.with_pressure(pressure),
+        None => request_cx,
+    };
     request_cx.set_trace_buffer(trace);
     request_cx.set_loser_drain_history_handle(loser_drain_history);
     request_cx

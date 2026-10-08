@@ -2175,6 +2175,10 @@ pub struct RuntimeState {
     /// Provides comprehensive admission decisions, resource envelope tracking,
     /// and swarm coordination for distributed pressure management.
     swarm_pressure_governor: SwarmPressureGovernor,
+    /// The pressure handle every task context the runtime builds carries while
+    /// resource sampling runs (`RuntimeBuilder::resource_sampling`). `None`
+    /// otherwise, and then `Cx::pressure()` stays `None`.
+    task_pressure: Option<Arc<crate::types::pressure::SystemPressure>>,
     /// Regions that need state advancement deferred until leak handling completes.
     ///
     /// During obligation leak handling, `abort_obligation` calls can trigger
@@ -2377,6 +2381,7 @@ impl RuntimeState {
             debt_monitor: Arc::new(crate::observability::CancellationDebtMonitor::default()),
             resource_monitor,
             swarm_pressure_governor,
+            task_pressure: None,
             deferred_region_advancements: BTreeSet::new(),
         }
     }
@@ -4375,6 +4380,7 @@ impl RuntimeState {
                 .get(region.arena_index())
                 .map(crate::record::RegionRecord::pending_obligation_post_handle),
         );
+        let cx = self.with_task_pressure(cx);
         let cx = cx.with_obligation_admission(
             regions
                 .resolve_ref(&self.regions)
@@ -4815,6 +4821,7 @@ impl RuntimeState {
                 .get(region.arena_index())
                 .map(crate::record::RegionRecord::pending_obligation_post_handle),
         );
+        let cx = self.with_task_pressure(cx);
         // Mailbox admission is visible in RuntimeState before its caller can
         // publish the first scheduler lane. Cancellation mutates this Cx while
         // the gate is false but delegates lane/Waker publication to the
@@ -5058,6 +5065,7 @@ impl RuntimeState {
             self.region(child_region)
                 .map(crate::record::RegionRecord::pending_obligation_post_handle),
         );
+        let principal_cx = self.with_task_pressure(principal_cx);
         // Mirror the mailbox-admission wiring so the principal context
         // observes and records exactly what an admitted task context would:
         // trace events flow to the runtime trace buffer, and cancellation
@@ -10491,6 +10499,29 @@ impl RuntimeState {
     /// connections, and triggers degradation policies when thresholds are exceeded.
     pub fn resource_monitor(&self) -> Arc<ResourceMonitor> {
         Arc::clone(&self.resource_monitor)
+    }
+
+    /// Sets the pressure handle every task context built from now on carries
+    /// (the resource sampler's), or clears it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn set_task_pressure(
+        &mut self,
+        pressure: Option<Arc<crate::types::pressure::SystemPressure>>,
+    ) {
+        self.task_pressure = pressure;
+    }
+
+    /// The pressure handle task contexts carry while resource sampling runs.
+    pub(crate) fn task_pressure(&self) -> Option<Arc<crate::types::pressure::SystemPressure>> {
+        self.task_pressure.clone()
+    }
+
+    /// `cx` with the runtime's task pressure handle, when sampling runs.
+    fn with_task_pressure(&self, cx: crate::cx::Cx) -> crate::cx::Cx {
+        match &self.task_pressure {
+            Some(pressure) => cx.with_pressure(Arc::clone(pressure)),
+            None => cx,
+        }
     }
 
     /// Sets the priority for a region in the graceful degradation system.

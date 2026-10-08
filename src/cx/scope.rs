@@ -1515,7 +1515,11 @@ impl<'scope, P: Policy> Scope<'scope, P> {
         let blocking_pool = parent_cx.blocking_pool_handle_for_inheritance();
         let evidence_sink = parent_cx.evidence_sink_handle();
         let macaroon = parent_cx.macaroon_handle();
-        let pressure_opt = parent_cx.pressure_handle();
+        // A parent without a pressure handle passes on the runtime's while
+        // resource sampling runs (asupersync-1ir2em).
+        let pressure_opt = parent_cx
+            .pressure_handle()
+            .or_else(|| state.task_pressure());
 
         // Build context with cached handles - minimizes Arc clone operations
         let mut child_cx = Cx::<Caps>::new_with_drivers(

@@ -1570,7 +1570,12 @@ fn test_function() {
     // for a single address. connect_one's connect keeps its site with a new
     // excerpt. Literal-address connects are unchanged. No scanner exemption
     // or detection pattern changed.
-    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 821;
+    // 821 -> 822 (br-asupersync-1ir2em, 2026-10-07): runtime/resource_monitor.rs
+    // ResourceSampler spawns one std thread, started only by the opt-in
+    // RuntimeBuilder::resource_sampling. It runs the monitor's existing OS
+    // probes (process_current_state) on an interval and holds no runtime
+    // lock; Drop joins it. No scanner exemption or detection pattern changed.
+    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 822;
 
     fn src_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src")

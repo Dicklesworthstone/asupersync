@@ -30,7 +30,8 @@
       "SapphireHill d0 (2026-10-07, watchdog heal) re-locates two rows after safe-only line shifts: the fourteen src/channel/mpsc_tests.rs raw_waker_probe locators by +20 lines (1167..1248 to 1187..1268; 8bad2b69d added tests above the probe), and the two src/fs/path_ops.rs uring_submit_one locators by -42 lines (713, 718 to 671, 676; 5c79c0294). Same code, kinds and patterns; categories, invariants, evidence, and no-claim boundaries are unchanged.",
       "asupersync-issue65-criticisms-kpmoy5.1.15 (2026-10-06) re-locates the same four src/runtime/builder.rs locators (7285, 10432, 10437, 10462 to 7314, 10533, 10538, 10563): the safe-only default blocking pool added a builder field, its default and docs above the test module (+29), and two tests above the env helpers (+72). The new env test reuses the existing with_envs helper and adds no unsafe site. Categories, invariants, evidence, and no-claim boundaries are unchanged.",
       "asupersync-r02ssd (2026-10-07) re-locates four src/net/atp/transport_common/metadata.rs locators by +87 lines (2614, 2648, 2897, 2919 to 2701, 2735, 2984, 3006): the safe-only DeferredParentSyncs batch (one parent-directory fsync per committed directory instead of per file) and its plumbing through install_staged_leaf_transactionally sit above them. 232 and 250 are unchanged. No unsafe site is added; categories, invariants, evidence, and no-claim boundaries are unchanged.",
-      "SapphireHill (2026-10-07, main-red heal) re-locates the twenty src/sync/mutex.rs locators after d7ba86cfe (wake blocked mutex acquisition on context cancellation) added safe-only code above them: 108, 109 by +4 and the nineteen from 683 on by +51 (25 is unchanged). Each locator keeps its pattern and its occurrence index. No unsafe site is added or removed; categories, invariants, evidence, and no-claim boundaries are unchanged."
+      "SapphireHill (2026-10-07, main-red heal) re-locates the twenty src/sync/mutex.rs locators after d7ba86cfe (wake blocked mutex acquisition on context cancellation) added safe-only code above them: 108, 109 by +4 and the nineteen from 683 on by +51 (25 is unchanged). Each locator keeps its pattern and its occurrence index. No unsafe site is added or removed; categories, invariants, evidence, and no-claim boundaries are unchanged.",
+      "asupersync-1ir2em (2026-10-07) re-locates the same four src/runtime/builder.rs locators by +83 lines (7314, 10533, 10538, 10563 to 7397, 10616, 10621, 10646): the safe-only opt-in resource sampler adds a builder field, its default, the resource_sampling method and docs, its start in build() with a warning when it cannot start, a RuntimeInner field with its start method and Drop handling, and the pressure handle on the request context, all above the test module. No unsafe site is added; categories, invariants, evidence, and no-claim boundaries are unchanged."
     ]
   },
   "required_row_fields": [
@@ -3809,22 +3810,22 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 7314,
+          "line": 7397,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 10533,
+          "line": 10616,
           "pattern": "unsafe { std::env::set_var(k, v) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 10538,
+          "line": 10621,
           "pattern": "unsafe { std::env::remove_var(k) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 10563,
+          "line": 10646,
           "pattern": "unsafe { std::env::remove_var(var) };"
         }
       ]

@@ -5372,7 +5372,7 @@ mod platform {
         let v: f64 = first.parse().map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "loadavg not numeric")
         })?;
-        let cpus = num_cpus().max(1) as f64;
+        let cpus = host_online_cpus().max(1) as f64;
         let pct = (v / cpus).clamp(0.0, 1.0) * 100.0;
         Ok(pct.round() as u64)
     }
@@ -5973,6 +5973,35 @@ mod platform {
     pub fn num_cpus() -> u64 {
         std::thread::available_parallelism().map_or(1, |n| n.get() as u64)
     }
+
+    /// The host's online CPU count, the divisor for host-wide signals such as
+    /// the load average. `num_cpus` honours this process's CPU quota and
+    /// affinity, so the host's load divided by it overstates pressure in a
+    /// container: a 2-CPU pod on a quarter-busy 32-core host read 100%. Falls
+    /// back to `num_cpus` when `/sys/devices/system/cpu/online` is unreadable.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub fn host_online_cpus() -> u64 {
+        std::fs::read_to_string("/sys/devices/system/cpu/online")
+            .ok()
+            .and_then(|list| cpu_list_len(list.trim()))
+            .filter(|&count| count > 0)
+            .unwrap_or_else(num_cpus)
+    }
+
+    /// The number of CPUs in a kernel CPU list such as `0-3,8,10-11`.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub fn cpu_list_len(list: &str) -> Option<u64> {
+        list.split(',').try_fold(0u64, |total, range| {
+            let (first, last) = match range.split_once('-') {
+                Some((first, last)) => (first.parse::<u64>().ok()?, last.parse::<u64>().ok()?),
+                None => {
+                    let cpu = range.parse::<u64>().ok()?;
+                    (cpu, cpu)
+                }
+            };
+            total.checked_add(last.checked_sub(first)?.checked_add(1)?)
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -6246,6 +6275,9 @@ pub struct ResourceMonitor {
     collector: SystemResourceCollector,
     /// Monitoring configuration.
     config: RwLock<MonitorConfig>,
+    /// Sampling cycles that exceeded the overhead limit; the warning is
+    /// throttled by this count.
+    overhead_warnings: AtomicU64,
 }
 
 /// Configuration for the resource monitor.
@@ -6283,6 +6315,7 @@ impl ResourceMonitor {
             engine,
             collector,
             config: RwLock::new(config),
+            overhead_warnings: AtomicU64::new(0),
         }
     }
 
@@ -6336,12 +6369,18 @@ impl ResourceMonitor {
                 cycle_overhead_percentage(cycle_start.elapsed(), config.collection_interval);
 
             if overhead_percent > config.max_overhead_percent {
-                crate::tracing_compat::warn!(
-                    overhead_percent,
-                    collection_interval_ms = config.collection_interval.as_millis(),
-                    max_overhead_percent = config.max_overhead_percent,
-                    "resource monitoring overhead exceeds configured limit"
-                );
+                // A sampler may exceed the limit every cycle: warn on the
+                // first cycle and then once per 600 (a minute at 100 ms).
+                let cycles = self.overhead_warnings.fetch_add(1, Ordering::Relaxed) + 1;
+                if cycles == 1 || cycles.is_multiple_of(600) {
+                    crate::tracing_compat::warn!(
+                        overhead_percent,
+                        collection_interval_ms = config.collection_interval.as_millis(),
+                        max_overhead_percent = config.max_overhead_percent,
+                        over_limit_cycles = cycles,
+                        "resource monitoring overhead exceeds configured limit"
+                    );
+                }
             }
         }
 
@@ -6431,6 +6470,82 @@ pub struct ResourceMonitorStatus {
     pub config: MonitorConfig,
 }
 
+/// The thread that samples a runtime's resource pressure, started by
+/// `RuntimeBuilder::resource_sampling`.
+///
+/// Every interval it runs [`ResourceMonitor::process_current_state`], the only
+/// path that refreshes measurements and moves the degradation levels and the
+/// shared [`SystemPressure`] headroom. It holds the monitor and nothing of the
+/// runtime state, so it takes no runtime lock. Dropping it stops and joins the
+/// thread and marks the monitor inactive.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+pub(crate) struct ResourceSampler {
+    monitor: Arc<ResourceMonitor>,
+    shutdown: Option<std::sync::mpsc::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ResourceSampler {
+    /// The shortest sampling interval accepted. A cycle reads `/proc/self/fd`
+    /// and every socket table of the network namespace, so shorter intervals
+    /// would cost a large share of a core on a busy host.
+    pub(crate) const MIN_INTERVAL: Duration = Duration::from_millis(100);
+
+    /// Starts sampling `monitor` every `interval`, at least
+    /// [`Self::MIN_INTERVAL`]. `None` when the monitor is already active or the
+    /// thread cannot be spawned.
+    pub(crate) fn start(monitor: Arc<ResourceMonitor>, interval: Duration) -> Option<Self> {
+        let interval = interval.max(Self::MIN_INTERVAL);
+        monitor.start().ok()?;
+        let mut config = monitor.config.read().clone();
+        config.collection_interval = interval;
+        monitor.update_config(config);
+        let (shutdown, stop_signal) = std::sync::mpsc::channel::<()>();
+        let sampled = Arc::clone(&monitor);
+        let thread = std::thread::Builder::new()
+            .name("asupersync-resource-sampler".to_owned())
+            .spawn(move || {
+                while stop_signal.recv_timeout(interval)
+                    == Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                {
+                    // A failed probe keeps the previous measurements, and a
+                    // panicking one does not end sampling.
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        sampled.process_current_state()
+                    }));
+                }
+            });
+        if let Ok(thread) = thread {
+            Some(Self {
+                monitor,
+                shutdown: Some(shutdown),
+                thread: Some(thread),
+            })
+        } else {
+            monitor.stop();
+            None
+        }
+    }
+
+    /// The pressure handle the sampler keeps current.
+    pub(crate) fn system_pressure(&self) -> Arc<SystemPressure> {
+        self.monitor.pressure().system_pressure()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for ResourceSampler {
+    fn drop(&mut self) {
+        drop(self.shutdown.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        self.monitor.stop();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -6456,6 +6571,20 @@ mod tests {
     use std::fs;
     use std::hash::{Hash, Hasher};
     use std::path::Path;
+
+    /// The load average is host-wide, so it is divided by the host's online
+    /// CPUs, read from the kernel's CPU list (asupersync-1ir2em review).
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn host_online_cpus_counts_the_kernel_cpu_list() {
+        assert_eq!(platform::cpu_list_len("0"), Some(1));
+        assert_eq!(platform::cpu_list_len("0-31"), Some(32));
+        assert_eq!(platform::cpu_list_len("0-3,8,10-11"), Some(7));
+        assert_eq!(platform::cpu_list_len(""), None);
+        assert_eq!(platform::cpu_list_len("3-1"), None);
+        assert_eq!(platform::cpu_list_len("0-x"), None);
+        assert!(platform::host_online_cpus() >= 1);
+    }
 
     #[test]
     fn test_resource_measurement_ratios() {
