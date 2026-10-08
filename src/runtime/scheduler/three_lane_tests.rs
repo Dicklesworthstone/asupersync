@@ -12856,3 +12856,45 @@ fn region_cancel_command_stamps_the_drain_before_the_deferred_batch() {
         );
     }
 }
+
+/// GH #77 should-fix 1 (br-asupersync-0khxcu): a task in the worker's LIFO
+/// slot when `next_task` returns an early `None` (cancellation commands still
+/// queued) moves to the global ready lane. Neither the park checks nor the
+/// idle I/O turn see the thread-local slot, so a task left there waited for an
+/// unrelated wake once another worker drained the commands.
+#[test]
+fn an_early_none_from_next_task_spills_the_lifo_slot() {
+    use crate::runtime::spawn_mailbox::SpawnMailbox;
+
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    let mut scheduler = ThreeLaneScheduler::new(1, &state);
+    let mailbox = Arc::new(SpawnMailbox::new());
+    scheduler.attach_spawn_mailbox(Arc::clone(&mailbox));
+    let mut worker = scheduler.take_workers().remove(0);
+    // More handle cancels than next_task's two drains take (16 each), for
+    // tasks that do not exist: the turn yields with commands still queued.
+    for index in 0..40_u32 {
+        mailbox.enqueue_handle_cancel(
+            TaskId::new_for_test(9_000 + index, 1),
+            CancelReason::user("queued handle cancel"),
+        );
+    }
+    let woken = TaskId::new_for_test(8_000, 1);
+    let key = Arc::as_ptr(&worker.coordinator).addr();
+    LIFO_SLOT.with(|slot| slot.set(Some((key, woken, 7))));
+
+    assert_eq!(
+        worker.next_task(),
+        None,
+        "queued cancellation commands yield the turn"
+    );
+    assert!(
+        take_lifo_task(&worker.coordinator).is_none(),
+        "the woken task was left in the LIFO slot"
+    );
+    let spilled = worker
+        .global
+        .pop_ready()
+        .expect("the woken task went to the global ready lane");
+    assert_eq!((spilled.task, spilled.priority), (woken, 7));
+}
