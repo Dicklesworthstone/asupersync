@@ -61,6 +61,7 @@ pub mod cap;
 mod cap_tests;
 mod copy;
 pub mod copy_session;
+mod duplex;
 pub mod ext;
 mod lines;
 mod owned_split;
@@ -69,6 +70,8 @@ mod read_buf;
 mod read_line;
 mod seek;
 mod split;
+#[cfg(not(target_arch = "wasm32"))]
+mod stdio;
 mod stream_adapters;
 pub mod transfer_session;
 mod write;
@@ -81,6 +84,7 @@ pub use copy::{
 pub use copy_session::{
     BidirectionalCopyProgress, BidirectionalCopySession, CopySession, CopySessionProgress,
 };
+pub use duplex::{DuplexStream, duplex};
 pub use ext::{
     AsyncReadExt, AsyncReadVectoredExt, Read, ReadExact, ReadI8, ReadToEnd, ReadToString, ReadU8,
     ReadVectored,
@@ -95,6 +99,8 @@ pub use read::{AsyncRead, AsyncReadVectored, Chain, Take};
 pub use read_buf::ReadBuf;
 pub use seek::AsyncSeek;
 pub use split::{ReadHalf, SplitStream, WriteHalf, split};
+#[cfg(not(target_arch = "wasm32"))]
+pub use stdio::{Stderr, Stdin, Stdout, stderr, stdin, stdout};
 pub use stream_adapters::{ReaderStream, StreamReader};
 pub use transfer_session::{ReadExactSession, WriteAllSession};
 pub use write::{AsyncWrite, AsyncWriteVectored};
