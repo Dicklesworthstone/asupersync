@@ -4,7 +4,7 @@
 
 use std::future::{Future, poll_fn};
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
@@ -812,4 +812,163 @@ fn client_receive_windows_track_the_response_body_limit() {
         "stream window must track max_response_body"
     );
     quiescent(&runtime);
+}
+
+/// What the accept-counting peer does after answering a connection's first
+/// request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AfterFirst {
+    Serve,
+    GoAway,
+    Refuse,
+}
+
+/// A raw HTTP/2 server that echoes each request body with status 200 and
+/// counts the TCP connections it accepts. Each answer is signalled after it
+/// (and any GOAWAY following it) has been written.
+fn counting_peer(
+    after: AfterFirst,
+) -> (std::net::SocketAddr, Arc<AtomicUsize>, mpsc::Receiver<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let (answered, answers) = mpsc::channel();
+    let count = Arc::clone(&accepted);
+    std::thread::spawn(move || {
+        for io in listener.incoming() {
+            let Ok(mut io) = io else { break };
+            count.fetch_add(1, Ordering::SeqCst);
+            let answered = answered.clone();
+            std::thread::spawn(move || {
+                io.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+                let mut preface = [0u8; 24];
+                if io.read_exact(&mut preface).is_err() {
+                    return;
+                }
+                let mut connection = Connection::server(Settings::server());
+                connection.queue_initial_settings();
+                let mut codec = FrameCodec::new();
+                let mut input = BytesMut::new();
+                let mut bodies = std::collections::HashMap::<u32, Vec<u8>>::new();
+                let mut served = 0;
+                loop {
+                    while let Some(frame) = codec.decode(&mut input).unwrap() {
+                        let (id, end) = match connection.process_frame(frame).unwrap() {
+                            Some(ReceivedFrame::Headers {
+                                stream_id,
+                                end_stream,
+                                ..
+                            }) => {
+                                bodies.entry(stream_id).or_default();
+                                (stream_id, end_stream)
+                            }
+                            Some(ReceivedFrame::Data {
+                                stream_id,
+                                data,
+                                end_stream,
+                            }) => {
+                                bodies
+                                    .entry(stream_id)
+                                    .or_default()
+                                    .extend_from_slice(&data);
+                                (stream_id, end_stream)
+                            }
+                            _ => continue,
+                        };
+                        if !end {
+                            continue;
+                        }
+                        if after == AfterFirst::Refuse && served > 0 {
+                            connection.reset_stream(id, ErrorCode::RefusedStream);
+                        } else {
+                            let body = bodies.remove(&id).unwrap_or_default();
+                            connection
+                                .send_headers(
+                                    id,
+                                    vec![
+                                        Header::new(":status", "200"),
+                                        Header::new("content-length", body.len().to_string()),
+                                    ],
+                                    body.is_empty(),
+                                )
+                                .unwrap();
+                            if !body.is_empty() {
+                                connection.send_data(id, Bytes::from(body), true).unwrap();
+                            }
+                            served += 1;
+                            if after == AfterFirst::GoAway {
+                                connection.goaway(ErrorCode::NoError, Bytes::new());
+                            }
+                        }
+                        let mut bytes = BytesMut::new();
+                        while let Some(frame) = connection.next_frame() {
+                            frame.encode(&mut bytes).unwrap();
+                        }
+                        let _ = io.write_all(&bytes);
+                        if after == AfterFirst::GoAway && served > 0 {
+                            let _ = io.shutdown(std::net::Shutdown::Both);
+                            answered.send(()).unwrap();
+                            return;
+                        }
+                        answered.send(()).unwrap();
+                    }
+                    let mut bytes = BytesMut::new();
+                    while let Some(frame) = connection.next_frame() {
+                        frame.encode(&mut bytes).unwrap();
+                    }
+                    if !bytes.is_empty() && io.write_all(&bytes).is_err() {
+                        return;
+                    }
+                    let mut chunk = [0u8; 8192];
+                    match io.read(&mut chunk) {
+                        Ok(0) | Err(_) => return,
+                        Ok(read) => input.extend_from_slice(&chunk[..read]),
+                    }
+                }
+            });
+        }
+    });
+    (address, accepted, answers)
+}
+
+/// Send `requests` sequential POSTs; return the connections the peer accepted.
+fn pooled_requests(after: AfterFirst, reuse: usize, requests: usize) -> usize {
+    let (address, accepted, answers) = counting_peer(after);
+    let runtime = runtime(1);
+    runtime.block_on(async move {
+        let cx = Cx::current().unwrap();
+        let client = Http2Client::new()
+            .timeout(Duration::from_secs(10))
+            .reuse_connections(reuse);
+        for request in 0..requests {
+            let body = format!("request {request}").into_bytes();
+            let response = client
+                .post(format!("http://{address}/echo"))
+                .body(body.clone())
+                .send(&cx)
+                .await
+                .unwrap_or_else(|error| panic!("{after:?} reuse={reuse} #{request}: {error}"));
+            assert_eq!(response.status, 200);
+            assert_eq!(response.body.as_ref(), body);
+            // Loopback delivers the answer's trailing GOAWAY or close before
+            // the next request looks at the idle connection.
+            while answers.recv_timeout(Duration::from_millis(200)).is_ok() {}
+        }
+    });
+    accepted.load(Ordering::SeqCst)
+}
+
+#[test]
+fn requests_dial_per_request_by_default_and_share_a_pooled_connection_when_enabled() {
+    assert_eq!(pooled_requests(AfterFirst::Serve, 0, 3), 3);
+    assert_eq!(pooled_requests(AfterFirst::Serve, 2, 3), 1);
+}
+
+#[test]
+fn a_pooled_connection_the_server_ended_or_refused_is_replaced() {
+    // GOAWAY and close while idle: dropped before use, the next request dials.
+    assert_eq!(pooled_requests(AfterFirst::GoAway, 2, 2), 2);
+    // REFUSED_STREAM on the reused connection: the server did not process
+    // the request, which is retried once on a fresh connection.
+    assert_eq!(pooled_requests(AfterFirst::Refuse, 2, 2), 2);
 }

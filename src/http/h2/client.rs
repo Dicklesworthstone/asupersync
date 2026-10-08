@@ -1,11 +1,12 @@
 //! Bounded native HTTP/2 requests over an owned transport.
 //!
 //! Each request drives its connection in the calling task. No background task,
-//! connection pool, redirect, or retry is implicit. Cleartext URLs use HTTP/2
-//! prior knowledge; HTTPS requires a caller-supplied TLS connector and `h2`
-//! ALPN. Both upload and download advance while the other direction is blocked
-//! by flow control. The connection is closed when the response finishes, the
-//! request fails, or the request future is dropped.
+//! redirect, or retry is implicit. Cleartext URLs use HTTP/2 prior knowledge;
+//! HTTPS requires a caller-supplied TLS connector and `h2` ALPN. Both upload
+//! and download advance while the other direction is blocked by flow control.
+//! The connection is closed when the response finishes, the request fails, or
+//! the request future is dropped, unless the client opted into keeping idle
+//! connections for reuse ([`Http2Client::reuse_connections`]).
 //!
 //! ```no_run
 //! # async fn example(cx: &asupersync::Cx) -> Result<(), Box<dyn std::error::Error>> {
@@ -22,11 +23,13 @@
 //! # }
 //! ```
 
+use std::collections::HashMap;
 use std::fmt;
 use std::future::{Future, poll_fn};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Poll, Waker};
 use std::time::Duration;
 
@@ -39,7 +42,8 @@ use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use crate::net::TcpStream;
 use crate::stream::Stream;
 use crate::time::Sleep;
-use crate::types::CancelReason;
+use crate::types::{CancelReason, Time};
+use parking_lot::Mutex;
 
 use super::connection::{CLIENT_PREFACE, ReceivedFrame};
 use super::{Connection, ConnectionState, ErrorCode, FrameCodec, H2Error, Header, Settings};
@@ -173,8 +177,9 @@ impl Http2Response {
 ///
 /// Defaults are a 30-second total timeout and 16 MiB each for upload and
 /// response. Header sections, including informational responses and trailers,
-/// share a 64 KiB decoded limit. A request owns one connection; concurrent
-/// calls have independent transports and cannot cancel one another.
+/// share a 64 KiB decoded limit. A request owns one connection (by default a
+/// fresh one; see [`Self::reuse_connections`]); concurrent calls have
+/// independent transports and cannot cancel one another.
 #[derive(Clone)]
 pub struct Http2Client {
     timeout: Duration,
@@ -182,6 +187,8 @@ pub struct Http2Client {
     max_response_body: usize,
     #[cfg(feature = "tls")]
     tls_connector: Option<crate::tls::TlsConnector>,
+    /// Idle connections kept for reuse ([`Self::reuse_connections`]).
+    pool: Option<Arc<ConnectionPool>>,
 }
 
 impl fmt::Debug for Http2Client {
@@ -202,6 +209,7 @@ impl Default for Http2Client {
             max_response_body: DEFAULT_BODY_LIMIT,
             #[cfg(feature = "tls")]
             tls_connector: None,
+            pool: None,
         }
     }
 }
@@ -241,6 +249,34 @@ impl Http2Client {
     #[must_use]
     pub fn tls_connector(mut self, connector: crate::tls::TlsConnector) -> Self {
         self.tls_connector = Some(connector);
+        self
+    }
+
+    /// Keep up to `max_idle` connections per origin (scheme, host and port)
+    /// open after [`Http2RequestBuilder::send`] completes a request, so later
+    /// requests from this client, or a clone of it, reuse them instead of
+    /// dialing (and TLS-handshaking) again. `0`, the default, keeps the
+    /// original behavior: each request owns a fresh connection.
+    ///
+    /// A pooled connection carries one request at a time; concurrent requests
+    /// use separate connections, and at most `max_idle` per origin are kept
+    /// between requests. Before reuse, whatever the server sent while the
+    /// connection was idle is processed: one the server closed or sent GOAWAY
+    /// on, or one idle for over 30 seconds, is dropped instead. If a reused
+    /// connection turns out to be gone before the server could act on the
+    /// request (the stream could not be opened, was refused, or GOAWAY
+    /// excludes it), the request is retried once on a fresh connection. A
+    /// connection whose request ended early (an error, or a response before
+    /// the upload finished) is not reused. [`Http2RequestBuilder::send_on`]
+    /// never pools its caller-supplied transport.
+    #[must_use]
+    pub fn reuse_connections(mut self, max_idle: usize) -> Self {
+        self.pool = (max_idle > 0).then(|| {
+            Arc::new(ConnectionPool {
+                max_idle,
+                idle: Mutex::new(HashMap::new()),
+            })
+        });
         self
     }
 
@@ -317,7 +353,7 @@ impl Http2RequestBuilder {
             .min(self.client.timeout);
         drive(cx, timeout, async {
             require_native_io(cx)?;
-            let host = request.url.host.trim_matches(['[', ']']);
+            let host = request.url.host.trim_matches(['[', ']']).to_owned();
             if request.url.scheme == Scheme::Https {
                 #[cfg(feature = "tls")]
                 if self.client.tls_connector.is_none() {
@@ -328,22 +364,52 @@ impl Http2RequestBuilder {
                 #[cfg(not(feature = "tls"))]
                 return Err(Http2ClientError::Tls("TLS support is disabled".into()));
             }
+            let limit = self.client.max_response_body;
+            let origin: Origin = (
+                request.url.scheme == Scheme::Https,
+                host.clone(),
+                request.url.port,
+            );
+            if let Some(pool) = &self.client.pool {
+                // Stale idle connections are dropped; a request the server
+                // provably did not process on a reused connection is retried
+                // once, on a fresh one.
+                while let Some(mut conn) = pool.take(&origin, pool_now(cx)) {
+                    if conn.refresh().await.is_err() {
+                        continue;
+                    }
+                    match conn
+                        .request(request.clone(), self.body.clone(), limit)
+                        .await
+                    {
+                        Ok((response, closed)) => {
+                            if closed && conn.reusable() {
+                                pool.put(origin, conn, pool_now(cx));
+                            }
+                            return Ok(response);
+                        }
+                        Err(failure) if failure.unprocessed => break,
+                        Err(failure) => return Err(failure.error),
+                    }
+                }
+            }
             let tcp = if let Ok(ip) = host.parse::<IpAddr>() {
                 TcpStream::connect(SocketAddr::new(ip, request.url.port)).await?
             } else {
-                crate::net::happy_eyeballs::connect_resolved(
-                    (host.to_owned(), request.url.port),
-                    None,
-                )
-                .await?
+                crate::net::happy_eyeballs::connect_resolved((host.clone(), request.url.port), None)
+                    .await?
             };
+            let transport = DialedTransport::Plain(tcp);
             #[cfg(feature = "tls")]
-            if request.url.scheme == Scheme::Https {
+            let transport = if request.url.scheme == Scheme::Https {
+                let DialedTransport::Plain(tcp) = transport else {
+                    unreachable!("dialed above")
+                };
                 let connector = self.client.tls_connector.as_ref().ok_or_else(|| {
                     Http2ClientError::Tls("HTTPS requires a TLS connector".into())
                 })?;
                 let tls = connector
-                    .connect(host, tcp)
+                    .connect(&host, tcp)
                     .await
                     .map_err(|error| Http2ClientError::Tls(error.to_string()))?;
                 if tls.alpn_protocol() != Some(b"h2".as_slice()) {
@@ -351,9 +417,22 @@ impl Http2RequestBuilder {
                         "peer did not negotiate h2 ALPN".into(),
                     ));
                 }
-                return exchange(tls, request, self.body, self.client.max_response_body).await;
+                DialedTransport::Tls(tls)
+            } else {
+                transport
+            };
+            let mut conn = Http2Conn::start(transport, limit).await?;
+            let (response, closed) = conn
+                .request(request, self.body, limit)
+                .await
+                .map_err(|failure| failure.error)?;
+            if let Some(pool) = &self.client.pool
+                && closed
+                && conn.reusable()
+            {
+                pool.put(origin, conn, pool_now(cx));
             }
-            exchange(tcp, request, self.body, self.client.max_response_body).await
+            Ok(response)
         })
         .await
     }
@@ -601,6 +680,7 @@ async fn drive<T>(
     .await
 }
 
+#[derive(Clone)]
 struct PreparedRequest {
     url: ParsedUrl,
     headers: Vec<Header>,
@@ -805,7 +885,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for ReadErrorTap<T> {
 }
 
 async fn exchange<T>(
-    mut transport: T,
+    transport: T,
     request: PreparedRequest,
     body: Bytes,
     limit: usize,
@@ -813,157 +893,391 @@ async fn exchange<T>(
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
-    transport.write_all(CLIENT_PREFACE).await?;
-    let receive_window = u32::try_from(limit)
-        .unwrap_or(u32::MAX)
-        .clamp(MIN_RECEIVE_WINDOW, MAX_RECEIVE_WINDOW);
-    let settings = Settings {
-        max_header_list_size: HEADER_LIMIT as u32,
-        initial_window_size: receive_window,
-        ..Settings::client()
-    };
-    let mut connection = Connection::client(settings);
-    connection.queue_initial_settings();
-    // SETTINGS must be the first frame; the connection WINDOW_UPDATE follows it.
-    connection.set_initial_connection_recv_window(receive_window)?;
-    let transport = ReadErrorTap {
-        inner: transport,
-        read_error: None,
-    };
-    let mut wire =
-        Framed::new(transport, FrameCodec::new()).with_max_buffer_len(DATA_CHUNK + 8192 + 9);
-    let mut headers = Some(request.headers);
-    let mut stream_id = None;
-    let mut sent = 0;
-    let mut response = ResponseState::new(request.head, limit);
-    poll_fn(|task| {
-        for _ in 0..POLL_STEPS {
-            let mut progress = false;
-            // Always read, including while upload writes or flow control are
-            // parked. An early final response can terminate a rejected upload.
-            match Pin::new(&mut wire).poll_next(task) {
-                Poll::Ready(Some(Ok(frame))) => {
-                    progress = true;
-                    match connection.process_frame(frame)? {
-                        Some(ReceivedFrame::Headers {
-                            stream_id: id,
-                            headers,
-                            end_stream,
-                        }) if Some(id) == stream_id => {
-                            if response.headers(headers, end_stream)? {
-                                return Poll::Ready(Ok(()));
+    let mut conn = Http2Conn::start(transport, limit).await?;
+    conn.request(request, body, limit)
+        .await
+        .map(|(response, _)| response)
+        .map_err(|failure| failure.error)
+}
+
+/// A request attempt that failed. `unprocessed` means the server provably did
+/// not act on it: the stream could not be opened, was refused, or GOAWAY
+/// excluded it. Only such a request is retried on another connection.
+struct AttemptFailure {
+    error: Http2ClientError,
+    unprocessed: bool,
+}
+
+impl From<Http2ClientError> for AttemptFailure {
+    fn from(error: Http2ClientError) -> Self {
+        Self {
+            error,
+            unprocessed: false,
+        }
+    }
+}
+
+impl From<H2Error> for AttemptFailure {
+    fn from(error: H2Error) -> Self {
+        Http2ClientError::from(error).into()
+    }
+}
+
+impl From<io::Error> for AttemptFailure {
+    fn from(error: io::Error) -> Self {
+        Http2ClientError::from(error).into()
+    }
+}
+
+/// One client HTTP/2 connection, carrying one request at a time.
+struct Http2Conn<T> {
+    wire: Framed<ReadErrorTap<T>, FrameCodec>,
+    connection: Connection,
+}
+
+impl<T> Http2Conn<T>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    /// Write the client preface and queue SETTINGS (sent with the request).
+    async fn start(mut transport: T, limit: usize) -> Result<Self, Http2ClientError> {
+        transport.write_all(CLIENT_PREFACE).await?;
+        let receive_window = u32::try_from(limit)
+            .unwrap_or(u32::MAX)
+            .clamp(MIN_RECEIVE_WINDOW, MAX_RECEIVE_WINDOW);
+        let settings = Settings {
+            max_header_list_size: HEADER_LIMIT as u32,
+            initial_window_size: receive_window,
+            ..Settings::client()
+        };
+        let mut connection = Connection::client(settings);
+        connection.queue_initial_settings();
+        // SETTINGS must be the first frame; the connection WINDOW_UPDATE follows it.
+        connection.set_initial_connection_recv_window(receive_window)?;
+        let transport = ReadErrorTap {
+            inner: transport,
+            read_error: None,
+        };
+        let wire =
+            Framed::new(transport, FrameCodec::new()).with_max_buffer_len(DATA_CHUNK + 8192 + 9);
+        Ok(Self { wire, connection })
+    }
+
+    /// Whether another request may open a stream on this connection.
+    fn reusable(&self) -> bool {
+        self.connection.state() == ConnectionState::Open
+            && !self.connection.goaway_received()
+            && !self.connection.goaway_sent()
+    }
+
+    /// Before reuse: take in what the server sent while the connection sat
+    /// idle, without waiting, and queue the answers (PING, SETTINGS). Fails
+    /// when the server closed the connection or sent GOAWAY.
+    async fn refresh(&mut self) -> Result<(), Http2ClientError> {
+        poll_fn(|task| {
+            loop {
+                match Pin::new(&mut self.wire).poll_next(task) {
+                    Poll::Ready(Some(Ok(frame))) => {
+                        self.connection.process_frame(frame)?;
+                    }
+                    Poll::Ready(Some(Err(error))) => return Poll::Ready(Err(error.into())),
+                    Poll::Ready(None) => {
+                        return Poll::Ready(Err(Http2ClientError::Io(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "pooled HTTP/2 connection closed",
+                        ))));
+                    }
+                    Poll::Pending => break,
+                }
+            }
+            if self.reusable() {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Ready(Err(protocol("pooled HTTP/2 connection is draining")))
+            }
+        })
+        .await
+    }
+
+    /// Run one request on a new stream. On success, also reports whether the
+    /// stream is closed in both directions, so the connection may carry
+    /// another request.
+    async fn request(
+        &mut self,
+        request: PreparedRequest,
+        body: Bytes,
+        limit: usize,
+    ) -> Result<(Http2Response, bool), AttemptFailure> {
+        let Self { wire, connection } = self;
+        let mut headers = Some(request.headers);
+        let mut stream_id = None;
+        let mut sent = 0;
+        let mut response = ResponseState::new(request.head, limit);
+        poll_fn(|task| -> Poll<Result<(), AttemptFailure>> {
+            for _ in 0..POLL_STEPS {
+                let mut progress = false;
+                // Always read, including while upload writes or flow control are
+                // parked. An early final response can terminate a rejected upload.
+                match Pin::new(&mut *wire).poll_next(task) {
+                    Poll::Ready(Some(Ok(frame))) => {
+                        progress = true;
+                        match connection.process_frame(frame)? {
+                            Some(ReceivedFrame::Headers {
+                                stream_id: id,
+                                headers,
+                                end_stream,
+                            }) if Some(id) == stream_id => {
+                                if response.headers(headers, end_stream)? {
+                                    return Poll::Ready(Ok(()));
+                                }
                             }
-                        }
-                        Some(ReceivedFrame::Data {
-                            stream_id: id,
-                            data,
-                            end_stream,
-                        }) if Some(id) == stream_id => {
-                            if response.data(&data, end_stream)? {
-                                return Poll::Ready(Ok(()));
+                            Some(ReceivedFrame::Data {
+                                stream_id: id,
+                                data,
+                                end_stream,
+                            }) if Some(id) == stream_id => {
+                                if response.data(&data, end_stream)? {
+                                    return Poll::Ready(Ok(()));
+                                }
                             }
-                        }
-                        Some(ReceivedFrame::Reset {
-                            stream_id: id,
-                            error_code,
-                        }) if Some(id) == stream_id => {
-                            return Poll::Ready(Err(Http2ClientError::Reset(error_code)));
-                        }
-                        Some(ReceivedFrame::GoAway {
-                            last_stream_id,
-                            error_code,
-                            ..
-                        }) => {
-                            if error_code != ErrorCode::NoError
-                                || stream_id.is_none_or(|id| id > last_stream_id)
-                            {
-                                return Poll::Ready(Err(Http2ClientError::GoAway {
-                                    last_stream_id,
-                                    error_code,
+                            Some(ReceivedFrame::Reset {
+                                stream_id: id,
+                                error_code,
+                            }) if Some(id) == stream_id => {
+                                return Poll::Ready(Err(AttemptFailure {
+                                    error: Http2ClientError::Reset(error_code),
+                                    unprocessed: error_code == ErrorCode::RefusedStream,
                                 }));
                             }
+                            Some(ReceivedFrame::GoAway {
+                                last_stream_id,
+                                error_code,
+                                ..
+                            }) => {
+                                let excluded = stream_id.is_none_or(|id| id > last_stream_id);
+                                if error_code != ErrorCode::NoError || excluded {
+                                    return Poll::Ready(Err(AttemptFailure {
+                                        error: Http2ClientError::GoAway {
+                                            last_stream_id,
+                                            error_code,
+                                        },
+                                        unprocessed: excluded,
+                                    }));
+                                }
+                            }
+                            // A late frame for an earlier request on a reused
+                            // connection (a reset after its response, say).
+                            Some(
+                                ReceivedFrame::Headers { stream_id: id, .. }
+                                | ReceivedFrame::Data { stream_id: id, .. }
+                                | ReceivedFrame::Reset { stream_id: id, .. },
+                            ) if stream_id.is_some_and(|current| id < current) => {}
+                            Some(_) => {
+                                return Poll::Ready(Err(protocol(
+                                    "unexpected HTTP/2 response stream",
+                                )
+                                .into()));
+                            }
+                            None => {}
                         }
-                        Some(_) => {
-                            return Poll::Ready(Err(protocol("unexpected HTTP/2 response stream")));
-                        }
-                        None => {}
                     }
+                    Poll::Ready(Some(Err(error))) => {
+                        let error = wire
+                            .get_mut()
+                            .read_error
+                            .take()
+                            .map_or_else(|| error.into(), Http2ClientError::Io);
+                        return Poll::Ready(Err(error.into()));
+                    }
+                    Poll::Ready(None) => {
+                        return Poll::Ready(Err(Http2ClientError::Io(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "peer closed before response completed",
+                        ))
+                        .into()));
+                    }
+                    Poll::Pending => {}
                 }
-                Poll::Ready(Some(Err(error))) => {
-                    let error = wire
-                        .get_mut()
-                        .read_error
+                // RFC 9113 §6.5.2: a peer may set SETTINGS_MAX_CONCURRENT_STREAMS
+                // to zero, and is expected to raise it again shortly. This
+                // connection carries one request, so it waits, within the
+                // request's deadline, for a SETTINGS that admits a stream instead
+                // of reporting a legal setting as a protocol error.
+                if stream_id.is_none()
+                    && connection.state() == ConnectionState::Open
+                    && connection.remote_settings().max_concurrent_streams != 0
+                {
+                    let request_headers = headers
                         .take()
-                        .map_or_else(|| error.into(), Http2ClientError::Io);
-                    return Poll::Ready(Err(error));
-                }
-                Poll::Ready(None) => {
-                    return Poll::Ready(Err(Http2ClientError::Io(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "peer closed before response completed",
-                    ))));
-                }
-                Poll::Pending => {}
-            }
-            // RFC 9113 §6.5.2: a peer may set SETTINGS_MAX_CONCURRENT_STREAMS
-            // to zero, and is expected to raise it again shortly. This
-            // connection carries one request, so it waits, within the
-            // request's deadline, for a SETTINGS that admits a stream instead
-            // of reporting a legal setting as a protocol error.
-            if stream_id.is_none()
-                && connection.state() == ConnectionState::Open
-                && connection.remote_settings().max_concurrent_streams != 0
-            {
-                let request_headers = headers
-                    .take()
-                    .ok_or_else(|| protocol("request headers already consumed"))?;
-                stream_id = Some(connection.open_stream(request_headers, body.is_empty())?);
-                progress = true;
-            }
-            if let Some(id) = stream_id
-                && sent < body.len()
-                && !connection.has_pending_frames()
-            {
-                let length = connection
-                    .available_send_capacity(id)
-                    .min(DATA_CHUNK)
-                    .min(body.len() - sent);
-                if length != 0 {
-                    let end = sent + length;
-                    connection.send_data(id, body.slice(sent..end), end == body.len())?;
-                    sent = end;
+                        .ok_or_else(|| protocol("request headers already consumed"))?;
+                    // A stream refused locally (GOAWAY seen, identifiers
+                    // exhausted) never reached the server.
+                    let id = connection
+                        .open_stream(request_headers, body.is_empty())
+                        .map_err(|error| AttemptFailure {
+                            error: error.into(),
+                            unprocessed: true,
+                        })?;
+                    stream_id = Some(id);
                     progress = true;
                 }
-            }
-            // Queue at most one bounded frame before returning to the read
-            // half. Framed retains partial writes and applies backpressure.
-            if connection.has_pending_frames() {
-                match wire.poll_ready(task) {
-                    Poll::Ready(Ok(())) => {
-                        if let Some(frame) = connection.next_frame() {
-                            wire.start_send(frame)?;
-                            progress = true;
-                        }
+                if let Some(id) = stream_id
+                    && sent < body.len()
+                    && !connection.has_pending_frames()
+                {
+                    let length = connection
+                        .available_send_capacity(id)
+                        .min(DATA_CHUNK)
+                        .min(body.len() - sent);
+                    if length != 0 {
+                        let end = sent + length;
+                        connection.send_data(id, body.slice(sent..end), end == body.len())?;
+                        sent = end;
+                        progress = true;
                     }
+                }
+                // Queue at most one bounded frame before returning to the read
+                // half. Framed retains partial writes and applies backpressure.
+                if connection.has_pending_frames() {
+                    match wire.poll_ready(task) {
+                        Poll::Ready(Ok(())) => {
+                            if let Some(frame) = connection.next_frame() {
+                                wire.start_send(frame)?;
+                                progress = true;
+                            }
+                        }
+                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                        Poll::Pending => {}
+                    }
+                }
+                let buffered = !wire.write_buffer().is_empty();
+                match wire.poll_flush(task) {
+                    Poll::Ready(Ok(())) => progress |= buffered,
                     Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
                     Poll::Pending => {}
                 }
+                if !progress {
+                    return Poll::Pending;
+                }
             }
-            let buffered = !wire.write_buffer().is_empty();
-            match wire.poll_flush(task) {
-                Poll::Ready(Ok(())) => progress |= buffered,
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
-                Poll::Pending => {}
-            }
-            if !progress {
-                return Poll::Pending;
-            }
+            task.waker().wake_by_ref();
+            Poll::Pending
+        })
+        .await?;
+        let closed_both_ways = sent == body.len()
+            && stream_id.is_some_and(|id| !connection.has_pending_frames_for_stream(id));
+        Ok((response.response, closed_both_ways))
+    }
+}
+
+/// The clock pooled connections age on: the context's timer, else wall time.
+fn pool_now(cx: &Cx) -> Time {
+    cx.timer_driver()
+        .map_or_else(crate::time::wall_now, |driver| driver.now())
+}
+
+/// How long an idle pooled connection is kept. Shorter than common proxy and
+/// load-balancer idle timeouts (60 s and up).
+const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A connection [`Http2Client::send`] dialed: plain TCP, or TLS over it.
+enum DialedTransport {
+    Plain(TcpStream),
+    #[cfg(feature = "tls")]
+    Tls(crate::tls::TlsStream<TcpStream>),
+}
+
+impl AsyncRead for DialedTransport {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        task: &mut std::task::Context<'_>,
+        buf: &mut crate::io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_read(task, buf),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => Pin::new(stream).poll_read(task, buf),
         }
-        task.waker().wake_by_ref();
-        Poll::Pending
-    })
-    .await?;
-    Ok(response.response)
+    }
+}
+
+impl AsyncWrite for DialedTransport {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        task: &mut std::task::Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_write(task, bytes),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => Pin::new(stream).poll_write(task, bytes),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, task: &mut std::task::Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_flush(task),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => Pin::new(stream).poll_flush(task),
+        }
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        task: &mut std::task::Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_shutdown(task),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => Pin::new(stream).poll_shutdown(task),
+        }
+    }
+}
+
+/// Idle connections an [`Http2Client`] keeps per origin
+/// ([`Http2Client::reuse_connections`]); shared by the client's clones.
+struct ConnectionPool {
+    max_idle: usize,
+    idle: Mutex<HashMap<Origin, Vec<(Time, Http2Conn<DialedTransport>)>>>,
+}
+
+/// Scheme, host and port: what one pooled connection can serve.
+type Origin = (bool, String, u16);
+
+impl ConnectionPool {
+    /// The most recently used connection to `origin` that has not idled too
+    /// long; expired ones are closed.
+    fn take(&self, origin: &Origin, now: Time) -> Option<Http2Conn<DialedTransport>> {
+        let mut expired = Vec::new();
+        let taken = {
+            let mut idle = self.idle.lock();
+            let conns = idle.get_mut(origin)?;
+            let taken = loop {
+                let Some((since, conn)) = conns.pop() else {
+                    break None;
+                };
+                let idle_nanos = now.as_nanos().saturating_sub(since.as_nanos());
+                if u128::from(idle_nanos) <= POOL_IDLE_TIMEOUT.as_nanos() {
+                    break Some(conn);
+                }
+                expired.push(conn);
+            };
+            if conns.is_empty() {
+                idle.remove(origin);
+            }
+            taken
+        };
+        drop(expired);
+        taken
+    }
+
+    fn put(&self, origin: Origin, conn: Http2Conn<DialedTransport>, now: Time) {
+        let mut idle = self.idle.lock();
+        let conns = idle.entry(origin).or_default();
+        if conns.len() < self.max_idle {
+            conns.push((now, conn));
+        }
+    }
 }
 
 #[cfg(test)]
