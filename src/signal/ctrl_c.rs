@@ -43,7 +43,10 @@ impl From<CtrlCError> for io::Error {
 /// # Errors
 ///
 /// Returns an error if Ctrl+C handling is not available on this platform
-/// or if the handler could not be registered.
+/// or if the handler could not be registered. Refuses with
+/// [`IoCapabilityDenied`](crate::cx::IoCapabilityDenied), as
+/// [`signal`](super::signal()) does, when the calling task's `Cx` lacks the
+/// IO capability.
 ///
 /// # Cancel Safety
 ///
@@ -72,8 +75,17 @@ impl From<CtrlCError> for io::Error {
 /// }
 /// ```
 pub async fn ctrl_c() -> io::Result<()> {
-    let mut stream = signal(SignalKind::interrupt())
-        .map_err(|_| io::Error::new(io::ErrorKind::Unsupported, CtrlCError::unavailable()))?;
+    let mut stream = signal(SignalKind::interrupt()).map_err(|err| {
+        // A refused IO capability [ASUP-E009] is not a platform limit.
+        if err
+            .get_ref()
+            .is_some_and(|inner| inner.is::<crate::cx::IoCapabilityDenied>())
+        {
+            err
+        } else {
+            io::Error::new(io::ErrorKind::Unsupported, CtrlCError::unavailable())
+        }
+    })?;
     match stream.recv().await {
         Some(()) => Ok(()),
         None => Err(io::Error::new(

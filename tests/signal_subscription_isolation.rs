@@ -238,3 +238,62 @@ fn concurrent_first_subscriptions_share_delivery_without_losing_a_kind() {
         "the concurrent child must finish all parked receives",
     );
 }
+
+// Records that it was woken, then panics.
+struct PanicOnWake(AtomicBool);
+
+impl Wake for PanicOnWake {
+    fn wake(self: Arc<Self>) {
+        self.0.store(true, Ordering::Release);
+        panic!("hostile waker: this panic is the test's input");
+    }
+}
+
+#[test]
+fn a_panicking_waker_does_not_end_signal_delivery_for_the_process() {
+    if let Ok(case) = std::env::var(CASE) {
+        assert_eq!(case, "panicking_waker");
+        restore_default_delivery(signal_hook::consts::SIGUSR1);
+        let mut stream = signal(SignalKind::User1).unwrap();
+        {
+            let hostile = Arc::new(PanicOnWake(AtomicBool::new(false)));
+            let waker = Waker::from(Arc::clone(&hostile));
+            let mut first = Box::pin(stream.recv());
+            assert!(
+                first
+                    .as_mut()
+                    .poll(&mut Context::from_waker(&waker))
+                    .is_pending()
+            );
+            signal_hook::low_level::raise(signal_hook::consts::SIGUSR1).expect("raise SIGUSR1");
+            // Wait for the dispatcher thread to wake the hostile waker. Polling
+            // `first` before that would replace the waker and skip the panic.
+            let until = Instant::now() + DELIVERY_BOUND;
+            while !hostile.0.load(Ordering::Acquire) {
+                assert!(
+                    Instant::now() < until,
+                    "the dispatcher never woke the parked receiver"
+                );
+                thread::sleep(Duration::from_millis(2));
+            }
+            let delivered = first.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+            assert!(
+                matches!(delivered, Poll::Ready(Some(()))),
+                "the first delivery is received"
+            );
+        }
+        // The waker's panic used to end the dispatcher thread, so this second
+        // delivery was never seen.
+        receive_all(&mut [stream], &[signal_hook::consts::SIGUSR1]);
+        std::process::exit(CHILD_COMPLETE);
+    }
+    assert_eq!(
+        child_status(
+            "a_panicking_waker_does_not_end_signal_delivery_for_the_process",
+            "panicking_waker"
+        )
+        .code(),
+        Some(CHILD_COMPLETE),
+        "a waker's panic must not stop later signal deliveries",
+    );
+}

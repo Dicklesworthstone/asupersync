@@ -382,6 +382,46 @@ fn the_refusal_carries_the_typed_denial() {
     );
 }
 
+/// `signal::ctrl_c` keeps the typed denial of the `signal` call it makes,
+/// instead of reporting that Ctrl+C is unsupported on this platform.
+#[test]
+fn ctrl_c_refuses_with_the_typed_denial() {
+    use std::future::Future;
+    use std::task::Poll;
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build runtime");
+    let denied = runtime.block_on(async {
+        let cx = Cx::current().expect("root cx");
+        let mut handle = {
+            let _no_io = Cx::push_restriction(<NoIo as CapSetRuntimeMask>::MASK);
+            Cx::current()
+                .expect("narrowed ambient cx")
+                .spawn(|_| async {
+                    // One poll: a refusal is immediate, and a wait for a real
+                    // Ctrl+C would mean the handler was installed without IO.
+                    let mut wait = std::pin::pin!(asupersync::signal::ctrl_c());
+                    let polled =
+                        std::future::poll_fn(|task| Poll::Ready(wait.as_mut().poll(task))).await;
+                    let Poll::Ready(result) = polled else {
+                        panic!("ctrl_c waited for a signal in a task without IO");
+                    };
+                    let error = result.expect_err("refused without IO");
+                    let kind = error.kind();
+                    let denied = error
+                        .get_ref()
+                        .and_then(|inner| inner.downcast_ref::<IoCapabilityDenied>())
+                        .copied();
+                    (kind, denied)
+                })
+                .expect("spawn")
+        };
+        handle.join(&cx).await.expect("join")
+    });
+    assert_eq!(denied.0, std::io::ErrorKind::PermissionDenied);
+    assert_eq!(denied.1.map(|d| d.operation()), Some("signal::signal"));
+}
+
 /// `Cx::with_ambient` is the explicit form of the entry points: inside it
 /// they are checked against the context passed, not the calling task's.
 #[test]

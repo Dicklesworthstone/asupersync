@@ -78,7 +78,7 @@ impl SignalSlot {
     #[cfg(any(unix, test))]
     fn record_delivery(&self) {
         self.deliveries.fetch_add(1, Ordering::Release);
-        self.notify.notify_waiters();
+        notify_waiters_contained(&self.notify);
     }
 
     /// Signal-safe delivery: only bumps the atomic counter.
@@ -97,7 +97,7 @@ impl SignalSlot {
     fn notify_if_changed(&self, last_seen: u64) -> u64 {
         let current = self.deliveries.load(Ordering::Acquire);
         if current != last_seen {
-            self.notify.notify_waiters();
+            notify_waiters_contained(&self.notify);
         }
         current
     }
@@ -484,6 +484,18 @@ fn signal_kind_from_raw(raw: i32) -> Option<SignalKind> {
     } else {
         None
     }
+}
+
+/// Wakes every waiter of a slot and contains a panicking waker.
+///
+/// `notify_waiters` wakes all of them, then re-raises the first panic. On the
+/// dispatcher thread that panic would end signal delivery for the whole
+/// process: the OS handlers stay installed, so every later delivery, SIGTERM
+/// and SIGINT included, would be swallowed. The panic hook has already
+/// reported the panic, so it is dropped here.
+#[cfg(any(unix, windows))]
+fn notify_waiters_contained(notify: &Notify) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| notify.notify_waiters()));
 }
 
 #[cfg(any(unix, windows))]
@@ -1116,6 +1128,52 @@ mod tests {
         let sigquit_ok = sigquit().is_ok();
         crate::assert_with_log!(sigquit_ok, "sigbreak ok", true, sigquit_ok);
         crate::test_complete!("windows_signal_helpers");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_panicking_waker_does_not_escape_a_delivery() {
+        init_test("a_panicking_waker_does_not_escape_a_delivery");
+        struct PanicOnWake;
+        impl std::task::Wake for PanicOnWake {
+            fn wake(self: Arc<Self>) {
+                panic!("hostile waker: this panic is the test's input");
+            }
+        }
+        struct CountWakes(std::sync::atomic::AtomicUsize);
+        impl std::task::Wake for CountWakes {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let slot = SignalSlot::new();
+        let hostile = Waker::from(Arc::new(PanicOnWake));
+        let counter = Arc::new(CountWakes(std::sync::atomic::AtomicUsize::new(0)));
+        let counting = Waker::from(Arc::clone(&counter));
+        let mut first = Box::pin(slot.notify.notified());
+        let mut second = Box::pin(slot.notify.notified());
+        assert!(
+            first
+                .as_mut()
+                .poll(&mut Context::from_waker(&hostile))
+                .is_pending()
+        );
+        assert!(
+            second
+                .as_mut()
+                .poll(&mut Context::from_waker(&counting))
+                .is_pending()
+        );
+        // The OS dispatcher thread calls this for every delivery. A panic
+        // escaping it would end that thread, and with it every later delivery.
+        slot.record_delivery();
+        assert_eq!(slot.deliveries.load(Ordering::Acquire), 1);
+        assert_eq!(
+            counter.0.load(Ordering::SeqCst),
+            1,
+            "the other waiter is woken"
+        );
+        crate::test_complete!("a_panicking_waker_does_not_escape_a_delivery");
     }
 
     #[cfg(unix)]
