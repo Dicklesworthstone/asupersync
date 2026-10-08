@@ -4764,6 +4764,18 @@ enum DeferredCancelLaneError {
     PinnedWorkerUnavailable(usize),
 }
 
+/// What publishing one task of a deferred cancellation did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeferredCancelPublish {
+    /// The task is in a cancel lane.
+    Published,
+    /// The task finished and left the table after the cancellation was
+    /// taken, so there is nothing to publish.
+    Finished,
+    /// The cancel lane refused the task.
+    Failed,
+}
+
 /// Ready finalizer tasks reserved into the global injector, awaiting the
 /// post-lock enqueue-evidence/wake/spawn-effect half of publication.
 type ReadyFinalizerPublication = (
@@ -6006,7 +6018,7 @@ impl ThreeLaneWorker {
         }
     }
 
-    fn publish_deferred_cancel_task(&self, task_id: TaskId, priority: u8) -> bool {
+    fn publish_deferred_cancel_task(&self, task_id: TaskId, priority: u8) -> DeferredCancelPublish {
         let task_location = self.with_task_table_ref(|tasks| {
             tasks.task(task_id).map(|record| {
                 record.wake_state.notify();
@@ -6014,13 +6026,12 @@ impl ThreeLaneWorker {
             })
         });
         let Some((is_local, pinned_worker)) = task_location else {
+            // A task completes and leaves the table on its own worker, so one
+            // can finish between the cancellation and this publication.
             Self::emit_cancel_diagnostic(|| {
-                error!(
-                    ?task_id,
-                    "deferred cancellation task is absent from the task table"
-                );
+                trace!(?task_id, "deferred cancellation task already finished");
             });
-            return false;
+            return DeferredCancelPublish::Finished;
         };
 
         match self.insert_deferred_cancel_lane_without_wake(
@@ -6031,7 +6042,7 @@ impl ThreeLaneWorker {
         ) {
             Ok(publication) => {
                 self.finish_deferred_cancel_lane_publication(task_id, publication);
-                true
+                DeferredCancelPublish::Published
             }
             Err(error) => {
                 Self::emit_cancel_diagnostic(|| {
@@ -6042,7 +6053,7 @@ impl ThreeLaneWorker {
                         "deferred cancellation lane insertion failed"
                     );
                 });
-                false
+                DeferredCancelPublish::Failed
             }
         }
     }
@@ -6196,7 +6207,9 @@ impl ThreeLaneWorker {
         }
         for (task_id, priority, task_wakes, admitted_slot) in tasks {
             task_wakes.stamp_drains();
-            if self.publish_deferred_cancel_task(task_id, priority) {
+            if self.publish_deferred_cancel_task(task_id, priority)
+                == DeferredCancelPublish::Published
+            {
                 wakes_to_dispatch.push(task_wakes);
                 if let Some(admitted_slot) = admitted_slot
                     && let Some(effects) = admitted_slot.publish_spawn_lane_and_take_effects()
@@ -6343,7 +6356,10 @@ impl ThreeLaneWorker {
             batch_wakes.stamp_drains();
             let mut batch_published = true;
             for (task_id, priority) in tasks {
-                batch_published &= self.publish_deferred_cancel_task(task_id, priority);
+                // A task that already finished takes nothing from the rest of
+                // its batch, whose Wakers must still fire (asupersync-exeimj).
+                batch_published &= self.publish_deferred_cancel_task(task_id, priority)
+                    != DeferredCancelPublish::Failed;
             }
             wakes.push((batch_published, batch_wakes));
         }

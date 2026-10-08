@@ -12802,6 +12802,68 @@ fn deferred_cancel_batch_stamps_drains_before_publishing() {
     );
 }
 
+/// A task of a deferred cancellation batch can finish and leave the table
+/// before a worker drains the batch. Its publication used to count as a
+/// failure, and the cancel Wakers of every other task in the batch were then
+/// dropped unwoken (br-asupersync-exeimj M1). A finished task has nothing to
+/// publish: the rest of the batch is published and woken.
+#[test]
+fn deferred_cancel_batch_still_wakes_its_tasks_when_one_already_finished() {
+    struct CountWake(Arc<std::sync::atomic::AtomicUsize>);
+    impl std::task::Wake for CountWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let mut runtime = RuntimeState::new();
+    let root = runtime.create_root_region(Budget::INFINITE);
+    let child = runtime
+        .create_child_region(root, Budget::INFINITE)
+        .expect("child region");
+    let (finished, _finished_handle) = runtime
+        .create_task(child, Budget::INFINITE, async {})
+        .expect("task that finishes first");
+    let (waiting, _waiting_handle) = runtime
+        .create_task(child, Budget::INFINITE, async {})
+        .expect("task that waits for its cancellation");
+    let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let waiting_inner = runtime
+        .task(waiting)
+        .and_then(|record| record.cx_inner.clone())
+        .expect("waiting task Cx");
+    waiting_inner.write().cancel_waker =
+        Some(Arc::new(crate::types::task_context::CancelWaker::new(
+            std::task::Waker::from(Arc::new(CountWake(Arc::clone(&wakes)))),
+        )));
+    let (tasks, batch_wakes) = runtime
+        .cancel_request(child, &CancelReason::shutdown(), None)
+        .into_parts();
+    assert_eq!(tasks.len(), 2, "both tasks are cancelled: {tasks:?}");
+    runtime.defer_cancel_dispatch(crate::types::task_context::CancellationEffects::new(
+        tasks,
+        batch_wakes,
+    ));
+    assert_eq!(wakes.load(Ordering::SeqCst), 0, "nothing is woken yet");
+    assert!(runtime.remove_task(finished).is_some());
+
+    let state = Arc::new(ContendedMutex::new("runtime_state", runtime));
+    let scheduler = ThreeLaneScheduler::new(1, &state);
+    scheduler.workers[0].drain_deferred_cancel_dispatches();
+    assert_eq!(
+        wakes.load(Ordering::SeqCst),
+        1,
+        "the waiting task's cancel Waker fires"
+    );
+    assert_eq!(
+        scheduler.workers[0]
+            .global
+            .pop_cancel()
+            .map(|entry| entry.task),
+        Some(waiting),
+        "the waiting task is published to the cancel lane"
+    );
+}
+
 /// A region cancelled by a `RegionCommand` (`ChildRegion::cancel`) has its
 /// drain stamped while the worker applies the command, with a time read
 /// before the state lock (br-asupersync-x9mmxl). Before, the stamp waited
