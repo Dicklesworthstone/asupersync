@@ -851,6 +851,26 @@ impl HttpClientBuilder {
         self
     }
 
+    /// Asks servers for compressed responses and decodes them, like reqwest's
+    /// `gzip`, `deflate` and `brotli` options. Off by default.
+    ///
+    /// It applies to a buffered request whose headers, and the client's
+    /// default headers, name no `Accept-Encoding` and no `Range`. The client
+    /// then sends `Accept-Encoding: gzip, deflate, br` and decodes the response
+    /// with [`Response::decode_content`], using the
+    /// [`max_body_size`](Self::max_body_size) limit (16 MiB by default) for
+    /// every decoded layer. Any error `decode_content` reports (an unknown
+    /// coding, more than eight codings, a bad stream, output past the limit)
+    /// fails the request with [`ClientError::HttpError`]. Streaming requests
+    /// are not affected. A gzip body of several concatenated members is not
+    /// supported.
+    #[cfg(feature = "compression")]
+    #[must_use]
+    pub fn response_decompression(mut self, enabled: bool) -> Self {
+        self.config.response_decompression = enabled;
+        self
+    }
+
     /// Routes requests through a proxy endpoint.
     ///
     /// Supported URL schemes: `http://`, `https://`, and `socks5://`.
@@ -939,6 +959,9 @@ pub struct HttpClientConfig {
     pub tls_root_certificates: Vec<crate::tls::Certificate>,
     /// Time source used for pool bookkeeping.
     time_getter: fn() -> Time,
+    /// Whether buffered requests ask for, and decode, gzip and br responses
+    /// (see [`HttpClientBuilder::response_decompression`]).
+    response_decompression: bool,
 }
 
 impl Default for HttpClientConfig {
@@ -956,6 +979,7 @@ impl Default for HttpClientConfig {
             #[cfg(feature = "tls")]
             tls_root_certificates: Vec::new(),
             time_getter: wall_clock_now,
+            response_decompression: false,
         }
     }
 }
@@ -972,6 +996,22 @@ impl HttpClientConfig {
     #[must_use]
     pub const fn time_getter(&self) -> fn() -> Time {
         self.time_getter
+    }
+
+    /// Sets whether buffered requests ask for, and decode, gzip and br
+    /// responses (see [`HttpClientBuilder::response_decompression`]).
+    #[cfg(feature = "compression")]
+    #[must_use]
+    pub const fn with_response_decompression(mut self, enabled: bool) -> Self {
+        self.response_decompression = enabled;
+        self
+    }
+
+    /// Returns whether response decompression is on.
+    #[cfg(feature = "compression")]
+    #[must_use]
+    pub const fn response_decompression(&self) -> bool {
+        self.response_decompression
     }
 }
 
@@ -1347,13 +1387,18 @@ impl HttpClient {
         cx: &Cx,
         method: Method,
         url: &str,
-        extra_headers: Vec<(String, String)>,
+        mut extra_headers: Vec<(String, String)>,
         body: Vec<u8>,
     ) -> Result<Response, ClientError> {
         check_cx(cx)?;
         let parsed = ParsedUrl::parse(url)?;
+        let decode = self
+            .request_encoded_response(&mut extra_headers)
+            .then(|| method.clone());
         let fut = self.execute_with_redirects(cx, method, parsed, extra_headers, body, None, 0, 0);
-        drive_with_budget_deadline(cx, self.config.request_timeout, None, fut).await
+        let response =
+            drive_with_budget_deadline(cx, self.config.request_timeout, None, fut).await?;
+        self.decode_response(decode.as_ref(), response)
     }
 
     /// Send a request with an explicit per-call total timeout
@@ -1371,14 +1416,19 @@ impl HttpClient {
         cx: &Cx,
         method: Method,
         url: &str,
-        extra_headers: Vec<(String, String)>,
+        mut extra_headers: Vec<(String, String)>,
         body: Vec<u8>,
         timeout: std::time::Duration,
     ) -> Result<Response, ClientError> {
         check_cx(cx)?;
         let parsed = ParsedUrl::parse(url)?;
+        let decode = self
+            .request_encoded_response(&mut extra_headers)
+            .then(|| method.clone());
         let fut = self.execute_with_redirects(cx, method, parsed, extra_headers, body, None, 0, 0);
-        drive_with_budget_deadline(cx, self.config.request_timeout, Some(timeout), fut).await
+        let response =
+            drive_with_budget_deadline(cx, self.config.request_timeout, Some(timeout), fut).await?;
+        self.decode_response(decode.as_ref(), response)
     }
 
     /// Send a request with multipart form-data body.
@@ -2043,6 +2093,52 @@ impl HttpClient {
         }
     }
 
+    /// With response decompression on and no `Accept-Encoding` chosen by the
+    /// caller or the default headers, asks for the codings the client decodes
+    /// and returns `true`. Only the response to such a request is decoded. A
+    /// range request is left alone: a 206 slice of a compressed representation
+    /// cannot be decoded on its own.
+    fn request_encoded_response(&self, extra_headers: &mut Vec<(String, String)>) -> bool {
+        let default_headers = &self.config.default_headers;
+        let ask = self.config.response_decompression
+            && !has_header(extra_headers, "accept-encoding")
+            && !has_header(default_headers, "accept-encoding")
+            && !has_header(extra_headers, "range")
+            && !has_header(default_headers, "range");
+        if ask {
+            extra_headers.push((
+                "Accept-Encoding".to_owned(),
+                DECODED_CONTENT_CODINGS.to_owned(),
+            ));
+        }
+        ask
+    }
+
+    /// Decodes the response to a request that asked for compressed content
+    /// (`request_method` is `Some`) through [`Response::decode_content`], with
+    /// the body limit as the decoded-size limit. Its errors (an unknown coding,
+    /// more than eight codings, an encoded partial response, a bad stream or
+    /// output past the limit) fail the request as
+    /// `ClientError::HttpError(HttpError::Io(_))`.
+    fn decode_response(
+        &self,
+        request_method: Option<&Method>,
+        mut response: Response,
+    ) -> Result<Response, ClientError> {
+        let Some(method) = request_method else {
+            return Ok(response);
+        };
+        let limit = crate::http::compress::DecompressionLimit::new(
+            self.config
+                .max_body_size
+                .unwrap_or(crate::http::compress::DEFAULT_MAX_DECOMPRESSED_SIZE),
+        );
+        response
+            .decode_content(method, limit)
+            .map_err(|err| ClientError::HttpError(crate::http::h1::codec::HttpError::Io(err)))?;
+        Ok(response)
+    }
+
     /// Convenience wrapper preserving the pre-u957g0 six-argument signature.
     /// Production request paths call [`Self::build_request_with_origin`] directly
     /// so they can pass the redirect origin; only the inline unit tests exercise
@@ -2689,6 +2785,9 @@ fn get_header(headers: &[(String, String)], name: &str) -> Option<String> {
 fn has_header(headers: &[(String, String)], name: &str) -> bool {
     headers.iter().any(|(n, _)| n.eq_ignore_ascii_case(name))
 }
+
+/// The `Accept-Encoding` a client with response decompression sends.
+const DECODED_CONTENT_CODINGS: &str = "gzip, deflate, br";
 
 fn ensure_multipart_content_type(headers: &mut Vec<(String, String)>, form: &MultipartForm) {
     if headers
@@ -7231,6 +7330,162 @@ mod tests {
                 matches!(result, Err(ClientError::DeadlineExceeded)),
                 "got {result:?}"
             );
+        }
+    }
+
+    // --- opt-in response decompression (HttpClientBuilder::response_decompression) ---
+
+    #[cfg(feature = "compression")]
+    mod response_decompression {
+        use super::*;
+        use crate::http::compress::{
+            BrotliCompressor, Compressor, DeflateCompressor, GzipCompressor,
+        };
+        use std::io::{Read, Write};
+
+        fn encode(mut encoder: impl Compressor, data: &[u8]) -> Vec<u8> {
+            let mut out = Vec::new();
+            encoder.compress(data, &mut out).expect("compress");
+            encoder.finish(&mut out).expect("finish compression");
+            out
+        }
+
+        /// Answers one request on a fresh listener with `head` and `body`.
+        /// Returns the URL and the server thread, which yields the request
+        /// head in lower case.
+        fn serve_once(head: String, body: Vec<u8>) -> (String, std::thread::JoinHandle<String>) {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+            let url = format!("http://{}/data", listener.local_addr().expect("address"));
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept");
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .expect("set read timeout");
+                let mut request = Vec::new();
+                let mut buf = [0_u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let n = stream.read(&mut buf).expect("read request");
+                    assert!(n > 0, "the request must arrive");
+                    request.extend_from_slice(&buf[..n]);
+                }
+                stream.write_all(head.as_bytes()).expect("write head");
+                stream.write_all(&body).expect("write body");
+                String::from_utf8_lossy(&request).to_ascii_lowercase()
+            });
+            (url, server)
+        }
+
+        fn encoded_head(coding: &str, len: usize) -> String {
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Encoding: {coding}\r\nContent-Length: {len}\r\n\
+                 Connection: close\r\n\r\n"
+            )
+        }
+
+        fn get(
+            client: &HttpClient,
+            url: &str,
+            headers: Vec<(String, String)>,
+        ) -> Result<Response, ClientError> {
+            block_on(client.request(&Cx::for_testing(), Method::Get, url, headers, Vec::new()))
+        }
+
+        #[test]
+        fn the_client_asks_for_and_decodes_gzip_deflate_and_brotli() {
+            let plain = b"hello, compressed world ".repeat(100);
+            let client = HttpClient::builder().response_decompression(true).build();
+            for (coding, encoded) in [
+                ("gzip", encode(GzipCompressor::new(), &plain)),
+                ("deflate", encode(DeflateCompressor::new(), &plain)),
+                ("br", encode(BrotliCompressor::new(), &plain)),
+            ] {
+                let (url, server) = serve_once(encoded_head(coding, encoded.len()), encoded);
+                let response = get(&client, &url, Vec::new()).expect("decoded response");
+                let request = server.join().expect("server thread");
+                assert!(
+                    request.contains("\r\naccept-encoding: gzip, deflate, br\r\n"),
+                    "{coding}: {request}"
+                );
+                assert_eq!(response.body, plain, "{coding}");
+                assert!(
+                    !has_header(&response.headers, "content-encoding"),
+                    "{coding}"
+                );
+                assert!(!has_header(&response.headers, "content-length"), "{coding}");
+            }
+        }
+
+        #[test]
+        fn a_caller_chosen_accept_encoding_gets_the_body_as_sent() {
+            let encoded = encode(GzipCompressor::new(), &b"keep me encoded ".repeat(50));
+            let client = HttpClient::builder().response_decompression(true).build();
+            let (url, server) = serve_once(encoded_head("gzip", encoded.len()), encoded.clone());
+            let headers = vec![("Accept-Encoding".to_owned(), "gzip".to_owned())];
+            let response = get(&client, &url, headers).expect("response");
+            let request = server.join().expect("server thread");
+            assert!(
+                request.contains("\r\naccept-encoding: gzip\r\n"),
+                "{request}"
+            );
+            assert_eq!(response.body, encoded);
+            assert!(has_header(&response.headers, "content-encoding"));
+        }
+
+        #[test]
+        fn a_client_without_the_option_does_not_ask_for_compression() {
+            let head = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n";
+            let (url, server) = serve_once(head.to_owned(), b"ok".to_vec());
+            let response = get(&HttpClient::new(), &url, Vec::new()).expect("response");
+            let request = server.join().expect("server thread");
+            assert!(!request.contains("accept-encoding"), "{request}");
+            assert_eq!(response.body, b"ok");
+        }
+
+        #[test]
+        fn a_body_that_decodes_past_the_limit_fails_the_request() {
+            let encoded = encode(GzipCompressor::new(), &[0_u8; 64 * 1024]);
+            assert!(encoded.len() < 1024, "the encoded body fits the limit");
+            let client = HttpClient::builder()
+                .response_decompression(true)
+                .max_body_size(1024)
+                .build();
+            let (url, server) = serve_once(encoded_head("gzip", encoded.len()), encoded);
+            let err = get(&client, &url, Vec::new()).expect_err("64 KiB decoded > 1 KiB limit");
+            server.join().expect("server thread");
+            assert!(
+                matches!(
+                    err,
+                    ClientError::HttpError(crate::http::h1::codec::HttpError::Io(_))
+                ),
+                "{err:?}"
+            );
+        }
+
+        #[test]
+        fn a_range_request_does_not_ask_for_compression() {
+            let encoded = encode(GzipCompressor::new(), &b"a slice ".repeat(50));
+            let client = HttpClient::builder().response_decompression(true).build();
+            let (url, server) = serve_once(encoded_head("gzip", encoded.len()), encoded.clone());
+            let headers = vec![("Range".to_owned(), "bytes=0-".to_owned())];
+            let response = get(&client, &url, headers).expect("response");
+            let request = server.join().expect("server thread");
+            assert!(!request.contains("accept-encoding"), "{request}");
+            assert_eq!(response.body, encoded, "returned as received");
+        }
+
+        #[test]
+        fn stacked_codings_decode_in_reverse_order() {
+            let plain = b"layered ".repeat(40);
+            let client = HttpClient::builder().response_decompression(true).build();
+            let gzip_then_br = encode(
+                BrotliCompressor::new(),
+                &encode(GzipCompressor::new(), &plain),
+            );
+            let (url, server) =
+                serve_once(encoded_head("gzip, br", gzip_then_br.len()), gzip_then_br);
+            let response = get(&client, &url, Vec::new()).expect("two codings decode");
+            server.join().expect("server thread");
+            assert_eq!(response.body, plain);
         }
     }
 }
