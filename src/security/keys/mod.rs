@@ -854,13 +854,24 @@ impl IdentityKeyStore {
             return Err(KeyStoreError::DuplicateFingerprint(fingerprint));
         }
 
-        self.record.active_generation = generation;
-        self.record.next_generation = generation
+        let next_generation = generation
             .checked_add(1)
             .ok_or(KeyStoreError::GenerationOverflow)?;
+        let previous_active = self.record.active_generation;
+        self.record.active_generation = generation;
+        self.record.next_generation = next_generation;
         self.record.keys.push(key);
-        validate_record(&self.record)?;
-        persist_record(&self.path, &self.record)?;
+        if let Err(err) =
+            validate_record(&self.record).and_then(|()| persist_record(&self.path, &self.record))
+        {
+            // The store on disk did not change, so memory must not either:
+            // signing with a key the store cannot reload would strand every
+            // token it signs.
+            self.record.keys.pop();
+            self.record.active_generation = previous_active;
+            self.record.next_generation = generation;
+            return Err(err);
+        }
         self.export_public()
     }
 
@@ -870,23 +881,34 @@ impl IdentityKeyStore {
         fingerprint: KeyFingerprint,
         revoked_at_micros: u64,
     ) -> Result<PublicIdentityKey, KeyStoreError> {
-        let mut revoked = None;
-        for key in &mut self.record.keys {
-            if key.fingerprint == fingerprint.to_hex() {
-                if key.generation == self.record.active_generation {
-                    return Err(KeyStoreError::CannotRevokeActiveKey(fingerprint));
-                }
-                key.revoked = true;
-                key.revoked_at_micros = Some(revoked_at_micros);
-                revoked = Some(key.public_view()?);
-                break;
-            }
+        let fingerprint_hex = fingerprint.to_hex();
+        let Some(index) = self
+            .record
+            .keys
+            .iter()
+            .position(|key| key.fingerprint == fingerprint_hex)
+        else {
+            return Err(KeyStoreError::UnknownFingerprint(fingerprint));
+        };
+        if self.record.keys[index].generation == self.record.active_generation {
+            return Err(KeyStoreError::CannotRevokeActiveKey(fingerprint));
         }
-
-        let revoked = revoked.ok_or(KeyStoreError::UnknownFingerprint(fingerprint))?;
-        validate_record(&self.record)?;
-        persist_record(&self.path, &self.record)?;
-        Ok(revoked)
+        let key = &mut self.record.keys[index];
+        let previous = (key.revoked, key.revoked_at_micros);
+        key.revoked = true;
+        key.revoked_at_micros = Some(revoked_at_micros);
+        let revoked = self.record.keys[index].public_view().and_then(|revoked| {
+            validate_record(&self.record)?;
+            persist_record(&self.path, &self.record)?;
+            Ok(revoked)
+        });
+        if revoked.is_err() {
+            // Not persisted: a key that is revoked only in memory would be
+            // valid again after a restart, so keep memory equal to disk.
+            let key = &mut self.record.keys[index];
+            (key.revoked, key.revoked_at_micros) = previous;
+        }
+        revoked
     }
 
     fn active_key_record(&self) -> Result<&PersistedIdentityKey, KeyStoreError> {
@@ -1182,11 +1204,14 @@ fn persist_record(path: &Path, record: &KeyStoreRecord) -> Result<(), KeyStoreEr
     }
 
     let tmp_path = pending_path(path)?;
-    let bytes = serde_json::to_vec_pretty(record).map_err(|source| KeyStoreError::Json {
+    let mut bytes = serde_json::to_vec_pretty(record).map_err(|source| KeyStoreError::Json {
         path: path.to_path_buf(),
         source,
     })?;
-    write_key_file(&tmp_path, &bytes)?;
+    // The serialized record holds every key seed: wipe it once written.
+    let written = write_key_file(&tmp_path, &bytes);
+    bytes.zeroize();
+    written?;
     fs::rename(&tmp_path, path).map_err(|source| KeyStoreError::Io {
         path: path.to_path_buf(),
         source,
@@ -1740,6 +1765,59 @@ mod tests {
         assert_eq!(history.len(), 2);
         assert!(history[0].revoked);
         assert!(!history[1].revoked);
+    }
+
+    /// asupersync-s45073 L6: a rotation or revocation the store cannot persist
+    /// leaves the in-memory store equal to the file, so a restart changes
+    /// nothing. Before, memory moved first: the active key was one the file
+    /// did not have, and a revoked key was valid again after a restart.
+    #[test]
+    fn a_rotation_that_cannot_persist_leaves_the_store_unchanged() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("identity.json");
+        let mut store = IdentityKeyStore::create(&path, strong_seed(6), 100).expect("create store");
+        let first = store.export_public().expect("first public");
+        let pending = pending_path(&path).expect("pending path");
+
+        // A directory at the pending path makes every persist fail.
+        fs::create_dir(&pending).expect("block persistence");
+        assert!(store.rotate(strong_seed(7), 200).is_err());
+        assert_eq!(store.active_generation(), 1);
+        assert_eq!(
+            store.export_public().expect("active").fingerprint,
+            first.fingerprint
+        );
+        assert_eq!(store.export_public_history().expect("history").len(), 1);
+
+        fs::remove_dir(&pending).expect("unblock persistence");
+        let second = store.rotate(strong_seed(7), 300).expect("rotate");
+        assert_eq!(second.generation, 2, "a failed rotation uses no generation");
+    }
+
+    /// asupersync-s45073 L6: see the rotation test above.
+    #[test]
+    fn a_revocation_that_cannot_persist_leaves_the_key_valid() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("identity.json");
+        let mut store = IdentityKeyStore::create(&path, strong_seed(8), 100).expect("create store");
+        let first = store.export_public().expect("first public");
+        store.rotate(strong_seed(9), 200).expect("rotate");
+        let pending = pending_path(&path).expect("pending path");
+
+        // A directory at the pending path makes every persist fail.
+        fs::create_dir(&pending).expect("block persistence");
+        assert!(store.revoke(first.fingerprint, 400).is_err());
+        assert!(!store.export_public_history().expect("history")[0].revoked);
+        let loaded = IdentityKeyStore::load(&path).expect("load");
+        assert!(!loaded.export_public_history().expect("history")[0].revoked);
+
+        fs::remove_dir(&pending).expect("unblock persistence");
+        assert!(
+            store
+                .revoke(first.fingerprint, 500)
+                .expect("revoke")
+                .revoked
+        );
     }
 
     #[test]
