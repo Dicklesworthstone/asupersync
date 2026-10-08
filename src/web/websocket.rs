@@ -45,7 +45,11 @@
 use crate::net::websocket::AcceptResponse;
 use crate::net::websocket::{WebSocketAcceptor, compute_accept_key};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::{Cx, http::h1::Http1Upgrade, net::tcp::stream::TcpStream};
+use crate::{
+    Cx,
+    http::h1::{Http1Upgrade, Http1UpgradedIo},
+    net::tcp::stream::TcpStream,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use std::future::Future;
 #[cfg(not(target_arch = "wasm32"))]
@@ -448,11 +452,47 @@ impl WebSocketUpgrade {
     /// `500` response because no transport slot exists.
     #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
-    pub fn on_upgrade<F, Fut>(mut self, callback: F) -> Response
+    pub fn on_upgrade<F, Fut>(self, callback: F) -> Response
     where
         F: FnOnce(Cx, ServerWebSocket<TcpStream>) -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
+        self.commit_upgrade(|acceptor, accept_response| {
+            Http1Upgrade::new(move |cx, io, read_ahead| async move {
+                let websocket = acceptor.finish_upgrade(io, accept_response, &read_ahead);
+                callback(cx, websocket).await;
+            })
+        })
+    }
+
+    /// [`Self::on_upgrade`] on any transport the HTTP/1 listener serves: its
+    /// TCP connections, TLS (`wss://` through `Http1Listener::run_tls`), a
+    /// Unix-domain socket, or a connection handed over by `HttpAutoListener`.
+    ///
+    /// `on_upgrade`'s callback receives the TCP stream, so those other
+    /// transports refuse it; this callback receives the transport as an
+    /// [`Http1UpgradedIo`]. Everything else (origin policy, negotiation, the
+    /// `101`, read-ahead) is the same.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn on_upgrade_any<F, Fut>(self, callback: F) -> Response
+    where
+        F: FnOnce(Cx, ServerWebSocket<Http1UpgradedIo>) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.commit_upgrade(|acceptor, accept_response| {
+            Http1Upgrade::new_any(move |cx, io, read_ahead| async move {
+                let websocket = acceptor.finish_upgrade(io, accept_response, &read_ahead);
+                callback(cx, websocket).await;
+            })
+        })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn commit_upgrade(
+        mut self,
+        action: impl FnOnce(WebSocketAcceptor, AcceptResponse) -> Http1Upgrade,
+    ) -> Response {
         if let Err(reason) = self.evaluate_origin() {
             return Self::plain_response(StatusCode::FORBIDDEN, reason);
         }
@@ -477,11 +517,7 @@ impl WebSocketUpgrade {
             extensions: self.selected_extensions.clone(),
         };
         let acceptor = self.acceptor();
-        let action = Http1Upgrade::new(move |cx, io, read_ahead| async move {
-            let websocket = acceptor.finish_upgrade(io, accept_response, &read_ahead);
-            callback(cx, websocket).await;
-        })
-        .with_websocket_negotiation(
+        let action = action(acceptor, accept_response).with_websocket_negotiation(
             self.selected_protocol.clone(),
             self.selected_extensions.clone(),
         );

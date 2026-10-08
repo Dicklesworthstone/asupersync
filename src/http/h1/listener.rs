@@ -726,10 +726,12 @@ impl<F> Http1Listener<F> {
     ///
     /// Requests carry no `peer_addr`, and every peer shares one entry in the
     /// connection manager's per-address accounting; access control is the
-    /// socket file's permissions. Protocol upgrades fail closed on these
-    /// connections, as on `run_tls`, because the public upgrade callback is
-    /// typed to a TCP stream. Router applications serve through this with
-    /// `into_http_handler()`, as on TCP.
+    /// socket file's permissions. Upgrade actions made with
+    /// `Http1Upgrade::new_any` (`WebSocketUpgrade::on_upgrade_any`) run on
+    /// these connections; TCP-typed ones (`Http1Upgrade::new`, `on_upgrade`)
+    /// are refused before the `101`. Router applications serve through this
+    /// with `into_http_handler()`, or `into_http1_handler()` for WebSocket
+    /// routes, as on TCP.
     #[cfg(unix)]
     pub fn from_unix_listener(
         listener: UnixListener,
@@ -828,10 +830,14 @@ where
     /// any negotiated protocol other than `http/1.1` is refused before request
     /// bytes reach the handler.
     ///
-    /// HTTP/1 transport upgrades remain fail-closed on this TLS path because
-    /// the existing public upgrade callback is intentionally typed to the raw
-    /// native [`crate::net::TcpStream`]. Ordinary responses, including Router
-    /// responses, retain the same handler contract as [`Self::run`].
+    /// Upgrade actions made with
+    /// [`Http1Upgrade::new_any`](crate::http::h1::Http1Upgrade::new_any) run
+    /// on the TLS stream after the `101`, which is how a Router route serves
+    /// `wss://` through `WebSocketUpgrade::on_upgrade_any`. TCP-typed actions
+    /// (`Http1Upgrade::new`, `on_upgrade`) are refused before the `101`,
+    /// because their callback receives the raw [`crate::net::TcpStream`].
+    /// Ordinary responses, including Router responses, retain the same
+    /// handler contract as [`Self::run`].
     ///
     /// The TCP connection is registered before its handshake begins, so the
     /// normal connection limit and drain accounting cover TLS peers. The
@@ -1438,8 +1444,9 @@ async fn serve_stream_connection<F, Fut, R>(
 }
 
 /// One HTTP/1.1 connection on a transport other than the listener's own TCP
-/// socket (a Unix-domain socket or a handed-off connection). It is served
-/// without protocol upgrades, which hand the handler a TCP stream.
+/// socket (a Unix-domain socket or a handed-off connection). Upgrade actions
+/// made with `Http1Upgrade::new_any` run on it; TCP-typed ones are refused
+/// before the `101`.
 #[cfg(any(unix, not(target_arch = "wasm32")))]
 async fn serve_without_upgrades<S, F, Fut, R>(
     stream: S,
@@ -1450,16 +1457,44 @@ async fn serve_without_upgrades<S, F, Fut, R>(
     shutdown_signal: ShutdownSignal,
     in_flight_requests: Arc<AtomicUsize>,
 ) where
-    S: crate::io::AsyncRead + crate::io::AsyncWrite + Unpin + Send,
+    S: crate::io::AsyncRead + crate::io::AsyncWrite + Unpin + Send + 'static,
     F: Fn(Request) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = R> + Send + 'static,
     R: IntoHttp1Response + Send + 'static,
 {
     let _guard = guard;
     let server = Http1Server::with_config_upgradeable(move |req| handler(req), config)
-        .with_shutdown_signal(shutdown_signal)
+        .with_shutdown_signal(shutdown_signal.clone())
         .with_in_flight_requests(in_flight_requests);
-    let _ = server.serve_with_peer_addr(stream, peer_addr).await;
+    serve_with_transport_upgrades(server, stream, peer_addr, &shutdown_signal).await;
+}
+
+/// Serves `stream`, then runs the transport-generic upgrade action a response
+/// committed, if any.
+#[cfg(any(unix, not(target_arch = "wasm32"), feature = "tls"))]
+async fn serve_with_transport_upgrades<S, F, Fut, R>(
+    server: Http1Server<F>,
+    stream: S,
+    peer_addr: Option<SocketAddr>,
+    shutdown_signal: &ShutdownSignal,
+) where
+    S: crate::io::AsyncRead + crate::io::AsyncWrite + Unpin + Send + 'static,
+    F: Fn(Request) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = R> + Send + 'static,
+    R: IntoHttp1Response + Send + 'static,
+{
+    if let Ok(Http1ServeOutcome::Upgraded {
+        io,
+        read_ahead,
+        upgrade,
+    }) = server
+        .serve_transport_upgradeable_with_peer_addr(stream, peer_addr)
+        .await
+        && let Some(session_cx) = Cx::current()
+        && let Some(session) = upgrade.run_on(session_cx.clone(), io, read_ahead)
+    {
+        run_upgrade_session(shutdown_signal, session_cx, session).await;
+    }
 }
 
 /// Spawn a connection handler as a runtime task.
@@ -1604,7 +1639,9 @@ where
         let server = Http1Server::with_config_upgradeable(move |req| handler(req), config)
             .with_shutdown_signal(shutdown_signal.clone())
             .with_in_flight_requests(in_flight_requests);
-        let _ = server.serve_with_peer_addr(tls_stream, peer_addr).await;
+        // `wss://`: upgrade actions made with `Http1Upgrade::new_any` run over
+        // the TLS stream; TCP-typed ones are refused before the `101`.
+        serve_with_transport_upgrades(server, tls_stream, peer_addr, &shutdown_signal).await;
     })?;
     Ok(handle)
 }

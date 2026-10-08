@@ -1075,6 +1075,26 @@ impl IntoHttp2Response for Http2Response {
     }
 }
 
+/// The response of an upgrade-aware HTTP/1 handler (such as
+/// `Router::into_http1_handler`), so one handler can serve both protocols
+/// (`HttpAutoListener`). An HTTP/2 stream cannot switch protocols: a response
+/// that carries an upgrade action is answered `500` instead.
+impl IntoHttp2Response for crate::http::h1::server::Http1Response {
+    fn into_h2_response(self) -> Http2Response {
+        self.into_plain().map_or_else(
+            || {
+                Response::new(
+                    500,
+                    "Internal Server Error",
+                    b"a protocol upgrade is not available over HTTP/2".to_vec(),
+                )
+                .into()
+            },
+            Into::into,
+        )
+    }
+}
+
 type Http2ProducerFuture =
     Pin<Box<dyn Future<Output = Result<Http2BodySender, HttpError>> + Send + 'static>>;
 type Http2ProducerFactory =

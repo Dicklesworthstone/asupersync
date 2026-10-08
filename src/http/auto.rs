@@ -117,9 +117,10 @@ pub struct HttpAutoShutdownStats {
 ///
 /// Each protocol's listener applies its own configuration: its host policy,
 /// `max_connections` (so the port admits up to the sum), body limits and
-/// drain timeouts. HTTP/1.1 protocol upgrades fail closed on these
-/// connections, as on `Http1Listener::run_tls`, because the public upgrade
-/// callback is typed to a raw TCP stream.
+/// drain timeouts. HTTP/1.1 upgrade actions made with `Http1Upgrade::new_any`
+/// (`WebSocketUpgrade::on_upgrade_any`) run on these connections, so a Router
+/// built with `into_http1_handler()` serves WebSockets next to HTTP/2;
+/// TCP-typed actions are refused before the `101`.
 pub struct HttpAutoListener<F> {
     listener: TcpListener,
     handler: Arc<F>,

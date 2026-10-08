@@ -470,17 +470,96 @@ pub struct ConnectionState {
 /// Boxed future that owns one committed HTTP/1 upgraded connection.
 pub type Http1UpgradeFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
+/// An upgraded HTTP/1 connection on whatever transport carried it: TCP, TLS,
+/// a Unix-domain socket, or a connection handed over by `HttpAutoListener`.
+/// Received by an [`Http1Upgrade::new_any`] action.
+pub struct Http1UpgradedIo(Box<dyn UpgradedTransport>);
+
+trait UpgradedTransport: AsyncRead + AsyncWrite + Send + Unpin {}
+
+impl<T: AsyncRead + AsyncWrite + Send + Unpin> UpgradedTransport for T {}
+
+impl Http1UpgradedIo {
+    fn new<T: AsyncRead + AsyncWrite + Send + Unpin + 'static>(io: T) -> Self {
+        Self(Box::new(io))
+    }
+}
+
+impl std::fmt::Debug for Http1UpgradedIo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Http1UpgradedIo").finish_non_exhaustive()
+    }
+}
+
+impl AsyncRead for Http1UpgradedIo {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut crate::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut *self.get_mut().0).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for Http1UpgradedIo {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut *self.get_mut().0).poll_write(cx, buf)
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut *self.get_mut().0).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.0.is_write_vectored()
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut *self.get_mut().0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut *self.get_mut().0).poll_shutdown(cx)
+    }
+}
+
+/// The callback of an [`Http1Upgrade`]: typed to the listener's TCP stream,
+/// or to any transport.
+enum UpgradeDriver {
+    Tcp(
+        Box<
+            dyn FnOnce(Cx, crate::net::tcp::stream::TcpStream, BytesMut) -> Http1UpgradeFuture
+                + Send
+                + 'static,
+        >,
+    ),
+    Any(Box<dyn FnOnce(Cx, Http1UpgradedIo, BytesMut) -> Http1UpgradeFuture + Send + 'static>),
+}
+
 /// One-shot action executed after an HTTP/1 upgrade response is fully flushed.
 ///
-/// The action is intentionally native-listener scoped: it receives the same
-/// TCP stream owned by the listener connection task plus every byte the HTTP
+/// The action is intentionally native-listener scoped: it receives the
+/// transport owned by the listener connection task plus every byte the HTTP
 /// codec read beyond the request. It must not spawn or detach its own owner.
+/// An action made with [`Self::new`] receives the TCP stream and runs only
+/// on a listener's own TCP connections; one made with [`Self::new_any`] also
+/// runs over TLS, Unix-domain sockets and `HttpAutoListener`.
 pub struct Http1Upgrade {
-    driver: Box<
-        dyn FnOnce(Cx, crate::net::tcp::stream::TcpStream, BytesMut) -> Http1UpgradeFuture
-            + Send
-            + 'static,
-    >,
+    driver: UpgradeDriver,
     expected_protocol: Option<String>,
     expected_extensions: Vec<String>,
 }
@@ -500,7 +579,28 @@ impl Http1Upgrade {
         Fut: Future<Output = ()> + Send + 'static,
     {
         Self {
-            driver: Box::new(move |cx, io, read_ahead| Box::pin(driver(cx, io, read_ahead))),
+            driver: UpgradeDriver::Tcp(Box::new(move |cx, io, read_ahead| {
+                Box::pin(driver(cx, io, read_ahead))
+            })),
+            expected_protocol: None,
+            expected_extensions: Vec::new(),
+        }
+    }
+
+    /// Create a one-shot upgrade action that runs on any transport the
+    /// listener serves (TCP, TLS through `Http1Listener::run_tls`, a
+    /// Unix-domain socket, or `HttpAutoListener`); it receives the transport
+    /// as an [`Http1UpgradedIo`].
+    #[must_use]
+    pub fn new_any<F, Fut>(driver: F) -> Self
+    where
+        F: FnOnce(Cx, Http1UpgradedIo, BytesMut) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        Self {
+            driver: UpgradeDriver::Any(Box::new(move |cx, io, read_ahead| {
+                Box::pin(driver(cx, io, read_ahead))
+            })),
             expected_protocol: None,
             expected_extensions: Vec::new(),
         }
@@ -525,7 +625,26 @@ impl Http1Upgrade {
         io: crate::net::tcp::stream::TcpStream,
         read_ahead: BytesMut,
     ) -> Http1UpgradeFuture {
-        (self.driver)(cx, io, read_ahead)
+        match self.driver {
+            UpgradeDriver::Tcp(driver) => driver(cx, io, read_ahead),
+            UpgradeDriver::Any(driver) => driver(cx, Http1UpgradedIo::new(io), read_ahead),
+        }
+    }
+
+    /// Runs a transport-generic action on `io`; `None` for a TCP-typed one,
+    /// which the transport-generic serve path refuses before the `101`.
+    pub(crate) fn run_on<T>(self, cx: Cx, io: T, read_ahead: BytesMut) -> Option<Http1UpgradeFuture>
+    where
+        T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    {
+        match self.driver {
+            UpgradeDriver::Tcp(_) => None,
+            UpgradeDriver::Any(driver) => Some(driver(cx, Http1UpgradedIo::new(io), read_ahead)),
+        }
+    }
+
+    const fn runs_on_any_transport(&self) -> bool {
+        matches!(self.driver, UpgradeDriver::Any(_))
     }
 
     pub(crate) fn websocket_negotiation_matches(&self, response: &Response) -> bool {
@@ -586,6 +705,12 @@ impl Http1Response {
         }
     }
 
+    /// The response, for a transport that cannot hand the connection off;
+    /// `None` when it carries an upgrade action.
+    pub(crate) fn into_plain(self) -> Option<Response> {
+        self.upgrade.is_none().then_some(self.response)
+    }
+
     /// Attach an explicit one-shot upgrade action.
     #[must_use]
     pub fn with_upgrade(mut self, upgrade: Http1Upgrade) -> Self {
@@ -610,6 +735,17 @@ impl IntoHttp1Response for Http1Response {
     fn into_h1_response(self) -> Http1Response {
         self
     }
+}
+
+/// Which upgrade actions a serve path may hand the connection to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpgradeAdmission {
+    /// None: the compatibility `serve` path.
+    Refused,
+    /// TCP-typed and transport-generic actions: a listener's TCP connection.
+    Any,
+    /// Transport-generic actions only: TLS, Unix-domain, handed-off.
+    TransportGeneric,
 }
 
 /// Terminal result from the listener-only upgrade-aware connection driver.
@@ -898,7 +1034,7 @@ where
         T: AsyncRead + AsyncWrite + Unpin + Send,
     {
         match self
-            .serve_connection_with_peer_addr(io, peer_addr, false)
+            .serve_connection_with_peer_addr(io, peer_addr, UpgradeAdmission::Refused)
             .await?
         {
             Http1ServeOutcome::Closed(state) => Ok(state),
@@ -916,7 +1052,22 @@ where
     where
         T: AsyncRead + AsyncWrite + Unpin + Send,
     {
-        self.serve_connection_with_peer_addr(io, peer_addr, true)
+        self.serve_connection_with_peer_addr(io, peer_addr, UpgradeAdmission::Any)
+            .await
+    }
+
+    /// Serves a connection whose transport is not the listener's own TCP
+    /// stream: upgrade actions made with [`Http1Upgrade::new_any`] are
+    /// admitted, TCP-typed ones refused before the `101`.
+    pub(crate) async fn serve_transport_upgradeable_with_peer_addr<T>(
+        self,
+        io: T,
+        peer_addr: Option<SocketAddr>,
+    ) -> Result<Http1ServeOutcome<T>, HttpError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin + Send,
+    {
+        self.serve_connection_with_peer_addr(io, peer_addr, UpgradeAdmission::TransportGeneric)
             .await
     }
 
@@ -925,7 +1076,7 @@ where
         self,
         io: T,
         peer_addr: Option<SocketAddr>,
-        admit_upgrade: bool,
+        admit_upgrade: UpgradeAdmission,
     ) -> Result<Http1ServeOutcome<T>, HttpError>
     where
         T: AsyncRead + AsyncWrite + Unpin + Send,
@@ -1150,8 +1301,10 @@ where
             // request, and a request with a body or trailers can never hand
             // off. Keep a copy just for that case: copying every request
             // cost a copy of its whole body, up to max_body_size.
-            let upgrade_request = (admit_upgrade && req.body.is_empty() && req.trailers.is_empty())
-                .then(|| req.clone());
+            let upgrade_request = (admit_upgrade != UpgradeAdmission::Refused
+                && req.body.is_empty()
+                && req.trailers.is_empty())
+            .then(|| req.clone());
             let mut forced_close = false;
             // The request context derives from the connection's own context
             // when there is one, so work a handler spawns belongs to the
@@ -1254,9 +1407,17 @@ where
 
             let upgrade = match upgrade {
                 Some(upgrade) => {
-                    if !admit_upgrade {
+                    if admit_upgrade == UpgradeAdmission::Refused {
                         return Err(invalid_upgrade_error(
                             "HTTP/1 upgrade action requires an upgrade-aware listener",
+                        ));
+                    }
+                    if admit_upgrade == UpgradeAdmission::TransportGeneric
+                        && !upgrade.runs_on_any_transport()
+                    {
+                        return Err(invalid_upgrade_error(
+                            "this transport runs only HTTP/1 upgrade actions made with \
+                             Http1Upgrade::new_any (WebSocketUpgrade::on_upgrade_any)",
                         ));
                     }
                     if draining {
