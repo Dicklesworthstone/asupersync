@@ -43,10 +43,13 @@
 //! hold across reconnections), and a PING cancelled before its PONG (the
 //! connection is replaced instead of left failing every command). A dropped
 //! subscription is unsubscribed on the wire, and a command whose caller gave
-//! up before the supervisor reached it is not sent.
+//! up before the supervisor reached it is not sent. Client keepalive: a
+//! connection that stops answering PINGs is replaced without any client call,
+//! as is one that never answers a `ping()` (which fails within the stale
+//! window); one that answers them is kept, and a disabled keepalive sends none.
 
 use asupersync::cx::{ChildRegionSpec, Cx};
-use asupersync::messaging::nats::{NatsClient, NatsConfig, NatsError};
+use asupersync::messaging::nats::{NatsClient, NatsConfig, NatsError, NatsKeepalive};
 use asupersync::runtime::RuntimeBuilder;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
@@ -1259,4 +1262,398 @@ fn nats_timed_out_process_does_not_hold_the_supervisor() {
     assert!(closed, "client did not close");
     assert!(completed.is_ok(), "process client task did not finish");
     assert!(drained, "process runtime did not drain");
+}
+
+/// Reads client lines until the client closes the connection, answering each
+/// PING with PONG when `answer_pings` is set. Returns the lines, and whether
+/// the client closed it (false: a read waited longer than `within`, or the
+/// client sent more than 64 lines, as a keepalive that never gives up would).
+fn lines_until_closed(
+    reader: &mut BufReader<std::net::TcpStream>,
+    answer_pings: bool,
+    within: Duration,
+) -> (Vec<String>, bool) {
+    reader
+        .get_mut()
+        .set_read_timeout(Some(within))
+        .expect("set close timeout");
+    let mut lines = Vec::new();
+    while lines.len() <= 64 {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => return (lines, true),
+            Ok(_) => {
+                let line = line.trim_end_matches(['\r', '\n']).to_string();
+                if answer_pings && line == "PING" {
+                    // The client may be closing; a PONG it never reads is fine.
+                    let stream = reader.get_mut();
+                    let _ = stream.write_all(b"PONG\r\n").and_then(|()| stream.flush());
+                }
+                lines.push(line);
+            }
+            Err(error) => {
+                let closed = matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                );
+                return (lines, closed);
+            }
+        }
+    }
+    (lines, false)
+}
+
+/// Reads client lines through `wanted`, answering each PING with PONG when
+/// `answer_pings` is set. The keepalive's first PING may come before or after
+/// the client's own commands.
+fn lines_through(
+    reader: &mut BufReader<std::net::TcpStream>,
+    wanted: &str,
+    answer_pings: bool,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    loop {
+        let line = read_nats_line(reader);
+        if answer_pings && line == "PING" {
+            reader.get_mut().write_all(b"PONG\r\n").expect("write PONG");
+            reader.get_mut().flush().expect("flush PONG");
+        }
+        let done = line == wanted;
+        lines.push(line);
+        if done {
+            return lines;
+        }
+    }
+}
+
+fn keepalive_client_config(addr: std::net::SocketAddr) -> NatsConfig {
+    let mut config = NatsConfig::from_url(&format!("nats://{addr}")).expect("parse keepalive URL");
+    config.reconnect_delay = Duration::ZERO;
+    config.max_reconnect_delay = Duration::ZERO;
+    config
+}
+
+#[test]
+fn nats_keepalive_settings_clamp_and_default_k6pxks() {
+    let default = NatsKeepalive::default();
+    assert_eq!(default.interval(), Some(Duration::from_secs(120)));
+    assert_eq!(default.max_pings_out(), 2);
+    assert_eq!(NatsKeepalive::disabled().interval(), None);
+    let clamped = NatsKeepalive::new(Duration::ZERO, 0);
+    assert_eq!(clamped.interval(), Some(Duration::from_millis(1)));
+    assert_eq!(clamped.max_pings_out(), 1);
+}
+
+/// A server that stops answering PINGs is replaced without any client call:
+/// after `max_pings_out` unanswered keepalive PINGs the supervisor closes the
+/// connection, reconnects and replays the subscription, so a message sent only
+/// on the second connection reaches a subscriber that issued nothing since.
+#[test]
+fn nats_keepalive_replaces_a_connection_that_stops_answering_pings_k6pxks() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind keepalive listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = thread::spawn(move || {
+        let mut first =
+            accept_within(&listener, Duration::from_secs(5)).expect("accept keepalive client");
+        send_info(&mut first, "keepalive-silent");
+        let mut first = BufReader::new(first);
+        // Withhold every PONG.
+        let (first_lines, first_closed) =
+            lines_until_closed(&mut first, false, Duration::from_secs(5));
+        let Some(mut second) = accept_within(&listener, Duration::from_secs(5)) else {
+            return (first_lines, first_closed, Vec::new(), false);
+        };
+        send_info(&mut second, "keepalive-fresh");
+        let mut second = BufReader::new(second);
+        let mut second_lines = lines_through(&mut second, "SUB events.kept 1", true);
+        second
+            .get_mut()
+            .write_all(b"MSG events.kept 1 5\r\nfresh\r\n")
+            .expect("write message on the replacement connection");
+        second.get_mut().flush().expect("flush message");
+        let (rest, second_closed) = lines_until_closed(&mut second, true, Duration::from_secs(5));
+        second_lines.extend(rest);
+        (first_lines, first_closed, second_lines, second_closed)
+    });
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let (done_tx, done_rx) = mpsc::channel();
+    let task = runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("runtime task context");
+        let keepalive = NatsKeepalive::new(Duration::from_millis(200), 2);
+        let mut client =
+            NatsClient::connect_with_keepalive(&cx, keepalive_client_config(addr), keepalive)
+                .await
+                .expect("connect supervised client");
+        let mut kept = client
+            .subscribe(&cx, "events.kept")
+            .await
+            .expect("subscribe on the first connection");
+        let message = kept
+            .next(&cx)
+            .await
+            .expect("receive after the keepalive reconnect")
+            .expect("message on the replacement connection");
+        assert_eq!(message.payload, b"fresh");
+        client.close(&cx).await.expect("close supervised client");
+        let _ = done_tx.send(());
+    });
+
+    let completed = done_rx.recv_timeout(Duration::from_secs(15));
+    let peer = server.join();
+    drop(task);
+    let drained = runtime.shutdown_timeout(Duration::from_secs(3));
+    let (first_lines, first_closed, second_lines, second_closed) =
+        peer.expect("keepalive peer joined");
+    assert!(
+        first_closed,
+        "the connection that stopped answering PINGs stays open: {first_lines:?}"
+    );
+    assert!(first_lines[0].starts_with("CONNECT "), "{first_lines:?}");
+    assert!(
+        first_lines.iter().any(|line| line == "SUB events.kept 1"),
+        "{first_lines:?}"
+    );
+    assert_eq!(
+        first_lines.iter().filter(|line| *line == "PING").count(),
+        2,
+        "max_pings_out unanswered PINGs, then the connection is stale: {first_lines:?}"
+    );
+    assert!(
+        !second_lines.is_empty(),
+        "the client never reconnected after its PINGs went unanswered"
+    );
+    assert!(second_lines[0].starts_with("CONNECT "), "{second_lines:?}");
+    assert!(
+        second_lines.iter().any(|line| line == "SUB events.kept 1"),
+        "the subscription is replayed on the replacement connection: {second_lines:?}"
+    );
+    assert!(
+        second_closed,
+        "client did not close the replacement connection"
+    );
+    assert!(completed.is_ok(), "keepalive client task did not finish");
+    assert!(drained, "keepalive runtime did not drain");
+}
+
+/// A supervised `ping()` the server never answers fails within the keepalive's
+/// stale window, and the connection is replaced. Waiting on would park the
+/// supervisor, which would also keep the keepalive from ticking.
+#[test]
+fn nats_keepalive_bounds_a_ping_the_server_never_answers_k6pxks() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind keepalive listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = thread::spawn(move || {
+        let mut first =
+            accept_within(&listener, Duration::from_secs(5)).expect("accept keepalive client");
+        send_info(&mut first, "keepalive-ping-silent");
+        let mut first = BufReader::new(first);
+        // Withhold every PONG, the caller's included.
+        let (first_lines, first_closed) =
+            lines_until_closed(&mut first, false, Duration::from_secs(5));
+        let Some(mut second) = accept_within(&listener, Duration::from_secs(5)) else {
+            return (first_lines, first_closed, false);
+        };
+        send_info(&mut second, "keepalive-ping-fresh");
+        let mut second = BufReader::new(second);
+        let (_, second_closed) = lines_until_closed(&mut second, true, Duration::from_secs(5));
+        (first_lines, first_closed, second_closed)
+    });
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let (done_tx, done_rx) = mpsc::channel();
+    let task = runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("runtime task context");
+        let keepalive = NatsKeepalive::new(Duration::from_millis(200), 2);
+        let mut client =
+            NatsClient::connect_with_keepalive(&cx, keepalive_client_config(addr), keepalive)
+                .await
+                .expect("connect supervised client");
+        let pinged = client.ping(&cx).await;
+        assert!(
+            pinged.is_err(),
+            "a PING the server never answers must fail: {pinged:?}"
+        );
+        // Queued behind the replacement: close() right away could find the
+        // client disconnected mid-reconnect and stop the supervisor instead.
+        client
+            .ping(&cx)
+            .await
+            .expect("ping on the replacement connection");
+        client
+            .close(&cx)
+            .await
+            .expect("close on the replacement connection");
+        let _ = done_tx.send(());
+    });
+
+    let completed = done_rx.recv_timeout(Duration::from_secs(15));
+    let peer = server.join();
+    drop(task);
+    let drained = runtime.shutdown_timeout(Duration::from_secs(3));
+    let (first_lines, first_closed, second_closed) = peer.expect("keepalive peer joined");
+    assert!(
+        completed.is_ok(),
+        "the unanswered PING parked the client: {first_lines:?}"
+    );
+    assert!(
+        first_lines.iter().any(|line| line == "PING"),
+        "{first_lines:?}"
+    );
+    assert!(
+        first_closed,
+        "the connection whose PING went unanswered stays open"
+    );
+    assert!(second_closed, "the replacement connection was not closed");
+    assert!(drained, "keepalive runtime did not drain");
+}
+
+/// A server that answers each keepalive PING keeps its connection: more PINGs
+/// than `max_pings_out` go by, each answered, and no reconnection follows.
+#[test]
+fn nats_keepalive_keeps_a_connection_that_answers_pings_k6pxks() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind keepalive listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = thread::spawn(move || {
+        let mut stream =
+            accept_within(&listener, Duration::from_secs(5)).expect("accept keepalive client");
+        send_info(&mut stream, "keepalive-answered");
+        let mut reader = BufReader::new(stream);
+        let mut lines = lines_through(&mut reader, "SUB events.kept 1", true);
+        // Five answered PINGs: more than max_pings_out. A read here fails if
+        // the client gave up on the connection anyway.
+        let mut answered = lines.iter().filter(|line| *line == "PING").count();
+        while answered < 5 {
+            lines.extend(lines_through(&mut reader, "PING", true));
+            answered += 1;
+        }
+        reader
+            .get_mut()
+            .write_all(b"MSG events.kept 1 5\r\nafter\r\n")
+            .expect("write message after the answered PINGs");
+        reader.get_mut().flush().expect("flush message");
+        let (rest, closed) = lines_until_closed(&mut reader, true, Duration::from_secs(5));
+        lines.extend(rest);
+        let reconnected = accept_within(&listener, Duration::from_millis(300)).is_some();
+        (lines, closed, reconnected)
+    });
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let (done_tx, done_rx) = mpsc::channel();
+    let task = runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("runtime task context");
+        // 250 ms x 2: a server-thread stall shorter than half a second
+        // cannot make an answered connection look stale.
+        let keepalive = NatsKeepalive::new(Duration::from_millis(250), 2);
+        let mut client =
+            NatsClient::connect_with_keepalive(&cx, keepalive_client_config(addr), keepalive)
+                .await
+                .expect("connect supervised client");
+        let mut kept = client
+            .subscribe(&cx, "events.kept")
+            .await
+            .expect("subscribe");
+        let message = kept
+            .next(&cx)
+            .await
+            .expect("receive after the answered PINGs")
+            .expect("message on the kept connection");
+        assert_eq!(message.payload, b"after");
+        client.close(&cx).await.expect("close supervised client");
+        let _ = done_tx.send(());
+    });
+
+    let completed = done_rx.recv_timeout(Duration::from_secs(15));
+    let peer = server.join();
+    drop(task);
+    let drained = runtime.shutdown_timeout(Duration::from_secs(3));
+    let (lines, closed, reconnected) = peer.expect("keepalive peer joined");
+    assert!(lines[0].starts_with("CONNECT "), "{lines:?}");
+    assert!(
+        lines.iter().filter(|line| *line == "PING").count() >= 5,
+        "{lines:?}"
+    );
+    assert!(closed, "client did not close");
+    assert!(
+        !reconnected,
+        "the client replaced a connection that answered every PING"
+    );
+    assert!(completed.is_ok(), "keepalive client task did not finish");
+    assert!(drained, "keepalive runtime did not drain");
+}
+
+/// A disabled keepalive sends no PING and keeps a silent connection.
+#[test]
+fn nats_keepalive_disabled_sends_no_ping_k6pxks() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind keepalive listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = thread::spawn(move || {
+        let mut stream =
+            accept_within(&listener, Duration::from_secs(5)).expect("accept keepalive client");
+        send_info(&mut stream, "keepalive-off");
+        let mut reader = BufReader::new(stream);
+        let mut lines = lines_through(&mut reader, "SUB events.kept 1", false);
+        // Silent for five times the interval the other tests use.
+        thread::sleep(Duration::from_millis(500));
+        reader
+            .get_mut()
+            .write_all(b"MSG events.kept 1 5\r\nquiet\r\n")
+            .expect("write message after the silence");
+        reader.get_mut().flush().expect("flush message");
+        let (rest, closed) = lines_until_closed(&mut reader, false, Duration::from_secs(5));
+        lines.extend(rest);
+        let reconnected = accept_within(&listener, Duration::from_millis(100)).is_some();
+        (lines, closed, reconnected)
+    });
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let (done_tx, done_rx) = mpsc::channel();
+    let task = runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("runtime task context");
+        let mut client = NatsClient::connect_with_keepalive(
+            &cx,
+            keepalive_client_config(addr),
+            NatsKeepalive::disabled(),
+        )
+        .await
+        .expect("connect supervised client");
+        let mut kept = client
+            .subscribe(&cx, "events.kept")
+            .await
+            .expect("subscribe");
+        let message = kept
+            .next(&cx)
+            .await
+            .expect("receive after the silence")
+            .expect("message on the silent connection");
+        assert_eq!(message.payload, b"quiet");
+        client.close(&cx).await.expect("close supervised client");
+        let _ = done_tx.send(());
+    });
+
+    let completed = done_rx.recv_timeout(Duration::from_secs(15));
+    let peer = server.join();
+    drop(task);
+    let drained = runtime.shutdown_timeout(Duration::from_secs(3));
+    let (lines, closed, reconnected) = peer.expect("keepalive peer joined");
+    assert!(
+        !lines.iter().any(|line| line == "PING"),
+        "a disabled keepalive sent a PING: {lines:?}"
+    );
+    assert!(closed, "client did not close");
+    assert!(!reconnected, "the client replaced a silent connection");
+    assert!(completed.is_ok(), "keepalive client task did not finish");
+    assert!(drained, "keepalive runtime did not drain");
 }

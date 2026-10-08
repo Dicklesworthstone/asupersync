@@ -1371,6 +1371,13 @@ struct SharedState {
     closed: std::sync::atomic::AtomicBool,
     connected: std::sync::atomic::AtomicBool,
     processed_epoch: AtomicU64,
+    /// PINGs written on the current connection, keepalive and
+    /// [`NatsClient::ping`] alike. The server answers in order, so
+    /// `pings_sent - pongs` are still unanswered. Both reset on reconnect.
+    pings_sent: AtomicU64,
+    /// `PONG` frames parsed on the current connection, whichever read
+    /// consumed them.
+    pongs: AtomicU64,
     /// Set once a supervisor owns the connection. Only a supervised client
     /// unsubscribes dropped subscriptions.
     supervised: std::sync::atomic::AtomicBool,
@@ -1387,6 +1394,8 @@ impl SharedState {
             closed: std::sync::atomic::AtomicBool::new(false),
             connected: std::sync::atomic::AtomicBool::new(false),
             processed_epoch: AtomicU64::new(0),
+            pings_sent: AtomicU64::new(0),
+            pongs: AtomicU64::new(0),
             supervised: std::sync::atomic::AtomicBool::new(false),
             dropped_sids: Mutex::new(Vec::new()),
         }
@@ -2037,6 +2046,9 @@ impl NatsConnection {
                     self.stream = new_stream.into();
                     self.read_buf = NatsReadBuffer::with_limit(self.config.max_read_buffer);
                     self.connected = false;
+                    // The old connection's unanswered PINGs never get a PONG.
+                    self.state.pings_sent.store(0, Ordering::Release);
+                    self.state.pongs.store(0, Ordering::Release);
 
                     // Complete NATS handshake
                     match self.complete_reconnect_handshake(cx).await {
@@ -2252,6 +2264,32 @@ impl NatsConnection {
         Ok(())
     }
 
+    /// Write a client keepalive `PING`. Its `PONG` is not awaited here:
+    /// whichever read parses it counts it (see [`NatsKeepalive`]). Fails
+    /// closed around the write like [`Self::send_server_pong`].
+    async fn send_keepalive_ping(&mut self, cx: &Cx) -> Result<(), NatsError> {
+        let restore_connected = self.connected;
+        if restore_connected {
+            self.connected = false;
+        }
+
+        nats_io(cx, self.stream.write_all(b"PING\r\n")).await?;
+        nats_io(cx, self.stream.flush()).await?;
+        self.state.pings_sent.fetch_add(1, Ordering::AcqRel);
+
+        if restore_connected {
+            self.connected = true;
+        }
+
+        Ok(())
+    }
+
+    /// PINGs written on this connection that no parsed `PONG` has answered.
+    fn unanswered_pings(&self) -> u64 {
+        let sent = self.state.pings_sent.load(Ordering::Acquire);
+        sent.saturating_sub(self.state.pongs.load(Ordering::Acquire))
+    }
+
     /// Send UNSUB for subscriptions dropped without an unsubscribe.
     ///
     /// Like every multi-part write, the connection stays marked unusable
@@ -2325,6 +2363,7 @@ impl NatsConnection {
         } else if buf.starts_with(b"PONG") {
             if buf.len() >= 6 && buf[4] == b'\r' && buf[5] == b'\n' {
                 self.read_buf.consume(6);
+                self.state.pongs.fetch_add(1, Ordering::AcqRel);
                 return Ok(Some(NatsMessage::Pong));
             } else if buf.len() < 6 {
                 return Ok(None);
@@ -3044,6 +3083,10 @@ impl NatsConnection {
 
         nats_io(cx, self.stream.write_all(b"PING\r\n")).await?;
         nats_io(cx, self.stream.flush()).await?;
+        // The server answers PINGs in order. A PONG for an earlier keepalive
+        // PING is not this one's: the commands written before this PING may
+        // still be unprocessed when it arrives.
+        let answered_at = self.state.pings_sent.fetch_add(1, Ordering::AcqRel) + 1;
 
         // Wait for PONG
         loop {
@@ -3052,8 +3095,10 @@ impl NatsConnection {
             if let Some(msg) = self.try_parse_message()? {
                 match msg {
                     NatsMessage::Pong => {
-                        self.connected = true;
-                        return Ok(());
+                        if self.state.pongs.load(Ordering::Acquire) >= answered_at {
+                            self.connected = true;
+                            return Ok(());
+                        }
                     }
                     // The server keeps the connection after a permissions
                     // violation and sends the PONG next. Failing here broke
@@ -3196,6 +3241,129 @@ impl Drop for NatsConnection {
 
 const NATS_SUPERVISOR_COMMAND_CAPACITY: usize = 64;
 
+/// Client-side keepalive of a supervised [`NatsClient`].
+///
+/// A half-open TCP connection (the server or a middlebox gone without a FIN
+/// or RST) accepts writes into the socket buffer for many minutes: publishes
+/// return `Ok` and subscriptions go quiet. The supervisor therefore sends a
+/// `PING` every interval; the server answers each with a `PONG`, in order.
+/// When `max_pings_out` PINGs are still unanswered at a tick, the connection
+/// is stale and the supervisor replaces it as it does after a transport
+/// error: it reconnects within [`NatsConfig`]'s reconnect limits and replays
+/// the subscriptions. [`NatsClient::ping`] still waits for its own `PONG`,
+/// not one answering an earlier keepalive `PING`, but no longer than
+/// `interval × max_pings_out`: past that it fails and the connection is
+/// replaced.
+///
+/// [`NatsClient::connect`] and [`NatsClient::connect_with_config`] use
+/// [`NatsKeepalive::default`], the nats.go defaults: a `PING` every two
+/// minutes, stale with two unanswered, so a dead connection is replaced
+/// within about six minutes. [`NatsClient::connect_with_keepalive`] changes
+/// or disables it.
+///
+/// A client without a supervisor (its `Cx` has no spawn gateway) reads only
+/// while one of its calls runs, so it has no keepalive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NatsKeepalive {
+    interval: Option<Duration>,
+    max_pings_out: u32,
+}
+
+impl NatsKeepalive {
+    /// The default `PING` interval (nats.go's `DefaultPingInterval`).
+    pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(120);
+    /// The default limit of unanswered PINGs (nats.go's `DefaultMaxPingOut`).
+    pub const DEFAULT_MAX_PINGS_OUT: u32 = 2;
+
+    /// Sends a `PING` every `interval` (at least 1 ms) and declares the
+    /// connection stale when `max_pings_out` (at least 1) are unanswered at
+    /// the next tick.
+    #[must_use]
+    pub fn new(interval: Duration, max_pings_out: u32) -> Self {
+        Self {
+            interval: Some(interval.max(Duration::from_millis(1))),
+            max_pings_out: max_pings_out.max(1),
+        }
+    }
+
+    /// No client keepalive, as in v0.4.3. The supervisor still answers the
+    /// server's PINGs.
+    #[must_use]
+    pub const fn disabled() -> Self {
+        Self {
+            interval: None,
+            max_pings_out: Self::DEFAULT_MAX_PINGS_OUT,
+        }
+    }
+
+    /// The `PING` interval, or `None` when the keepalive is disabled.
+    #[must_use]
+    pub const fn interval(&self) -> Option<Duration> {
+        self.interval
+    }
+
+    /// How many unanswered PINGs make the connection stale.
+    #[must_use]
+    pub const fn max_pings_out(&self) -> u32 {
+        self.max_pings_out
+    }
+}
+
+impl Default for NatsKeepalive {
+    fn default() -> Self {
+        Self::new(Self::DEFAULT_INTERVAL, Self::DEFAULT_MAX_PINGS_OUT)
+    }
+}
+
+/// When the supervisor's next keepalive `PING` is due.
+struct KeepaliveClock {
+    interval: Duration,
+    max_pings_out: u32,
+    next_ping: Time,
+}
+
+/// What a keepalive tick asks the supervisor to do.
+enum KeepaliveTick {
+    /// Send a `PING`, bounding the write by the interval.
+    Ping(Duration),
+    /// `max_pings_out` PINGs are unanswered: replace the connection.
+    Stale,
+}
+
+impl KeepaliveClock {
+    /// `None` when the keepalive is disabled.
+    fn new(cx: &Cx, keepalive: NatsKeepalive) -> Option<Self> {
+        let interval = keepalive.interval?;
+        Some(Self {
+            interval,
+            max_pings_out: keepalive.max_pings_out,
+            next_ping: timeout_now(cx) + interval,
+        })
+    }
+
+    /// A fresh connection waits a whole interval for its first `PING`.
+    fn restart(&mut self, cx: &Cx) {
+        self.next_ping = timeout_now(cx) + self.interval;
+    }
+
+    /// How long a `PING` may go unanswered before the keepalive would call the
+    /// connection stale. A supervised [`NatsClient::ping`] waits no longer:
+    /// while it waits, the supervisor cannot tick.
+    fn stale_window(&self) -> Duration {
+        self.interval.saturating_mul(self.max_pings_out)
+    }
+
+    /// Handles a due tick: with `max_pings_out` PINGs still unanswered the
+    /// connection is stale; otherwise one more is sent.
+    fn tick(&mut self, cx: &Cx, unanswered: u64) -> KeepaliveTick {
+        if unanswered >= u64::from(self.max_pings_out) {
+            return KeepaliveTick::Stale;
+        }
+        self.next_ping = timeout_now(cx) + self.interval;
+        KeepaliveTick::Ping(self.interval)
+    }
+}
+
 /// Messages a subscription buffers before further ones are dropped; see
 /// [`NatsClient::subscribe_with_capacity`].
 const DEFAULT_SUBSCRIPTION_CAPACITY: usize = 256;
@@ -3206,8 +3374,10 @@ const DEFAULT_SUBSCRIPTION_CAPACITY: usize = 256;
 /// starts one region-owned connection supervisor. That task is the exclusive
 /// owner of socket reads and writes, so it can answer server `PING` frames and
 /// dispatch subscription messages even while the caller is otherwise idle.
-/// Contexts without a spawn gateway retain the cooperative v0.4.3 transport
-/// behavior for compatibility with lightweight test harnesses.
+/// It also sends keepalive PINGs and replaces a connection that stops
+/// answering them; see [`NatsKeepalive`]. Contexts without a spawn gateway
+/// retain the cooperative v0.4.3 transport behavior for compatibility with
+/// lightweight test harnesses.
 pub struct NatsClient {
     config: NatsConfig,
     state: Arc<SharedState>,
@@ -3351,8 +3521,21 @@ impl NatsClient {
         Self::connect_with_config(cx, config).await
     }
 
-    /// Connect with explicit configuration.
+    /// Connect with explicit configuration and the default keepalive
+    /// ([`NatsKeepalive::default`]).
     pub async fn connect_with_config(cx: &Cx, config: NatsConfig) -> Result<Self, NatsError> {
+        Self::connect_with_keepalive(cx, config, NatsKeepalive::default()).await
+    }
+
+    /// Connect with explicit configuration and client keepalive.
+    ///
+    /// The keepalive runs in the connection supervisor, so it applies only
+    /// when `cx` has a spawn gateway; see [`NatsKeepalive`].
+    pub async fn connect_with_keepalive(
+        cx: &Cx,
+        config: NatsConfig,
+        keepalive: NatsKeepalive,
+    ) -> Result<Self, NatsError> {
         let connection = NatsConnection::connect_with_config(cx, config).await?;
         let config = connection.config.clone();
         let state = Arc::clone(&connection.state);
@@ -3368,7 +3551,7 @@ impl NatsClient {
         let (commands, receiver) = mpsc::channel(NATS_SUPERVISOR_COMMAND_CAPACITY);
         let task = cx
             .spawn(move |supervisor_cx| async move {
-                run_nats_supervisor(&supervisor_cx, connection, receiver).await;
+                run_nats_supervisor(&supervisor_cx, connection, receiver, keepalive).await;
             })
             .map_err(|_| NatsError::NotConnected)?;
 
@@ -3705,9 +3888,13 @@ async fn run_nats_supervisor(
     supervisor_cx: &Cx,
     mut connection: NatsConnection,
     mut commands: mpsc::Receiver<NatsSupervisorCommand>,
+    keepalive: NatsKeepalive,
 ) {
     let mut streak = ReconnectStreak::default();
     let mut process_waiters = Vec::new();
+    let mut keepalive = KeepaliveClock::new(supervisor_cx, keepalive);
+    // Kept across iterations: a frame loop turn must not re-arm the timer.
+    let mut ping_timer: Option<(Time, Pin<Box<crate::time::Sleep>>)> = None;
     connection.state.supervised.store(true, Ordering::Release);
     loop {
         let pumped = match connection.flush_dropped_subscriptions(supervisor_cx).await {
@@ -3732,6 +3919,7 @@ async fn run_nats_supervisor(
                     supervisor_cx,
                     &mut connection,
                     &mut streak,
+                    &mut keepalive,
                     error,
                 )
                 .await
@@ -3742,29 +3930,84 @@ async fn run_nats_supervisor(
             }
         }
 
-        // Both operations are drop-cancel-safe: mpsc recv leaves the queued
-        // command untouched, and poll_read commits no bytes while pending. A
-        // selected command therefore cannot steal socket bytes, and a selected
-        // read cannot lose a command reservation.
+        let due = keepalive.as_ref().map(|clock| clock.next_ping);
+        if ping_timer.as_ref().map(|(at, _)| *at) != due {
+            ping_timer = due.map(|at| (at, Box::pin(crate::time::sleep_until(at))));
+        }
+
+        // All three operations are drop-cancel-safe: mpsc recv leaves the
+        // queued command untouched, poll_read commits no bytes while pending,
+        // and the keepalive timer outlives the select. A selected command
+        // therefore cannot steal socket bytes, and a selected read cannot
+        // lose a command reservation. The socket is always polled before the
+        // timer (`Select` alternates its sides), so a PONG that has arrived
+        // is parsed before a keepalive tick judges the connection.
         let selected = {
-            let read = Box::pin(connection.read_more(supervisor_cx));
+            let mut read = Box::pin(connection.read_more(supervisor_cx));
+            let timer = &mut ping_timer;
+            let io = Box::pin(std::future::poll_fn(move |task| {
+                if let Poll::Ready(result) = read.as_mut().poll(task) {
+                    return Poll::Ready(Either::Left(result));
+                }
+                match timer.as_mut() {
+                    Some((_, sleep)) => sleep.as_mut().poll(task).map(Either::Right),
+                    None => Poll::Pending,
+                }
+            }));
             let command = Box::pin(commands.recv(supervisor_cx));
-            Select::new(read, command).await
+            Select::new(io, command).await
         };
 
         match selected {
-            Ok(Either::Left(Ok(()))) => {}
-            Ok(Either::Left(Err(error))) => {
+            Ok(Either::Left(Either::Left(Ok(())))) => {}
+            Ok(Either::Left(Either::Left(Err(error)))) => {
                 fail_process_waiters(&mut process_waiters);
                 if !recover_supervisor_connection(
                     supervisor_cx,
                     &mut connection,
                     &mut streak,
+                    &mut keepalive,
                     error,
                 )
                 .await
                 {
                     break;
+                }
+            }
+            Ok(Either::Left(Either::Right(()))) => {
+                // A finished Sleep must not be polled again; the next turn
+                // arms one for the new deadline.
+                ping_timer = None;
+                let Some(clock) = keepalive.as_mut() else {
+                    continue;
+                };
+                let failure = match clock.tick(supervisor_cx, connection.unanswered_pings()) {
+                    KeepaliveTick::Ping(bound) => {
+                        // A dead peer's full send buffer must not park the
+                        // supervisor: the PING write gets one interval.
+                        let now = timeout_now(supervisor_cx);
+                        let ping = connection.send_keepalive_ping(supervisor_cx);
+                        match crate::time::timeout(now, bound, ping).await {
+                            Ok(Ok(())) => None,
+                            Ok(Err(error)) => Some(error),
+                            Err(_) => Some(stale_connection_error()),
+                        }
+                    }
+                    KeepaliveTick::Stale => Some(stale_connection_error()),
+                };
+                if let Some(error) = failure {
+                    fail_process_waiters(&mut process_waiters);
+                    if !recover_supervisor_connection(
+                        supervisor_cx,
+                        &mut connection,
+                        &mut streak,
+                        &mut keepalive,
+                        error,
+                    )
+                    .await
+                    {
+                        break;
+                    }
                 }
             }
             Ok(Either::Right(Ok(command))) => {
@@ -3776,6 +4019,7 @@ async fn run_nats_supervisor(
                         supervisor_cx,
                         &mut connection,
                         &mut streak,
+                        &mut keepalive,
                         error,
                     )
                     .await
@@ -3783,7 +4027,14 @@ async fn run_nats_supervisor(
                         break;
                     }
                 }
-                if !handle_supervisor_command(&mut connection, command, &mut process_waiters).await
+                let ping_bound = keepalive.as_ref().map(KeepaliveClock::stale_window);
+                if !handle_supervisor_command(
+                    &mut connection,
+                    command,
+                    &mut process_waiters,
+                    ping_bound,
+                )
+                .await
                 {
                     break;
                 }
@@ -3797,6 +4048,7 @@ async fn run_nats_supervisor(
                         supervisor_cx,
                         &mut connection,
                         &mut streak,
+                        &mut keepalive,
                         NatsError::NotConnected,
                     )
                     .await
@@ -3859,6 +4111,7 @@ async fn recover_supervisor_connection(
     cx: &Cx,
     connection: &mut NatsConnection,
     streak: &mut ReconnectStreak,
+    keepalive: &mut Option<KeepaliveClock>,
     error: NatsError,
 ) -> bool {
     cx.trace(&format!(
@@ -3873,7 +4126,19 @@ async fn recover_supervisor_connection(
         .state
         .connected
         .store(reconnected, Ordering::Release);
+    if reconnected && let Some(clock) = keepalive.as_mut() {
+        clock.restart(cx);
+    }
     reconnected
+}
+
+/// Why the supervisor replaces a connection that stopped answering its
+/// keepalive (nats.go's `ErrStaleConnection`).
+fn stale_connection_error() -> NatsError {
+    NatsError::Io(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "nats: stale connection: keepalive PINGs went unanswered",
+    ))
 }
 
 /// A parked supervised `process()` call: the epoch it saw, and its reply.
@@ -3905,6 +4170,7 @@ async fn handle_supervisor_command(
     connection: &mut NatsConnection,
     command: NatsSupervisorCommand,
     process_waiters: &mut Vec<ProcessWaiter>,
+    ping_bound: Option<Duration>,
 ) -> bool {
     if command.caller_gave_up() {
         return true;
@@ -3996,7 +4262,20 @@ async fn handle_supervisor_command(
             let _ = reply.send_blocking(connection.unsubscribe(&cx, sid).await);
         }
         NatsSupervisorCommand::Ping { cx, reply } => {
-            let _ = reply.send_blocking(connection.ping(&cx).await);
+            // With a keepalive, a PONG that has not come within its stale
+            // window never will: the PING leaves the connection unusable and
+            // the supervisor replaces it, rather than waiting (and keeping
+            // the keepalive from ticking) until TCP gives up.
+            let result = match ping_bound {
+                Some(bound) => {
+                    let ping = connection.ping(&cx);
+                    crate::time::timeout(timeout_now(&cx), bound, ping)
+                        .await
+                        .unwrap_or_else(|_| Err(stale_connection_error()))
+                }
+                None => connection.ping(&cx).await,
+            };
+            let _ = reply.send_blocking(result);
         }
         NatsSupervisorCommand::Process { after_epoch, reply } => {
             // The supervisor's own frame loop answers it. Reading the socket
@@ -6310,6 +6589,69 @@ mod tests {
             line.is_none(),
             "disconnected ping must not emit wire bytes, got {line:?}"
         );
+    }
+
+    /// br-asupersync-messaging-client-audit-k6pxks item 8: the `PONG` that
+    /// answers an earlier keepalive `PING` is not `ping()`'s own. `ping()`
+    /// returns on the second one, after the message the server sent between
+    /// them, so the publish-then-ping flush still covers what came before it.
+    #[test]
+    fn ping_waits_past_the_pong_of_an_earlier_keepalive_ping_k6pxks() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            let mut reader = BufReader::new(stream);
+            let lines: Vec<String> = (0..3)
+                .map(|_| read_protocol_line(&mut reader).trim_end().to_string())
+                .collect();
+            reader
+                .get_mut()
+                .write_all(b"PONG\r\nMSG svc.flush 1 5\r\nafter\r\nPONG\r\n")
+                .expect("write both PONGs");
+            reader.get_mut().flush().expect("flush both PONGs");
+            let _ = read_optional_protocol_line(&mut reader);
+            lines
+        });
+
+        run_test_with_cx(|cx| async move {
+            let stream = TcpStream::connect(format!("{addr}"))
+                .await
+                .expect("connect client");
+            let mut client = NatsConnection {
+                config: NatsConfig::default(),
+                stream: stream.into(),
+                read_buf: NatsReadBuffer::new(),
+                state: Arc::new(SharedState::new()),
+                next_sid: AtomicU64::new(1),
+                connected: true,
+                tls_required_on_connect: false,
+            };
+
+            let mut flushed = client.subscribe(&cx, "svc.flush").await.expect("subscribe");
+            client
+                .send_keepalive_ping(&cx)
+                .await
+                .expect("keepalive PING");
+            client.ping(&cx).await.expect("ping");
+            assert_eq!(
+                client.state.pongs.load(Ordering::Acquire),
+                2,
+                "ping returned on the keepalive's PONG"
+            );
+            assert_eq!(client.unanswered_pings(), 0);
+            let message = flushed
+                .try_next()
+                .expect("the message between the two PONGs is dispatched first");
+            assert_eq!(message.payload, b"after");
+            assert!(client.connected);
+        });
+
+        let lines = server.join().expect("server join");
+        assert_eq!(lines, ["SUB svc.flush 1", "PING", "PING"]);
     }
 
     #[test]
