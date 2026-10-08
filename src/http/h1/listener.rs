@@ -9,6 +9,8 @@ use crate::http::h1::server::{
 };
 use crate::http::h1::stream::{Http1ProducedResponse, StreamingServerRequest};
 use crate::http::h1::types::{Request, Response};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::http::handoff::{HandoffQueue, HandoffStream};
 #[cfg(feature = "tls")]
 use crate::io::AsyncWriteExt;
 use crate::net::tcp::listener::TcpListener;
@@ -734,6 +736,21 @@ impl<F> Http1Listener<F> {
         handler: F,
         config: Http1ListenerConfig,
     ) -> Self {
+        Self::from_source(H1AcceptSource::Unix(listener), handler, config)
+    }
+
+    /// A listener that serves the connections `HttpAutoListener` hands over.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn from_handoff(
+        queue: Arc<HandoffQueue>,
+        handler: F,
+        config: Http1ListenerConfig,
+    ) -> Self {
+        Self::from_source(H1AcceptSource::Handoff(queue), handler, config)
+    }
+
+    #[cfg(any(unix, not(target_arch = "wasm32")))]
+    fn from_source(listener: H1AcceptSource, handler: F, config: Http1ListenerConfig) -> Self {
         let shutdown_signal = shutdown_signal_for_time_getter(config.time_getter);
         let connection_manager = ConnectionManager::with_time_getter(
             config.max_connections,
@@ -742,7 +759,7 @@ impl<F> Http1Listener<F> {
         );
         let stats = Arc::new(Http1ListenerStats::new(config.time_getter));
         Self {
-            listener: H1AcceptSource::Unix(listener),
+            listener,
             handler: Arc::new(handler),
             config,
             shutdown_signal,
@@ -1160,6 +1177,9 @@ enum H1Stream {
     Tcp(TcpStream),
     #[cfg(unix)]
     Unix(UnixStream),
+    /// A connection handed over by `HttpAutoListener`, with its peer.
+    #[cfg(not(target_arch = "wasm32"))]
+    Handoff(HandoffStream, Option<SocketAddr>),
 }
 
 impl H1Stream {
@@ -1168,6 +1188,8 @@ impl H1Stream {
             Self::Tcp(stream) => stream.peer_addr().ok(),
             #[cfg(unix)]
             Self::Unix(_) => None,
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Handoff(_, peer) => *peer,
         }
     }
 }
@@ -1182,6 +1204,8 @@ impl crate::io::AsyncRead for H1Stream {
             Self::Tcp(stream) => Pin::new(stream).poll_read(cx, buf),
             #[cfg(unix)]
             Self::Unix(stream) => Pin::new(stream).poll_read(cx, buf),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Handoff(stream, _) => Pin::new(stream).poll_read(cx, buf),
         }
     }
 }
@@ -1196,6 +1220,8 @@ impl crate::io::AsyncWrite for H1Stream {
             Self::Tcp(stream) => Pin::new(stream).poll_write(cx, buf),
             #[cfg(unix)]
             Self::Unix(stream) => Pin::new(stream).poll_write(cx, buf),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Handoff(stream, _) => Pin::new(stream).poll_write(cx, buf),
         }
     }
 
@@ -1208,6 +1234,8 @@ impl crate::io::AsyncWrite for H1Stream {
             Self::Tcp(stream) => Pin::new(stream).poll_write_vectored(cx, bufs),
             #[cfg(unix)]
             Self::Unix(stream) => Pin::new(stream).poll_write_vectored(cx, bufs),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Handoff(stream, _) => Pin::new(stream).poll_write_vectored(cx, bufs),
         }
     }
 
@@ -1216,6 +1244,8 @@ impl crate::io::AsyncWrite for H1Stream {
             Self::Tcp(stream) => stream.is_write_vectored(),
             #[cfg(unix)]
             Self::Unix(stream) => stream.is_write_vectored(),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Handoff(stream, _) => stream.is_write_vectored(),
         }
     }
 
@@ -1224,6 +1254,8 @@ impl crate::io::AsyncWrite for H1Stream {
             Self::Tcp(stream) => Pin::new(stream).poll_flush(cx),
             #[cfg(unix)]
             Self::Unix(stream) => Pin::new(stream).poll_flush(cx),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Handoff(stream, _) => Pin::new(stream).poll_flush(cx),
         }
     }
 
@@ -1235,6 +1267,8 @@ impl crate::io::AsyncWrite for H1Stream {
             Self::Tcp(stream) => Pin::new(stream).poll_shutdown(cx),
             #[cfg(unix)]
             Self::Unix(stream) => Pin::new(stream).poll_shutdown(cx),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Handoff(stream, _) => Pin::new(stream).poll_shutdown(cx),
         }
     }
 }
@@ -1244,6 +1278,9 @@ enum H1AcceptSource {
     Tcp(TcpListener),
     #[cfg(unix)]
     Unix(UnixListener),
+    /// Connections `HttpAutoListener` hands over.
+    #[cfg(not(target_arch = "wasm32"))]
+    Handoff(Arc<HandoffQueue>),
 }
 
 /// Stands in for a Unix-domain peer in the connection manager, which keys its
@@ -1265,6 +1302,11 @@ impl H1AcceptSource {
                 .accept()
                 .await
                 .map(|(stream, _)| (H1Stream::Unix(stream), None)),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Handoff(queue) => queue
+                .accept()
+                .await
+                .map(|(stream, peer)| (H1Stream::Handoff(stream, peer), peer)),
         }
     }
 
@@ -1275,6 +1317,11 @@ impl H1AcceptSource {
             Self::Unix(_) => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "a Unix-domain HTTP/1 listener has no socket address",
+            )),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Handoff(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a handed-off HTTP/1 listener has no socket of its own",
             )),
         }
     }
@@ -1314,8 +1361,19 @@ where
             runtime,
         ),
         #[cfg(unix)]
-        H1Stream::Unix(stream) => runtime.try_spawn(serve_unix_connection(
+        H1Stream::Unix(stream) => runtime.try_spawn(serve_without_upgrades(
             stream,
+            None,
+            guard,
+            handler,
+            config,
+            shutdown_signal,
+            in_flight_requests,
+        )),
+        #[cfg(not(target_arch = "wasm32"))]
+        H1Stream::Handoff(stream, peer) => runtime.try_spawn(serve_without_upgrades(
+            stream,
+            peer,
             guard,
             handler,
             config,
@@ -1352,8 +1410,22 @@ async fn serve_stream_connection<F, Fut, R>(
         }
         #[cfg(unix)]
         H1Stream::Unix(stream) => {
-            serve_unix_connection(
+            serve_without_upgrades(
                 stream,
+                None,
+                guard,
+                handler,
+                config,
+                shutdown_signal,
+                in_flight_requests,
+            )
+            .await;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        H1Stream::Handoff(stream, peer) => {
+            serve_without_upgrades(
+                stream,
+                peer,
                 guard,
                 handler,
                 config,
@@ -1365,17 +1437,20 @@ async fn serve_stream_connection<F, Fut, R>(
     }
 }
 
-/// One HTTP/1.1 connection on a Unix-domain socket. It is served without
-/// protocol upgrades, which hand the handler a TCP stream.
-#[cfg(unix)]
-async fn serve_unix_connection<F, Fut, R>(
-    stream: UnixStream,
+/// One HTTP/1.1 connection on a transport other than the listener's own TCP
+/// socket (a Unix-domain socket or a handed-off connection). It is served
+/// without protocol upgrades, which hand the handler a TCP stream.
+#[cfg(any(unix, not(target_arch = "wasm32")))]
+async fn serve_without_upgrades<S, F, Fut, R>(
+    stream: S,
+    peer_addr: Option<SocketAddr>,
     guard: ConnectionGuard,
     handler: Arc<F>,
     config: Http1Config,
     shutdown_signal: ShutdownSignal,
     in_flight_requests: Arc<AtomicUsize>,
 ) where
+    S: crate::io::AsyncRead + crate::io::AsyncWrite + Unpin + Send,
     F: Fn(Request) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = R> + Send + 'static,
     R: IntoHttp1Response + Send + 'static,
@@ -1384,7 +1459,7 @@ async fn serve_unix_connection<F, Fut, R>(
     let server = Http1Server::with_config_upgradeable(move |req| handler(req), config)
         .with_shutdown_signal(shutdown_signal)
         .with_in_flight_requests(in_flight_requests);
-    let _ = server.serve_with_peer_addr(stream, None).await;
+    let _ = server.serve_with_peer_addr(stream, peer_addr).await;
 }
 
 /// Spawn a connection handler as a runtime task.

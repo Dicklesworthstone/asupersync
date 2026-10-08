@@ -18,11 +18,15 @@
 //! The [`pool`] module provides connection pool management for HTTP clients,
 //! enabling connection reuse for improved performance.
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod auto;
 pub mod body;
 pub mod compress;
 mod decode;
 pub mod h1;
 pub mod h2;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod handoff;
 
 // Conformance tests for H1 vs H2 header decoder equivalence
 #[cfg(test)]
@@ -63,6 +67,8 @@ pub mod pool;
 /// no-ambient-global entry point to the runtime's default client.
 pub mod client;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub use auto::{HttpAutoListener, HttpAutoListenerConfig, HttpAutoShutdownStats};
 pub use body::{Body, Empty, Frame, Full, HeaderMap, HeaderName, HeaderValue, SizeHint};
 pub use h1::{
     ClientError, ClientRequestBuilder, HttpClient, HttpClientBuilder, HttpClientConfig, Method,

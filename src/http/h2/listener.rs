@@ -31,6 +31,8 @@ use crate::http::h2::frame::{Frame, PingFrame};
 use crate::http::h2::hpack::Header;
 use crate::http::h2::settings::Settings;
 use crate::http::h2::stream::StreamState;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::http::handoff::{HandoffQueue, HandoffStream};
 use crate::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, ReadBuf};
 use crate::net::tcp::listener::TcpListener;
 use crate::net::tcp::stream::TcpStream;
@@ -229,6 +231,9 @@ enum H2Transport {
     Plain(H2Socket),
     #[cfg(unix)]
     Unix(H2Socket<UnixStream>),
+    /// A connection handed over by `HttpAutoListener`, which has done any TLS.
+    #[cfg(not(target_arch = "wasm32"))]
+    Handoff(H2Socket<HandoffStream>),
     #[cfg(feature = "tls")]
     Tls(Box<TlsStream<H2Socket>>),
 }
@@ -239,6 +244,8 @@ impl H2Transport {
             Self::Plain(socket) => socket.bytes_written,
             #[cfg(unix)]
             Self::Unix(socket) => socket.bytes_written,
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Handoff(socket) => socket.bytes_written,
             #[cfg(feature = "tls")]
             Self::Tls(stream) => stream.get_ref().bytes_written,
         }
@@ -255,6 +262,8 @@ impl AsyncRead for H2Transport {
             Self::Plain(stream) => Pin::new(stream).poll_read(cx, buf),
             #[cfg(unix)]
             Self::Unix(stream) => Pin::new(stream).poll_read(cx, buf),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Handoff(stream) => Pin::new(stream).poll_read(cx, buf),
             #[cfg(feature = "tls")]
             Self::Tls(stream) => Pin::new(stream.as_mut()).poll_read(cx, buf),
         }
@@ -271,6 +280,8 @@ impl AsyncWrite for H2Transport {
             Self::Plain(stream) => Pin::new(stream).poll_write(cx, buf),
             #[cfg(unix)]
             Self::Unix(stream) => Pin::new(stream).poll_write(cx, buf),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Handoff(stream) => Pin::new(stream).poll_write(cx, buf),
             #[cfg(feature = "tls")]
             Self::Tls(stream) => Pin::new(stream.as_mut()).poll_write(cx, buf),
         }
@@ -285,6 +296,8 @@ impl AsyncWrite for H2Transport {
             Self::Plain(stream) => Pin::new(stream).poll_write_vectored(cx, bufs),
             #[cfg(unix)]
             Self::Unix(stream) => Pin::new(stream).poll_write_vectored(cx, bufs),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Handoff(stream) => Pin::new(stream).poll_write_vectored(cx, bufs),
             #[cfg(feature = "tls")]
             Self::Tls(stream) => Pin::new(stream.as_mut()).poll_write_vectored(cx, bufs),
         }
@@ -295,6 +308,8 @@ impl AsyncWrite for H2Transport {
             Self::Plain(stream) => stream.is_write_vectored(),
             #[cfg(unix)]
             Self::Unix(stream) => stream.is_write_vectored(),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Handoff(stream) => stream.is_write_vectored(),
             #[cfg(feature = "tls")]
             Self::Tls(stream) => stream.is_write_vectored(),
         }
@@ -305,6 +320,8 @@ impl AsyncWrite for H2Transport {
             Self::Plain(stream) => Pin::new(stream).poll_flush(cx),
             #[cfg(unix)]
             Self::Unix(stream) => Pin::new(stream).poll_flush(cx),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Handoff(stream) => Pin::new(stream).poll_flush(cx),
             #[cfg(feature = "tls")]
             Self::Tls(stream) => Pin::new(stream.as_mut()).poll_flush(cx),
         }
@@ -315,6 +332,8 @@ impl AsyncWrite for H2Transport {
             Self::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
             #[cfg(unix)]
             Self::Unix(stream) => Pin::new(stream).poll_shutdown(cx),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Handoff(stream) => Pin::new(stream).poll_shutdown(cx),
             #[cfg(feature = "tls")]
             Self::Tls(stream) => Pin::new(stream.as_mut()).poll_shutdown(cx),
         }
@@ -326,6 +345,8 @@ enum H2Accepted {
     Tcp(TcpStream),
     #[cfg(unix)]
     Unix(UnixStream),
+    #[cfg(not(target_arch = "wasm32"))]
+    Handoff(HandoffStream),
 }
 
 /// The socket a listener accepts connections on.
@@ -333,6 +354,9 @@ enum H2AcceptSource {
     Tcp(TcpListener),
     #[cfg(unix)]
     Unix(UnixListener),
+    /// Connections `HttpAutoListener` hands over.
+    #[cfg(not(target_arch = "wasm32"))]
+    Handoff(Arc<HandoffQueue>),
 }
 
 /// Stands in for a Unix-domain peer in the connection manager, which keys its
@@ -355,6 +379,11 @@ impl H2AcceptSource {
                 .accept()
                 .await
                 .map(|(stream, _)| (H2Accepted::Unix(stream), None)),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Handoff(queue) => queue
+                .accept()
+                .await
+                .map(|(stream, peer)| (H2Accepted::Handoff(stream), peer)),
         }
     }
 
@@ -366,16 +395,19 @@ impl H2AcceptSource {
                 io::ErrorKind::InvalidInput,
                 "a Unix-domain HTTP/2 listener has no socket address",
             )),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Handoff(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a handed-off HTTP/2 listener has no socket of its own",
+            )),
         }
     }
 
+    /// Whether the listener accepts raw TCP connections, the only ones its
+    /// own TLS acceptor wraps.
     #[cfg_attr(not(feature = "tls"), allow(dead_code))]
-    const fn is_unix(&self) -> bool {
-        match self {
-            Self::Tcp(_) => false,
-            #[cfg(unix)]
-            Self::Unix(_) => true,
-        }
+    const fn is_tcp(&self) -> bool {
+        matches!(self, Self::Tcp(_))
     }
 }
 
@@ -3441,6 +3473,11 @@ where
             stream,
             bytes_written: 0,
         }),
+        #[cfg(not(target_arch = "wasm32"))]
+        H2Accepted::Handoff(stream) => H2Transport::Handoff(H2Socket {
+            stream,
+            bytes_written: 0,
+        }),
     };
     let mut request_owners = H2RequestOwners::new(&task_cx).await?;
     #[cfg(feature = "http2-streaming")]
@@ -5234,6 +5271,16 @@ impl<F> Http2Listener<F> {
         listener
     }
 
+    /// A listener that serves the connections `HttpAutoListener` hands over.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn from_handoff(
+        queue: Arc<HandoffQueue>,
+        handler: F,
+        config: Http2ListenerConfig,
+    ) -> Self {
+        Self::from_parts(H2AcceptSource::Handoff(queue), handler, config)
+    }
+
     fn from_parts(listener: H2AcceptSource, handler: F, config: Http2ListenerConfig) -> Self {
         let shutdown_signal = h2_shutdown_signal_for_time_getter(config.time_getter);
         let connection_manager = ConnectionManager::with_time_getter(
@@ -5450,7 +5497,7 @@ impl<F> Http2Listener<F> {
         // TLS is applied to TCP connections only; refuse rather than serve a
         // Unix-domain socket in cleartext that was configured for TLS.
         #[cfg(feature = "tls")]
-        if self.tls_acceptor.is_some() && self.listener.is_unix() {
+        if self.tls_acceptor.is_some() && !self.listener.is_tcp() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "Http2Listener::with_tls is not supported on a Unix-domain listener",
