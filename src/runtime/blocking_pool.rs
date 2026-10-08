@@ -786,16 +786,16 @@ impl BlockingPool {
 
         let deadline = timeout_deadline(timeout, self.inner.time_getter);
 
-        // Wait until no worker is active AND no retiring worker has a
-        // replacement hand-off in flight. Every retiring worker announces a
-        // possible hand-off in `replacement_pending` *before* it decrements
-        // `active_threads`, and clears it only after deciding whether to spawn a
-        // replacement, so gating on both counters closes the race where a
-        // replacement worker is spawned just after we would otherwise have
-        // declared a clean shutdown — which would leak the replacement's
-        // never-joined handle (d679m7).
+        // Wait until no worker is active, no retiring worker has a replacement
+        // hand-off in flight (announced in `replacement_pending` before it
+        // decrements `active_threads`, cleared after its spawn decision;
+        // d679m7), and no accepted job is still queued: a submitter preempted
+        // between its enqueue and its `maybe_spawn` starts a worker later, and
+        // returning first would leak that worker's never-joined handle and run
+        // the job after teardown (mopkmt).
         while self.inner.active_threads.load(Ordering::Acquire) > 0
             || self.inner.replacement_pending.load(Ordering::Acquire) > 0
+            || blocking_pool_has_pending_work(&self.inner)
         {
             let remaining = timeout_remaining(deadline, self.inner.time_getter);
             if remaining.is_zero() {
@@ -1392,19 +1392,19 @@ fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
                     // replacement is spawned, declare a clean shutdown, and leak
                     // the replacement's never-joined handle (d679m7).
                     //
-                    // The pending check MUST stay *after* the decrement: that is
-                    // what makes the accepted-work hand-off race-free. If it ran
-                    // before the decrement, a task enqueued in between could be
-                    // missed by this worker while a concurrent enqueuer's
-                    // `maybe_spawn` still sees `active_threads == 1` (this worker
-                    // not yet retired) and declines to spawn — stranding the
-                    // task. Checking after the decrement guarantees that either
-                    // this worker observes the pending work, or any enqueuer
-                    // sees the decremented count and spawns the worker itself.
+                    // The pending check MUST stay *after* the decrement, with a
+                    // SeqCst fence between them that pairs with the one in
+                    // `maybe_spawn_thread_on_inner` (store, fence, load on both
+                    // sides): then either this worker observes work enqueued
+                    // meanwhile, or that enqueuer sees the decremented count and
+                    // spawns a worker itself. Checked before the decrement, or
+                    // without the fence on a weak memory model, a task enqueued
+                    // in between could be stranded with no worker (mopkmt).
                     self.inner
                         .replacement_pending
                         .fetch_add(1, Ordering::Release);
                     self.inner.active_threads.fetch_sub(1, Ordering::Release);
+                    std::sync::atomic::fence(Ordering::SeqCst);
                     if blocking_pool_has_pending_work(self.inner) {
                         maybe_spawn_thread_on_inner(self.inner);
                         let _guard = self.inner.mutex.lock();
@@ -2152,6 +2152,48 @@ mod tests {
         assert!(
             pool.inner.thread_handles.lock().is_empty(),
             "no replacement handle should be left un-joined",
+        );
+    }
+
+    #[test]
+    fn shutdown_and_wait_waits_for_a_queued_job_whose_worker_is_not_spawned_yet() {
+        // A submitter enqueues its job and is preempted before its
+        // `maybe_spawn`. With no worker active, shutdown_and_wait used to
+        // report a clean shutdown at once; the submitter then started a worker
+        // nobody joins, which ran the job after teardown (mopkmt M1).
+        let pool = Arc::new(BlockingPool::new(0, 1));
+        let ran = Arc::new(AtomicUsize::new(0));
+        let (task, _cancelled, _completion) = tracked_test_blocking_task(None, Arc::clone(&ran));
+        assert!(try_enqueue_task(&pool.inner, task));
+        assert_eq!(pool.active_threads(), 0);
+
+        let done = Arc::new(AtomicBool::new(false));
+        let pool_w = Arc::clone(&pool);
+        let done_w = Arc::clone(&done);
+        let waiter = thread::spawn(move || {
+            let ok = pool_w.shutdown_and_wait(Duration::from_secs(5));
+            done_w.store(true, Ordering::Release);
+            ok
+        });
+
+        thread::sleep(Duration::from_millis(60));
+        assert!(
+            !done.load(Ordering::Acquire),
+            "shutdown_and_wait must wait while an accepted job is still queued",
+        );
+
+        // The preempted submitter resumes and starts its worker.
+        maybe_spawn_thread_on_inner(&pool.inner);
+        let ok = waiter.join().expect("waiter thread joins");
+        assert!(ok, "clean shutdown once the queued job ran");
+        assert_eq!(
+            ran.load(Ordering::Relaxed),
+            1,
+            "the job ran before shutdown returned"
+        );
+        assert!(
+            pool.inner.thread_handles.lock().is_empty(),
+            "the job's worker was joined",
         );
     }
 
