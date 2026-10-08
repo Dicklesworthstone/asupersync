@@ -6931,6 +6931,7 @@ impl ThreeLaneWorker {
             // A just-dispatched Waker requested more cancellation. Yield this
             // selection turn so no ordinary ready task is polled ahead of the
             // runtime-owned command/deferred publication on the next turn.
+            self.spill_lifo_slot();
             return None;
         }
 
@@ -7048,6 +7049,7 @@ impl ThreeLaneWorker {
             self.preemption_metrics.browser_ready_handoff_yields += 1;
             self.cancel_streak = 0;
             self.ready_dispatch_streak = 0;
+            self.spill_lifo_slot();
             return None;
         }
 
@@ -7175,6 +7177,19 @@ impl ThreeLaneWorker {
         self.lifo_streak += 1;
         self.record_ready_dispatch();
         Some(self.dispatch_with_adaptive_epoch(task))
+    }
+
+    /// Moves the task in this worker's LIFO slot to the global ready lane and
+    /// wakes a worker for it, as the dispatch loop does when it stops.
+    /// `next_task` calls it before an early `None`: neither the park checks
+    /// nor the idle I/O turn can see the thread-local slot, so the task would
+    /// wait for some unrelated wake (GH #77, br-asupersync-0khxcu).
+    fn spill_lifo_slot(&mut self) {
+        if let Some((task, priority)) = take_lifo_task(&self.coordinator) {
+            self.lifo_streak = 0;
+            self.global.inject_ready(task, priority);
+            self.coordinator.wake_one();
+        }
     }
 
     fn try_phase3_ready_work(&mut self) -> Option<TaskId> {
