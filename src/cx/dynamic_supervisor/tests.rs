@@ -282,5 +282,86 @@ fn next_completed_reports_a_quarantined_child_once_then_moves_on() {
     assert!(still_quarantined, "the quarantined child stays reserved until shutdown");
 }
 
+/// wait_child reports a quarantined child's failure, and next_completed does
+/// not report it a second time (br-asupersync-25txip L1). Before, only
+/// next_completed marked a failure as reported.
+#[test]
+fn a_quarantined_child_reported_by_wait_child_is_not_reported_again() {
+    let mut lab = LabRuntime::new(LabConfig::new(0xd1_0003).max_steps(16384));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let opened = Arc::new(parking_lot::Mutex::new(None));
+    let opened_slot = Arc::clone(&opened);
+    let observed = Arc::new(parking_lot::Mutex::new(None));
+    let observed_slot = Arc::clone(&observed);
+    let (release, mut released) = crate::channel::oneshot::channel::<()>();
+    let (task, mut join) = lab
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            let cx = Cx::current().expect("registered dynamic owner");
+            let mut owner = cx
+                .open_dynamic_supervisor(DynamicSupervisorConfig::new(2))
+                .await
+                .unwrap();
+            let started = Arc::new(AtomicUsize::new(0));
+            let stopped = Arc::new(AtomicUsize::new(0));
+            let unclean = owner.start_child("a-unclean", done()).await.unwrap();
+            let live = owner
+                .start_child("b-live", parked(Arc::clone(&started), Arc::clone(&stopped)))
+                .await
+                .unwrap();
+            wait_count(&started, 1).await;
+            // The test registers a failing finalizer on the first child's boundary.
+            *opened_slot.lock() = Some(unclean.region_id());
+            released.recv(&cx).await.unwrap();
+            let first = owner.wait_child(&unclean).await;
+            let live_reaped = owner.terminate_child(&live).await.is_ok();
+            let second = owner.next_completed().await;
+            *observed_slot.lock() = Some((
+                matches!(
+                    first,
+                    Err(DynamicSupervisorError::UncleanChild | DynamicSupervisorError::Region(_))
+                ),
+                live_reaped,
+                matches!(second, Ok(None)),
+            ));
+            drop(owner.shutdown().await);
+        })
+        .unwrap();
+    lab.scheduler.lock().schedule(task, 0);
+    for _ in 0..4096 {
+        if opened.lock().is_some() {
+            break;
+        }
+        lab.step_for_test();
+    }
+    let region = opened
+        .lock()
+        .expect("the first child's boundary region was opened");
+    assert!(
+        lab.state
+            .register_sync_finalizer(region, || panic!("boundary cleanup fails"))
+    );
+    let owner_cx = lab.state.task(task).unwrap().cx.clone().unwrap();
+    release.send(&owner_cx, ()).unwrap();
+    lab.run_until_idle();
+    assert!(
+        join.try_join().unwrap().is_some(),
+        "the owner finished within the step bound"
+    );
+    let (first_unclean, live_reaped, second_none) = observed
+        .lock()
+        .take()
+        .expect("the owner recorded its observations");
+    assert!(
+        first_unclean,
+        "wait_child reports the quarantined child's failure"
+    );
+    assert!(live_reaped, "the live sibling is reaped");
+    assert!(
+        second_none,
+        "next_completed does not report the same failure again"
+    );
+}
+
 #[path = "lifecycle_tests.rs"]
 mod lifecycle;

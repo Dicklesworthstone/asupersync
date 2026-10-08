@@ -695,10 +695,23 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
 
     fn reap(&mut self, id: &DynamicChildId) -> Result<DynamicChildCompletion<E>, DynamicSupervisorError> {
         let child = self.child(id)?;
-        if let Some(Err(error)) = &child.closed {
-            return Err(DynamicSupervisorError::Region(Arc::clone(error)));
+        let failure = if let Some(Err(error)) = &child.closed {
+            Some(DynamicSupervisorError::Region(Arc::clone(error)))
+        } else if child.reusable() {
+            None
+        } else {
+            Some(DynamicSupervisorError::UncleanChild)
+        };
+        if let Some(error) = failure {
+            // Reported here, whichever call reaps it (wait_child,
+            // terminate_child(ren) or next_completed), so next_completed
+            // does not report the quarantined child a second time.
+            self.children
+                .get_mut(id.name.as_str())
+                .expect("validated child")
+                .unclean_reported = true;
+            return Err(error);
         }
-        if !child.reusable() { return Err(DynamicSupervisorError::UncleanChild); }
         Ok(self.children.remove(id.name.as_str()).expect("validated terminal child").into_completion())
     }
 
@@ -787,12 +800,7 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
             if waiting { Poll::Pending } else { Poll::Ready(None) }
         }).await;
         let Some(id) = id else { return Ok(None); };
-        let reaped = self.reap(&id);
-        if reaped.is_err() {
-            self.children.get_mut(id.name.as_str()).expect("quarantined child is retained")
-                .unclean_reported = true;
-        }
-        reaped.map(Some)
+        self.reap(&id).map(Some)
     }
 
     /// Stop every tree, attempt EVERY drain, then close the enclosing root.
