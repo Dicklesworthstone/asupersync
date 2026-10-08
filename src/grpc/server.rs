@@ -577,6 +577,21 @@ fn grpc_content_type_is_allowed(value: &str) -> bool {
     matches_media_type_prefix(value.trim(), "application/grpc")
 }
 
+/// Whether `request` is a gRPC call.
+///
+/// Its `content-type` is `application/grpc` or one of its `+codec` variants,
+/// the test the gRPC transport applies. Use it to route a shared listener's
+/// requests to [`Server::registered_unary_handler`].
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub fn is_grpc_request(request: &HttpRequest) -> bool {
+    request
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+        .is_some_and(|(_, value)| grpc_content_type_is_allowed(value))
+}
+
 fn grpc_te_header_is_allowed(value: &str) -> bool {
     value.trim().eq_ignore_ascii_case("trailers")
 }
@@ -1464,7 +1479,8 @@ impl Server {
     where
         A: std::net::ToSocketAddrs + Send + 'static,
     {
-        let (transport_handler, config) = self.registered_http2_handler(host_policy)?;
+        let transport_handler = self.registered_unary_handler()?;
+        let config = self.http2_listener_config(host_policy);
         Http2Listener::bind_with_config(addr, transport_handler, config)
             .await
             .map(|listener| self.with_http2_keepalive(listener))
@@ -1487,7 +1503,8 @@ impl Server {
         host_policy: HostPolicy,
     ) -> io::Result<Http2Listener<impl Fn(HttpRequest) -> GrpcHttp2Future + Send + Sync + 'static>>
     {
-        let (transport_handler, config) = self.registered_http2_handler(host_policy)?;
+        let transport_handler = self.registered_unary_handler()?;
+        let config = self.http2_listener_config(host_policy);
         Ok(self.with_http2_keepalive(Http2Listener::from_unix_listener(
             listener,
             transport_handler,
@@ -1495,14 +1512,37 @@ impl Server {
         )))
     }
 
+    /// The request handler behind [`Self::bind_registered_http2`], for a
+    /// listener the caller builds, so gRPC can share a port with other routes.
+    ///
+    /// Send requests for which [`is_grpc_request`] holds to it and the rest
+    /// to another handler (a `Router`'s `into_http_handler()`), and serve the
+    /// combination with an `Http2Listener`, or with an `HttpAutoListener` to
+    /// answer HTTP/1.1 on the same port (gRPC clients speak HTTP/2).
+    /// [`Self::http2_listener_config`] gives gRPC's transport limits for the
+    /// HTTP/2 side. Registered unary methods are served; streaming methods
+    /// answer `UNIMPLEMENTED`, as on `bind_registered_http2`.
+    ///
+    /// ```ignore
+    /// let grpc = server.registered_unary_handler()?;
+    /// let rest = router.into_http_handler();
+    /// let app = move |request: HttpRequest| {
+    ///     if is_grpc_request(&request) { grpc(request) } else { rest(request) }
+    /// };
+    /// ```
+    ///
+    /// # Errors
+    /// Refuses a server without services or with invalid transport limits.
     #[cfg(not(target_arch = "wasm32"))]
-    fn registered_http2_handler(
+    pub fn registered_unary_handler(
         self: &Arc<Self>,
-        host_policy: HostPolicy,
-    ) -> io::Result<(
-        impl Fn(HttpRequest) -> GrpcHttp2Future + Send + Sync + 'static,
-        Http2ListenerConfig,
-    )> {
+    ) -> io::Result<
+        impl Fn(HttpRequest) -> Pin<Box<dyn Future<Output = HttpResponse> + Send>>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    > {
         if self.services.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1510,13 +1550,11 @@ impl Server {
             ));
         }
         self.validate_http2_transport_config()?;
-        let config = self.http2_listener_config(host_policy);
         let server = Arc::clone(self);
-        let transport_handler = move |request: HttpRequest| -> GrpcHttp2Future {
+        Ok(move |request: HttpRequest| -> GrpcHttp2Future {
             let server = Arc::clone(&server);
             Box::pin(async move { server.dispatch_http2_registered_unary(request).await })
-        };
-        Ok((transport_handler, config))
+        })
     }
 
     /// Bind and run the registered-service native HTTP/2 listener.

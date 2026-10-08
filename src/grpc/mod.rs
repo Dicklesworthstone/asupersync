@@ -135,12 +135,12 @@ pub use reflection::{
 pub use reflection_descriptor::ReflectionDescriptorSet;
 #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
 pub use reflection_rpc::{ReflectionRpcConfig, ReflectionRpcService, ReflectionRpcV1AlphaService};
-#[cfg(not(target_arch = "wasm32"))]
-pub use server::GrpcTransportRequest;
 pub use server::{
     CallContext, CallContextWithCx, Interceptor, Server, ServerBuilder, ServerConfig,
     format_grpc_timeout, parse_grpc_timeout,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use server::{GrpcTransportRequest, is_grpc_request};
 #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
 pub use server::{RegisteredRequestStream, ServerDuplexConfig};
 pub use service::{
