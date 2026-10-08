@@ -718,6 +718,32 @@ impl Drop for MaskGuard<'_> {
 
 type FullCx = Cx<cap::All>;
 
+/// A context that is built the first time an ambient lookup needs it: a
+/// fiber's own context, derived from its task's only if the fiber reads it
+/// (br-asupersync-98569u). `materialize` returns the same context on every
+/// call once built. It runs under the thread-local stack's borrow, so it
+/// must not install or read the ambient context itself.
+pub(crate) trait LazyCurrentCx: Send + Sync + std::fmt::Debug {
+    fn materialize(&self) -> &FullCx;
+}
+
+/// What a frame installs: a context, or one built on first use.
+#[derive(Debug, Clone)]
+enum FrameCx {
+    Ready(FullCx),
+    Lazy(Arc<dyn LazyCurrentCx>),
+}
+
+impl FrameCx {
+    /// The installed context, built first if it is a lazy one.
+    fn installed(&self) -> &FullCx {
+        match self {
+            Self::Ready(cx) => cx,
+            Self::Lazy(lazy) => lazy.materialize(),
+        }
+    }
+}
+
 /// br-asupersync-5ckssb: a single frame on the thread-local
 /// `CURRENT_CX_STACK`. Each `set_current` push records BOTH the cx
 /// itself AND the runtime [`cap::CapMask`] under which it was
@@ -729,7 +755,7 @@ type FullCx = Cx<cap::All>;
 #[derive(Debug, Clone)]
 struct CurrentCxFrame {
     id: u64,
-    cx: FullCx,
+    cx: FrameCx,
     mask: cap::CapMask,
 }
 
@@ -813,7 +839,7 @@ impl FullCx {
         CURRENT_CX_STACK
             .try_with(|slot| {
                 slot.borrow().last().map(|frame| {
-                    let mut cx = frame.cx.clone();
+                    let mut cx = frame.cx.installed().clone();
                     cx.runtime_mask = frame.mask;
                     cx
                 })
@@ -882,8 +908,10 @@ impl FullCx {
     ///
     /// `with_current` saves all 3 atomic ops in the common case (no
     /// active `set_current_restricted` / `push_restriction` narrowing
-    /// — i.e. `frame.mask == frame.cx.runtime_mask`), borrowing the
-    /// frame's `Cx` directly and handing `&Cx` to the closure. When a
+    /// — i.e. the frame's mask equals its installed context's
+    /// `runtime_mask`), borrowing the frame's `Cx` directly (a fiber's
+    /// own context is built on first use and then borrowed the same
+    /// way) and handing `&Cx` to the closure. When a
     /// restriction stack IS active and the frame's mask differs from
     /// the cx's runtime mask, we must apply the narrowed mask to a
     /// stack-local copy of the cx (1 cheap clone) so cap-gated
@@ -914,19 +942,20 @@ impl FullCx {
             .try_with(|slot| {
                 let stack = slot.borrow();
                 let frame = stack.last()?;
-                if frame.mask == frame.cx.runtime_mask {
+                let installed = frame.cx.installed();
+                if frame.mask == installed.runtime_mask {
                     // Common case: no restriction-stack narrowing. The
                     // borrowed frame.cx already carries the correct
                     // runtime mask, so we hand it to the closure
                     // without any Arc::clone — saves 3 atomic ops
                     // versus `Cx::current()`.
-                    Some(f(&frame.cx))
+                    Some(f(installed))
                 } else {
                     // Restricted: apply the frame's narrowed mask to a
                     // stack-local copy. Equivalent in cost to legacy
                     // `current()` (3 Arc::clone), so the worst case is
                     // a tie, never a regression.
-                    let mut cx = frame.cx.clone();
+                    let mut cx = installed.clone();
                     cx.runtime_mask = frame.mask;
                     Some(f(&cx))
                 }
@@ -967,6 +996,7 @@ impl FullCx {
             Some(cx) => {
                 let id = next_current_cx_frame_id();
                 let mask = cx.runtime_mask;
+                let cx = FrameCx::Ready(cx);
                 stack.borrow_mut().push(CurrentCxFrame { id, cx, mask });
                 Some(id)
             }
@@ -974,6 +1004,27 @@ impl FullCx {
         });
         CurrentCxGuard {
             frame_id,
+            _not_send: std::marker::PhantomData,
+        }
+    }
+
+    /// Installs a context that is built the first time an ambient lookup
+    /// needs it, under `mask`: a fiber's own context, which most fibers
+    /// never read (br-asupersync-98569u).
+    #[inline]
+    #[must_use]
+    pub(crate) fn set_current_lazy(
+        lazy: Arc<dyn LazyCurrentCx>,
+        mask: cap::CapMask,
+    ) -> CurrentCxGuard {
+        let frame_id = CURRENT_CX_STACK.with(|stack| {
+            let id = next_current_cx_frame_id();
+            let cx = FrameCx::Lazy(lazy);
+            stack.borrow_mut().push(CurrentCxFrame { id, cx, mask });
+            id
+        });
+        CurrentCxGuard {
+            frame_id: Some(frame_id),
             _not_send: std::marker::PhantomData,
         }
     }
@@ -1018,6 +1069,7 @@ where
                 crate::types::task_context::MAX_CONTEXT_STACK_DEPTH
             );
             let id = next_current_cx_frame_id();
+            let cx = FrameCx::Ready(cx);
             s.push(CurrentCxFrame { id, cx, mask });
             id
         });
@@ -6987,7 +7039,7 @@ mod tests {
             for _ in 0..crate::types::task_context::MAX_CONTEXT_STACK_DEPTH {
                 s.push(CurrentCxFrame {
                     id: next_current_cx_frame_id(),
-                    cx: cx.clone().retype::<cap::All>(),
+                    cx: FrameCx::Ready(cx.clone().retype::<cap::All>()),
                     mask: cap::CapMask::all(),
                 });
             }
@@ -7010,7 +7062,7 @@ mod tests {
             for _ in 0..crate::types::task_context::MAX_CONTEXT_STACK_DEPTH {
                 s.push(CurrentCxFrame {
                     id: next_current_cx_frame_id(),
-                    cx: cx.clone().retype::<cap::All>(),
+                    cx: FrameCx::Ready(cx.clone().retype::<cap::All>()),
                     mask: cap::CapMask::all(),
                 });
             }

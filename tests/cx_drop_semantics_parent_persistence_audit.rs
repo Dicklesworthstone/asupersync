@@ -378,8 +378,10 @@ fn cx_current_returns_owned_clone_not_borrow() {
     let body_end = source[start..].find("\n    }\n").expect("current close");
     let body = &source[start..start + body_end];
 
+    // The frame installs a context, or one built on first use (a fiber's,
+    // br-asupersync-98569u); `installed()` borrows it either way.
     assert!(
-        body.contains("frame.cx.clone()"),
+        body.contains("frame.cx.installed().clone()"),
         "REGRESSION: Cx::current no longer clones the frame's \
          cx. Without the clone, the returned value would be \
          tied to the frame's lifetime — a frame pop would \
@@ -418,11 +420,26 @@ fn current_cx_frame_owns_full_cx_not_borrows_it() {
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("cx: FullCx,"),
+        body.contains("cx: FrameCx,"),
         "REGRESSION: CurrentCxFrame.cx is no longer an owned \
-         FullCx. A borrowed alternative (cx: &'a FullCx) \
+         FrameCx. A borrowed alternative (cx: &'a FullCx) \
          would require lifetime parameters incompatible with \
          thread-local storage.",
+    );
+
+    // FrameCx owns what it installs: a FullCx, or a shared handle to a
+    // context built on first use (br-asupersync-98569u). No lifetimes.
+    let enum_marker = "enum FrameCx {";
+    let start = source.find(enum_marker).expect("FrameCx enum");
+    let body_end = source[start..].find("\n}\n").expect("FrameCx close");
+    let body = &source[start..start + body_end];
+    assert!(
+        body.contains("Ready(FullCx),")
+            && body.contains("Lazy(Arc<dyn LazyCurrentCx>),")
+            && !body.contains('&'),
+        "REGRESSION: FrameCx no longer owns its context. A \
+         borrowed variant would require lifetime parameters \
+         incompatible with thread-local storage.",
     );
 }
 
