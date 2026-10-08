@@ -525,8 +525,8 @@ impl<S: StreamingSseSource> StreamingSse<S> {
     /// [`StreamingSseSource::poll_next_event`] to return [`Poll::Pending`] while
     /// idle; a source using the default (blocking) `next_event` never reports an
     /// idle moment, so no heartbeat is emitted regardless of this setting.
-    /// `None` (the default) disables idle heartbeats and preserves the prior
-    /// blocking behavior exactly.
+    /// `None` (the default) disables idle heartbeats: the live step then waits
+    /// for the source's next event however long it idles.
     #[must_use]
     pub fn heartbeat_interval(mut self, interval: Option<Duration>) -> Self {
         self.heartbeat_interval = interval;
@@ -688,17 +688,30 @@ impl<S: StreamingSseSource> StreamingSse<S> {
         match prepared {
             // No event within the interval → keep-alive heartbeat.
             Err(_elapsed) => self.send_h1_heartbeat(cx, sender).await,
+            Ok(prepared) => self.send_prepared_h1_chunk(cx, sender, prepared).await,
+        }
+    }
+
+    /// Finish the body at stream completion, or commit the prepared event
+    /// (as [`send_next_h1_chunk`](Self::send_next_h1_chunk) commits it).
+    async fn send_prepared_h1_chunk(
+        &mut self,
+        cx: &Cx,
+        sender: &mut OutgoingBodySender,
+        prepared: Result<bool, StreamingSseError>,
+    ) -> Result<StreamingSseTransportStep, StreamingSseTransportError> {
+        match prepared {
             // Stream complete.
-            Ok(Ok(false)) => {
+            Ok(false) => {
                 sender
                     .finish(cx)
                     .map_err(StreamingSseTransportError::Transport)?;
                 Ok(StreamingSseTransportStep::Complete)
             }
             // Source error.
-            Ok(Err(error)) => Err(StreamingSseTransportError::Stream(error)),
-            // Event prepared → commit it (mirrors send_next_h1_chunk's commit).
-            Ok(Ok(true)) => {
+            Err(error) => Err(StreamingSseTransportError::Stream(error)),
+            // Event prepared → commit it.
+            Ok(true) => {
                 let body_bytes = Bytes::copy_from_slice(
                     &self
                         .pending_event_chunk
@@ -722,9 +735,18 @@ impl<S: StreamingSseSource> StreamingSse<S> {
         }
     }
 
-    /// One live host-loop step: heartbeat-aware when `heartbeat_interval` is
-    /// configured, otherwise byte-for-byte identical to
-    /// [`send_next_h1_chunk`](Self::send_next_h1_chunk) (br-asupersync-sse7kp2).
+    /// One live host-loop step, the one the HTTP/1 server's SSE loop runs.
+    ///
+    /// It pulls the source through its non-blocking
+    /// [`poll_next_event`](StreamingSseSource::poll_next_event), so a live
+    /// source that returns `Pending` while idle stays open without holding a
+    /// worker thread. With `heartbeat_interval` set, an idle interval emits a
+    /// keep-alive heartbeat (see
+    /// [`send_next_h1_chunk_with_heartbeat`](Self::send_next_h1_chunk_with_heartbeat));
+    /// without it, the step waits for the next event. A source that does not
+    /// override `poll_next_event` is pulled through `next_event`, exactly as
+    /// [`send_next_h1_chunk`](Self::send_next_h1_chunk) pulls it
+    /// (br-asupersync-sse7kp2, br-asupersync-a1q12q).
     ///
     /// # Errors
     ///
@@ -739,7 +761,12 @@ impl<S: StreamingSseSource> StreamingSse<S> {
                 self.send_next_h1_chunk_with_heartbeat(cx, sender, interval)
                     .await
             }
-            None => self.send_next_h1_chunk(cx, sender).await,
+            None => {
+                let prepared =
+                    std::future::poll_fn(|task_cx| self.poll_prepare_next_event_chunk(cx, task_cx))
+                        .await;
+                self.send_prepared_h1_chunk(cx, sender, prepared).await
+            }
         }
     }
 
@@ -2403,5 +2430,80 @@ mod tests {
                 "the heartbeat must be a keep-alive comment, got {text:?}"
             );
         });
+    }
+
+    /// A live source that idles until released, then yields one event. Its
+    /// blocking `next_event` must never be called. The test re-polls by hand,
+    /// so the source does not keep the waker.
+    struct ReleasedLaterSource {
+        released: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        sent: bool,
+    }
+    impl StreamingSseSource for ReleasedLaterSource {
+        fn next_event(&mut self, _cx: &Cx) -> Result<Option<SseEvent>, StreamingSseError> {
+            panic!("the live step called the blocking next_event");
+        }
+        fn poll_next_event(
+            &mut self,
+            _cx: &Cx,
+            _task_cx: &mut Context<'_>,
+        ) -> Poll<Result<Option<SseEvent>, StreamingSseError>> {
+            if self.sent {
+                return Poll::Ready(Ok(None));
+            }
+            if !self.released.load(std::sync::atomic::Ordering::Acquire) {
+                return Poll::Pending;
+            }
+            self.sent = true;
+            Poll::Ready(Ok(Some(SseEvent::default().data("live"))))
+        }
+    }
+
+    #[test]
+    fn live_step_without_heartbeat_uses_poll_next_event() {
+        // br-asupersync-a1q12q (round 9 M3): with no heartbeat interval, the
+        // live step the HTTP/1 server runs called the blocking next_event, so a
+        // live source either ended its stream at once or held a worker thread.
+        let cx = Cx::for_testing();
+        let released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut stream = StreamingSse::from_source(ReleasedLaterSource {
+            released: std::sync::Arc::clone(&released),
+            sent: false,
+        });
+        assert!(stream.heartbeat_interval.is_none());
+        let (response, mut sender) = stream.h1_chunked_response(&cx, 2);
+        let mut body = response.body;
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+        {
+            let mut step = std::pin::pin!(stream.send_next_h1_chunk_live(&cx, &mut sender));
+            assert!(
+                step.as_mut().poll(&mut task_cx).is_pending(),
+                "an idle live source keeps the step pending"
+            );
+            released.store(true, std::sync::atomic::Ordering::Release);
+            let sent = loop {
+                match step.as_mut().poll(&mut task_cx) {
+                    Poll::Ready(sent) => break sent,
+                    Poll::Pending => std::thread::yield_now(),
+                }
+            };
+            assert_eq!(
+                sent.expect("event send"),
+                StreamingSseTransportStep::Sent {
+                    bytes: "data:live\n\n".len(),
+                    total_bytes: "data:live\n\n".len(),
+                }
+            );
+        }
+        let frame = poll_body(&mut body)
+            .expect("event frame")
+            .expect("event frame ok");
+        assert_eq!(
+            frame.into_data().expect("data frame").chunk(),
+            b"data:live\n\n"
+        );
+        let complete = block_on(stream.send_next_h1_chunk_live(&cx, &mut sender)).expect("finish");
+        assert_eq!(complete, StreamingSseTransportStep::Complete);
     }
 }
