@@ -262,7 +262,19 @@ fn bad_certificates_and_names_are_rejected_when_stored() {
             .set_default(CertificateChain::new(), key(SERVER_KEY))
             .is_err()
     );
-    for name in ["", "*.", "a.*.test", "."] {
+    // A client never sends the last four as SNI: an IP literal, a U-label,
+    // and malformed names were stored and then never matched
+    // (br-asupersync-7u9x9b).
+    for name in [
+        "",
+        "*.",
+        "a.*.test",
+        ".",
+        "10.0.0.1",
+        "bücher.example",
+        "api example.test",
+        "a..b.example",
+    ] {
         assert!(
             certificates
                 .insert(name, chain(SERVER_CERT), key(SERVER_KEY))
@@ -279,5 +291,91 @@ fn bad_certificates_and_names_are_rejected_when_stored() {
             .build()
             .is_err(),
         "require_full_chain cannot be checked against a table"
+    );
+}
+
+/// Private keys loaded by the counting provider's key provider.
+static KEY_LOADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// ring's key provider, counting the keys it loads.
+#[derive(Debug)]
+struct CountingKeys;
+
+impl rustls::crypto::KeyProvider for CountingKeys {
+    fn load_private_key(
+        &self,
+        key_der: rustls::pki_types::PrivateKeyDer<'static>,
+    ) -> Result<Arc<dyn rustls::sign::SigningKey>, rustls::Error> {
+        KEY_LOADS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        rustls::crypto::ring::default_provider()
+            .key_provider
+            .load_private_key(key_der)
+    }
+}
+
+static COUNTING_KEYS: CountingKeys = CountingKeys;
+
+fn counting_provider() -> Arc<rustls::crypto::CryptoProvider> {
+    Arc::new(rustls::crypto::CryptoProvider {
+        key_provider: &COUNTING_KEYS,
+        ..rustls::crypto::ring::default_provider()
+    })
+}
+
+/// A table loads its keys with its own provider, so its handshakes are signed
+/// by it; it used to load them with the default provider whatever the
+/// acceptor's `crypto_provider` said (br-asupersync-7u9x9b).
+#[test]
+fn a_table_loads_its_keys_with_its_own_provider() {
+    let provider = counting_provider();
+    let table = TlsCertificates::with_crypto_provider(Arc::clone(&provider));
+    let before = KEY_LOADS.load(std::sync::atomic::Ordering::SeqCst);
+    table
+        .set_default(chain(SERVER_CERT), key(SERVER_KEY))
+        .expect("store the default certificate");
+    assert!(
+        KEY_LOADS.load(std::sync::atomic::Ordering::SeqCst) > before,
+        "the table's provider loaded the key"
+    );
+}
+
+/// `build` refuses an acceptor whose provider differs from its table's, and a
+/// table with a provider lends it to an acceptor that names none
+/// (br-asupersync-7u9x9b).
+#[test]
+fn an_acceptor_and_its_table_share_one_provider() {
+    let provider = counting_provider();
+    let table = TlsCertificates::with_crypto_provider(Arc::clone(&provider));
+    table
+        .set_default(chain(SERVER_CERT), key(SERVER_KEY))
+        .expect("store the default certificate");
+    assert!(
+        TlsAcceptorBuilder::from_certificates(table.clone())
+            .crypto_provider(Arc::clone(&provider))
+            .build()
+            .is_ok(),
+        "the same provider builds"
+    );
+    assert!(
+        TlsAcceptorBuilder::from_certificates(table.clone())
+            .build()
+            .is_ok(),
+        "a table with a provider lends it to the acceptor"
+    );
+    assert!(
+        TlsAcceptorBuilder::from_certificates(table)
+            .crypto_provider(counting_provider())
+            .build()
+            .is_err(),
+        "another provider is refused"
+    );
+    let plain = TlsCertificates::with_default(chain(SERVER_CERT), key(SERVER_KEY))
+        .expect("a default-provider table");
+    assert!(
+        TlsAcceptorBuilder::from_certificates(plain)
+            .crypto_provider(provider)
+            .build()
+            .is_err(),
+        "a default-provider table next to an explicit provider is refused"
     );
 }
