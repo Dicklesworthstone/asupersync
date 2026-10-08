@@ -3540,6 +3540,39 @@ impl MySqlConnection {
         self.query_unchecked_internal(cx, sql).await
     }
 
+    /// Execute one SQL statement exactly as given, without the static-SQL
+    /// heuristic, and return the affected rows.
+    ///
+    /// [`Self::execute_static_sql`] and [`Self::query_static_sql`] first run a
+    /// conservative substring heuristic that refuses ordinary statements:
+    /// anything containing ` into `, ` and `, ` or `, a quote, `;` or a
+    /// comment, so `INSERT INTO t VALUES (1)` or a migration statement with a
+    /// string literal cannot run through them. This method skips that
+    /// heuristic (br-asupersync-bi2462.112) and is otherwise the same: one
+    /// `COM_QUERY`, any pending rollback of a dropped transaction first, the
+    /// statement timeout applied, and cancellation checked.
+    ///
+    /// # Security
+    ///
+    /// No parameterization is performed and nothing is screened. Pass only SQL
+    /// your program fully controls (literals, version-controlled migrations);
+    /// bind every value derived from external input through the
+    /// prepared-statement APIs ([`Self::prepare`], [`Self::execute_prepared`]).
+    pub async fn execute_trusted_sql(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, MySqlError> {
+        self.execute_sql_exchange(cx, sql).await
+    }
+
+    /// Run one SQL query exactly as given, without the static-SQL heuristic,
+    /// and return its rows. See [`Self::execute_trusted_sql`] for what the
+    /// heuristic refuses and the caller's obligation.
+    pub async fn query_trusted_sql(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+    ) -> Outcome<Vec<MySqlRow>, MySqlError> {
+        self.query_sql_exchange(cx, sql).await
+    }
+
     /// Begin a transaction - safe wrapper.
     pub async fn begin_transaction(
         &mut self,
@@ -3634,6 +3667,20 @@ impl MySqlConnection {
         // SECURITY: Validate SQL for potential injection patterns
         if let Err(injection_error) = self.validate_sql_security(sql) {
             return Outcome::Err(injection_error);
+        }
+        self.query_sql_exchange(cx, sql).await
+    }
+
+    /// The COM_QUERY exchange behind [`Self::query_static_sql`] (after its
+    /// SQL heuristic) and [`Self::query_trusted_sql`] (which has none).
+    async fn query_sql_exchange(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+    ) -> Outcome<Vec<MySqlRow>, MySqlError> {
+        if self.inner.closed {
+            // Preserve an abandoned exchange's in-flight flag for Drop.
+            return Outcome::Err(MySqlError::ConnectionClosed);
         }
         if let Err(error) = self.forget_prepared_statements_before(cx, sql).await {
             return outcome_from_error(error);
@@ -4559,6 +4606,15 @@ impl MySqlConnection {
         // SECURITY: Validate SQL for potential injection patterns
         if let Err(injection_error) = self.validate_sql_security(sql) {
             return Outcome::Err(injection_error);
+        }
+        self.execute_sql_exchange(cx, sql).await
+    }
+
+    /// The COM_QUERY exchange behind [`Self::execute_static_sql`] (after its
+    /// SQL heuristic) and [`Self::execute_trusted_sql`] (which has none).
+    async fn execute_sql_exchange(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, MySqlError> {
+        if self.inner.closed {
+            return Outcome::Err(MySqlError::ConnectionClosed);
         }
         if let Err(error) = self.forget_prepared_statements_before(cx, sql).await {
             return outcome_from_error(error);
@@ -6959,6 +7015,32 @@ impl MySqlTransaction<'_> {
         sql: &str,
     ) -> Outcome<Vec<MySqlRow>, MySqlError> {
         self.query_unchecked_internal(cx, sql).await
+    }
+
+    /// Execute one statement within this transaction exactly as given,
+    /// without the static-SQL heuristic (see
+    /// [`MySqlConnection::execute_trusted_sql`] for what that heuristic
+    /// refuses and the caller's obligation).
+    pub async fn execute_trusted_sql(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, MySqlError> {
+        if let Err(error) = self.check_open() {
+            return Outcome::Err(error);
+        }
+        let outcome = self.conn.execute_sql_exchange(cx, sql).await;
+        self.note_server_rollback(outcome)
+    }
+
+    /// Run one query within this transaction exactly as given, without the
+    /// static-SQL heuristic (see [`MySqlConnection::execute_trusted_sql`]).
+    pub async fn query_trusted_sql(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+    ) -> Outcome<Vec<MySqlRow>, MySqlError> {
+        if let Err(error) = self.check_open() {
+            return Outcome::Err(error);
+        }
+        let outcome = self.conn.query_sql_exchange(cx, sql).await;
+        self.note_server_rollback(outcome)
     }
 
     /// Prepare a statement within this transaction.

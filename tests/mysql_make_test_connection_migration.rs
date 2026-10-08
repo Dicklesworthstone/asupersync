@@ -152,6 +152,24 @@ fn skip_if_disabled(cfg: &RealMySqlConfig, test_name: &str) -> bool {
     false
 }
 
+/// Connect to the test server. `MYSQL_ALLOW_NATIVE_PASSWORD=true` opts into
+/// the SHA-1 `mysql_native_password` plugin for servers without
+/// `caching_sha2_password` (MariaDB, MySQL 5.7); the client refuses it by
+/// default. Only enable it against a disposable local test server.
+async fn connect_test_server(
+    cx: &asupersync::Cx,
+    url: &str,
+) -> Outcome<MySqlConnection, MySqlError> {
+    let mut options = match MySqlConnectOptions::parse(url) {
+        Ok(options) => options,
+        Err(error) => return Outcome::Err(error),
+    };
+    if std::env::var("MYSQL_ALLOW_NATIVE_PASSWORD").is_ok_and(|value| value == "true") {
+        options.insecure_legacy_mysql_native_password = true;
+    }
+    MySqlConnection::connect_with_options(cx, options).await
+}
+
 fn unwrap_mysql<T>(out: Outcome<T, MySqlError>, log: &MySqlMigrationTestLogger, op: &str) -> T {
     match out {
         Outcome::Ok(v) => v,
@@ -196,11 +214,7 @@ fn real_mysql_transaction_rollback_behavior() {
 
     run_test_with_cx(|cx| async move {
         log.phase("connect");
-        let mut conn = unwrap_mysql(
-            MySqlConnection::connect(&cx, &cfg.url).await,
-            &log,
-            "connect",
-        );
+        let mut conn = unwrap_mysql(connect_test_server(&cx, &cfg.url).await, &log, "connect");
 
         log.phase("begin_transaction");
         let _ = unwrap_mysql(conn.execute_static_sql(&cx, "BEGIN").await, &log, "BEGIN");
@@ -214,7 +228,9 @@ fn real_mysql_transaction_rollback_behavior() {
             "create_temp_table",
         );
         let _ = unwrap_mysql(
-            conn.execute_static_sql(&cx, "INSERT INTO test_rollback VALUES (42)")
+            // execute_static_sql's heuristic refuses " into "; this literal
+            // is trusted.
+            conn.execute_trusted_sql(&cx, "INSERT INTO test_rollback VALUES (42)")
                 .await,
             &log,
             "insert_data",
@@ -284,11 +300,7 @@ fn real_mysql_query_execution_error_handling() {
 
     run_test_with_cx(|cx| async move {
         log.phase("connect");
-        let mut conn = unwrap_mysql(
-            MySqlConnection::connect(&cx, &cfg.url).await,
-            &log,
-            "connect",
-        );
+        let mut conn = unwrap_mysql(connect_test_server(&cx, &cfg.url).await, &log, "connect");
 
         // Test 1: Syntax error should preserve session but return error
         log.phase("test_syntax_error");

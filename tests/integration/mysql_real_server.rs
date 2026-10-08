@@ -173,6 +173,24 @@ fn mysql_real_config_localhost_gate_rejects_prefix_spoofing() {
     assert!(!mysql_url_host_is_local("not-a-mysql-url"));
 }
 
+/// Connect to the test server. `MYSQL_ALLOW_NATIVE_PASSWORD=true` opts into
+/// the SHA-1 `mysql_native_password` plugin for servers without
+/// `caching_sha2_password` (MariaDB, MySQL 5.7); the client refuses it by
+/// default. Only enable it against a disposable local test server.
+async fn connect_test_server(
+    cx: &asupersync::Cx,
+    url: &str,
+) -> Outcome<MySqlConnection, MySqlError> {
+    let mut options = match MySqlConnectOptions::parse(url) {
+        Ok(options) => options,
+        Err(error) => return Outcome::Err(error),
+    };
+    if std::env::var("MYSQL_ALLOW_NATIVE_PASSWORD").is_ok_and(|value| value == "true") {
+        options.insecure_legacy_mysql_native_password = true;
+    }
+    MySqlConnection::connect_with_options(cx, options).await
+}
+
 fn unwrap_mysql<T>(outcome: Outcome<T, MySqlError>, op: &str, log: &MySqlTestLogger) -> T {
     match outcome {
         Outcome::Ok(value) => value,
@@ -214,11 +232,7 @@ fn mysql_real_ping_query_and_prepared_roundtrip() {
 
     run_test_with_cx(|cx| async move {
         log.phase("connect");
-        let mut conn = unwrap_mysql(
-            MySqlConnection::connect(&cx, &cfg.url).await,
-            "connect",
-            &log,
-        );
+        let mut conn = unwrap_mysql(connect_test_server(&cx, &cfg.url).await, "connect", &log);
         log.line(
             "connection",
             &[
@@ -315,11 +329,7 @@ fn mysql_real_transaction_isolation_and_rollback() {
 
     run_test_with_cx(|cx| async move {
         log.phase("connect");
-        let mut conn = unwrap_mysql(
-            MySqlConnection::connect(&cx, &cfg.url).await,
-            "connect",
-            &log,
-        );
+        let mut conn = unwrap_mysql(connect_test_server(&cx, &cfg.url).await, "connect", &log);
 
         log.phase("temp_table");
         unwrap_mysql(
@@ -399,11 +409,7 @@ fn mysql_real_read_only_transaction_rejects_mutation() {
 
     run_test_with_cx(|cx| async move {
         log.phase("connect");
-        let mut conn = unwrap_mysql(
-            MySqlConnection::connect(&cx, &cfg.url).await,
-            "connect",
-            &log,
-        );
+        let mut conn = unwrap_mysql(connect_test_server(&cx, &cfg.url).await, "connect", &log);
 
         let table_name = format!(
             "asupersync_real_tx_ro_{}_{}",
@@ -578,11 +584,7 @@ fn mysql_real_dropped_transaction_drains_rollback_on_next_op() {
 
     run_test_with_cx(|cx| async move {
         log.phase("connect");
-        let mut conn = unwrap_mysql(
-            MySqlConnection::connect(&cx, &cfg.url).await,
-            "connect",
-            &log,
-        );
+        let mut conn = unwrap_mysql(connect_test_server(&cx, &cfg.url).await, "connect", &log);
 
         // TEMPORARY tables are session-local and auto-drop on connection
         // close, so this test leaves no schema state behind even if it
@@ -991,4 +993,82 @@ fn mysql_real_drop_kills_query_observed_in_processlist() {
         runtime.shutdown_drained(Duration::from_secs(2)).outcome,
         RootDrainOutcome::Quiescent
     );
+}
+
+/// `execute_static_sql`'s substring heuristic refuses ordinary statements
+/// (` into `, ` and `, quotes); `execute_trusted_sql` / `query_trusted_sql`
+/// run them as given (br-asupersync-bi2462.112), on a connection and inside a
+/// transaction, without changing what the static-SQL methods accept.
+#[test]
+fn mysql_real_trusted_sql_runs_statements_the_static_heuristic_refuses() {
+    let cfg = RealMySqlConfig::from_env();
+    let test_name = "mysql_real_trusted_sql_runs_statements_the_static_heuristic_refuses";
+    if skip_if_disabled(&cfg, test_name) {
+        return;
+    }
+    let log = MySqlTestLogger::new("mysql_real", test_name);
+
+    run_test_with_cx(|cx| async move {
+        let mut conn = unwrap_mysql(connect_test_server(&cx, &cfg.url).await, "connect", &log);
+        unwrap_mysql(
+            conn.execute_static_sql(
+                &cx,
+                "CREATE TEMPORARY TABLE asupersync_trusted (id INT PRIMARY KEY, name VARCHAR(64))",
+            )
+            .await,
+            "create_temp_table",
+            &log,
+        );
+
+        log.phase("static_heuristic_still_refuses");
+        let insert = "INSERT INTO asupersync_trusted VALUES (1, 'it''s')";
+        assert!(matches!(
+            conn.execute_static_sql(&cx, insert).await,
+            Outcome::Err(MySqlError::InvalidParameter(_))
+        ));
+
+        log.phase("trusted");
+        let affected = unwrap_mysql(conn.execute_trusted_sql(&cx, insert).await, "insert", &log);
+        assert_eq!(affected, 1);
+        let rows = unwrap_mysql(
+            conn.query_trusted_sql(
+                &cx,
+                "SELECT name FROM asupersync_trusted WHERE id = 1 AND name = 'it''s'",
+            )
+            .await,
+            "select",
+            &log,
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get_str("name").expect("name"), "it's");
+
+        log.phase("trusted_in_transaction");
+        let mut tx = unwrap_mysql(conn.begin(&cx).await, "begin", &log);
+        let affected = unwrap_mysql(
+            tx.execute_trusted_sql(
+                &cx,
+                "UPDATE asupersync_trusted SET name = 'x' WHERE id = 1 AND id > 0",
+            )
+            .await,
+            "tx_update",
+            &log,
+        );
+        assert_eq!(affected, 1);
+        let rows = unwrap_mysql(
+            tx.query_trusted_sql(&cx, "SELECT name FROM asupersync_trusted WHERE name = 'x'")
+                .await,
+            "tx_select",
+            &log,
+        );
+        assert_eq!(rows.len(), 1);
+        unwrap_mysql(tx.rollback(&cx).await, "rollback", &log);
+        let rows = unwrap_mysql(
+            conn.query_trusted_sql(&cx, "SELECT name FROM asupersync_trusted WHERE id = 1")
+                .await,
+            "after_rollback",
+            &log,
+        );
+        assert_eq!(rows[0].get_str("name").expect("name"), "it's");
+        log.end("pass");
+    });
 }
