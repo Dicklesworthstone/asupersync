@@ -1425,10 +1425,13 @@ fn pg_real_unix_socket_host_connects_over_the_socket() {
     let by_host = PgConnectOptions::parse(&format!("postgres://u@{encoded}:6543/db"))
         .expect("percent-encoded socket directory");
     assert_eq!((by_host.host.as_str(), by_host.port), (dir.as_str(), 6543));
-    let by_param = PgConnectOptions::parse(&format!("postgres:///db?host={dir}"))
-        .expect("host parameter");
+    let by_param =
+        PgConnectOptions::parse(&format!("postgres:///db?host={dir}")).expect("host parameter");
     assert_eq!(by_param.host, dir);
-    assert!(PgConnectOptions::parse("postgres:///db").is_err(), "still no host");
+    assert!(
+        PgConnectOptions::parse("postgres:///db").is_err(),
+        "still no host"
+    );
 
     run_test_with_cx(|cx| async move {
         let mut options = PgConnectOptions::parse(&cfg.url).expect("parse POSTGRES_URL");
@@ -1451,6 +1454,138 @@ fn pg_real_unix_socket_host_connects_over_the_socket() {
         assert!(rows[0].get_bool("via_socket").expect("via_socket"));
         assert_eq!(rows[0].get_i32("v").expect("v"), 7);
 
+        log.end("pass");
+    });
+}
+
+/// One-dimensional arrays round-trip through a real server: `Vec<T>` binds as
+/// the matching array type (on the unprepared and the prepared path), a batch
+/// lookup takes it through `= ANY($1)`, and array columns decode into
+/// `Vec<T>` from the server's text output, including quoting, NULL elements
+/// and the empty array.
+#[test]
+fn pg_real_arrays_bind_and_decode() {
+    use asupersync::database::postgres::ToSql;
+
+    let cfg = RealPgConfig::from_env();
+    if skip_if_disabled(&cfg, "pg_real_arrays_bind_and_decode") {
+        return;
+    }
+    let log = PgTestLogger::new("postgres_real", "pg_real_arrays_bind_and_decode");
+
+    run_test_with_cx(|cx| async move {
+        let mut conn = unwrap_pg(PgConnection::connect(&cx, &cfg.url).await, &log, "connect");
+
+        log.phase("any_batch_lookup");
+        let wanted = vec![2_i32, 5, 7, 42];
+        let params: &[&dyn ToSql] = &[&wanted];
+        let rows = unwrap_pg(
+            conn.query_params(
+                &cx,
+                "SELECT count(*)::int4 AS n FROM generate_series(1, 10) AS g WHERE g = ANY($1)",
+                params,
+            )
+            .await,
+            &log,
+            "any",
+        );
+        assert_eq!(rows[0].get_i32("n").expect("n"), 3);
+
+        log.phase("round_trip");
+        let ints = vec![1_i64, -2, i64::MAX];
+        let names = vec![
+            Some("plain".to_string()),
+            Some("a b".to_string()),
+            Some("q\"u".to_string()),
+            Some("back\\slash".to_string()),
+            Some(String::new()),
+            None,
+            Some("NULL".to_string()),
+            Some("{x,y}".to_string()),
+        ];
+        let flags = vec![true, false];
+        let floats = vec![1.5_f64, -0.25];
+        let blobs = vec![vec![0_u8, 255], Vec::new()];
+        let empty: Vec<i32> = Vec::new();
+        let params: &[&dyn ToSql] = &[&ints, &names, &flags, &floats, &blobs, &empty];
+        let rows = unwrap_pg(
+            conn.query_params(
+                &cx,
+                "SELECT $1 AS ints, $2 AS names, $3 AS flags, $4 AS floats, $5 AS blobs, \
+                 $6 AS empty, cardinality($6) AS empty_len",
+                params,
+            )
+            .await,
+            &log,
+            "round_trip",
+        );
+        let row = &rows[0];
+        assert_eq!(row.get_typed::<Vec<i64>>("ints").expect("ints"), ints);
+        assert_eq!(
+            row.get_typed::<Vec<Option<String>>>("names")
+                .expect("names"),
+            names
+        );
+        assert_eq!(row.get_typed::<Vec<bool>>("flags").expect("flags"), flags);
+        assert_eq!(row.get_typed::<Vec<f64>>("floats").expect("floats"), floats);
+        assert_eq!(
+            row.get_typed::<Vec<Vec<u8>>>("blobs").expect("blobs"),
+            blobs
+        );
+        assert!(
+            row.get_typed::<Vec<i32>>("empty")
+                .expect("empty")
+                .is_empty()
+        );
+        assert_eq!(row.get_i32("empty_len").expect("empty_len"), 0);
+
+        log.phase("prepared");
+        let stmt = unwrap_pg(
+            conn.prepare(
+                &cx,
+                "SELECT array_length($1::text[], 1) AS n, $1::text[] AS same",
+            )
+            .await,
+            &log,
+            "prepare",
+        );
+        let tags = vec!["red", "green", "blue"];
+        let params: &[&dyn ToSql] = &[&tags];
+        let rows = unwrap_pg(
+            conn.query_prepared(&cx, &stmt, params).await,
+            &log,
+            "query_prepared",
+        );
+        assert_eq!(rows[0].get_i32("n").expect("n"), 3);
+        assert_eq!(
+            rows[0].get_typed::<Vec<String>>("same").expect("same"),
+            tags
+        );
+
+        log.phase("server_literals");
+        let rows = unwrap_pg(
+            conn.query_unchecked(
+                &cx,
+                "SELECT '{1,NULL,3}'::int4[] AS sparse, '[0:1]={5,6}'::int2[] AS shifted, \
+                 ARRAY['2026-10-08'::date] AS dates",
+            )
+            .await,
+            &log,
+            "literals",
+        );
+        let row = &rows[0];
+        assert_eq!(
+            row.get_typed::<Vec<Option<i32>>>("sparse").expect("sparse"),
+            [Some(1), None, Some(3)]
+        );
+        assert_eq!(
+            row.get_typed::<Vec<i16>>("shifted").expect("shifted"),
+            [5, 6]
+        );
+        assert_eq!(
+            row.get_typed::<Vec<String>>("dates").expect("dates"),
+            ["2026-10-08"]
+        );
         log.end("pass");
     });
 }

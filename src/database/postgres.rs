@@ -379,6 +379,76 @@ pub mod oid {
     pub const JSON: u32 = 114;
     /// JSONB (binary JSON).
     pub const JSONB: u32 = 3802;
+    /// Blank-padded character string.
+    pub const BPCHAR: u32 = 1042;
+    /// `bool[]`.
+    pub const BOOL_ARRAY: u32 = 1000;
+    /// `bytea[]`.
+    pub const BYTEA_ARRAY: u32 = 1001;
+    /// `"char"[]`.
+    pub const CHAR_ARRAY: u32 = 1002;
+    /// `int2[]`.
+    pub const INT2_ARRAY: u32 = 1005;
+    /// `int4[]`.
+    pub const INT4_ARRAY: u32 = 1007;
+    /// `text[]`.
+    pub const TEXT_ARRAY: u32 = 1009;
+    /// `bpchar[]`.
+    pub const BPCHAR_ARRAY: u32 = 1014;
+    /// `varchar[]`.
+    pub const VARCHAR_ARRAY: u32 = 1015;
+    /// `int8[]`.
+    pub const INT8_ARRAY: u32 = 1016;
+    /// `float4[]`.
+    pub const FLOAT4_ARRAY: u32 = 1021;
+    /// `float8[]`.
+    pub const FLOAT8_ARRAY: u32 = 1022;
+    /// `oid[]`.
+    pub const OID_ARRAY: u32 = 1028;
+    /// `timestamp[]`.
+    pub const TIMESTAMP_ARRAY: u32 = 1115;
+    /// `date[]`.
+    pub const DATE_ARRAY: u32 = 1182;
+    /// `timestamptz[]`.
+    pub const TIMESTAMPTZ_ARRAY: u32 = 1185;
+    /// `interval[]`.
+    pub const INTERVAL_ARRAY: u32 = 1187;
+    /// `numeric[]`.
+    pub const NUMERIC_ARRAY: u32 = 1231;
+    /// `json[]`.
+    pub const JSON_ARRAY: u32 = 199;
+    /// `uuid[]`.
+    pub const UUID_ARRAY: u32 = 2951;
+    /// `jsonb[]`.
+    pub const JSONB_ARRAY: u32 = 3807;
+
+    /// The element type of a built-in one-dimensional array type.
+    #[must_use]
+    pub const fn array_element(array_oid: u32) -> Option<u32> {
+        Some(match array_oid {
+            BOOL_ARRAY => BOOL,
+            BYTEA_ARRAY => BYTEA,
+            CHAR_ARRAY => CHAR,
+            INT2_ARRAY => INT2,
+            INT4_ARRAY => INT4,
+            TEXT_ARRAY => TEXT,
+            BPCHAR_ARRAY => BPCHAR,
+            VARCHAR_ARRAY => VARCHAR,
+            INT8_ARRAY => INT8,
+            FLOAT4_ARRAY => FLOAT4,
+            FLOAT8_ARRAY => FLOAT8,
+            OID_ARRAY => OID,
+            TIMESTAMP_ARRAY => TIMESTAMP,
+            DATE_ARRAY => DATE,
+            TIMESTAMPTZ_ARRAY => TIMESTAMPTZ,
+            INTERVAL_ARRAY => INTERVAL,
+            NUMERIC_ARRAY => NUMERIC,
+            JSON_ARRAY => JSON,
+            UUID_ARRAY => UUID,
+            JSONB_ARRAY => JSONB,
+            _ => return None,
+        })
+    }
 }
 
 /// Column description from RowDescription message.
@@ -986,6 +1056,287 @@ impl<T: FromSql> FromSql for Option<T> {
     }
     fn accepts(oid: u32) -> bool {
         T::accepts(oid)
+    }
+}
+
+// ---- One-dimensional arrays ----
+
+/// A Rust type that binds as an element of a one-dimensional PostgreSQL array.
+///
+/// `Vec<T>` and `[T]` of these types bind as the matching array type, so a
+/// batch lookup such as `WHERE id = ANY($1)` takes a `Vec<i64>`, and
+/// `Option<T>` elements bind SQL NULLs. Arrays are sent in binary format; each
+/// element is encoded by its own [`ToSql`] implementation. Decoding goes
+/// through `Vec<T>`'s [`FromSql`] implementation, for any element type `T`
+/// that implements [`FromSql`].
+pub trait PgArrayElement: ToSql {
+    /// The array type a `[Self]` binds as.
+    const ARRAY_OID: u32;
+    /// The element type written into the array header.
+    const ELEMENT_OID: u32;
+}
+
+macro_rules! pg_array_element {
+    ($($ty:ty => $element:ident, $array:ident;)*) => {
+        $(impl PgArrayElement for $ty {
+            const ARRAY_OID: u32 = oid::$array;
+            const ELEMENT_OID: u32 = oid::$element;
+        })*
+    };
+}
+
+pg_array_element! {
+    bool => BOOL, BOOL_ARRAY;
+    i16 => INT2, INT2_ARRAY;
+    i32 => INT4, INT4_ARRAY;
+    i64 => INT8, INT8_ARRAY;
+    f32 => FLOAT4, FLOAT4_ARRAY;
+    f64 => FLOAT8, FLOAT8_ARRAY;
+    String => TEXT, TEXT_ARRAY;
+    &str => TEXT, TEXT_ARRAY;
+    Vec<u8> => BYTEA, BYTEA_ARRAY;
+}
+
+impl<T: PgArrayElement> PgArrayElement for Option<T> {
+    const ARRAY_OID: u32 = T::ARRAY_OID;
+    const ELEMENT_OID: u32 = T::ELEMENT_OID;
+}
+
+impl<T: PgArrayElement> ToSql for [T] {
+    fn to_sql(&self, buf: &mut Vec<u8>) -> Result<IsNull, PgError> {
+        encode_binary_array(self, buf)
+    }
+    fn type_oid(&self) -> u32 {
+        T::ARRAY_OID
+    }
+}
+
+impl<T: PgArrayElement> ToSql for Vec<T> {
+    fn to_sql(&self, buf: &mut Vec<u8>) -> Result<IsNull, PgError> {
+        encode_binary_array(self, buf)
+    }
+    fn type_oid(&self) -> u32 {
+        T::ARRAY_OID
+    }
+}
+
+fn array_length(value: usize, what: &str) -> Result<i32, PgError> {
+    i32::try_from(value).map_err(|_| PgError::Protocol(format!("array {what} exceeds i32::MAX")))
+}
+
+/// PostgreSQL's binary array format: dimension count, has-NULL flag, element
+/// type, then one (length, lower bound) pair per dimension and each element
+/// as a length (-1 for NULL) followed by its bytes.
+fn encode_binary_array<T: PgArrayElement>(
+    elements: &[T],
+    buf: &mut Vec<u8>,
+) -> Result<IsNull, PgError> {
+    let count = array_length(elements.len(), "length")?;
+    let header = buf.len();
+    buf.extend_from_slice(&i32::from(count > 0).to_be_bytes());
+    buf.extend_from_slice(&0_i32.to_be_bytes());
+    buf.extend_from_slice(&T::ELEMENT_OID.to_be_bytes());
+    if count > 0 {
+        buf.extend_from_slice(&count.to_be_bytes());
+        buf.extend_from_slice(&1_i32.to_be_bytes());
+    }
+    let mut has_null = false;
+    let mut element = Vec::new();
+    for value in elements {
+        element.clear();
+        match value.to_sql(&mut element)? {
+            IsNull::Yes => {
+                has_null = true;
+                buf.extend_from_slice(&(-1_i32).to_be_bytes());
+            }
+            IsNull::No => {
+                buf.extend_from_slice(&array_length(element.len(), "element")?.to_be_bytes());
+                buf.extend_from_slice(&element);
+            }
+        }
+    }
+    if has_null {
+        buf[header + 4..header + 8].copy_from_slice(&1_i32.to_be_bytes());
+    }
+    Ok(IsNull::No)
+}
+
+fn array_element_oid(array_oid: u32) -> Result<u32, PgError> {
+    oid::array_element(array_oid).ok_or_else(|| {
+        PgError::Protocol(format!(
+            "type OID {array_oid} is not a supported one-dimensional array type"
+        ))
+    })
+}
+
+fn decode_array_element<T: FromSql>(
+    element: Option<&[u8]>,
+    element_oid: u32,
+    format: Format,
+) -> Result<T, PgError> {
+    element.map_or_else(T::from_sql_null, |bytes| {
+        T::from_sql(bytes, element_oid, format)
+    })
+}
+
+/// Decode PostgreSQL's binary array format (see [`encode_binary_array`]).
+fn decode_binary_array<T: FromSql>(data: &[u8], array_oid: u32) -> Result<Vec<T>, PgError> {
+    fn read_i32(data: &[u8], at: &mut usize) -> Result<i32, PgError> {
+        let bytes = data
+            .get(*at..*at + 4)
+            .ok_or_else(|| PgError::Protocol("truncated binary array".to_string()))?;
+        *at += 4;
+        Ok(i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+    let mut at = 0;
+    let dimensions = read_i32(data, &mut at)?;
+    let _has_null = read_i32(data, &mut at)?;
+    let element_oid = read_i32(data, &mut at)?.cast_unsigned();
+    if let Ok(expected) = array_element_oid(array_oid)
+        && expected != element_oid
+    {
+        return Err(PgError::Protocol(format!(
+            "array element type OID {element_oid} does not match array type OID {array_oid}"
+        )));
+    }
+    let count = match dimensions {
+        0 => 0,
+        1 => {
+            let count = read_i32(data, &mut at)?;
+            let _lower_bound = read_i32(data, &mut at)?;
+            usize::try_from(count)
+                .map_err(|_| PgError::Protocol(format!("negative array length {count}")))?
+        }
+        _ => {
+            return Err(PgError::Protocol(format!(
+                "{dimensions}-dimensional arrays are not supported; decode one dimension"
+            )));
+        }
+    };
+    // Every element costs at least its 4-byte length on the wire.
+    let mut values = Vec::with_capacity(count.min(data.len() / 4));
+    for _ in 0..count {
+        let length = read_i32(data, &mut at)?;
+        let element = if length == -1 {
+            None
+        } else {
+            let end = usize::try_from(length)
+                .ok()
+                .and_then(|length| at.checked_add(length))
+                .ok_or_else(|| {
+                    PgError::Protocol(format!("invalid binary array element length {length}"))
+                })?;
+            let bytes = data
+                .get(at..end)
+                .ok_or_else(|| PgError::Protocol("truncated binary array element".to_string()))?;
+            at = end;
+            Some(bytes)
+        };
+        values.push(decode_array_element(element, element_oid, Format::Binary)?);
+    }
+    if at != data.len() {
+        return Err(PgError::Protocol(
+            "trailing bytes after binary array".to_string(),
+        ));
+    }
+    Ok(values)
+}
+
+/// Decode PostgreSQL's text array output: `{a,"b c",NULL}`, optionally
+/// prefixed by non-default bounds (`[0:2]={...}`). Quoted elements unescape
+/// `\\` and `\"`; an unquoted `NULL` is SQL NULL.
+fn decode_text_array<T: FromSql>(data: &[u8], array_oid: u32) -> Result<Vec<T>, PgError> {
+    let element_oid = array_element_oid(array_oid)?;
+    let malformed = |why: &str| PgError::Protocol(format!("malformed array text: {why}"));
+    let mut text = data;
+    if text.first() == Some(&b'[') {
+        let equals = text
+            .iter()
+            .position(|&byte| byte == b'=')
+            .ok_or_else(|| malformed("bounds without '='"))?;
+        // One `[lower:upper]` pair per dimension.
+        if text[..equals].split(|&byte| byte == b':').nth(2).is_some() {
+            return Err(PgError::Protocol(
+                "multi-dimensional arrays are not supported; decode one dimension".to_string(),
+            ));
+        }
+        text = &text[equals + 1..];
+    }
+    let inner = text
+        .strip_prefix(b"{")
+        .and_then(|rest| rest.strip_suffix(b"}"))
+        .ok_or_else(|| malformed("missing braces"))?;
+    let mut values = Vec::new();
+    if inner.is_empty() {
+        return Ok(values);
+    }
+    let mut at = 0;
+    let mut element = Vec::new();
+    loop {
+        element.clear();
+        let quoted = inner.get(at) == Some(&b'"');
+        if quoted {
+            at += 1;
+            loop {
+                match inner.get(at) {
+                    Some(b'"') => {
+                        at += 1;
+                        break;
+                    }
+                    Some(b'\\') => {
+                        let escaped = *inner
+                            .get(at + 1)
+                            .ok_or_else(|| malformed("dangling escape"))?;
+                        element.push(escaped);
+                        at += 2;
+                    }
+                    Some(&byte) => {
+                        element.push(byte);
+                        at += 1;
+                    }
+                    None => return Err(malformed("unterminated quoted element")),
+                }
+            }
+        } else {
+            while let Some(&byte) = inner.get(at) {
+                match byte {
+                    b',' => break,
+                    b'{' | b'}' => {
+                        return Err(PgError::Protocol(
+                            "multi-dimensional arrays are not supported; decode one dimension"
+                                .to_string(),
+                        ));
+                    }
+                    _ => {
+                        element.push(byte);
+                        at += 1;
+                    }
+                }
+            }
+        }
+        let value = if !quoted && element.eq_ignore_ascii_case(b"NULL") {
+            None
+        } else {
+            Some(element.as_slice())
+        };
+        values.push(decode_array_element(value, element_oid, Format::Text)?);
+        match inner.get(at) {
+            None => return Ok(values),
+            Some(b',') => at += 1,
+            Some(_) => return Err(malformed("expected ',' between elements")),
+        }
+    }
+}
+
+impl<T: FromSql> FromSql for Vec<T> {
+    fn from_sql(data: &[u8], oid: u32, format: Format) -> Result<Self, PgError> {
+        match format {
+            Format::Text => decode_text_array(data, oid),
+            Format::Binary => decode_binary_array(data, oid),
+        }
+    }
+    fn accepts(array_oid: u32) -> bool {
+        oid::array_element(array_oid).is_some_and(T::accepts)
     }
 }
 
