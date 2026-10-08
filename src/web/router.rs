@@ -436,6 +436,35 @@ struct RouteSpecificity {
     total_segments: usize,
 }
 
+impl RouteSpecificity {
+    /// A mount whose router resolves nothing for the rest of the path still
+    /// claims its own prefix, like a `prefix/*` route.
+    const UNRESOLVED: Self = Self {
+        exact_path: false,
+        literal_segments: 0,
+        param_segments: 0,
+        total_segments: 0,
+    };
+
+    /// What a nested router resolved, seen from the parent: the mount
+    /// prefix's literal segments come first.
+    fn under_mount(self, prefix_segments: usize) -> Self {
+        Self {
+            exact_path: self.exact_path,
+            literal_segments: self.literal_segments + prefix_segments,
+            param_segments: self.param_segments,
+            total_segments: self.total_segments + prefix_segments,
+        }
+    }
+}
+
+/// Where a router sends a path: one of its own routes, or a nested router
+/// with the rest of the path.
+enum RouteSelection<'a> {
+    Route(&'a MethodRouter, HashMap<String, String>),
+    Mount(&'a Router, String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Segment {
     Literal(String),
@@ -599,6 +628,9 @@ pub struct Router {
     server_body_policy: Option<RequestBodyPolicy>,
     body_policy: Option<RequestBodyPolicy>,
     default_trace: Option<DefaultTrace>,
+    /// Mounts compete with routes by specificity
+    /// ([`Router::prefer_specific_mounts`]).
+    prefer_specific_mounts: bool,
 }
 
 /// Boxed response future returned by [`Router::into_http_handler`].
@@ -3008,6 +3040,7 @@ impl Default for Router {
             server_body_policy: None,
             body_policy: None,
             default_trace: Some(DefaultTrace::default()),
+            prefer_specific_mounts: false,
         }
     }
 }
@@ -3043,6 +3076,27 @@ impl Router {
     #[must_use]
     pub fn nest(mut self, prefix: &str, router: Self) -> Self {
         self.nested.push((prefix.to_string(), router));
+        self
+    }
+
+    /// Let this router's mounts compete with its own routes by specificity.
+    ///
+    /// By default a mount is consulted only when none of this router's routes
+    /// matches (see [`Self::handle`]), so `.route("/*", spa).nest("/api", api)`
+    /// sends `/api/users` to `spa`, and `.route("/:page", ..)` captures
+    /// `/admin` ahead of `.nest("/admin", ..)` and the layers on it. When
+    /// enabled, a mount counts its prefix's literal segments in front of the
+    /// route its router matches, and the more specific of the two wins: those
+    /// paths go to `api` and to the `/admin` router. A path under a mount that
+    /// its router does not route counts like a `prefix/*` route and gets that
+    /// router's fallback or 404. A route still wins a tie with a mount.
+    ///
+    /// The setting applies to this router's own choice between its routes and
+    /// mounts; enable it on nested routers that have mounts of their own
+    /// (br-asupersync-vftw38 item 4).
+    #[must_use]
+    pub fn prefer_specific_mounts(mut self, enabled: bool) -> Self {
+        self.prefer_specific_mounts = enabled;
         self
     }
 
@@ -3214,7 +3268,8 @@ impl Router {
     /// Handle an incoming request.
     ///
     /// Top-level routes are selected by path specificity. Nested routers are
-    /// selected by longest matching prefix after top-level route selection.
+    /// selected by longest matching prefix after top-level route selection,
+    /// unless [`Self::prefer_specific_mounts`] lets them compete with routes.
     #[must_use]
     pub fn handle(&self, req: Request) -> Response {
         let cx = Cx::new(
@@ -3837,45 +3892,27 @@ impl Router {
             );
             apply_probe_policy(&mut probe, inherited, local)?;
 
-            let mut best_route: Option<(RouteSpecificity, &MethodRouter)> = None;
-            for (pattern, method_router) in &router.routes {
-                if let Some(matched) = pattern.matches(&probe.path) {
-                    match best_route {
-                        Some((specificity, _)) if specificity >= matched.specificity => {}
-                        _ => best_route = Some((matched.specificity, method_router)),
-                    }
+            // Admission selects exactly what dispatch will (`Self::select`).
+            match router.select(&probe.path) {
+                Some(RouteSelection::Route(method_router, _)) => {
+                    // MethodRouter applies this before method lookup, including a
+                    // 405 response. Admission must select the same policy.
+                    apply_probe_policy(
+                        &mut probe,
+                        None,
+                        method_router
+                            .body_policy
+                            .map(RequestBodyPolicyState::from_policy),
+                    )?;
+                    break;
                 }
-            }
-            if let Some((_, method_router)) = best_route {
-                // MethodRouter applies this before method lookup, including a
-                // 405 response. Admission must select the same policy.
-                apply_probe_policy(
-                    &mut probe,
-                    None,
-                    method_router
-                        .body_policy
-                        .map(RequestBodyPolicyState::from_policy),
-                )?;
-                break;
-            }
-
-            let mut best_nested: Option<(usize, &Self, String)> = None;
-            for (prefix, nested) in &router.nested {
-                if let Some(path) = strip_prefix(&probe.path, prefix) {
-                    let length = prefix.trim_end_matches('/').len();
-                    match &best_nested {
-                        Some((best, _, _)) if *best >= length => {}
-                        _ => best_nested = Some((length, nested, path)),
-                    }
+                Some(RouteSelection::Mount(nested, path)) => {
+                    router = nested;
+                    probe.path = path;
                 }
-            }
-            if let Some((_, nested, path)) = best_nested {
-                router = nested;
-                probe.path = path;
-            } else {
                 // The selected router's fallback/404 uses its inherited
                 // policy; it does not retry a shorter mount or outer fallback.
-                break;
+                None => break,
             }
         }
         Ok(explicit_policy_state_from_extensions(&probe.extensions)
@@ -3899,44 +3936,18 @@ impl Router {
             return response;
         }
 
-        // Pick the most specific top-level route. First-registered only wins
-        // among equal-specificity routes; broad wildcard routes must not shadow
-        // narrower protected paths.
-        let mut best_route: Option<(RouteSpecificity, &MethodRouter, HashMap<String, String>)> =
-            None;
-        for (pattern, method_router) in &self.routes {
-            if let Some(route_match) = pattern.matches(&req.path) {
-                match &best_route {
-                    Some((best_specificity, _, _))
-                        if *best_specificity >= route_match.specificity => {}
-                    _ => {
-                        best_route =
-                            Some((route_match.specificity, method_router, route_match.params));
-                    }
-                }
+        match self.select(&req.path) {
+            Some(RouteSelection::Route(method_router, params)) => {
+                req.path_params = params;
+                return method_router.dispatch(cx, req).await;
             }
-        }
-        if let Some((_, method_router, params)) = best_route {
-            req.path_params = params;
-            return method_router.dispatch(cx, req).await;
-        }
-
-        // Check nested routers.
-        let mut best_nested_match: Option<(usize, &Self, String)> = None;
-        for (prefix, router) in &self.nested {
-            if let Some(sub_path) = strip_prefix(&req.path, prefix) {
-                let normalized_len = prefix.trim_end_matches('/').len();
-                match &best_nested_match {
-                    Some((best_len, _, _)) if *best_len >= normalized_len => {}
-                    _ => best_nested_match = Some((normalized_len, router, sub_path)),
-                }
+            Some(RouteSelection::Mount(router, sub_path)) => {
+                req.path = sub_path;
+                // Nested routers dispatch without re-tracing: the outermost
+                // router already instruments the exchange.
+                return Box::pin(router.handle_inner(cx, req)).await;
             }
-        }
-        if let Some((_, router, sub_path)) = best_nested_match {
-            req.path = sub_path;
-            // Nested routers dispatch without re-tracing: the outermost
-            // router already instruments the exchange.
-            return Box::pin(router.handle_inner(cx, req)).await;
+            None => {}
         }
 
         // Fallback.
@@ -3945,6 +3956,84 @@ impl Router {
         }
 
         StatusCode::NOT_FOUND.into_response()
+    }
+
+    /// Choose where `path` goes: the most specific of this router's routes, or
+    /// else its longest matching mount.
+    ///
+    /// With [`Self::prefer_specific_mounts`], the mount wins when what it
+    /// resolves is more specific than the route: it counts its prefix's
+    /// literal segments in front of the route its router matches (or,
+    /// matching none, acts like a `prefix/*` route). First-registered only
+    /// wins among equal-specificity routes, and a route wins a tie with a
+    /// mount.
+    fn select(&self, path: &str) -> Option<RouteSelection<'_>> {
+        match (self.best_route(path), self.best_mount(path)) {
+            (Some((route, method_router, params)), Some((segments, router, sub_path))) => {
+                if self.prefer_specific_mounts
+                    && router.resolved_specificity(&sub_path).under_mount(segments) > route
+                {
+                    Some(RouteSelection::Mount(router, sub_path))
+                } else {
+                    Some(RouteSelection::Route(method_router, params))
+                }
+            }
+            (Some((_, method_router, params)), None) => {
+                Some(RouteSelection::Route(method_router, params))
+            }
+            (None, Some((_, router, sub_path))) => Some(RouteSelection::Mount(router, sub_path)),
+            (None, None) => None,
+        }
+    }
+
+    /// The specificity of whatever this router (and its mounts) resolves
+    /// `path` to, following [`Self::select`]; `UNRESOLVED` when only a
+    /// fallback or 404 would answer.
+    fn resolved_specificity(&self, path: &str) -> RouteSpecificity {
+        let route = self.best_route(path).map(|(specificity, _, _)| specificity);
+        if route.is_some() && !self.prefer_specific_mounts {
+            return route.unwrap_or(RouteSpecificity::UNRESOLVED);
+        }
+        let mount = self.best_mount(path).map(|(segments, router, sub_path)| {
+            router.resolved_specificity(&sub_path).under_mount(segments)
+        });
+        route.max(mount).unwrap_or(RouteSpecificity::UNRESOLVED)
+    }
+
+    /// The most specific matching route; the first registered among equals.
+    fn best_route(
+        &self,
+        path: &str,
+    ) -> Option<(RouteSpecificity, &MethodRouter, HashMap<String, String>)> {
+        let mut best: Option<(RouteSpecificity, &MethodRouter, HashMap<String, String>)> = None;
+        for (pattern, method_router) in &self.routes {
+            if let Some(route_match) = pattern.matches(path) {
+                match &best {
+                    Some((specificity, _, _)) if *specificity >= route_match.specificity => {}
+                    _ => best = Some((route_match.specificity, method_router, route_match.params)),
+                }
+            }
+        }
+        best
+    }
+
+    /// The longest matching mount: its prefix's segment count, its router and
+    /// the rest of the path.
+    fn best_mount(&self, path: &str) -> Option<(usize, &Self, String)> {
+        let mut best: Option<(usize, &str, &Self, String)> = None;
+        for (prefix, router) in &self.nested {
+            if let Some(sub_path) = strip_prefix(path, prefix) {
+                let length = prefix.trim_end_matches('/').len();
+                match &best {
+                    Some((best_length, _, _, _)) if *best_length >= length => {}
+                    _ => best = Some((length, prefix, router, sub_path)),
+                }
+            }
+        }
+        best.map(|(_, prefix, router, sub_path)| {
+            let segments = prefix.split('/').filter(|s| !s.is_empty()).count();
+            (segments, router, sub_path)
+        })
     }
 
     /// Return the number of registered routes (not counting nested).
