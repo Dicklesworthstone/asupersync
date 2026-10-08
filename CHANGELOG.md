@@ -377,6 +377,17 @@ To keep the v0.5.0 wire behaviour, use
 A client whose `Cx` has no spawn gateway (and so no supervisor) is unchanged.
 (asupersync-messaging-client-audit-k6pxks item 8)
 
+### Behavior change — HTTP `deflate` is the zlib format
+
+`Content-Encoding: deflate` is now the zlib format that RFC 9110 requires
+(RFC 1950: a two-byte header, the deflate data and an Adler-32 trailer).
+Before, `DeflateCompressor`, and through it the response compression
+middleware, produced raw RFC 1951 data labelled `deflate`, which clients that
+decode `deflate` as zlib reject. `DeflateDecompressor` decodes zlib and still
+accepts raw data when the zlib header check fails. Code that calls
+`DeflateCompressor` directly now gets zlib framing; see
+`docs/http_deflate_compatibility.md` (`asupersync-zodgeb`).
+
 ### Native GenServers and actors
 
 `Cx::spawn_gen_server`, `Cx::spawn_actor` and `Cx::spawn_supervised_actor`
@@ -466,6 +477,58 @@ decisions. Before, only a test could attach a sink to a worker. The docs of
   provider the connection uses.
 
 (asupersync-sdua27)
+
+### W3C trace context propagation
+
+Incoming `traceparent`, `tracestate` and `baggage` headers are now continued
+by the HTTP and gRPC stacks when you add the new pieces:
+
+- web: `W3CTraceContextMiddleware`, `W3CTraceContextLayer` and
+  `MiddlewareStack::with_w3c_trace_context`;
+- gRPC: `W3CTraceContextInterceptor`.
+
+A valid incoming trace is continued as a child span: same trace id, new span
+id. A missing or invalid one starts a new trace and drops its `tracestate`.
+Malformed baggage is dropped without breaking the trace. The web middleware
+draws new ids from the request's `Cx` entropy, so lab runs replay them; the
+gRPC interceptor gets no `Cx` and uses the operating system's random source.
+`observability::continue_or_start_trace` and `continue_or_start_trace_with`
+expose the same logic. Before, the extract and inject helpers existed but
+nothing called them (`asupersync-cx78tm`).
+
+### Resource-pressure sampling (opt-in)
+
+`RuntimeBuilder::resource_sampling(interval)` runs the resource monitor's OS
+probes on a thread every `interval` (at least 100 ms) until the runtime is
+dropped. While it runs, every task context the runtime builds carries the
+sampled pressure, so `Cx::pressure()` reports headroom instead of `None`.
+Child region creation also consults it: under pressure `Low` and `BestEffort`
+regions are refused, and at `Emergency` `Normal` ones too. Before, the monitor
+was never sampled, so these checks always admitted. The probes are host-wide:
+in a container they describe the host, not the container's quota. Sampling is
+off by default (`asupersync-1ir2em`).
+
+### HTTP client response decompression (opt-in)
+
+`HttpClientBuilder::response_decompression(true)` (feature `compression`)
+sends `Accept-Encoding: gzip, deflate, br` and decodes the response body
+through `Response::decode_content`, bounded by the client's maximum body
+size. It does not touch a request that sets its own `Accept-Encoding` or a
+`Range` header (`asupersync-ecnp0m`).
+
+### Supervisor restart storms are reported
+
+`ManagedSupervisorReport::restart_storm_detected` is set, and a
+`restart_storm` trace is recorded, when a managed supervisor configured with
+`SupervisionConfig::with_storm_threshold` crosses that threshold. Before, the
+storm detector ran but nothing read it (`asupersync-k7muvv`).
+
+### Macaroon replay keys
+
+`MacaroonToken::replay_key()` returns SHA-256 of the token's identifier and
+signature, a key for replay caches. Locations are not covered by the
+signature, so a token's bytes can change without changing what it authorizes;
+the replay key does not (`asupersync-s45073`).
 
 ### Fixed
 
@@ -925,6 +988,66 @@ Panics and stale names:
 - `NamedGenServerHandle::release_name` and `abort_lease` left the lease
   armed after another task took the name over, so dropping the handle
   panicked. They still return the registry's error, as in v0.4.3.
+
+### Fixed by the 2026-10-07 and 2026-10-08 follow-ups
+
+Each fix landed with a regression test that fails on the old code. The commit
+messages carry the details and receipts.
+
+Signals:
+
+- A waker that panicked while being woken for a signal ended the signal
+  dispatcher thread. Every later delivery was then swallowed, SIGTERM and
+  SIGINT included. The panic is now contained.
+- `ctrl_c()` called from a task whose `Cx` lacks the IO capability refuses with
+  the typed `IoCapabilityDenied` [ASUP-E009], as `signal()` does. Before, it
+  reported that Ctrl+C was unsupported on the platform.
+
+Runtime and synchronization:
+
+- A task that finished before its deferred cancellation was published made the
+  cancel Wakers of the rest of its batch be dropped unwoken.
+- `BlockingPool::shutdown_and_wait` reported a clean shutdown while an accepted
+  job was still waiting for a worker, which then ran unjoined after teardown. A
+  retiring blocking worker also fences before it checks for new work, so a job
+  queued at that moment cannot be stranded on weak memory models.
+- `Mutex::is_locked` reports a lock that has been handed to a woken waiter,
+  which `try_lock` already refused.
+- `DynamicSupervisor::next_completed` no longer reports a quarantined child a
+  second time after `wait_child` or `terminate_child` reported it.
+- `SelectAllDrain` returns its losers in their original order, the coordinates
+  `winner_index` uses (it used to move the last one into the winner's slot).
+
+Processes and I/O:
+
+- A process error converted to `io::Error` keeps its kind: a missing program
+  is `NotFound` and a refused one `PermissionDenied`. It used to be `Other`.
+  A missing working directory is reported with the OS error instead of as
+  "process not found" for the program.
+- `Child::wait_with_output` and `Command::output`, cancelled through the
+  task's `Cx`, terminate and reap the child before they return, as
+  `wait_async` does. Before, they returned "cancelled" with the child still
+  running.
+- `Command::output_async` and `status_async` refuse a `Cx` that is already
+  cancelled before they start the program.
+- `BrowserReadableStream` reads a body exactly `max_total_read_bytes` long to
+  its end instead of failing it with `ReadLimitExceeded`.
+
+Networking and web:
+
+- The new bytes of a mostly duplicate QUIC STREAM frame are copied out, so they
+  no longer keep the whole datagram alive.
+- The live SSE step the HTTP/1 server runs pulls the source through
+  `poll_next_event` even without a heartbeat interval. A live source that idles
+  stays open without holding a worker thread, instead of ending its stream at
+  once or blocking.
+
+Security:
+
+- An identity key rotation or revocation that cannot be persisted leaves the key
+  store unchanged, and the serialized key seeds are wiped after each write.
+  Before, a failed revocation left the key revoked only in memory, so it was
+  valid again after a restart.
 
 ### UDP launch-time sends and the socket error queue (Linux, GH #73)
 
