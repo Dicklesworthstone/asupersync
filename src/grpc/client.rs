@@ -527,6 +527,8 @@ impl Channel {
     /// Supports in-memory loopback transport (host: `loopback`) and native
     /// HTTP/2 connections to DNS names, IPv4 and bracketed IPv6 literals.
     /// Network-backed RPCs perform hostname resolution and TCP connection.
+    /// `unix:path` and `unix:///absolute/path` targets dial a Unix-domain
+    /// socket with cleartext HTTP/2 and the `localhost` authority.
     pub async fn connect(uri: impl Into<String>) -> Result<Self, GrpcError> {
         Self::connect_with_config(&uri.into(), ChannelConfig::default()).await
     }

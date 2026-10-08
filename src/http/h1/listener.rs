@@ -12,6 +12,9 @@ use crate::http::h1::types::{Request, Response};
 #[cfg(feature = "tls")]
 use crate::io::AsyncWriteExt;
 use crate::net::tcp::listener::TcpListener;
+use crate::net::tcp::stream::TcpStream;
+#[cfg(unix)]
+use crate::net::unix::{UnixListener, UnixStream};
 use crate::runtime::{JoinHandle, RuntimeHandle, SpawnError};
 use crate::server::connection::{ConnectionGuard, ConnectionManager};
 use crate::server::shutdown::{
@@ -379,7 +382,7 @@ impl Http1ListenerConfig {
 /// })?;
 /// ```
 pub struct Http1Listener<F> {
-    tcp_listener: TcpListener,
+    listener: H1AcceptSource,
     handler: Arc<F>,
     config: Http1ListenerConfig,
     shutdown_signal: ShutdownSignal,
@@ -456,7 +459,7 @@ where
         let stats = Arc::new(Http1ListenerStats::new(config.time_getter));
 
         Ok(Self {
-            tcp_listener,
+            listener: H1AcceptSource::Tcp(tcp_listener),
             handler: Arc::new(handler),
             config,
             shutdown_signal,
@@ -481,7 +484,7 @@ where
         let stats = Arc::new(Http1ListenerStats::new(config.time_getter));
 
         Self {
-            tcp_listener,
+            listener: H1AcceptSource::Tcp(tcp_listener),
             handler: Arc::new(handler),
             config,
             shutdown_signal,
@@ -530,7 +533,7 @@ where
         let stats = Arc::new(Http1ListenerStats::new(config.time_getter));
 
         Self {
-            tcp_listener,
+            listener: H1AcceptSource::Tcp(tcp_listener),
             handler: Arc::new(handler),
             config,
             shutdown_signal,
@@ -582,7 +585,7 @@ where
         let stats = Arc::new(Http1ListenerStats::new(config.time_getter));
 
         Self {
-            tcp_listener,
+            listener: H1AcceptSource::Tcp(tcp_listener),
             handler: Arc::new(handler),
             config,
             shutdown_signal,
@@ -632,7 +635,7 @@ where
         let stats = Arc::new(Http1ListenerStats::new(config.time_getter));
 
         Self {
-            tcp_listener,
+            listener: H1AcceptSource::Tcp(tcp_listener),
             handler: Arc::new(handler),
             config,
             shutdown_signal,
@@ -706,8 +709,47 @@ impl<F> Http1Listener<F> {
     }
 
     /// Returns the local address this listener is bound to.
+    ///
+    /// A listener made with [`Self::from_unix_listener`] has no socket
+    /// address and returns an `InvalidInput` error.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.tcp_listener.local_addr()
+        self.listener.local_addr()
+    }
+
+    /// Serve on a Unix-domain socket listener instead of TCP, for any handler
+    /// kind: drive it with the `run*` method of the matching TCP constructor
+    /// (`run`, `run_in`, `run_tls`, `run_streaming`, `run_produced` or
+    /// `run_sse`). A reverse proxy in front of the application (nginx's
+    /// `proxy_pass http://unix:/run/app.sock`) is the usual client.
+    ///
+    /// Requests carry no `peer_addr`, and every peer shares one entry in the
+    /// connection manager's per-address accounting; access control is the
+    /// socket file's permissions. Protocol upgrades fail closed on these
+    /// connections, as on `run_tls`, because the public upgrade callback is
+    /// typed to a TCP stream. Router applications serve through this with
+    /// `into_http_handler()`, as on TCP.
+    #[cfg(unix)]
+    pub fn from_unix_listener(
+        listener: UnixListener,
+        handler: F,
+        config: Http1ListenerConfig,
+    ) -> Self {
+        let shutdown_signal = shutdown_signal_for_time_getter(config.time_getter);
+        let connection_manager = ConnectionManager::with_time_getter(
+            config.max_connections,
+            shutdown_signal.clone(),
+            config.time_getter,
+        );
+        let stats = Arc::new(Http1ListenerStats::new(config.time_getter));
+        Self {
+            listener: H1AcceptSource::Unix(listener),
+            handler: Arc::new(handler),
+            config,
+            shutdown_signal,
+            connection_manager,
+            stats,
+            in_flight_requests: Arc::new(AtomicUsize::new(0)),
+        }
     }
 }
 
@@ -724,7 +766,8 @@ where
     ///
     /// Returns shutdown statistics upon completion.
     pub async fn run(self, runtime: &RuntimeHandle) -> io::Result<ShutdownStats> {
-        self.run_with(runtime, spawn_connection::<F, Fut, R>).await
+        self.run_with(runtime, spawn_stream_connection::<F, Fut, R>)
+            .await
     }
 
     /// Like [`Self::run`], but each connection task is spawned with `cx`, so
@@ -744,7 +787,7 @@ where
             move |stream, guard, handler, config, shutdown_signal, in_flight_requests| {
                 spawner
                     .spawn(move |_connection_cx| {
-                        serve_connection::<F, Fut, R>(
+                        serve_stream_connection::<F, Fut, R>(
                             stream,
                             guard,
                             handler,
@@ -829,7 +872,7 @@ impl<F> Http1Listener<F> {
     where
         F: Send + Sync,
         Spawn: Fn(
-                crate::net::tcp::stream::TcpStream,
+                H1Stream,
                 ConnectionGuard,
                 Arc<F>,
                 Http1Config,
@@ -868,7 +911,7 @@ impl<F> Http1Listener<F> {
     where
         F: Send + Sync,
         Spawn: Fn(
-                crate::net::tcp::stream::TcpStream,
+                H1Stream,
                 ConnectionGuard,
                 Arc<F>,
                 Http1Config,
@@ -893,7 +936,7 @@ impl<F> Http1Listener<F> {
 
             // Race accept against shutdown phase change
             let result = {
-                let accept_fut = self.tcp_listener.accept();
+                let accept_fut = self.listener.accept();
                 let shutdown_fut = shutdown_rx.wait();
                 // Pin both futures on the stack
                 let mut accept_fut = core::pin::pin!(accept_fut);
@@ -947,7 +990,14 @@ impl<F> Http1Listener<F> {
             };
 
             // Register with connection manager (enforces capacity + shutdown)
-            let Some(guard) = self.connection_manager.register(addr) else {
+            #[cfg(unix)]
+            let registered_addr = addr.unwrap_or(UNIX_PEER_PLACEHOLDER);
+            #[cfg(not(unix))]
+            let Some(registered_addr) = addr else {
+                drop(stream);
+                continue;
+            };
+            let Some(guard) = self.connection_manager.register(registered_addr) else {
                 drop(stream);
                 continue;
             };
@@ -985,13 +1035,10 @@ impl<F> Http1Listener<F> {
         // attempts fail fast with connection-refused; with
         // `lb_compat_keep_socket` it stays bound (never accepting) until the
         // drain completes so LB health probes still see TCP-connectable.
-        let parked_socket = self
-            .config
-            .lb_compat_keep_socket
-            .then_some(self.tcp_listener);
+        let parked_socket = self.config.lb_compat_keep_socket.then_some(self.listener);
 
         if self.shutdown_signal.phase() == ShutdownPhase::Running {
-            // Inlined begin_drain(): `self.tcp_listener` has been moved out
+            // Inlined begin_drain(): `self.listener` has been moved out
             // above, so whole-`self` method calls are no longer possible.
             let _ = self
                 .connection_manager
@@ -1108,12 +1155,236 @@ impl<F> Http1Listener<F> {
     }
 }
 
+/// A connection the listener accepted.
+enum H1Stream {
+    Tcp(TcpStream),
+    #[cfg(unix)]
+    Unix(UnixStream),
+}
+
+impl H1Stream {
+    fn peer_addr(&self) -> Option<SocketAddr> {
+        match self {
+            Self::Tcp(stream) => stream.peer_addr().ok(),
+            #[cfg(unix)]
+            Self::Unix(_) => None,
+        }
+    }
+}
+
+impl crate::io::AsyncRead for H1Stream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut crate::io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Tcp(stream) => Pin::new(stream).poll_read(cx, buf),
+            #[cfg(unix)]
+            Self::Unix(stream) => Pin::new(stream).poll_read(cx, buf),
+        }
+    }
+}
+
+impl crate::io::AsyncWrite for H1Stream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Tcp(stream) => Pin::new(stream).poll_write(cx, buf),
+            #[cfg(unix)]
+            Self::Unix(stream) => Pin::new(stream).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Tcp(stream) => Pin::new(stream).poll_write_vectored(cx, bufs),
+            #[cfg(unix)]
+            Self::Unix(stream) => Pin::new(stream).poll_write_vectored(cx, bufs),
+        }
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        match self {
+            Self::Tcp(stream) => stream.is_write_vectored(),
+            #[cfg(unix)]
+            Self::Unix(stream) => stream.is_write_vectored(),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Tcp(stream) => Pin::new(stream).poll_flush(cx),
+            #[cfg(unix)]
+            Self::Unix(stream) => Pin::new(stream).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Tcp(stream) => Pin::new(stream).poll_shutdown(cx),
+            #[cfg(unix)]
+            Self::Unix(stream) => Pin::new(stream).poll_shutdown(cx),
+        }
+    }
+}
+
+/// The socket a listener accepts connections on.
+enum H1AcceptSource {
+    Tcp(TcpListener),
+    #[cfg(unix)]
+    Unix(UnixListener),
+}
+
+/// Stands in for a Unix-domain peer in the connection manager, which keys its
+/// per-IP accounting by socket address: every local peer of a Unix-domain
+/// listener shares this one entry.
+#[cfg(unix)]
+const UNIX_PEER_PLACEHOLDER: SocketAddr =
+    SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0);
+
+impl H1AcceptSource {
+    async fn accept(&self) -> io::Result<(H1Stream, Option<SocketAddr>)> {
+        match self {
+            Self::Tcp(listener) => listener
+                .accept()
+                .await
+                .map(|(stream, addr)| (H1Stream::Tcp(stream), Some(addr))),
+            #[cfg(unix)]
+            Self::Unix(listener) => listener
+                .accept()
+                .await
+                .map(|(stream, _)| (H1Stream::Unix(stream), None)),
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        match self {
+            Self::Tcp(listener) => listener.local_addr(),
+            #[cfg(unix)]
+            Self::Unix(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a Unix-domain HTTP/1 listener has no socket address",
+            )),
+        }
+    }
+}
+
 /// Result of racing accept against shutdown.
 enum AcceptOrShutdown {
     /// A new connection was accepted.
-    Accept(io::Result<(crate::net::tcp::stream::TcpStream, SocketAddr)>),
+    Accept(io::Result<(H1Stream, Option<SocketAddr>)>),
     /// Shutdown was signaled.
     Shutdown,
+}
+
+/// [`spawn_connection`] for a connection of either transport.
+fn spawn_stream_connection<F, Fut, R>(
+    stream: H1Stream,
+    guard: ConnectionGuard,
+    handler: Arc<F>,
+    config: Http1Config,
+    shutdown_signal: ShutdownSignal,
+    in_flight_requests: Arc<AtomicUsize>,
+    runtime: &RuntimeHandle,
+) -> Result<JoinHandle<()>, SpawnError>
+where
+    F: Fn(Request) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = R> + Send + 'static,
+    R: IntoHttp1Response + Send + 'static,
+{
+    match stream {
+        H1Stream::Tcp(stream) => spawn_connection(
+            stream,
+            guard,
+            handler,
+            config,
+            shutdown_signal,
+            in_flight_requests,
+            runtime,
+        ),
+        #[cfg(unix)]
+        H1Stream::Unix(stream) => runtime.try_spawn(serve_unix_connection(
+            stream,
+            guard,
+            handler,
+            config,
+            shutdown_signal,
+            in_flight_requests,
+        )),
+    }
+}
+
+/// [`serve_connection`] for a connection of either transport.
+async fn serve_stream_connection<F, Fut, R>(
+    stream: H1Stream,
+    guard: ConnectionGuard,
+    handler: Arc<F>,
+    config: Http1Config,
+    shutdown_signal: ShutdownSignal,
+    in_flight_requests: Arc<AtomicUsize>,
+) where
+    F: Fn(Request) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = R> + Send + 'static,
+    R: IntoHttp1Response + Send + 'static,
+{
+    match stream {
+        H1Stream::Tcp(stream) => {
+            serve_connection(
+                stream,
+                guard,
+                handler,
+                config,
+                shutdown_signal,
+                in_flight_requests,
+            )
+            .await;
+        }
+        #[cfg(unix)]
+        H1Stream::Unix(stream) => {
+            serve_unix_connection(
+                stream,
+                guard,
+                handler,
+                config,
+                shutdown_signal,
+                in_flight_requests,
+            )
+            .await;
+        }
+    }
+}
+
+/// One HTTP/1.1 connection on a Unix-domain socket. It is served without
+/// protocol upgrades, which hand the handler a TCP stream.
+#[cfg(unix)]
+async fn serve_unix_connection<F, Fut, R>(
+    stream: UnixStream,
+    guard: ConnectionGuard,
+    handler: Arc<F>,
+    config: Http1Config,
+    shutdown_signal: ShutdownSignal,
+    in_flight_requests: Arc<AtomicUsize>,
+) where
+    F: Fn(Request) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = R> + Send + 'static,
+    R: IntoHttp1Response + Send + 'static,
+{
+    let _guard = guard;
+    let server = Http1Server::with_config_upgradeable(move |req| handler(req), config)
+        .with_shutdown_signal(shutdown_signal)
+        .with_in_flight_requests(in_flight_requests);
+    let _ = server.serve_with_peer_addr(stream, None).await;
 }
 
 /// Spawn a connection handler as a runtime task.
@@ -1185,7 +1456,7 @@ async fn serve_connection<F, Fut, R>(
 /// silent peers from keeping listener shutdown non-quiescent indefinitely.
 #[cfg(feature = "tls")]
 fn spawn_tls_connection<F, Fut, R>(
-    stream: crate::net::tcp::stream::TcpStream,
+    stream: H1Stream,
     guard: ConnectionGuard,
     handler: Arc<F>,
     config: Http1Config,
@@ -1201,7 +1472,7 @@ where
 {
     let handle = runtime.try_spawn(async move {
         let _guard = guard;
-        let peer_addr = stream.peer_addr().ok();
+        let peer_addr = stream.peer_addr();
         // asupersync-hylbr1: `TlsAcceptor` defaults to no handshake timeout, so
         // a peer that never finishes TLS would pin this registered connection
         // slot until listener shutdown. Bound the handshake by the acceptor's
@@ -1265,7 +1536,7 @@ where
 
 /// Spawn a connection whose request heads are dispatched before body EOF.
 fn spawn_streaming_connection<F, Fut>(
-    stream: crate::net::tcp::stream::TcpStream,
+    stream: H1Stream,
     guard: ConnectionGuard,
     handler: Arc<F>,
     config: Http1Config,
@@ -1285,7 +1556,7 @@ where
         )
         .with_shutdown_signal(shutdown_signal)
         .with_in_flight_requests(in_flight_requests);
-        let peer_addr = stream.peer_addr().ok();
+        let peer_addr = stream.peer_addr();
         let Some(connection_cx) = Cx::current() else {
             return;
         };
@@ -1301,7 +1572,7 @@ where
 /// The connection task owns the manager guard, and the streaming server mints
 /// each request context beneath the runtime-provided connection context.
 fn spawn_produced_connection<F, Fut>(
-    stream: crate::net::tcp::stream::TcpStream,
+    stream: H1Stream,
     guard: ConnectionGuard,
     handler: Arc<F>,
     config: Http1Config,
@@ -1321,7 +1592,7 @@ where
         )
         .with_shutdown_signal(shutdown_signal)
         .with_in_flight_requests(in_flight_requests);
-        let peer_addr = stream.peer_addr().ok();
+        let peer_addr = stream.peer_addr();
         let Some(connection_cx) = Cx::current() else {
             return;
         };
@@ -1334,7 +1605,7 @@ where
 
 /// Spawn a supervised live-SSE connection as a runtime task.
 fn spawn_sse_connection<F, Fut, S>(
-    stream: crate::net::tcp::stream::TcpStream,
+    stream: H1Stream,
     guard: ConnectionGuard,
     handler: Arc<F>,
     config: Http1Config,
@@ -1355,7 +1626,7 @@ where
         )
         .with_shutdown_signal(shutdown_signal)
         .with_in_flight_requests(in_flight_requests);
-        let peer_addr = stream.peer_addr().ok();
+        let peer_addr = stream.peer_addr();
         let Some(connection_cx) = Cx::current() else {
             return;
         };
