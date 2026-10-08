@@ -282,27 +282,35 @@ impl TrackedNamePermit<'_> {
 
     fn abort_inner(&mut self, reason: ObligationAbortReason) -> Result<(), TrackedNameError> {
         let mut _changed = None;
-        let removed = if let Some(permit) = self.permit.take() {
+        let token = self.obligation.take();
+        let (removed, accepted, notification) = if let Some(permit) = self.permit.take() {
             // This private registry has no raw waiters. Reuse the recorded time
             // rather than calling an arbitrary clock driver during unwinding.
             let at = permit.reserved_at();
             let name = permit.name().to_owned();
-            let removed = self.registry
-                .inner
-                .lock()
-                .abort_permit(permit, at)
-                .map(|_| ())
-                .map_err(TrackedNameError::Registry);
+            let (removed, accepted, notification) = {
+                let mut inner = self.registry.inner.lock();
+                let removed = inner
+                    .abort_permit(permit, at)
+                    .map(|_| ())
+                    .map_err(TrackedNameError::Registry);
+                // Settle before the lock that freed the name is released, so
+                // a contender that finds it free also finds the quota returned
+                // (br-asupersync-xphg21). No callback runs here.
+                let (accepted, notification) = settle_deferred(token, reason, removed.is_ok());
+                (removed, accepted, notification)
+            };
             if removed.is_ok() {
                 _changed = self.registry.publish_availability(&name);
             }
-            removed
+            (removed, accepted, notification)
         } else {
-            Ok(())
+            let (accepted, notification) = settle_deferred(token, reason, true);
+            (Ok(()), accepted, notification)
         };
-        let accepted = self.obligation.take().is_none_or(|token| {
-            token.abort(if removed.is_ok() { reason } else { ObligationAbortReason::Error })
-        });
+        if let Some(gateway) = notification {
+            gateway.notify();
+        }
         removed?;
         if accepted { Ok(()) } else { Err(TrackedNameError::SettlementRejected) }
     }
@@ -311,6 +319,27 @@ impl TrackedNamePermit<'_> {
 impl Drop for TrackedNamePermit<'_> {
     fn drop(&mut self) {
         let _ = self.abort_inner(ObligationAbortReason::Cancel);
+    }
+}
+
+/// Aborts a permit's credit without running the gateway notification (the
+/// caller runs it once no registry lock is held). Returns whether the runtime
+/// accepted the settlement; no token means nothing to settle.
+fn settle_deferred(
+    token: Option<ObligationToken>,
+    reason: ObligationAbortReason,
+    removed: bool,
+) -> (
+    bool,
+    Option<std::sync::Arc<crate::runtime::obligation_mailbox::ObligationGateway>>,
+) {
+    match token {
+        Some(token) => token.abort_deferred(if removed {
+            reason
+        } else {
+            ObligationAbortReason::Error
+        }),
+        None => (true, None),
     }
 }
 

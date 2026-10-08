@@ -240,3 +240,53 @@ fn retaining_guard_beyond_holder_completion_is_a_runtime_leak() {
     assert_eq!(registry.whereis("worker"), None);
     assert_eq!(lab.state.leak_count(), 1);
 }
+
+/// A released name is free only once its quota credit is back. Release used to
+/// remove the name, publish the wake and only then return the credit, so a
+/// contender registering in between got LimitReached at quota one, although
+/// the only credit was being returned with the name (br-asupersync-xphg21).
+/// The releaser is held inside that window by a thread that keeps the
+/// registry's waiter lock, which the release takes to publish the change.
+#[test]
+fn a_released_name_is_free_only_with_its_quota_returned() {
+    let (lab, cx, handle) = fixture(1);
+    let names = TrackedNameRegistry::new();
+    let owner = names.register(&cx, "worker").unwrap();
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (open_tx, open_rx) = std::sync::mpsc::channel::<()>();
+    let gate = {
+        let names = names.clone();
+        std::thread::spawn(move || {
+            let waiters = names.waiters.lock();
+            held_tx.send(()).unwrap();
+            // The gate also opens on its own, so a path that does need the
+            // waiter lock cannot hang the test.
+            let _ = open_rx.recv_timeout(std::time::Duration::from_secs(5));
+            drop(waiters);
+        })
+    };
+    held_rx.recv().unwrap();
+    let contender = {
+        let (names, cx) = (names.clone(), cx.clone());
+        std::thread::spawn(move || {
+            while names.whereis("worker").is_some() {
+                std::thread::yield_now();
+            }
+            let attempt = names.register(&cx, "worker");
+            let refused = attempt.as_ref().err().map(|error| format!("{error:?}"));
+            let _ = open_tx.send(());
+            if let Ok(lease) = attempt {
+                lease.release().unwrap();
+            }
+            refused
+        })
+    };
+    owner.release().unwrap();
+    gate.join().unwrap();
+    assert_eq!(
+        contender.join().unwrap(),
+        None,
+        "the contender found the name free but its quota still held"
+    );
+    finish(lab, &cx, handle, 2);
+}

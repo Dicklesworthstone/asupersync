@@ -338,25 +338,36 @@ impl TrackedNameLease {
         } else {
             lease.release().map(|_| ())
         };
-        let removed = self
-            .registry
-            .inner
-            .lock()
-            .unregister_owned_and_grant(&lease, lease.acquired_at());
-        // There are no raw waiters in this private registry, so removal needs
-        // no fresh clock callback. Never run user/runtime callbacks under it.
-        let result = grade.and(removed).map_err(TrackedNameError::Registry);
+        let token = self
+            .obligation
+            .take()
+            .expect("name guard owns runtime credit");
+        let (result, accepted, notification) = {
+            let mut inner = self.registry.inner.lock();
+            // There are no raw waiters in this private registry, so removal
+            // needs no fresh clock callback.
+            let removed = inner.unregister_owned_and_grant(&lease, lease.acquired_at());
+            let result = grade.and(removed).map_err(TrackedNameError::Registry);
+            // Settle the credit before the lock that freed the name is
+            // released: a contender that finds the name free must also find
+            // its quota returned (br-asupersync-xphg21). The deferred forms
+            // run no callback; the gateway is notified below, unlocked.
+            let (accepted, notification) = match (abort, result.is_ok()) {
+                (None, true) => token.commit_deferred(),
+                (Some(reason), true) => token.abort_deferred(reason),
+                (_, false) => token.abort_deferred(ObligationAbortReason::Error),
+            };
+            (result, accepted, notification)
+        };
+        // Never run user/runtime callbacks under the registry lock.
         let _changed = if result.is_ok() {
             self.registry.publish_availability(lease.name())
         } else {
             None
         };
-        let token = self.obligation.take().expect("name guard owns runtime credit");
-        let accepted = match (abort, result.is_ok()) {
-            (None, true) => token.commit(),
-            (Some(reason), true) => token.abort(reason),
-            (_, false) => token.abort(ObligationAbortReason::Error),
-        };
+        if let Some(gateway) = notification {
+            gateway.notify();
+        }
         result?;
         if accepted { Ok(()) } else { Err(TrackedNameError::SettlementRejected) }
     }
