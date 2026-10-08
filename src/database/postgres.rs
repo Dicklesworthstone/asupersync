@@ -2444,7 +2444,10 @@ impl ScramAuth {
 /// Parsed PostgreSQL connection URL.
 #[derive(Clone)]
 pub struct PgConnectOptions {
-    /// Host name or IP address.
+    /// Host name or IP address, or, as in libpq, the directory of the
+    /// server's Unix-domain socket when it is an absolute path (the client
+    /// then connects to `<host>/.s.PGSQL.<port>`, and `ssl_mode` does not
+    /// apply). Unix-domain sockets are available on Unix platforms only.
     pub host: String,
     /// Port number (default 5432).
     pub port: u16,
@@ -2601,6 +2604,10 @@ impl PgConnectOptions {
     /// Parse a connection URL.
     ///
     /// Format: `postgres://user:password@host:port/database?options`
+    ///
+    /// A Unix-domain socket directory is given percent-encoded as the host
+    /// (`postgres://user@%2Fvar%2Frun%2Fpostgresql/db`) or, with no host in
+    /// the URL, as the `host` parameter (`postgres:///db?host=/var/run/postgresql`).
     /// Use [`Self::parse_with_tls`] for `verify-ca`, `verify-full`, or
     /// `sslrootcert`, which cannot be represented by this legacy struct alone.
     pub fn parse(url: &str) -> Result<Self, PgError> {
@@ -2682,12 +2689,9 @@ impl PgConnectOptions {
                 None => (host_port, 5432),
             }
         };
-        if host.is_empty() {
-            return Err(PgError::InvalidUrl("missing host".to_string()));
-        }
-
         // Parse query parameters
         let mut ssl_mode = SslMode::Prefer;
+        let mut host_param = None;
         let mut application_name = None;
         let mut connect_timeout = None;
         let mut tls = PgTlsOptions::default();
@@ -2744,6 +2748,11 @@ impl PgConnectOptions {
                             (secs != 0).then_some(std::time::Duration::from_secs(secs));
                     }
                     "sslcrl" | "sslcrldir" => revocation_list = Some(key),
+                    // libpq's `postgres:///db?host=/var/run/postgresql`: the
+                    // host (usually a Unix-socket directory) as a parameter.
+                    // It is read only when the URL names no host, where it
+                    // used to be refused as a missing host.
+                    "host" => host_param = Some(percent_decode(value)),
                     _ => {} // ignore unknown parameters
                 }
             }
@@ -2768,9 +2777,16 @@ impl PgConnectOptions {
         if let Some(verification) = verification {
             tls = tls.verification(verification);
         }
+        let host = if host.is_empty() {
+            host_param
+                .filter(|host| !host.is_empty())
+                .ok_or_else(|| PgError::InvalidUrl("missing host".to_string()))?
+        } else {
+            percent_decode(host)
+        };
         Ok((
             Self {
-                host: percent_decode(host),
+                host,
                 port,
                 database: percent_decode(database),
                 user,
@@ -2794,13 +2810,17 @@ impl PgConnectOptions {
 // PostgreSQL Stream (plain or TLS)
 // ============================================================================
 
-/// Transport stream that may be plain TCP or TLS-encrypted.
+/// Transport stream that may be plain TCP, TLS-encrypted, or a Unix-domain
+/// socket.
 enum PgStream {
     /// Plain TCP connection.
     Plain(TcpStream),
     /// TLS-encrypted TCP connection.
     #[cfg(feature = "tls")]
     Tls(Box<TlsStream<TcpStream>>),
+    /// Unix-domain socket connection (a host given as a directory path).
+    #[cfg(unix)]
+    Unix(crate::net::unix::UnixStream),
 }
 
 impl PgStream {
@@ -2810,6 +2830,21 @@ impl PgStream {
             Self::Plain(s) => s.shutdown(how),
             #[cfg(feature = "tls")]
             Self::Tls(s) => s.get_ref().shutdown(how),
+            #[cfg(unix)]
+            Self::Unix(s) => s.shutdown(how),
+        }
+    }
+
+    /// Whether this is a Unix-domain socket, which TLS settings do not apply
+    /// to (as in libpq).
+    fn is_unix(&self) -> bool {
+        #[cfg(unix)]
+        {
+            matches!(self, Self::Unix(_))
+        }
+        #[cfg(not(unix))]
+        {
+            false
         }
     }
 
@@ -2855,6 +2890,14 @@ impl PgStream {
                 // See doc — TLS path requires async TLS encrypt; left
                 // for a future async-helper refactor.
             }
+            #[cfg(unix)]
+            Self::Unix(s) => {
+                // The socket is already non-blocking; a peer that stopped
+                // reading leaves the frame unsent, as on TCP.
+                use std::io::Write;
+                let mut writer = s.as_std();
+                let _ = writer.write_all(&TERMINATE_FRAME);
+            }
         }
     }
 
@@ -2883,6 +2926,8 @@ impl PgStream {
         match self {
             Self::Plain(_) => None,
             Self::Tls(s) => s.peer_leaf_certificate_der(),
+            #[cfg(unix)]
+            Self::Unix(_) => None,
         }
     }
 }
@@ -2898,6 +2943,8 @@ impl AsyncRead for PgStream {
             Self::Plain(s) => Pin::new(s).poll_read(cx, buf),
             #[cfg(feature = "tls")]
             Self::Tls(s) => Pin::new(s).poll_read(cx, buf),
+            #[cfg(unix)]
+            Self::Unix(s) => Pin::new(s).poll_read(cx, buf),
         }
     }
 }
@@ -2912,6 +2959,8 @@ impl AsyncWrite for PgStream {
             Self::Plain(s) => Pin::new(s).poll_write(cx, buf),
             #[cfg(feature = "tls")]
             Self::Tls(s) => Pin::new(s).poll_write(cx, buf),
+            #[cfg(unix)]
+            Self::Unix(s) => Pin::new(s).poll_write(cx, buf),
         }
     }
 
@@ -2924,6 +2973,8 @@ impl AsyncWrite for PgStream {
             Self::Plain(s) => Pin::new(s).poll_write_vectored(cx, bufs),
             #[cfg(feature = "tls")]
             Self::Tls(s) => Pin::new(s).poll_write_vectored(cx, bufs),
+            #[cfg(unix)]
+            Self::Unix(s) => Pin::new(s).poll_write_vectored(cx, bufs),
         }
     }
 
@@ -2932,6 +2983,8 @@ impl AsyncWrite for PgStream {
             Self::Plain(s) => s.is_write_vectored(),
             #[cfg(feature = "tls")]
             Self::Tls(s) => s.is_write_vectored(),
+            #[cfg(unix)]
+            Self::Unix(s) => s.is_write_vectored(),
         }
     }
 
@@ -2940,6 +2993,8 @@ impl AsyncWrite for PgStream {
             Self::Plain(s) => Pin::new(s).poll_flush(cx),
             #[cfg(feature = "tls")]
             Self::Tls(s) => Pin::new(s).poll_flush(cx),
+            #[cfg(unix)]
+            Self::Unix(s) => Pin::new(s).poll_flush(cx),
         }
     }
 
@@ -2948,6 +3003,8 @@ impl AsyncWrite for PgStream {
             Self::Plain(s) => Pin::new(s).poll_shutdown(cx),
             #[cfg(feature = "tls")]
             Self::Tls(s) => Pin::new(s).poll_shutdown(cx),
+            #[cfg(unix)]
+            Self::Unix(s) => Pin::new(s).poll_shutdown(cx),
         }
     }
 }
@@ -3257,6 +3314,36 @@ struct PgConnectionInner {
     statement_timeout_uncertain: bool,
     /// A managed SET ran inside the current transaction block.
     statement_timeout_set_in_block: bool,
+    /// Set when a pool that resets sessions took this connection back
+    /// ([`PgConnectionManager::reset_session_on_return`]): the next request
+    /// first runs `DISCARD ALL`, so the previous borrower's session state
+    /// cannot reach the next one.
+    pending_session_reset: bool,
+}
+
+/// The socket a host names when it is an absolute path: libpq's
+/// `<directory>/.s.PGSQL.<port>`. Any other host is a TCP host.
+fn unix_socket_path(host: &str, port: u16) -> Option<std::path::PathBuf> {
+    host.starts_with('/')
+        .then(|| std::path::Path::new(host).join(format!(".s.PGSQL.{port}")))
+}
+
+/// The sockets a CancelRequest travels over, closed after the frame.
+trait CancelRequestSocket {
+    fn shutdown_both(&self);
+}
+
+impl CancelRequestSocket for TcpStream {
+    fn shutdown_both(&self) {
+        let _ = self.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+#[cfg(unix)]
+impl CancelRequestSocket for crate::net::unix::UnixStream {
+    fn shutdown_both(&self) {
+        let _ = self.shutdown(std::net::Shutdown::Both);
+    }
 }
 
 /// Coordinates needed to send a PG `CancelRequest` on a fresh socket.
@@ -3314,11 +3401,6 @@ impl Drop for PgConnectionInner {
     }
 }
 
-    /// Set when a pool that resets sessions took this connection back
-    /// ([`PgConnectionManager::reset_session_on_return`]): the next request
-    /// first runs `DISCARD ALL`, so the previous borrower's session state
-    /// cannot reach the next one.
-    pending_session_reset: bool,
 #[cfg(any(test, feature = "test-internals"))]
 fn test_cancel_target() -> CancelTarget {
     CancelTarget {
@@ -3811,6 +3893,16 @@ impl PgNotifications<'_> {
     /// A disconnected connection returns a database error; no automatic reconnect
     /// hides notifications lost while disconnected.
     pub async fn next(&mut self, cx: &Cx) -> Outcome<PgNotification, PgNotificationError> {
+        // A resetting pool's next borrower must not receive the previous
+        // borrower's notifications either.
+        if self.connection.inner.pending_session_reset {
+            match self.connection.reset_pooled_session(cx).await {
+                Outcome::Ok(()) => {}
+                Outcome::Err(err) => return Outcome::Err(PgNotificationError::Database(err)),
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+            }
+        }
         loop {
             if cx.checkpoint().is_err() {
                 return Outcome::Cancelled(cancelled_reason(cx));
@@ -3893,16 +3985,6 @@ fn backend_message_body_len(len_i32: i32) -> Result<usize, PgError> {
             "invalid message length: {len_i32}"
         )));
     }
-        // A resetting pool's next borrower must not receive the previous
-        // borrower's notifications either.
-        if self.connection.inner.pending_session_reset {
-            match self.connection.reset_pooled_session(cx).await {
-                Outcome::Ok(()) => {}
-                Outcome::Err(err) => return Outcome::Err(PgNotificationError::Database(err)),
-                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
-                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
-            }
-        }
     Ok(len_i32 as usize - 4)
 }
 
@@ -4145,11 +4227,38 @@ impl PgConnection {
         process_id: i32,
         secret_key: i32,
     ) -> Result<(), (&'static str, std::io::Error)> {
+        if let Some(path) = unix_socket_path(&target.host, target.port) {
+            #[cfg(unix)]
+            {
+                let stream = crate::net::unix::UnixStream::connect(&path)
+                    .await
+                    .map_err(|err| ("connect", err))?;
+                return Self::write_cancel_request(stream, process_id, secret_key).await;
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = path;
+                return Err((
+                    "connect",
+                    io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "Unix-domain sockets are not supported on this platform",
+                    ),
+                ));
+            }
+        }
         let addr = format!("{}:{}", target.host, target.port);
-        let mut stream = crate::net::TcpStream::connect_timeout(addr, target.connect_timeout)
+        let stream = crate::net::TcpStream::connect_timeout(addr, target.connect_timeout)
             .await
             .map_err(|err| ("connect", err))?;
+        Self::write_cancel_request(stream, process_id, secret_key).await
+    }
 
+    async fn write_cancel_request<S: AsyncWrite + Unpin + CancelRequestSocket>(
+        mut stream: S,
+        process_id: i32,
+        secret_key: i32,
+    ) -> Result<(), (&'static str, std::io::Error)> {
         // CancelRequest frame, all big-endian:
         //   length          = 16  (i32)
         //   request_code    = 80877102  (i32, magic per protocol)
@@ -4179,7 +4288,7 @@ impl PgConnection {
             }
             written += n;
         }
-        let _ = stream.shutdown(std::net::Shutdown::Both);
+        stream.shutdown_both();
         Ok(())
     }
 
@@ -4248,10 +4357,59 @@ impl PgConnection {
     }
 
     async fn ensure_open_for_request(&mut self, cx: &Cx) -> Outcome<PgOpenState, PgError> {
+        if self.inner.pending_session_reset {
+            match self.reset_pooled_session(cx).await {
+                Outcome::Ok(()) => {}
+                Outcome::Err(err) => return Outcome::Err(err),
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+            }
+        }
         if !self.inner.closed {
             return Outcome::Ok(PgOpenState::AlreadyOpen);
         }
         self.reconnect_idle(cx).await
+    }
+
+    /// `DISCARD ALL` for a connection a resetting pool handed out again:
+    /// session settings (including `set_config` values and the role),
+    /// temporary tables, `LISTEN` registrations, session advisory locks, open
+    /// cursors and prepared statements all end with the previous borrower.
+    /// The client forgets what DISCARD removed: prepared statements (held
+    /// handles re-prepare on use), subscriptions, buffered notifications and
+    /// the applied `statement_timeout`. A connection that is closed needs no
+    /// DISCARD: its transparent reconnect opens a fresh session, and it no
+    /// longer replays the previous borrower's `LISTEN` channels.
+    async fn reset_pooled_session(&mut self, cx: &Cx) -> Outcome<(), PgError> {
+        if !self.inner.closed {
+            // The minimal simple-Query exchange, which deliberately skips the
+            // command-tag reactions (DISCARD would otherwise mark this
+            // connection for discard).
+            match self
+                .run_managed_statement_timeout_set(cx, "DISCARD ALL")
+                .await
+            {
+                Outcome::Ok(()) => {}
+                other => return other,
+            }
+        }
+        // Includes notifications that arrived during the DISCARD exchange.
+        self.inner.subscribed_channels.clear();
+        self.inner.notifications = NotificationBuffer::default();
+        if self.inner.closed {
+            self.inner.pending_session_reset = false;
+            return Outcome::Ok(());
+        }
+        // The server deallocated every prepared statement: forget them
+        // without sending DEALLOCATE, and make held handles re-prepare.
+        let _ = self.inner.prepared_cache.clear_returning_names();
+        self.inner.deallocate_retry_queue.clear();
+        self.inner.session_generation = self.inner.session_generation.wrapping_add(1);
+        self.inner.applied_statement_timeout_ms = None;
+        self.inner.statement_timeout_uncertain = false;
+        self.inner.statement_timeout_set_in_block = false;
+        self.inner.pending_session_reset = false;
+        Outcome::Ok(())
     }
 
     async fn reconnect_idle(&mut self, cx: &Cx) -> Outcome<PgOpenState, PgError> {
@@ -4357,61 +4515,12 @@ impl PgConnection {
         Ok(NotificationResponseFields {
             process_id,
             channel,
-        if self.inner.pending_session_reset {
-            match self.reset_pooled_session(cx).await {
-                Outcome::Ok(()) => {}
-                Outcome::Err(err) => return Outcome::Err(err),
-                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
-                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
-            }
-        }
             payload,
         })
     }
 
     fn handle_notification_response(&mut self, data: &[u8]) -> Result<(), PgError> {
         let fields = Self::parse_notification_response_fields(data)?;
-    /// `DISCARD ALL` for a connection a resetting pool handed out again:
-    /// session settings (including `set_config` values and the role),
-    /// temporary tables, `LISTEN` registrations, session advisory locks, open
-    /// cursors and prepared statements all end with the previous borrower.
-    /// The client forgets what DISCARD removed: prepared statements (held
-    /// handles re-prepare on use), subscriptions, buffered notifications and
-    /// the applied `statement_timeout`. A connection that is closed needs no
-    /// DISCARD: its transparent reconnect opens a fresh session, and it no
-    /// longer replays the previous borrower's `LISTEN` channels.
-    async fn reset_pooled_session(&mut self, cx: &Cx) -> Outcome<(), PgError> {
-        if !self.inner.closed {
-            // The minimal simple-Query exchange, which deliberately skips the
-            // command-tag reactions (DISCARD would otherwise mark this
-            // connection for discard).
-            match self
-                .run_managed_statement_timeout_set(cx, "DISCARD ALL")
-                .await
-            {
-                Outcome::Ok(()) => {}
-                other => return other,
-            }
-        }
-        // Includes notifications that arrived during the DISCARD exchange.
-        self.inner.subscribed_channels.clear();
-        self.inner.notifications = NotificationBuffer::default();
-        if self.inner.closed {
-            self.inner.pending_session_reset = false;
-            return Outcome::Ok(());
-        }
-        // The server deallocated every prepared statement: forget them
-        // without sending DEALLOCATE, and make held handles re-prepare.
-        let _ = self.inner.prepared_cache.clear_returning_names();
-        self.inner.deallocate_retry_queue.clear();
-        self.inner.session_generation = self.inner.session_generation.wrapping_add(1);
-        self.inner.applied_statement_timeout_ms = None;
-        self.inner.statement_timeout_uncertain = false;
-        self.inner.statement_timeout_set_in_block = false;
-        self.inner.pending_session_reset = false;
-        Outcome::Ok(())
-    }
-
         self.inner.notifications.push(fields);
         Ok(())
     }
@@ -4471,6 +4580,22 @@ impl PgConnection {
         connect(addr, options.connect_timeout)
             .await
             .map_err(PgError::Io)
+    }
+
+    #[cfg(unix)]
+    async fn connect_unix(path: &std::path::Path) -> Result<PgStream, PgError> {
+        crate::net::unix::UnixStream::connect(path)
+            .await
+            .map(PgStream::Unix)
+            .map_err(PgError::Io)
+    }
+
+    #[cfg(not(unix))]
+    async fn connect_unix(_path: &std::path::Path) -> Result<PgStream, PgError> {
+        Err(PgError::Io(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Unix-domain sockets are not supported on this platform",
+        )))
     }
 
     async fn connect_tcp(options: &PgConnectOptions) -> Result<TcpStream, PgError> {
@@ -4584,39 +4709,49 @@ impl PgConnection {
             ));
         }
 
-        let tcp_stream = match Self::connect_tcp(&options).await {
-            Ok(stream) => stream,
-            Err(PgError::Io(error)) => return outcome_from_error(io_or_cancelled(cx, error)),
-            Err(error) => return Outcome::Err(error),
-        };
+        // A host that is an absolute path names the directory of a Unix-domain
+        // socket, as in libpq. TLS settings do not apply to it.
+        let stream = if let Some(path) = unix_socket_path(&options.host, options.port) {
+            match Self::connect_unix(&path).await {
+                Ok(stream) => stream,
+                Err(PgError::Io(error)) => return outcome_from_error(io_or_cancelled(cx, error)),
+                Err(error) => return Outcome::Err(error),
+            }
+        } else {
+            let tcp_stream = match Self::connect_tcp(&options).await {
+                Ok(stream) => stream,
+                Err(PgError::Io(error)) => return outcome_from_error(io_or_cancelled(cx, error)),
+                Err(error) => return Outcome::Err(error),
+            };
 
-        // TLS negotiation based on ssl_mode
-        let stream = match options.ssl_mode {
-            SslMode::Disable => PgStream::Plain(tcp_stream),
-            #[cfg(feature = "tls")]
-            SslMode::Prefer | SslMode::Require => {
-                match Self::negotiate_tls(
-                    cx,
-                    tcp_stream,
-                    &options,
-                    &tls,
-                    connector.expect("TLS connector was configured"),
-                )
-                .await
-                {
-                    Ok(s) => s,
-                    Err(PgError::Cancelled(reason)) => return Outcome::Cancelled(reason),
-                    Err(e) => return outcome_from_error(e),
+            // TLS negotiation based on ssl_mode
+            match options.ssl_mode {
+                SslMode::Disable => PgStream::Plain(tcp_stream),
+                #[cfg(feature = "tls")]
+                SslMode::Prefer | SslMode::Require => {
+                    match Self::negotiate_tls(
+                        cx,
+                        tcp_stream,
+                        &options,
+                        &tls,
+                        connector.expect("TLS connector was configured"),
+                    )
+                    .await
+                    {
+                        Ok(s) => s,
+                        Err(PgError::Cancelled(reason)) => return Outcome::Cancelled(reason),
+                        Err(e) => return outcome_from_error(e),
+                    }
                 }
+                #[cfg(not(feature = "tls"))]
+                SslMode::Require => {
+                    return Outcome::Err(PgError::Tls(
+                        "TLS required but the `tls` feature is not enabled".into(),
+                    ));
+                }
+                #[cfg(not(feature = "tls"))]
+                SslMode::Prefer => PgStream::Plain(tcp_stream),
             }
-            #[cfg(not(feature = "tls"))]
-            SslMode::Require => {
-                return Outcome::Err(PgError::Tls(
-                    "TLS required but the `tls` feature is not enabled".into(),
-                ));
-            }
-            #[cfg(not(feature = "tls"))]
-            SslMode::Prefer => PgStream::Plain(tcp_stream),
         };
 
         let cancel_target = CancelTarget::from_options(&options);
@@ -4648,6 +4783,7 @@ impl PgConnection {
                 applied_statement_timeout_ms: None,
                 statement_timeout_uncertain: false,
                 statement_timeout_set_in_block: false,
+                pending_session_reset: false,
             },
         };
 
@@ -4783,7 +4919,6 @@ impl PgConnection {
                         return Poll::Ready(Err(cancelled_error(cx)));
                     }
                     cancel_wake.refresh(task_cx.waker());
-                pending_session_reset: false,
                     match Pin::new(&mut tcp).poll_write(task_cx, &ssl_request[pos..]) {
                         Poll::Ready(Ok(written)) => Poll::Ready(Ok(written)),
                         Poll::Ready(Err(err)) => Poll::Ready(Err(PgError::Io(err))),
@@ -6553,6 +6688,10 @@ impl PgConnection {
 
     #[inline]
     fn transport_matches_ssl_mode(&self, ssl_mode: SslMode) -> bool {
+        // TLS settings do not apply to a Unix-domain socket (as in libpq).
+        if self.inner.stream.is_unix() {
+            return true;
+        }
         match ssl_mode {
             SslMode::Disable => !self.inner.stream.is_tls(),
             SslMode::Prefer => true,
@@ -9928,6 +10067,8 @@ pub struct PgConnectionManager {
     /// Options used to mint each new connection.
     options: PgConnectOptions,
     tls_options: PgTlsOptions,
+    /// Whether a returned connection runs `DISCARD ALL` before its next use.
+    reset_session_on_return: bool,
 }
 
 impl fmt::Debug for PgConnectionManager {
@@ -9935,6 +10076,7 @@ impl fmt::Debug for PgConnectionManager {
         f.debug_struct("PgConnectionManager")
             .field("options", &self.options)
             .field("tls_options", &self.tls_options)
+            .field("reset_session_on_return", &self.reset_session_on_return)
             .finish()
     }
 }
@@ -9946,7 +10088,28 @@ impl PgConnectionManager {
         Self {
             options,
             tls_options: PgTlsOptions::default(),
+            reset_session_on_return: false,
         }
+    }
+
+    /// Reset each connection's server session between pool borrowers.
+    ///
+    /// When enabled, a connection returned to the pool runs `DISCARD ALL`
+    /// before the next borrower's first request (one extra round trip per
+    /// checkout that is used), the way PgBouncer's `server_reset_query` does.
+    /// Without it, which is the default, session state a borrower creates
+    /// survives into the next borrower of the same connection: `set_config`
+    /// values (the usual row-level-security tenant setting), session
+    /// `SET`s made outside this client's tracking, temporary tables, `LISTEN`
+    /// registrations, session advisory locks, `DECLARE ... WITH HOLD`
+    /// cursors and SQL-level `PREPARE`d statements. Enable it when borrowers
+    /// must not observe one another's session. A reset also clears the
+    /// returning borrower's
+    /// [`PgConnection::set_statement_timeout_override`].
+    #[must_use]
+    pub fn reset_session_on_return(mut self, enabled: bool) -> Self {
+        self.reset_session_on_return = enabled;
+        self
     }
 
     /// Configure the trust policy retained by every pooled connection and reconnect.
@@ -10032,6 +10195,13 @@ impl crate::database::pool::AsyncConnectionManager for PgConnectionManager {
         if !conn.transport_matches_ssl_mode(self.options.ssl_mode) {
             return false;
         }
+        if self.reset_session_on_return {
+            // The next borrower also starts from the manager's statement
+            // timeout, not this borrower's override (mysql audit r10 M3 notes
+            // the same gap); the next query's reconciliation sends it.
+            conn.inner.statement_timeout_override = None;
+            conn.inner.pending_session_reset = true;
+        }
         true
     }
 
@@ -10067,8 +10237,6 @@ fn fuzz_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
     (
         PgConnection {
             inner: PgConnectionInner {
-    /// Whether a returned connection runs `DISCARD ALL` before its next use.
-    reset_session_on_return: bool,
                 stream: PgStream::Plain(stream),
                 options: test_pg_connect_options(),
                 tls_options: PgTlsOptions::default(),
@@ -10076,7 +10244,6 @@ fn fuzz_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
                 secret_key: 0,
                 cancel_target: test_cancel_target(),
                 parameters: BTreeMap::new(),
-            .field("reset_session_on_return", &self.reset_session_on_return)
                 transaction_status: b'I',
                 closed: false,
                 explicitly_closed: false,
@@ -10088,35 +10255,15 @@ fn fuzz_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
                 prepared_cache: PreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
                 deallocate_retry_queue: VecDeque::new(),
                 consecutive_deallocate_failures: 0,
-            reset_session_on_return: false,
                 unhealthy: false,
                 subscribed_channels: BTreeSet::new(),
                 notifications: NotificationBuffer::default(),
-    /// Reset each connection's server session between pool borrowers.
-    ///
-    /// When enabled, a connection returned to the pool runs `DISCARD ALL`
-    /// before the next borrower's first request (one extra round trip per
-    /// checkout that is used), the way PgBouncer's `server_reset_query` does.
-    /// Without it, which is the default, session state a borrower creates
-    /// survives into the next borrower of the same connection: `set_config`
-    /// values (the usual row-level-security tenant setting), session
-    /// `SET`s made outside this client's tracking, temporary tables, `LISTEN`
-    /// registrations, session advisory locks, `DECLARE ... WITH HOLD`
-    /// cursors and SQL-level `PREPARE`d statements. Enable it when borrowers
-    /// must not observe one another's session. A reset also clears the
-    /// returning borrower's
-    /// [`PgConnection::set_statement_timeout_override`].
-    #[must_use]
-    pub fn reset_session_on_return(mut self, enabled: bool) -> Self {
-        self.reset_session_on_return = enabled;
-        self
-    }
-
                 backend_frame: BackendFrame::default(),
                 statement_timeout_override: None,
                 applied_statement_timeout_ms: None,
                 statement_timeout_uncertain: false,
                 statement_timeout_set_in_block: false,
+                pending_session_reset: false,
             },
         },
         peer_stream,
@@ -10195,13 +10342,6 @@ pub fn fuzz_parse_error_response(data: &[u8]) -> Result<PgError, PgError> {
 pub fn fuzz_parse_parameter_description(data: &[u8]) -> Result<Vec<u32>, PgError> {
     PgConnection::parse_parameter_description(data)
 }
-        if self.reset_session_on_return {
-            // The next borrower also starts from the manager's statement
-            // timeout, not this borrower's override (mysql audit r10 M3 notes
-            // the same gap); the next query's reconciliation sends it.
-            conn.inner.statement_timeout_override = None;
-            conn.inner.pending_session_reset = true;
-        }
 
 /// Fuzz-target re-exporter for CopyOutResponse body parsing.
 #[cfg(feature = "test-internals")]
@@ -10263,7 +10403,6 @@ pub fn fuzz_parse_command_complete_tag(data: &[u8]) -> Result<u64, PgError> {
 
 /// Fuzz-target re-exporter for frontend StartupMessage parsing.
 #[cfg(feature = "test-internals")]
-                pending_session_reset: false,
 #[doc(hidden)]
 pub fn fuzz_parse_startup_message(data: &[u8]) -> Result<FuzzStartupMessage, PgError> {
     parse_startup_message(data).map(|message| FuzzStartupMessage {

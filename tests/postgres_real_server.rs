@@ -90,6 +90,8 @@ fn postgres_url_host_is_local(url: &str) -> bool {
         Ok((opts, _)) => {
             opts.host.eq_ignore_ascii_case("localhost")
                 || matches!(opts.host.as_str(), "127.0.0.1" | "::1")
+                // A Unix-domain socket directory is local by construction.
+                || opts.host.starts_with('/')
         }
         Err(_) => false,
     }
@@ -1395,3 +1397,60 @@ fn pg_real_pool_session_reset_isolates_borrowers() {
     });
 }
 
+/// A host that is an absolute path names the server's Unix-domain socket
+/// directory, as in libpq. Set `POSTGRES_SOCKET_DIR` (for example
+/// `/var/run/postgresql`) to the server's `unix_socket_directories`; the test
+/// connects with the credentials of `POSTGRES_URL` through
+/// `<dir>/.s.PGSQL.<port>` and checks that the server sees a socket client
+/// (`inet_client_addr()` is NULL). Setting `POSTGRES_URL` itself to
+/// `postgres://user:password@/db?host=<dir>` runs every test of this suite
+/// over the socket, the CancelRequest journeys included.
+#[test]
+fn pg_real_unix_socket_host_connects_over_the_socket() {
+    let cfg = RealPgConfig::from_env();
+    let test_name = "pg_real_unix_socket_host_connects_over_the_socket";
+    if skip_if_disabled(&cfg, test_name) {
+        return;
+    }
+    let Ok(dir) = std::env::var("POSTGRES_SOCKET_DIR") else {
+        eprintln!(
+            r#"{{"suite":"postgres_real","test":"{test_name}","event":"skip","reason":"POSTGRES_SOCKET_DIR not set"}}"#
+        );
+        return;
+    };
+    let log = PgTestLogger::new("postgres_real", test_name);
+
+    // The URL spellings that name a socket directory.
+    let encoded = dir.replace('/', "%2F");
+    let by_host = PgConnectOptions::parse(&format!("postgres://u@{encoded}:6543/db"))
+        .expect("percent-encoded socket directory");
+    assert_eq!((by_host.host.as_str(), by_host.port), (dir.as_str(), 6543));
+    let by_param = PgConnectOptions::parse(&format!("postgres:///db?host={dir}"))
+        .expect("host parameter");
+    assert_eq!(by_param.host, dir);
+    assert!(PgConnectOptions::parse("postgres:///db").is_err(), "still no host");
+
+    run_test_with_cx(|cx| async move {
+        let mut options = PgConnectOptions::parse(&cfg.url).expect("parse POSTGRES_URL");
+        options.host = dir.clone();
+        log.phase("connect_over_socket");
+        let mut conn = unwrap_pg(
+            PgConnection::connect_with_options(&cx, options).await,
+            &log,
+            "connect",
+        );
+        let rows = unwrap_pg(
+            conn.query_unchecked(
+                &cx,
+                "SELECT (inet_client_addr() IS NULL) AS via_socket, 7::int4 AS v",
+            )
+            .await,
+            &log,
+            "query",
+        );
+        assert!(rows[0].get_bool("via_socket").expect("via_socket"));
+        assert_eq!(rows[0].get_i32("v").expect("v"), 7);
+
+        log.end("pass");
+    });
+}
