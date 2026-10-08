@@ -403,6 +403,21 @@ impl RecvPacketRuns {
 /// A run whose slices cost more than the bytes they hold is joined into one.
 const RECV_PIECE_OVERHEAD: u64 = 64;
 
+/// The part `range` of a received frame that reassembly keeps. A whole frame
+/// stays a zero-copy slice: `NativeQuicConnection::decode_frames_bytes` keeps
+/// only frames that use at least a quarter of their datagram. A trimmed part is
+/// copied, because a frame that mostly repeats bytes already received would
+/// otherwise pin its whole datagram for its few new bytes. Every slice
+/// reassembly stores then keeps at most four times its length resident; the
+/// remainder a partial read leaves stays a slice until the application reads it.
+fn recv_slice(data: &Bytes, range: std::ops::Range<usize>) -> Bytes {
+    if range.len() == data.len() {
+        data.clone()
+    } else {
+        Bytes::copy_from_slice(&data[range])
+    }
+}
+
 impl RecvRun {
     fn push_back(&mut self, bytes: Bytes) {
         self.len += bytes.len() as u64;
@@ -1109,7 +1124,10 @@ impl QuicStream {
         for (known_start, known_end) in overlapping {
             if cursor < known_start {
                 let gap_len = (known_start - cursor) as usize;
-                self.insert_recv_gap(cursor, data.slice(data_cursor..data_cursor + gap_len));
+                self.insert_recv_gap(
+                    cursor,
+                    recv_slice(&data, data_cursor..data_cursor + gap_len),
+                );
                 cursor = known_start;
                 data_cursor += gap_len;
             }
@@ -1122,7 +1140,10 @@ impl QuicStream {
 
         if cursor < end {
             let tail_len = (end - cursor) as usize;
-            self.insert_recv_gap(cursor, data.slice(data_cursor..data_cursor + tail_len));
+            self.insert_recv_gap(
+                cursor,
+                recv_slice(&data, data_cursor..data_cursor + tail_len),
+            );
         }
         Ok(())
     }
@@ -2934,6 +2955,51 @@ mod tests {
             );
             assert!(stream.recv_chunks.is_empty());
         }
+    }
+
+    /// d0's review of ff1cbbacd (tzjbn9): a frame that passes the datagram
+    /// check can mostly repeat buffered bytes; its few new bytes must not stay
+    /// a slice of its 64 KiB datagram.
+    #[test]
+    fn the_new_bytes_of_a_mostly_duplicate_frame_do_not_pin_its_datagram() {
+        let first = Bytes::from(vec![1u8; 65_536]);
+        let second = Bytes::from(vec![2u8; 65_536]);
+        let mut stream = QuicStream::new(StreamId(0), 0, 1 << 20);
+        stream
+            .receive_bytes(10, first.slice(..20_000), false)
+            .expect("out-of-order frame");
+        // The same bytes again with one new byte in front, and the same bytes
+        // with one new byte behind.
+        stream
+            .receive_bytes(9, second.slice(..20_001), false)
+            .expect("mostly duplicate frame, new byte first");
+        stream
+            .receive_bytes(10, second.slice(..20_001), false)
+            .expect("mostly duplicate frame, new byte last");
+
+        // (length, first byte, points into the first datagram, into the second)
+        let pieces: Vec<(usize, u8, bool, bool)> = stream.recv_chunks[&9]
+            .pieces
+            .iter()
+            .map(|piece| {
+                let ptr = piece.as_ptr();
+                (
+                    piece.len(),
+                    piece[0],
+                    first.as_ptr_range().contains(&ptr),
+                    second.as_ptr_range().contains(&ptr),
+                )
+            })
+            .collect();
+        assert_eq!(
+            pieces,
+            [
+                (1, 2, false, false),
+                (20_000, 1, true, false),
+                (1, 2, false, false)
+            ],
+            "each new byte is copied out; the whole first frame stays a slice"
+        );
     }
 
     #[test]
