@@ -10919,3 +10919,153 @@ fn a_panicking_tick_gate_leaves_the_workers_running() {
     }
     crate::test_complete!("a_panicking_tick_gate_leaves_the_workers_running");
 }
+
+/// br-asupersync-k27oxe: a race branch's context kept past its sealed region
+/// still spawns once that region has closed. A branch region records its
+/// nearest unsealed ancestor (a nested branch skips its sealed parent), a task
+/// admitted into one carries it on its context, and both admission paths send
+/// a spawn whose requested region has gone to it. Without a fallback the spawn
+/// is still denied, and a branch region still draining denies it even with
+/// one.
+#[test]
+fn a_spawn_from_a_closed_branch_regions_context_goes_to_its_unsealed_ancestor() {
+    use crate::runtime::spawn_mailbox::{
+        AdmittedTaskSlot, LocalSpawnRequest, SpawnMailbox, SpawnRequest,
+    };
+
+    let mut state = RuntimeState::new();
+    let root = state.create_root_region(Budget::INFINITE);
+    let outer = state
+        .create_race_branch_region(root)
+        .expect("outer branch region");
+    let inner = state
+        .create_race_branch_region(outer)
+        .expect("nested branch region");
+    let fallback = |state: &RuntimeState, region: RegionId| {
+        state
+            .regions
+            .get(region.arena_index())
+            .and_then(RegionRecord::spawn_fallback)
+    };
+    assert_eq!(fallback(&state, root), None, "an unsealed region has none");
+    assert_eq!(fallback(&state, outer), Some(root));
+    assert_eq!(
+        fallback(&state, inner),
+        Some(root),
+        "a nested branch skips its sealed parent"
+    );
+
+    // A task admitted into a branch region carries the fallback.
+    let request = SpawnRequest::new_with_factory(
+        SpawnMailbox::new().allocate_task_id(),
+        inner,
+        Budget::INFINITE,
+        Box::new(|_| panic!("admission must not invoke the factory")),
+    )
+    .with_admitted_slot(Arc::new(AdmittedTaskSlot::new()));
+    let task_id = match state.admit_spawn_request(request.into_parts()) {
+        SpawnAdmission::Admitted { task_id, .. } => task_id,
+        SpawnAdmission::Denied { error, .. } => {
+            panic!("admission into the branch region was denied: {error:?}")
+        }
+    };
+    let carried = state
+        .task(task_id)
+        .unwrap()
+        .cx_inner
+        .as_ref()
+        .unwrap()
+        .read()
+        .spawn_fallback_region;
+    assert_eq!(carried, Some(root));
+
+    // A sealed region with no work closes by itself and leaves the table.
+    let gone = state
+        .create_race_branch_region(outer)
+        .expect("a second branch region");
+    state.advance_region_state(gone);
+    assert!(
+        state.regions.get(gone.arena_index()).is_none(),
+        "the idle sealed region closed"
+    );
+
+    for local in [false, true] {
+        for with_fallback in [false, true] {
+            let slot = Arc::new(
+                AdmittedTaskSlot::new().with_spawn_fallback(with_fallback.then_some(root)),
+            );
+            let provisional = SpawnMailbox::new().allocate_task_id();
+            let admitted = if local {
+                let _worker = crate::runtime::scheduler::three_lane::ScopedWorkerId::new(0);
+                let request = LocalSpawnRequest {
+                    task_id: provisional,
+                    region: gone,
+                    budget: Budget::INFINITE,
+                    factory: Box::new(|_| panic!("admission must not invoke the local factory")),
+                    on_unadmitted_cancel: None,
+                    on_admission_error: None,
+                    pending_reservation: None,
+                    admitted_slot: Some(slot),
+                };
+                match state.admit_local_spawn_request_in(
+                    request,
+                    &mut AdmissionTaskTarget::Embedded,
+                    &AdmissionRegionTarget::Embedded,
+                ) {
+                    LocalSpawnAdmission::Admitted { task_id, .. } => Ok(task_id),
+                    LocalSpawnAdmission::Denied { error, .. } => Err(error),
+                }
+            } else {
+                let request = SpawnRequest::new_with_factory(
+                    provisional,
+                    gone,
+                    Budget::INFINITE,
+                    Box::new(|_| panic!("admission must not invoke the Send factory")),
+                )
+                .with_admitted_slot(slot);
+                match state.admit_spawn_request(request.into_parts()) {
+                    SpawnAdmission::Admitted { task_id, .. } => Ok(task_id),
+                    SpawnAdmission::Denied { error, .. } => Err(error),
+                }
+            };
+            let case = format!("local={local} with_fallback={with_fallback}");
+            if with_fallback {
+                let task_id = admitted.unwrap_or_else(|error| panic!("{case}: denied: {error:?}"));
+                assert_eq!(
+                    state.task(task_id).unwrap().owner,
+                    root,
+                    "{case}: admitted into the fallback"
+                );
+            } else {
+                assert!(
+                    matches!(admitted, Err(SpawnError::RegionNotFound(region)) if region == gone),
+                    "{case}: {admitted:?}"
+                );
+            }
+        }
+    }
+
+    // A branch region still closing (a race loser being drained) keeps
+    // denying, even with a fallback: no work escapes its drain. `inner` still
+    // holds the task admitted above, so it cannot finish closing.
+    let _effects = state.cancel_request(inner, &CancelReason::user("lost the race"), None);
+    let request = SpawnRequest::new_with_factory(
+        SpawnMailbox::new().allocate_task_id(),
+        inner,
+        Budget::INFINITE,
+        Box::new(|_| panic!("admission must not invoke the factory")),
+    )
+    .with_admitted_slot(Arc::new(
+        AdmittedTaskSlot::new().with_spawn_fallback(Some(root)),
+    ));
+    match state.admit_spawn_request(request.into_parts()) {
+        SpawnAdmission::Denied {
+            error: SpawnError::RegionClosed(region),
+            ..
+        } => assert_eq!(region, inner),
+        SpawnAdmission::Denied { error, .. } => panic!("unexpected denial: {error:?}"),
+        SpawnAdmission::Admitted { .. } => {
+            panic!("a spawn into a draining branch region escaped to its fallback")
+        }
+    }
+}

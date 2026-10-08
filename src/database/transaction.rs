@@ -272,16 +272,16 @@ mod pg {
 
         match result {
             Outcome::Ok(value) => {
-                if tx.requires_rollback_before_commit() {
+                let rollback_required = tx.requires_rollback_before_commit();
+                if rollback_required || cx.checkpoint().is_err() {
                     rollback_before_propagating(tx, cx).await;
-                    return Outcome::Err(rollback_required_error());
+                    return if rollback_required {
+                        Outcome::Err(rollback_required_error())
+                    } else {
+                        Outcome::Cancelled(cancelled_before_commit(cx))
+                    };
                 }
-                match tx.commit(cx).await {
-                    Outcome::Ok(()) => Outcome::Ok(value),
-                    Outcome::Err(e) => Outcome::Err(e),
-                    Outcome::Cancelled(r) => Outcome::Cancelled(r),
-                    Outcome::Panicked(p) => Outcome::Panicked(p),
-                }
+                tx.commit(cx).await.map(|()| value)
             }
             Outcome::Err(e) => {
                 // Best-effort rollback; drop will handle it if this fails.
@@ -449,6 +449,16 @@ mod pg {
                 self.tx.poison_for_rollback();
             }
         }
+    }
+
+    /// A Cx cancelled while the body finished refuses the commit, and
+    /// dropping the transaction would only schedule its rollback for the
+    /// connection's next operation, so `with_pg_transaction` finishes that
+    /// rollback first and reports this reason
+    /// (br-asupersync-sqlite-pool-audit-r10-dj4uhx L4).
+    fn cancelled_before_commit(cx: &Cx) -> crate::types::CancelReason {
+        cx.cancel_reason()
+            .unwrap_or_else(|| crate::types::CancelReason::user("cancelled"))
     }
 }
 
@@ -819,16 +829,16 @@ mod mysql {
 
         match result {
             Outcome::Ok(value) => {
-                if tx.requires_rollback_before_commit() {
+                let rollback_required = tx.requires_rollback_before_commit();
+                if rollback_required || cx.checkpoint().is_err() {
                     rollback_before_propagating(tx, cx).await;
-                    return Outcome::Err(rollback_required_error());
+                    return if rollback_required {
+                        Outcome::Err(rollback_required_error())
+                    } else {
+                        Outcome::Cancelled(cancelled_before_commit(cx))
+                    };
                 }
-                match tx.commit(cx).await {
-                    Outcome::Ok(()) => Outcome::Ok(value),
-                    Outcome::Err(e) => Outcome::Err(e),
-                    Outcome::Cancelled(r) => Outcome::Cancelled(r),
-                    Outcome::Panicked(p) => Outcome::Panicked(p),
-                }
+                tx.commit(cx).await.map(|()| value)
             }
             Outcome::Err(e) => {
                 rollback_before_propagating(tx, cx).await;
@@ -992,6 +1002,15 @@ mod mysql {
                 self.tx.poison_for_rollback();
             }
         }
+    }
+
+    /// A Cx cancelled while the body finished refuses the commit, and
+    /// dropping the transaction would only schedule its rollback, so
+    /// `with_mysql_transaction` finishes that rollback first and reports this
+    /// reason (br-asupersync-sqlite-pool-audit-r10-dj4uhx L4).
+    fn cancelled_before_commit(cx: &Cx) -> crate::types::CancelReason {
+        cx.cancel_reason()
+            .unwrap_or_else(|| crate::types::CancelReason::user("cancelled"))
     }
 }
 

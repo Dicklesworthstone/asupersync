@@ -1075,3 +1075,228 @@ fn race_drained_fails_closed_and_drains_admitted_branches_at_the_task_limit() {
         assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
     }
 }
+// --- A race finishes what its losers started (br-asupersync-issue65-criticisms-kpmoy5.2.2)
+// --- and its winner's kept context still spawns (br-asupersync-k27oxe) ---
+
+/// What a task spawned by a race branch observed.
+#[derive(Default)]
+struct Spawned {
+    started: AtomicBool,
+    released: AtomicBool,
+    spawned_again: AtomicBool,
+    finished: AtomicBool,
+    cancel_kind: Mutex<Option<CancelKind>>,
+    /// The spawning branch's own context, kept past the race.
+    branch_cx: Mutex<Option<Cx>>,
+    changed: Notify,
+}
+
+struct SpawnedFinished(Arc<Spawned>);
+impl Drop for SpawnedFinished {
+    fn drop(&mut self) {
+        self.0.finished.store(true, Ordering::Release);
+        self.0.changed.notify_waiters();
+    }
+}
+
+/// Spawned by a losing branch: parks on its own cancellation, then records
+/// the kind it was cancelled with.
+async fn loser_child_parked(cx: Cx, seen: Arc<Spawned>) {
+    let _finished = SpawnedFinished(Arc::clone(&seen));
+    let mut cancelled = std::pin::pin!(cx.cancelled());
+    poll_fn(|task| {
+        let progress = cancelled.as_mut().poll(task);
+        if progress.is_pending() && !seen.started.swap(true, Ordering::AcqRel) {
+            seen.changed.notify_waiters();
+        }
+        progress
+    })
+    .await;
+    *seen.cancel_kind.lock().unwrap() = cx.cancel_reason().map(|reason| reason.kind);
+}
+
+/// Spawned by the winning branch: waits to be released after the race, then
+/// spawns once more and joins that task.
+async fn outlives_the_race(cx: Cx, seen: Arc<Spawned>) {
+    let _finished = SpawnedFinished(Arc::clone(&seen));
+    seen.started.store(true, Ordering::Release);
+    seen.changed.notify_waiters();
+    seen.changed
+        .wait_until(|| seen.released.load(Ordering::Acquire))
+        .await;
+    *seen.cancel_kind.lock().unwrap() = cx.cancel_reason().map(|reason| reason.kind);
+    let mut again = cx
+        .spawn(|_| async {})
+        .expect("the winner's task still spawns");
+    again.join(&cx).await.expect("the late task runs");
+    seen.spawned_again.store(true, Ordering::Release);
+}
+
+/// Races a loser that spawns a task parked on its own cancellation against a
+/// winner that spawns a task meant to outlive the race, and keeps its own
+/// context. The winner returns only once both spawned tasks have started, so
+/// the race is decided while both are running. Returns what the loser's and
+/// the winner's tasks saw.
+async fn race_with_spawning_branches(cx: Cx, prebuilt: bool) -> (Arc<Spawned>, Arc<Spawned>) {
+    let lost = Arc::new(Spawned::default());
+    let won = Arc::new(Spawned::default());
+    let (lost_task, won_task) = (Arc::clone(&lost), Arc::clone(&won));
+    let (lost_seen, won_seen) = (Arc::clone(&lost), Arc::clone(&won));
+    let loser = async move {
+        let cx = Cx::current().expect("the branch's own context");
+        drop(
+            cx.spawn(move |task_cx| loser_child_parked(task_cx, lost_task))
+                .expect("the loser spawns"),
+        );
+        cx.cancelled().await;
+        0_u8
+    };
+    let winner = async move {
+        let cx = Cx::current().expect("the branch's own context");
+        *won_seen.branch_cx.lock().unwrap() = Some(cx.clone());
+        drop(
+            cx.spawn(move |task_cx| outlives_the_race(task_cx, won_task))
+                .expect("the winner spawns"),
+        );
+        for seen in [&lost_seen, &won_seen] {
+            seen.changed
+                .wait_until(|| seen.started.load(Ordering::Acquire))
+                .await;
+        }
+        7_u8
+    };
+    let value = if prebuilt {
+        let branches: Vec<Pin<Box<dyn Future<Output = u8> + Send>>> =
+            vec![Box::pin(loser), Box::pin(winner)];
+        cx.race_drained(branches).await
+    } else {
+        cx.race_drained_with(vec![boxed(move |_| loser), boxed(move |_| winner)])
+            .await
+    };
+    assert_eq!(value.expect("the winner wins"), 7);
+    (lost, won)
+}
+
+/// The winner's work after the race: the winner's spawned task is released
+/// and finishes uncancelled, and the winner's own context, kept past the
+/// race, still starts work. Returns whether it all ran.
+async fn the_winners_work_after_the_race(cx: &Cx, won: &Spawned) -> bool {
+    won.released.store(true, Ordering::Release);
+    won.changed.notify_waiters();
+    won.changed
+        .wait_until(|| won.finished.load(Ordering::Acquire))
+        .await;
+    let kept = won
+        .branch_cx
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the winner kept its context");
+    let mut late = kept
+        .spawn(|_| async { 5_u8 })
+        .expect("the winner's kept context still spawns");
+    let late = late.join(cx).await;
+    won.spawned_again.load(Ordering::Acquire)
+        && won.cancel_kind.lock().unwrap().is_none()
+        && matches!(late, Ok(5))
+}
+
+/// A losing branch's own spawned task is cancelled as a race loser and has
+/// finished when the race returns. The winning branch's spawned task keeps
+/// running after the race, uncancelled, and still spawns, and the winner's
+/// own context keeps working past the race. Both race forms (factories and
+/// prebuilt futures), current-thread and four workers.
+#[test]
+fn a_race_finishes_what_its_loser_spawned_and_keeps_what_its_winner_spawned() {
+    for workers in [1, 4] {
+        for prebuilt in [false, true] {
+            native(workers, move |cx| async move {
+                let (lost, won) = race_with_spawning_branches(cx.clone(), prebuilt).await;
+                // Sampled as the race returns, before anything else runs here.
+                let lost_finished = lost.finished.load(Ordering::Acquire);
+                let won_finished = won.finished.load(Ordering::Acquire);
+                let case = format!("workers={workers} prebuilt={prebuilt}");
+                assert!(
+                    lost_finished,
+                    "{case}: the loser's task was still running when the race returned"
+                );
+                assert_eq!(
+                    *lost.cancel_kind.lock().unwrap(),
+                    Some(CancelKind::RaceLost),
+                    "{case}: the loser's task was cancelled as a race loser"
+                );
+                assert!(!won_finished, "{case}: the winner's task outlives the race");
+                assert!(
+                    the_winners_work_after_the_race(&cx, &won).await,
+                    "{case}: the winner's work runs on, uncancelled, after the race"
+                );
+            });
+        }
+    }
+}
+
+/// The same race under the lab runtime: the loser's task has finished as a
+/// race loser when the race returns, the winner's work runs on afterwards,
+/// the run is quiescent with every oracle passing, and each seed replays
+/// identically.
+#[test]
+fn lab_a_race_finishes_what_its_loser_spawned() {
+    use asupersync::{Budget, LabConfig, LabRuntime};
+
+    for seed in [17, 41, 93] {
+        let mut fingerprints = Vec::new();
+        for _ in 0..2 {
+            let mut lab = LabRuntime::new(LabConfig::new(seed).worker_count(2).max_steps(20_000));
+            let root = lab.state.create_root_region(Budget::INFINITE);
+            let observed = Arc::new(Mutex::new(None));
+            let recorded = Arc::clone(&observed);
+            let (task, mut joined) = lab
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    let cx = Cx::current().expect("lab task context");
+                    let (lost, won) = race_with_spawning_branches(cx.clone(), false).await;
+                    let lost_finished = lost.finished.load(Ordering::Acquire);
+                    let won_finished = won.finished.load(Ordering::Acquire);
+                    let lost_kind = *lost.cancel_kind.lock().unwrap();
+                    let winner_ran_on = the_winners_work_after_the_race(&cx, &won).await;
+                    *recorded.lock().unwrap() =
+                        Some((lost_finished, won_finished, lost_kind, winner_ran_on));
+                })
+                .unwrap();
+            lab.scheduler.lock().schedule(task, 0);
+            let report = lab.run_until_quiescent_with_report();
+            assert!(
+                matches!(joined.try_join(), Ok(Some(()))),
+                "seed {seed}: the owner did not finish: {report:?}"
+            );
+            let (lost_finished, won_finished, lost_kind, winner_ran_on) = observed
+                .lock()
+                .unwrap()
+                .take()
+                .expect("the owner recorded the race");
+            assert!(
+                lost_finished,
+                "seed {seed}: the loser's task outlived the race"
+            );
+            assert_eq!(lost_kind, Some(CancelKind::RaceLost), "seed {seed}");
+            assert!(
+                !won_finished,
+                "seed {seed}: the winner's task ended with the race"
+            );
+            assert!(
+                winner_ran_on,
+                "seed {seed}: the winner's work ran on after the race"
+            );
+            assert!(
+                lab.state.tasks_is_empty(),
+                "seed {seed}: the race left task records"
+            );
+            assert!(report.lab_test_passed(), "seed {seed}: {report:?}");
+            fingerprints.push(report.trace_fingerprint);
+        }
+        assert_eq!(
+            fingerprints[0], fingerprints[1],
+            "seed {seed} replays identically"
+        );
+    }
+}

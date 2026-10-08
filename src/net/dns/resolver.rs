@@ -3504,7 +3504,10 @@ mod tests {
             nameservers: vec![addr],
             cache_enabled: true,
             retries: 0,
-            timeout: Duration::from_millis(600),
+            // Every A query waits out this timeout; the AAAA answer must come
+            // back within it from the server thread, which a loaded test
+            // worker can leave unscheduled for well over 600 ms.
+            timeout: Duration::from_secs(3),
             ..ResolverConfig::default()
         });
         let lookup = future::block_on(async { resolver.lookup_ip("dual.example.test").await })

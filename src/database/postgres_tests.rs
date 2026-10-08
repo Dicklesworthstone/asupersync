@@ -13081,4 +13081,44 @@ mod tests {
             Some(3)
         );
     }
+
+    /// br-asupersync-sqlite-pool-audit-r10-dj4uhx L4: a body that cancelled
+    /// its Cx and returned Ok made commit() refuse at its first checkpoint;
+    /// the helper then returned at once, with the rollback only scheduled for
+    /// the connection's next operation, so the transaction and its locks
+    /// outlived the helper. The helper now finishes the rollback first.
+    #[test]
+    fn transaction_helper_rolls_back_before_returning_when_its_cx_was_cancelled_before_commit() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let cx = crate::cx::Cx::for_testing();
+        let responder = std::thread::spawn(move || {
+            let _ = read_until_contains(&mut peer, b"BEGIN");
+            std::io::Write::write_all(&mut peer, &backend_message(b'C', b"BEGIN\0"))
+                .expect("BEGIN complete");
+            std::io::Write::write_all(&mut peer, &ready_for_query(b'T')).expect("ready");
+            let _ = read_until_contains(&mut peer, b"ROLLBACK");
+            std::io::Write::write_all(&mut peer, &backend_message(b'C', b"ROLLBACK\0"))
+                .expect("ROLLBACK complete");
+            std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).expect("ready");
+            peer
+        });
+
+        let outcome = run(crate::database::transaction::with_pg_transaction(
+            &mut conn,
+            &cx,
+            |_tx: &mut PgTransaction<'_>, cx: &Cx| {
+                cx.cancel_fast(CancelKind::User);
+                async { Outcome::<(), PgError>::Ok(()) }
+            },
+        ));
+        match outcome {
+            Outcome::Cancelled(reason) => assert_eq!(reason.kind, CancelKind::User),
+            other => panic!("the caller's cancellation is returned, got {other:?}"),
+        }
+        // Checked before joining: the helper has already returned, so the
+        // rollback must have completed, not merely been scheduled.
+        assert_eq!(conn.inner.transaction_status, b'I', "the transaction ended");
+        assert!(!conn.inner.needs_rollback, "no rollback is left for later");
+        let _peer = responder.join().expect("the ROLLBACK reached the server");
+    }
 }

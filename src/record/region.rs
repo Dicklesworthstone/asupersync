@@ -887,6 +887,11 @@ pub struct RegionRecord {
     /// race returns, and the region still never outlives its work
     /// (br-asupersync-issue65-criticisms-kpmoy5.2.2).
     sealed: AtomicBool,
+    /// For a sealed region, its nearest unsealed ancestor. A spawn from one
+    /// of its tasks' contexts that arrives after this region closed is
+    /// admitted there, the region a race branch's context belonged to before
+    /// branches had regions of their own (br-asupersync-k27oxe).
+    spawn_fallback: std::sync::OnceLock<RegionId>,
     /// When this region's first cancellation report was dispatched, in
     /// nanoseconds (`u64::MAX` until then). Region close reports the drain
     /// time from it. The first cancel creates it, so a region that is never
@@ -1001,6 +1006,7 @@ impl RegionRecord {
             pending_spawns: Arc::new(PendingSpawnCounter::new()),
             pending_obligation_posts: Arc::new(PendingSpawnCounter::new()),
             sealed: AtomicBool::new(false),
+            spawn_fallback: std::sync::OnceLock::new(),
             cancel_reported_at: None,
             span,
         }
@@ -1008,8 +1014,18 @@ impl RegionRecord {
 
     /// Marks this region sealed: once it holds no live work it begins a
     /// non-cancelling close by itself (see [`Self::is_sealed`]).
-    pub(crate) fn seal(&self) {
+    /// `spawn_fallback` is its nearest unsealed ancestor (see
+    /// [`Self::spawn_fallback`]).
+    pub(crate) fn seal(&self, spawn_fallback: RegionId) {
+        let _ = self.spawn_fallback.set(spawn_fallback);
         self.sealed.store(true, Ordering::Release);
+    }
+
+    /// For a sealed region, the region that admits a spawn from one of its
+    /// tasks' contexts once this region has closed.
+    #[must_use]
+    pub(crate) fn spawn_fallback(&self) -> Option<RegionId> {
+        self.spawn_fallback.get().copied()
     }
 
     /// The stamp this region's cancellation report writes when it is

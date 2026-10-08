@@ -5384,7 +5384,8 @@ where
                 .with_retirement_barrier(Arc::clone(&barrier))
                 // Admission builds the task's one context with these, so
                 // `Cx::current()` in the task carries them (br-asupersync-93zkbz).
-                .with_inherited_handles(self.inherited_handles()),
+                .with_inherited_handles(self.inherited_handles())
+                .with_spawn_fallback(self.spawn_fallback_for(region)),
         );
         let (result_tx, handle) = crate::runtime::task_handle::pending_task_handle_channel::<
             Fut::Output,
@@ -5625,7 +5626,8 @@ where
             .with_retirement_barrier(Arc::clone(&barrier))
             // Admission builds the task's one context with these, so
             // `Cx::current()` in the task carries them (br-asupersync-93zkbz).
-            .with_inherited_handles(self.inherited_handles());
+            .with_inherited_handles(self.inherited_handles())
+            .with_spawn_fallback(self.spawn_fallback_for(region));
         if let Some(branch_region) = branch_region {
             admitted_slot = admitted_slot.with_branch_region(branch_region);
         }
@@ -5727,6 +5729,25 @@ where
 
         gateway.enqueue_and_notify(request)?;
         Ok(handle)
+    }
+
+    /// The region that admits a spawn into this context's own region once
+    /// that sealed (race-branch) region has closed (br-asupersync-k27oxe).
+    /// `None` for a spawn that names any other region: a closed scope or
+    /// child region still denies it.
+    pub(crate) fn spawn_fallback_for(&self, region: RegionId) -> Option<RegionId> {
+        let inner = self.inner.read();
+        if inner.region == region {
+            inner.spawn_fallback_region
+        } else {
+            None
+        }
+    }
+
+    /// Records the fallback [`Self::spawn_fallback_for`] returns; admission
+    /// sets it when it admits a task into a sealed region.
+    pub(crate) fn set_spawn_fallback_region(&self, region: Option<RegionId>) {
+        self.inner.write().spawn_fallback_region = region;
     }
 
     /// Snapshots the handles a task spawned from this context inherits:
