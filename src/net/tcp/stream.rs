@@ -1405,6 +1405,50 @@ impl Drop for TcpStream {
     }
 }
 
+/// Wraps a connected standard-library TCP stream, for example one inherited
+/// through systemd socket activation or configured with `socket2` before it
+/// connected. The socket is switched to non-blocking mode and registers with
+/// the reactor on first use, like a stream from [`TcpStream::connect`].
+/// Dropping the wrapper shuts the connection down.
+impl TryFrom<net::TcpStream> for TcpStream {
+    type Error = io::Error;
+
+    fn try_from(stream: net::TcpStream) -> io::Result<Self> {
+        Self::from_std(stream)
+    }
+}
+
+/// The raw socket, for socket options this API does not cover (through
+/// `socket2::SockRef`, for example). Reading or writing it directly bypasses
+/// the reactor's readiness tracking.
+#[cfg(unix)]
+impl std::os::fd::AsRawFd for TcpStream {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        std::os::fd::AsRawFd::as_raw_fd(&*self.inner)
+    }
+}
+
+#[cfg(unix)]
+impl std::os::fd::AsFd for TcpStream {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        std::os::fd::AsFd::as_fd(&*self.inner)
+    }
+}
+
+#[cfg(windows)]
+impl std::os::windows::io::AsRawSocket for TcpStream {
+    fn as_raw_socket(&self) -> std::os::windows::io::RawSocket {
+        std::os::windows::io::AsRawSocket::as_raw_socket(&*self.inner)
+    }
+}
+
+#[cfg(windows)]
+impl std::os::windows::io::AsSocket for TcpStream {
+    fn as_socket(&self) -> std::os::windows::io::BorrowedSocket<'_> {
+        std::os::windows::io::AsSocket::as_socket(&*self.inner)
+    }
+}
+
 // Implement the TcpStreamApi trait for TcpStream
 impl TcpStreamApi for TcpStream {
     fn connect<A: ToSocketAddrs + Send + 'static>(

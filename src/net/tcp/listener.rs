@@ -214,8 +214,14 @@ struct AcceptStormState {
 }
 
 impl TcpListener {
+    /// Wrap a bound, listening standard-library TCP listener, for example one
+    /// inherited through systemd socket activation (`listenfd`) or configured
+    /// with `socket2` (`SO_REUSEPORT`, a custom backlog) before `listen`.
+    ///
+    /// The listener is switched to non-blocking mode and registers with the
+    /// reactor on its first accept, like one from [`Self::bind`].
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    pub(crate) fn from_std(inner: net::TcpListener) -> io::Result<Self> {
+    pub fn from_std(inner: net::TcpListener) -> io::Result<Self> {
         Self::from_std_with_time_getter(inner, listener_now)
     }
 
@@ -491,6 +497,45 @@ impl TcpListenerApi for TcpListener {
 
     fn set_ttl(&self, ttl: u32) -> io::Result<()> {
         Self::set_ttl(self, ttl)
+    }
+}
+
+/// Same as [`TcpListener::from_std`].
+impl TryFrom<net::TcpListener> for TcpListener {
+    type Error = io::Error;
+
+    fn try_from(inner: net::TcpListener) -> io::Result<Self> {
+        Self::from_std(inner)
+    }
+}
+
+/// The raw socket, for socket options this API does not cover. Accepting on
+/// it directly bypasses the reactor's readiness tracking.
+#[cfg(unix)]
+impl std::os::fd::AsRawFd for TcpListener {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        std::os::fd::AsRawFd::as_raw_fd(&self.inner)
+    }
+}
+
+#[cfg(unix)]
+impl std::os::fd::AsFd for TcpListener {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        std::os::fd::AsFd::as_fd(&self.inner)
+    }
+}
+
+#[cfg(windows)]
+impl std::os::windows::io::AsRawSocket for TcpListener {
+    fn as_raw_socket(&self) -> std::os::windows::io::RawSocket {
+        std::os::windows::io::AsRawSocket::as_raw_socket(&self.inner)
+    }
+}
+
+#[cfg(windows)]
+impl std::os::windows::io::AsSocket for TcpListener {
+    fn as_socket(&self) -> std::os::windows::io::BorrowedSocket<'_> {
+        std::os::windows::io::AsSocket::as_socket(&self.inner)
     }
 }
 
