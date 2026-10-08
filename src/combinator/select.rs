@@ -238,7 +238,9 @@ pub struct SelectAllDrainResult<T, F> {
     pub value: T,
     /// Index of the winning future in the original vec.
     pub winner_index: usize,
-    /// Remaining (loser) futures that the caller MUST cancel and drain.
+    /// Remaining (loser) futures that the caller MUST cancel and drain, in
+    /// their original order without the winner: the loser at original index
+    /// `i` is `losers[i]` before `winner_index` and `losers[i - 1]` after it.
     pub losers: Vec<F>,
 }
 
@@ -297,7 +299,9 @@ impl<F: Future + Unpin> Future for SelectAllDrain<F> {
             let Some(mut all) = this.futures.take() else {
                 return Poll::Ready(Err(SelectAllDrainError::PolledAfterCompletion));
             };
-            all.swap_remove(idx);
+            // `remove`, not `swap_remove`: the losers keep their original
+            // order, the coordinates `winner_index` is given in.
+            all.remove(idx);
             return Poll::Ready(Ok(SelectAllDrainResult {
                 value,
                 winner_index: idx,
@@ -736,6 +740,41 @@ mod tests {
                 assert_eq!(r.value, 42);
                 assert_eq!(r.winner_index, 1);
                 assert_eq!(r.losers.len(), 2);
+            }
+            Poll::Ready(Err(err)) => panic!("unexpected SelectAllDrain error: {err}"),
+            Poll::Pending => unreachable!("expected Ready"),
+        }
+    }
+
+    /// The losers come back in their original order, the coordinates
+    /// `winner_index` uses (br-asupersync-1sngsf L3). `swap_remove` used to
+    /// move the last future into the winner's slot.
+    #[test]
+    fn test_select_all_drain_losers_keep_their_original_order() {
+        struct Tagged {
+            id: usize,
+            ready: bool,
+        }
+        impl Future for Tagged {
+            type Output = usize;
+            fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<usize> {
+                if self.ready {
+                    Poll::Ready(self.id)
+                } else {
+                    Poll::Pending
+                }
+            }
+        }
+
+        let futures = (0..4)
+            .map(|id| Tagged { id, ready: id == 1 })
+            .collect::<Vec<_>>();
+        let mut sel = SelectAllDrain::new(futures);
+        match poll_once(&mut sel) {
+            Poll::Ready(Ok(r)) => {
+                assert_eq!((r.value, r.winner_index), (1, 1));
+                let ids: Vec<usize> = r.losers.iter().map(|loser| loser.id).collect();
+                assert_eq!(ids, [0, 2, 3]);
             }
             Poll::Ready(Err(err)) => panic!("unexpected SelectAllDrain error: {err}"),
             Poll::Pending => unreachable!("expected Ready"),
