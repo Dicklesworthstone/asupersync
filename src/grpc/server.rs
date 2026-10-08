@@ -990,7 +990,9 @@ impl ServerBuilder {
     /// ([`DEFAULT_MAX_METADATA_SIZE`]). The native HTTP/2 adapter applies this
     /// cap to initial and trailing metadata combined. This remains a
     /// post-decode retention limit, not an HPACK allocation bound. A value of
-    /// `0` disables the check. (br-asupersync-i2bae8.)
+    /// `0` disables the check. (br-asupersync-i2bae8.) The HTTP/2 listener
+    /// still never decodes more than 16 MiB of headers for one header block,
+    /// even with `0` (br-asupersync-dycth8).
     #[must_use]
     pub fn max_metadata_size(mut self, size: usize) -> Self {
         self.config.max_metadata_size = size;

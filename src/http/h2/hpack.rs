@@ -593,6 +593,14 @@ impl DynamicTable {
         }
     }
 
+    /// The RFC 7541 size of the entry at `index` (1-based), without copying it.
+    fn entry_size(&self, index: usize) -> Option<usize> {
+        index
+            .checked_sub(1)
+            .and_then(|position| self.entries.get(position))
+            .map(DynamicTableEntry::size)
+    }
+
     /// Find an entry by name and value, returning the index if found.
     ///
     /// br-asupersync-4pshog: O(1) expected via the side index.
@@ -843,6 +851,14 @@ impl Default for Encoder {
 const MAX_STRING_LENGTH: usize = 256 * 1024;
 /// Maximum consecutive dynamic table size updates allowed at block start.
 const MAX_SIZE_UPDATES: usize = 16;
+/// Hard ceiling on one decoded header list (RFC 7541 section 4.1 sizes),
+/// applied even when the configured `max_header_list_size` is "unlimited"
+/// (`u32::MAX`, which gRPC's `max_metadata_size(0)` maps to). An indexed field
+/// costs one octet on the wire but decodes to a full copy of a dynamic-table
+/// entry, so a single 256 KiB block of them could otherwise allocate about a
+/// gigabyte (br-asupersync-dycth8 H1). 16 MiB is the `h2` crate's default
+/// header list limit, far above any real request's headers.
+const MAX_DECODED_HEADER_LIST_SIZE: usize = 16 * 1024 * 1024;
 
 /// HPACK decoder for decoding headers.
 #[derive(Debug)]
@@ -873,6 +889,9 @@ impl Decoder {
     }
 
     /// Set the maximum header list size.
+    ///
+    /// Decoding never retains more than 16 MiB of headers per block, whatever
+    /// this is set to: a larger value, including "unlimited", acts as 16 MiB.
     pub fn set_max_header_list_size(&mut self, size: usize) {
         self.max_header_list_size = size;
     }
@@ -932,11 +951,12 @@ impl Decoder {
             self.dynamic_table.set_max_size(new_size);
         }
 
+        let limit = self.max_header_list_size.min(MAX_DECODED_HEADER_LIST_SIZE);
         while !src.is_empty() {
-            let remaining_budget = self.max_header_list_size.saturating_sub(total_size);
+            let remaining_budget = limit.saturating_sub(total_size);
             let header = self.decode_header(src, remaining_budget)?;
             total_size = total_size.saturating_add(header.size());
-            if total_size > self.max_header_list_size {
+            if total_size > limit {
                 return Err(H2Error::compression("header list too large"));
             }
             headers.push(header);
@@ -964,8 +984,16 @@ impl Decoder {
         let first = src[0];
 
         if first & 0x80 != 0 {
-            // Indexed header field
+            // Indexed header field. A dynamic entry is refused before it is
+            // copied when it alone would overrun the list budget.
             let index = decode_integer(src, 7)?;
+            if let Some(size) = index
+                .checked_sub(STATIC_TABLE.len())
+                .and_then(|dynamic| self.dynamic_table.entry_size(dynamic))
+                && size > remaining_budget
+            {
+                return Err(H2Error::compression("header list too large"));
+            }
             return self.get_indexed(index);
         }
 
