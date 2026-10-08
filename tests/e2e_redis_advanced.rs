@@ -653,3 +653,42 @@ fn redis_e2e_handshake_trace_events_have_logical_time() {
     });
     test_complete!(name);
 }
+
+/// `unix:///path/to/redis.sock` (also `redis+unix://`) connects to the
+/// server's Unix-domain socket. Set `REDIS_SOCKET` to a socket the test server
+/// listens on (`redis-server --unixsocket <path>`); `REDIS_URL` can also be a
+/// `unix://` URL, which runs this whole suite over the socket.
+#[test]
+fn redis_e2e_unix_socket_url_connects_over_the_socket() {
+    use asupersync::messaging::redis::RedisConfig;
+
+    let name = "redis_e2e_unix_socket_url_connects_over_the_socket";
+    init_redis_test(name);
+    let Ok(socket) = std::env::var("REDIS_SOCKET") else {
+        test_complete!(name, skipped = true);
+        return;
+    };
+
+    let config =
+        RedisConfig::from_url("redis+unix://:s3cret@/var/run/redis.sock?db=3").expect("socket URL");
+    assert_eq!(config.host, "/var/run/redis.sock");
+    assert_eq!(config.password.as_deref(), Some("s3cret"));
+    assert_eq!(config.database, 3);
+    assert!(RedisConfig::from_url("unix://relative.sock").is_err());
+
+    futures_lite::future::block_on(async move {
+        let cx: Cx = Cx::for_testing();
+        let client = RedisClient::connect(&cx, &format!("unix://{socket}"))
+            .await
+            .expect("connect");
+        let key = key_for(name, "k");
+        client
+            .set(&cx, &key, b"over-the-socket", None)
+            .await
+            .expect("set");
+        let value = client.get(&cx, &key).await.expect("get");
+        assert_eq!(value.as_deref(), Some(b"over-the-socket".as_slice()));
+        let _ = client.del(&cx, &[key.as_str()]).await;
+    });
+    test_complete!(name);
+}

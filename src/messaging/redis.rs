@@ -2219,7 +2219,9 @@ fn encode_command_into(buf: &mut Vec<u8>, args: &[&[u8]]) {
 /// Configuration for Redis client.
 #[derive(Clone)]
 pub struct RedisConfig {
-    /// Host address.
+    /// Host address, or the path of the server's Unix-domain socket when it
+    /// is an absolute path (`port` is then unused; see
+    /// [`Self::from_url`]'s `unix://` form).
     pub host: String,
     /// Port.
     pub port: u16,
@@ -2383,7 +2385,18 @@ impl RedisConfig {
     }
 
     /// Create config from a Redis URL.
+    ///
+    /// `redis://[user[:password]@]host[:port][/db]` and `rediss://` (TLS) dial
+    /// TCP. `unix://[user[:password]@]/path/to/redis.sock[?db=N]` (also
+    /// spelled `redis+unix://`) connects to the server's Unix-domain socket;
+    /// [`Self::host`] then holds the socket path (Unix platforms only).
     pub fn from_url(url: &str) -> Result<Self, RedisError> {
+        if let Some(rest) = url
+            .strip_prefix("unix://")
+            .or_else(|| url.strip_prefix("redis+unix://"))
+        {
+            return Self::from_unix_socket_url(rest);
+        }
         let (url, use_tls) = if let Some(url) = url.strip_prefix("rediss://") {
             (url, true)
         } else if let Some(url) = url.strip_prefix("redis://") {
@@ -2461,6 +2474,41 @@ impl RedisConfig {
 
         Ok(config)
     }
+
+    /// `unix://[user[:password]@]/path/to/redis.sock[?db=N]`, without its
+    /// scheme.
+    fn from_unix_socket_url(url: &str) -> Result<Self, RedisError> {
+        let mut config = Self::default();
+        let (url, query) = url.split_once('?').unwrap_or((url, ""));
+        let path = if let Some((userinfo, path)) = url.rsplit_once('@') {
+            if let Some((username, password)) = userinfo.split_once(':') {
+                if !username.is_empty() {
+                    config.username = Some(Self::url_decode_credential(username)?);
+                }
+                config.password = Some(Self::url_decode_credential(password)?);
+            } else if !userinfo.is_empty() {
+                config.password = Some(Self::url_decode_credential(userinfo)?);
+            }
+            path
+        } else {
+            url
+        };
+        if !path.starts_with('/') {
+            return Err(RedisError::InvalidUrl(
+                "a unix:// Redis URL needs an absolute socket path".to_string(),
+            ));
+        }
+        config.host = path.to_string();
+        for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            if key == "db" {
+                config.database = value
+                    .parse()
+                    .map_err(|_| RedisError::InvalidUrl(format!("invalid database: {value}")))?;
+            }
+        }
+        Ok(config)
+    }
 }
 
 #[derive(Debug)]
@@ -2468,6 +2516,9 @@ enum RedisStream {
     Plain(TcpStream),
     #[cfg(feature = "tls")]
     Tls(TlsStream<TcpStream>),
+    /// A Unix-domain socket (a host given as the socket's path).
+    #[cfg(unix)]
+    Unix(crate::net::unix::UnixStream),
 }
 
 impl RedisStream {
@@ -2481,6 +2532,8 @@ impl RedisStream {
             Self::Plain(stream) => stream.shutdown(std::net::Shutdown::Both),
             #[cfg(feature = "tls")]
             Self::Tls(stream) => stream.get_ref().shutdown(std::net::Shutdown::Both),
+            #[cfg(unix)]
+            Self::Unix(stream) => stream.shutdown(std::net::Shutdown::Both),
         }
     }
 }
@@ -2495,6 +2548,8 @@ impl AsyncRead for RedisStream {
             Self::Plain(stream) => Pin::new(stream).poll_read(cx, buf),
             #[cfg(feature = "tls")]
             Self::Tls(stream) => Pin::new(stream).poll_read(cx, buf),
+            #[cfg(unix)]
+            Self::Unix(stream) => Pin::new(stream).poll_read(cx, buf),
         }
     }
 }
@@ -2509,6 +2564,8 @@ impl AsyncWrite for RedisStream {
             Self::Plain(stream) => Pin::new(stream).poll_write(cx, buf),
             #[cfg(feature = "tls")]
             Self::Tls(stream) => Pin::new(stream).poll_write(cx, buf),
+            #[cfg(unix)]
+            Self::Unix(stream) => Pin::new(stream).poll_write(cx, buf),
         }
     }
 
@@ -2520,6 +2577,8 @@ impl AsyncWrite for RedisStream {
             Self::Plain(stream) => Pin::new(stream).poll_flush(cx),
             #[cfg(feature = "tls")]
             Self::Tls(stream) => Pin::new(stream).poll_flush(cx),
+            #[cfg(unix)]
+            Self::Unix(stream) => Pin::new(stream).poll_flush(cx),
         }
     }
 
@@ -2531,6 +2590,8 @@ impl AsyncWrite for RedisStream {
             Self::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
             #[cfg(feature = "tls")]
             Self::Tls(stream) => Pin::new(stream).poll_shutdown(cx),
+            #[cfg(unix)]
+            Self::Unix(stream) => Pin::new(stream).poll_shutdown(cx),
         }
     }
 }
@@ -2662,10 +2723,41 @@ where
 }
 
 impl RedisConnection {
+    /// A host that is an absolute path is the server's Unix-domain socket.
+    #[cfg(unix)]
+    async fn connect_unix(config: &RedisConfig) -> Result<RedisStream, RedisError> {
+        if config.use_tls {
+            return Err(RedisError::InvalidUrl(
+                "TLS over a Unix-domain socket is not supported".to_string(),
+            ));
+        }
+        Ok(RedisStream::Unix(
+            crate::net::unix::UnixStream::connect(&config.host).await?,
+        ))
+    }
+
+    #[cfg(not(unix))]
+    async fn connect_unix(_config: &RedisConfig) -> Result<RedisStream, RedisError> {
+        Err(RedisError::Io(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Unix-domain sockets are not supported on this platform",
+        )))
+    }
+
     async fn connect(
         config: RedisConfig,
         resp3_push_backlog: Option<Arc<parking_lot::Mutex<RedisResp3PushBacklog>>>,
     ) -> Result<Self, RedisError> {
+        if config.host.starts_with('/') {
+            let stream = Self::connect_unix(&config).await?;
+            return Ok(Self {
+                stream,
+                read_buf: RespReadBuffer::new(),
+                config,
+                initialized: false,
+                resp3_push_backlog,
+            });
+        }
         let addr = format!("{}:{}", config.host, config.port);
         let tcp_stream = TcpStream::connect(addr).await?;
 
