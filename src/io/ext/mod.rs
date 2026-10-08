@@ -9,9 +9,12 @@
 //! - [`WriteAll`] is **not** cancel-safe: partial writes may occur.
 //! - [`WritePermit`](super::WritePermit) is cancel-safe: uncommitted data is discarded on drop.
 
+mod buf_read_ext;
 mod read_ext;
 mod seek_ext;
 mod write_ext;
+
+pub use buf_read_ext::{AsyncBufReadExt, FillBuf, ReadUntil, Split};
 
 pub use read_ext::{
     AsyncReadExt, AsyncReadVectoredExt, Read, ReadExact, ReadF32, ReadF32Le, ReadF64, ReadF64Le,
