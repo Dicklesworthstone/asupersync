@@ -340,6 +340,27 @@ branch now runs in its own child region of the caller's region:
 handles the caller already spawned and are unchanged.
 (asupersync-issue65-criticisms-kpmoy5.2.2)
 
+### Behavior change — a supervised `NatsClient` sends keepalive PINGs
+
+`NatsClient::connect` and `NatsClient::connect_with_config` now enable a
+client-side keepalive: `NatsKeepalive::default()`, with nats.go's defaults.
+
+- The connection supervisor sends a `PING` every 2 minutes.
+- When 2 are still unanswered at a tick, it replaces the connection: it
+  reconnects within `NatsConfig`'s limits and replays the subscriptions.
+- A half-open connection is therefore replaced within about 6 minutes. Before,
+  it lasted until the kernel gave up, about 15 minutes on Linux.
+- A peer that never answers `PING` is reconnected about every 6 minutes.
+
+`NatsClient::ping` waits for the `PONG` that answers its own `PING`, so a
+publish-then-ping flush still covers the publishes. With a keepalive it waits
+at most `interval × max_pings_out`.
+
+To keep the v0.5.0 wire behaviour, use
+`NatsClient::connect_with_keepalive(cx, config, NatsKeepalive::disabled())`.
+A client whose `Cx` has no spawn gateway (and so no supervisor) is unchanged.
+(asupersync-messaging-client-audit-k6pxks item 8)
+
 ### Native GenServers and actors
 
 `Cx::spawn_gen_server`, `Cx::spawn_actor` and `Cx::spawn_supervised_actor`
