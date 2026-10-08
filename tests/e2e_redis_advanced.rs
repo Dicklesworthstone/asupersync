@@ -547,9 +547,10 @@ fn redis_e2e_cx_cancel_before_publish_returns_cleanly() {
 // br-asupersync-osluhp — wire-level logging assertions
 // ───────────────────────────────────────────────────────────────────
 
-/// `RedisClient::connect` runs the HELLO/AUTH/SELECT init sequence
-/// and emits Cx::trace events that a TraceBufferHandle MUST
-/// capture. These events are the forensic substrate for diagnosing
+/// A client's first command runs the HELLO/AUTH/SELECT init sequence
+/// (`RedisClient::connect` only builds the pool; connections open
+/// lazily) and emits Cx::trace events on the command's Cx that a
+/// TraceBufferHandle MUST capture. These events are the forensic substrate for diagnosing
 /// connection-time failures (auth rejection, RESP3 rejection, DB
 /// select rejection) without a packet capture. If they stop being
 /// emitted, this test fires.
@@ -566,7 +567,9 @@ fn redis_e2e_connect_emits_handshake_trace_events() {
         let trace = TraceBufferHandle::new(128);
         cx.set_trace_buffer(trace.clone());
 
-        let _client = RedisClient::connect(&cx, &url).await.expect("connect");
+        let client = RedisClient::connect(&cx, &url).await.expect("connect");
+        // The first command opens the connection and runs its handshake.
+        client.ping(&cx).await.expect("ping");
 
         let events = trace.snapshot();
         // Extract the human-readable message from each UserTrace event.
@@ -596,7 +599,7 @@ fn redis_e2e_connect_emits_handshake_trace_events() {
     test_complete!(name);
 }
 
-/// Companion test: trace events captured during connect must carry
+/// Companion test: trace events captured during the handshake must carry
 /// a logical_time stamp (forensic ordering invariant). A trace event
 /// without logical_time can't be causally ordered against other
 /// runtime events, defeating the point of capturing it.
@@ -613,7 +616,9 @@ fn redis_e2e_handshake_trace_events_have_logical_time() {
         let trace = TraceBufferHandle::new(64);
         cx.set_trace_buffer(trace.clone());
 
-        let _client = RedisClient::connect(&cx, &url).await.expect("connect");
+        let client = RedisClient::connect(&cx, &url).await.expect("connect");
+        // The first command opens the connection and runs its handshake.
+        client.ping(&cx).await.expect("ping");
 
         let events = trace.snapshot();
         let user_events: Vec<_> = events
