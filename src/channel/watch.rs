@@ -832,6 +832,61 @@ impl<T> Receiver<T> {
         Poll::Pending
     }
 
+    /// Waits until the value satisfies `predicate`, then returns it borrowed
+    /// and marks it seen.
+    ///
+    /// The current value is checked first, so a value that already matches
+    /// returns at once without waiting for a change. Otherwise every newer
+    /// value is checked as it is published. The predicate runs under the
+    /// value's read lock, and the returned [`Ref`] is the value it accepted:
+    /// no send can slip in between.
+    ///
+    /// ```ignore
+    /// let ready = rx.wait_for(&cx, |state| *state == State::Ready).await?;
+    /// ```
+    ///
+    /// # Cancel Safety
+    ///
+    /// Cancel-safe: if the future is dropped before it resolves, the
+    /// receiver's `seen_version` is unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns `RecvError::Closed` if the sender is dropped while no value
+    /// satisfies the predicate, and `RecvError::Cancelled` if `cx` is
+    /// cancelled while waiting.
+    pub async fn wait_for<Caps>(
+        &mut self,
+        cx: &Cx<Caps>,
+        mut predicate: impl FnMut(&T) -> bool,
+    ) -> Result<Ref<'_, T>, RecvError> {
+        // Changes are awaited on a clone, so the value can be returned
+        // borrowed from `self.inner` while this loop still waits through
+        // another receiver; `seen_version` is written as a disjoint field.
+        let mut waiter: Option<Self> = None;
+        loop {
+            let checked = {
+                let guard = self.inner.value.read();
+                if predicate(&guard.0) {
+                    self.seen_version = guard.1;
+                    self.inner
+                        .update_receiver_version(self.receiver_token, guard.1);
+                    return Ok(Ref { guard });
+                }
+                guard.1
+            };
+            let waiter = waiter.get_or_insert_with(|| self.clone());
+            // Wait for a version newer than the one just checked, not newer
+            // than whatever is current now: a send since the check must
+            // still wake this loop.
+            waiter.seen_version = checked;
+            waiter
+                .inner
+                .update_receiver_version(waiter.receiver_token, checked);
+            waiter.changed(cx).await?;
+        }
+    }
+
     /// Returns a reference to the current value.
     ///
     /// This does NOT update `seen_version`.
