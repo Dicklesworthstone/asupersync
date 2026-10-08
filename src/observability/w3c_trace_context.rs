@@ -621,7 +621,7 @@ pub fn extract_propagation_from_http<S: BuildHasher>(
             let mut context = W3CTraceContext::from_str(traceparent)?;
 
             if let Some(tracestate) = headers.get("tracestate") {
-                if tracestate.len() <= MAX_TRACE_CONTEXT_LENGTH {
+                if tracestate.len() <= MAX_TRACESTATE_LENGTH {
                     context.tracestate = Some(tracestate.clone());
                 }
             }
@@ -694,6 +694,96 @@ pub fn inject_to_grpc(
     }
 
     let _ = inject_baggage_to_http(&context.baggage, metadata);
+}
+
+/// Longest `tracestate` kept. W3C Trace Context asks vendors to propagate at
+/// least 512 characters, and multi-vendor values routinely pass 128.
+const MAX_TRACESTATE_LENGTH: usize = 512;
+
+/// Returns the context one hop of a request runs under.
+///
+/// A valid incoming `traceparent` is continued as a child span, keeping its
+/// `tracestate` and the request's `baggage`. A missing or invalid
+/// `traceparent` starts a new trace and drops `tracestate`, as the W3C Trace
+/// Context specification requires; valid baggage is kept either way. A
+/// malformed `baggage` header is ignored instead of discarding a valid trace.
+/// Header names are expected in lower case.
+///
+/// New trace and span ids come from the operating system's random source;
+/// [`continue_or_start_trace_with`] takes them from the caller's instead.
+#[must_use]
+pub fn continue_or_start_trace<S: BuildHasher>(
+    headers: &HashMap<String, String, S>,
+) -> W3CTraceContext {
+    continue_or_start(headers, None)
+}
+
+/// Like [`continue_or_start_trace`], with new ids filled by `fill`.
+///
+/// Pass a context's entropy, for example `|bytes| cx.random_bytes(bytes)`,
+/// so a run under a deterministic entropy source replays the same ids. An
+/// all-zero id, which W3C Trace Context forbids, gets its last byte set to 1.
+#[must_use]
+pub fn continue_or_start_trace_with<S: BuildHasher>(
+    headers: &HashMap<String, String, S>,
+    mut fill: impl FnMut(&mut [u8]),
+) -> W3CTraceContext {
+    continue_or_start(headers, Some(&mut fill))
+}
+
+fn continue_or_start<S: BuildHasher>(
+    headers: &HashMap<String, String, S>,
+    fill: Option<&mut dyn FnMut(&mut [u8])>,
+) -> W3CTraceContext {
+    let baggage = extract_baggage_from_http(headers).unwrap_or_default();
+    let incoming = headers
+        .get("traceparent")
+        .and_then(|traceparent| W3CTraceContext::from_str(traceparent).ok());
+    match incoming {
+        Some(parent) => W3CTraceContext {
+            trace_id: parent.trace_id,
+            parent_span_id: parent.span_id,
+            span_id: fill.map_or_else(SpanId::new_random, |fill| SpanId(filled_id(fill))),
+            flags: parent.flags,
+            tracestate: headers
+                .get("tracestate")
+                .filter(|tracestate| tracestate.len() <= MAX_TRACESTATE_LENGTH)
+                .cloned(),
+            baggage,
+        },
+        None => {
+            let (trace_id, parent_span_id, span_id) = match fill {
+                Some(fill) => (
+                    TraceId(filled_id(fill)),
+                    SpanId(filled_id(fill)),
+                    SpanId(filled_id(fill)),
+                ),
+                None => (
+                    TraceId::new_random(),
+                    SpanId::new_random(),
+                    SpanId::new_random(),
+                ),
+            };
+            W3CTraceContext {
+                trace_id,
+                parent_span_id,
+                span_id,
+                flags: TraceFlags::SAMPLED,
+                tracestate: None,
+                baggage,
+            }
+        }
+    }
+}
+
+/// An id of `N` bytes from `fill`, never all zero.
+fn filled_id<const N: usize>(fill: &mut dyn FnMut(&mut [u8])) -> [u8; N] {
+    let mut bytes = [0u8; N];
+    fill(&mut bytes);
+    if bytes == [0u8; N] {
+        bytes[N - 1] = 1;
+    }
+    bytes
 }
 
 #[cfg(test)]
@@ -972,6 +1062,106 @@ mod tests {
                     Err(TraceContextError::InvalidFormat(_))
                 ),
                 "flags {bad:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn continue_or_start_trace_continues_a_valid_trace_as_a_child_span() {
+        let upstream = W3CTraceContext::new_root();
+        let mut headers = HashMap::new();
+        headers.insert("traceparent".to_string(), upstream.to_traceparent());
+        headers.insert("tracestate".to_string(), "vendor=a".to_string());
+        headers.insert("baggage".to_string(), "user=7".to_string());
+
+        let hop = continue_or_start_trace(&headers);
+        assert_eq!(hop.trace_id, upstream.trace_id);
+        assert_eq!(hop.parent_span_id, upstream.span_id);
+        assert_ne!(hop.span_id, upstream.span_id);
+        assert_eq!(hop.flags, upstream.flags);
+        assert_eq!(hop.tracestate.as_deref(), Some("vendor=a"));
+        assert_eq!(hop.baggage.get("user"), Some("7"));
+    }
+
+    #[test]
+    fn continue_or_start_trace_restarts_a_missing_or_invalid_trace() {
+        let mut headers = HashMap::new();
+        headers.insert("tracestate".to_string(), "vendor=a".to_string());
+        let fresh = continue_or_start_trace(&headers);
+        assert!(
+            fresh.tracestate.is_none(),
+            "no traceparent: tracestate is dropped"
+        );
+
+        headers.insert("traceparent".to_string(), "00-not-a-trace-01".to_string());
+        let restarted = continue_or_start_trace(&headers);
+        assert!(
+            restarted.tracestate.is_none(),
+            "invalid traceparent: tracestate is dropped"
+        );
+        assert_ne!(
+            restarted.trace_id, fresh.trace_id,
+            "each start is a new trace"
+        );
+    }
+
+    #[test]
+    fn continue_or_start_trace_keeps_the_trace_when_only_baggage_is_malformed() {
+        let upstream = W3CTraceContext::new_root();
+        let mut headers = HashMap::new();
+        headers.insert("traceparent".to_string(), upstream.to_traceparent());
+        headers.insert(
+            "baggage".to_string(),
+            "=".repeat(MAX_BAGGAGE_HEADER_LENGTH + 1),
+        );
+
+        let hop = continue_or_start_trace(&headers);
+        assert_eq!(hop.trace_id, upstream.trace_id);
+        assert!(hop.baggage.is_empty());
+    }
+
+    #[test]
+    fn continue_or_start_trace_with_replays_the_ids_of_its_entropy() {
+        // A counter stands in for a seeded entropy source.
+        let seeded = || {
+            let mut next = 0u8;
+            move |bytes: &mut [u8]| {
+                for byte in bytes {
+                    next = next.wrapping_add(1);
+                    *byte = next;
+                }
+            }
+        };
+        let upstream = W3CTraceContext::new_root();
+        let mut continued = HashMap::new();
+        continued.insert("traceparent".to_string(), upstream.to_traceparent());
+        for headers in [HashMap::new(), continued] {
+            let first = continue_or_start_trace_with(&headers, seeded());
+            let second = continue_or_start_trace_with(&headers, seeded());
+            assert_eq!(first, second, "the same entropy gives the same ids");
+            assert_ne!(first.span_id, upstream.span_id);
+        }
+
+        // An all-zero fill still yields ids W3C accepts.
+        let zero = continue_or_start_trace_with(&HashMap::new(), |bytes: &mut [u8]| {
+            bytes.fill(0);
+        });
+        let reparsed = W3CTraceContext::from_str(&zero.to_traceparent()).expect("valid ids");
+        assert_eq!(reparsed.trace_id, zero.trace_id);
+    }
+
+    #[test]
+    fn continue_or_start_trace_keeps_a_tracestate_up_to_512_characters() {
+        let upstream = W3CTraceContext::new_root();
+        for (len, kept) in [(300, true), (MAX_TRACESTATE_LENGTH + 1, false)] {
+            let mut headers = HashMap::new();
+            headers.insert("traceparent".to_string(), upstream.to_traceparent());
+            headers.insert("tracestate".to_string(), "a".repeat(len));
+            let hop = continue_or_start_trace(&headers);
+            assert_eq!(
+                hop.tracestate.is_some(),
+                kept,
+                "tracestate of {len} characters"
             );
         }
     }

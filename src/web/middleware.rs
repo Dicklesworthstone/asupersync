@@ -1621,6 +1621,71 @@ impl<H: Handler> Handler for RequestTraceMiddleware<H> {
     }
 }
 
+// ─── W3CTraceContextMiddleware ─────────────────────────────────────────────
+
+/// Middleware that continues the request's W3C trace context or starts one.
+///
+/// It reads `traceparent`, `tracestate` and `baggage` and runs the handler as
+/// a child span of that context; a missing or invalid `traceparent` starts a
+/// new trace (see
+/// [`continue_or_start_trace`](crate::observability::w3c_trace_context::continue_or_start_trace)).
+/// New trace and span ids come from the request `Cx`'s entropy source, so a
+/// lab run replays them. The handler finds its span in the request extensions:
+/// - `traceparent`, and `tracestate` / `baggage` when present, ready to copy
+///   onto outgoing requests so the trace continues downstream;
+/// - `trace_id` (the 32-hex trace id), unless an outer layer set one, so the
+///   logs of [`RequestTraceMiddleware`] and [`CatchPanicMiddleware`] layered
+///   inside this one carry the W3C trace id. A [`RequestIdMiddleware`] layered
+///   inside this one replaces it with the request id.
+///
+/// A client picks the trace id it sends. At an untrusted edge, either accept
+/// that (the usual W3C deployment) or place this layer behind a gateway that
+/// resets `traceparent`.
+pub struct W3CTraceContextMiddleware<H> {
+    inner: H,
+}
+
+impl<H: Handler> W3CTraceContextMiddleware<H> {
+    /// Wrap a handler with W3C trace context propagation.
+    #[must_use]
+    pub fn new(inner: H) -> Self {
+        Self { inner }
+    }
+}
+
+impl<H: Handler> Handler for W3CTraceContextMiddleware<H> {
+    fn call(
+        &self,
+        cx: &Cx,
+        mut req: Request,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+        let headers: std::collections::HashMap<String, String> =
+            ["traceparent", "tracestate", "baggage"]
+                .into_iter()
+                .filter_map(|name| Some((name.to_string(), req.header(name)?.to_string())))
+                .collect();
+        // New ids come from the request's Cx, so a lab run replays them.
+        let context = crate::observability::w3c_trace_context::continue_or_start_trace_with(
+            &headers,
+            |bytes: &mut [u8]| cx.random_bytes(bytes),
+        );
+        req.extensions
+            .insert("traceparent", context.to_traceparent());
+        if let Some(tracestate) = &context.tracestate {
+            req.extensions.insert("tracestate", tracestate.clone());
+        }
+        if let Ok(baggage) = context.baggage.to_header() {
+            if !baggage.is_empty() {
+                req.extensions.insert("baggage", baggage);
+            }
+        }
+        if req.extensions.get("trace_id").is_none() {
+            req.extensions.insert("trace_id", context.trace_id.to_hex());
+        }
+        self.inner.call(cx, req)
+    }
+}
+
 // ─── AuthMiddleware ────────────────────────────────────────────────────────
 
 /// Authorization policy for bearer-token middleware.
@@ -2318,6 +2383,12 @@ impl<H: Handler> MiddlewareStack<H> {
         self.layer(RequestTraceLayer::new(policy))
     }
 
+    /// Add W3C trace context propagation.
+    #[must_use]
+    pub fn with_w3c_trace_context(self) -> MiddlewareStack<W3CTraceContextMiddleware<H>> {
+        self.layer(W3CTraceContextLayer::new())
+    }
+
     /// Add a panic recovery middleware layer.
     #[must_use]
     pub fn with_catch_panic(self) -> MiddlewareStack<CatchPanicMiddleware<H>> {
@@ -2997,6 +3068,26 @@ impl<H: Handler> Layer<H> for SetResponseHeaderLayer {
     }
 }
 
+/// Layer that applies [`W3CTraceContextMiddleware`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct W3CTraceContextLayer;
+
+impl W3CTraceContextLayer {
+    /// Create a W3C trace context layer.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl<H: Handler> Layer<H> for W3CTraceContextLayer {
+    type Service = W3CTraceContextMiddleware<H>;
+
+    fn layer(&self, inner: H) -> Self::Service {
+        W3CTraceContextMiddleware::new(inner)
+    }
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -3107,6 +3198,7 @@ mod tests {
     impl_test_sync_call!(CatchPanicMiddleware);
     impl_test_sync_call!(NormalizePathMiddleware);
     impl_test_sync_call!(SetResponseHeaderMiddleware);
+    impl_test_sync_call!(W3CTraceContextMiddleware);
 
     struct CountingHandler {
         calls: Arc<std::sync::atomic::AtomicU32>,
@@ -3902,6 +3994,123 @@ mod tests {
             "response should not carry duplicate request-id headers"
         );
         assert!(!resp.headers.contains_key("X-Request-Id"));
+    }
+
+    // --- W3CTraceContextMiddleware ---
+
+    /// Answers with the trace extensions it sees, one per line, `-` if absent.
+    struct TraceExtensionsHandler;
+
+    impl Handler for TraceExtensionsHandler {
+        fn call(
+            &self,
+            _cx: &crate::Cx,
+            req: Request,
+        ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+            let body = ["traceparent", "tracestate", "baggage", "trace_id"]
+                .map(|key| req.extensions.get(key).unwrap_or("-").to_string())
+                .join("\n");
+            Box::pin(async move { Response::new(StatusCode::OK, body.into_bytes()) })
+        }
+    }
+
+    /// The handler's `[traceparent, tracestate, baggage, trace_id]`, with its
+    /// traceparent parsed.
+    fn handler_trace(
+        resp: &Response,
+    ) -> (
+        crate::observability::w3c_trace_context::W3CTraceContext,
+        Vec<String>,
+    ) {
+        let seen: Vec<String> = std::str::from_utf8(resp.body.as_ref())
+            .expect("utf-8 body")
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let span = seen[0]
+            .parse()
+            .expect("the handler always sees a valid traceparent");
+        (span, seen)
+    }
+
+    #[test]
+    fn w3c_trace_context_runs_the_handler_as_a_child_span_of_the_incoming_trace() {
+        let upstream = crate::observability::w3c_trace_context::W3CTraceContext::new_root();
+        let mw = W3CTraceContextMiddleware::new(TraceExtensionsHandler);
+        let req = Request::new("GET", "/w3c")
+            .with_header("Traceparent", upstream.to_traceparent())
+            .with_header("tracestate", "vendor=a")
+            .with_header("baggage", "user=7");
+        let (span, seen) = handler_trace(&mw.call(req));
+
+        assert_eq!(span.trace_id, upstream.trace_id, "the trace continues");
+        assert_ne!(
+            span.span_id, upstream.span_id,
+            "the handler has its own span"
+        );
+        assert_eq!(span.flags, upstream.flags);
+        assert_eq!(seen[1], "vendor=a");
+        assert_eq!(seen[2], "user=7");
+        assert_eq!(
+            seen[3],
+            upstream.trace_id.to_hex(),
+            "logs carry the trace id"
+        );
+    }
+
+    #[test]
+    fn w3c_trace_context_starts_a_trace_without_a_valid_traceparent() {
+        let mw = W3CTraceContextMiddleware::new(TraceExtensionsHandler);
+        let missing = Request::new("GET", "/w3c").with_header("tracestate", "vendor=a");
+        let invalid = Request::new("GET", "/w3c")
+            .with_header("traceparent", "00-not-a-trace-01")
+            .with_header("tracestate", "vendor=a");
+        let mut trace_ids = Vec::new();
+        for req in [missing, invalid] {
+            let (span, seen) = handler_trace(&mw.call(req));
+            assert_eq!(seen[1], "-", "the tracestate of no valid trace is dropped");
+            assert_eq!(seen[3], span.trace_id.to_hex());
+            trace_ids.push(span.trace_id);
+        }
+        assert_ne!(
+            trace_ids[0], trace_ids[1],
+            "each request starts its own trace"
+        );
+    }
+
+    #[test]
+    fn w3c_trace_context_keeps_a_trace_id_an_outer_layer_set() {
+        let upstream = crate::observability::w3c_trace_context::W3CTraceContext::new_root();
+        let mw = RequestIdMiddleware::new(
+            W3CTraceContextMiddleware::new(TraceExtensionsHandler),
+            "x-request-id",
+        );
+        let req = Request::new("GET", "/w3c")
+            .with_header("traceparent", upstream.to_traceparent())
+            .with_header("x-request-id", "abc-123");
+        let (span, seen) = handler_trace(&mw.call(req));
+
+        assert_eq!(seen[3], "abc-123", "the outer layer's trace_id is kept");
+        assert_eq!(span.trace_id, upstream.trace_id);
+    }
+
+    #[test]
+    fn w3c_trace_context_layer_and_stack_method_apply_the_middleware() {
+        let upstream = crate::observability::w3c_trace_context::W3CTraceContext::new_root();
+        let request =
+            || Request::new("GET", "/w3c").with_header("traceparent", upstream.to_traceparent());
+        let stacked = MiddlewareStack::new(TraceExtensionsHandler)
+            .with_w3c_trace_context()
+            .build();
+        let layered = W3CTraceContextLayer::new().layer(TraceExtensionsHandler);
+        for resp in [
+            call_sync(&stacked, request()),
+            call_sync(&layered, request()),
+        ] {
+            let (span, _) = handler_trace(&resp);
+            assert_eq!(span.trace_id, upstream.trace_id);
+            assert_ne!(span.span_id, upstream.span_id);
+        }
     }
 
     // --- AuthMiddleware ---

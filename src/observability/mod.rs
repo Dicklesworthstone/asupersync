@@ -338,7 +338,8 @@ pub use task_inspector::{
 };
 pub use w3c_trace_context::{
     SpanId as W3CSpanId, TraceContextError, TraceFlags, TraceId, W3CBaggage, W3CPropagationContext,
-    W3CTraceContext, extract_baggage_from_http, extract_from_http, extract_propagation_from_http,
+    W3CTraceContext, continue_or_start_trace, continue_or_start_trace_with,
+    extract_baggage_from_http, extract_from_http, extract_propagation_from_http,
     inject_baggage_to_http, inject_to_grpc, inject_to_http,
 };
 

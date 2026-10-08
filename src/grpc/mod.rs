@@ -108,8 +108,9 @@ pub use health_rpc::HealthRpcService;
 pub use interceptor::{
     BearerAuthInterceptor, BearerAuthValidator, FnInterceptor, InterceptorLayer,
     LoggingInterceptor, MetadataPropagator, RateLimitInterceptor, TimeoutInterceptor,
-    TracingInterceptor, auth_bearer_interceptor, auth_validator, fn_interceptor,
-    logging_interceptor, metadata_propagator, rate_limiter, timeout_interceptor, trace_interceptor,
+    TracingInterceptor, W3CTraceContextInterceptor, auth_bearer_interceptor, auth_validator,
+    fn_interceptor, logging_interceptor, metadata_propagator, rate_limiter, timeout_interceptor,
+    trace_interceptor, w3c_trace_context_interceptor,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use native_stream::{NativeDuplexEvent, NativeDuplexStream, NativeStreamConfig, NativeStreamKeepalive};

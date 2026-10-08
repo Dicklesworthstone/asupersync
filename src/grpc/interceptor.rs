@@ -521,6 +521,71 @@ pub fn trace_interceptor() -> TracingInterceptor {
     TracingInterceptor::new()
 }
 
+/// W3C trace context metadata keys this interceptor reads and rewrites.
+const W3C_TRACE_CONTEXT_KEYS: [&str; 3] = ["traceparent", "tracestate", "baggage"];
+
+/// Interceptor that continues a request's W3C trace context or starts one.
+///
+/// On every request it reads `traceparent`, `tracestate` and `baggage` from
+/// the metadata and replaces them with a child span of that context; a
+/// missing or invalid `traceparent` starts a new trace (see
+/// [`continue_or_start_trace`](crate::observability::w3c_trace_context::continue_or_start_trace)).
+/// An interceptor gets no `Cx`, so new ids come from the operating system's
+/// random source.
+/// - On a client, each outgoing call gets its own span. To continue the
+///   caller's trace, copy the caller's `traceparent` (and `tracestate`,
+///   `baggage`) into the request metadata before the call.
+/// - On a server, the handler finds its own span in the request metadata.
+///
+/// A client picks the trace id it sends; at an untrusted edge, either accept
+/// that (the usual W3C deployment) or reset `traceparent` at a gateway first.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct W3CTraceContextInterceptor;
+
+impl W3CTraceContextInterceptor {
+    /// Create a W3C trace context interceptor.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl Interceptor for W3CTraceContextInterceptor {
+    fn intercept_request(&self, request: &mut Request<Bytes>) -> Result<(), Status> {
+        let incoming: std::collections::HashMap<String, String> = W3C_TRACE_CONTEXT_KEYS
+            .into_iter()
+            .filter_map(|key| {
+                let value = metadata_to_string(request.metadata().get(key)?)?;
+                Some((key.to_string(), value.to_string()))
+            })
+            .collect();
+        let context = crate::observability::w3c_trace_context::continue_or_start_trace(&incoming);
+        let mut outgoing = std::collections::HashMap::new();
+        crate::observability::w3c_trace_context::inject_to_grpc(&context, &mut outgoing);
+        let metadata = request.metadata_mut();
+        // Keys are written in a fixed order. A key the new context does not
+        // carry (for example the tracestate of an invalid traceparent) must
+        // not survive from the incoming request.
+        for key in W3C_TRACE_CONTEXT_KEYS {
+            let _ = metadata.remove(key);
+            if let Some(value) = outgoing.remove(key) {
+                let _ = metadata.insert_or_replace(key, value);
+            }
+        }
+        Ok(())
+    }
+
+    fn intercept_response(&self, _response: &mut Response<Bytes>) -> Result<(), Status> {
+        Ok(())
+    }
+}
+
+/// Create a W3C trace context interceptor.
+#[must_use]
+pub fn w3c_trace_context_interceptor() -> W3CTraceContextInterceptor {
+    W3CTraceContextInterceptor::new()
+}
+
 /// Bearer token authentication interceptor.
 #[derive(Debug, Clone)]
 pub struct BearerAuthInterceptor {
@@ -2116,5 +2181,117 @@ mod tests {
         );
         crate::assert_with_log!(ok, "trusted-edge request id preserved", true, ok);
         crate::test_complete!("tracing_interceptor_trusted_edge_preserves_existing_request_id");
+    }
+
+    fn ascii_metadata<'a>(request: &'a Request<Bytes>, key: &str) -> Option<&'a str> {
+        request.metadata().get(key).and_then(metadata_to_string)
+    }
+
+    fn metadata_span(
+        request: &Request<Bytes>,
+    ) -> crate::observability::w3c_trace_context::W3CTraceContext {
+        ascii_metadata(request, "traceparent")
+            .expect("the interceptor always writes a traceparent")
+            .parse()
+            .expect("the written traceparent is valid")
+    }
+
+    #[test]
+    fn w3c_trace_context_interceptor_continues_the_trace_at_every_hop() {
+        init_test("w3c_trace_context_interceptor_continues_the_trace_at_every_hop");
+        let upstream = crate::observability::w3c_trace_context::W3CTraceContext::new_root();
+        let mut request = Request::new(Bytes::new());
+        request
+            .metadata_mut()
+            .insert("traceparent", upstream.to_traceparent());
+        request.metadata_mut().insert("tracestate", "vendor=a");
+        request.metadata_mut().insert("baggage", "user=7");
+
+        let interceptor = w3c_trace_context_interceptor();
+        interceptor.intercept_request(&mut request).unwrap();
+        let client_span = metadata_span(&request);
+        assert_eq!(client_span.trace_id, upstream.trace_id);
+        assert_ne!(client_span.span_id, upstream.span_id);
+        assert_eq!(ascii_metadata(&request, "tracestate"), Some("vendor=a"));
+        assert_eq!(ascii_metadata(&request, "baggage"), Some("user=7"));
+
+        // The server side of the call continues the client's span.
+        interceptor.intercept_request(&mut request).unwrap();
+        let server_span = metadata_span(&request);
+        assert_eq!(server_span.trace_id, upstream.trace_id);
+        assert_ne!(server_span.span_id, client_span.span_id);
+        let traceparents = request
+            .metadata()
+            .iter()
+            .filter(|(key, _)| *key == "traceparent")
+            .count();
+        assert_eq!(traceparents, 1, "the traceparent is replaced, not appended");
+        crate::test_complete!("w3c_trace_context_interceptor_continues_the_trace_at_every_hop");
+    }
+
+    #[test]
+    fn w3c_trace_context_interceptor_restarts_an_invalid_trace_without_its_tracestate() {
+        init_test("w3c_trace_context_interceptor_restarts_an_invalid_trace_without_its_tracestate");
+        let mut request = Request::new(Bytes::new());
+        request
+            .metadata_mut()
+            .insert("traceparent", "00-not-a-trace-01");
+        request.metadata_mut().insert("tracestate", "vendor=a");
+        request.metadata_mut().insert("baggage", "user=7");
+
+        W3CTraceContextInterceptor::new()
+            .intercept_request(&mut request)
+            .unwrap();
+        // The invalid traceparent is replaced by a new, valid trace.
+        let _new_trace = metadata_span(&request);
+        assert_eq!(ascii_metadata(&request, "tracestate"), None);
+        assert_eq!(ascii_metadata(&request, "baggage"), Some("user=7"));
+        crate::test_complete!(
+            "w3c_trace_context_interceptor_restarts_an_invalid_trace_without_its_tracestate"
+        );
+    }
+
+    #[test]
+    fn w3c_trace_context_interceptor_drops_malformed_baggage_but_keeps_the_trace() {
+        init_test("w3c_trace_context_interceptor_drops_malformed_baggage_but_keeps_the_trace");
+        let upstream = crate::observability::w3c_trace_context::W3CTraceContext::new_root();
+        let mut request = Request::new(Bytes::new());
+        request
+            .metadata_mut()
+            .insert("traceparent", upstream.to_traceparent());
+        request.metadata_mut().insert("baggage", "user");
+
+        w3c_trace_context_interceptor()
+            .intercept_request(&mut request)
+            .unwrap();
+        assert_eq!(
+            ascii_metadata(&request, "baggage"),
+            None,
+            "malformed baggage is not forwarded"
+        );
+        assert_eq!(metadata_span(&request).trace_id, upstream.trace_id);
+        crate::test_complete!(
+            "w3c_trace_context_interceptor_drops_malformed_baggage_but_keeps_the_trace"
+        );
+    }
+
+    #[test]
+    fn w3c_trace_context_interceptor_starts_a_trace_per_request_without_one() {
+        init_test("w3c_trace_context_interceptor_starts_a_trace_per_request_without_one");
+        let interceptor = W3CTraceContextInterceptor::new();
+        let mut first = Request::new(Bytes::new());
+        let mut second = Request::new(Bytes::new());
+        interceptor.intercept_request(&mut first).unwrap();
+        interceptor.intercept_request(&mut second).unwrap();
+
+        assert_ne!(
+            metadata_span(&first).trace_id,
+            metadata_span(&second).trace_id
+        );
+        assert_eq!(ascii_metadata(&first, "tracestate"), None);
+        assert_eq!(ascii_metadata(&first, "baggage"), None);
+        crate::test_complete!(
+            "w3c_trace_context_interceptor_starts_a_trace_per_request_without_one"
+        );
     }
 }
