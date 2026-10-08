@@ -67,6 +67,9 @@ pub mod pool;
 /// no-ambient-global entry point to the runtime's default client.
 pub mod client;
 
+/// Explicit outbound W3C propagation with same-origin redirect boundaries.
+pub mod trace_client;
+
 #[cfg(not(target_arch = "wasm32"))]
 pub use auto::{HttpAutoListener, HttpAutoListenerConfig, HttpAutoShutdownStats};
 pub use body::{Body, Empty, Frame, Full, HeaderMap, HeaderName, HeaderValue, SizeHint};
@@ -100,3 +103,6 @@ pub use h3_native::{
     validate_response_pseudo_headers,
 };
 pub use pool::{Pool, PoolConfig, PoolKey, PoolStats, PooledConnectionMeta, PooledConnectionState};
+pub use trace_client::{
+    TracedClientError, TracedClientRequestBuilder, TracedHttpClient, TracedResponse,
+};
