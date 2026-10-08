@@ -4922,11 +4922,7 @@ where
 
     let accepted_at = cx.now();
     let mut expires_at = accepted_at + remote_service_clamp_lease(request.lease);
-    let child_spec = request
-        .budget
-        .map_or_else(ChildRegionSpec::inherit, |budget| {
-            ChildRegionSpec::inherit().with_budget(budget)
-        });
+    let child_spec = remote_service_child_spec(cx.budget(), request.budget);
     let child = match cx.open_child_region(child_spec).await {
         Ok(child) => child,
         Err(error) => {
@@ -5546,6 +5542,41 @@ const MAX_REMOTE_LEASE: Duration = Duration::from_secs(86_400);
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 fn remote_service_clamp_lease(lease: Duration) -> Duration {
     lease.min(MAX_REMOTE_LEASE)
+}
+
+/// The admission envelope for a peer's computation region.
+///
+/// A peer's wire budget may tighten the region (deadline, poll and cost
+/// quotas) but never raise its scheduling priority above the serving task's:
+/// `Budget::combine` keeps the higher priority, so an unclamped peer could ask
+/// for 255 and outrank all local ready work, although `RemoteCap::remote_budget`
+/// is documented as a ceiling (br-asupersync-remote-service-audit-pjrlqa M1).
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+fn remote_service_child_spec(local: Budget, requested: Option<Budget>) -> ChildRegionSpec {
+    requested.map_or_else(ChildRegionSpec::inherit, |mut budget| {
+        budget.priority = budget.priority.min(local.priority);
+        ChildRegionSpec::inherit().with_budget(budget)
+    })
+}
+
+#[cfg(all(test, feature = "tls", not(target_arch = "wasm32")))]
+#[test]
+fn remote_service_peer_budget_cannot_raise_priority() {
+    let local = Budget::INFINITE.with_priority(64);
+    let requested = Budget::INFINITE.with_priority(255).with_poll_quota(7);
+    let spec = remote_service_child_spec(local, Some(requested));
+    let budget = spec.budget.expect("peer budget is applied");
+    assert_eq!(
+        budget.priority, 64,
+        "the peer's priority is capped at the server's"
+    );
+    assert_eq!(budget.poll_quota, 7, "tightening fields pass through");
+    assert_eq!(budget.combine(local).priority, 64);
+
+    let lower = Budget::INFINITE.with_priority(3);
+    let spec = remote_service_child_spec(local, Some(lower));
+    assert_eq!(spec.budget.expect("peer budget").priority, 3);
+    assert!(remote_service_child_spec(local, None).budget.is_none());
 }
 
 #[cfg(all(test, feature = "tls", not(target_arch = "wasm32")))]
