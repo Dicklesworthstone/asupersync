@@ -180,6 +180,37 @@ frame types will not break it again.
 `server_handshake_over_udp_with_early_data` on the server side
 (`asupersync-nao6pg`, GitHub #77).
 
+### Breaking change — a child region keeps its opener's capability set
+
+`ChildRegionOpening` and `ChildRegion` gained a type parameter, `Caps`, which
+defaults to `cap::All`. `Cx::open_child_region` returns
+`ChildRegionOpening<Caps>` for the opener's `Caps`, and the child's `cx()` is a
+`Cx<Caps>`. Before, a restricted context such as `Cx<cap::None>` could open a
+child region and get back a `Cx<cap::All>` with every gated API, such as
+`spawn` and `blocking_pool_handle`.
+
+A caller holding `Cx<cap::All>` gets the same types as in v0.5.0. Code that
+opened a child region from a restricted context and relied on the wider child
+`Cx` no longer compiles; that was the escalation (`05f6ab6c6`,
+`asupersync-cwxavr`, GitHub #77).
+
+### Breaking build change — wasm32 builds need `default-features = false`
+
+The default features now include `runtime-core` and `native-runtime`
+(`0967799e0`). A wasm32 build that keeps the default features fails with
+"feature `native-runtime` is forbidden on wasm32 browser builds". At v0.5.0
+the defaults did not include `native-runtime`, so this check did not fire.
+
+Turn the defaults off and pick one browser profile, as the wasm documentation
+shows:
+
+```toml
+asupersync = { version = "0.6", default-features = false, features = ["wasm-browser-prod"] }
+```
+
+Native builds compile as before. Both features are markers for the planned
+runtime split and gate none of the v0.5.0 code (GitHub #77).
+
 ### Behavior change — the legacy ATP SDK session refuses work it cannot do
 
 `asupersync::atp::sdk::AtpSession` has no transport and no object store.
