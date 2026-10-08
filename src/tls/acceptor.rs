@@ -89,6 +89,9 @@ pub struct TlsCertificates {
 struct CertificateTable {
     default: Option<Arc<rustls::sign::CertifiedKey>>,
     by_name: std::collections::HashMap<String, Arc<rustls::sign::CertifiedKey>>,
+    /// Loads the stored keys, which then sign the handshakes; `None` is the
+    /// linked or process-default provider.
+    provider: Option<Arc<rustls::crypto::CryptoProvider>>,
 }
 
 #[cfg(feature = "tls")]
@@ -97,6 +100,23 @@ impl TlsCertificates {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An empty table whose keys are loaded by `provider`, so its handshakes
+    /// are signed by it: pass the provider given to
+    /// [`TlsAcceptorBuilder::crypto_provider`] (an acceptor built from a table
+    /// with another provider is refused). A table from [`Self::new`] uses the
+    /// linked or process-default provider (br-asupersync-7u9x9b).
+    #[must_use]
+    pub fn with_crypto_provider(provider: Arc<rustls::crypto::CryptoProvider>) -> Self {
+        let certificates = Self::new();
+        certificates.table.write().provider = Some(provider);
+        certificates
+    }
+
+    /// The provider given to [`Self::with_crypto_provider`], if any.
+    fn crypto_provider(&self) -> Option<Arc<rustls::crypto::CryptoProvider>> {
+        self.table.read().provider.clone()
     }
 
     /// A table whose default certificate is `chain` with `key`.
@@ -120,7 +140,7 @@ impl TlsCertificates {
     /// or outside its validity period, or the key does not match the leaf
     /// certificate. The table is unchanged then.
     pub fn set_default(&self, chain: CertificateChain, key: PrivateKey) -> Result<(), TlsError> {
-        let certified = certified_key(chain, key)?;
+        let certified = certified_key(chain, key, self.crypto_provider().as_ref())?;
         self.table.write().default = Some(certified);
         Ok(())
     }
@@ -154,7 +174,7 @@ impl TlsCertificates {
         key: PrivateKey,
     ) -> Result<(), TlsError> {
         let name = normalize_server_name(server_name)?;
-        let certified = certified_key(chain, key)?;
+        let certified = certified_key(chain, key, self.crypto_provider().as_ref())?;
         self.table.write().by_name.insert(name, certified);
         Ok(())
     }
@@ -201,11 +221,18 @@ impl std::fmt::Debug for TlsCertificates {
     }
 }
 
+/// The table key for `server_name`, which must be a name a client can send
+/// as SNI: an ASCII DNS name (an A-label, not a U-label, and not an IP
+/// address), or `*.` followed by one (br-asupersync-7u9x9b).
 #[cfg(feature = "tls")]
 fn normalize_server_name(server_name: &str) -> Result<String, TlsError> {
     let name = server_name.trim_end_matches('.').to_ascii_lowercase();
     let host = name.strip_prefix("*.").unwrap_or(&name);
-    if host.is_empty() || host.contains('*') {
+    if host.is_empty()
+        || host.contains('*')
+        || host.parse::<std::net::IpAddr>().is_ok()
+        || rustls::pki_types::DnsName::try_from(host).is_err()
+    {
         return Err(TlsError::Configuration(
             "a TLS server name must be a DNS name or *. followed by one".into(),
         ));
@@ -213,22 +240,31 @@ fn normalize_server_name(server_name: &str) -> Result<String, TlsError> {
     Ok(name)
 }
 
-/// Loads and checks one certificate for [`TlsCertificates`].
+/// Loads and checks one certificate for [`TlsCertificates`], with the
+/// table's provider.
 #[cfg(feature = "tls")]
 fn certified_key(
     chain: CertificateChain,
     key: PrivateKey,
+    provider: Option<&Arc<rustls::crypto::CryptoProvider>>,
 ) -> Result<Arc<rustls::sign::CertifiedKey>, TlsError> {
     TlsAcceptorBuilder::validate_certificate_chain(&chain)?;
-    let provider = super::resolve_crypto_provider(None)?;
+    let provider = super::resolve_crypto_provider(provider)?;
     let signing_key = provider
         .key_provider
         .load_private_key(key.clone_inner())
         .map_err(|e| TlsError::Configuration(format!("unusable private key: {e}")))?;
     let certified = rustls::sign::CertifiedKey::new(chain.into_inner(), signing_key);
-    certified
-        .keys_match()
-        .map_err(|e| TlsError::Configuration(format!("key does not match certificate: {e}")))?;
+    // As rustls's own `CertifiedKey::from_der`: a key that cannot report its
+    // public key (some hardware-backed providers) is not a mismatch.
+    match certified.keys_match() {
+        Ok(()) | Err(rustls::Error::InconsistentKeys(rustls::InconsistentKeys::Unknown)) => {}
+        Err(e) => {
+            return Err(TlsError::Configuration(format!(
+                "key does not match certificate: {e}"
+            )));
+        }
+    }
     Ok(Arc::new(certified))
 }
 
@@ -872,7 +908,9 @@ impl TlsAcceptorBuilder {
     /// The other settings apply as with [`Self::new`]. Certificates are
     /// checked when they are stored, so [`Self::require_full_chain`] and
     /// [`Self::disable_strict_cert_validation`] do not apply; `build` refuses
-    /// `require_full_chain`.
+    /// `require_full_chain`. A table from
+    /// [`TlsCertificates::with_crypto_provider`] gives the acceptor its
+    /// provider unless [`Self::crypto_provider`] names the same one.
     #[cfg(feature = "tls")]
     #[must_use]
     pub fn from_certificates(certificates: TlsCertificates) -> Self {
@@ -1250,7 +1288,9 @@ impl TlsAcceptorBuilder {
     /// Mirrors `TlsConnectorBuilder::crypto_provider`: without it, the
     /// acceptor uses the ring provider when `tls` links it, else rustls's
     /// process default; a `tls-core` build with neither fails in
-    /// [`Self::build`].
+    /// [`Self::build`]. With [`Self::from_certificates`], the table must come
+    /// from [`TlsCertificates::with_crypto_provider`] with this same
+    /// provider, or `build` refuses it.
     #[cfg(feature = "tls")]
     pub fn crypto_provider(mut self, provider: Arc<rustls::crypto::CryptoProvider>) -> Self {
         self.crypto_provider = Some(provider);
@@ -1416,7 +1456,29 @@ impl TlsAcceptorBuilder {
         // narrower protocol range than the rustls safe defaults (e.g.,
         // TLS 1.3 only to eliminate downgrade-attack surface and TLS
         // 1.2 cipher-suite negotiation pitfalls).
-        let provider = super::resolve_crypto_provider(self.crypto_provider.as_ref())?;
+        // A certificate table signs with the keys its own provider loaded, so
+        // it must be the acceptor's provider: a table from `new()` next to an
+        // explicit provider would sign every handshake with the default one
+        // (br-asupersync-7u9x9b). A table with a provider lends it to an
+        // acceptor that names none.
+        let table_provider = self
+            .certificates
+            .as_ref()
+            .and_then(TlsCertificates::crypto_provider);
+        if let (Some(explicit), Some(_)) = (self.crypto_provider.as_ref(), &self.certificates)
+            && !table_provider
+                .as_ref()
+                .is_some_and(|table| Arc::ptr_eq(table, explicit))
+        {
+            return Err(TlsError::Configuration(
+                "crypto_provider differs from the TlsCertificates provider: build the table \
+                 with TlsCertificates::with_crypto_provider and the same provider"
+                    .into(),
+            ));
+        }
+        let provider = super::resolve_crypto_provider(
+            self.crypto_provider.as_ref().or(table_provider.as_ref()),
+        )?;
         let builder = ServerConfig::builder_with_provider(Arc::clone(&provider));
         let builder = if self.min_protocol.is_some() || self.max_protocol.is_some() {
             // Convert protocol versions to the wire ordinals so the
