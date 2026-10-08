@@ -131,6 +131,15 @@ pub use lines::Lines;
 pub use read_line::{LineReader, ReadLine, ReadLineCancelSafe, read_line};
 pub use std::io::SeekFrom;
 
+#[cfg(all(unix, not(target_arch = "wasm32")))]
+mod async_fd;
+
+/// Unix-specific I/O: readiness waits for arbitrary file descriptors.
+#[cfg(all(unix, not(target_arch = "wasm32")))]
+pub mod unix {
+    pub use super::async_fd::{AsyncFd, AsyncFdReadyGuard, AsyncFdReadyMutGuard, TryIoError};
+}
+
 pub mod replay;
 pub mod replay_session;
 
