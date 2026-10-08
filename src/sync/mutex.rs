@@ -168,11 +168,11 @@ impl<T> Mutex<T> {
         self.poisoned.load(Ordering::Acquire)
     }
 
-    /// Returns true if the mutex is currently locked.
+    /// Returns true if the mutex is locked or handed to a woken waiter.
     #[inline]
     #[must_use]
     pub fn is_locked(&self) -> bool {
-        self.state.lock().locked
+        self.state.lock().is_held()
     }
 
     /// Returns the number of tasks currently waiting for the lock.
@@ -1115,6 +1115,16 @@ impl<T, Caps> LockFuture<'_, '_, T, Caps> {
             self.waiter_id = None;
         }
         self.waiter_id.is_none()
+    }
+}
+
+impl MutexState {
+    /// Locked, or handed to a woken waiter that has not resumed yet. Either
+    /// way `try_lock` refuses, so `is_locked` reports both
+    /// (br-asupersync-myvrjv L3). Defined here, after the unsafe-ledger line
+    /// locators, so they keep their lines.
+    fn is_held(&self) -> bool {
+        self.locked || self.granted_waiter.is_some()
     }
 }
 

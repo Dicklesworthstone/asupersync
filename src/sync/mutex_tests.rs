@@ -1192,6 +1192,35 @@ mod tests {
         crate::test_complete!("try_lock_does_not_bypass_granted_waiter");
     }
 
+    /// While the lock is handed to a woken waiter that has not resumed,
+    /// is_locked agrees with try_lock (br-asupersync-myvrjv L3): unlock
+    /// clears `locked` and grants the next waiter its turn.
+    #[test]
+    fn is_locked_counts_a_granted_waiter_that_has_not_resumed() {
+        init_test("is_locked_counts_a_granted_waiter_that_has_not_resumed");
+        let cx = test_cx();
+        let mutex = Mutex::new(0u32);
+        let mut fut_hold = mutex.lock(&cx);
+        let guard = poll_once(&mut fut_hold).expect("immediate").expect("lock");
+        let mut fut_w = mutex.lock(&cx);
+        let _ = poll_once(&mut fut_w);
+
+        drop(guard);
+        assert!(matches!(mutex.try_lock(), Err(TryLockError::Locked)));
+        assert!(
+            mutex.is_locked(),
+            "the lock is handed to the woken waiter, so it is not free"
+        );
+
+        let guard_w = poll_once(&mut fut_w)
+            .expect("should complete")
+            .expect("no error");
+        assert!(mutex.is_locked());
+        drop(guard_w);
+        assert!(!mutex.is_locked());
+        crate::test_complete!("is_locked_counts_a_granted_waiter_that_has_not_resumed");
+    }
+
     #[test]
     fn owned_try_lock_does_not_bypass_granted_waiter() {
         init_test("owned_try_lock_does_not_bypass_granted_waiter");
