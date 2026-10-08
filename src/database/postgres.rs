@@ -1059,6 +1059,226 @@ impl<T: FromSql> FromSql for Option<T> {
     }
 }
 
+// ---- Timestamps ----
+
+/// Microseconds from the Unix epoch to PostgreSQL's epoch, 2000-01-01 UTC.
+const PG_EPOCH_UNIX_MICROS: i64 = 946_684_800_000_000;
+
+/// `SystemTime` binds as `timestamptz`, in binary (microseconds since
+/// 2000-01-01 UTC; a sub-microsecond remainder is truncated toward the past).
+/// Bound into a `timestamp without time zone` column, the instant is converted
+/// to the session's `TimeZone`, as PostgreSQL converts any `timestamptz`.
+impl ToSql for std::time::SystemTime {
+    fn to_sql(&self, buf: &mut Vec<u8>) -> Result<IsNull, PgError> {
+        let micros = system_time_unix_micros(*self)?
+            .checked_sub(PG_EPOCH_UNIX_MICROS)
+            .ok_or_else(timestamp_out_of_range)?;
+        buf.extend_from_slice(&micros.to_be_bytes());
+        Ok(IsNull::No)
+    }
+    fn type_oid(&self) -> u32 {
+        oid::TIMESTAMPTZ
+    }
+}
+
+/// `timestamptz` and `timestamp` decode into `SystemTime`. A `timestamp`
+/// carries no offset and is read as UTC. Text values must be in the ISO
+/// `DateStyle` (the server default); `infinity` and `-infinity` have no
+/// `SystemTime` and fail to decode.
+impl FromSql for std::time::SystemTime {
+    fn from_sql(data: &[u8], _oid: u32, format: Format) -> Result<Self, PgError> {
+        let unix_micros = match format {
+            Format::Binary => {
+                let raw: [u8; 8] = data
+                    .try_into()
+                    .map_err(|_| PgError::Protocol("timestamp requires 8 bytes".into()))?;
+                let micros = i64::from_be_bytes(raw);
+                if micros == i64::MAX || micros == i64::MIN {
+                    return Err(infinite_timestamp());
+                }
+                micros
+                    .checked_add(PG_EPOCH_UNIX_MICROS)
+                    .ok_or_else(timestamp_out_of_range)?
+            }
+            Format::Text => parse_pg_timestamp_text(data)?,
+        };
+        let magnitude = std::time::Duration::from_micros(unix_micros.unsigned_abs());
+        if unix_micros >= 0 {
+            std::time::UNIX_EPOCH.checked_add(magnitude)
+        } else {
+            std::time::UNIX_EPOCH.checked_sub(magnitude)
+        }
+        .ok_or_else(timestamp_out_of_range)
+    }
+    fn accepts(oid: u32) -> bool {
+        matches!(oid, oid::TIMESTAMP | oid::TIMESTAMPTZ)
+    }
+}
+
+fn timestamp_out_of_range() -> PgError {
+    PgError::Protocol("timestamp is out of range".into())
+}
+
+fn infinite_timestamp() -> PgError {
+    PgError::Protocol("an infinite timestamp has no SystemTime value".into())
+}
+
+/// Microseconds since the Unix epoch, truncated toward the past.
+fn system_time_unix_micros(time: std::time::SystemTime) -> Result<i64, PgError> {
+    match time.duration_since(std::time::UNIX_EPOCH) {
+        Ok(after) => i64::try_from(after.as_micros()).map_err(|_| timestamp_out_of_range()),
+        Err(before) => {
+            let before = before.duration();
+            let micros = before.as_micros() + u128::from(before.subsec_nanos() % 1_000 != 0);
+            i64::try_from(micros)
+                .map(|micros| -micros)
+                .map_err(|_| timestamp_out_of_range())
+        }
+    }
+}
+
+/// Days from 1970-01-01 to a proleptic Gregorian date (astronomical year
+/// numbering, so 1 BC is year 0).
+const fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let month_index = if month > 2 { month - 3 } else { month + 9 };
+    let day_of_year = (153 * month_index + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+/// Parses `timestamp`/`timestamptz` text in the ISO `DateStyle`
+/// (`2026-10-08 06:45:50.25+05:30`, `0044-03-15 12:00:00+00:19:32 BC`) into
+/// microseconds since the Unix epoch. Without an offset the value is UTC.
+fn parse_pg_timestamp_text(data: &[u8]) -> Result<i64, PgError> {
+    let text =
+        std::str::from_utf8(data).map_err(|e| PgError::Protocol(format!("invalid UTF-8: {e}")))?;
+    if matches!(text, "infinity" | "-infinity") {
+        return Err(infinite_timestamp());
+    }
+    let invalid = || {
+        PgError::Protocol(format!(
+            "unrecognized timestamp {text:?}; SystemTime decodes the ISO DateStyle"
+        ))
+    };
+    let number = |digits: &str| -> Result<i64, PgError> {
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(invalid());
+        }
+        digits.parse().map_err(|_| invalid())
+    };
+    let (body, before_christ) = text
+        .strip_suffix(" BC")
+        .map_or((text, false), |body| (body, true));
+    let (date, time) = body.split_once(' ').ok_or_else(invalid)?;
+    let mut date_parts = date.split('-');
+    let (Some(year), Some(month), Some(day), None) = (
+        date_parts.next(),
+        date_parts.next(),
+        date_parts.next(),
+        date_parts.next(),
+    ) else {
+        return Err(invalid());
+    };
+    let (year, month, day) = (number(year)?, number(month)?, number(day)?);
+    let year = if before_christ { 1 - year } else { year };
+
+    let (clock, offset) = time
+        .find(['+', '-'])
+        .map_or((time, None), |at| (&time[..at], Some(&time[at..])));
+    let (hms, fraction) = clock.split_once('.').unwrap_or((clock, ""));
+    let mut clock_parts = hms.split(':');
+    let (Some(hour), Some(minute), Some(second), None) = (
+        clock_parts.next(),
+        clock_parts.next(),
+        clock_parts.next(),
+        clock_parts.next(),
+    ) else {
+        return Err(invalid());
+    };
+    let (hour, minute, second) = (number(hour)?, number(minute)?, number(second)?);
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 24
+        || minute > 59
+        || second > 60
+        || fraction.len() > 6
+    {
+        return Err(invalid());
+    }
+    let fraction_micros = if fraction.is_empty() {
+        0
+    } else {
+        number(fraction)? * 10_i64.pow(6 - u32::try_from(fraction.len()).map_err(|_| invalid())?)
+    };
+
+    let offset_seconds = match offset {
+        None => 0,
+        Some(offset) => {
+            let (sign, magnitude) = offset.split_at(1);
+            let mut offset_parts = magnitude.split(':');
+            let hours = number(offset_parts.next().ok_or_else(invalid)?)?;
+            let minutes = offset_parts.next().map_or(Ok(0), number)?;
+            let seconds = offset_parts.next().map_or(Ok(0), number)?;
+            if offset_parts.next().is_some() || minutes > 59 || seconds > 59 {
+                return Err(invalid());
+            }
+            let total = hours * 3_600 + minutes * 60 + seconds;
+            if sign == "-" { -total } else { total }
+        }
+    };
+
+    let local_seconds = days_from_civil(year, month, day)
+        .checked_mul(86_400)
+        .and_then(|seconds| seconds.checked_add(hour * 3_600 + minute * 60 + second))
+        .ok_or_else(timestamp_out_of_range)?;
+    local_seconds
+        .checked_sub(offset_seconds)
+        .and_then(|seconds| seconds.checked_mul(1_000_000))
+        .and_then(|micros| micros.checked_add(fraction_micros))
+        .ok_or_else(timestamp_out_of_range)
+}
+
+// ---- JSON ----
+
+/// `serde_json::Value` binds as `jsonb`, in text format, so it fits a `json`
+/// or `jsonb` parameter whether the type comes from this binding or from the
+/// server's inference for a prepared statement.
+impl ToSql for serde_json::Value {
+    fn to_sql(&self, buf: &mut Vec<u8>) -> Result<IsNull, PgError> {
+        serde_json::to_writer(&mut *buf, self)
+            .map_err(|e| PgError::Protocol(format!("JSON encoding failed: {e}")))?;
+        Ok(IsNull::No)
+    }
+    fn type_oid(&self) -> u32 {
+        oid::JSONB
+    }
+    fn format(&self) -> Format {
+        Format::Text
+    }
+}
+
+/// `json` and `jsonb` decode into `serde_json::Value`.
+impl FromSql for serde_json::Value {
+    fn from_sql(data: &[u8], oid: u32, format: Format) -> Result<Self, PgError> {
+        let json = match (format, data.split_first()) {
+            (Format::Binary, Some((&1, json))) if oid == oid::JSONB => json,
+            (Format::Binary, Some((&version, _))) if oid == oid::JSONB => {
+                return Err(PgError::Protocol(format!(
+                    "unsupported JSONB version: {version}"
+                )));
+            }
+            _ => data,
+        };
+        serde_json::from_slice(json).map_err(|e| PgError::Protocol(format!("invalid JSON: {e}")))
+    }
+    fn accepts(oid: u32) -> bool {
+        matches!(oid, oid::JSON | oid::JSONB)
+    }
+}
+
 // ---- One-dimensional arrays ----
 
 /// A Rust type that binds as an element of a one-dimensional PostgreSQL array.
@@ -1095,6 +1315,7 @@ pg_array_element! {
     String => TEXT, TEXT_ARRAY;
     &str => TEXT, TEXT_ARRAY;
     Vec<u8> => BYTEA, BYTEA_ARRAY;
+    std::time::SystemTime => TIMESTAMPTZ, TIMESTAMPTZ_ARRAY;
 }
 
 impl<T: PgArrayElement> PgArrayElement for Option<T> {

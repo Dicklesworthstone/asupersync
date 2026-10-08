@@ -1589,3 +1589,150 @@ fn pg_real_arrays_bind_and_decode() {
         log.end("pass");
     });
 }
+
+/// `SystemTime` and `serde_json::Value` round-trip through a real server: a
+/// `SystemTime` binds into `timestamptz` and `timestamp` columns (on the
+/// unprepared and the prepared path, and as a `timestamptz[]`), decodes back
+/// from the text output in a non-UTC session time zone, and a JSON value binds
+/// into `json` and `jsonb` columns and decodes from both.
+#[test]
+fn pg_real_timestamps_and_json_bind_and_decode() {
+    use asupersync::database::postgres::ToSql;
+
+    let cfg = RealPgConfig::from_env();
+    if skip_if_disabled(&cfg, "pg_real_timestamps_and_json_bind_and_decode") {
+        return;
+    }
+    let log = PgTestLogger::new(
+        "postgres_real",
+        "pg_real_timestamps_and_json_bind_and_decode",
+    );
+
+    run_test_with_cx(|cx| async move {
+        let mut conn = unwrap_pg(PgConnection::connect(&cx, &cfg.url).await, &log, "connect");
+        // Offsets with minutes in the text output, and a timestamp column
+        // that stores the session's wall time.
+        unwrap_pg(
+            conn.execute_unchecked(&cx, "SET TimeZone = 'Asia/Kolkata'")
+                .await,
+            &log,
+            "set_timezone",
+        );
+        unwrap_pg(
+            conn.execute_unchecked(
+                &cx,
+                "CREATE TEMP TABLE asupersync_time_json \
+                 (id int4, tz timestamptz, local timestamp, doc json, docb jsonb)",
+            )
+            .await,
+            &log,
+            "create",
+        );
+
+        log.phase("unprepared");
+        // 2026-10-08 06:45:50.123456 UTC.
+        let instant = UNIX_EPOCH + Duration::from_micros(1_791_441_950_123_456);
+        let doc =
+            serde_json::json!({"name": "q\"u", "tags": ["a", 1, null], "nested": {"ok": true}});
+        let params: &[&dyn ToSql] = &[&1_i32, &instant, &instant, &doc, &doc];
+        unwrap_pg(
+            conn.execute_params(
+                &cx,
+                "INSERT INTO asupersync_time_json VALUES ($1, $2, $3, $4, $5)",
+                params,
+            )
+            .await,
+            &log,
+            "insert",
+        );
+
+        log.phase("prepared");
+        let before_2000 = UNIX_EPOCH + Duration::from_secs(86_400 * 365);
+        let other = serde_json::json!([1, "two", 3.5]);
+        let stmt = unwrap_pg(
+            conn.prepare(
+                &cx,
+                "INSERT INTO asupersync_time_json VALUES ($1, $2, $3, $4, $5)",
+            )
+            .await,
+            &log,
+            "prepare",
+        );
+        let params: &[&dyn ToSql] = &[&2_i32, &before_2000, &before_2000, &other, &other];
+        unwrap_pg(
+            conn.execute_prepared(&cx, &stmt, params).await,
+            &log,
+            "execute_prepared",
+        );
+
+        log.phase("decode");
+        let rows = unwrap_pg(
+            conn.query_unchecked(
+                &cx,
+                "SELECT id, tz, local, doc, docb, tz::text AS tz_text, local::text AS local_text \
+                 FROM asupersync_time_json ORDER BY id",
+            )
+            .await,
+            &log,
+            "select",
+        );
+        assert_eq!(rows.len(), 2);
+        let first = &rows[0];
+        assert_eq!(
+            first.get_str("tz_text").expect("tz_text"),
+            "2026-10-08 12:15:50.123456+05:30"
+        );
+        assert_eq!(
+            first.get_str("local_text").expect("local_text"),
+            "2026-10-08 12:15:50.123456"
+        );
+        assert_eq!(first.get_typed::<SystemTime>("tz").expect("tz"), instant);
+        assert_eq!(
+            first.get_typed::<serde_json::Value>("doc").expect("doc"),
+            doc
+        );
+        assert_eq!(
+            first.get_typed::<serde_json::Value>("docb").expect("docb"),
+            doc
+        );
+        let second = &rows[1];
+        assert_eq!(
+            second.get_typed::<SystemTime>("tz").expect("tz"),
+            before_2000
+        );
+        assert_eq!(
+            second.get_typed::<serde_json::Value>("docb").expect("docb"),
+            other
+        );
+
+        log.phase("arrays");
+        let instants = vec![instant, before_2000];
+        let params: &[&dyn ToSql] = &[&instants];
+        let rows = unwrap_pg(
+            conn.query_params(
+                &cx,
+                "SELECT $1 AS same, (SELECT count(*)::int4 FROM asupersync_time_json \
+                 WHERE tz = ANY($1)) AS matched",
+                params,
+            )
+            .await,
+            &log,
+            "arrays",
+        );
+        assert_eq!(
+            rows[0].get_typed::<Vec<SystemTime>>("same").expect("same"),
+            instants
+        );
+        assert_eq!(rows[0].get_i32("matched").expect("matched"), 2);
+
+        log.phase("infinity");
+        let rows = unwrap_pg(
+            conn.query_unchecked(&cx, "SELECT 'infinity'::timestamptz AS forever")
+                .await,
+            &log,
+            "infinity",
+        );
+        assert!(rows[0].get_typed::<SystemTime>("forever").is_err());
+        log.end("pass");
+    });
+}
