@@ -728,9 +728,10 @@ impl<R> Drop for Reply<R> {
         } else {
             // Genuine programmer bug: handler returned without send/abort
             // while the cx was healthy. Let the linearity drop-bomb fire
-            // so the supervisor surfaces the leak. Nothing is recorded, so
-            // the lab's reply-linearity oracle reports the drop even when a
-            // restarting supervisor absorbs the panic.
+            // so the supervisor surfaces the leak. The drop is recorded, so
+            // the lab's reply-linearity oracle reports it at once, even when
+            // a restarting supervisor absorbs the panic.
+            self.record(|call| crate::runtime::state::ReplyHistoryEvent::Dropped { call });
             drop(permit);
         }
     }

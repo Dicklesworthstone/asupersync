@@ -650,6 +650,10 @@ pub(crate) enum ReplyHistoryEvent {
     /// The reply was aborted: explicitly, or by the server's cancellation or
     /// panic unwind.
     Aborted { call: u64 },
+    /// The `Reply` was dropped unresolved while its task was healthy: the
+    /// linearity drop-bomb fires. Recorded wherever it was dropped, which
+    /// may be a helper task the reply was handed to.
+    Dropped { call: u64 },
 }
 
 #[derive(Debug, Default)]

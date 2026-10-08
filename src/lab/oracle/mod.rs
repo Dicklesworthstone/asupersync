@@ -489,19 +489,32 @@ impl OracleSuite {
         // every hydration. It replaces the oracle's events; a suite fed by
         // hand keeps them only while the runtime has recorded no reply. Each `Reply`
         // gets its own synthetic task, so calls to one server do not share an
-        // entry. A reply still unresolved while its server runs is in flight,
-        // not dropped, so a mid-run report leaves it out.
+        // entry. A reply recorded as dropped is reported at once. Any other
+        // reply still unresolved while some task runs is in flight, so a
+        // mid-run report leaves it out: a `Reply` can be moved into a helper
+        // task that outlives its server. Once no task runs, an unresolved
+        // reply was lost (for example forgotten) and is reported.
         let replies = state.reply_history();
         if !replies.is_empty() {
             use crate::runtime::state::ReplyHistoryEvent;
             self.reply_linearity.reset();
+            let any_task_running = state
+                .tasks_iter()
+                .any(|(_, task)| !task.state.is_terminal());
             let resolved: std::collections::BTreeSet<u64> = replies
                 .iter()
                 .filter_map(|event| match *event {
                     ReplyHistoryEvent::Sent { call } | ReplyHistoryEvent::Aborted { call } => {
                         Some(call)
                     }
-                    ReplyHistoryEvent::Created { .. } => None,
+                    ReplyHistoryEvent::Created { .. } | ReplyHistoryEvent::Dropped { .. } => None,
+                })
+                .collect();
+            let dropped: std::collections::BTreeSet<u64> = replies
+                .iter()
+                .filter_map(|event| match *event {
+                    ReplyHistoryEvent::Dropped { call } => Some(call),
+                    _ => None,
                 })
                 .collect();
             let call_task = |call: u64| {
@@ -515,9 +528,8 @@ impl OracleSuite {
                 match *event {
                     ReplyHistoryEvent::Created { call, server, time } => {
                         let in_flight = !resolved.contains(&call)
-                            && state
-                                .task(server)
-                                .is_some_and(|task| !task.state.is_terminal());
+                            && !dropped.contains(&call)
+                            && any_task_running;
                         if !in_flight {
                             let server = crate::actor::ActorId::from_task(server);
                             servers.insert(call, server);
@@ -536,6 +548,8 @@ impl OracleSuite {
                                 .on_reply_aborted(server, call_task(call));
                         }
                     }
+                    // Fed above as created and never resolved.
+                    ReplyHistoryEvent::Dropped { .. } => {}
                 }
             }
         }
@@ -1590,6 +1604,67 @@ mod tests {
         });
         crate::assert_with_log!(found, "lost wakeup", true, found);
         crate::test_complete!("oracle_suite_routes_logical_time_to_waker_age_checks");
+    }
+
+    /// br-asupersync-52hxjz: a reply whose server is gone but which a helper
+    /// task may still hold is in flight, not dropped. A reply recorded as
+    /// dropped is reported at once, though tasks still run. Once no task
+    /// runs, an unresolved reply is reported too.
+    #[test]
+    fn hydration_classifies_handed_off_and_dropped_replies() {
+        use crate::runtime::state::ReplyHistoryEvent;
+        init_test("hydration_classifies_handed_off_and_dropped_replies");
+        let budget = crate::types::Budget::INFINITE;
+        let mut state = crate::runtime::RuntimeState::new();
+        let root = state.create_root_region(budget);
+        let (server, _server_handle) = state
+            .create_task(root, budget, async {})
+            .expect("server task");
+        let (helper, _helper_handle) = state
+            .create_task(root, budget, async {})
+            .expect("helper task");
+        let history = state.reply_history_handle();
+        let handed_off = history.next_call();
+        history.record(ReplyHistoryEvent::Created {
+            call: handed_off,
+            server,
+            time: Time::ZERO,
+        });
+        // The server is gone; the helper it handed the reply to still runs.
+        assert!(state.remove_task(server).is_some());
+        let mut suite = OracleSuite::new();
+        suite.hydrate_temporal_from_state(&state, Time::ZERO);
+        assert!(
+            suite.reply_linearity.check().is_ok(),
+            "a handed-off reply is in flight while a task runs"
+        );
+        assert_eq!(suite.reply_linearity.created_count(), 0);
+
+        let dropped = history.next_call();
+        history.record(ReplyHistoryEvent::Created {
+            call: dropped,
+            server: helper,
+            time: Time::ZERO,
+        });
+        history.record(ReplyHistoryEvent::Dropped { call: dropped });
+        let mut suite = OracleSuite::new();
+        suite.hydrate_temporal_from_state(&state, Time::ZERO);
+        assert!(
+            suite.reply_linearity.check().is_err(),
+            "a dropped reply is reported while its task still runs"
+        );
+        assert_eq!(suite.reply_linearity.created_count(), 1);
+
+        assert!(state.remove_task(helper).is_some());
+        let mut suite = OracleSuite::new();
+        suite.hydrate_temporal_from_state(&state, Time::ZERO);
+        assert_eq!(
+            suite.reply_linearity.created_count(),
+            2,
+            "once no task runs, the unresolved handed-off reply is reported too"
+        );
+        assert!(suite.reply_linearity.check().is_err());
+        crate::test_complete!("hydration_classifies_handed_off_and_dropped_replies");
     }
 
     #[test]
