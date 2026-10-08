@@ -383,9 +383,11 @@ where
 // struct that owns the underlying reader. Each `LineReader::read_line` call
 // borrows the wrapper's `pending` field, so cancelling the future leaves
 // the partial prefix in the wrapper for the next call. The user holds a
-// `LineReader` and the same `String` across read_line invocations and gets
-// bit-exact resumption on cancel: complete codepoints are already in the
-// String, only the partial one waits in the wrapper.
+// `LineReader` and the same `String` across read_line invocations, and no
+// byte is lost on cancel: complete codepoints are already in the String,
+// only the partial one waits in the wrapper. A resumed call returns only the
+// count of bytes it read itself, so the caller must check the String, not
+// just the count, for a line begun before the cancel (asupersync-6n35x5).
 // ============================================================================
 
 /// Cancel-safe wrapper that holds the partial UTF-8 prefix for a sequence of
@@ -406,12 +408,19 @@ where
 /// // a fresh String per call would drop the start of the line.
 /// let mut line = String::new();
 /// loop {
+///     // `n` counts only the bytes this call read. After a cancelled call,
+///     // `line` can hold the start of a last line that this call ends with
+///     // EOF (n == 0), so the loop handles it before it stops.
 ///     let n = reader.read_line(&mut line).await?;
-///     if n == 0 { break; }
+///     if n == 0 && line.is_empty() { break; }
 ///     handle_line(&line);
 ///     line.clear();
+///     if n == 0 { break; }
 /// }
 /// ```
+///
+/// After an error (for example invalid UTF-8), `line` can still hold the
+/// start of the bad line: clear it before reusing the `String`.
 #[derive(Debug)]
 pub struct LineReader<R> {
     inner: R,

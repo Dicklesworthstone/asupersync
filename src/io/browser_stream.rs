@@ -912,14 +912,14 @@ impl<R: AsyncRead + Unpin> AsyncRead for BrowserReadableStream<R> {
             BrowserStreamState::Closing | BrowserStreamState::Open => {}
         }
 
-        // Check read limit
+        // Check read limit. A body exactly max_total_read_bytes long is
+        // complete: at the limit, a clean end of the source is still EOF, and
+        // only a byte past it is an error (asupersync-6n35x5). The probe reads
+        // at most one byte, so a source with more fails the stream as before.
+        // It also keeps a source error, and the stats, as other reads do.
+        // (See poll_at_read_limit at the end of this file.)
         if this.total_read >= this.config.max_total_read_bytes {
-            this.state = BrowserStreamState::Errored;
-            return Poll::Ready(Err(BrowserStreamError::ReadLimitExceeded {
-                read: this.total_read,
-                limit: this.config.max_total_read_bytes,
-            }
-            .into()));
+            return this.poll_at_read_limit(cx);
         }
 
         if buf.remaining() == 0 {
@@ -3091,6 +3091,82 @@ mod tests {
         #[allow(unsafe_code)]
         unsafe {
             std::task::Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE))
+        }
+    }
+
+    /// A body exactly `max_total_read_bytes` long reads to EOF; one byte more
+    /// fails the stream (asupersync-6n35x5).
+    #[test]
+    fn readable_stream_accepts_a_body_exactly_at_the_read_limit() {
+        let waker = futures_task_noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let config = BrowserStreamConfig {
+            max_total_read_bytes: 10,
+            ..BrowserStreamConfig::default()
+        };
+
+        let mut exact = BrowserReadableStream::new(Cursor::new(vec![7u8; 10]), config.clone());
+        let mut buf = [0u8; 64];
+        let mut read_buf = ReadBuf::new(&mut buf);
+        let first = Pin::new(&mut exact).poll_read(&mut cx, &mut read_buf);
+        assert!(matches!(first, Poll::Ready(Ok(()))));
+        assert_eq!(read_buf.filled().len(), 10);
+        let mut eof = [0u8; 64];
+        let mut eof_buf = ReadBuf::new(&mut eof);
+        let second = Pin::new(&mut exact).poll_read(&mut cx, &mut eof_buf);
+        assert!(
+            matches!(second, Poll::Ready(Ok(()))),
+            "a body exactly at the limit ends with EOF: {second:?}"
+        );
+        assert!(eof_buf.filled().is_empty());
+        assert_eq!(exact.state(), BrowserStreamState::Closed);
+
+        let mut over = BrowserReadableStream::new(Cursor::new(vec![7u8; 11]), config);
+        let mut buf = [0u8; 64];
+        let mut read_buf = ReadBuf::new(&mut buf);
+        assert!(matches!(
+            Pin::new(&mut over).poll_read(&mut cx, &mut read_buf),
+            Poll::Ready(Ok(()))
+        ));
+        let mut more = [0u8; 64];
+        let mut more_buf = ReadBuf::new(&mut more);
+        let past = Pin::new(&mut over).poll_read(&mut cx, &mut more_buf);
+        assert!(
+            matches!(past, Poll::Ready(Err(_))),
+            "one byte past the limit fails: {past:?}"
+        );
+        assert_eq!(over.state(), BrowserStreamState::Errored);
+    }
+}
+
+impl<R: AsyncRead + Unpin> BrowserReadableStream<R> {
+    /// The stream has read `max_total_read_bytes`. A clean end of the source
+    /// is EOF; any further byte exceeds the limit (asupersync-6n35x5). Defined
+    /// after the unsafe-ledger line locators above, so they keep their lines.
+    fn poll_at_read_limit(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let mut probe = [0u8; 1];
+        let mut probe_buf = ReadBuf::new(&mut probe);
+        match Pin::new(&mut self.source).poll_read(cx, &mut probe_buf) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(())) if probe_buf.filled().is_empty() => {
+                self.state = BrowserStreamState::Closed;
+                self.accounting.mark_closed();
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Ok(())) => {
+                self.state = BrowserStreamState::Errored;
+                self.accounting.mark_aborted();
+                Poll::Ready(Err(BrowserStreamError::ReadLimitExceeded {
+                    read: self.total_read,
+                    limit: self.config.max_total_read_bytes,
+                }
+                .into()))
+            }
+            Poll::Ready(Err(error)) => {
+                self.state = BrowserStreamState::Errored;
+                self.accounting.mark_aborted();
+                Poll::Ready(Err(error))
+            }
         }
     }
 }
