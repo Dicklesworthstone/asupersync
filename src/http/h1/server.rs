@@ -4028,6 +4028,14 @@ mod tests {
             // deadline and its registered shutdown waiter, including retries.
             ("poll_pending_expectation_flush", ".poll_flush("),
             ("poll_request_expectation", ".poll_flush("),
+            // Http1UpgradedIo's AsyncWrite impl (1765fc422) only forwards to
+            // the transport. It is handed to an upgrade handler after the 101
+            // response was committed, so its writes belong to the upgraded
+            // protocol and its owner, not to an HTTP response.
+            ("poll_write", ".poll_write("),
+            ("poll_write_vectored", ".poll_write_vectored("),
+            ("poll_flush", ".poll_flush("),
+            ("poll_shutdown", ".poll_shutdown("),
         ];
         let mut observed = Vec::new();
         let mut function = "";
