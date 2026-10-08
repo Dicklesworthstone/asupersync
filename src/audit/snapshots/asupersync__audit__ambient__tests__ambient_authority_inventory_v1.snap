@@ -146,6 +146,7 @@ expression: inventory
 2	Io	trace/file.rs	File::create(
 2	Io	trace/file.rs	File::open(
 1	Io	trace/integrity.rs	File::open(
+1	Io	trace/recovery.rs	File::open(
 2	Io	web/static_files.rs	std::fs::OpenOptions
 1	Output	atp/journal/append_journal.rs	eprintln!(
 2	Output	channel/verification_suite.rs	eprintln!(
@@ -519,6 +520,7 @@ expression: inventory
 1	Io	trace/file.rs	File::open(	File::open(&staged_path.path)?.sync_all()?;
 1	Io	trace/file.rs	File::open(	let file = File::open(path)?;
 1	Io	trace/integrity.rs	File::open(	let mut file = File::open(path)?;
+1	Io	trace/recovery.rs	File::open(	let mut reader = BufReader::new(File::open(path)?).take(limits.max_input_bytes);
 1	Io	web/static_files.rs	std::fs::OpenOptions	std::fs::OpenOptions::new()
 1	Io	web/static_files.rs	std::fs::OpenOptions	std::fs::OpenOptions::new().read(true).open(path)
 1	Output	atp/journal/append_journal.rs	eprintln!(	eprintln!(

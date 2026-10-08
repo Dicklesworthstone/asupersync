@@ -1575,7 +1575,13 @@ fn test_function() {
     // RuntimeBuilder::resource_sampling. It runs the monitor's existing OS
     // probes (process_current_state) on an interval and holds no runtime
     // lock; Drop joins it. No scanner exemption or detection pattern changed.
-    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 822;
+    // 822 -> 823 (br-asupersync-tjr6s9, re-blessed 2026-10-08 after it
+    // landed in 29616ece7 without the inventory): trace/recovery.rs opens the
+    // crash trace a caller names to salvage its bounded prefix, reading at
+    // most limits.max_input_bytes. It is the same authority as trace/file.rs's
+    // and trace/compat.rs's File::open of a caller's path. No scanner
+    // exemption or detection pattern changed.
+    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 823;
 
     fn src_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
