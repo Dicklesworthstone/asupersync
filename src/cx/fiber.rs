@@ -122,7 +122,10 @@
 //! # Cost
 //!
 //! Starting a fiber costs one boxed future and one shared completion cell,
-//! plus its derived context when the scope runs inside a task; a wake handle
+//! plus a small context cell when the scope runs inside a task. The fiber's
+//! own context is derived from the task's the first time the fiber reads it
+//! ([`Cx::current`](crate::cx::Cx::current)); a cancellation sent before then
+//! is applied when it does. A wake handle
 //! is allocated only when no finished fiber's slot can be reused. It never
 //! touches runtime-global state. A poll of the scope takes the
 //! fiber table lock twice however many fibers are ready, and wakes raised
@@ -131,6 +134,7 @@
 //! (br-asupersync-issue65-criticisms-kpmoy5.3.2).
 
 use crate::cx::Cx;
+use crate::cx::cx::LazyCurrentCx;
 use crate::runtime::JoinError;
 use crate::types::outcome::PanicPayload;
 use crate::types::{CancelKind, CancelReason};
@@ -138,7 +142,7 @@ use parking_lot::Mutex;
 use std::cell::Cell;
 use std::future::{Future, poll_fn};
 use std::pin::{Pin, pin};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 
@@ -230,15 +234,130 @@ impl Wake for FiberWake {
     }
 }
 
+/// The message of a cancellation through [`FiberHandle::cancel`].
+const HANDLE_CANCEL_MESSAGE: &str = "fiber cancelled through its handle";
+
+/// A fiber's own context, derived from its task's the first time the fiber
+/// reads it ([`Cx::current`]), copying the task's budget as it is then.
+/// Cancellations sent before then are kept and applied when it is built. A
+/// full context kept per live fiber made a fan-out of trivial fibers cost
+/// about 2.5x a tokio task (br-asupersync-98569u), and most fibers use the
+/// task's `Cx` they borrow.
+#[derive(Debug)]
+struct FiberCtx {
+    task_cx: Arc<Cx>,
+    /// The derived context, once built: set only under `pending`'s lock,
+    /// after the replay, and read without a lock from then on.
+    cx: OnceLock<Cx>,
+    /// Cancellations that arrived before the context was built, replayed in
+    /// order when it is, to the same effect they would have had on it.
+    pending: Mutex<Vec<PendingCancel>>,
+}
+
+#[derive(Debug)]
+enum PendingCancel {
+    /// The task's cancellation, or a sibling's fail-fast (`inherit_cancel`).
+    Inherit(CancelReason),
+    /// [`FiberHandle::cancel`], with the reason stamped when it was called.
+    Handle(CancelReason),
+}
+
+impl FiberCtx {
+    fn new(task_cx: Arc<Cx>) -> Self {
+        Self {
+            task_cx,
+            cx: OnceLock::new(),
+            pending: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The built context, or `None` after `record` noted a cancellation for
+    /// it. A context built meanwhile (on another thread) gets it directly.
+    fn built_or_record(&self, record: impl FnOnce(&mut Vec<PendingCancel>)) -> Option<&Cx> {
+        if let Some(cx) = self.cx.get() {
+            return Some(cx);
+        }
+        let mut pending = self.pending.lock();
+        if let Some(cx) = self.cx.get() {
+            return Some(cx);
+        }
+        record(&mut pending);
+        None
+    }
+
+    /// Passes the task's or a sibling's cancellation on. Like
+    /// `Cx::inherit_cancel`, it does nothing once the fiber has one.
+    fn inherit_cancel(&self, reason: &CancelReason) {
+        let built = self.built_or_record(|pending| {
+            if pending.is_empty() {
+                pending.push(PendingCancel::Inherit(reason.clone()));
+            }
+        });
+        if let Some(cx) = built {
+            cx.inherit_cancel(reason);
+        }
+    }
+
+    /// [`FiberHandle::cancel`].
+    fn cancel_from_handle(&self) {
+        let built = self.built_or_record(|pending| {
+            if !pending
+                .iter()
+                .any(|cancel| matches!(cancel, PendingCancel::Handle(_)))
+            {
+                let task = &self.task_cx;
+                let reason = CancelReason::with_origin(
+                    CancelKind::User,
+                    task.region_id(),
+                    task.now_for_observability(),
+                )
+                .with_task(task.task_id())
+                .with_message(HANDLE_CANCEL_MESSAGE);
+                pending.push(PendingCancel::Handle(reason));
+            }
+        });
+        if let Some(cx) = built {
+            cx.cancel_with(CancelKind::User, Some(HANDLE_CANCEL_MESSAGE));
+        }
+    }
+}
+
+impl LazyCurrentCx for FiberCtx {
+    fn materialize(&self) -> &Cx {
+        if let Some(cx) = self.cx.get() {
+            return cx;
+        }
+        // This runs under the ambient-context borrow and holds `pending`,
+        // neither of which re-enters: nothing below may read or install the
+        // ambient context or emit an event a subscriber could answer so. A
+        // fresh context has no cancel wakers, so the replay wakes nothing.
+        let mut pending = self.pending.lock();
+        if let Some(cx) = self.cx.get() {
+            return cx;
+        }
+        let cx = self.task_cx.derive_cancel_scope();
+        for cancel in pending.drain(..) {
+            match cancel {
+                PendingCancel::Inherit(reason) => {
+                    cx.inherit_cancel(&reason);
+                }
+                PendingCancel::Handle(reason) => cx.cancel_with_reason(reason),
+            }
+        }
+        self.cx.get_or_init(|| cx)
+    }
+}
+
 struct FiberSlot<'env> {
     /// The fiber, or `None` while it is being polled or the slot is free.
     future: Option<FiberFuture<'env>>,
     /// `None` only while the fiber is being polled.
     waker: Option<Waker>,
     wake: Arc<FiberWake>,
-    /// The fiber's own context, derived from the scope's task; `None` when
-    /// the slot is free or the scope runs outside any task.
-    cx: Option<Cx>,
+    /// The fiber's own context, built on first use; `None` while the fiber
+    /// is being polled, when the slot is free, or when the scope runs
+    /// outside any task.
+    ctx: Option<Arc<FiberCtx>>,
 }
 
 #[derive(Default)]
@@ -255,7 +374,7 @@ struct Running<'env> {
     index: usize,
     future: Option<FiberFuture<'env>>,
     waker: Option<Waker>,
-    cx: Option<Cx>,
+    ctx: Option<Arc<FiberCtx>>,
     finished: bool,
 }
 
@@ -270,8 +389,8 @@ struct ScopeState<'env> {
     next_fiber_id: AtomicU64,
     unobserved_panics: UnobservedPanics,
     /// The context of the task running the scope (`Cx::current()` when it
-    /// started), from which each fiber derives its own.
-    task_cx: Option<Cx>,
+    /// started), from which each fiber derives its own on first use.
+    task_cx: Option<Arc<Cx>>,
     /// Raised when a fiber panics; the scope then cancels its siblings.
     fiber_panicked: Arc<AtomicBool>,
 }
@@ -367,7 +486,7 @@ impl<T> Drop for FiberCompletion<T> {
 #[must_use = "a fiber keeps running even if its handle is dropped; await it to observe its result"]
 pub struct FiberHandle<T> {
     completion: Arc<Completion<T>>,
-    cx: Option<Cx>,
+    ctx: Option<Arc<FiberCtx>>,
 }
 
 impl<T> FiberHandle<T> {
@@ -380,8 +499,8 @@ impl<T> FiberHandle<T> {
     /// are not cancelled. A scope started outside any task has no fiber
     /// contexts, and then this does nothing.
     pub fn cancel(&self) {
-        if let Some(cx) = &self.cx {
-            cx.cancel_with(CancelKind::User, Some("fiber cancelled through its handle"));
+        if let Some(ctx) = &self.ctx {
+            ctx.cancel_from_handle();
         }
     }
 }
@@ -468,7 +587,7 @@ impl<'env> FiberScope<'env> {
                 queue: Arc::new(ReadyQueue::default()),
                 next_fiber_id: AtomicU64::new(0),
                 unobserved_panics: Arc::new(Mutex::new(Vec::new())),
-                task_cx: Cx::current(),
+                task_cx: Cx::current().map(Arc::new),
                 fiber_panicked: Arc::new(AtomicBool::new(false)),
             }),
         }
@@ -499,7 +618,11 @@ impl<'env> FiberScope<'env> {
             FiberCompletion(Arc::clone(&completion)),
             Arc::clone(&self.state.fiber_panicked),
         ));
-        let fiber_cx = self.state.task_cx.as_ref().map(Cx::derive_cancel_scope);
+        let fiber_ctx = self
+            .state
+            .task_cx
+            .as_ref()
+            .map(|task_cx| Arc::new(FiberCtx::new(Arc::clone(task_cx))));
         let index = {
             let mut guard = self.state.set.lock();
             let set = &mut *guard;
@@ -511,7 +634,7 @@ impl<'env> FiberScope<'env> {
                 let slot = &mut set.slots[index];
                 slot.wake.queued.store(true, Ordering::Release);
                 slot.future = Some(fiber);
-                slot.cx.clone_from(&fiber_cx);
+                slot.ctx.clone_from(&fiber_ctx);
                 index
             } else {
                 let index = set.slots.len();
@@ -524,7 +647,7 @@ impl<'env> FiberScope<'env> {
                     future: Some(fiber),
                     waker: Some(Waker::from(Arc::clone(&wake))),
                     wake,
-                    cx: fiber_cx.clone(),
+                    ctx: fiber_ctx.clone(),
                 });
                 index
             };
@@ -534,7 +657,7 @@ impl<'env> FiberScope<'env> {
         self.state.queue.schedule(index);
         FiberHandle {
             completion,
-            cx: fiber_cx,
+            ctx: fiber_ctx,
         }
     }
 
@@ -569,29 +692,33 @@ impl ScopeState<'_> {
     /// Passes cancellation on to the live fibers' contexts: the task's own,
     /// when it is observable (requested and not masked), and a fail-fast
     /// cancellation after a fiber panicked. A cancelled fiber's waits wake,
-    /// so it is polled in this pass or the next.
+    /// so it is polled in this pass or the next. A fiber that has not read
+    /// its context yet gets the cancellation when it does.
     fn propagate_cancellation(&self) {
         let panicked = self.fiber_panicked.swap(false, Ordering::AcqRel);
-        let from_task = self.task_cx.as_ref().and_then(Cx::observable_cancel_reason);
+        let from_task = self
+            .task_cx
+            .as_ref()
+            .and_then(|task_cx| task_cx.observable_cancel_reason());
         if !panicked && from_task.is_none() {
             return;
         }
-        let contexts: Vec<Cx> = self
+        let contexts: Vec<Arc<FiberCtx>> = self
             .set
             .lock()
             .slots
             .iter()
-            .filter_map(|slot| slot.cx.clone())
+            .filter_map(|slot| slot.ctx.clone())
             .collect();
         let fail_fast = panicked.then(|| {
             CancelReason::new(CancelKind::FailFast).with_message("a sibling fiber panicked")
         });
-        for cx in &contexts {
+        for ctx in &contexts {
             if let Some(reason) = &from_task {
-                cx.inherit_cancel(reason);
+                ctx.inherit_cancel(reason);
             }
             if let Some(reason) = &fail_fast {
-                cx.inherit_cancel(reason);
+                ctx.inherit_cancel(reason);
             }
         }
     }
@@ -615,11 +742,13 @@ impl ScopeState<'_> {
                 };
                 slot.wake.queued.store(false, Ordering::Release);
                 if let Some(future) = slot.future.take() {
+                    // Cancellation is passed on only between passes, so the
+                    // context leaves with the fiber and comes back after.
                     running.push(Running {
                         index,
                         future: Some(future),
                         waker: slot.waker.take(),
-                        cx: slot.cx.clone(),
+                        ctx: slot.ctx.take(),
                         finished: false,
                     });
                 }
@@ -627,8 +756,12 @@ impl ScopeState<'_> {
         }
         for fiber in &mut running {
             if let (Some(future), Some(waker)) = (fiber.future.as_mut(), fiber.waker.as_ref()) {
-                // Inside the fiber, the ambient context is the fiber's own.
-                let current = fiber.cx.take().map(|cx| Cx::set_current(Some(cx)));
+                // Inside the fiber, the ambient context is the fiber's own,
+                // derived the first time the fiber reads it.
+                let current = fiber.ctx.as_ref().map(|ctx| {
+                    let mask = ctx.task_cx.runtime_mask;
+                    Cx::set_current_lazy(Arc::clone(ctx) as Arc<dyn LazyCurrentCx>, mask)
+                });
                 fiber.finished = future
                     .as_mut()
                     .poll(&mut Context::from_waker(waker))
@@ -643,11 +776,11 @@ impl ScopeState<'_> {
                 let slot = &mut set.slots[fiber.index];
                 slot.waker = fiber.waker.take();
                 if fiber.finished {
-                    slot.cx = None;
                     set.free.push(fiber.index);
                     set.live -= 1;
                 } else {
                     slot.future = fiber.future.take();
+                    slot.ctx = fiber.ctx.take();
                 }
             }
             set.live > 0
@@ -1296,6 +1429,175 @@ mod tests {
             "fail-fast sibling cancel"
         );
         assert!(!task_cancelled, "the task is not cancelled");
+    }
+
+    // --- Contexts built on first use (br-asupersync-98569u) ---
+
+    /// Yields twice without reading the ambient context, then waits on the
+    /// fiber's own context until it is cancelled.
+    async fn read_context_late() -> CancelReason {
+        crate::runtime::yield_now().await;
+        crate::runtime::yield_now().await;
+        until_cancelled().await
+    }
+
+    #[test]
+    fn a_fiber_that_never_reads_its_context_derives_none() {
+        let task_cx = Cx::for_testing();
+        let (silent_built, reader_built) = block_on_in(&task_cx, async {
+            scope(|s| async move {
+                let silent = s.spawn(async { 1 });
+                let reader = s.spawn(async { Cx::current().is_some() });
+                let silent_ctx = Arc::clone(silent.ctx.as_ref().expect("a task scope's cell"));
+                let reader_ctx = Arc::clone(reader.ctx.as_ref().expect("a task scope's cell"));
+                assert_eq!(silent.await.expect("silent"), 1);
+                assert!(reader.await.expect("reader"), "the fiber has a context");
+                let built = |ctx: &FiberCtx| ctx.cx.get().is_some();
+                (built(&silent_ctx), built(&reader_ctx))
+            })
+            .await
+        });
+        assert!(
+            !silent_built,
+            "a fiber that never read its context has none"
+        );
+        assert!(
+            reader_built,
+            "reading Cx::current() built the fiber's context"
+        );
+    }
+
+    #[test]
+    fn every_read_in_a_fiber_sees_the_same_context() {
+        let task_cx = Cx::for_testing();
+        let (same, task_cancelled) = block_on_in(&task_cx, async {
+            let same = scope(|s| async move {
+                s.spawn(async {
+                    let first = Cx::current().expect("the fiber's context");
+                    crate::runtime::yield_now().await;
+                    let later = Cx::current().expect("the fiber's context");
+                    first.cancel_fast(CancelKind::User);
+                    later.is_cancel_requested()
+                })
+                .await
+                .expect("fiber")
+            })
+            .await;
+            (same, Cx::current().expect("task").is_cancel_requested())
+        });
+        assert!(same, "both reads see one context, across polls");
+        assert!(!task_cancelled, "and it is not the task's");
+    }
+
+    #[test]
+    fn with_current_in_a_fiber_borrows_the_fibers_own_context() {
+        let task_cx = Cx::for_testing();
+        let (cancelled_inside, task_cancelled) = block_on_in(&task_cx, async {
+            let inside = scope(|s| async move {
+                s.spawn(async {
+                    Cx::with_current(|cx| cx.cancel_fast(CancelKind::User))
+                        .expect("the fiber's context");
+                    Cx::current()
+                        .expect("the fiber's context")
+                        .is_cancel_requested()
+                })
+                .await
+                .expect("fiber")
+            })
+            .await;
+            (inside, Cx::current().expect("task").is_cancel_requested())
+        });
+        assert!(cancelled_inside, "with_current reached the fiber's context");
+        assert!(!task_cancelled, "not the task's");
+    }
+
+    /// The task is cancelled, then the fiber's handle, both before the fiber
+    /// reads its context. Replayed in that order the task's `Shutdown` stays
+    /// (the handle's weaker `User` cannot replace it), as on a context built
+    /// at spawn. Replayed the other way, `User` would stick: a cancelled
+    /// context ignores a later inherit.
+    #[test]
+    fn cancellations_before_the_first_read_apply_in_order() {
+        let reason = within_watchdog(|| {
+            let task_cx = Cx::for_testing();
+            let task_ref = &task_cx;
+            block_on_in(&task_cx, async {
+                scope(|s| async move {
+                    let fiber = s.spawn(read_context_late());
+                    crate::runtime::yield_now().await;
+                    task_ref.cancel_with(CancelKind::Shutdown, Some("the task is cancelled"));
+                    crate::runtime::yield_now().await;
+                    fiber.cancel();
+                    fiber.await.expect("fiber")
+                })
+                .await
+            })
+        });
+        assert_eq!(reason.kind, CancelKind::Shutdown, "the first cancellation");
+    }
+
+    #[test]
+    fn a_handle_cancel_before_the_fiber_reads_its_context_reaches_it() {
+        let (reason, task_cancelled) = within_watchdog(|| {
+            let task_cx = Cx::for_testing();
+            let reason = block_on_in(&task_cx, async {
+                scope(|s| async move {
+                    let fiber = s.spawn(read_context_late());
+                    fiber.cancel();
+                    fiber.await.expect("fiber")
+                })
+                .await
+            });
+            (reason, task_cx.is_cancel_requested())
+        });
+        assert_eq!(reason.kind, CancelKind::User, "the handle's cancellation");
+        assert!(
+            !task_cancelled,
+            "cancelling a fiber does not cancel the task"
+        );
+    }
+
+    #[test]
+    fn the_tasks_cancellation_reaches_a_fiber_that_reads_its_context_later() {
+        let reason = within_watchdog(|| {
+            let task_cx = Cx::for_testing();
+            let task_ref = &task_cx;
+            block_on_in(&task_cx, async {
+                scope(|s| async move {
+                    let fiber = s.spawn(read_context_late());
+                    crate::runtime::yield_now().await;
+                    task_ref.cancel_with(CancelKind::Shutdown, Some("the task is cancelled"));
+                    fiber.await.expect("fiber")
+                })
+                .await
+            })
+        });
+        assert_eq!(reason.kind, CancelKind::Shutdown, "the task's own reason");
+    }
+
+    #[test]
+    fn a_panic_cancels_a_sibling_that_reads_its_context_later() {
+        let (panicked, sibling) = within_watchdog(|| {
+            let task_cx = Cx::for_testing();
+            block_on_in(&task_cx, async {
+                scope(|s| async move {
+                    let sibling = s.spawn(read_context_late());
+                    let failing = s.spawn(async {
+                        let fail = std::hint::black_box(true);
+                        assert!(!fail, "this fiber fails");
+                    });
+                    let panicked = failing.await.is_err();
+                    (panicked, sibling.await.expect("sibling"))
+                })
+                .await
+            })
+        });
+        assert!(panicked, "the failing fiber's handle reports its panic");
+        assert_eq!(
+            sibling.kind,
+            CancelKind::FailFast,
+            "the sibling read its context after the panic and saw the fail-fast"
+        );
     }
 
     #[test]

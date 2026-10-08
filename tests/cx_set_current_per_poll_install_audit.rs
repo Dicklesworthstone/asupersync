@@ -157,7 +157,8 @@ fn current_cx_storage_is_a_stack_not_a_single_slot() {
     // The frame must carry both cx AND mask.
     assert!(
         source.contains("struct CurrentCxFrame {")
-            && source.contains("cx: FullCx,")
+            && source.contains("cx: FrameCx,")
+            && source.contains("Ready(FullCx),")
             && source.contains("mask: cap::CapMask,"),
         "REGRESSION: CurrentCxFrame no longer holds (cx, \
          mask). Capability attenuation via the ambient \
