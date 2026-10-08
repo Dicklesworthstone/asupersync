@@ -133,6 +133,14 @@ fn directory_id(path: &Path) -> io::Result<(u64, u64)> {
     }
     Ok((metadata.dev(), metadata.ino()))
 }
+/// Whether a directory identity recorded on an earlier boot names `current`.
+/// A device number is assigned at mount time and can differ after a reboot
+/// (btrfs subvolumes, dynamically numbered partitions), so only the inodes are
+/// compared, as the receiver journal does on reopen (ea1df1bca). Same-boot
+/// checks (held descriptor vs. named path) still compare both.
+pub(super) fn recorded_directory_matches(recorded: (u64, u64), current: (u64, u64)) -> bool {
+    recorded.1 == current.1
+}
 
 impl Catalog {
     /// Explicit initialization requires an empty, dedicated private WAL directory.
@@ -192,7 +200,10 @@ impl Catalog {
         let maximum_wal = number(&header, 16);
         if &header[..8] != MAGIC || header[12..16] != [0; 4] || header[40..48] != [0; 8]
             || !(1..=65_536).contains(&maximum_keys) || maximum_wal < 96
-            || (number(&header, 24), number(&header, 32)) != expected_directory
+            || !recorded_directory_matches(
+                (number(&header, 24), number(&header, 32)),
+                expected_directory,
+            )
             || header[48..] != checksum(&[], &header[..48])
         { return Err(invalid("invalid receiver catalog header")); }
         let length = file.metadata()?.len();
@@ -298,7 +309,9 @@ impl Catalog {
         self.check_current(&mut state)?;
         if let Some(entry) = state.entries.get(&key) {
             if entry.retired.is_some() { return Err(io::Error::from(io::ErrorKind::PermissionDenied)); }
-            if entry.directory != directory { return Err(invalid("receiver catalog inbox identity changed")); }
+            if !recorded_directory_matches(entry.directory, directory) {
+                return Err(invalid("receiver catalog inbox identity changed"));
+            }
             return Ok((entry.clone(), false));
         }
         let reserved = state.reserved_wal.checked_add(policy.journal_bytes)
@@ -474,5 +487,37 @@ mod tests {
         file.seek(SeekFrom::Start(HEADER + 56)).unwrap(); file.write_all(&[99]).unwrap(); file.sync_all().unwrap();
         let corrupted = std::fs::read(&path).unwrap(); assert!(Catalog::open(&path).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), corrupted);
+    }
+
+    /// GH #77 item 3 (br-asupersync-7nw4jf): a reboot can renumber the device
+    /// a directory lives on. A catalog whose recorded device numbers all
+    /// changed (the catalog directory in the header, the inbox in its entry)
+    /// still reopens and re-admits its key, because the inodes match.
+    #[test]
+    fn recorded_device_numbers_changed_by_a_reboot_do_not_refuse_the_catalog() {
+        let (path, inbox) = fixture();
+        Catalog::initialize(&path, 2, 8192).unwrap();
+        let catalog = Catalog::open(&path).unwrap();
+        let (first, _) = catalog.admit(key(1), &inbox, policy()).unwrap();
+        drop(catalog);
+        let renumbered = u64::MAX.to_be_bytes();
+        let mut bytes = std::fs::read(&path).unwrap();
+        let header = HEADER as usize;
+        bytes[24..32].copy_from_slice(&renumbered);
+        let mut previous = checksum(&[], &bytes[..48]);
+        bytes[48..header].copy_from_slice(&previous);
+        for record in bytes[header..].chunks_mut(RECORD as usize) {
+            record[88..96].copy_from_slice(&renumbered);
+            previous = checksum(&previous, &record[..BODY]);
+            record[BODY..].copy_from_slice(&previous);
+        }
+        std::fs::write(&path, &bytes).unwrap();
+        let catalog = Catalog::open(&path).expect("the recorded inodes still match");
+        assert_eq!(catalog.entries()[0].directory.0, u64::MAX);
+        let (again, fresh) = catalog
+            .admit(key(1), &inbox, policy())
+            .expect("the same inbox on a renumbered device");
+        assert!(!fresh);
+        assert_eq!(again.id, first.id);
     }
 }

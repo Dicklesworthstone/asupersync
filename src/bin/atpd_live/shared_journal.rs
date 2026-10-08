@@ -2,7 +2,9 @@
 //! The existing SDK owns mTLS, routing, WAL barriers, revalidation and joins.
 //! This adapter owns persistent claims, all-session disk admission and retirement.
 
-use super::super::journal_catalog::{Catalog, Entry, FilePolicy, Retirement};
+use super::super::journal_catalog::{
+    Catalog, Entry, FilePolicy, Retirement, recorded_directory_matches,
+};
 use super::super::settings::{self, ServeConfig, invalid};
 use super::super::{INBOX_OWNERSHIP, emit, receipt_json, runtime, storage};
 use super::{
@@ -79,7 +81,7 @@ fn reserve_restored(catalog: &Catalog, inboxes: &storage::Inboxes, maximum: u64)
             continue;
         };
         let metadata = std::fs::symlink_metadata(&inbox.directory)?;
-        if (metadata.dev(), metadata.ino()) != entry.directory {
+        if !recorded_directory_matches(entry.directory, (metadata.dev(), metadata.ino())) {
             return Err(invalid("catalog client inbox cannot be remapped"));
         }
         if entry.policy.data_bytes > maximum {
