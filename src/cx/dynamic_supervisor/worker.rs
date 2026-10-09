@@ -20,8 +20,19 @@ pub struct DynamicWorkerConfig {
     /// Permanent, transient or temporary eligibility under the managed contract.
     pub restart_mode: ManagedRestartMode,
     /// Existing restart intensity, backoff, escalation and storm policy.
-    /// The policy is preserved; with a single worker the three sibling strategies
-    /// all select that worker, never other dynamic children.
+    /// With a single worker the three sibling strategies all select that
+    /// worker, never other dynamic children.
+    ///
+    /// # Escalation Scope
+    ///
+    /// Under a dynamic supervisor, each admitted dynamic child tree executes inside its own
+    /// per-name boundary region below the dynamic root. If a child tree's controller triggers
+    /// [`EscalationPolicy::Escalate`](crate::supervision::EscalationPolicy::Escalate), that escalation cancels only that child's per-name boundary
+    /// region; it does not cancel sibling child trees or the dynamic supervisor's owner context.
+    /// The escalation outcome is preserved in the child's completion report when reaped.
+    /// If cross-child restart containment across dynamic children is required,
+    /// configure a [`SharedRestartDomain`](crate::cx::dynamic_supervisor::SharedRestartDomain) via
+    /// [`Cx::open_dynamic_supervisor_with_shared_restarts`](crate::cx::Cx::open_dynamic_supervisor_with_shared_restarts).
     pub supervision: SupervisionConfig,
     /// Optional worker-controller region envelope, met with parent authority.
     pub budget: Option<Budget>,

@@ -363,5 +363,52 @@ fn a_quarantined_child_reported_by_wait_child_is_not_reported_again() {
     );
 }
 
+#[test]
+fn controller_panic_is_labeled_as_controller_panicked_and_quarantined() {
+    let result = run_case(|cx| async move {
+        let mut owner = cx
+            .open_dynamic_supervisor(DynamicSupervisorConfig::new(2))
+            .await
+            .unwrap();
+
+        let id = owner.start_child("panicked-worker", done()).await.unwrap();
+
+        // Simulate a controller panic on the child
+        let panic_msg = "internal controller invariant violated";
+        owner
+            .children
+            .get_mut("panicked-worker")
+            .unwrap()
+            .joined = Some(Err(JoinError::Panicked(crate::types::PanicPayload::new(panic_msg))));
+
+        // Reaping the child via wait_child reports ControllerPanicked with the panic payload
+        let outcome = owner.wait_child(&id).await;
+        let is_controller_panicked = match outcome {
+            Err(DynamicSupervisorError::ControllerPanicked(payload)) => {
+                payload.message().contains(panic_msg)
+            }
+            _ => false,
+        };
+        assert!(is_controller_panicked, "wait_child must report ControllerPanicked error");
+
+        // The panicked child is quarantined, not removed, so its result remains inspectable
+        let children = owner.children();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].state, DynamicChildState::Quarantined);
+
+        // child_result preserves the panic
+        let child_res = owner.child_result(&id).unwrap();
+        assert!(matches!(child_res, Some(Err(JoinError::Panicked(_)))));
+
+        // next_completed does not report the quarantined child again
+        let next = owner.next_completed().await;
+        assert!(matches!(next, Ok(None)));
+
+        drop(owner.shutdown().await);
+        true
+    });
+    assert!(result);
+}
+
 #[path = "lifecycle_tests.rs"]
 mod lifecycle;

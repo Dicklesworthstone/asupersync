@@ -366,6 +366,9 @@ pub enum DynamicSupervisorError {
     /// Controller submission failed. Any admitted empty boundary is closed first.
     #[error("dynamic child controller submission failed: {0:?}")]
     Spawn(SpawnError),
+    /// The supervisor controller panicked during execution.
+    #[error("dynamic child controller panicked: {0}")]
+    ControllerPanicked(crate::types::PanicPayload),
     /// Cleanup did not establish a safely reusable name. The full result is retained.
     #[error("dynamic child cleanup requires shutdown before name reuse")]
     UncleanChild,
@@ -708,6 +711,8 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
         let child = self.child(id)?;
         let failure = if let Some(Err(error)) = &child.closed {
             Some(DynamicSupervisorError::Region(Arc::clone(error)))
+        } else if let Some(Err(JoinError::Panicked(payload))) = &child.joined {
+            Some(DynamicSupervisorError::ControllerPanicked(payload.clone()))
         } else if child.reusable() {
             None
         } else {
