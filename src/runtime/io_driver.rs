@@ -50,6 +50,8 @@ use std::sync::{Arc, Weak};
 use std::task::Waker;
 use std::time::Duration;
 
+mod shared;
+
 /// Default capacity for the events buffer.
 const DEFAULT_EVENTS_CAPACITY: usize = 1024;
 /// Default lower bound for the token->interest map.
@@ -108,6 +110,11 @@ pub struct IoStats {
 ///
 /// `IoDriver` is designed for single-threaded use within a runtime worker.
 /// For cross-thread wakeup, use [`wake()`](Self::wake).
+///
+/// A directly constructed driver requires exclusive dispatch ownership of its
+/// reactor. To share one reactor allocation between runtimes, construct
+/// [`IoDriverHandle`]s instead; their constructors share one dispatcher.
+/// Do not also poll that reactor directly or through an independent `IoDriver`.
 pub struct IoDriver {
     /// The platform-specific reactor.
     reactor: Arc<dyn Reactor>,
@@ -577,12 +584,20 @@ impl IoDriver {
 ///
 /// This wrapper provides interior mutability for registering and updating
 /// wakers from async I/O types while keeping the driver single-threaded.
+/// Independently constructed handles of the same reactor `Arc` share one
+/// token namespace, dispatcher and poll-leader flag, just like cloned handles.
+/// Statistics and event callbacks describe that shared physical dispatcher.
+/// Distinct reactor allocations remain independent. Raw reactor polling or a
+/// separately constructed [`IoDriver`] must not compete with this dispatcher.
 #[derive(Clone)]
 pub struct IoDriverHandle {
     inner: Arc<Mutex<IoDriver>>,
     reactor: Arc<dyn Reactor>,
     capabilities: IoReactorCapabilitySnapshot,
     is_polling: Arc<AtomicBool>,
+    // Last field: keep retirement ownership until the ordinary handle fields
+    // have been released. Registrations remain weak and cannot form a cycle.
+    _shared_owner: Arc<shared::DriverOwner>,
 }
 
 struct PollingGuard<'a> {
@@ -640,31 +655,21 @@ impl std::fmt::Debug for IoDriverHandle {
 }
 
 impl IoDriverHandle {
-    /// Creates a new handle with the default events buffer capacity.
+    /// Creates a handle, reusing the dispatcher of this reactor allocation
+    /// when another handle already exists. A fresh dispatcher uses the default
+    /// events capacity; sharing never resizes an active poll buffer.
     #[must_use]
     pub fn new(reactor: Arc<dyn Reactor>) -> Self {
-        let capabilities = reactor.capability_snapshot();
-        Self {
-            inner: Arc::new(Mutex::new(IoDriver::new(reactor.clone()))),
-            reactor,
-            capabilities,
-            is_polling: Arc::new(AtomicBool::new(false)),
-        }
+        shared::handle(reactor, None)
     }
 
-    /// Creates a new handle with a custom events buffer capacity.
+    /// Creates a handle with a custom initial events capacity.
+    ///
+    /// The first live dispatcher for this reactor allocation chooses its
+    /// capacity. Later constructors share it without resizing its active buffer.
     #[must_use]
     pub fn with_capacity(reactor: Arc<dyn Reactor>, events_capacity: usize) -> Self {
-        let capabilities = reactor.capability_snapshot();
-        Self {
-            inner: Arc::new(Mutex::new(IoDriver::with_capacity(
-                reactor.clone(),
-                events_capacity,
-            ))),
-            reactor,
-            capabilities,
-            is_polling: Arc::new(AtomicBool::new(false)),
-        }
+        shared::handle(reactor, Some(events_capacity))
     }
 
     /// Registers a source with the reactor and associates the waker.
