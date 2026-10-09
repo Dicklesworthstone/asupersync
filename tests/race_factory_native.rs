@@ -3,7 +3,7 @@
 
 use asupersync::Cx;
 use asupersync::channel::mpsc;
-use asupersync::cx::{RaceFactory, cap};
+use asupersync::cx::{ChildRegionSpec, RaceFactory, cap};
 use asupersync::runtime::{JoinError, RuntimeBuilder, TaskHandle};
 use asupersync::sync::Notify;
 use asupersync::types::{CancelKind, CancelReason, TaskId};
@@ -1298,5 +1298,48 @@ fn lab_a_race_finishes_what_its_loser_spawned() {
             fingerprints[0], fingerprints[1],
             "seed {seed} replays identically"
         );
+    }
+}
+
+/// A race winner's context kept past the race opens a child region after its
+/// sealed branch region has closed. The child is minted where the context's
+/// spawns now land, in the caller's region (br-asupersync-inleqi M2), as a
+/// spawn from it already is (br-asupersync-k27oxe). Current-thread and four
+/// workers.
+#[test]
+fn a_winners_kept_context_opens_a_child_region_after_its_region_closed() {
+    for workers in [1, 4] {
+        native(workers, move |cx| async move {
+            let kept = cx
+                .race_drained_with(vec![boxed(|branch: Cx| async move { branch })])
+                .await
+                .expect("the only branch wins");
+            assert_ne!(
+                kept.region_id(),
+                cx.region_id(),
+                "workers={workers}: the branch ran in its own region"
+            );
+            // The sealed region has closed once a spawn from the kept context
+            // lands in the caller's region.
+            loop {
+                let mut probe = kept
+                    .spawn(|probe| async move { probe.region_id() })
+                    .expect("the kept context spawns");
+                if probe.join(&cx).await.expect("the probe runs") == cx.region_id() {
+                    break;
+                }
+                asupersync::time::sleep(cx.now(), Duration::from_millis(1)).await;
+            }
+            let child = kept
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .expect("the kept context opens a child region");
+            let mut work = child
+                .cx()
+                .spawn(|_| async { 9_u8 })
+                .expect("the child region admits work");
+            assert_eq!(work.join(&cx).await.expect("the child's work runs"), 9);
+            child.close().await.expect("the child region closes");
+        });
     }
 }
