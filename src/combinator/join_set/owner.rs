@@ -45,8 +45,12 @@ where
                 let Some((&index, _)) = self.members.first_key_value() else {
                     return Poll::Ready(std::mem::take(&mut outcomes));
                 };
-                let joined = self.members.get_mut(&index)
-                    .expect("first member remains owned").handle.poll_join(task);
+                let joined = self
+                    .members
+                    .get_mut(&index)
+                    .expect("first member remains owned")
+                    .handle
+                    .poll_join(task);
                 let Poll::Ready(joined) = joined else {
                     break;
                 };
@@ -60,7 +64,8 @@ where
             }
             if !forwarded && cancelled.as_mut().poll(task).is_ready() {
                 forwarded = true;
-                let reason = cx.cancel_reason()
+                let reason = cx
+                    .cancel_reason()
                     .unwrap_or_else(|| CancelReason::user("join set owner cancelled"));
                 let _ = cx.checkpoint();
                 self.cancel_unfinished_for_owner(&reason);
@@ -69,7 +74,8 @@ where
                 task.waker().wake_by_ref();
             }
             Poll::Pending
-        }).await
+        })
+        .await
     }
 
     /// Collect one member, forwarding owner cancellation when the wait would park.
@@ -100,12 +106,14 @@ where
                 } else {
                     Poll::Pending
                 }
-            }).await
+            })
+            .await
         };
         match completed {
             Some(outcome) => outcome,
             None => {
-                let reason = cx.cancel_reason()
+                let reason = cx
+                    .cancel_reason()
                     .unwrap_or_else(|| CancelReason::user("join set owner cancelled"));
                 let _ = cx.checkpoint();
                 self.cancel_unfinished_for_owner(&reason);
@@ -130,7 +138,9 @@ where
         }
         // A hostile waker must not strand the unvisited suffix. Every request
         // has been attempted before the first panic is allowed to propagate.
-        if !std::thread::panicking() && let Some(payload) = first_panic {
+        if !std::thread::panicking()
+            && let Some(payload) = first_panic
+        {
             std::panic::resume_unwind(payload);
         }
     }
@@ -143,8 +153,8 @@ mod tests {
     use crate::runtime::{RootDrainOutcome, RuntimeBuilder, yield_now};
     use crate::types::{CancelKind, Severity};
     use std::rc::Rc;
-    use std::sync::{Arc, mpsc};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, mpsc};
     use std::time::{Duration, Instant};
 
     fn bounded(test: impl FnOnce() + Send + 'static) {
@@ -153,7 +163,8 @@ mod tests {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(test));
             let _ = send.send(result);
         });
-        let result = receive.recv_timeout(Duration::from_secs(45))
+        let result = receive
+            .recv_timeout(Duration::from_secs(45))
             .expect("owner-aware JoinSet scenario must finish");
         worker.join().unwrap();
         if let Err(payload) = result {
@@ -193,7 +204,8 @@ mod tests {
                 }
                 Poll::Pending
             }
-        }).await;
+        })
+        .await;
         assert!(cx.checkpoint().is_err());
     }
 
@@ -217,20 +229,25 @@ mod tests {
                     let cleaned = Arc::new(AtomicUsize::new(0));
                     let observed = Arc::clone(&cleaned);
                     let drain_cx = cx.clone();
-                    let mut owner = cx.spawn(move |owner| async move {
-                        let mut set = JoinSet::<usize, (), _>::in_cx(&owner);
-                        for (index, (started, mut release)) in starts.into_iter().zip(waits).enumerate() {
-                            let drain_cx = drain_cx.clone();
-                            let cleaned = Arc::clone(&observed);
-                            set.spawn(&owner, move |child| async move {
-                                park(&child, started).await;
-                                release.recv(&drain_cx).await.unwrap();
-                                cleaned.fetch_add(1, Ordering::SeqCst);
-                                Ok(index)
-                            }).unwrap();
-                        }
-                        set.join_all_cancel_on_owner(&owner).await
-                    }).unwrap();
+                    let mut owner = cx
+                        .spawn(move |owner| async move {
+                            let mut set = JoinSet::<usize, (), _>::in_cx(&owner);
+                            for (index, (started, mut release)) in
+                                starts.into_iter().zip(waits).enumerate()
+                            {
+                                let drain_cx = drain_cx.clone();
+                                let cleaned = Arc::clone(&observed);
+                                set.spawn(&owner, move |child| async move {
+                                    park(&child, started).await;
+                                    release.recv(&drain_cx).await.unwrap();
+                                    cleaned.fetch_add(1, Ordering::SeqCst);
+                                    Ok(index)
+                                })
+                                .unwrap();
+                            }
+                            set.join_all_cancel_on_owner(&owner).await
+                        })
+                        .unwrap();
                     let mut children = Vec::new();
                     for receiver in &mut parked {
                         children.push(receiver.recv(&cx).await.unwrap());
@@ -238,11 +255,17 @@ mod tests {
                     owner.abort_with_reason(CancelReason::shutdown());
                     let deadline = Instant::now() + Duration::from_secs(5);
                     while children.iter().any(|child| !child.is_cancel_requested()) {
-                        assert!(Instant::now() < deadline, "every child must receive owner cancellation");
+                        assert!(
+                            Instant::now() < deadline,
+                            "every child must receive owner cancellation"
+                        );
                         yield_now().await;
                     }
                     assert_eq!(cleaned.load(Ordering::SeqCst), 0);
-                    assert!(matches!(owner.try_join(), Ok(None)), "owner must still be draining");
+                    assert!(
+                        matches!(owner.try_join(), Ok(None)),
+                        "owner must still be draining"
+                    );
                     for sender in releases {
                         sender.send_blocking(()).unwrap();
                     }
@@ -269,7 +292,8 @@ mod tests {
                         set.spawn(&cx, move |child| async move {
                             park(&child, started).await;
                             Ok(index)
-                        }).unwrap();
+                        })
+                        .unwrap();
                         children.push(parked.recv(&cx).await.unwrap());
                     }
                     owner.cancel_with(CancelKind::User, Some("stop incremental collection"));
@@ -312,9 +336,12 @@ mod tests {
                                     }
                                     Poll::Pending
                                 }
-                            }).await.unwrap();
+                            })
+                            .await
+                            .unwrap();
                             Ok(index)
-                        }).unwrap();
+                        })
+                        .unwrap();
                         releases.push(release);
                         children.push(parked.recv(&cx).await.unwrap());
                     }
@@ -322,7 +349,8 @@ mod tests {
                     poll_fn(|task| {
                         assert!(next.as_mut().poll(task).is_pending());
                         Poll::Ready(())
-                    }).await;
+                    })
+                    .await;
                     drop(next);
                     owner.cancel_with(CancelKind::User, Some("observer already dropped"));
                     assert_eq!(set.len(), 3);
@@ -351,15 +379,21 @@ mod tests {
                     let owner = Cx::detached_cancel_context();
                     let mut set = JoinSet::<u8, &'static str, _>::in_cx(&cx);
                     set.spawn(&cx, |_| async { Ok(5) }).unwrap();
-                    set.spawn(&cx, |_| async { Err("application error") }).unwrap();
-                    while set.members.values().any(|member| !member.handle.is_finished()) {
+                    set.spawn(&cx, |_| async { Err("application error") })
+                        .unwrap();
+                    while set
+                        .members
+                        .values()
+                        .any(|member| !member.handle.is_finished())
+                    {
                         yield_now().await;
                     }
                     let (started, mut parked) = oneshot::channel();
                     set.spawn(&cx, move |child| async move {
                         park(&child, started).await;
                         Ok(9)
-                    }).unwrap();
+                    })
+                    .unwrap();
                     parked.recv(&cx).await.unwrap();
                     owner.cancel_with(CancelKind::User, Some("preserve completed prefix"));
                     let outcomes = set.join_all_cancel_on_owner(&owner).await;
@@ -392,7 +426,8 @@ mod tests {
                             assert_eq!(std::thread::current().id(), thread);
                             cleaned.fetch_add(1, Ordering::SeqCst);
                             Ok(*marker)
-                        }).unwrap();
+                        })
+                        .unwrap();
                         parked.recv(&cx).await.unwrap();
                     }
                     owner.cancel_with(CancelKind::User, Some("local group stop"));
@@ -419,14 +454,16 @@ mod tests {
                     set.spawn(&cx, move |child| async move {
                         park(&child, started).await;
                         Ok(())
-                    }).unwrap();
+                    })
+                    .unwrap();
                     let child = parked.recv(&cx).await.unwrap();
                     observer.cancel_with(CancelKind::User, Some("legacy observer cancellation"));
                     let mut next = Box::pin(set.join_next(&observer));
                     poll_fn(|task| {
                         assert!(next.as_mut().poll(task).is_pending());
                         Poll::Ready(())
-                    }).await;
+                    })
+                    .await;
                     drop(next);
                     assert!(!child.is_cancel_requested());
                     let outcomes = set.cancel_all(&cx).await;
@@ -451,13 +488,15 @@ mod tests {
                     set.spawn(&cx, move |child| async move {
                         park(&child, start_a).await;
                         panic!("owner-aware set member panic");
-                    }).unwrap();
+                    })
+                    .unwrap();
                     set.spawn(&cx, move |child| async move {
                         park(&child, start_b).await;
                         yield_now().await;
                         observed.fetch_add(1, Ordering::SeqCst);
                         Ok(())
-                    }).unwrap();
+                    })
+                    .unwrap();
                     parked_a.recv(&cx).await.unwrap();
                     parked_b.recv(&cx).await.unwrap();
                     owner.cancel_with(CancelKind::User, Some("stop before panic"));

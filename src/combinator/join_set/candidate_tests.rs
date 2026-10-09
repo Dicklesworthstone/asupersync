@@ -13,7 +13,10 @@ type Completion = oneshot::Sender<Result<Result<u32, &'static str>, JoinError>>;
 fn member(slot: u32) -> (Completion, TaskHandle<Result<u32, &'static str>>) {
     crate::test_utils::init_test_logging();
     let (send, receive) = oneshot::channel();
-    (send, TaskHandle::new(TaskId::new_for_test(slot, 0), receive, Weak::new()))
+    (
+        send,
+        TaskHandle::new(TaskId::new_for_test(slot, 0), receive, Weak::new()),
+    )
 }
 
 #[test]
@@ -28,7 +31,10 @@ fn nonblocking_collection_parks_candidates_without_an_async_join() {
     }
     assert_eq!(set.ready.candidates.lock().len(), 256);
     assert!(set.try_join_next().is_none());
-    assert!(set.ready.candidates.lock().is_empty(), "sleepers no longer need rescanning");
+    assert!(
+        set.ready.candidates.lock().is_empty(),
+        "sleepers no longer need rescanning"
+    );
     assert!(set.members.values().all(|member| member.waker.is_some()));
     for _ in 0..32 {
         assert!(set.try_join_next().is_none());
@@ -51,9 +57,18 @@ fn nonblocking_completion_arrivals_repopulate_only_their_own_candidates() {
     }
     assert!(set.try_join_next().is_none());
     for index in (0..64).rev() {
-        senders[index].take().unwrap().send(&cx, Ok(Ok(index as u32))).unwrap();
+        senders[index]
+            .take()
+            .unwrap()
+            .send(&cx, Ok(Ok(index as u32)))
+            .unwrap();
         assert_eq!(
-            set.ready.candidates.lock().iter().copied().collect::<Vec<_>>(),
+            set.ready
+                .candidates
+                .lock()
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
             vec![index as u64],
         );
         assert!(matches!(set.try_join_next(), Some(Outcome::Ok(value)) if value == index as u32));
@@ -93,7 +108,10 @@ fn async_collection_after_nonblocking_parking_receives_completion_wake() {
     assert_eq!(count.0.load(Ordering::SeqCst), 0, "park without spinning");
     send.send(&cx, Ok(Ok(9))).unwrap();
     assert_eq!(count.0.load(Ordering::SeqCst), 1);
-    assert!(matches!(wait.as_mut().poll(&mut task), Poll::Ready(Some(Outcome::Ok(9)))));
+    assert!(matches!(
+        wait.as_mut().poll(&mut task),
+        Poll::Ready(Some(Outcome::Ok(9)))
+    ));
     assert!(ready.waiter.lock().is_none());
 }
 
@@ -153,14 +171,15 @@ fn nonblocking_readiness_respects_retirement_before_exposing_a_value() {
     let cx = Cx::for_testing();
     let mut set = JoinSet::<u32, &'static str, _>::in_cx(&cx);
     let barrier = RetirementBarrier::pending();
-    let admitted = Arc::new(
-        AdmittedTaskSlot::new().with_retirement_barrier(Arc::clone(&barrier)),
-    );
+    let admitted = Arc::new(AdmittedTaskSlot::new().with_retirement_barrier(Arc::clone(&barrier)));
     let (send, receive) = oneshot::channel();
     let handle = TaskHandle::new_pending(TaskId::new_for_test(1, 0), receive, admitted);
     set.insert_member(handle);
     send.send(&cx, Ok(Ok(31))).unwrap();
-    assert!(set.try_join_next().is_none(), "publication is not retirement");
+    assert!(
+        set.try_join_next().is_none(),
+        "publication is not retirement"
+    );
     assert!(set.ready.candidates.lock().is_empty());
     assert_eq!(set.summary().completed(), 0);
     barrier.open_and_wake();

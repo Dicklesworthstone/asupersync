@@ -6,7 +6,9 @@ use crate::types::TaskId;
 use std::sync::Weak;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-fn member(slot: u32) -> (
+fn member(
+    slot: u32,
+) -> (
     oneshot::Sender<Result<Result<u32, &'static str>, JoinError>>,
     TaskHandle<Result<u32, &'static str>>,
 ) {
@@ -52,10 +54,17 @@ fn dropped_wait_retires_collector_but_preserves_members_and_outcomes() {
     assert_eq!(Arc::strong_count(&count), 2, "no obsolete executor owner");
     assert_eq!(set.len(), 1);
     send.send(&cx, Ok(Ok(17))).unwrap();
-    assert_eq!(count.0.load(Ordering::SeqCst), 0, "the old collector is gone");
+    assert_eq!(
+        count.0.load(Ordering::SeqCst),
+        0,
+        "the old collector is gone"
+    );
     assert!(ready.candidates.lock().contains(&0), "member wake survives");
     let mut retry = Box::pin(set.join_next(&cx));
-    assert!(matches!(retry.as_mut().poll(&mut task), Poll::Ready(Some(Outcome::Ok(17)))));
+    assert!(matches!(
+        retry.as_mut().poll(&mut task),
+        Poll::Ready(Some(Outcome::Ok(17)))
+    ));
     drop(retry);
     assert!(set.is_empty());
     assert_eq!(set.summary().completed(), 1);
@@ -75,7 +84,10 @@ fn completed_wait_retires_collector_before_the_future_is_dropped() {
     let mut waiting = Box::pin(set.join_next(&cx));
     assert!(waiting.as_mut().poll(&mut task).is_pending());
     first.send(&cx, Ok(Ok(1))).unwrap();
-    assert!(matches!(waiting.as_mut().poll(&mut task), Poll::Ready(Some(Outcome::Ok(1)))));
+    assert!(matches!(
+        waiting.as_mut().poll(&mut task),
+        Poll::Ready(Some(Outcome::Ok(1)))
+    ));
     assert!(ready.waiter.lock().is_none());
     assert_eq!(Arc::strong_count(&count), 2);
     count.0.store(0, Ordering::SeqCst);
@@ -102,7 +114,10 @@ fn moving_a_pending_collector_retires_its_old_waker() {
     send.send(&cx, Ok(Ok(3))).unwrap();
     assert_eq!(old_count.0.load(Ordering::SeqCst), 0);
     assert!(new_count.0.load(Ordering::SeqCst) > 0);
-    assert!(matches!(waiting.as_mut().poll(&mut new_task), Poll::Ready(Some(Outcome::Ok(3)))));
+    assert!(matches!(
+        waiting.as_mut().poll(&mut new_task),
+        Poll::Ready(Some(Outcome::Ok(3)))
+    ));
     assert_eq!(Arc::strong_count(&new_count), 2);
 }
 
@@ -120,7 +135,10 @@ fn unchanged_task_reuses_the_same_arc_registration() {
     let original = ready.waiter.lock().as_ref().unwrap().clone();
     for _ in 0..8 {
         assert!(waiting.as_mut().poll(&mut task).is_pending());
-        assert!(Arc::ptr_eq(ready.waiter.lock().as_ref().unwrap(), &original));
+        assert!(Arc::ptr_eq(
+            ready.waiter.lock().as_ref().unwrap(),
+            &original
+        ));
     }
     drop(waiting);
     assert!(ready.waiter.lock().is_none());
@@ -176,14 +194,27 @@ fn replacement_retirement_reenters_after_unlock_and_sees_new_collector() {
             retired: Arc::clone(&retired),
             locked: Arc::clone(&locked),
         }));
-        assert!(waiting.as_mut().poll(&mut Context::from_waker(&old)).is_pending());
+        assert!(
+            waiting
+                .as_mut()
+                .poll(&mut Context::from_waker(&old))
+                .is_pending()
+        );
     }
     assert_eq!(retired.load(Ordering::SeqCst), 0);
     let (count, new) = counter();
-    assert!(waiting.as_mut().poll(&mut Context::from_waker(&new)).is_pending());
+    assert!(
+        waiting
+            .as_mut()
+            .poll(&mut Context::from_waker(&new))
+            .is_pending()
+    );
     assert_eq!(retired.load(Ordering::SeqCst), 1);
     assert!(!locked.load(Ordering::SeqCst));
-    assert!(count.0.load(Ordering::SeqCst) > 0, "reentrant event reached replacement");
+    assert!(
+        count.0.load(Ordering::SeqCst) > 0,
+        "reentrant event reached replacement"
+    );
 }
 
 #[test]
@@ -202,7 +233,12 @@ fn drop_retirement_reenters_after_unlock_without_resurrecting_collector() {
             retired: Arc::clone(&retired),
             locked: Arc::clone(&locked),
         }));
-        assert!(waiting.as_mut().poll(&mut Context::from_waker(&old)).is_pending());
+        assert!(
+            waiting
+                .as_mut()
+                .poll(&mut Context::from_waker(&old))
+                .is_pending()
+        );
     }
     drop(waiting);
     assert_eq!(retired.load(Ordering::SeqCst), 1);
@@ -223,7 +259,9 @@ fn fail_fast_completion_clears_collector_even_if_ready_state_is_retained() {
     let mut waiting = Box::pin(set.try_join_all(&cx));
     assert!(waiting.as_mut().poll(&mut task).is_pending());
     send.send(&cx, Ok(Ok(5))).unwrap();
-    assert!(matches!(waiting.as_mut().poll(&mut task), Poll::Ready(Outcome::Ok(values)) if values == [5]));
+    assert!(
+        matches!(waiting.as_mut().poll(&mut task), Poll::Ready(Outcome::Ok(values)) if values == [5])
+    );
     assert!(ready.waiter.lock().is_none());
     assert_eq!(Arc::strong_count(&count), 2);
 }
@@ -237,7 +275,12 @@ fn fail_fast_abandonment_clears_the_collector_subscription() {
     let ready = Arc::clone(&set.ready);
     let (count, waker) = counter();
     let mut waiting = Box::pin(set.try_join_all(&cx));
-    assert!(waiting.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+    assert!(
+        waiting
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
     drop(waiting);
     assert!(ready.waiter.lock().is_none());
     assert_eq!(Arc::strong_count(&count), 2);
@@ -255,7 +298,12 @@ fn owner_aware_borrowed_wait_retires_both_subscriptions_on_drop() {
     let ready = Arc::clone(&set.ready);
     let (count, waker) = counter();
     let mut waiting = Box::pin(set.join_next_cancel_on_owner(&owner));
-    assert!(waiting.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+    assert!(
+        waiting
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
     drop(waiting);
     assert!(ready.waiter.lock().is_none());
     assert_eq!(Arc::strong_count(&count), 2);
@@ -275,7 +323,11 @@ fn retiring_an_old_registration_does_not_clear_a_replacement_owner() {
     old.refresh(&old_waker);
     new.refresh(&new_waker);
     drop(old);
-    Waker::from(Arc::new(MemberWake { index: 7, ready: Arc::clone(&ready) })).wake();
+    Waker::from(Arc::new(MemberWake {
+        index: 7,
+        ready: Arc::clone(&ready),
+    }))
+    .wake();
     assert_eq!(old_count.0.load(Ordering::SeqCst), 0);
     assert_eq!(new_count.0.load(Ordering::SeqCst), 1);
     drop(new);

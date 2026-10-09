@@ -31,7 +31,9 @@
 //! for completion-order collection, [`JoinSet::join_all`] for spawn-order
 //! collection, [`JoinSet::cancel_all`] for explicit drain after cancellation,
 //! [`JoinSet::summary`] for severity aggregation, structured
-//! `join_set.spawn` trace fields that bind each member to its parent set, and
+//! `join_set.spawn` trace fields that record the set's region id (`join_set_id`),
+//! `member_index`, `member_task_id`, `region`, `spawn_kind`, and `active_members`
+//! (uniquely distinguishing member tasks even when sets share an owning region), and
 //! abort-on-drop for best-effort cancellation requests.
 //!
 //! Child-region isolation is state-threaded through [`Scope::region`]:
@@ -83,7 +85,7 @@ use crate::runtime::JoinError;
 use crate::runtime::TaskHandle;
 use crate::runtime::state::SpawnError;
 use crate::types::policy::FailFast;
-use crate::types::{CancelReason, Outcome, PanicPayload, Policy, Severity};
+use crate::types::{CancelReason, Outcome, PanicPayload, Policy, Severity, TaskId};
 
 mod collector;
 mod owner;
@@ -199,8 +201,8 @@ where
         Fut: Future<Output = Result<T, E>> + Send + 'static,
     {
         let handle = cx.spawn_in_cancellation_dominant(&self.scope, f)?;
-        let member_index = self.insert_member(handle);
-        self.trace_member_spawn(cx, member_index, "send");
+        let (member_index, task_id) = self.insert_member(handle);
+        self.trace_member_spawn(cx, member_index, task_id, "send");
         Ok(())
     }
 
@@ -219,15 +221,16 @@ where
         Fut: Future<Output = Result<T, E>> + 'static,
     {
         let handle = cx.spawn_local_in_cancellation_dominant(&self.scope, f)?;
-        let member_index = self.insert_member(handle);
-        self.trace_member_spawn(cx, member_index, "local");
+        let (member_index, task_id) = self.insert_member(handle);
+        self.trace_member_spawn(cx, member_index, task_id, "local");
         Ok(())
     }
 
-    /// Takes ownership of a spawned member and returns its spawn index. A new
-    /// member is a `join_next` candidate until its first poll.
-    fn insert_member(&mut self, handle: TaskHandle<Result<T, E>>) -> u64 {
+    /// Takes ownership of a spawned member and returns its spawn index and task id.
+    /// A new member is a `join_next` candidate until its first poll.
+    fn insert_member(&mut self, handle: TaskHandle<Result<T, E>>) -> (u64, TaskId) {
         let member_index = self.next_member_index;
+        let task_id = handle.task_id();
         self.members.insert(
             member_index,
             Member {
@@ -237,7 +240,7 @@ where
         );
         self.ready.candidates.lock().insert(member_index);
         self.next_member_index = self.next_member_index.saturating_add(1);
-        member_index
+        (member_index, task_id)
     }
 
     /// Removes a collected member and records its outcome.
@@ -439,9 +442,16 @@ where
         outcomes
     }
 
-    fn trace_member_spawn(&self, cx: &Cx, member_index: u64, spawn_kind: &str) {
+    fn trace_member_spawn(
+        &self,
+        cx: &Cx,
+        member_index: u64,
+        member_task_id: TaskId,
+        spawn_kind: &str,
+    ) {
         let set_id = self.set_id.to_string();
         let member_index = member_index.to_string();
+        let member_task_id = member_task_id.to_string();
         let region = self.scope.region_id().to_string();
         let active_members = self.members.len().to_string();
         cx.trace_with_fields(
@@ -449,6 +459,7 @@ where
             &[
                 ("join_set_id", set_id.as_str()),
                 ("member_index", member_index.as_str()),
+                ("member_task_id", member_task_id.as_str()),
                 ("region", region.as_str()),
                 ("spawn_kind", spawn_kind),
                 ("active_members", active_members.as_str()),
@@ -697,11 +708,55 @@ mod tests {
             assert_eq!(entry.get_field("region"), Some(region.as_str()));
             assert_eq!(entry.get_field("spawn_kind"), Some("send"));
             assert_eq!(entry.get_field("member_index"), Some(member_index.as_str()));
+            assert!(entry.get_field("member_task_id").is_some());
             assert_eq!(
                 entry.get_field("active_members"),
                 Some(active_members.as_str())
             );
         }
+    }
+
+    #[test]
+    fn join_set_spawn_trace_distinguishes_multiple_sets_in_same_region() {
+        let entries = run_in_runtime(|cx| async move {
+            let collector = LogCollector::new(8).with_min_level(LogLevel::Trace);
+            cx.set_log_collector(collector.clone());
+
+            let mut set_a = JoinSet::<u32, (), _>::in_cx(&cx);
+            let mut set_b = JoinSet::<u32, (), _>::in_cx(&cx);
+
+            set_a
+                .spawn(&cx, |_| async move { Ok::<u32, ()>(10) })
+                .expect("set_a member spawns");
+            set_b
+                .spawn(&cx, |_| async move { Ok::<u32, ()>(20) })
+                .expect("set_b member spawns");
+
+            let res_a = set_a.join_next(&cx).await.unwrap().unwrap();
+            let res_b = set_b.join_next(&cx).await.unwrap().unwrap();
+            assert_eq!(res_a, 10);
+            assert_eq!(res_b, 20);
+
+            collector.peek()
+        });
+
+        let spawn_entries = entries
+            .iter()
+            .filter(|entry| entry.message() == "join_set.spawn")
+            .collect::<Vec<_>>();
+        assert_eq!(spawn_entries.len(), 2);
+
+        // Both sets share the owning region as join_set_id and both have member_index 0,
+        // but their distinct member_task_ids uniquely identify which task belonged to which spawn.
+        let member_task_id_0 = spawn_entries[0].get_field("member_task_id").unwrap();
+        let member_task_id_1 = spawn_entries[1].get_field("member_task_id").unwrap();
+        assert_ne!(member_task_id_0, member_task_id_1);
+        assert_eq!(spawn_entries[0].get_field("member_index"), Some("0"));
+        assert_eq!(spawn_entries[1].get_field("member_index"), Some("0"));
+        assert_eq!(
+            spawn_entries[0].get_field("join_set_id"),
+            spawn_entries[1].get_field("join_set_id")
+        );
     }
 
     #[test]

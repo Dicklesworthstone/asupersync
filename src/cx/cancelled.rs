@@ -25,6 +25,17 @@ struct Registration {
 /// Each future owns one registration, even when several observers share the
 /// same task waker. Completion and drop unregister only that observer. Once a
 /// request has been observed, subsequent polls stay ready.
+///
+/// # Task Lifecycle & Completion
+///
+/// While the context's task is live, cancellation requests wake registered
+/// observers. When a task completes, its cancellation-waker registry is closed
+/// (`cancel_waker_registry_closed`) and any registered observers are retired
+/// without a wakeup. A cancellation request published to a context after its
+/// task has already completed does not wake observers (since no active
+/// registrations remain, and new registrations are rejected with a token of 0).
+/// However, if cancellation is requested post-completion, any subsequent poll
+/// of [`Cancelled`] will immediately observe the request and return [`Poll::Ready`].
 #[must_use = "cancellation observers do nothing unless polled or awaited"]
 pub struct Cancelled<'a, Caps = cap::All> {
     cx: &'a Cx<Caps>,
@@ -47,8 +58,23 @@ impl<Caps> Cx<Caps> {
     /// The first poll installs an owned cancellation-waker registration and
     /// rechecks the request, closing the check/register race. Cancellation
     /// published through the runtime or methods such as [`Self::cancel_fast`]
-    /// and [`Self::cancel_with`] wakes a parked observer. Legacy direct writes
-    /// to public context fields are not a wake-producing publication mechanism.
+    /// and [`Self::cancel_with`] wakes a parked observer while the context's
+    /// task is live. Legacy direct writes to public context fields are not a
+    /// wake-producing publication mechanism.
+    ///
+    /// # Task Lifecycle & Completion Semantics
+    ///
+    /// When a task completes and its record reaches terminal retirement, the
+    /// runtime detaches its cancellation-waker registry
+    /// (`cancel_waker_registry_closed`). Parked observers are retired without
+    /// wakeups, and subsequent calls to [`Self::cancel_fast`] or [`Self::cancel_with`]
+    /// on the finished task's context do not wake observers (since no active
+    /// waker registrations remain). Additionally, completed contexts reject new
+    /// waker registrations (returning a zero token).
+    ///
+    /// However, if cancellation was requested before or after completion, any
+    /// subsequent poll of [`Self::cancelled`] or check of [`Self::is_cancel_requested`]
+    /// will immediately observe the request and resolve [`Poll::Ready`].
     ///
     /// This is a read-only, mask-agnostic observation, just like
     /// [`Self::is_cancel_requested`]. It does not acknowledge cancellation,
@@ -383,5 +409,69 @@ mod tests {
             );
             assert_eq!(registrations(&cx), 0);
         }
+    }
+
+    #[test]
+    fn completed_context_cancelled_future_resolves_ready_if_already_cancelled() {
+        let cx = Cx::for_testing();
+        cx.cancel_fast(CancelKind::User);
+        let retired = cx.inner.write().take_cancel_wakers();
+        drop(retired);
+
+        let mut wait = Box::pin(cx.cancelled());
+        assert!(
+            wait.as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_ready()
+        );
+        assert_eq!(registrations(&cx), 0);
+    }
+
+    #[test]
+    fn completed_context_cancelled_future_returns_pending_when_uncancelled_and_does_not_register() {
+        let cx = Cx::for_testing();
+        let retired = cx.inner.write().take_cancel_wakers();
+        drop(retired);
+
+        let (count, waker) = counter();
+        let mut task = Context::from_waker(&waker);
+        let mut wait = Box::pin(cx.cancelled());
+
+        // Polling on an uncancelled completed context returns Pending and does not leak a registration.
+        assert!(wait.as_mut().poll(&mut task).is_pending());
+        assert_eq!(registrations(&cx), 0);
+
+        // Subsequent cancellation sets cancel_requested. Because the task finished and its registry
+        // closed, the waker is not woken, but a subsequent poll observes the cancellation.
+        cx.cancel_fast(CancelKind::User);
+        assert_eq!(count.0.load(Ordering::SeqCst), 0);
+        assert!(wait.as_mut().poll(&mut task).is_ready());
+        assert_eq!(registrations(&cx), 0);
+    }
+
+    #[test]
+    fn cancelled_observer_registered_before_completion_retires_on_finish_and_resolves_on_repoll() {
+        let cx = Cx::for_testing();
+        let (count, waker) = counter();
+        let mut task = Context::from_waker(&waker);
+        let mut wait = Box::pin(cx.cancelled());
+
+        // Register observer before task completion.
+        assert!(wait.as_mut().poll(&mut task).is_pending());
+        assert_eq!(registrations(&cx), 1);
+
+        // Task completion detaches and retires all cancel wakers without waking them.
+        let retired = cx.inner.write().take_cancel_wakers();
+        drop(retired);
+        assert_eq!(registrations(&cx), 0);
+        assert_eq!(count.0.load(Ordering::SeqCst), 0);
+
+        // Late cancellation sets the flag on the context.
+        cx.cancel_fast(CancelKind::User);
+        assert_eq!(count.0.load(Ordering::SeqCst), 0);
+
+        // Repolling observes the cancellation and completes.
+        assert!(wait.as_mut().poll(&mut task).is_ready());
+        assert_eq!(registrations(&cx), 0);
     }
 }
