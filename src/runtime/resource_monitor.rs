@@ -6115,8 +6115,9 @@ impl SystemResourceCollector {
     /// - Linux: VmRSS from `/proc/self/status`; max from `RLIMIT_AS`,
     ///   falling back to `MemTotal` from `/proc/meminfo` when the
     ///   address-space rlimit is `RLIM_INFINITY`.
-    /// - macOS/BSD: `getrusage(RUSAGE_SELF).ru_maxrss` for current
-    ///   (bytes on macOS, KiB on BSD); same `RLIMIT_AS` fallback.
+    /// - macOS/BSD: only `getrusage(RUSAGE_SELF).ru_maxrss` is read, the
+    ///   lifetime peak, which [`current_rss_reading`] refuses as current
+    ///   usage, so memory is not measured there.
     /// - Windows / other: `SystemAccessFailed` — caller's
     ///   `if let Ok(..)` in `collect_now` cleanly skips the
     ///   measurement update so existing pressure values are preserved.
@@ -6124,7 +6125,7 @@ impl SystemResourceCollector {
         let current_bytes_result = self.observe_probe(
             ResourceProbe::ProcessRssBytes,
             ResourceProbeFallback::OmitMeasurement,
-            platform::process_rss_bytes(),
+            current_rss_reading(platform::process_rss_bytes(), RSS_READING_IS_LIFETIME_PEAK),
             |value| Some(*value),
         );
         let max_limit_result = self.observe_probe(
@@ -6595,6 +6596,33 @@ impl TriggerConfig {
             .min(current_level);
         new_level.max(floor)
     }
+}
+
+/// Whether [`platform::process_rss_bytes`] can only report the lifetime peak
+/// RSS (`getrusage(RUSAGE_SELF).ru_maxrss` on macOS and the BSDs), not the
+/// current one.
+const RSS_READING_IS_LIFETIME_PEAK: bool = cfg!(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly"
+));
+
+/// The process's current RSS from a platform reading. A lifetime peak never
+/// falls, so as current usage it would hold the memory level at a transient
+/// peak for the life of the process: one burst to 90% of the limit kept
+/// admission at Emergency, refusing every Normal child region from then on
+/// (br-asupersync-1ir2em HIGH-1). Such a reading is refused as unsupported,
+/// and memory is then not measured, as on platforms with no reading at all.
+fn current_rss_reading(reading: std::io::Result<u64>, peak_only: bool) -> std::io::Result<u64> {
+    if peak_only && reading.is_ok() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "only the lifetime peak RSS (ru_maxrss) is available, not the current RSS",
+        ));
+    }
+    reading
 }
 
 #[cfg(test)]
@@ -7157,6 +7185,28 @@ mod tests {
         assert!(m.max_limit > 0, "connection ceiling > 0");
         assert!(m.soft_limit <= m.hard_limit);
         assert!(m.hard_limit <= m.max_limit);
+    }
+
+    /// 1ir2em HIGH-1: macOS and the BSDs read only `ru_maxrss`, the lifetime
+    /// peak. Taken as current usage, one burst held the memory level at
+    /// Emergency for the life of the process. A peak-only reading is refused
+    /// as unsupported, so memory goes unmeasured there; a current reading
+    /// and a failed one pass through unchanged.
+    #[test]
+    fn a_lifetime_peak_rss_is_not_taken_as_current_usage() {
+        let peak = 15_u64 << 30;
+        let refused = current_rss_reading(Ok(peak), true).expect_err("a peak is not current usage");
+        assert_eq!(refused.kind(), std::io::ErrorKind::Unsupported);
+        assert!(refused.to_string().contains("ru_maxrss"), "{refused}");
+        assert_eq!(current_rss_reading(Ok(peak), false).unwrap(), peak);
+        let failed = current_rss_reading(Err(std::io::Error::other("no reading")), true)
+            .expect_err("a failed reading stays failed");
+        assert_eq!(failed.to_string(), "no reading");
+        // Linux reads VmRSS, the current RSS, which falls again.
+        #[cfg(target_os = "linux")]
+        assert!(!RSS_READING_IS_LIFETIME_PEAK);
+        #[cfg(target_os = "macos")]
+        assert!(RSS_READING_IS_LIFETIME_PEAK);
     }
 
     /// 1ir2em MEDIUM-2: `EMFILE` comes at the soft descriptor limit, which
