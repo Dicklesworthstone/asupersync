@@ -75,7 +75,7 @@ expression: inventory
 2	Io	grpc/server/duplex/tests.rs	std::net::TcpStream
 1	Io	grpc/server/server_streaming/tests.rs	TcpStream::
 1	Io	http/auto.rs	TcpListener::
-1	Io	http/h1/http_client.rs	TcpStream::
+2	Io	http/h1/http_client.rs	TcpStream::
 4	Io	http/h1/listener.rs	TcpListener::
 1	Io	http/h2/client.rs	TcpStream::
 4	Io	http/h2/listener.rs	TcpListener::
@@ -293,6 +293,7 @@ expression: inventory
 4	Time	runtime/epoch_gc.rs	Instant::now()
 1	Time	runtime/epoch_tracker.rs	std::time::Instant::now()
 1	Time	runtime/epoch_tracking.rs	Instant::now()
+1	Time	runtime/io_driver/shared.rs	std::time::Instant::now()
 2	Time	runtime/panic_isolation.rs	Instant::now()
 2	Time	runtime/resource_cleanup_verifier.rs	SystemTime::now()
 6	Time	runtime/resource_monitor.rs	Instant::now()
@@ -423,7 +424,8 @@ expression: inventory
 1	Io	grpc/server/duplex/tests.rs	std::net::TcpStream	socket: std::net::TcpStream,
 1	Io	grpc/server/server_streaming/tests.rs	TcpStream::	let socket = TcpStream::connect_timeout(&addr, Duration::from_secs(3))
 1	Io	http/auto.rs	TcpListener::	let listener = TcpListener::bind(addr).await?;
-1	Io	http/h1/http_client.rs	TcpStream::	TcpStream::connect_socket_addr(socket_addr)
+1	Io	http/h1/http_client.rs	TcpStream::	return TcpStream::connect_socket_addr(SocketAddr::new(ip, port))
+1	Io	http/h1/http_client.rs	TcpStream::	return TcpStream::connect_socket_addr(socket_addr)
 4	Io	http/h1/listener.rs	TcpListener::	let tcp_listener = TcpListener::bind(addr).await?;
 1	Io	http/h2/client.rs	TcpStream::	TcpStream::connect(SocketAddr::new(ip, request.url.port)).await?
 4	Io	http/h2/listener.rs	TcpListener::	let tcp_listener = TcpListener::bind(addr).await?;
@@ -918,6 +920,7 @@ expression: inventory
 1	Time	runtime/epoch_gc.rs	Instant::now()	let start_time = Instant::now();
 1	Time	runtime/epoch_tracker.rs	std::time::Instant::now()	let processing_start = std::time::Instant::now();
 1	Time	runtime/epoch_tracking.rs	Instant::now()	instant_to_nanos(Instant::now())
+1	Time	runtime/io_driver/shared.rs	std::time::Instant::now()	let start = std::time::Instant::now();
 2	Time	runtime/panic_isolation.rs	Instant::now()	timestamp: Instant::now(),
 1	Time	runtime/resource_cleanup_verifier.rs	SystemTime::now()	let now = SystemTime::now();
 1	Time	runtime/resource_cleanup_verifier.rs	SystemTime::now()	self.last_updated = SystemTime::now();
