@@ -100,6 +100,17 @@ fn receipt<'a>(result: &'a Value, lane: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("no receipt for {lane}: {result:#}"))
 }
 
+/// Tracker writes run as `br --no-db <args>` so they reach issues.jsonl even when the
+/// checkout's beads.db is stale (87cd61b9d); returns `<args>`.
+fn br_args(call: &[String]) -> &[String] {
+    assert_eq!(
+        call[..2],
+        ["br", "--no-db"],
+        "tracker write bypasses the DB: {call:?}"
+    );
+    &call[2..]
+}
+
 /// Five commits; the web/API commit 3 breaks `alpha_native`; the head is 5.
 fn planted_red_scenario(state: Value, head_targets: &[&str]) -> Value {
     let commits = vec![
@@ -1367,17 +1378,18 @@ fn a_healed_red_is_reported_on_its_bead_and_closes_it_only_when_nothing_it_track
         ],
     });
     let result = evaluate(&scenario);
-    let calls: Vec<Vec<String>> =
+    let argv: Vec<Vec<String>> =
         serde_json::from_value(result["heal_calls"].clone()).expect("recorded br calls");
+    let calls: Vec<&[String]> = argv.iter().map(|call| br_args(call)).collect();
     let commented: Vec<&str> = calls
         .iter()
-        .filter(|call| call[1] == "comments")
-        .map(|call| call[3].as_str())
+        .filter(|call| call[0] == "comments")
+        .map(|call| call[2].as_str())
         .collect();
     let closed: Vec<&str> = calls
         .iter()
-        .filter(|call| call[1] == "close")
-        .map(|call| call[2].as_str())
+        .filter(|call| call[0] == "close")
+        .map(|call| call[1].as_str())
         .collect();
     assert_eq!(
         commented,
@@ -1391,9 +1403,9 @@ fn a_healed_red_is_reported_on_its_bead_and_closes_it_only_when_nothing_it_track
     );
     let shared_note = calls
         .iter()
-        .find(|call| call[1] == "comments" && call[3] == "asupersync-shared")
+        .find(|call| call[0] == "comments" && call[2] == "asupersync-shared")
         .expect("shared comment");
-    assert!(shared_note[5].contains("stays open"), "{shared_note:?}");
+    assert!(shared_note[4].contains("stays open"), "{shared_note:?}");
     let pending: Vec<&str> = result["state"]["pending_beads"]
         .as_array()
         .expect("pending")
@@ -1659,10 +1671,12 @@ fn a_run_red_only_through_known_reds_covers_and_closes_its_escalations() {
         ]),
         "{closures:#}"
     );
-    let commands = closures["commands"].as_array().expect("commands");
+    let argv: Vec<Vec<String>> =
+        serde_json::from_value(closures["commands"].clone()).expect("commands");
+    let commands: Vec<&[String]> = argv.iter().map(|call| br_args(call)).collect();
     let verbs: Vec<(&str, &str)> = commands
         .iter()
-        .map(|c| (c[1].as_str().expect("verb"), c[2].as_str().expect("id")))
+        .map(|c| (c[0].as_str(), c[1].as_str()))
         .collect();
     assert_eq!(
         verbs,
@@ -1673,10 +1687,10 @@ fn a_run_red_only_through_known_reds_covers_and_closes_its_escalations() {
         ],
         "{closures:#}"
     );
-    assert_eq!(commands[0][3], "asupersync-bi2462.147.91");
+    assert_eq!(commands[0][2], "asupersync-bi2462.147.91");
     assert_eq!(
-        commands[2][4],
-        json!(format!("covered at {} (main watchdog)", &sha(8)[..9]))
+        commands[2][3],
+        format!("covered at {} (main watchdog)", &sha(8)[..9])
     );
     assert_eq!(
         closures["filed"],
