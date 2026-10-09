@@ -33,6 +33,7 @@ use crate::net::tcp::listener::TcpListener;
 use crate::net::tcp::stream::TcpStream;
 use crate::runtime::RuntimeHandle;
 use crate::server::shutdown::{ShutdownSignal, ShutdownStats};
+use crate::sync::Notify;
 #[cfg(feature = "tls")]
 use crate::tls::TlsAcceptor;
 use crate::types::Time;
@@ -194,7 +195,9 @@ where
     }
 
     /// Accepts until the shutdown signal begins draining, then drains both
-    /// protocols' listeners and returns their statistics.
+    /// protocols' listeners and returns their statistics. Incomplete protocol
+    /// detection and TLS handshakes are cancelled, and their connections are
+    /// released before this method returns.
     ///
     /// # Errors
     /// A non-transient accept error (after draining the connections already
@@ -227,7 +230,7 @@ where
             .try_spawn(async move { http2.run(&http2_runtime).await })
             .map_err(|error| io::Error::other(format!("spawn HTTP/2 listener: {error}")))?;
 
-        let detecting = Arc::new(AtomicUsize::new(0));
+        let detecting = Arc::new(DetectionTasks::default());
         let accept_result = self
             .accept_loop(runtime, &http1_queue, &http2_queue, &detecting)
             .await;
@@ -239,6 +242,11 @@ where
         let _ = http2_manager.begin_drain(http2_drain);
         let http1_stats = http1_run.await;
         let http2_stats = http2_run.await;
+        // Wait until neither accept loop can observe a closed queue as an
+        // accept error. Close then fences pushes that raced the stop check.
+        http1_queue.close();
+        http2_queue.close();
+        detecting.wait_idle().await;
         accept_result?;
         Ok(HttpAutoShutdownStats {
             http1: http1_stats?,
@@ -251,7 +259,7 @@ where
         runtime: &RuntimeHandle,
         http1_queue: &Arc<HandoffQueue>,
         http2_queue: &Arc<HandoffQueue>,
-        detecting: &Arc<AtomicUsize>,
+        detecting: &Arc<DetectionTasks>,
     ) -> io::Result<()> {
         let mut shutdown = self.shutdown_signal.subscribe();
         let mut transient_streak: u32 = 0;
@@ -283,19 +291,21 @@ where
                     // Back off so a persistent condition (EMFILE) does not spin.
                     transient_streak = transient_streak.saturating_add(1);
                     let delay = Duration::from_millis(2_u64 << transient_streak.min(5));
-                    crate::time::sleep(now(), delay).await;
+                    let _ = until_shutdown(
+                        &self.shutdown_signal,
+                        crate::time::sleep(now(), delay),
+                    )
+                    .await;
                     continue;
                 }
                 Err(error) => return Err(error),
             };
-            if detecting.fetch_add(1, Ordering::AcqRel) >= self.config.max_detecting {
-                detecting.fetch_sub(1, Ordering::AcqRel);
+            let Some(slot) = detecting.acquire(self.config.max_detecting) else {
                 drop(stream);
                 continue;
-            }
+            };
             // Owned by the detection future, so the slot is released even if
             // the future is dropped without running.
-            let slot = DetectionSlot(Arc::clone(detecting));
             let detection = Detection {
                 http1: Arc::clone(http1_queue),
                 http2: Arc::clone(http2_queue),
@@ -306,9 +316,30 @@ where
             };
             // A spawn failure drops the future, and with it the connection and
             // its detection slot.
-            let _ = runtime.try_spawn(detection.hand_off(stream, peer, slot));
+            let connection = DetectingConnection { stream, peer, slot };
+            let _ = runtime.try_spawn(detection.hand_off(connection));
         }
     }
+}
+
+/// Detection only reads an unadmitted connection or performs its handshake:
+/// dropping that work on shutdown closes the transport instead of abandoning
+/// an established request. Poll shutdown first, including on the first poll.
+async fn until_shutdown<T>(
+    shutdown: &ShutdownSignal,
+    operation: impl Future<Output = T>,
+) -> Option<T> {
+    let mut receiver = shutdown.subscribe();
+    let mut stop = pin!(receiver.wait());
+    let mut operation = pin!(operation);
+    std::future::poll_fn(|cx| {
+        if shutdown.is_shutting_down() || stop.as_mut().poll(cx).is_ready() {
+            Poll::Ready(None)
+        } else {
+            operation.as_mut().poll(cx).map(Some)
+        }
+    })
+    .await
 }
 
 fn now() -> Time {
@@ -339,9 +370,24 @@ struct Detection {
     shutdown: ShutdownSignal,
 }
 
+// Declaration order also releases the socket before the completion slot if
+// the spawned future is dropped before its very first poll.
+struct DetectingConnection {
+    stream: TcpStream,
+    peer: SocketAddr,
+    slot: DetectionSlot,
+}
+
 impl Detection {
-    async fn hand_off(self, stream: TcpStream, peer: SocketAddr, slot: DetectionSlot) {
+    async fn hand_off(self, connection: DetectingConnection) {
+        let DetectingConnection { stream, peer, slot } = connection;
         let _slot = slot;
+        // The operation (and its socket) is dropped before the slot signals
+        // completion, so an idle observation is a resource-release barrier.
+        let _ = until_shutdown(&self.shutdown, self.detect(stream, peer)).await;
+    }
+
+    async fn detect(&self, stream: TcpStream, peer: SocketAddr) {
         #[cfg(feature = "tls")]
         if let Some(acceptor) = &self.tls {
             let bound = acceptor.handshake_timeout().unwrap_or(self.timeout);
@@ -402,11 +448,225 @@ async fn read_until_decided(
     }
 }
 
+/// Bounded detection admission and a barrier for releasing accepted sockets.
+#[derive(Default)]
+struct DetectionTasks {
+    active: AtomicUsize,
+    idle: Notify,
+}
+
+impl DetectionTasks {
+    fn acquire(self: &Arc<Self>, max: usize) -> Option<DetectionSlot> {
+        self.active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                (active < max).then(|| active + 1)
+            })
+            .ok()
+            .map(|_| DetectionSlot(Arc::clone(self)))
+    }
+
+    async fn wait_idle(&self) {
+        while self.active.load(Ordering::Acquire) != 0 {
+            // notify_one retains a permit if the last slot finishes between
+            // the count check and registration of this sole drain waiter.
+            self.idle.notified().await;
+        }
+    }
+}
+
 /// Releases a detection slot when the detection ends, however it ends.
-struct DetectionSlot(Arc<AtomicUsize>);
+struct DetectionSlot(Arc<DetectionTasks>);
 
 impl Drop for DetectionSlot {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
+        if self.0.active.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.0.idle.notify_one();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::RuntimeBuilder;
+    use std::sync::atomic::AtomicBool;
+    use std::task::{Context, Wake, Waker};
+
+    struct WakeFlag(AtomicBool);
+
+    impl Wake for WakeFlag {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    #[test]
+    fn detection_admission_and_idle_wait_cover_every_slot() {
+        let tasks = Arc::new(DetectionTasks::default());
+        assert!(tasks.acquire(0).is_none());
+        let first = tasks.acquire(2).expect("first slot");
+        let second = tasks.acquire(2).expect("second slot");
+        assert!(tasks.acquire(2).is_none());
+        assert_eq!(tasks.active.load(Ordering::Acquire), 2);
+
+        let flag = Arc::new(WakeFlag(AtomicBool::new(false)));
+        let waker = Waker::from(Arc::clone(&flag));
+        let mut cx = Context::from_waker(&waker);
+        let mut idle = pin!(tasks.wait_idle());
+        assert!(idle.as_mut().poll(&mut cx).is_pending());
+        drop(first);
+        assert!(idle.as_mut().poll(&mut cx).is_pending());
+        assert!(!flag.0.load(Ordering::Acquire));
+        drop(second);
+        assert!(flag.0.load(Ordering::Acquire));
+        assert!(idle.as_mut().poll(&mut cx).is_ready());
+
+        // A completed burst may leave a notification permit. It must not
+        // make a later drain finish while a new connection is still owned.
+        let slot = tasks.acquire(1).expect("reused capacity");
+        let mut idle = pin!(tasks.wait_idle());
+        assert!(idle.as_mut().poll(&mut cx).is_pending());
+        drop(slot);
+        assert!(idle.as_mut().poll(&mut cx).is_ready());
+        assert_eq!(tasks.active.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn shutdown_preempts_detection_and_drops_it_before_completion() {
+        struct PendingOperation<'a> {
+            polls: &'a AtomicUsize,
+            dropped: &'a AtomicBool,
+        }
+        impl Future for PendingOperation<'_> {
+            type Output = ();
+
+            fn poll(self: std::pin::Pin<&mut Self>, _: &mut Context<'_>) -> Poll<()> {
+                self.polls.fetch_add(1, Ordering::Relaxed);
+                Poll::Pending
+            }
+        }
+        impl Drop for PendingOperation<'_> {
+            fn drop(&mut self) {
+                self.dropped.store(true, Ordering::Release);
+            }
+        }
+
+        for already_stopped in [false, true] {
+            let shutdown = ShutdownSignal::new();
+            let polls = AtomicUsize::new(0);
+            let dropped = AtomicBool::new(false);
+            let flag = Arc::new(WakeFlag(AtomicBool::new(false)));
+            let waker = Waker::from(Arc::clone(&flag));
+            let mut cx = Context::from_waker(&waker);
+            if already_stopped {
+                shutdown.trigger_immediate();
+            }
+            let mut operation = pin!(until_shutdown(
+                &shutdown,
+                PendingOperation {
+                    polls: &polls,
+                    dropped: &dropped,
+                },
+            ));
+            if !already_stopped {
+                assert!(operation.as_mut().poll(&mut cx).is_pending());
+                assert_eq!(polls.load(Ordering::Relaxed), 1);
+                assert!(!dropped.load(Ordering::Acquire));
+                assert!(shutdown.begin_drain(Duration::from_secs(30)));
+                assert!(flag.0.load(Ordering::Acquire));
+            }
+            assert_eq!(operation.as_mut().poll(&mut cx), Poll::Ready(None));
+            assert!(dropped.load(Ordering::Acquire));
+            assert_eq!(polls.load(Ordering::Relaxed), usize::from(!already_stopped));
+        }
+    }
+
+    #[test]
+    fn detection_result_is_preserved_while_running() {
+        let shutdown = ShutdownSignal::new();
+        let mut operation = pin!(until_shutdown(&shutdown, std::future::ready(42)));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert_eq!(operation.as_mut().poll(&mut cx), Poll::Ready(Some(42)));
+    }
+
+    fn stalled_connection_closes_on_shutdown(mut detection: Detection) {
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(2)
+            .build()
+            .expect("runtime");
+        let handle = runtime.handle();
+        runtime.block_on(handle.spawn(async move {
+            // Capture the runtime's clock, as the public listener does.
+            detection.shutdown = ShutdownSignal::new();
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let mut client = TcpStream::connect(listener.local_addr().expect("address"))
+                .await
+                .expect("connect");
+            let (stream, peer) = listener.accept().await.expect("accept");
+            let tasks = Arc::new(DetectionTasks::default());
+            let slot = tasks.acquire(1).expect("detection slot");
+            let shutdown = detection.shutdown.clone();
+            let mut handoff = pin!(detection.hand_off(DetectingConnection {
+                stream,
+                peer,
+                slot,
+            }));
+
+            // This is the actual native TCP read / TLS handshake, polled to
+            // Pending before the stop. No sleep guesses that it was reached.
+            std::future::poll_fn(|cx| {
+                assert!(handoff.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            assert_eq!(tasks.active.load(Ordering::Acquire), 1);
+            assert!(shutdown.begin_drain(Duration::from_secs(30)));
+            crate::time::timeout(now(), Duration::from_secs(2), handoff.as_mut())
+                .await
+                .expect("shutdown must not wait for the detection deadline");
+            assert_eq!(tasks.active.load(Ordering::Acquire), 0);
+            let mut buf = [0_u8; 1];
+            let read = crate::time::timeout(
+                now(),
+                Duration::from_secs(2),
+                AsyncReadExt::read(&mut client, &mut buf),
+            )
+            .await
+            .expect("detection completion must release the socket")
+            .expect("peer read");
+            assert_eq!(read, 0, "no protocol response is sent to an undecided peer");
+        }));
+    }
+
+    fn detection() -> Detection {
+        Detection {
+            http1: Arc::new(HandoffQueue::default()),
+            http2: Arc::new(HandoffQueue::default()),
+            #[cfg(feature = "tls")]
+            tls: None,
+            timeout: Duration::from_secs(60),
+            shutdown: ShutdownSignal::new(),
+        }
+    }
+
+    #[test]
+    fn shutdown_interrupts_a_native_preface_read() {
+        stalled_connection_closes_on_shutdown(detection());
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn shutdown_interrupts_a_native_tls_handshake() {
+        use crate::tls::{CertificateChain, PrivateKey, TlsAcceptorBuilder};
+
+        let chain = CertificateChain::from_pem(include_bytes!(
+            "../../tests/fixtures/tls/server.crt"
+        ))
+        .expect("certificate chain");
+        let key = PrivateKey::from_pem(include_bytes!("../../tests/fixtures/tls/server.key"))
+            .expect("private key");
+        let mut detection = detection();
+        detection.tls = Some(TlsAcceptorBuilder::new(chain, key).build().expect("acceptor"));
+        stalled_connection_closes_on_shutdown(detection);
     }
 }
