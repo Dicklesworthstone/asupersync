@@ -100,6 +100,27 @@ impl<T: Buf, U: Buf> Buf for Chain<T, U> {
             self.b.advance(cnt);
         }
     }
+
+    #[inline]
+    fn copy_to_bytes(&mut self, len: usize) -> crate::bytes::Bytes {
+        let a_rem = self.a.remaining();
+        if a_rem >= len {
+            self.a.copy_to_bytes(len)
+        } else if a_rem == 0 {
+            self.b.copy_to_bytes(len)
+        } else {
+            assert!(
+                len <= self.remaining(),
+                "cannot copy {} bytes with {} remaining",
+                len,
+                self.remaining()
+            );
+            let mut ret = Vec::with_capacity(len);
+            ret.extend_from_slice(&self.a.copy_to_bytes(a_rem));
+            ret.extend_from_slice(&self.b.copy_to_bytes(len - a_rem));
+            crate::bytes::Bytes::from(ret)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -426,5 +447,29 @@ mod tests {
         let ok = b_out == [4, 5, 6];
         crate::assert_with_log!(ok, "b_out", &[4, 5, 6], b_out);
         crate::test_complete!("test_chain_into_inner");
+    }
+
+    #[test]
+    fn test_chain_copy_to_bytes() {
+        init_test("test_chain_copy_to_bytes");
+        let a = crate::bytes::Bytes::from_static(b"hello ").reader();
+        let b = crate::bytes::Bytes::from_static(b"world!").reader();
+        let mut chain = Chain::new(a, b);
+
+        // Copy within first segment
+        let s1 = chain.copy_to_bytes(3);
+        assert_eq!(s1.as_ref(), b"hel");
+        assert_eq!(chain.remaining(), 9);
+
+        // Copy straddling first and second segment
+        let s2 = chain.copy_to_bytes(5);
+        assert_eq!(s2.as_ref(), b"lo wo");
+        assert_eq!(chain.remaining(), 4);
+
+        // Copy remaining in second segment
+        let s3 = chain.copy_to_bytes(4);
+        assert_eq!(s3.as_ref(), b"rld!");
+        assert_eq!(chain.remaining(), 0);
+        crate::test_complete!("test_chain_copy_to_bytes");
     }
 }

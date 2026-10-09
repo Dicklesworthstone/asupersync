@@ -96,6 +96,20 @@ impl<T: Buf> Buf for Take<T> {
         self.inner.advance(cnt);
         self.limit -= cnt;
     }
+
+    #[inline]
+    fn copy_to_bytes(&mut self, len: usize) -> crate::bytes::Bytes {
+        let remaining = self.remaining();
+        assert!(
+            len <= remaining,
+            "cannot copy {} bytes with {} remaining",
+            len,
+            remaining
+        );
+        let ret = self.inner.copy_to_bytes(len);
+        self.limit -= len;
+        ret
+    }
 }
 
 #[cfg(test)]
@@ -445,5 +459,17 @@ mod tests {
             got
         );
         crate::test_complete!("test_take_get_ref");
+    }
+
+    #[test]
+    fn test_take_copy_to_bytes() {
+        init_test("test_take_copy_to_bytes");
+        let bytes = crate::bytes::Bytes::from_static(b"hello world");
+        let mut take = bytes.reader().take(5);
+        let sliced = take.copy_to_bytes(5);
+        assert_eq!(sliced.as_ref(), b"hello");
+        assert_eq!(take.remaining(), 0);
+        assert_eq!(take.limit(), 0);
+        crate::test_complete!("test_take_copy_to_bytes");
     }
 }

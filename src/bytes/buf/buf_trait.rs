@@ -70,6 +70,10 @@ pub trait Buf {
         let mut off = 0;
         while off < dst.len() {
             let chunk = self.chunk();
+            assert!(
+                !chunk.is_empty(),
+                "chunk returned empty with remaining() > 0"
+            );
             let cnt = std::cmp::min(chunk.len(), dst.len() - off);
             dst[off..off + cnt].copy_from_slice(&chunk[..cnt]);
             self.advance(cnt);
@@ -99,6 +103,10 @@ pub trait Buf {
         let mut off = 0;
         while off < len {
             let chunk = self.chunk();
+            assert!(
+                !chunk.is_empty(),
+                "chunk returned empty with remaining() > 0"
+            );
             let cnt = std::cmp::min(chunk.len(), len - off);
             dst.extend_from_slice(&chunk[..cnt]);
             self.advance(cnt);
@@ -794,5 +802,34 @@ mod tests {
             v
         );
         crate::test_complete!("test_roundtrip_all_integers");
+    }
+
+    struct EmptyChunkBuf(usize);
+
+    impl Buf for EmptyChunkBuf {
+        fn remaining(&self) -> usize {
+            self.0
+        }
+        fn chunk(&self) -> &[u8] {
+            &[]
+        }
+        fn advance(&mut self, cnt: usize) {
+            self.0 -= cnt;
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "chunk returned empty with remaining() > 0")]
+    fn test_copy_to_slice_panics_on_empty_chunk() {
+        let mut buf = EmptyChunkBuf(10);
+        let mut dst = [0u8; 5];
+        buf.copy_to_slice(&mut dst);
+    }
+
+    #[test]
+    #[should_panic(expected = "chunk returned empty with remaining() > 0")]
+    fn test_copy_to_bytes_panics_on_empty_chunk() {
+        let mut buf = EmptyChunkBuf(10);
+        let _ = buf.copy_to_bytes(5);
     }
 }
