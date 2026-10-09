@@ -1504,6 +1504,11 @@ pub(crate) struct CreateRegionRequest {
     /// mints its own canonical records at admission.
     pub(crate) principal_task_id: TaskId,
     pub(crate) slot: Arc<AdmittedRegionSlot>,
+    /// Where the child is minted once `parent` has closed: the caller's
+    /// spawn fallback (`Cx::spawn_fallback_for`), so a race winner's context
+    /// kept past its sealed region opens children where it spawns
+    /// (br-asupersync-inleqi M2, br-asupersync-k27oxe). `None` otherwise.
+    pub(crate) parent_fallback: Option<RegionId>,
 }
 
 impl fmt::Debug for CreateRegionRequest {

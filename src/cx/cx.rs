@@ -4480,6 +4480,7 @@ impl<Caps> Cx<Caps> {
             priority: spec.priority,
             principal_task_id,
             slot: std::sync::Arc::clone(&slot),
+            parent_fallback: self.inner.read().spawn_fallback_region,
         };
         if gateway
             .enqueue_region_command(crate::runtime::spawn_mailbox::RegionCommand::Create(
