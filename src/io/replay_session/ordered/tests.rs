@@ -597,3 +597,57 @@ fn dropping_io_releases_parked_wakers_even_if_entropy_clones_survive() {
     assert!(weak.upgrade().is_none());
     drop(entropy);
 }
+
+/// br-asupersync-h08ezk: I/O polled while another thread is inside its
+/// admitted effect waits for that effect to finish, as it would before the
+/// effect started, instead of failing the session as an overlap. I/O in the
+/// direction already active still overlaps.
+#[test]
+fn io_polled_during_another_effect_waits_for_it_to_finish() {
+    use crate::io::replay::IoOperation;
+    let entry = |effect| gate::Entry {
+        effect,
+        child: 0,
+        pending: None,
+    };
+    let order = ReplayOrder::new(OrderTape {
+        entries: vec![
+            entry(OrderedEffect::Clock),
+            entry(OrderedEffect::Io(IoOperation::Read)),
+        ],
+        poll_aware: false,
+    });
+    let clock = order.enter(OrderedEffect::Clock).unwrap();
+    let probe = Arc::new(CountWake(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&probe));
+    let mut cx = Context::from_waker(&waker);
+    assert!(order.enter_io(&mut cx, IoOperation::Read).is_pending());
+    assert_eq!(probe.0.load(Ordering::Relaxed), 0);
+    clock.finish(true).unwrap();
+    assert_eq!(
+        probe.0.load(Ordering::Relaxed),
+        1,
+        "finishing the clock read wakes the parked I/O"
+    );
+    let Poll::Ready(Ok(read)) = order.enter_io(&mut cx, IoOperation::Read) else {
+        panic!("the read is admitted once the clock read finished");
+    };
+    read.finish(true).unwrap();
+    assert_eq!(order.verify(), Ok(()));
+
+    let order = ReplayOrder::new(OrderTape {
+        entries: vec![
+            entry(OrderedEffect::Io(IoOperation::Read)),
+            entry(OrderedEffect::Io(IoOperation::Read)),
+        ],
+        poll_aware: false,
+    });
+    let Poll::Ready(Ok(first)) = order.enter_io(&mut cx, IoOperation::Read) else {
+        panic!("the first read is admitted");
+    };
+    let Poll::Ready(Err(error)) = order.enter_io(&mut cx, IoOperation::Read) else {
+        panic!("a second read during the first one overlaps");
+    };
+    assert_eq!(error.reason, OrderReplayMismatch::Overlap);
+    drop(first);
+}
