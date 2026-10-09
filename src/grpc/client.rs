@@ -1927,13 +1927,16 @@ impl NativeH2Conn {
             && !self.connection.goaway_sent()
     }
 
-    /// Run one unary call on a new stream of this connection.
+    /// Run one unary call on a new stream of this connection. `Ok` carries a
+    /// call whose stream completed, with its outcome: the response, or the
+    /// status a completed call ended with (a non-OK grpc-status, a non-gRPC
+    /// HTTP answer). The connection is intact either way and may be reused.
     async fn exchange(
         &mut self,
         headers: Vec<Header>,
         request_body: Bytes,
         max_recv_message_size: usize,
-    ) -> Result<(NativeUnaryWireResponse, u32), UnaryFailure> {
+    ) -> Result<(Result<NativeUnaryWireResponse, Status>, u32), UnaryFailure> {
         // A stream refused locally (GOAWAY seen, identifiers exhausted) never
         // reached the server.
         let stream_id = self.connection.open_stream(headers, false).map_err(|error| {
@@ -1994,10 +1997,7 @@ impl NativeH2Conn {
                     .await
                     .map_err(UnaryFailure::processed)?;
                 if accumulator.is_complete() {
-                    return accumulator
-                        .finish()
-                        .map(|response| (response, stream_id))
-                        .map_err(UnaryFailure::processed);
+                    return Ok((accumulator.finish(), stream_id));
                 }
             }
 
@@ -2037,9 +2037,9 @@ async fn native_h2_unary_io(
                 .exchange(headers.clone(), request_body.clone(), max_recv)
                 .await
             {
-                Ok((response, stream_id)) => {
+                Ok((outcome, stream_id)) => {
                     pool_after_success(pool, conn, stream_id);
-                    return Ok(response);
+                    return outcome;
                 }
                 Err(failure) if failure.unprocessed => break,
                 Err(failure) => return Err(failure.status),
@@ -2047,17 +2047,18 @@ async fn native_h2_unary_io(
         }
     }
     let mut conn = NativeH2Conn::dial(&target, &config, tls_connector).await?;
-    let (response, stream_id) = conn
+    let (outcome, stream_id) = conn
         .exchange(headers, request_body, max_recv)
         .await
         .map_err(|failure| failure.status)?;
     if let Some(pool) = &pool {
         pool_after_success(pool, conn, stream_id);
     }
-    Ok(response)
+    outcome
 }
 
-/// Keep a connection whose call completed cleanly for the next unary call.
+/// Keep a connection whose call completed cleanly, with any grpc-status, for
+/// the next unary call.
 #[cfg(not(target_arch = "wasm32"))]
 fn pool_after_success(pool: &UnaryConnectionPool, conn: NativeH2Conn, stream_id: u32) {
     if conn.reusable() && !conn.connection.has_pending_frames_for_stream(stream_id) {

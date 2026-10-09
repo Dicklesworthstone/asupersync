@@ -2805,6 +2805,8 @@ enum ReusePeer {
     CloseAfterFirst,
     /// Refuse every later stream with REFUSED_STREAM.
     RefuseAfterFirst,
+    /// Answer every call with a trailers-only `grpc-status: 5` (NOT_FOUND).
+    NotFound,
 }
 
 /// A raw HTTP/2 gRPC echo server counting the TCP connections it accepts.
@@ -2882,6 +2884,26 @@ fn serve_unary_reuse_connection(
                 settled.send(()).unwrap();
                 continue;
             }
+            if mode == ReusePeer::NotFound {
+                // Trailers-only: one HEADERS frame carries the status and
+                // ends the stream.
+                bodies.remove(&stream_id);
+                connection
+                    .send_headers(
+                        stream_id,
+                        vec![
+                            Header::new(":status", "200"),
+                            Header::new("content-type", "application/grpc"),
+                            Header::new("grpc-status", "5"),
+                            Header::new("grpc-message", "no such key"),
+                        ],
+                        true,
+                    )
+                    .unwrap();
+                write_owned_h2_frames(&mut socket, &mut connection);
+                settled.send(()).unwrap();
+                continue;
+            }
             // The framed request message is echoed as the framed response.
             let body = bodies.remove(&stream_id).unwrap_or_default().freeze();
             connection
@@ -2913,7 +2935,7 @@ fn serve_unary_reuse_connection(
                     settled.send(()).unwrap();
                     return;
                 }
-                ReusePeer::Serve | ReusePeer::RefuseAfterFirst => {
+                ReusePeer::Serve | ReusePeer::RefuseAfterFirst | ReusePeer::NotFound => {
                     write_owned_h2_frames(&mut socket, &mut connection);
                     settled.send(()).unwrap();
                 }
@@ -2943,9 +2965,17 @@ fn unary_reuse_case(mode: ReusePeer, reuse: usize, calls: usize) -> usize {
             let payload = Bytes::from(format!("reuse call {call}"));
             let response = client
                 .unary::<Bytes, Bytes>("/test.Reuse/Echo", Request::new(payload.clone()))
-                .await
-                .unwrap_or_else(|status| panic!("{mode:?} reuse={reuse} call {call}: {status}"));
-            assert_eq!(response.get_ref(), &payload);
+                .await;
+            if mode == ReusePeer::NotFound {
+                let status = response.expect_err("the peer answers NOT_FOUND");
+                assert_eq!(status.code(), Code::NotFound, "{status}");
+                assert_eq!(status.message(), "no such key");
+            } else {
+                let response = response.unwrap_or_else(|status| {
+                    panic!("{mode:?} reuse={reuse} call {call}: {status}")
+                });
+                assert_eq!(response.get_ref(), &payload);
+            }
             // The peer finished answering (and any GOAWAY or close after it).
             // Loopback delivers those bytes before the next call looks.
             while settled.recv_timeout(Duration::from_millis(200)).is_ok() {}
@@ -2982,6 +3012,19 @@ fn unary_reuse_replaces_connections_the_server_ended_or_refused() {
     // the call, so it is retried once on a fresh connection.
     assert_eq!(unary_reuse_case(ReusePeer::RefuseAfterFirst, 2, 2), 2);
     test_complete!("unary_reuse_replaces_connections_the_server_ended_or_refused");
+}
+
+/// asupersync-mu5yhv finding 4: a call that ends with a non-OK grpc-status
+/// completed its stream cleanly in both directions, so its connection stays
+/// reusable. It used to be dropped like a transport failure, which cost one
+/// connection (and on https one handshake) per failed call.
+#[test]
+fn unary_reuse_keeps_a_connection_whose_call_ended_with_a_grpc_error() {
+    init_test("unary_reuse_keeps_a_connection_whose_call_ended_with_a_grpc_error");
+    assert_eq!(unary_reuse_case(ReusePeer::NotFound, 2, 3), 1);
+    // Without reuse each call still dials its own connection.
+    assert_eq!(unary_reuse_case(ReusePeer::NotFound, 0, 2), 2);
+    test_complete!("unary_reuse_keeps_a_connection_whose_call_ended_with_a_grpc_error");
 }
 
 // ============================================================================
