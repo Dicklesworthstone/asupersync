@@ -32,7 +32,8 @@
       "asupersync-r02ssd (2026-10-07) re-locates four src/net/atp/transport_common/metadata.rs locators by +87 lines (2614, 2648, 2897, 2919 to 2701, 2735, 2984, 3006): the safe-only DeferredParentSyncs batch (one parent-directory fsync per committed directory instead of per file) and its plumbing through install_staged_leaf_transactionally sit above them. 232 and 250 are unchanged. No unsafe site is added; categories, invariants, evidence, and no-claim boundaries are unchanged.",
       "SapphireHill (2026-10-07, main-red heal) re-locates the twenty src/sync/mutex.rs locators after d7ba86cfe (wake blocked mutex acquisition on context cancellation) added safe-only code above them: 108, 109 by +4 and the nineteen from 683 on by +51 (25 is unchanged). Each locator keeps its pattern and its occurrence index. No unsafe site is added or removed; categories, invariants, evidence, and no-claim boundaries are unchanged.",
       "asupersync-1ir2em (2026-10-07) re-locates the same four src/runtime/builder.rs locators by +83 lines (7314, 10533, 10538, 10563 to 7397, 10616, 10621, 10646): the safe-only opt-in resource sampler adds a builder field, its default, the resource_sampling method and docs, its start in build() with a warning when it cannot start, a RuntimeInner field with its start method and Drop handling, and the pressure handle on the request context, all above the test module. No unsafe site is added; categories, invariants, evidence, and no-claim boundaries are unchanged.",
-      "SapphireHill (2026-10-08, main-red heal) re-locates the thirteen src/net/tcp/stream.rs unsafe_block locators by +186 lines (2388..3026 to 2574..3212): dcf62f50c (standard-library TCP sockets, raw socket access) added 44 safe-only lines and d3608cf85 (peek, readiness, try_read/try_write, linger, take_error) 142 more above them. 6 is unchanged. Each locator keeps its pattern and its occurrence index. No unsafe site is added or removed; categories, invariants, evidence, and no-claim boundaries are unchanged."
+      "SapphireHill (2026-10-08, main-red heal) re-locates the thirteen src/net/tcp/stream.rs unsafe_block locators by +186 lines (2388..3026 to 2574..3212): dcf62f50c (standard-library TCP sockets, raw socket access) added 44 safe-only lines and d3608cf85 (peek, readiness, try_read/try_write, linger, take_error) 142 more above them. 6 is unchanged. Each locator keeps its pattern and its occurrence index. No unsafe site is added or removed; categories, invariants, evidence, and no-claim boundaries are unchanged.",
+      "asupersync-7u9x9b (SapphireHill d0, 2026-10-08) re-locates the same thirteen src/net/tcp/stream.rs unsafe_block locators by +38 lines (2574..3212 to 2612..3250): set_linger refuses a non-zero linger, set_zero_linger is added, and Drop skips its shutdown for a zero-linger stream (closes_abortively), all safe code above them. 6 is unchanged. Each locator keeps its pattern and its occurrence index. No unsafe site is added or removed; categories, invariants, evidence, and no-claim boundaries are unchanged."
     ]
   },
   "required_row_fields": [
@@ -2349,47 +2350,42 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 2574,
+          "line": 2612,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2588,
+          "line": 2626,
           "pattern": "let get_result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2936,
+          "line": 2974,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2955,
+          "line": 2993,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2989,
+          "line": 3027,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 3007,
+          "line": 3045,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 3043,
+          "line": 3081,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 3057,
-          "pattern": "let result = unsafe {"
-        },
-        {
-          "kind": "unsafe_block",
-          "line": 3071,
+          "line": 3095,
           "pattern": "let result = unsafe {"
         },
         {
@@ -2399,17 +2395,22 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 3151,
+          "line": 3147,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 3196,
+          "line": 3189,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 3212,
+          "line": 3234,
+          "pattern": "let result = unsafe {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 3250,
           "pattern": "let result = unsafe {"
         }
       ]

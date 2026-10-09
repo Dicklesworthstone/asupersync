@@ -750,16 +750,38 @@ impl TcpStream {
         (&*self.inner).write_vectored(bufs)
     }
 
-    /// `SO_LINGER`: `None` lets close return at once; `Some(duration)` makes
-    /// it wait up to `duration` for unsent data, and `Some(Duration::ZERO)`
-    /// resets the connection on close.
+    /// `SO_LINGER`: `None` (the default) closes gracefully in the background;
+    /// `Some(Duration::ZERO)` resets the connection on close.
     pub fn linger(&self) -> io::Result<Option<Duration>> {
         socket2::SockRef::from(&*self.inner).linger()
     }
 
-    /// Sets `SO_LINGER`; see [`Self::linger`].
+    /// Sets `SO_LINGER` to `None` or `Some(Duration::ZERO)` (the same as
+    /// [`Self::set_zero_linger`]).
+    ///
+    /// Any other duration is refused with [`io::ErrorKind::InvalidInput`]: a
+    /// non-zero linger makes the close in `Drop` block the runtime thread
+    /// until the peer acknowledges the unsent data, which a peer that stops
+    /// reading can delay for the whole duration (tokio deprecated it for the
+    /// same reason). Only whole seconds would count, too.
     pub fn set_linger(&self, linger: Option<Duration>) -> io::Result<()> {
-        socket2::SockRef::from(&*self.inner).set_linger(linger)
+        match linger {
+            None => socket2::SockRef::from(&*self.inner).set_linger(None),
+            Some(duration) if duration.is_zero() => self.set_zero_linger(),
+            Some(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a non-zero SO_LINGER blocks the runtime thread on close; \
+                 use set_zero_linger or None",
+            )),
+        }
+    }
+
+    /// Sets `SO_LINGER` to zero: dropping the stream discards unsent data and
+    /// resets the connection, so the peer's next read fails with
+    /// [`io::ErrorKind::ConnectionReset`] instead of seeing end-of-stream.
+    pub fn set_zero_linger(&self) -> io::Result<()> {
+        ZERO_LINGER_SET.store(true, std::sync::atomic::Ordering::Relaxed);
+        socket2::SockRef::from(&*self.inner).set_linger(Some(Duration::ZERO))
     }
 
     /// Takes the socket's pending error (`SO_ERROR`), if any.
@@ -1541,10 +1563,26 @@ impl AsyncWrite for TcpStream {
 impl Drop for TcpStream {
     fn drop(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
-        if self.shutdown_on_drop {
+        if self.shutdown_on_drop && !closes_abortively(&self.inner) {
             let _ = self.inner.shutdown(Shutdown::Both);
         }
     }
+}
+
+/// Whether some stream in this process was given a zero `SO_LINGER` through
+/// [`TcpStream::set_linger`] or [`TcpStream::set_zero_linger`]; until then,
+/// drops skip the `SO_LINGER` query.
+#[cfg(not(target_arch = "wasm32"))]
+static ZERO_LINGER_SET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether closing `stream` resets the connection (`SO_LINGER` of zero).
+/// Such a close must not be preceded by a `shutdown`, whose FIN would reach
+/// the peer first and make it read a clean end-of-stream instead of the
+/// reset (br-asupersync-7u9x9b).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn closes_abortively(stream: &net::TcpStream) -> bool {
+    ZERO_LINGER_SET.load(std::sync::atomic::Ordering::Relaxed)
+        && socket2::SockRef::from(stream).linger().ok().flatten() == Some(Duration::ZERO)
 }
 
 /// Wraps a connected standard-library TCP stream, for example one inherited

@@ -120,19 +120,64 @@ fn readiness_and_try_io_move_data_and_wait_for_a_full_buffer_to_drain() {
     });
 }
 
+/// Only `None` and zero linger are accepted: a non-zero `SO_LINGER` would make
+/// the close in `Drop` block the runtime thread until the peer acknowledged
+/// the unsent data, and a sub-second one was stored as zero
+/// (br-asupersync-7u9x9b).
 #[test]
 fn linger_and_pending_error_options() {
     let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
     runtime.block_on(async {
         let (client, _server) = pair().await;
         assert_eq!(client.linger().expect("linger"), None);
+        for refused in [Duration::from_secs(3), Duration::from_millis(500)] {
+            let error = client
+                .set_linger(Some(refused))
+                .expect_err("a non-zero linger is refused");
+            assert_eq!(error.kind(), ErrorKind::InvalidInput, "{error}");
+            assert_eq!(client.linger().expect("linger"), None, "nothing was set");
+        }
         client
-            .set_linger(Some(Duration::from_secs(3)))
-            .expect("set linger");
-        assert_eq!(
-            client.linger().expect("linger"),
-            Some(Duration::from_secs(3))
-        );
+            .set_linger(Some(Duration::ZERO))
+            .expect("set zero linger");
+        assert_eq!(client.linger().expect("linger"), Some(Duration::ZERO));
+        client.set_linger(None).expect("clear linger");
+        assert_eq!(client.linger().expect("linger"), None);
+        client.set_zero_linger().expect("set zero linger");
+        assert_eq!(client.linger().expect("linger"), Some(Duration::ZERO));
         assert!(client.take_error().expect("take_error").is_none());
+    });
+}
+
+/// Dropping a zero-linger stream resets the connection: the peer's read fails
+/// with `ConnectionReset`. `Drop` used to shut the stream down first, and that
+/// FIN reached the peer before the reset, so it read a clean end-of-stream
+/// (br-asupersync-7u9x9b).
+#[test]
+fn dropping_a_zero_linger_stream_resets_the_peer() {
+    let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+    runtime.block_on(async {
+        let (client, mut server) = pair().await;
+        client.set_zero_linger().expect("set zero linger");
+        drop(client);
+        let mut buf = [0_u8; 8];
+        let result = server.read(&mut buf).await;
+        let error = result.expect_err("the peer sees a reset, not end-of-stream");
+        assert_eq!(error.kind(), ErrorKind::ConnectionReset, "{error}");
+
+        // An owned write half closes the same way.
+        let (client, mut server) = pair().await;
+        client.set_zero_linger().expect("set zero linger");
+        let (read_half, write_half) = client.into_split();
+        drop(write_half);
+        drop(read_half);
+        let result = server.read(&mut buf).await;
+        let error = result.expect_err("the peer sees a reset, not end-of-stream");
+        assert_eq!(error.kind(), ErrorKind::ConnectionReset, "{error}");
+
+        // A stream without a zero linger still ends gracefully.
+        let (client, mut server) = pair().await;
+        drop(client);
+        assert_eq!(server.read(&mut buf).await.expect("read"), 0);
     });
 }

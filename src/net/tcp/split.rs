@@ -1197,7 +1197,7 @@ impl Drop for OwnedWriteHalf {
         self.inner
             .retire_waiter(Interest::WRITABLE, self.last_waiter.take());
         #[cfg(not(target_arch = "wasm32"))]
-        if self.shutdown_on_drop {
+        if self.shutdown_on_drop && !super::stream::closes_abortively(&self.inner.stream) {
             let _ = self.inner.stream.shutdown(Shutdown::Write);
         }
     }
