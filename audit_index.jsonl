@@ -5030,3 +5030,16 @@
 {"file":"src/stream/throttle.rs","lines":476,"batch":"526c3g","date":"2026-10-05","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"judged sound in the 526c3g audit"}
 {"file":"src/stream/try_stream.rs","lines":1110,"batch":"526c3g","date":"2026-10-05","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"judged sound in the 526c3g audit"}
 {"file":"src/stream/zip.rs","lines":567,"batch":"526c3g","date":"2026-10-05","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"judged sound in the 526c3g audit"}
+{"file":"src/runtime/blocking_pool.rs","lines":4237,"batch":"mopkmt","date":"2026-10-08","agent":"SapphireHill","verdict":"FIXED","bugs":3,"notes":"shutdown_and_wait vs an unspawned worker and the exit-guard fence (88f9d941d); cohort starvation (3949d429c)"}
+{"file":"src/combinator/retry.rs","lines":2604,"batch":"e9gn8y","date":"2026-10-08","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"retry token bucket never consulted by retry(): RetryBudget (182736d5e)"}
+{"file":"src/process.rs","lines":5833,"batch":"7tg3di","date":"2026-10-08","agent":"SapphireHill","verdict":"FIXED","bugs":4,"notes":"ErrorKind mapping, cancelled sync wait_with_output, spawn after cancel (c27e96671); ExactImageChild group kill after reap, Linux (110f4fad3)"}
+{"file":"src/runtime/current_thread.rs","lines":1274,"batch":"01oghn","date":"2026-10-08","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"orphaned local requests left their regions unadvanced (4feab9a9a)"}
+{"file":"src/io/browser_stream.rs","lines":3172,"batch":"6n35x5","date":"2026-10-08","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"a body exactly at max_total_read_bytes failed (917c405dd)"}
+{"file":"src/io/read_line.rs","lines":1077,"batch":"6n35x5","date":"2026-10-08","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"documented LineReader loop dropped a cancelled final line (917c405dd)"}
+{"file":"src/signal/signal.rs","lines":2176,"batch":"abc5w5","date":"2026-10-08","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"a panicking waker ended signal delivery (e3b1bee0f)"}
+{"file":"src/signal/ctrl_c.rs","lines":207,"batch":"abc5w5","date":"2026-10-08","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"IO-capability denial lost its type (e3b1bee0f)"}
+{"file":"src/web/sse.rs","lines":2509,"batch":"a1q12q","date":"2026-10-08","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"live step without a heartbeat never polled its source (d29581c2b)"}
+{"file":"src/combinator/select.rs","lines":1150,"batch":"1sngsf","date":"2026-10-08","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"SelectAllDrain losers out of order (d76cb99a0)"}
+{"file":"src/cx/dynamic_supervisor.rs","lines":939,"batch":"25txip","date":"2026-10-08","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"a reported child failure reported again (93244d66c)"}
+{"file":"src/sync/mutex.rs","lines":1132,"batch":"myvrjv","date":"2026-10-08","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"is_locked missed a handed-off lock (2f6397d72)"}
+{"file":"src/runtime/scheduler/three_lane.rs","lines":10031,"batch":"exeimj","date":"2026-10-08","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"a finished task silenced a deferred cancel batch (35f3abd6c)"}
