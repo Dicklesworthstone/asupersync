@@ -821,6 +821,8 @@ enum AfterFirst {
     Serve,
     GoAway,
     Refuse,
+    /// Lower SETTINGS_MAX_CONCURRENT_STREAMS to 0 right after the answer.
+    ZeroStreams,
 }
 
 /// A raw HTTP/2 server that echoes each request body with status 200 and
@@ -904,6 +906,14 @@ fn counting_peer(
                         while let Some(frame) = connection.next_frame() {
                             frame.encode(&mut bytes).unwrap();
                         }
+                        if after == AfterFirst::ZeroStreams {
+                            // RFC 9113 §6.5.2: a legal limit that admits no
+                            // stream until the server raises it again.
+                            let zero = vec![Setting::MaxConcurrentStreams(0)];
+                            Frame::Settings(SettingsFrame::new(zero))
+                                .encode(&mut bytes)
+                                .unwrap();
+                        }
                         let _ = io.write_all(&bytes);
                         if after == AfterFirst::GoAway && served > 0 {
                             let _ = io.shutdown(std::net::Shutdown::Both);
@@ -971,4 +981,19 @@ fn a_pooled_connection_the_server_ended_or_refused_is_replaced() {
     // REFUSED_STREAM on the reused connection: the server did not process
     // the request, which is retried once on a fresh connection.
     assert_eq!(pooled_requests(AfterFirst::Refuse, 2, 2), 2);
+}
+
+/// asupersync-mu5yhv (d0's LOW 2): a pooled connection whose server has
+/// lowered SETTINGS_MAX_CONCURRENT_STREAMS to 0 admits no request now. It was
+/// taken from the pool anyway, and the next request waited out its whole
+/// timeout (10 s here) for a stream; it now dials a fresh connection.
+#[test]
+fn a_pooled_connection_whose_server_admits_no_stream_is_not_reused() {
+    let started = Instant::now();
+    assert_eq!(pooled_requests(AfterFirst::ZeroStreams, 2, 2), 2);
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the second request waited on the zero-stream connection: {:?}",
+        started.elapsed()
+    );
 }
