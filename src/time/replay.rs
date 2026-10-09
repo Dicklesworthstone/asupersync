@@ -100,10 +100,14 @@ impl<S: TimeSource + ?Sized> RecordingTimeSource<S> {
     /// Wrap a supplied clock without sampling it. Zero is a valid capture limit.
     #[must_use]
     pub fn new(source: Arc<S>, max_observations: usize) -> Self {
+        let mut samples = Vec::new();
+        if max_observations > 0 {
+            let _ = samples.try_reserve_exact(max_observations);
+        }
         Self {
             source,
             state: Mutex::new(CaptureState {
-                samples: Vec::new(),
+                samples,
                 limit: max_observations,
                 in_flight: false,
                 finished: false,
@@ -164,12 +168,20 @@ impl<S: TimeSource + ?Sized> RecordingTimeSource<S> {
         } else if state.samples.len() == state.samples.capacity() {
             // Amortize growth without requesting capacity beyond the logical
             // ceiling. No source callback runs until storage has been reserved.
+            // When reallocating, grow into a new buffer and zeroize the old buffer
+            // in place so no un-wiped timestamps remain in freed blocks.
             let additional = (state.limit - state.samples.len()).min(state.samples.len().max(8));
-            state
-                .samples
-                .try_reserve_exact(additional)
-                .err()
-                .map(|_| TimeCaptureError::Allocation)
+            let new_cap = state.samples.capacity().saturating_add(additional);
+            let mut new_samples = Vec::new();
+            match new_samples.try_reserve_exact(new_cap) {
+                Ok(()) => {
+                    new_samples.extend_from_slice(&state.samples);
+                    state.samples.zeroize();
+                    state.samples = new_samples;
+                    None
+                }
+                Err(_) => Some(TimeCaptureError::Allocation),
+            }
         } else {
             None
         };

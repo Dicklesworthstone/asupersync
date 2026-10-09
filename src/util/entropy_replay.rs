@@ -236,12 +236,21 @@ impl RecordingEntropy {
         if limits.max_streams == 0 {
             return Err(EntropyCaptureError::NoRootCapacity);
         }
+        let mut root_stream = Vec::new();
+        if limits.max_calls > 0 {
+            let _ = root_stream.try_reserve_exact(limits.max_calls);
+        }
+        let mut streams = Vec::new();
+        if limits.max_streams > 0 {
+            let _ = streams.try_reserve_exact(limits.max_streams);
+        }
+        streams.push(root_stream);
         Ok(Self {
             source,
             shared: Arc::new(CaptureShared {
                 limits,
                 state: Mutex::new(CaptureState {
-                    streams: vec![Vec::new()],
+                    streams,
                     calls: 0,
                     bytes: 0,
                     in_flight: 0,
@@ -331,7 +340,12 @@ impl RecordingEntropy {
         }
         let child = if matches!(request, EntropyRequest::Fork(_)) {
             let child = state.streams.len();
-            state.streams.push(Vec::new());
+            let mut child_stream = Vec::new();
+            let remaining = self.shared.limits.max_calls.saturating_sub(state.calls);
+            if remaining > 0 {
+                let _ = child_stream.try_reserve_exact(remaining);
+            }
+            state.streams.push(child_stream);
             Some(child)
         } else {
             None

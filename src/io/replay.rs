@@ -244,11 +244,15 @@ impl<T: AsyncWrite> RecordingIo<T> {
     #[must_use]
     pub fn new(inner: T, limits: IoCaptureLimits) -> Self {
         let vectored = inner.is_write_vectored();
+        let mut events = Vec::new();
+        if limits.max_operations > 0 {
+            let _ = events.try_reserve_exact(limits.max_operations);
+        }
         Self {
             inner,
             limits,
             tape: IoTape {
-                events: Vec::new(),
+                events,
                 read_bytes: 0,
                 write_bytes: 0,
                 vectored,

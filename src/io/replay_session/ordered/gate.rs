@@ -168,11 +168,15 @@ impl RecordOrder {
         limit: usize,
         pending_limits: Option<PendingIoCaptureLimits>,
     ) -> Self {
+        let mut entries = Vec::new();
+        if limit > 0 {
+            let _ = entries.try_reserve_exact(limit);
+        }
         Self(Mutex::new(RecordState {
             pending_limits,
             pending_polls: 0,
             pending_bytes: 0,
-            entries: Vec::new(),
+            entries,
             limit,
             sources: 1,
             active: false,
@@ -549,19 +553,29 @@ impl Drop for ReplayGuard<'_> {
 // Read-only checkpoints and shared failure propagation for the opt-in poll
 // driver. Pending I/O does NOT consume an entry in the completed-effect order.
 impl RecordOrder {
-    pub(super) fn effect_position(&self) -> usize { self.0.lock().entries.len() }
+    pub(super) fn effect_position(&self) -> usize {
+        self.0.lock().entries.len()
+    }
 }
 impl ReplayOrder {
-    pub(super) fn effect_position(&self) -> usize { self.0.lock().index }
+    pub(super) fn effect_position(&self) -> usize {
+        self.0.lock().index
+    }
 
     pub(super) fn check_polled_io(&self, operation: IoOperation) -> Result<(), OrderReplayError> {
         let result = {
             let mut state = self.0.lock();
-            if let Some(error) = state.failure { Err(error) }
-            else if state.active { Err(state.refuse(OrderedEffect::Io(operation), OrderReplayMismatch::Overlap)) }
-            else { Ok(()) }
+            if let Some(error) = state.failure {
+                Err(error)
+            } else if state.active {
+                Err(state.refuse(OrderedEffect::Io(operation), OrderReplayMismatch::Overlap))
+            } else {
+                Ok(())
+            }
         };
-        if result.is_err() { self.wake_waiters(); }
+        if result.is_err() {
+            self.wake_waiters();
+        }
         result
     }
 

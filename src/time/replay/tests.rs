@@ -175,8 +175,14 @@ fn backwards_source_time_is_forwarded_but_not_admitted_to_replay() {
     for value in [10, 9, 30] {
         assert_eq!(recorder.now(), Time::from_nanos(value));
     }
-    assert_eq!(recorder.capture_error(), Some(TimeCaptureError::NonMonotonic));
-    assert_eq!(recorder.finish().unwrap_err(), TimeCaptureError::NonMonotonic);
+    assert_eq!(
+        recorder.capture_error(),
+        Some(TimeCaptureError::NonMonotonic)
+    );
+    assert_eq!(
+        recorder.finish().unwrap_err(),
+        TimeCaptureError::NonMonotonic
+    );
 }
 
 #[test]
@@ -195,7 +201,10 @@ fn unwinding_source_invalidates_capture_but_future_reads_still_forward() {
     struct PanickingClock(AtomicBool);
     impl TimeSource for PanickingClock {
         fn now(&self) -> Time {
-            assert!(!self.0.swap(false, Ordering::SeqCst), "source panic sentinel");
+            assert!(
+                !self.0.swap(false, Ordering::SeqCst),
+                "source panic sentinel"
+            );
             Time::from_nanos(42)
         }
     }
@@ -358,4 +367,50 @@ fn captured_clock_replays_real_timer_driver_expiration() {
     assert_eq!(driver.pending_count(), 0);
     assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
     assert_eq!(replay.verify_complete(), Ok(()));
+}
+
+#[test]
+fn recording_time_source_preallocates_up_to_limit() {
+    let source = Arc::new(ScriptedClock::new(&[1, 2, 3, 4, 5, 6, 7, 8, 9]));
+    let recorder = RecordingTimeSource::new(source, 64);
+    assert_eq!(recorder.state.lock().samples.capacity(), 64);
+    for _ in 0..9 {
+        recorder.now();
+    }
+    assert_eq!(recorder.state.lock().samples.capacity(), 64);
+    let tape = recorder.finish().unwrap();
+    assert_eq!(tape.observations(), 9);
+}
+
+#[test]
+fn recording_time_source_zeroizes_old_buffer_when_growing() {
+    struct SteppingClock(AtomicU64);
+    impl TimeSource for SteppingClock {
+        fn now(&self) -> Time {
+            Time::from_nanos(self.0.fetch_add(100, Ordering::SeqCst))
+        }
+    }
+    let source = Arc::new(SteppingClock(AtomicU64::new(0xdead_beef_0000_0000)));
+    let recorder = RecordingTimeSource::new(source, 64);
+    // Explicitly simulate smaller initial capacity to exercise growth path
+    {
+        let mut state = recorder.state.lock();
+        state.samples = Vec::new();
+        state.samples.reserve_exact(8);
+        assert_eq!(state.samples.capacity(), 8);
+    }
+    // Take 8 reads, filling capacity exactly
+    for _ in 0..8 {
+        recorder.now();
+    }
+    assert_eq!(recorder.state.lock().samples.len(), 8);
+    assert_eq!(recorder.state.lock().samples.capacity(), 8);
+
+    // 9th read forces growth into a new buffer with zeroize of old buffer
+    recorder.now();
+    assert_eq!(recorder.state.lock().samples.len(), 9);
+    assert!(recorder.state.lock().samples.capacity() >= 16);
+
+    let tape = recorder.finish().unwrap();
+    assert_eq!(tape.observations(), 9);
 }
