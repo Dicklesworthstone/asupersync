@@ -629,7 +629,18 @@ impl LeakChecker {
                     "abort"
                 };
                 match self.state.get(var) {
-                    Some(VarState::Held(_) | VarState::MayHold(_) | VarState::MayHoldAmbiguous) => {
+                    Some(VarState::Held(_)) => {
+                        self.state.insert(*var, VarState::Resolved);
+                    }
+                    Some(VarState::MayHold(_) | VarState::MayHoldAmbiguous) => {
+                        self.push_diagnostic(
+                            DiagnosticCode::DoubleResolve,
+                            DiagnosticKind::DoubleResolve,
+                            *var,
+                            self.state.get(var).and_then(VarState::kind),
+                            location,
+                            format!("{var} may already be resolved, {action} is a potential double resolve"),
+                        );
                         self.state.insert(*var, VarState::Resolved);
                     }
                     Some(VarState::Resolved) => {
@@ -1647,6 +1658,87 @@ mod tests {
         let leak_len = leaks.len();
         crate::assert_with_log!(leak_len == 0, "no leaks", 0, leak_len);
         crate::test_complete!("double_resolve_detected");
+    }
+
+    #[test]
+    fn double_resolve_after_branch_commit_detected() {
+        init_test("double_resolve_after_branch_commit_detected");
+        let body = Body::new(
+            "branch_double_commit",
+            vec![
+                Instruction::Reserve {
+                    var: v(0),
+                    kind: ObligationKind::SendPermit,
+                },
+                Instruction::Branch {
+                    arms: vec![
+                        vec![Instruction::Commit { var: v(0) }],
+                        vec![], // Untouched in this arm => MayHold after join.
+                    ],
+                },
+                Instruction::Commit { var: v(0) },
+            ],
+        );
+
+        let mut checker = LeakChecker::new();
+        let result = checker.check(&body);
+        let doubles = result.double_resolves();
+        let len = doubles.len();
+        crate::assert_with_log!(len == 1, "double count", 1, len);
+        crate::assert_with_log!(
+            doubles[0].code == DiagnosticCode::DoubleResolve,
+            "code",
+            DiagnosticCode::DoubleResolve,
+            doubles[0].code
+        );
+        crate::assert_with_log!(
+            doubles[0].kind == DiagnosticKind::DoubleResolve,
+            "kind",
+            DiagnosticKind::DoubleResolve,
+            doubles[0].kind
+        );
+        let leaks = result.leaks();
+        let leak_len = leaks.len();
+        crate::assert_with_log!(leak_len == 0, "no leaks", 0, leak_len);
+        let is_clean = result.is_clean();
+        crate::assert_with_log!(!is_clean, "not clean", false, is_clean);
+        crate::test_complete!("double_resolve_after_branch_commit_detected");
+    }
+
+    #[test]
+    fn double_resolve_after_branch_abort_detected() {
+        init_test("double_resolve_after_branch_abort_detected");
+        let body = Body::new(
+            "branch_double_abort",
+            vec![
+                Instruction::Reserve {
+                    var: v(0),
+                    kind: ObligationKind::IoOp,
+                },
+                Instruction::Branch {
+                    arms: vec![
+                        vec![Instruction::Abort { var: v(0) }],
+                        vec![], // Untouched in this arm => MayHold after join.
+                    ],
+                },
+                Instruction::Commit { var: v(0) },
+            ],
+        );
+
+        let mut checker = LeakChecker::new();
+        let result = checker.check(&body);
+        let doubles = result.double_resolves();
+        let len = doubles.len();
+        crate::assert_with_log!(len == 1, "double count", 1, len);
+        crate::assert_with_log!(
+            doubles[0].code == DiagnosticCode::DoubleResolve,
+            "code",
+            DiagnosticCode::DoubleResolve,
+            doubles[0].code
+        );
+        let is_clean = result.is_clean();
+        crate::assert_with_log!(!is_clean, "not clean", false, is_clean);
+        crate::test_complete!("double_resolve_after_branch_abort_detected");
     }
 
     // ---- Resolve unheld ----------------------------------------------------
