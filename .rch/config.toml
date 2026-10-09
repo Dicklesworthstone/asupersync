@@ -8,4 +8,4 @@
 # eligible, and falls back to all eligible workers only if none are.
 # (Merged with the RCH_WORKER env var if set.)
 [routing]
-preferred_workers = ["hz3", "hz4"]
+preferred_workers = ["vmi1153651", "vmi1227854", "vmi1152480", "ovh-a"]

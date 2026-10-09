@@ -10825,6 +10825,170 @@ async fn receive_native_symbol_round(
     Ok(Some(need))
 }
 
+#[allow(dead_code)]
+async fn drain_native_multi_peer_symbol_datagrams_with_aggregator_deferred(
+    cx: &Cx,
+    peers: &mut [(PathId, &mut NativeQuicConnection)],
+    manifest: &TransferManifest,
+    decoders: &mut [QuicEntryDecoder],
+    config: &QuicConfig,
+    aggregator: &MultipathAggregator,
+    decode_stats: &mut QuicDecodeStats,
+) -> Result<QuicRoundSymbolStats, QuicTransportError> {
+    let symbol_auth = config.symbol_auth_context()?;
+    let auth_required = symbol_auth.is_some();
+    let tag = transfer_tag(&manifest.transfer_id);
+    let mut stats = QuicRoundSymbolStats::default();
+    let mut datagrams = VecDeque::with_capacity(NATIVE_SYMBOL_DRAIN_BATCH);
+
+    for (path_id, conn) in peers.iter_mut() {
+        let receive = QuicReceiveAggregation::new(aggregator, *path_id, cx.now()).with_trace(cx);
+        loop {
+            if conn.recv_datagram_batch(NATIVE_SYMBOL_DRAIN_BATCH, &mut datagrams) == 0 {
+                break;
+            }
+            while let Some(bytes) = datagrams.pop_front() {
+                let envelope = decode_native_symbol_envelope(bytes, auth_required)?;
+                if envelope.transfer_tag != tag {
+                    return Err(QuicTransportError::Integrity(format!(
+                        "symbol transfer tag mismatch: got {}, expected {tag}",
+                        envelope.transfer_tag
+                    )));
+                }
+                if envelope.payload.len() != usize::from(config.symbol_size) {
+                    return Err(QuicTransportError::Integrity(format!(
+                        "symbol payload has {} bytes, expected {}",
+                        envelope.payload.len(),
+                        config.symbol_size
+                    )));
+                }
+                let decoder = decoders
+                    .iter()
+                    .find(|decoder| decoder.index == envelope.entry)
+                    .ok_or_else(|| {
+                        QuicTransportError::Integrity(format!(
+                            "symbol for unknown manifest entry {}",
+                            envelope.entry
+                        ))
+                    })?;
+                stats.observed = stats.observed.saturating_add(1);
+                let auth_symbol = verified_authenticated_symbol_from_envelope(
+                    &envelope,
+                    decoder.object_id,
+                    symbol_auth.as_ref(),
+                )?;
+                stats.accepted = stats.accepted.saturating_add(
+                    feed_aggregated_symbol_for_entry_deferred(
+                        cx,
+                        decoders,
+                        envelope.entry,
+                        auth_symbol,
+                        receive,
+                        config,
+                        decode_stats,
+                    )?,
+                );
+                let _ = drain_ready_quic_decodes(cx, decoders, decode_stats).await?;
+            }
+        }
+    }
+    let _ = drain_ready_quic_decodes(cx, decoders, decode_stats).await?;
+    Ok(stats)
+}
+
+#[allow(dead_code)]
+async fn receive_native_multi_peer_symbol_round(
+    cx: &Cx,
+    peers: &mut [(PathId, &mut NativeQuicConnection, &mut NativeQuicFrameTransport)],
+    manifest: &TransferManifest,
+    decoders: &mut [QuicEntryDecoder],
+    config: &QuicConfig,
+    aggregator: &MultipathAggregator,
+    symbols_accepted: &mut u64,
+    feedback_rounds: &mut u32,
+    decode_stats: &mut QuicDecodeStats,
+) -> Result<Option<QuicNeedMore>, QuicTransportError> {
+    cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+    let mut connection_pairs: Vec<(PathId, &mut NativeQuicConnection)> = peers
+        .iter_mut()
+        .map(|(path_id, conn, _)| (*path_id, &mut **conn))
+        .collect();
+    let round_stats = drain_native_multi_peer_symbol_datagrams_with_aggregator_deferred(
+        cx,
+        &mut connection_pairs,
+        manifest,
+        decoders,
+        config,
+        aggregator,
+        decode_stats,
+    )
+    .await?;
+    *symbols_accepted = (*symbols_accepted).saturating_add(round_stats.accepted);
+
+    let mut total_symbols_sent = 0u64;
+    for (_, conn, control) in peers.iter_mut() {
+        if let Ok(complete) = receive_native_object_complete(cx, conn, control) {
+            total_symbols_sent = total_symbols_sent.saturating_add(complete.round_symbols_sent);
+        }
+    }
+
+    let _ = join_all_quic_decodes(cx, decoders, decode_stats).await?;
+    decode_stats.add(assemble_completed_entries(decoders));
+
+    let pending = pending_entries(decoders);
+    if pending.is_empty() {
+        return Ok(None);
+    }
+    if *feedback_rounds >= config.max_feedback_rounds {
+        return Err(QuicTransportError::NoConvergence {
+            rounds: *feedback_rounds,
+            pending: pending.len(),
+        });
+    }
+    let round_loss_fraction = receiver_round_loss_fraction(round_stats.observed, total_symbols_sent);
+    let round = (*feedback_rounds).saturating_add(1);
+    let repair_symbol_round_cap = quic_repair_symbol_round_cap(config, round_loss_fraction);
+    let (repair_blocks, repair_accounting) = block_repair_requests_with_accounting(
+        decoders,
+        config,
+        repair_symbol_round_cap,
+        round_loss_fraction,
+        round,
+    );
+    let source_symbols = if repair_blocks.is_empty() {
+        source_symbol_requests(decoders, MAX_SOURCE_SYMBOL_REQUESTS_PER_FEEDBACK_ROUND)
+    } else {
+        Vec::new()
+    };
+    let progress = quic_pending_decode_progress(decoders, &pending, config);
+    let need = QuicNeedMore {
+        feedback_round: round,
+        pending,
+        repair_blocks,
+        source_symbols,
+        round_symbols_observed: Some(round_stats.observed),
+        round_loss_fraction,
+        round_symbols_accepted: Some(round_stats.accepted),
+        repair_base_deficit_symbols: Some(repair_accounting.base_deficit_symbols),
+        repair_loss_compensated_target_symbols: Some(
+            repair_accounting.loss_compensated_target_symbols,
+        ),
+        repair_request_gap_to_target_symbols: Some(repair_accounting.request_gap_to_target_symbols),
+        repair_symbol_round_cap: Some(u64::try_from(repair_symbol_round_cap).unwrap_or(u64::MAX)),
+        pending_rank: Some(progress.rank),
+        pending_rank_columns: Some(progress.rank_columns),
+        pending_rank_deficit: Some(progress.rank_deficit),
+        pending_decode_jobs: Some(progress.pending_decode_jobs),
+    };
+
+    // Broadcast NeedMore feedback to all peers
+    for (_, conn, control) in peers.iter_mut() {
+        let _ = send_native_need_more(cx, conn, control, &need);
+    }
+    *feedback_rounds = round;
+    Ok(Some(need))
+}
+
 async fn receive_established_native_connection(
     cx: &Cx,
     mut connection: NativeQuicConnection,
