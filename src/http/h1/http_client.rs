@@ -926,6 +926,19 @@ impl HttpClientBuilder {
         self
     }
 
+    /// Sets an explicit DNS resolver for the client.
+    ///
+    /// When configured, hostname resolution uses this [`Resolver`](crate::net::dns::Resolver)
+    /// (with its caching, TTL enforcement, nameserver routing, and timeout) rather than
+    /// an uncached system lookup. Cloned resolvers share the underlying cache, allowing
+    /// callers to observe [`cache_stats`](crate::net::dns::Resolver::cache_stats).
+    /// (asupersync-lfhzhl)
+    #[must_use]
+    pub fn dns_resolver(mut self, resolver: crate::net::dns::Resolver) -> Self {
+        self.config.dns_resolver = Some(resolver);
+        self
+    }
+
     /// Builds the [`HttpClient`].
     #[must_use]
     pub fn build(self) -> HttpClient {
@@ -983,6 +996,11 @@ pub struct HttpClientConfig {
     /// How long a request waits for a pooled connection at the connection
     /// limit (see [`HttpClientBuilder::pool_wait_timeout`]).
     pool_wait_timeout: Option<std::time::Duration>,
+    /// Optional DNS resolver for host lookups and Happy Eyeballs connection racing.
+    ///
+    /// When `None`, host lookups fall back to the system resolver via
+    /// `net::happy_eyeballs::connect_resolved`. (asupersync-lfhzhl)
+    dns_resolver: Option<crate::net::dns::Resolver>,
 }
 
 impl Default for HttpClientConfig {
@@ -1002,6 +1020,7 @@ impl Default for HttpClientConfig {
             time_getter: wall_clock_now,
             response_decompression: false,
             pool_wait_timeout: None,
+            dns_resolver: None,
         }
     }
 }
@@ -1018,6 +1037,19 @@ impl HttpClientConfig {
     #[must_use]
     pub const fn time_getter(&self) -> fn() -> Time {
         self.time_getter
+    }
+
+    /// Sets the DNS resolver.
+    #[must_use]
+    pub fn with_dns_resolver(mut self, resolver: Option<crate::net::dns::Resolver>) -> Self {
+        self.dns_resolver = resolver;
+        self
+    }
+
+    /// Returns the DNS resolver, if configured.
+    #[must_use]
+    pub fn dns_resolver(&self) -> Option<&crate::net::dns::Resolver> {
+        self.dns_resolver.as_ref()
     }
 
     /// Sets how long a request waits for a pooled connection at the
@@ -2108,7 +2140,8 @@ impl HttpClient {
                 }
             }
             ProxyScheme::Socks5 => {
-                let tcp = connect_via_socks5(proxy, parsed, cx).await?;
+                let tcp =
+                    connect_via_socks5(proxy, parsed, cx, self.config.dns_resolver.as_ref()).await?;
                 if parsed.scheme == Scheme::Http {
                     return Ok(ProxyConnection {
                         io: ClientIo::Plain(tcp),
@@ -2437,16 +2470,13 @@ impl HttpClient {
 
     async fn connect_io(&self, cx: &Cx, parsed: &ParsedUrl) -> Result<ClientIo, ClientError> {
         check_cx(cx)?;
-        let stream = if let Some(socket_addr) = parsed_numeric_socket_addr(parsed) {
-            TcpStream::connect_socket_addr(socket_addr)
-                .await
-                .map_err(ClientError::ConnectError)?
-        } else {
-            let addr = format!("{}:{}", parsed.host, parsed.port);
-            crate::net::happy_eyeballs::connect_resolved(addr, None)
-                .await
-                .map_err(ClientError::ConnectError)?
-        };
+        let stream = dial_tcp_with_resolver(
+            &parsed.host,
+            parsed.port,
+            parsed_numeric_socket_addr(parsed),
+            self.config.dns_resolver.as_ref(),
+        )
+        .await?;
 
         // Check cancellation after TCP connect, before TLS.
         check_cx(cx)?;
@@ -2698,6 +2728,12 @@ impl HttpClient {
     pub fn pool_stats(&self) -> crate::http::pool::PoolStats {
         self.pool.lock().stats()
     }
+
+    /// Returns the configured DNS resolver, if any.
+    #[must_use]
+    pub fn dns_resolver(&self) -> Option<&crate::net::dns::Resolver> {
+        self.config.dns_resolver.as_ref()
+    }
 }
 
 impl HttpClient {
@@ -2918,6 +2954,66 @@ fn parsed_numeric_socket_addr(parsed: &ParsedUrl) -> Option<SocketAddr> {
         .map(|ip| SocketAddr::new(ip, parsed.port))
 }
 
+fn dns_error_to_connect_error(err: crate::net::dns::DnsError) -> ClientError {
+    let kind = match err {
+        crate::net::dns::DnsError::Timeout => io::ErrorKind::TimedOut,
+        crate::net::dns::DnsError::Cancelled => io::ErrorKind::Interrupted,
+        crate::net::dns::DnsError::InvalidHost(_) => io::ErrorKind::InvalidInput,
+        crate::net::dns::DnsError::NoRecords(_) => io::ErrorKind::NotFound,
+        _ => io::ErrorKind::Other,
+    };
+    ClientError::ConnectError(io::Error::new(kind, err))
+}
+
+async fn dial_tcp_with_resolver(
+    host: &str,
+    port: u16,
+    numeric_addr: Option<SocketAddr>,
+    resolver: Option<&crate::net::dns::Resolver>,
+) -> Result<TcpStream, ClientError> {
+    if let Some(socket_addr) = numeric_addr {
+        return TcpStream::connect_socket_addr(socket_addr)
+            .await
+            .map_err(ClientError::ConnectError);
+    }
+    let unbracketed = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = unbracketed.parse::<IpAddr>() {
+        return TcpStream::connect_socket_addr(SocketAddr::new(ip, port))
+            .await
+            .map_err(ClientError::ConnectError);
+    }
+    if let Some(resolver) = resolver {
+        let lookup = resolver
+            .lookup_ip(unbracketed)
+            .await
+            .map_err(dns_error_to_connect_error)?;
+        let addrs: Vec<SocketAddr> = lookup
+            .addresses()
+            .iter()
+            .map(|ip| SocketAddr::new(*ip, port))
+            .collect();
+        if addrs.is_empty() {
+            return Err(ClientError::ConnectError(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no IP addresses resolved for {host}"),
+            )));
+        }
+        let config = crate::net::happy_eyeballs::HappyEyeballsConfig {
+            connect_timeout: std::time::Duration::MAX,
+            overall_timeout: std::time::Duration::MAX,
+            ..Default::default()
+        };
+        crate::net::happy_eyeballs::connect(&addrs, &config)
+            .await
+            .map_err(ClientError::ConnectError)
+    } else {
+        let addr = format!("{host}:{port}");
+        crate::net::happy_eyeballs::connect_resolved(addr, None)
+            .await
+            .map_err(ClientError::ConnectError)
+    }
+}
+
 fn parse_set_cookie_pair(raw: &str) -> Option<(String, String)> {
     let pair = raw.split(';').next()?.trim();
     let (name, value) = pair.split_once('=')?;
@@ -3081,12 +3177,16 @@ async fn connect_via_socks5(
     proxy: &ProxyEndpoint,
     target: &ParsedUrl,
     cx: &Cx,
+    dns_resolver: Option<&crate::net::dns::Resolver>,
 ) -> Result<TcpStream, ClientError> {
     check_cx(cx)?;
-    let addr = format!("{}:{}", proxy.host, proxy.port);
-    let mut stream = crate::net::happy_eyeballs::connect_resolved(addr, None)
-        .await
-        .map_err(ClientError::ConnectError)?;
+    let mut stream = dial_tcp_with_resolver(
+        &proxy.host,
+        proxy.port,
+        None,
+        dns_resolver,
+    )
+    .await?;
 
     check_cx(cx)?;
     socks5_negotiate_auth(&mut stream, proxy.socks5_credentials()).await?;
