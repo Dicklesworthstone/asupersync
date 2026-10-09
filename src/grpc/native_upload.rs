@@ -242,6 +242,13 @@ where
                         }
                     }
                     Poll::Ready(Some(Err(status))) => {
+                        // An aborted upload must not read as success
+                        // (br-asupersync-244ump L2).
+                        let status = if status.code() == Code::Ok {
+                            Status::internal("native request source failed with an OK status")
+                        } else {
+                            status
+                        };
                         return Poll::Ready(Some(Err(self.finish(status))));
                     }
                     Poll::Ready(None) => {

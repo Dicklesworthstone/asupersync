@@ -437,6 +437,47 @@ fn producer_failure_is_not_half_close_and_keeps_its_exact_status() {
     });
 }
 
+/// br-asupersync-244ump L2: a source that fails with an OK-coded status ends
+/// the call as a failure whose status is not OK, so an aborted upload never
+/// reads as success.
+#[test]
+fn a_source_failure_with_an_ok_status_does_not_report_ok() {
+    bounded(|| {
+        for workers in [1, 2] {
+            let (witness, witnessed) = mpsc::channel();
+            let peer = peer(Mode::ZeroWindow, witnessed);
+            let runtime = runtime(workers);
+            runtime.block_on(async {
+                let cx = Cx::current().unwrap();
+                let (source, gate, stats) = source(
+                    "ok-coded failure",
+                    &cx,
+                    witness,
+                    VecDeque::from([Err(Status::new(Code::Ok, "not really ok"))]),
+                );
+                let channel = Channel::builder(format!("http://{}", peer.address))
+                    .timeout(LIMIT)
+                    .connect()
+                    .await
+                    .unwrap();
+                let mut call = GrpcClient::new(channel)
+                    .into_native_bidi_streaming(&cx, "/test.Upload/Exchange", Request::new(source))
+                    .await
+                    .unwrap();
+                peer.respond.send(()).unwrap();
+                assert_eq!(call.message().await.unwrap().unwrap().as_ref(), b"ready");
+                gate.release();
+                let received = call.message().await.unwrap_err();
+                assert_eq!(received.code(), Code::Internal);
+                assert_eq!(call.status().unwrap().code(), Code::Internal);
+                assert_eq!(stats.eof.load(Ordering::SeqCst), 0);
+            });
+            assert_eq!(peer.worker.join().unwrap(), (0, false));
+            assert_drained(&runtime);
+        }
+    });
+}
+
 #[test]
 fn owner_cancellation_wakes_a_call_with_a_never_ready_source() {
     bounded(|| {

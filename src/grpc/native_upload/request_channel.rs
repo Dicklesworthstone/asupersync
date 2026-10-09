@@ -61,11 +61,15 @@ impl RequestControl {
         status
     }
 
-    fn fail(&self, status: Status) {
+    // False once the source has retired: the end of the request was already
+    // published, so a failure can no longer abort it.
+    fn fail(&self, status: Status) -> bool {
         let waiter = {
             let mut state = self.0.lock();
-            if matches!(&state.state, State::Failed(_) | State::Retired) {
-                return;
+            match &state.state {
+                State::Retired => return false,
+                State::Failed(_) => return true,
+                State::Open | State::HalfClosed => {}
             }
             state.state = State::Failed(status);
             state.waiter.take()
@@ -73,6 +77,27 @@ impl RequestControl {
         if let Some(waiter) = waiter {
             waiter.wake();
         }
+        true
+    }
+
+    // Every sender is gone. One locked transition decides the source's end: a
+    // recorded failure is its result, otherwise input ended and the source
+    // retires, so a racing fail() cannot be accepted after the end of input
+    // is published (br-asupersync-244ump L3).
+    fn finish_input(&self) -> Option<Status> {
+        let (failure, waiter) = {
+            let mut state = self.0.lock();
+            let failure = match &state.state {
+                State::Failed(status) => Some(status.clone()),
+                State::Open | State::HalfClosed | State::Retired => None,
+            };
+            if failure.is_none() {
+                state.state = State::Retired;
+            }
+            (failure, state.waiter.take())
+        };
+        drop(waiter);
+        failure
     }
 
     fn retire(&self) {
@@ -280,6 +305,8 @@ impl<T> NativeRequestSender<T> {
     /// Fail the source with an exact non-OK status, without queueing a message.
     /// The first failure wins. An OK status is rejected without closing input.
     /// Cancellation can override a requested half-close until the source retires.
+    /// Once the source has published the end of its input, the request can no
+    /// longer be aborted and this returns `FailedPrecondition`.
     pub fn fail(&mut self, status: Status) -> Result<(), Status> {
         if status.code() == Code::Ok {
             return Err(Status::invalid_argument("request failure status must not be OK"));
@@ -287,9 +314,15 @@ impl<T> NativeRequestSender<T> {
         let _ambient = Cx::set_current(Some(self.cx.clone()));
         // Own the channel locally before invoking a possibly panicking waker.
         let sender = self.sender.take();
-        self.control.fail(status);
+        let failed = self.control.fail(status);
         drop(sender);
-        Ok(())
+        if failed {
+            Ok(())
+        } else {
+            Err(Status::failed_precondition(
+                "native request source already completed",
+            ))
+        }
     }
 
     /// Abort only this request source, not its parent context.
@@ -369,7 +402,7 @@ impl<T: Send> Streaming for NativeRequestStream<T> {
             Poll::Ready(Err(mpsc::RecvError::Disconnected)) => {
                 // Sender drop publishes failure before disconnecting. Recheck
                 // after recv so a racing drop cannot be mistaken for EOF.
-                let failure = this.control.poll_failure(task);
+                let failure = this.control.finish_input();
                 this.retire();
                 Poll::Ready(failure.map(Err))
             }
@@ -616,5 +649,32 @@ mod tests {
         drop(stream);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
         assert!(sender.is_closed());
+    }
+
+    /// br-asupersync-244ump L3: a failure before the source publishes the end
+    /// of its input still overrides a requested half-close. Once that end is
+    /// published, fail() is refused, as close() is, instead of returning Ok
+    /// for an abort that cannot take effect.
+    #[test]
+    fn fail_after_the_end_of_input_is_published_is_refused() {
+        let cx = Cx::for_testing();
+        let (mut sender, mut stream) = native_request_channel::<u8>(&cx, 1).unwrap();
+        sender.close().unwrap();
+        sender
+            .fail(Status::data_loss("abort before the end"))
+            .unwrap();
+        assert!(matches!(
+            next(&mut stream),
+            Poll::Ready(Some(Err(status))) if status.code() == Code::DataLoss
+        ));
+
+        let (mut sender, mut stream) = native_request_channel::<u8>(&cx, 1).unwrap();
+        sender.close().unwrap();
+        assert!(matches!(next(&mut stream), Poll::Ready(None)));
+        let refused = sender
+            .fail(Status::data_loss("abort after the end"))
+            .unwrap_err();
+        assert_eq!(refused.code(), Code::FailedPrecondition);
+        assert!(matches!(next(&mut stream), Poll::Ready(None)));
     }
 }
