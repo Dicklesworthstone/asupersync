@@ -765,8 +765,13 @@ impl<T> TaskHandle<T> {
         barrier: Arc<RetirementBarrier>,
     ) -> Self {
         Self {
+            task_id,
+            receiver,
+            inner,
+            admitted: None,
+            requested_cancel_reason: Arc::new(RwLock::new(None)),
+            terminal_consumed: false,
             barrier,
-            ..Self::new(task_id, receiver, inner)
         }
     }
 

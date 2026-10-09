@@ -382,6 +382,7 @@ fn register_before_scan_ordering_in_next_outcome_wakes_waiter() {
             }
         }
     }
+    #[allow(dead_code)]
     struct ActionWaker<F: FnMut() + Send + Sync + 'static>(Arc<parking_lot::Mutex<DropAction<F>>>);
     impl<F: FnMut() + Send + Sync + 'static> Wake for ActionWaker<F> {
         fn wake(self: Arc<Self>) {}
