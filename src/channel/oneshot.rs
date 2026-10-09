@@ -1212,8 +1212,9 @@ impl<T, Caps> Drop for RecvFuture<'_, T, Caps> {
 
 /// The receiving half of a oneshot channel.
 ///
-/// Can only receive a single value. After receiving (or getting an error),
-/// the receiver is consumed.
+/// Can only receive a single value. Receiving borrows the receiver mutably
+/// (`&mut self`); once a value is received or the channel closes, subsequent
+/// receive attempts return `RecvError::Closed`.
 ///
 /// # Cancel Safety
 ///
@@ -1351,7 +1352,10 @@ impl<T> Receiver<T> {
         self.inner.lock().is_ready()
     }
 
-    /// Returns true if the sender has been dropped without sending.
+    /// Returns true if the channel is closed.
+    ///
+    /// This is true if the sender has been dropped without sending, or if the
+    /// sent value has already been received and drained from the channel.
     #[inline]
     #[must_use]
     pub fn is_closed(&self) -> bool {
@@ -1365,10 +1369,12 @@ impl<T> Receiver<T> {
         self.inner.lock().telemetry_snapshot(channel_id)
     }
 
-    /// Returns a future that resolves when the sender is dropped.
+    /// Returns a future that resolves when the channel closes.
     ///
-    /// This provides async notification of channel closure without attempting
-    /// to receive a value. Useful for detecting sender dropout.
+    /// This provides async notification of channel closure (the sender was
+    /// dropped or cancelled, or after a sent value has already been received
+    /// and drained) without attempting to receive a value. Useful for detecting
+    /// sender dropout.
     #[inline]
     pub fn poll_closed(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
         let mut incoming_waker = None;

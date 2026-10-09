@@ -6769,4 +6769,36 @@ mod tests {
             Poll::Ready(Err(RecvError::Closed))
         );
     }
+
+    #[test]
+    fn receiver_is_closed_and_poll_closed_ready_after_value_drained() {
+        init_test("receiver_is_closed_and_poll_closed_ready_after_value_drained");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<u32>();
+
+        assert!(!rx.is_closed());
+        assert!(!rx.is_ready());
+
+        tx.send(&cx, 42).expect("send value");
+
+        assert!(rx.is_ready());
+        assert!(!rx.is_closed(), "channel with buffered value is ready, not closed");
+
+        let val = rx.try_recv().expect("recv value");
+        assert_eq!(val, 42);
+
+        assert!(rx.is_closed(), "channel is closed after value has been received and drained");
+        assert!(!rx.is_ready());
+
+        let waker = Waker::noop();
+        let mut ctx = Context::from_waker(waker);
+        assert_eq!(
+            rx.poll_closed(&mut ctx),
+            Poll::Ready(()),
+            "poll_closed is Ready after value is drained"
+        );
+
+        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
+        crate::test_complete!("receiver_is_closed_and_poll_closed_ready_after_value_drained");
+    }
 }

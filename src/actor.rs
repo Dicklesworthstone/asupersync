@@ -322,6 +322,11 @@ impl<A: Actor> ActorHandle<A> {
     /// any currently buffered messages in its mailbox. Once the mailbox is
     /// empty, the actor loop will exit and call `on_stop` before returning.
     ///
+    /// If this actor is a supervised actor currently waiting out a restart
+    /// backoff, the backoff timer is cancelled immediately, restart is
+    /// suppressed, and any messages buffered in the mailbox when the stop lands
+    /// are dropped with the mailbox without being processed by a new instance.
+    ///
     /// Unlike [`abort`](Self::abort), this does NOT immediately request
     /// cancellation, allowing the actor to drain pending work. The mailbox is
     /// sealed immediately so new sends fail fast instead of extending shutdown.
@@ -1008,9 +1013,21 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
     // empty the mailbox to drop the messages.
     cell.mailbox.close();
 
+    let discard_buffered_message = |msg| {
+        if let Err(_payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            drop(msg);
+        })) {
+            cx.trace("actor::message_drop_panicked_on_abort");
+        }
+    };
+
     if is_aborted {
-        drop(pending_drain_message);
-        while let Ok(_msg) = cell.mailbox.try_recv() {}
+        if let Some(msg) = pending_drain_message {
+            discard_buffered_message(msg);
+        }
+        while let Ok(msg) = cell.mailbox.try_recv() {
+            discard_buffered_message(msg);
+        }
     } else {
         let mut drained: u64 = 0;
         let mut drain_yield_counter = 0u32;
@@ -1019,8 +1036,12 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
             // like one that landed before it: the buffered tail is dropped.
             if cx.checkpoint().is_err() {
                 cx.trace("actor::drain_cancelled");
-                drop(pending_drain_message.take());
-                while let Ok(_msg) = cell.mailbox.try_recv() {}
+                if let Some(msg) = pending_drain_message.take() {
+                    discard_buffered_message(msg);
+                }
+                while let Ok(msg) = cell.mailbox.try_recv() {
+                    discard_buffered_message(msg);
+                }
                 break;
             }
             let msg = match pending_drain_message.take() {
@@ -1179,6 +1200,10 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
     /// * `actor` - The actor instance
     /// * `mailbox_capacity` - Bounded mailbox size
     ///
+    /// # Panics
+    ///
+    /// Panics if `mailbox_capacity == 0`. Channel capacity must be non-zero.
+    ///
     /// # Returns
     ///
     /// A tuple of `(ActorHandle, StoredTask)`. The `StoredTask` must be
@@ -1311,6 +1336,10 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
     /// * `factory` - Closure that creates actor instances (called on each restart)
     /// * `strategy` - Supervision strategy (Stop, Restart, Escalate)
     /// * `mailbox_capacity` - Bounded mailbox size
+    ///
+    /// # Panics
+    ///
+    /// Panics if `mailbox_capacity == 0`. Channel capacity must be non-zero.
     pub fn spawn_supervised_actor<A, F>(
         &self,
         state: &mut crate::runtime::state::RuntimeState,
@@ -1442,6 +1471,10 @@ impl Cx {
     /// [`JoinError::Cancelled`]. A panic in the actor is the task's outcome
     /// and joins as [`JoinError::Panicked`].
     ///
+    /// # Panics
+    ///
+    /// Panics if `mailbox_capacity == 0`. Channel capacity must be non-zero.
+    ///
     /// # Errors
     ///
     /// Returns [`SpawnError::RuntimeUnavailable`] when this context is not
@@ -1470,6 +1503,10 @@ impl Cx {
     /// When supervision stops or escalates, the crash is the task's outcome
     /// and joins as [`JoinError::Panicked`]. Admission is as for
     /// [`Cx::spawn_actor`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `mailbox_capacity == 0`. Channel capacity must be non-zero.
     ///
     /// # Errors
     ///
@@ -4233,6 +4270,86 @@ mod tests {
         // Copy
         let c3 = c;
         assert_eq!(c3.capacity, c.capacity);
+    }
+
+    #[test]
+    #[should_panic(expected = "channel capacity must be non-zero")]
+    fn spawn_actor_zero_capacity_panics() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx: Cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(root, Budget::INFINITE);
+        let _ = scope.spawn_actor(&mut state, &cx, Counter::new(), 0);
+    }
+
+    #[test]
+    fn abort_with_panic_on_drop_messages_is_contained_and_runs_on_stop() {
+        init_test("abort_with_panic_on_drop_messages_is_contained_and_runs_on_stop");
+
+        #[derive(Debug)]
+        struct PanicDropMsg(#[allow(dead_code)] u32);
+        impl Drop for PanicDropMsg {
+            fn drop(&mut self) {
+                panic!("intentional panic on message drop");
+            }
+        }
+
+        struct DropPanicActor {
+            stopped: Arc<parking_lot::Mutex<bool>>,
+        }
+
+        impl Actor for DropPanicActor {
+            type Message = PanicDropMsg;
+
+            fn handle(
+                &mut self,
+                _cx: &Cx,
+                _msg: Self::Message,
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                Box::pin(async {})
+            }
+
+            fn on_stop(&mut self, _cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                *self.stopped.lock() = true;
+                Box::pin(async {})
+            }
+        }
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx: Cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(root, Budget::INFINITE);
+
+        let stopped = Arc::new(parking_lot::Mutex::new(false));
+        let actor = DropPanicActor {
+            stopped: Arc::clone(&stopped),
+        };
+
+        let (handle, mut stored) = scope
+            .spawn_actor(&mut state, &cx, actor, 8)
+            .expect("spawn actor");
+
+        // Enqueue multiple panic-on-drop messages
+        handle.try_send(PanicDropMsg(1)).expect("send msg 1");
+        handle.try_send(PanicDropMsg(2)).expect("send msg 2");
+
+        // Abort the actor
+        handle.abort();
+
+        // Run the task: it should safely discard the messages, run on_stop, and finish
+        let waker = Waker::noop();
+        let mut task_cx = Context::from_waker(waker);
+        assert!(
+            stored.poll(&mut task_cx).is_ready(),
+            "the aborted actor task must finish without an unhandled unwind"
+        );
+
+        assert!(
+            *stopped.lock(),
+            "on_stop must be invoked even when discarded messages panic on drop"
+        );
+
+        crate::test_complete!("abort_with_panic_on_drop_messages_is_contained_and_runs_on_stop");
     }
 }
 
