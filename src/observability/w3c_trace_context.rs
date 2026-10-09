@@ -621,9 +621,7 @@ pub fn extract_propagation_from_http<S: BuildHasher>(
             let mut context = W3CTraceContext::from_str(traceparent)?;
 
             if let Some(tracestate) = headers.get("tracestate") {
-                if tracestate.len() <= MAX_TRACESTATE_LENGTH {
-                    context.tracestate = Some(tracestate.clone());
-                }
+                context.tracestate = forwardable_tracestate(tracestate);
             }
             context.baggage = baggage.clone();
             Some(context)
@@ -700,6 +698,24 @@ pub fn inject_to_grpc(
 /// least 512 characters, and multi-vendor values routinely pass 128.
 const MAX_TRACESTATE_LENGTH: usize = 512;
 
+/// The incoming `tracestate` as kept and forwarded, if any. It is sent again
+/// on every outgoing request of the trace, so it must be a value an outgoing
+/// header can carry:
+/// - spaces and tabs around it are trimmed (HTTP/2 refuses them, RFC 9113
+///   §8.2.1);
+/// - a value holding a control character other than a tab, or DEL, is
+///   dropped, like an over-long one (more than [`MAX_TRACESTATE_LENGTH`]
+///   bytes) and an empty one. An HTTP/2 peer can send such a byte, and
+///   forwarding it would fail every request made under the trace.
+fn forwardable_tracestate(tracestate: &str) -> Option<String> {
+    let trimmed = tracestate.trim_matches([' ', '\t']);
+    let carries = trimmed
+        .bytes()
+        .all(|byte| byte == b'\t' || !byte.is_ascii_control());
+    (carries && !trimmed.is_empty() && trimmed.len() <= MAX_TRACESTATE_LENGTH)
+        .then(|| trimmed.to_owned())
+}
+
 /// Returns the context one hop of a request runs under.
 ///
 /// A valid incoming `traceparent` is continued as a child span, keeping its
@@ -747,8 +763,7 @@ fn continue_or_start<S: BuildHasher>(
             flags: parent.flags,
             tracestate: headers
                 .get("tracestate")
-                .filter(|tracestate| tracestate.len() <= MAX_TRACESTATE_LENGTH)
-                .cloned(),
+                .and_then(|tracestate| forwardable_tracestate(tracestate)),
             baggage,
         },
         None => {
@@ -1162,6 +1177,40 @@ mod tests {
                 hop.tracestate.is_some(),
                 kept,
                 "tracestate of {len} characters"
+            );
+        }
+    }
+
+    /// An incoming tracestate is sent again on every outgoing request of its
+    /// trace (asupersync-mu5yhv, d0's LOW 4). One holding a byte that no
+    /// header value can carry made each of those requests fail; it is now
+    /// dropped. Spaces and tabs around it, which HTTP/2 refuses, are trimmed.
+    /// Bytes a header carries, non-ASCII included, are kept as before.
+    #[test]
+    fn an_incoming_tracestate_with_a_byte_no_header_can_carry_is_dropped() {
+        let upstream = W3CTraceContext::new_root();
+        for (tracestate, kept) in [
+            ("vendor=a,other=b", Some("vendor=a,other=b")),
+            ("vendor=a ,\tother=b~c", Some("vendor=a ,\tother=b~c")),
+            ("vendor=caf\u{e9}", Some("vendor=caf\u{e9}")),
+            (" \tvendor=a\t ", Some("vendor=a")),
+            ("vendor=\u{1}a", None),
+            ("vendor=a\r\nx-injected: 1", None),
+            ("vendor=\u{7f}", None),
+            (" \t ", None),
+        ] {
+            let mut headers = HashMap::new();
+            headers.insert("traceparent".to_string(), upstream.to_traceparent());
+            headers.insert("tracestate".to_string(), tracestate.to_string());
+            let hop = continue_or_start_trace(&headers);
+            assert_eq!(hop.tracestate.as_deref(), kept, "continued {tracestate:?}");
+            let extracted = extract_from_http(&headers)
+                .expect("valid traceparent")
+                .expect("trace context");
+            assert_eq!(
+                extracted.tracestate.as_deref(),
+                kept,
+                "extracted {tracestate:?}"
             );
         }
     }

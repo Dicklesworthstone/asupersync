@@ -1048,6 +1048,104 @@ mod tests {
             .expect("passwordless plaintext redirect should not trip auth guard");
     }
 
+    /// x4kh5w finding 1: a host that is a path is dialed as a local Unix
+    /// socket, so a forged `-MOVED 1 /run/redis/other.sock:6379` would hand the
+    /// caller's command to that socket. Even a passwordless plaintext client
+    /// refuses it; only the configured endpoint itself may be a path.
+    #[test]
+    fn cluster_redirect_to_a_socket_path_is_refused() {
+        let mut client = pooled_client_without_acquire();
+        client.config.host = "redis.internal".to_string();
+        client.config.port = 6379;
+        client.config.password = None;
+        for host in [
+            "/run/redis/other.sock",
+            "/tmp/x.sock",
+            "run/x.sock",
+            "C:\\redis.sock",
+        ] {
+            let err = client
+                .validate_redirect_target(host, 6379)
+                .expect_err("a redirect to a socket path must fail closed");
+            assert!(
+                matches!(err, RedisError::Protocol(ref msg) if msg.contains("socket path")),
+                "unexpected redirect error for {host}: {err:?}"
+            );
+        }
+
+        client.config.host = "/run/redis.sock".to_string();
+        client
+            .validate_redirect_target("/run/redis.sock", 6379)
+            .expect("a redirect to the configured socket stays allowed");
+        assert!(
+            client
+                .validate_redirect_target("/run/other.sock", 6379)
+                .is_err()
+        );
+    }
+
+    /// x4kh5w finding 2: the redis-rs and redis-py spellings of a socket URL
+    /// carry their credentials in the query or as a bare `user@`; they were
+    /// dropped (or the user name was taken as the password).
+    #[test]
+    fn unix_socket_url_reads_query_credentials_and_a_bare_user() {
+        let config = RedisConfig::from_url("redis+unix:///run/r.sock?db=2&user=app&pass=s3cret")
+            .expect("redis-rs spelling");
+        assert_eq!(config.host, "/run/r.sock");
+        assert_eq!(config.database, 2);
+        assert_eq!(config.username.as_deref(), Some("app"));
+        assert_eq!(config.password.as_deref(), Some("s3cret"));
+
+        let config = RedisConfig::from_url("unix://app@/run/r.sock?password=s%3Acret")
+            .expect("redis-py spelling");
+        assert_eq!(config.username.as_deref(), Some("app"));
+        assert_eq!(config.password.as_deref(), Some("s:cret"));
+
+        let config = RedisConfig::from_url("redis+unix://:s3cret@/var/run/redis.sock?db=3")
+            .expect("password-only userinfo");
+        assert_eq!(config.username, None);
+        assert_eq!(config.password.as_deref(), Some("s3cret"));
+    }
+
+    #[test]
+    fn unix_socket_url_refuses_unknown_parameters_and_repeated_credentials() {
+        for url in [
+            "unix:///run/r.sock?bogus=1",
+            "unix:///run/r.sock?requirepeer=redis",
+            "unix://app@/run/r.sock?user=other",
+            "unix://:pw@/run/r.sock?pass=other",
+            "unix:///run/r.sock?password=a&password=b",
+        ] {
+            assert!(
+                matches!(RedisConfig::from_url(url), Err(RedisError::InvalidUrl(_))),
+                "{url} must be refused"
+            );
+        }
+    }
+
+    /// x4kh5w finding 3: the socket path is percent-decoded, and an `@` inside
+    /// it belongs to the path.
+    #[test]
+    fn unix_socket_url_path_is_decoded_and_may_contain_an_at_sign() {
+        let config = RedisConfig::from_url("unix:///run/redis@6380/redis.sock").expect("@ in path");
+        assert_eq!(config.host, "/run/redis@6380/redis.sock");
+        assert_eq!(config.password, None);
+
+        let config = RedisConfig::from_url("unix:///tmp/my%20redis.sock").expect("decoded path");
+        assert_eq!(config.host, "/tmp/my redis.sock");
+
+        for url in [
+            "unix:///tmp/a%00b.sock",
+            "unix:///tmp/bad%2",
+            "unix://%2Frun%2Fr.sock",
+        ] {
+            assert!(
+                matches!(RedisConfig::from_url(url), Err(RedisError::InvalidUrl(_))),
+                "{url} must be refused"
+            );
+        }
+    }
+
     #[test]
     fn test_resp_encode_simple_string() {
         let value = RespValue::SimpleString("OK".to_string());

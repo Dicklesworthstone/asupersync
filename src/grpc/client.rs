@@ -1510,7 +1510,7 @@ impl NativeH2Target {
         let target = parse_channel_uri(uri)
             .map_err(|error| Status::unavailable(format!("invalid gRPC channel target: {error}")))?;
         if let Some(path) = target.unix_path {
-            return Self::unix(path, use_tls, dial_addr);
+            return Self::unix(&path, use_tls, dial_addr);
         }
         let use_tls = use_tls || target.use_tls;
         let host = target.host;
@@ -1927,13 +1927,16 @@ impl NativeH2Conn {
             && !self.connection.goaway_sent()
     }
 
-    /// Run one unary call on a new stream of this connection.
+    /// Run one unary call on a new stream of this connection. `Ok` carries a
+    /// call whose stream completed, with its outcome: the response, or the
+    /// status a completed call ended with (a non-OK grpc-status, a non-gRPC
+    /// HTTP answer). The connection is intact either way and may be reused.
     async fn exchange(
         &mut self,
         headers: Vec<Header>,
         request_body: Bytes,
         max_recv_message_size: usize,
-    ) -> Result<(NativeUnaryWireResponse, u32), UnaryFailure> {
+    ) -> Result<(Result<NativeUnaryWireResponse, Status>, u32), UnaryFailure> {
         // A stream refused locally (GOAWAY seen, identifiers exhausted) never
         // reached the server.
         let stream_id = self.connection.open_stream(headers, false).map_err(|error| {
@@ -1994,10 +1997,7 @@ impl NativeH2Conn {
                     .await
                     .map_err(UnaryFailure::processed)?;
                 if accumulator.is_complete() {
-                    return accumulator
-                        .finish()
-                        .map(|response| (response, stream_id))
-                        .map_err(UnaryFailure::processed);
+                    return Ok((accumulator.finish(), stream_id));
                 }
             }
 
@@ -2037,9 +2037,9 @@ async fn native_h2_unary_io(
                 .exchange(headers.clone(), request_body.clone(), max_recv)
                 .await
             {
-                Ok((response, stream_id)) => {
+                Ok((outcome, stream_id)) => {
                     pool_after_success(pool, conn, stream_id);
-                    return Ok(response);
+                    return outcome;
                 }
                 Err(failure) if failure.unprocessed => break,
                 Err(failure) => return Err(failure.status),
@@ -2047,17 +2047,18 @@ async fn native_h2_unary_io(
         }
     }
     let mut conn = NativeH2Conn::dial(&target, &config, tls_connector).await?;
-    let (response, stream_id) = conn
+    let (outcome, stream_id) = conn
         .exchange(headers, request_body, max_recv)
         .await
         .map_err(|failure| failure.status)?;
     if let Some(pool) = &pool {
         pool_after_success(pool, conn, stream_id);
     }
-    Ok(response)
+    outcome
 }
 
-/// Keep a connection whose call completed cleanly for the next unary call.
+/// Keep a connection whose call completed cleanly, with any grpc-status, for
+/// the next unary call.
 #[cfg(not(target_arch = "wasm32"))]
 fn pool_after_success(pool: &UnaryConnectionPool, conn: NativeH2Conn, stream_id: u32) {
     if conn.reusable() && !conn.connection.has_pending_frames_for_stream(stream_id) {
@@ -2410,7 +2411,7 @@ struct ChannelUri<'a> {
     port: Option<u16>,
     use_tls: bool,
     /// The socket path of a `unix:` target.
-    unix_path: Option<&'a str>,
+    unix_path: Option<std::borrow::Cow<'a, str>>,
 }
 
 fn parse_channel_uri(uri: &str) -> Result<ChannelUri<'_>, GrpcError> {
@@ -2553,11 +2554,17 @@ fn parse_channel_uri(uri: &str) -> Result<ChannelUri<'_>, GrpcError> {
 /// The socket path of a gRPC `unix:` target: `unix:path` (relative or
 /// absolute) or `unix:///absolute/path`, as gRPC's naming documentation
 /// spells them. `None` for any other URI.
-fn unix_target_path(uri: &str) -> Option<Result<&str, GrpcError>> {
+///
+/// As in grpc-go, whose resolver reads the parsed URL: a query or fragment is
+/// not part of the path, and an absolute path is percent-decoded
+/// (`unix:///tmp/my%20app.sock` is `/tmp/my app.sock`), while a relative
+/// `unix:path` is used as written (br-asupersync-mu5yhv finding 6).
+fn unix_target_path(uri: &str) -> Option<Result<std::borrow::Cow<'_, str>, GrpcError>> {
     let rest = uri
         .get(..5)
         .filter(|scheme| scheme.eq_ignore_ascii_case("unix:"))
         .map(|_| &uri[5..])?;
+    let rest = rest.split(['?', '#']).next().unwrap_or_default();
     let path = match rest.strip_prefix("//") {
         Some(absolute) if absolute.starts_with('/') => absolute,
         Some(_) => {
@@ -2567,6 +2574,16 @@ fn unix_target_path(uri: &str) -> Option<Result<&str, GrpcError>> {
         }
         None => rest,
     };
+    let path = if path.starts_with('/') {
+        let Some(decoded) = percent_decode_socket_path(path) else {
+            return Some(Err(GrpcError::transport(
+                "unix: channel URI has an invalid percent escape in its socket path",
+            )));
+        };
+        decoded
+    } else {
+        std::borrow::Cow::Borrowed(path)
+    };
     if path.is_empty() || path.contains('\0') {
         return Some(Err(GrpcError::transport(
             "unix: channel URI needs a socket path without NUL bytes",
@@ -2575,13 +2592,68 @@ fn unix_target_path(uri: &str) -> Option<Result<&str, GrpcError>> {
     Some(Ok(path))
 }
 
+/// Whether this platform can dial the socket `path`. A target it never can
+/// is refused when the channel is built, instead of failing every call with
+/// an UNAVAILABLE that callers retry (d0's LOW 3 on br-asupersync-x4kh5w).
+fn unix_target_dialable(path: &str) -> Result<(), GrpcError> {
+    if !cfg!(unix) {
+        return Err(GrpcError::transport_kind(
+            TransportErrorKind::ProtocolViolation,
+            "unix: gRPC channel targets need a Unix platform",
+        ));
+    }
+    // sockaddr_un's sun_path, which also holds the terminating NUL: 108
+    // bytes on Linux, 104 on macOS and the BSDs.
+    let sun_path = if cfg!(any(target_os = "linux", target_os = "android")) {
+        108
+    } else {
+        104
+    };
+    if path.len() >= sun_path {
+        return Err(GrpcError::transport_kind(
+            TransportErrorKind::ProtocolViolation,
+            format!(
+                "unix: channel socket path is {} bytes; a socket path here must be shorter \
+                 than {sun_path}",
+                path.len()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// `path` with its `%XX` escapes decoded; `None` for an incomplete or
+/// non-hex escape, or bytes that are not UTF-8.
+fn percent_decode_socket_path(path: &str) -> Option<std::borrow::Cow<'_, str>> {
+    if !path.contains('%') {
+        return Some(std::borrow::Cow::Borrowed(path));
+    }
+    let bytes = path.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let escape = bytes.get(index + 1..index + 3)?;
+            if !escape.iter().all(u8::is_ascii_hexdigit) {
+                return None;
+            }
+            decoded.push(u8::from_str_radix(std::str::from_utf8(escape).ok()?, 16).ok()?);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok().map(std::borrow::Cow::Owned)
+}
+
 fn validate_channel_security(
     uri: &str,
     config: &ChannelConfig,
     has_tls_connector: bool,
     has_explicit_dial_addr: bool,
 ) -> Result<(), GrpcError> {
-    if unix_target_path(uri).is_some() {
+    if let Some(path) = unix_target_path(uri) {
         if config.use_tls || has_tls_connector {
             return Err(GrpcError::transport_kind(
                 TransportErrorKind::ProtocolViolation,
@@ -2594,7 +2666,7 @@ fn validate_channel_security(
                 "unix: channel targets cannot use an explicit dial address",
             ));
         }
-        return Ok(());
+        return unix_target_dialable(&path?);
     }
     let (scheme, _) = uri
         .split_once("://")
@@ -2849,6 +2921,9 @@ pub struct ResponseStream<T> {
 struct NativeResponses<T> {
     handle: Arc<LegacyResponseHandle>,
     convert: fn(Box<dyn Any + Send>) -> Result<T, Status>,
+    /// This handle's id on the call; each clone gets its own, so clones
+    /// parked in different tasks are each woken.
+    responder: u64,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2857,7 +2932,16 @@ impl<T> Clone for NativeResponses<T> {
         Self {
             handle: Arc::clone(&self.handle),
             convert: self.convert,
+            responder: self.handle.call().new_responder(),
         }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<T> Drop for NativeResponses<T> {
+    fn drop(&mut self) {
+        // The waker this handle may have left parked on the call goes with it.
+        self.handle.call().forget_responder(self.responder);
     }
 }
 
@@ -2928,6 +3012,7 @@ impl<T> ResponseStream<T> {
         stream.native = Some(NativeResponses {
             handle: Arc::new(LegacyResponseHandle::new(call)),
             convert: downcast_native_response::<T>,
+            responder: 0,
         });
         stream
     }
@@ -3147,7 +3232,7 @@ impl<T> ResponseStream<T> {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<T, Status>>> {
         let call = native.handle.call();
-        let end = match call.poll_message(cx) {
+        let end = match call.poll_message(cx, native.responder) {
             Poll::Pending => return Poll::Pending,
             Poll::Ready(Some(Ok(message))) => return Poll::Ready(Some((native.convert)(message))),
             Poll::Ready(Some(Err(status))) => Some(Err(status)),
@@ -3568,6 +3653,7 @@ impl<T> ResponseFuture<T> {
             native: Some(NativeResponses {
                 handle: Arc::new(LegacyResponseHandle::new(call)),
                 convert: downcast_native_response::<T>,
+                responder: 0,
             }),
         }
     }
@@ -3586,7 +3672,8 @@ impl<T: Send> Future for ResponseFuture<T> {
         let this = self.get_mut();
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(native) = &this.native {
-            let output = match native.handle.call().poll_single_response(cx) {
+            let call = native.handle.call();
+            let output = match call.poll_single_response(cx, native.responder) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Ok((message, metadata))) => (native.convert)(message)
                     .map(|message| Response::with_metadata(message, metadata)),
@@ -4412,6 +4499,289 @@ mod tests {
             poll_stream(&mut second_reader, &second_reader_waker),
             Poll::Ready(None)
         ));
+    }
+
+    /// What a native call fed by a test has received: its messages, its end,
+    /// and the waker of its last pending poll, as a transport keeps it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[derive(Default)]
+    struct Feed {
+        messages: VecDeque<u32>,
+        ended: bool,
+        waker: Option<Waker>,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    struct FedCall(Arc<Mutex<Feed>>);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl FedCall {
+        /// Queue a message, or the end, and wake the call as arriving data does.
+        fn deliver(feed: &Mutex<Feed>, message: Option<u32>) {
+            let waker = {
+                let mut feed = lock_unpoisoned(feed);
+                match message {
+                    Some(message) => feed.messages.push_back(message),
+                    None => feed.ended = true,
+                }
+                feed.waker.take()
+            };
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl legacy_native::LegacyCall for FedCall {
+        fn poll_event(
+            &mut self,
+            task: &mut Context<'_>,
+        ) -> Poll<Option<Result<legacy_native::LegacyEvent, Status>>> {
+            let mut feed = lock_unpoisoned(&self.0);
+            if let Some(message) = feed.messages.pop_front() {
+                let message = legacy_native::LegacyEvent::Message(Box::new(message));
+                return Poll::Ready(Some(Ok(message)));
+            }
+            if feed.ended {
+                return Poll::Ready(None);
+            }
+            feed.waker = Some(task.waker().clone());
+            Poll::Pending
+        }
+
+        fn queue_message(&mut self, _message: Box<dyn Any + Send>) -> Result<(), Status> {
+            Ok(())
+        }
+
+        fn close_requests(&mut self) -> Result<(), Status> {
+            Ok(())
+        }
+
+        fn initial_metadata(&self) -> Option<Metadata> {
+            None
+        }
+
+        fn trailers(&self) -> Option<Metadata> {
+            None
+        }
+
+        fn status(&self) -> Option<Status> {
+            None
+        }
+
+        fn cancel(&mut self) {}
+    }
+
+    /// Clones of a network call's response stream polled from two tasks
+    /// (asupersync-mu5yhv finding 3): the call kept one waker for its whole
+    /// response side, so the clone that parked first was never woken again,
+    /// not even by the end of the call, and its `next()` hung.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_response_stream_clones_parked_in_two_tasks_are_each_woken() {
+        init_test("native_response_stream_clones_parked_in_two_tasks_are_each_woken");
+        let feed = Arc::new(Mutex::new(Feed::default()));
+        let call = LegacyNativeCall::new(
+            Box::new(FedCall(Arc::clone(&feed))),
+            LegacyShape::ServerStreaming,
+        );
+        let mut first_reader = ResponseStream::<u32>::native(call);
+        let mut second_reader = first_reader.clone();
+        let first_wake_count = Arc::new(AtomicUsize::new(0));
+        let second_wake_count = Arc::new(AtomicUsize::new(0));
+        let first_reader_waker = counting_waker(&first_wake_count);
+        let second_reader_waker = counting_waker(&second_wake_count);
+
+        // Both clones park on the call, the second one last.
+        assert!(poll_stream(&mut first_reader, &first_reader_waker).is_pending());
+        assert!(poll_stream(&mut second_reader, &second_reader_waker).is_pending());
+
+        // A message arrives: both parked clones are woken; the second takes it.
+        FedCall::deliver(&feed, Some(7));
+        assert_eq!(
+            first_wake_count.load(Ordering::SeqCst),
+            1,
+            "first cloned reader lost its wakeup",
+        );
+        assert_eq!(
+            second_wake_count.load(Ordering::SeqCst),
+            1,
+            "second cloned reader should also be notified",
+        );
+        assert!(matches!(
+            poll_stream(&mut second_reader, &second_reader_waker),
+            Poll::Ready(Some(Ok(7)))
+        ));
+
+        // The first clone parks again (twice: it keeps one entry) while the
+        // second is busy elsewhere and does not poll. The end wakes it.
+        assert!(poll_stream(&mut first_reader, &first_reader_waker).is_pending());
+        assert!(poll_stream(&mut first_reader, &first_reader_waker).is_pending());
+        FedCall::deliver(&feed, None);
+        assert_eq!(
+            first_wake_count.load(Ordering::SeqCst),
+            2,
+            "the end of the call should wake the parked clone",
+        );
+        assert!(matches!(
+            poll_stream(&mut first_reader, &first_reader_waker),
+            Poll::Ready(None)
+        ));
+        assert!(matches!(
+            poll_stream(&mut second_reader, &second_reader_waker),
+            Poll::Ready(None)
+        ));
+        crate::test_complete!("native_response_stream_clones_parked_in_two_tasks_are_each_woken");
+    }
+
+    /// A response stream clone that parks and is dropped while the call is
+    /// quiet forgets its waker (asupersync-mu5yhv finding 3 follow-up): each
+    /// such clone used to leave one parked on the call until the next wake.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_dropped_response_stream_clone_forgets_its_parked_waker() {
+        init_test("a_dropped_response_stream_clone_forgets_its_parked_waker");
+        let feed = Arc::new(Mutex::new(Feed::default()));
+        let call = LegacyNativeCall::new(
+            Box::new(FedCall(Arc::clone(&feed))),
+            LegacyShape::ServerStreaming,
+        );
+        let probe = Arc::clone(&call);
+        let mut reader = ResponseStream::<u32>::native(call);
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let waker = counting_waker(&wake_count);
+        assert!(poll_stream(&mut reader, &waker).is_pending());
+        for _ in 0..100 {
+            let mut clone = reader.clone();
+            assert!(poll_stream(&mut clone, &waker).is_pending());
+        }
+
+        assert_eq!(
+            probe.parked_responders(),
+            1,
+            "only the live reader stays parked"
+        );
+        FedCall::deliver(&feed, Some(7));
+        assert_eq!(wake_count.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            poll_stream(&mut reader, &waker),
+            Poll::Ready(Some(Ok(7)))
+        ));
+        crate::test_complete!("a_dropped_response_stream_clone_forgets_its_parked_waker");
+    }
+
+    /// The last waker parked for a response handle can belong to a task
+    /// whose future owns another clone of the same stream, whose drop takes
+    /// the fan-out lock. A waker forgotten (handle dropped) or replaced
+    /// (re-registered from another task) used to be dropped under that lock,
+    /// and the thread deadlocked on itself.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn dropping_a_parked_waker_that_owns_a_stream_clone_does_not_deadlock() {
+        init_test("dropping_a_parked_waker_that_owns_a_stream_clone_does_not_deadlock");
+        // Holds the clone only to drop it with the waker.
+        struct OwnsAClone {
+            _clone: Mutex<Option<ResponseStream<u32>>>,
+        }
+        // The waker exists to own the clone, so Waker::noop() cannot stand in.
+        #[allow(clippy::manual_noop_waker)]
+        impl Wake for OwnsAClone {
+            fn wake(self: Arc<Self>) {}
+        }
+        let parked_reader = || {
+            let feed = Arc::new(Mutex::new(Feed::default()));
+            let call = LegacyNativeCall::new(
+                Box::new(FedCall(Arc::clone(&feed))),
+                LegacyShape::ServerStreaming,
+            );
+            let mut reader = ResponseStream::<u32>::native(call);
+            let owner = Arc::new(OwnsAClone {
+                _clone: Mutex::new(Some(reader.clone())),
+            });
+            // Only the call keeps this waker once the poll returns.
+            assert!(poll_stream(&mut reader, &Waker::from(owner)).is_pending());
+            reader
+        };
+        let finishes = |name: &str, step: Box<dyn FnOnce() + Send>| {
+            let (done, finished) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                step();
+                let _ = done.send(());
+            });
+            assert!(
+                finished.recv_timeout(Duration::from_secs(5)).is_ok(),
+                "{name} deadlocked"
+            );
+        };
+
+        let reader = parked_reader();
+        finishes("dropping the reader", Box::new(move || drop(reader)));
+
+        let mut reader = parked_reader();
+        finishes(
+            "re-registering from another task",
+            Box::new(move || {
+                let other = counting_waker(&Arc::new(AtomicUsize::new(0)));
+                assert!(poll_stream(&mut reader, &other).is_pending());
+            }),
+        );
+        crate::test_complete!("dropping_a_parked_waker_that_owns_a_stream_clone_does_not_deadlock");
+    }
+
+    /// A unix: target's path was used verbatim (asupersync-mu5yhv finding
+    /// 6): `unix:///tmp/my%20app.sock` dialled a file named with a literal
+    /// `%20`, and a query or fragment stayed in the file name.
+    #[test]
+    fn unix_channel_targets_decode_an_absolute_path_and_drop_query_and_fragment() {
+        let path = |uri: &str| {
+            parse_channel_uri(uri)
+                .ok()
+                .and_then(|target| target.unix_path)
+                .map(std::borrow::Cow::into_owned)
+        };
+        assert_eq!(
+            path("unix:///tmp/my%20app.sock").as_deref(),
+            Some("/tmp/my app.sock")
+        );
+        assert_eq!(
+            path("unix:/tmp/my%20app.sock").as_deref(),
+            Some("/tmp/my app.sock")
+        );
+        assert_eq!(
+            path("unix:///run/x.sock?foo#bar").as_deref(),
+            Some("/run/x.sock")
+        );
+        assert_eq!(path("UNIX:///run/x.sock").as_deref(), Some("/run/x.sock"));
+        // A relative path is used as written, as grpc-go uses the URL's
+        // opaque part.
+        assert_eq!(
+            path("unix:relative%20name.sock").as_deref(),
+            Some("relative%20name.sock")
+        );
+        for refused in [
+            "unix:///tmp/cut%2",
+            "unix:///tmp/bad%zz",
+            "unix:///tmp/nul%00",
+            "unix:///tmp/not-utf8-%ff",
+            "unix:?only-a-query",
+        ] {
+            assert!(parse_channel_uri(refused).is_err(), "{refused}");
+        }
+    }
+
+    /// d0's LOW 3 on asupersync-x4kh5w: Channel::connect accepted a unix:
+    /// target whose path no sockaddr_un holds, and every call made on it then
+    /// failed UNAVAILABLE, which callers retry.
+    #[cfg(unix)]
+    #[test]
+    fn a_unix_target_the_platform_cannot_dial_is_refused_by_connect() {
+        let too_long = format!("unix:///tmp/{}.sock", "a".repeat(200));
+        let refused = futures_lite::future::block_on(Channel::connect(too_long))
+            .expect_err("a socket path longer than sun_path");
+        assert!(refused.to_string().contains("socket path"), "{refused}");
+        // Building a channel dials nothing, so a short path is accepted.
+        assert!(futures_lite::future::block_on(Channel::connect("unix:///tmp/ok.sock")).is_ok());
     }
 
     #[test]

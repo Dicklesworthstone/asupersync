@@ -136,6 +136,10 @@ impl BranchRegions {
 enum Timed<T> {
     Value(T),
     Expired,
+    // A user branch that completed at or after the deadline. It lost to the
+    // deadline even when the engine selected it, so its region is drained like
+    // every other loser's (br-asupersync-inleqi M1).
+    Late,
 }
 
 // Published by the primary itself, not by its waiting owner. Otherwise an
@@ -381,11 +385,24 @@ impl Cx<cap::All> {
     /// runs in its own child region, so a losing branch's descendants (tasks it
     /// spawned through its `Cx`) are cancelled and drained before this returns;
     /// the winner's descendants keep running and its region closes once they
-    /// finish (br-asupersync-issue65-criticisms-kpmoy5.2.2). Synchronous
+    /// finish (br-asupersync-issue65-criticisms-kpmoy5.2.2). If the runtime
+    /// refuses a branch its own region (this context's region has limits, or
+    /// resource pressure), that branch runs directly in this context's region
+    /// and the race does not drain its descendants. Synchronous
     /// admission failure cancels every admitted sibling and awaits its actual
-    /// terminal before returning. Dropping this future requests cancellation;
-    /// the owning region remains the asynchronous cleanup boundary on drop.
+    /// terminal before returning. Dropping this future cancels the branch
+    /// tasks; what they spawned is cancelled only with this context's region,
+    /// which remains the asynchronous cleanup boundary on drop.
     /// Noncooperative user code can prevent draining; no preemption is promised.
+    ///
+    /// A branch that waits for a task it spawned must wait cancel-aware.
+    /// [`TaskHandle::join`](crate::runtime::TaskHandle::join) does not observe
+    /// the branch's cancellation, and the branch's region (with that task) is
+    /// cancelled only after the branch finishes. A losing branch blocked in such
+    /// a join therefore waits until that task finishes on its own. Join through
+    /// [`Scope::join_all_owned`](super::Scope::join_all_owned) instead, which
+    /// passes the branch's cancellation to the tasks it waits for
+    /// (br-asupersync-inleqi).
     ///
     /// # Errors
     /// Empty input or synchronous admission refusal returns `JoinError::Cancelled` with a
@@ -394,6 +411,20 @@ impl Cx<cap::All> {
     pub async fn race_drained_with<T>(
         &self,
         factories: Vec<RaceFactory<T>>,
+    ) -> Result<T, JoinError>
+    where
+        T: Send + 'static,
+    {
+        self.race_drained_settled(factories, |_| true).await
+    }
+
+    // The engine behind `race_drained_with`. `keeps_region` tells whether the
+    // selected winner keeps its region; a winner whose value says it lost
+    // (a timed branch that completed late) is drained with the losers.
+    async fn race_drained_settled<T>(
+        &self,
+        factories: Vec<RaceFactory<T>>,
+        keeps_region: fn(&T) -> bool,
     ) -> Result<T, JoinError>
     where
         T: Send + 'static,
@@ -430,7 +461,12 @@ impl Cx<cap::All> {
         // Ownership passes directly to race_all's existing join/drain guards.
         let handles = std::mem::take(&mut admitted.handles);
         let result = scope.race_all(self, handles).await;
-        settle_branch_regions(regions, &result).await;
+        match &result {
+            Ok((value, _)) if !keeps_region(value) => {
+                regions.settle(None, CancelReason::race_loser(), true).await;
+            }
+            _ => settle_branch_regions(regions, &result).await,
+        }
         result.map(|(value, _)| value)
     }
 
@@ -458,6 +494,8 @@ impl Cx<cap::All> {
     /// and one extra task slot. No ambient clock or fallback timer is created.
     /// Factories are not invoked once the deadline is observed expired, and a
     /// value completing at or after the deadline cannot become a timely winner.
+    /// Its branch lost to the deadline, so its descendants are cancelled and
+    /// drained like a loser's (br-asupersync-inleqi).
     /// A result completed before the deadline may be returned after loser drain.
     ///
     /// # Errors
@@ -508,10 +546,10 @@ impl Cx<cap::All> {
             let clock = timer.clone();
             timed.push(Box::new(move |child| Box::pin(async move {
                 if clock.now() >= deadline {
-                    return Timed::Expired;
+                    return Timed::Late;
                 }
                 let value = factory(child).await;
-                if clock.now() >= deadline { Timed::Expired } else { Timed::Value(value) }
+                if clock.now() >= deadline { Timed::Late } else { Timed::Value(value) }
             })));
         }
         timed.push(Box::new(move |child| Box::pin(async move {
@@ -528,9 +566,10 @@ impl Cx<cap::All> {
             }).await;
             Timed::Expired
         })));
-        match self.race_drained_with(timed).await? {
+        let keeps_region = |timed: &Timed<T>| !matches!(timed, Timed::Late);
+        match self.race_drained_settled(timed, keeps_region).await? {
             Timed::Value(value) => Ok(value),
-            Timed::Expired => Err(JoinError::Cancelled(CancelReason::timeout())),
+            Timed::Expired | Timed::Late => Err(JoinError::Cancelled(CancelReason::timeout())),
         }
     }
 

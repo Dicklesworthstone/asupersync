@@ -3248,7 +3248,10 @@ impl TriggerConfig {
         }
     }
 
-    /// Apply hysteresis to prevent oscillation.
+    /// Apply the cooldown: a level holds for `cooldown` after it was entered,
+    /// except that Emergency is entered at once. The margin a downgrade needs
+    /// (`hysteresis`) is a usage margin, so it is applied with the
+    /// measurement, by [`Self::bounded_degradation`].
     #[must_use]
     pub fn apply_hysteresis(
         &self,
@@ -3256,6 +3259,12 @@ impl TriggerConfig {
         current_level: DegradationLevel,
         last_change: Option<Instant>,
     ) -> DegradationLevel {
+        // Emergency is entered at once, even within a cooldown. The cooldown
+        // used to be checked first, which delayed it (br-asupersync-1ir2em).
+        if new_level == DegradationLevel::Emergency {
+            return new_level;
+        }
+
         // Respect cooldown period
         if let Some(last) = last_change {
             if last.elapsed() < self.cooldown {
@@ -3263,24 +3272,15 @@ impl TriggerConfig {
             }
         }
 
-        // Allow immediate escalation for emergencies
-        if new_level == DegradationLevel::Emergency {
-            return new_level;
-        }
-
-        // Apply hysteresis for downgrades
-        if new_level < current_level {
-            // Only downgrade if we're well below the threshold
-            let new_u8 = new_level as u8;
-            let current_u8 = current_level as u8;
-            if new_u8 <= current_u8.saturating_sub(1) {
-                new_level
-            } else {
-                current_level
-            }
-        } else {
-            new_level
-        }
+        // Downgrades used to be held back here only when
+        // `new <= current - 1` failed, which no downgrade does, so the level
+        // fell with every dip of the usage below a band's threshold (Moderate
+        // and Emergency alternated at 94% and 95% CPU). The usage margin is
+        // now applied by `bounded_degradation`, which the engine calls before
+        // this; a caller that passes a lower level directly gets it after the
+        // cooldown, as before. The helpers sit below the line-pinned code
+        // (br-asupersync-1ir2em).
+        new_level
     }
 }
 
@@ -3543,8 +3543,8 @@ impl DegradationEngine {
             }
 
             if let Some(measurement) = self.pressure.get_measurement(resource_type) {
-                let new_level = config.calculate_degradation(&measurement);
                 let current_level = self.pressure.get_degradation_level(resource_type);
+                let new_level = config.bounded_degradation(&measurement, current_level);
 
                 let last_change = self
                     .pressure
@@ -5379,19 +5379,19 @@ mod platform {
 
     #[cfg(any(target_os = "linux", target_os = "android"))]
     pub fn process_connection_count() -> std::io::Result<u64> {
+        // This process's sockets: the `socket:[inode]` links among its
+        // descriptors (one closed meanwhile is skipped), which is what the
+        // descriptor limit bounds. `/proc/self/net/{tcp,udp}*` list every
+        // socket of the network namespace, other processes' and TIME_WAIT
+        // ones too, so a busy host read as pressure on a process that owned
+        // almost none (br-asupersync-1ir2em).
         let mut total: u64 = 0;
-        for path in [
-            "/proc/self/net/tcp",
-            "/proc/self/net/tcp6",
-            "/proc/self/net/udp",
-            "/proc/self/net/udp6",
-        ] {
-            if let Ok(s) = std::fs::read_to_string(path) {
-                // First line is the column header; everything after is
-                // a single connection. `saturating_sub(1)` handles the
-                // empty-file edge case.
-                total = total.saturating_add((s.lines().count() as u64).saturating_sub(1));
-            }
+        for entry in std::fs::read_dir("/proc/self/fd")? {
+            let Ok(target) = entry.and_then(|entry| std::fs::read_link(entry.path())) else {
+                continue;
+            };
+            let link = target.as_os_str().as_encoded_bytes();
+            total = total.saturating_add(u64::from(link.starts_with(b"socket:")));
         }
         Ok(total)
     }
@@ -6115,8 +6115,9 @@ impl SystemResourceCollector {
     /// - Linux: VmRSS from `/proc/self/status`; max from `RLIMIT_AS`,
     ///   falling back to `MemTotal` from `/proc/meminfo` when the
     ///   address-space rlimit is `RLIM_INFINITY`.
-    /// - macOS/BSD: `getrusage(RUSAGE_SELF).ru_maxrss` for current
-    ///   (bytes on macOS, KiB on BSD); same `RLIMIT_AS` fallback.
+    /// - macOS/BSD: only `getrusage(RUSAGE_SELF).ru_maxrss` is read, the
+    ///   lifetime peak, which [`current_rss_reading`] refuses as current
+    ///   usage, so memory is not measured there.
     /// - Windows / other: `SystemAccessFailed` — caller's
     ///   `if let Ok(..)` in `collect_now` cleanly skips the
     ///   measurement update so existing pressure values are preserved.
@@ -6124,7 +6125,7 @@ impl SystemResourceCollector {
         let current_bytes_result = self.observe_probe(
             ResourceProbe::ProcessRssBytes,
             ResourceProbeFallback::OmitMeasurement,
-            platform::process_rss_bytes(),
+            current_rss_reading(platform::process_rss_bytes(), RSS_READING_IS_LIFETIME_PEAK),
             |value| Some(*value),
         );
         let max_limit_result = self.observe_probe(
@@ -6166,22 +6167,24 @@ impl SystemResourceCollector {
             platform::process_fd_count(),
             |value| Some(*value),
         );
+        // The soft limit: `EMFILE` comes at `rlim_cur`, not at the hard
+        // ceiling a process may raise it to (br-asupersync-1ir2em).
         let fd_limit_result = self.observe_probe(
             ResourceProbe::FileDescriptorLimit,
             ResourceProbeFallback::OmitMeasurement,
             platform::fd_rlimit(),
-            |(_, hard)| Some(*hard),
+            |(soft, _)| Some(*soft),
         );
 
         let current_fds =
             current_fds_result.map_err(|e| ResourceMonitorError::SystemAccessFailed {
                 reason: format!("fd count: {e}"),
             })?;
-        let (_, hard_max) =
+        let (soft_max, _) =
             fd_limit_result.map_err(|e| ResourceMonitorError::SystemAccessFailed {
                 reason: format!("fd rlimit: {e}"),
             })?;
-        let max_limit = if hard_max == 0 { 1024 } else { hard_max };
+        let max_limit = if soft_max == 0 { 1024 } else { soft_max };
         let (soft_limit, hard_limit) = derive_thresholds(max_limit, 75, 90);
         Ok(ResourceMeasurement::new(
             current_fds,
@@ -6237,7 +6240,7 @@ impl SystemResourceCollector {
             ResourceProbe::NetworkConnectionLimit,
             ResourceProbeFallback::ConservativeDefault,
             platform::fd_rlimit(),
-            |(_, hard)| Some(*hard),
+            |(soft, _)| Some(*soft),
         );
 
         let current_connections =
@@ -6245,10 +6248,11 @@ impl SystemResourceCollector {
                 reason: format!("connection count: {e}"),
             })?;
         // Sockets share the descriptor/handle table, so the connection
-        // ceiling is capped by the platform descriptor ceiling. Use a
-        // reasonable fallback when that limit is unavailable.
-        let (_, hard_max) = fd_limit_result.unwrap_or((512, 1024));
-        let max_limit = if hard_max == 0 { 1024 } else { hard_max };
+        // ceiling is capped by the descriptor limit in force, the soft one
+        // (br-asupersync-1ir2em). Use a reasonable fallback when that limit
+        // is unavailable.
+        let (soft_max, _) = fd_limit_result.unwrap_or((512, 1024));
+        let max_limit = if soft_max == 0 { 1024 } else { soft_max };
         let (soft_limit, hard_limit) = derive_thresholds(max_limit, 70, 85);
         Ok(ResourceMeasurement::new(
             current_connections,
@@ -6544,6 +6548,83 @@ impl Drop for ResourceSampler {
         }
         self.monitor.stop();
     }
+}
+
+impl TriggerConfig {
+    /// The level a downgrade may fall to: the level `measurement` would have
+    /// with its usage `hysteresis` higher. Usage has to fall that far below a
+    /// band's threshold before the band is left (br-asupersync-1ir2em).
+    #[must_use]
+    pub fn calculate_downgrade_floor(&self, measurement: &ResourceMeasurement) -> DegradationLevel {
+        // The epsilon absorbs the sum's rounding: 0.70 + 0.10 is just under
+        // 0.80 in f64, which left Light a point early.
+        let usage_ratio = measurement.usage_ratio() + self.hysteresis + 1e-9;
+        // `is_critical` with the same margin: within 5% of the maximum.
+        let critical = usage_ratio >= 0.95;
+        if usage_ratio >= self.hard_threshold {
+            if critical {
+                DegradationLevel::Emergency
+            } else {
+                DegradationLevel::Heavy
+            }
+        } else if usage_ratio >= self.soft_threshold {
+            if usage_ratio >= (self.hard_threshold - self.hysteresis) {
+                DegradationLevel::Moderate
+            } else {
+                DegradationLevel::Light
+            }
+        } else {
+            DegradationLevel::None
+        }
+    }
+
+    /// The level `measurement` calls for, given the level now in force: an
+    /// escalation is taken as measured, and a downgrade stops at
+    /// [`Self::calculate_downgrade_floor`], so a usage that hovers at a
+    /// threshold does not flip the level back and forth. The cooldown is
+    /// applied after this, by [`Self::apply_hysteresis`].
+    #[must_use]
+    pub fn bounded_degradation(
+        &self,
+        measurement: &ResourceMeasurement,
+        current_level: DegradationLevel,
+    ) -> DegradationLevel {
+        let new_level = self.calculate_degradation(measurement);
+        if new_level >= current_level {
+            return new_level;
+        }
+        let floor = self
+            .calculate_downgrade_floor(measurement)
+            .min(current_level);
+        new_level.max(floor)
+    }
+}
+
+/// Whether [`platform::process_rss_bytes`] can only report the lifetime peak
+/// RSS (`getrusage(RUSAGE_SELF).ru_maxrss` on macOS and the BSDs), not the
+/// current one.
+const RSS_READING_IS_LIFETIME_PEAK: bool = cfg!(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly"
+));
+
+/// The process's current RSS from a platform reading. A lifetime peak never
+/// falls, so as current usage it would hold the memory level at a transient
+/// peak for the life of the process: one burst to 90% of the limit kept
+/// admission at Emergency, refusing every Normal child region from then on
+/// (br-asupersync-1ir2em HIGH-1). Such a reading is refused as unsupported,
+/// and memory is then not measured, as on platforms with no reading at all.
+fn current_rss_reading(reading: std::io::Result<u64>, peak_only: bool) -> std::io::Result<u64> {
+    if peak_only && reading.is_ok() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "only the lifetime peak RSS (ru_maxrss) is available, not the current RSS",
+        ));
+    }
+    reading
 }
 
 #[cfg(test)]
@@ -7031,9 +7112,19 @@ mod tests {
     fn thfiyk_collect_memory_usage_returns_real_rss() {
         let pressure = Arc::new(ResourcePressure::new());
         let collector = SystemResourceCollector::new(pressure, Duration::from_secs(1));
-        let m = collector
-            .collect_memory_usage()
-            .expect("memory usage read should succeed on supported platform");
+        let read = collector.collect_memory_usage();
+        // macOS and the BSDs read only the lifetime peak (ru_maxrss), which is
+        // refused as current usage (1ir2em HIGH-1).
+        if RSS_READING_IS_LIFETIME_PEAK {
+            match read {
+                Err(ResourceMonitorError::SystemAccessFailed { reason }) => {
+                    assert!(reason.contains("ru_maxrss"), "{reason}");
+                }
+                other => panic!("a lifetime peak is not current usage: {other:?}"),
+            }
+            return;
+        }
+        let m = read.expect("memory usage read should succeed on supported platform");
         // The old constant-only reader always returned 512 MiB exactly; the real
         // reader yields the live VmRSS / ru_maxrss which is virtually
         // never that exact value. We assert (a) non-zero current
@@ -7106,6 +7197,143 @@ mod tests {
         assert!(m.max_limit > 0, "connection ceiling > 0");
         assert!(m.soft_limit <= m.hard_limit);
         assert!(m.hard_limit <= m.max_limit);
+    }
+
+    /// 1ir2em HIGH-1: macOS and the BSDs read only `ru_maxrss`, the lifetime
+    /// peak. Taken as current usage, one burst held the memory level at
+    /// Emergency for the life of the process. A peak-only reading is refused
+    /// as unsupported, so memory goes unmeasured there; a current reading
+    /// and a failed one pass through unchanged.
+    #[test]
+    fn a_lifetime_peak_rss_is_not_taken_as_current_usage() {
+        let peak = 15_u64 << 30;
+        let refused = current_rss_reading(Ok(peak), true).expect_err("a peak is not current usage");
+        assert_eq!(refused.kind(), std::io::ErrorKind::Unsupported);
+        assert!(refused.to_string().contains("ru_maxrss"), "{refused}");
+        assert_eq!(current_rss_reading(Ok(peak), false).unwrap(), peak);
+        let failed = current_rss_reading(Err(std::io::Error::other("no reading")), true)
+            .expect_err("a failed reading stays failed");
+        assert_eq!(failed.to_string(), "no reading");
+        // Linux reads VmRSS, the current RSS, which falls again.
+        #[cfg(target_os = "linux")]
+        assert!(!RSS_READING_IS_LIFETIME_PEAK);
+        #[cfg(target_os = "macos")]
+        assert!(RSS_READING_IS_LIFETIME_PEAK);
+    }
+
+    /// 1ir2em MEDIUM-2: `EMFILE` comes at the soft descriptor limit, which
+    /// both the descriptor and the connection measurements now use as their
+    /// ceiling; the connection count is this process's own sockets. (It is
+    /// not compared with the descriptor count: the two scans run at different
+    /// times while other tests open and close sockets.)
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn descriptor_and_connection_pressure_use_the_soft_limit_and_own_sockets() {
+        let (soft, _) = platform::fd_rlimit().expect("rlimit");
+        let pressure = Arc::new(ResourcePressure::new());
+        let collector = SystemResourceCollector::new(pressure, Duration::from_secs(1));
+        let fds = collector.collect_fd_usage().expect("fd usage");
+        assert_eq!(fds.max_limit, if soft == 0 { 1024 } else { soft });
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let pairs: Vec<_> = (0..4)
+            .map(|_| std::os::unix::net::UnixStream::pair().expect("socket pair"))
+            .collect();
+        let sockets = platform::process_connection_count().expect("connection count");
+        assert!(sockets >= 9, "our listener and eight pair ends: {sockets}");
+        let connections = collector.collect_network_usage().expect("network usage");
+        assert_eq!(connections.max_limit, fds.max_limit);
+        drop((listener, pairs));
+    }
+
+    /// 1ir2em MEDIUM-1: the downgrade test was `new <= current - 1`, which
+    /// every downgrade passes, so a usage hovering at a threshold flipped the
+    /// level each cooldown. A downgrade now stops at the level the usage
+    /// would have `hysteresis` higher.
+    #[test]
+    fn a_downgrade_waits_until_usage_falls_by_the_hysteresis_margin() {
+        let cpu = TriggerConfig::default_for_resource(&ResourceType::CpuLoad);
+        let load = |percent| ResourceMeasurement::new(percent, 80, 95, 100);
+        assert_eq!(
+            cpu.bounded_degradation(&load(96), DegradationLevel::None),
+            DegradationLevel::Emergency
+        );
+        for (percent, current, expected) in [
+            (94, DegradationLevel::Emergency, DegradationLevel::Emergency),
+            (86, DegradationLevel::Emergency, DegradationLevel::Emergency),
+            (80, DegradationLevel::Emergency, DegradationLevel::Moderate),
+            (72, DegradationLevel::Moderate, DegradationLevel::Light),
+            (70, DegradationLevel::Moderate, DegradationLevel::Light),
+            (69, DegradationLevel::Light, DegradationLevel::None),
+            (50, DegradationLevel::Light, DegradationLevel::None),
+            (90, DegradationLevel::Light, DegradationLevel::Moderate),
+        ] {
+            assert_eq!(
+                cpu.bounded_degradation(&load(percent), current),
+                expected,
+                "{percent}% load at {current:?}"
+            );
+        }
+    }
+
+    /// 1ir2em MEDIUM-1: the cooldown was checked before the
+    /// immediate-Emergency branch, so a jump to Emergency inside a cooldown
+    /// waited for it to end.
+    #[test]
+    fn emergency_is_entered_inside_a_cooldown() {
+        let config = TriggerConfig {
+            cooldown: Duration::from_secs(3_600),
+            ..TriggerConfig::default_for_resource(&ResourceType::CpuLoad)
+        };
+        let just_changed = Some(Instant::now());
+        assert_eq!(
+            config.apply_hysteresis(
+                DegradationLevel::Emergency,
+                DegradationLevel::Light,
+                just_changed
+            ),
+            DegradationLevel::Emergency
+        );
+        assert_eq!(
+            config.apply_hysteresis(
+                DegradationLevel::Moderate,
+                DegradationLevel::Light,
+                just_changed
+            ),
+            DegradationLevel::Light,
+            "other changes still wait for the cooldown"
+        );
+    }
+
+    /// The engine applies the margin: 94% load after an Emergency at 96%
+    /// keeps Emergency, where it used to drop to Moderate.
+    #[test]
+    fn the_engine_keeps_a_level_while_usage_hovers_at_its_threshold() {
+        let monitor = ResourceMonitor::new(MonitorConfig::default());
+        monitor
+            .engine()
+            .register_resource_type(
+                ResourceType::CpuLoad,
+                TriggerConfig {
+                    cooldown: Duration::ZERO,
+                    ..TriggerConfig::default_for_resource(&ResourceType::CpuLoad)
+                },
+            )
+            .expect("register");
+        let level_after = |percent| {
+            monitor.pressure().update_measurement(
+                ResourceType::CpuLoad,
+                ResourceMeasurement::new(percent, 80, 95, 100),
+            );
+            let _ = monitor.engine().process_measurements();
+            monitor
+                .pressure()
+                .get_degradation_level(&ResourceType::CpuLoad)
+        };
+        assert_eq!(level_after(96), DegradationLevel::Emergency);
+        assert_eq!(level_after(94), DegradationLevel::Emergency);
+        assert_eq!(level_after(96), DegradationLevel::Emergency);
+        assert_eq!(level_after(60), DegradationLevel::None);
     }
 
     fn sample_scheduler_metrics() -> SchedulerEvidenceMetrics {

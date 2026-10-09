@@ -630,6 +630,15 @@ pub trait ToSql: Sync {
     fn format(&self) -> Format {
         Format::Binary
     }
+
+    /// Whether this is a `SystemTime` (or an `Option`, reference or array of
+    /// them): a prepared statement refuses one where the server typed the
+    /// parameter as a built-in type other than `timestamptz`. Implementations
+    /// outside this crate keep the default, so their binds behave as before.
+    #[doc(hidden)]
+    fn binds_system_time(&self) -> bool {
+        false
+    }
 }
 
 /// Decode a PostgreSQL wire-format value into a Rust type.
@@ -781,6 +790,9 @@ impl<T: ToSql> ToSql for Option<T> {
             None => Format::Binary,
         }
     }
+    fn binds_system_time(&self) -> bool {
+        self.as_ref().is_some_and(ToSql::binds_system_time)
+    }
 }
 
 impl<T: ToSql + ?Sized> ToSql for &T {
@@ -792,6 +804,9 @@ impl<T: ToSql + ?Sized> ToSql for &T {
     }
     fn format(&self) -> Format {
         (*self).format()
+    }
+    fn binds_system_time(&self) -> bool {
+        (*self).binds_system_time()
     }
 }
 
@@ -1100,10 +1115,20 @@ impl ToSql for Untyped<'_> {
 /// Microseconds from the Unix epoch to PostgreSQL's epoch, 2000-01-01 UTC.
 const PG_EPOCH_UNIX_MICROS: i64 = 946_684_800_000_000;
 
+/// PostgreSQL's `FirstNormalObjectId`: OIDs below it are the built-in types;
+/// domains, extension types and other user-defined types get one at or above.
+const FIRST_NORMAL_OBJECT_ID: u32 = 16_384;
+
 /// `SystemTime` binds as `timestamptz`, in binary (microseconds since
 /// 2000-01-01 UTC; a sub-microsecond remainder is truncated toward the past).
-/// Bound into a `timestamp without time zone` column, the instant is converted
-/// to the session's `TimeZone`, as PostgreSQL converts any `timestamptz`.
+/// Bound into a `timestamp without time zone` column by
+/// [`PgConnection::execute_params`], the instant is converted to the session's
+/// `TimeZone`, as PostgreSQL converts any `timestamptz`. A prepared statement
+/// whose parameter the server typed as another built-in type refuses it (cast
+/// the parameter, `$1::timestamptz`): in a `timestamp` the binary value would
+/// be stored unconverted, as UTC wall-clock time, and other types would read
+/// its bytes as their own. A domain or other user-defined type is left to the
+/// server, which decodes a domain over `timestamptz` correctly.
 impl ToSql for std::time::SystemTime {
     fn to_sql(&self, buf: &mut Vec<u8>) -> Result<IsNull, PgError> {
         let micros = system_time_unix_micros(*self)?
@@ -1115,14 +1140,28 @@ impl ToSql for std::time::SystemTime {
     fn type_oid(&self) -> u32 {
         oid::TIMESTAMPTZ
     }
+    fn binds_system_time(&self) -> bool {
+        true
+    }
 }
 
-/// `timestamptz` and `timestamp` decode into `SystemTime`. A `timestamp`
-/// carries no offset and is read as UTC. Text values must be in the ISO
+/// `timestamptz` decodes into `SystemTime`. Text values must be in the ISO
 /// `DateStyle` (the server default); `infinity` and `-infinity` have no
 /// `SystemTime` and fail to decode.
+///
+/// A `timestamp without time zone` is refused: it is a wall-clock time in a
+/// zone the value does not record, so no instant follows from it. Select it as
+/// `col AT TIME ZONE 'UTC'` (or the zone it was written in), which is a
+/// `timestamptz` (br-asupersync-qml5yb).
 impl FromSql for std::time::SystemTime {
-    fn from_sql(data: &[u8], _oid: u32, format: Format) -> Result<Self, PgError> {
+    fn from_sql(data: &[u8], oid: u32, format: Format) -> Result<Self, PgError> {
+        if oid == oid::TIMESTAMP {
+            return Err(PgError::Protocol(
+                "a timestamp without time zone has no SystemTime; select it AT TIME ZONE \
+                 'UTC' (or the zone it was written in) to get a timestamptz"
+                    .into(),
+            ));
+        }
         let unix_micros = match format {
             Format::Binary => {
                 let raw: [u8; 8] = data
@@ -1147,7 +1186,7 @@ impl FromSql for std::time::SystemTime {
         .ok_or_else(timestamp_out_of_range)
     }
     fn accepts(oid: u32) -> bool {
-        matches!(oid, oid::TIMESTAMP | oid::TIMESTAMPTZ)
+        oid == oid::TIMESTAMPTZ
     }
 }
 
@@ -1219,6 +1258,12 @@ fn parse_pg_timestamp_text(data: &[u8]) -> Result<i64, PgError> {
         return Err(invalid());
     };
     let (year, month, day) = (number(year)?, number(month)?, number(day)?);
+    // PostgreSQL's timestamps end in year 294276; a larger year can only be
+    // crafted text, and would overflow the arithmetic below
+    // (br-asupersync-qml5yb).
+    if year > 294_276 {
+        return Err(timestamp_out_of_range());
+    }
     let year = if before_christ { 1 - year } else { year };
 
     let (clock, offset) = time
@@ -1258,7 +1303,7 @@ fn parse_pg_timestamp_text(data: &[u8]) -> Result<i64, PgError> {
             let hours = number(offset_parts.next().ok_or_else(invalid)?)?;
             let minutes = offset_parts.next().map_or(Ok(0), number)?;
             let seconds = offset_parts.next().map_or(Ok(0), number)?;
-            if offset_parts.next().is_some() || minutes > 59 || seconds > 59 {
+            if offset_parts.next().is_some() || hours > 24 || minutes > 59 || seconds > 59 {
                 return Err(invalid());
             }
             let total = hours * 3_600 + minutes * 60 + seconds;
@@ -1322,9 +1367,12 @@ impl FromSql for serde_json::Value {
 /// `Vec<T>` and `[T]` of these types bind as the matching array type, so a
 /// batch lookup such as `WHERE id = ANY($1)` takes a `Vec<i64>`, and
 /// `Option<T>` elements bind SQL NULLs. Arrays are sent in binary format; each
-/// element is encoded by its own [`ToSql`] implementation. Decoding goes
-/// through `Vec<T>`'s [`FromSql`] implementation, for any element type `T`
-/// that implements [`FromSql`].
+/// element is encoded by its own [`ToSql`] implementation, which must produce
+/// the binary form of [`Self::ELEMENT_OID`]. An element whose
+/// [`ToSql::format`] is [`Format::Text`] is refused, except for the text
+/// types (`text`, `varchar`, `bpchar`, `json`), whose text is their binary
+/// form. Decoding goes through `Vec<T>`'s [`FromSql`] implementation, for any
+/// element type `T` that implements [`FromSql`].
 pub trait PgArrayElement: ToSql {
     /// The array type a `[Self]` binds as.
     const ARRAY_OID: u32;
@@ -1366,6 +1414,9 @@ impl<T: PgArrayElement> ToSql for [T] {
     fn type_oid(&self) -> u32 {
         T::ARRAY_OID
     }
+    fn binds_system_time(&self) -> bool {
+        self.iter().any(ToSql::binds_system_time)
+    }
 }
 
 impl<T: PgArrayElement> ToSql for Vec<T> {
@@ -1375,10 +1426,48 @@ impl<T: PgArrayElement> ToSql for Vec<T> {
     fn type_oid(&self) -> u32 {
         T::ARRAY_OID
     }
+    fn binds_system_time(&self) -> bool {
+        self.as_slice().binds_system_time()
+    }
 }
 
 fn array_length(value: usize, what: &str) -> Result<i32, PgError> {
     i32::try_from(value).map_err(|_| PgError::Protocol(format!("array {what} exceeds i32::MAX")))
+}
+
+/// Element types whose text form is also their binary form, so an element
+/// that encodes itself as text is still valid inside a binary array.
+fn text_is_binary(element_oid: u32) -> bool {
+    matches!(
+        element_oid,
+        oid::TEXT | oid::VARCHAR | oid::BPCHAR | oid::JSON
+    )
+}
+
+/// A binary `text[]` parameter sent as another text-family array type: its
+/// header's element OID (after the dimension count and the has-NULL flag)
+/// is rewritten, and the elements, whose bytes are the same, are kept.
+struct TextArrayAs<'a> {
+    inner: &'a dyn ToSql,
+    array_oid: u32,
+    element_oid: u32,
+}
+
+impl ToSql for TextArrayAs<'_> {
+    fn to_sql(&self, buf: &mut Vec<u8>) -> Result<IsNull, PgError> {
+        let start = buf.len();
+        let null = self.inner.to_sql(buf)?;
+        if null == IsNull::No && buf.len() >= start + 12 {
+            buf[start + 8..start + 12].copy_from_slice(&self.element_oid.to_be_bytes());
+        }
+        Ok(null)
+    }
+    fn type_oid(&self) -> u32 {
+        self.array_oid
+    }
+    fn format(&self) -> Format {
+        self.inner.format()
+    }
 }
 
 /// PostgreSQL's binary array format: dimension count, has-NULL flag, element
@@ -1407,6 +1496,16 @@ fn encode_binary_array<T: PgArrayElement>(
                 buf.extend_from_slice(&(-1_i32).to_be_bytes());
             }
             IsNull::No => {
+                // The server reads every element as the binary form of the
+                // element type: a text-encoded int4 "1234" would be stored
+                // as 825373492.
+                if value.format() == Format::Text && !text_is_binary(T::ELEMENT_OID) {
+                    return Err(PgError::Protocol(format!(
+                        "array element of type OID {} encodes as text; a binary array needs \
+                         its binary form",
+                        T::ELEMENT_OID
+                    )));
+                }
                 buf.extend_from_slice(&array_length(element.len(), "element")?.to_be_bytes());
                 buf.extend_from_slice(&element);
             }
@@ -3056,6 +3155,9 @@ pub struct PgConnectOptions {
     /// server's Unix-domain socket when it is an absolute path (the client
     /// then connects to `<host>/.s.PGSQL.<port>`, and `ssl_mode` does not
     /// apply). Unix-domain sockets are available on Unix platforms only.
+    /// A configured password must be asked for, over a socket too: a server
+    /// that accepts the connection with peer or trust authentication instead
+    /// is refused, so a socket URL relying on those carries no password.
     pub host: String,
     /// Port number (default 5432).
     pub port: u16,
@@ -3208,6 +3310,19 @@ fn percent_decode(input: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
+/// Query parameters that [`PgConnectOptions::parse`] reads only when the
+/// host is a Unix-domain socket directory.
+#[derive(Default)]
+struct SocketFormParams<'a> {
+    port: Option<&'a str>,
+    user: Option<&'a str>,
+    password: Option<&'a str>,
+    /// A parameter of that form this client cannot honour.
+    unsupported: Option<&'a str>,
+    /// One of `host`, `port`, `user` and `password` given more than once.
+    repeated: Option<&'a str>,
+}
+
 impl PgConnectOptions {
     /// Parse a connection URL.
     ///
@@ -3216,6 +3331,10 @@ impl PgConnectOptions {
     /// A Unix-domain socket directory is given percent-encoded as the host
     /// (`postgres://user@%2Fvar%2Frun%2Fpostgresql/db`) or, with no host in
     /// the URL, as the `host` parameter (`postgres:///db?host=/var/run/postgresql`).
+    /// For a socket the `port`, `user` and `password` parameters are read
+    /// too; `requirepeer` and `dbname` are refused, and so is a value the URL
+    /// already gives or gives twice. URLs that name a TCP host ignore those
+    /// parameters.
     /// Use [`Self::parse_with_tls`] for `verify-ca`, `verify-full`, or
     /// `sslrootcert`, which cannot be represented by this legacy struct alone.
     pub fn parse(url: &str) -> Result<Self, PgError> {
@@ -3262,6 +3381,8 @@ impl PgConnectOptions {
         } else {
             ("postgres".to_string(), None, auth_host)
         };
+        // The authority names a user (not `@host` or `:pw@host`).
+        let user_given = auth_host.contains('@') && !user.is_empty();
 
         // Split host:port (handle IPv6 addresses like [::1]:5432)
         let (host, port) = if host_port.starts_with('[') {
@@ -3300,6 +3421,7 @@ impl PgConnectOptions {
         // Parse query parameters
         let mut ssl_mode = SslMode::Prefer;
         let mut host_param = None;
+        let mut socket_params = SocketFormParams::default();
         let mut application_name = None;
         let mut connect_timeout = None;
         let mut tls = PgTlsOptions::default();
@@ -3360,7 +3482,23 @@ impl PgConnectOptions {
                     // host (usually a Unix-socket directory) as a parameter.
                     // It is read only when the URL names no host, where it
                     // used to be refused as a missing host.
-                    "host" => host_param = Some(percent_decode(value)),
+                    "host" => {
+                        if host_param.replace(percent_decode(value)).is_some() {
+                            socket_params.repeated = Some(key);
+                        }
+                    }
+                    // Read only for a socket host, below.
+                    "port" | "user" | "password" => {
+                        let slot = match key {
+                            "port" => &mut socket_params.port,
+                            "user" => &mut socket_params.user,
+                            _ => &mut socket_params.password,
+                        };
+                        if slot.replace(value).is_some() {
+                            socket_params.repeated = Some(key);
+                        }
+                    }
+                    "dbname" | "requirepeer" => socket_params.unsupported = Some(key),
                     _ => {} // ignore unknown parameters
                 }
             }
@@ -3385,12 +3523,55 @@ impl PgConnectOptions {
         if let Some(verification) = verification {
             tls = tls.verification(verification);
         }
+        let (mut user, mut password, mut port) = (user, password, port);
+        let decoded_host = percent_decode(host);
+        if host.is_empty() || unix_socket_path(&decoded_host, port).is_some() {
+            // libpq's socket forms name the rest of their target in the query
+            // as well. Ignoring `port` or `user` connected to another
+            // cluster's socket, or as `postgres`, without an error, so they
+            // are read here. A value the URL gives twice, or a parameter this
+            // client cannot honour (`requirepeer`, `dbname`), is refused
+            // (br-asupersync-qml5yb).
+            if let Some(key) = socket_params.unsupported {
+                return Err(PgError::InvalidUrl(format!(
+                    "the {key} parameter is not supported"
+                )));
+            }
+            let twice = |name: &str| PgError::InvalidUrl(format!("the URL gives the {name} twice"));
+            if let Some(key) = socket_params.repeated {
+                return Err(twice(key));
+            }
+            // A socket directory in the authority and a `host` parameter.
+            if !host.is_empty() && host_param.is_some() {
+                return Err(twice("host"));
+            }
+            if let Some(value) = socket_params.port {
+                if host_port.contains(':') {
+                    return Err(twice("port"));
+                }
+                port = value
+                    .parse()
+                    .map_err(|_| PgError::InvalidUrl(format!("invalid port: {value}")))?;
+            }
+            if let Some(value) = socket_params.user {
+                if user_given {
+                    return Err(twice("user"));
+                }
+                user = percent_decode(value);
+            }
+            if let Some(value) = socket_params.password {
+                if password.is_some() {
+                    return Err(twice("password"));
+                }
+                password = Some(percent_decode(value));
+            }
+        }
         let host = if host.is_empty() {
             host_param
                 .filter(|host| !host.is_empty())
                 .ok_or_else(|| PgError::InvalidUrl("missing host".to_string()))?
         } else {
-            percent_decode(host)
+            decoded_host
         };
         Ok((
             Self {
@@ -5652,10 +5833,22 @@ impl PgConnection {
                         0 => {
                             // AuthenticationOk
                             if options.password.is_some() && !auth_challenged {
-                                return Err(PgError::AuthenticationFailed(
-                                    "server accepted connection without challenging configured password"
-                                        .to_string(),
-                                ));
+                                // Over a Unix-domain socket this is peer or
+                                // trust authentication. It is refused all the
+                                // same, since a socket another local process
+                                // squats answers this way too; the message
+                                // says so instead of hinting at an attack.
+                                let socket = unix_socket_path(&options.host, options.port);
+                                let reason = if socket.is_some() {
+                                    "server accepted the Unix-domain socket connection without \
+                                     asking for the configured password (peer or trust \
+                                     authentication); leave the password out of a socket URL \
+                                     that relies on it"
+                                } else {
+                                    "server accepted connection without challenging configured \
+                                     password"
+                                };
+                                return Err(PgError::AuthenticationFailed(reason.to_string()));
                             }
                             return Ok(());
                         }
@@ -7990,8 +8183,10 @@ impl PgConnection {
     /// float where it inferred an integer, has the same width, so the server
     /// reads the bytes as the other type and stores a wrong value without
     /// an error: `100i64` for a `double precision` parameter stored
-    /// 4.94e-322. Those pairs are refused before anything is written. NULLs
-    /// carry no bytes and pass; other mismatches are left to the server.
+    /// 4.94e-322. Those pairs are refused before anything is written, and so
+    /// is a `SystemTime` where the server inferred another built-in type.
+    /// NULLs carry no bytes and pass; other mismatches are left to the
+    /// server.
     fn validate_prepared_bind_types(
         stmt: &PgStatement,
         params: &[&dyn ToSql],
@@ -8002,21 +8197,69 @@ impl PgConnection {
             let sent = param.type_oid();
             let crossed = (INTEGERS.contains(&sent) && FLOATS.contains(&expected))
                 || (FLOATS.contains(&sent) && INTEGERS.contains(&expected));
-            if !crossed
+            // A `SystemTime` where the server typed another built-in type,
+            // `timestamp without time zone` above all: the binary value would
+            // be stored unconverted, as UTC wall-clock time, while the same
+            // value through `execute_params` is converted to the session's
+            // zone (br-asupersync-qml5yb). Other `ToSql` types bind as they
+            // did in v0.4.3, and a user-defined type (a domain over
+            // `timestamptz`, OID 16384 or above) is left to the server.
+            let misplaced_instant = param.binds_system_time()
+                && expected < FIRST_NORMAL_OBJECT_ID
+                && ((sent == oid::TIMESTAMPTZ && expected != oid::TIMESTAMPTZ)
+                    || (sent == oid::TIMESTAMPTZ_ARRAY && expected != oid::TIMESTAMPTZ_ARRAY));
+            if !(crossed || misplaced_instant)
                 || param.format() != Format::Binary
                 || matches!(param.to_sql(&mut Vec::new())?, IsNull::Yes)
             {
                 continue;
             }
+            let number = position + 1;
+            let consequence = if crossed {
+                "the binary value would be stored as a different number".to_string()
+            } else {
+                format!("cast it (${number}::timestamptz) so the server converts the instant")
+            };
             return Err(PgError::Protocol(format!(
-                "prepared statement '{}' parameter ${} is bound as type OID {sent}, but the \
-                 server expects type OID {expected}; the binary value would be stored as a \
-                 different number",
-                stmt.name,
-                position + 1
+                "prepared statement '{}' parameter ${number} is bound as type OID {sent}, but \
+                 the server expects type OID {expected}; {consequence}",
+                stmt.name
             )));
         }
         Ok(())
+    }
+
+    /// The Bind message for `stmt`. A binary `text[]` value (`Vec<String>`,
+    /// `Vec<&str>`) where the server typed the parameter `varchar[]` or
+    /// `bpchar[]` is sent as that array type: `array_recv` refuses a header
+    /// whose element type is not the parameter's (42804), although the
+    /// element bytes are the same. A scalar `String` binds to `varchar` here
+    /// already, and `execute_params` binds the array (br-asupersync-qml5yb).
+    fn bind_prepared(stmt: &PgStatement, params: &[&dyn ToSql]) -> Result<Vec<u8>, PgError> {
+        let retyped: Vec<Option<TextArrayAs<'_>>> = params
+            .iter()
+            .zip(stmt.param_oids.iter().copied().chain(std::iter::repeat(0)))
+            .map(|(param, expected)| {
+                let element_oid = match expected {
+                    oid::VARCHAR_ARRAY => oid::VARCHAR,
+                    oid::BPCHAR_ARRAY => oid::BPCHAR,
+                    _ => return None,
+                };
+                (param.type_oid() == oid::TEXT_ARRAY && param.format() == Format::Binary).then(
+                    || TextArrayAs {
+                        inner: *param,
+                        array_oid: expected,
+                        element_oid,
+                    },
+                )
+            })
+            .collect();
+        let bound: Vec<&dyn ToSql> = params
+            .iter()
+            .zip(&retyped)
+            .map(|(param, retyped)| retyped.as_ref().map_or(*param, |r| r as &dyn ToSql))
+            .collect();
+        build_bind_msg("", &stmt.name, &bound, Format::Text)
     }
 
     /// Execute a prepared statement returning rows.
@@ -8077,7 +8320,7 @@ impl PgConnection {
         {
             return Outcome::Err(err);
         }
-        let bind = match build_bind_msg("", &stmt.name, params, Format::Text) {
+        let bind = match Self::bind_prepared(stmt, params) {
             Ok(b) => b,
             Err(e) => return Outcome::Err(e),
         };
@@ -8183,7 +8426,7 @@ impl PgConnection {
         {
             return Outcome::Err(err);
         }
-        let bind = match build_bind_msg("", &stmt.name, params, Format::Text) {
+        let bind = match Self::bind_prepared(stmt, params) {
             Ok(b) => b,
             Err(e) => return Outcome::Err(e),
         };

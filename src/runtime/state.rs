@@ -4922,8 +4922,21 @@ impl RuntimeState {
         std::sync::Arc<crate::runtime::spawn_mailbox::AdmittedRegionSlot>,
         Result<crate::runtime::spawn_mailbox::AdmittedRegion, RegionCreateError>,
     ) {
+        // A race winner's context kept past its sealed region opens children
+        // where its spawns now land (br-asupersync-inleqi M2), the same rule
+        // as `spawn_target_region`.
+        let parent = match request.parent_fallback {
+            Some(fallback)
+                if self.region(request.parent).is_none_or(|record| {
+                    record.state() == crate::record::region::RegionState::Closed
+                }) =>
+            {
+                fallback
+            }
+            _ => request.parent,
+        };
         let outcome = self.mint_child_region_parts(
-            request.parent,
+            parent,
             request.budget,
             request.capability_budget,
             request.requirements,

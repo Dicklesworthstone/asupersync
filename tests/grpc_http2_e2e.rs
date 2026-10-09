@@ -2805,6 +2805,8 @@ enum ReusePeer {
     CloseAfterFirst,
     /// Refuse every later stream with REFUSED_STREAM.
     RefuseAfterFirst,
+    /// Answer every call with a trailers-only `grpc-status: 5` (NOT_FOUND).
+    NotFound,
 }
 
 /// A raw HTTP/2 gRPC echo server counting the TCP connections it accepts.
@@ -2882,6 +2884,26 @@ fn serve_unary_reuse_connection(
                 settled.send(()).unwrap();
                 continue;
             }
+            if mode == ReusePeer::NotFound {
+                // Trailers-only: one HEADERS frame carries the status and
+                // ends the stream.
+                bodies.remove(&stream_id);
+                connection
+                    .send_headers(
+                        stream_id,
+                        vec![
+                            Header::new(":status", "200"),
+                            Header::new("content-type", "application/grpc"),
+                            Header::new("grpc-status", "5"),
+                            Header::new("grpc-message", "no such key"),
+                        ],
+                        true,
+                    )
+                    .unwrap();
+                write_owned_h2_frames(&mut socket, &mut connection);
+                settled.send(()).unwrap();
+                continue;
+            }
             // The framed request message is echoed as the framed response.
             let body = bodies.remove(&stream_id).unwrap_or_default().freeze();
             connection
@@ -2913,7 +2935,7 @@ fn serve_unary_reuse_connection(
                     settled.send(()).unwrap();
                     return;
                 }
-                ReusePeer::Serve | ReusePeer::RefuseAfterFirst => {
+                ReusePeer::Serve | ReusePeer::RefuseAfterFirst | ReusePeer::NotFound => {
                     write_owned_h2_frames(&mut socket, &mut connection);
                     settled.send(()).unwrap();
                 }
@@ -2943,9 +2965,17 @@ fn unary_reuse_case(mode: ReusePeer, reuse: usize, calls: usize) -> usize {
             let payload = Bytes::from(format!("reuse call {call}"));
             let response = client
                 .unary::<Bytes, Bytes>("/test.Reuse/Echo", Request::new(payload.clone()))
-                .await
-                .unwrap_or_else(|status| panic!("{mode:?} reuse={reuse} call {call}: {status}"));
-            assert_eq!(response.get_ref(), &payload);
+                .await;
+            if mode == ReusePeer::NotFound {
+                let status = response.expect_err("the peer answers NOT_FOUND");
+                assert_eq!(status.code(), Code::NotFound, "{status}");
+                assert_eq!(status.message(), "no such key");
+            } else {
+                let response = response.unwrap_or_else(|status| {
+                    panic!("{mode:?} reuse={reuse} call {call}: {status}")
+                });
+                assert_eq!(response.get_ref(), &payload);
+            }
             // The peer finished answering (and any GOAWAY or close after it).
             // Loopback delivers those bytes before the next call looks.
             while settled.recv_timeout(Duration::from_millis(200)).is_ok() {}
@@ -2982,6 +3012,19 @@ fn unary_reuse_replaces_connections_the_server_ended_or_refused() {
     // the call, so it is retried once on a fresh connection.
     assert_eq!(unary_reuse_case(ReusePeer::RefuseAfterFirst, 2, 2), 2);
     test_complete!("unary_reuse_replaces_connections_the_server_ended_or_refused");
+}
+
+/// asupersync-mu5yhv finding 4: a call that ends with a non-OK grpc-status
+/// completed its stream cleanly in both directions, so its connection stays
+/// reusable. It used to be dropped like a transport failure, which cost one
+/// connection (and on https one handshake) per failed call.
+#[test]
+fn unary_reuse_keeps_a_connection_whose_call_ended_with_a_grpc_error() {
+    init_test("unary_reuse_keeps_a_connection_whose_call_ended_with_a_grpc_error");
+    assert_eq!(unary_reuse_case(ReusePeer::NotFound, 2, 3), 1);
+    // Without reuse each call still dials its own connection.
+    assert_eq!(unary_reuse_case(ReusePeer::NotFound, 0, 2), 2);
+    test_complete!("unary_reuse_keeps_a_connection_whose_call_ended_with_a_grpc_error");
 }
 
 // ============================================================================
@@ -3256,5 +3299,94 @@ mod legacy_streaming {
             }
         }
         test_complete!("legacy_client_server_and_bidi_streaming_cross_native_http2");
+    }
+
+    /// Two clones of one bidi response stream, read by two tasks that both
+    /// park before anything is sent (asupersync-mu5yhv finding 3): every echo
+    /// reaches one of them and both see the end. The call used to keep one
+    /// waker for its response side, so the reader that parked first was never
+    /// woken and this case hung until the watchdog.
+    fn run_clone_case(workers: usize) {
+        let runtime = if workers == 1 {
+            RuntimeBuilder::current_thread()
+        } else {
+            RuntimeBuilder::new().worker_threads(workers)
+        }
+        .build()
+        .expect("legacy streaming runtime");
+        let handle = runtime.handle();
+        let task_handle = handle.clone();
+        runtime.block_on(handle.spawn(async move {
+            let server = Server::builder().add_service(Streams).build();
+            let server = Arc::new(server);
+            let listener = server
+                .bind_registered_duplex_http2(
+                    "127.0.0.1:0",
+                    HostPolicy::allow_all(),
+                    ServerDuplexConfig::default(),
+                )
+                .await
+                .expect("bind legacy streaming listener");
+            let address = listener.local_addr().unwrap();
+            let manager = listener.connection_manager().clone();
+            let listener_runtime = task_handle.clone();
+            let serving = task_handle
+                .spawn(async move { listener.run_streaming_produced(&listener_runtime).await });
+            let channel = Channel::builder(format!("http://127.0.0.1:{}", address.port()))
+                .connect_timeout(LIMIT)
+                .timeout(LIMIT)
+                .connect()
+                .await
+                .expect("legacy streaming channel");
+            let mut client = GrpcClient::new(channel);
+
+            let (mut sink, responses) = client
+                .bidi_streaming::<Bytes, Bytes>("/legacy.Streams/Echo")
+                .await
+                .expect("bidi dials the server");
+            let readers: Vec<_> = [responses.clone(), responses]
+                .into_iter()
+                .map(|mut responses| {
+                    task_handle.spawn(async move {
+                        let mut markers = Vec::new();
+                        while let Some(echo) = next_response(&mut responses).await {
+                            markers.push(echo.expect("echo")[0]);
+                        }
+                        markers
+                    })
+                })
+                .collect();
+            // Nothing has been sent, so both readers park on the call.
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(200)).await;
+            for marker in 0..4_u8 {
+                sink.send(Bytes::from(vec![marker; 16])).await.unwrap();
+            }
+            sink.close().await.unwrap();
+            let mut markers = Vec::new();
+            for reader in readers {
+                markers.extend(reader.await);
+            }
+            markers.sort_unstable();
+            assert_eq!(markers, vec![0, 1, 2, 3]);
+            drop(sink);
+
+            assert!(manager.begin_drain(Duration::from_secs(5)));
+            serving.await.expect("legacy streaming listener drain");
+            log_test_event(
+                "legacy_bidi_response_clones_read_from_two_tasks",
+                json!({ "bead": "asupersync-mu5yhv", "workers": workers }),
+            );
+        }));
+        drop(handle);
+        assert!(runtime.shutdown_timeout(LIMIT));
+    }
+
+    #[test]
+    fn legacy_bidi_response_stream_clones_read_from_two_tasks_both_see_the_end() {
+        init_test("legacy_bidi_response_stream_clones_read_from_two_tasks_both_see_the_end");
+        for workers in [1, 2] {
+            owned_stream_watchdog(move || run_clone_case(workers));
+        }
+        test_complete!("legacy_bidi_response_stream_clones_read_from_two_tasks_both_see_the_end");
     }
 }

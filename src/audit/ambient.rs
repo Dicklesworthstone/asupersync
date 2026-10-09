@@ -1589,7 +1589,14 @@ fn test_function() {
     // The connect sites in mysql.rs, postgres.rs, grpc/client.rs and
     // grpc/native_stream/connect.rs only changed their quoted line text.
     // No scanner exemption or detection pattern changed.
-    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 825;
+    // 825 -> 827 (re-blessed 2026-10-09 after 231319ebe and ceac580d9 landed
+    // without the inventory): runtime/io_driver/shared.rs's poll gate times
+    // its wait with std::time::Instant::now() to shorten the backend poll's
+    // timeout, a monotonic wait like the reactor's own. http/h1/http_client.rs
+    // dials a resolved address on a second path, through a configured
+    // dns_resolver, with the same TcpStream::connect_socket_addr. No scanner
+    // exemption or detection pattern changed.
+    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 827;
 
     fn src_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src")

@@ -450,3 +450,24 @@ fn connect_timeout_still_bounds_a_peer_that_never_sends_settings() {
         Poll::Pending => panic!("the handshake wait outlived connect_timeout"),
     }
 }
+
+/// mu5yhv finding 5: `Channel::connect` accepts `unix:` targets (45bf3826f),
+/// but `server_streaming_on` parsed the channel URI as `scheme://authority`
+/// and refused every one with INVALID_ARGUMENT before any I/O.
+#[test]
+fn unix_channel_targets_use_the_localhost_authority() {
+    for uri in [
+        "unix:///run/app.sock",
+        "unix:/run/app.sock",
+        "unix:app.sock",
+        "UNIX:///run/app.sock",
+        "Unix:app.sock",
+    ] {
+        assert_eq!(authority(uri).expect(uri), ("http", "localhost"));
+    }
+    assert_eq!(
+        authority("http://h:50051").expect("http"),
+        ("http", "h:50051")
+    );
+    assert!(authority("ftp://h").is_err());
+}

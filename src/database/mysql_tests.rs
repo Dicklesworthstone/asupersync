@@ -6001,6 +6001,69 @@ mod tests {
         payload
     }
 
+    /// qml5yb HIGH 3: trusted SQL skips the static check that refused
+    /// comments, and a comment before `USE` or a version-comment `SET
+    /// sql_mode` hid the verb, so the prepared-statement cache was kept and
+    /// later statements reached the old database.
+    #[test]
+    fn comment_prefixed_use_and_sql_mode_changes_clear_the_prepared_cache() {
+        for sql in [
+            "USE b",
+            "use`b`",
+            "USE/* x */b",
+            "/* switch tenant */ USE b",
+            "/* a */ /* b */\n  USE b",
+            "-- x\nUSE b",
+            "--\tx\nUSE b",
+            "# x\nUSE b",
+            "/*!40101 SET SQL_MODE='ANSI_QUOTES' */",
+            "/*! USE b */",
+            "SET SESSION sql_mode = 'ANSI'",
+            "/* never ends USE b",
+            // An empty version comment ends before the statement, and
+            // MariaDB runs the text of its own executable comments.
+            "/*!40101*/ USE b",
+            "/*!40101 */ USE b",
+            "/*M!100100 USE b */",
+            // A server older than the comment's version skips it, and MySQL
+            // skips every /*M! comment, so the statement after it counts too.
+            "/*M!999999 x */ USE b",
+            "/*!99999 x */ USE b",
+            "/*!40101 USE b",
+        ] {
+            assert!(
+                MySqlConnection::statement_rebinds_prepared_statements(sql),
+                "{sql:?} must clear the prepared-statement cache"
+            );
+        }
+        for sql in [
+            "SELECT * FROM users",
+            "SELECT 1 FROM t USE INDEX (i)",
+            "/* USE b */ SELECT 1",
+            "SET NAMES utf8mb4",
+            "--x\nUSE b",
+            "-- only a comment",
+            "INSERT INTO t VALUES ('USE b')",
+            "/*!40101*/ SELECT 1",
+            "/*!40101 SELECT 1 */ SELECT 2",
+        ] {
+            assert!(
+                !MySqlConnection::statement_rebinds_prepared_statements(sql),
+                "{sql:?} must keep the prepared-statement cache"
+            );
+        }
+        // Each executable comment is read both ways, within a budget: SQL
+        // with more than 16 of them clears the cache rather than cost more.
+        let few = format!("{} SELECT 1", "/*!*/".repeat(3));
+        assert!(!MySqlConnection::statement_rebinds_prepared_statements(
+            &few
+        ));
+        let many = format!("{} SELECT 1", "/*!*/".repeat(17));
+        assert!(MySqlConnection::statement_rebinds_prepared_statements(
+            &many
+        ));
+    }
+
     /// H1: MySQL binds a prepared statement to the default database it was
     /// prepared in. After `USE tenant_b`, prepare of the same SQL returned
     /// the cached statement, still bound to the earlier database, so its

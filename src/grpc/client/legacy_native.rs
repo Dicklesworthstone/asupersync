@@ -15,7 +15,8 @@
 //! both directions, so a sink waiting for upload credit also reads responses,
 //! and a response wait also flushes queued request bytes. The call is polled
 //! with one fan-out waker that wakes every handle parked on it: a sink and a
-//! response stream may live in different tasks without losing a wakeup.
+//! response stream, or clones of one response stream, may live in different
+//! tasks without losing a wakeup.
 //! Responses read while uploading are buffered up to `MAX_STREAM_BUFFERED`;
 //! a sink then waits for the response side to drain them.
 //!
@@ -26,6 +27,7 @@
 
 use std::any::Any;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 
@@ -162,35 +164,76 @@ pub(super) fn downcast_native_response<T: Send + 'static>(
     })
 }
 
-/// Which handle is polling the call.
+/// Which handle is polling the call. A response handle carries its
+/// responder id ([`LegacyNativeCall::new_responder`]): clones of one response
+/// stream are separate handles and may be parked in different tasks.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Role {
-    Sink = 0,
-    Response = 1,
+    Sink,
+    Response(u64),
 }
 
 /// Wakes every handle parked on the call. The call keeps one clone of this
 /// waker registered with its transport, cancel signal and timers.
 #[derive(Default)]
 struct Fanout {
-    wakers: Mutex<[Option<Waker>; 2]>,
+    wakers: Mutex<FanoutWakers>,
+}
+
+#[derive(Default)]
+struct FanoutWakers {
+    sink: Option<Waker>,
+    /// One waker per parked response handle, by responder id. A handle that
+    /// polls again replaces only its own entry, so a clone parked in another
+    /// task keeps its wakeup. Every entry is taken when the response side is
+    /// woken.
+    responses: Vec<(u64, Waker)>,
 }
 
 impl Fanout {
+    /// A waker this replaces is dropped after the lock is released: dropping
+    /// it can free a task whose future drops a handle of this call, which
+    /// takes this lock again.
     fn register(&self, role: Role, waker: &Waker) {
         let mut wakers = lock_unpoisoned(&self.wakers);
-        let slot = &mut wakers[role as usize];
+        let slot = match role {
+            Role::Sink => &mut wakers.sink,
+            Role::Response(responder) => {
+                let responses = &mut wakers.responses;
+                let replaced = match responses.iter_mut().find(|(id, _)| *id == responder) {
+                    Some((_, current)) if current.will_wake(waker) => None,
+                    Some((_, current)) => Some(std::mem::replace(current, waker.clone())),
+                    None => {
+                        responses.push((responder, waker.clone()));
+                        None
+                    }
+                };
+                drop(wakers);
+                drop(replaced);
+                return;
+            }
+        };
         if !slot
             .as_ref()
             .is_some_and(|current| current.will_wake(waker))
         {
-            *slot = Some(waker.clone());
+            let replaced = slot.replace(waker.clone());
+            drop(wakers);
+            drop(replaced);
         }
     }
 
-    fn wake_role(&self, role: Role) {
-        let waker = lock_unpoisoned(&self.wakers)[role as usize].take();
+    fn wake_sink(&self) {
+        let waker = lock_unpoisoned(&self.wakers).sink.take();
         if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+
+    /// Wake every parked response handle.
+    fn wake_responses(&self) {
+        let responses = std::mem::take(&mut lock_unpoisoned(&self.wakers).responses);
+        for (_, waker) in responses {
             waker.wake();
         }
     }
@@ -202,8 +245,9 @@ impl Wake for Fanout {
     }
 
     fn wake_by_ref(self: &Arc<Self>) {
-        let [sink, response] = std::mem::take(&mut *lock_unpoisoned(&self.wakers));
-        for waker in [sink, response].into_iter().flatten() {
+        let FanoutWakers { sink, responses } = std::mem::take(&mut *lock_unpoisoned(&self.wakers));
+        let responses = responses.into_iter().map(|(_, waker)| waker);
+        for waker in sink.into_iter().chain(responses) {
             waker.wake();
         }
     }
@@ -246,6 +290,9 @@ impl CallState {
 pub(super) struct LegacyNativeCall {
     state: Mutex<CallState>,
     fanout: Arc<Fanout>,
+    /// The last responder id handed out; the handle created with the call
+    /// is responder 0. Atomic, so cloning a handle takes no lock.
+    last_responder: AtomicU64,
 }
 
 impl LegacyNativeCall {
@@ -261,7 +308,33 @@ impl LegacyNativeCall {
                 finished: None,
             }),
             fanout: Arc::new(Fanout::default()),
+            last_responder: AtomicU64::new(0),
         })
+    }
+
+    /// A fresh responder id for another response handle on this call, such
+    /// as a clone of its response stream.
+    pub(super) fn new_responder(&self) -> u64 {
+        self.last_responder.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Forgets the waker a dropped response handle left parked, so handles
+    /// cloned and dropped while the call is quiet do not pile up until the
+    /// next wake. The waker is dropped after the lock is released: dropping
+    /// it can free a task whose future drops another handle of this call.
+    pub(super) fn forget_responder(&self, responder: u64) {
+        let forgotten = {
+            let mut wakers = lock_unpoisoned(&self.fanout.wakers);
+            let index = wakers.responses.iter().position(|(id, _)| *id == responder);
+            index.map(|index| wakers.responses.remove(index))
+        };
+        drop(forgotten);
+    }
+
+    /// Response handles with a waker parked on the call.
+    #[cfg(test)]
+    pub(super) fn parked_responders(&self) -> usize {
+        lock_unpoisoned(&self.fanout.wakers).responses.len()
     }
 
     /// Progress the call for `role` until `done` holds, the call ends, or the
@@ -288,8 +361,8 @@ impl LegacyNativeCall {
             match state.call.poll_event(&mut call_task) {
                 Poll::Ready(Some(Ok(LegacyEvent::RequestFlushed))) => {
                     state.request_ready = !state.request_closed;
-                    if role == Role::Response {
-                        self.fanout.wake_role(Role::Sink);
+                    if role != Role::Sink {
+                        self.fanout.wake_sink();
                     }
                 }
                 Poll::Ready(Some(Ok(LegacyEvent::Message(message)))) => {
@@ -301,7 +374,7 @@ impl LegacyNativeCall {
                         state.responses.push_back(message);
                     }
                     if role == Role::Sink {
-                        self.fanout.wake_role(Role::Response);
+                        self.fanout.wake_responses();
                     }
                 }
                 Poll::Ready(None) => {
@@ -321,11 +394,13 @@ impl LegacyNativeCall {
         }
     }
 
+    /// The call ended: wake the handles on the other side, and the other
+    /// response handles when a response handle saw the end.
     fn wake_other(&self, role: Role) {
-        self.fanout.wake_role(match role {
-            Role::Sink => Role::Response,
-            Role::Response => Role::Sink,
-        });
+        if role != Role::Sink {
+            self.fanout.wake_sink();
+        }
+        self.fanout.wake_responses();
     }
 
     /// Queue one request message once the request slot is free.
@@ -362,7 +437,7 @@ impl LegacyNativeCall {
             Err(_) => {
                 if let Some(status) = state.call.status() {
                     state.finish(status);
-                    self.fanout.wake_role(Role::Response);
+                    self.fanout.wake_responses();
                 }
             }
         }
@@ -394,20 +469,21 @@ impl LegacyNativeCall {
             state.request_closed = true;
         }
         // The response side may be waiting for the half-close to be flushed.
-        self.fanout.wake_role(Role::Response);
+        self.fanout.wake_responses();
         Poll::Ready(result)
     }
 
     /// Next response message, `Ok(None)`-style end as `None`, or the terminal
-    /// error once (then `None`).
+    /// error once (then `None`), for the response handle `responder`.
     pub(super) fn poll_message(
         &self,
         task: &mut Context<'_>,
+        responder: u64,
     ) -> Poll<Option<Result<Box<dyn Any + Send>, Status>>> {
         let mut state = lock_unpoisoned(&self.state);
         if state.responses.is_empty()
             && self
-                .drive(&mut state, task, Role::Response, |state| {
+                .drive(&mut state, task, Role::Response(responder), |state| {
                     !state.responses.is_empty()
                 })
                 .is_pending()
@@ -416,7 +492,7 @@ impl LegacyNativeCall {
         }
         if let Some(message) = state.responses.pop_front() {
             // A response slot freed: a sink held at the window may continue.
-            self.fanout.wake_role(Role::Sink);
+            self.fanout.wake_sink();
             return Poll::Ready(Some(Ok(message)));
         }
         match &state.finished {
@@ -430,10 +506,11 @@ impl LegacyNativeCall {
     pub(super) fn poll_single_response(
         &self,
         task: &mut Context<'_>,
+        responder: u64,
     ) -> Poll<Result<(Box<dyn Any + Send>, Metadata), Status>> {
         let mut state = lock_unpoisoned(&self.state);
         if self
-            .drive(&mut state, task, Role::Response, |_| false)
+            .drive(&mut state, task, Role::Response(responder), |_| false)
             .is_pending()
         {
             return Poll::Pending;
@@ -476,8 +553,8 @@ impl LegacyNativeCall {
             open
         };
         if ended {
-            self.fanout.wake_role(Role::Sink);
-            self.fanout.wake_role(Role::Response);
+            self.fanout.wake_sink();
+            self.fanout.wake_responses();
         }
     }
 }

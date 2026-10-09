@@ -245,17 +245,30 @@ impl Http2Client {
 
     /// Supply certificate trust and TLS configuration for HTTPS. The
     /// connector must offer `h2`; a different negotiated ALPN is rejected.
+    ///
+    /// With [`Self::reuse_connections`] on, the client gets its own empty
+    /// pool here, with the same limit. A clone given another connector, that
+    /// is another client identity or trust policy, so never reuses a
+    /// connection that was authenticated under this one's
+    /// (br-asupersync-mu5yhv).
     #[cfg(feature = "tls")]
     #[must_use]
     pub fn tls_connector(mut self, connector: crate::tls::TlsConnector) -> Self {
         self.tls_connector = Some(connector);
+        if let Some(pool) = &self.pool {
+            self.pool = Some(Arc::new(ConnectionPool {
+                max_idle: pool.max_idle,
+                idle: Mutex::new(HashMap::new()),
+            }));
+        }
         self
     }
 
     /// Keep up to `max_idle` connections per origin (scheme, host and port)
     /// open after [`Http2RequestBuilder::send`] completes a request, so later
     /// requests from this client, or a clone of it, reuse them instead of
-    /// dialing (and TLS-handshaking) again. `0`, the default, keeps the
+    /// dialing (and TLS-handshaking) again. A clone later given its own
+    /// `tls_connector` stops sharing. `0`, the default, keeps the
     /// original behavior: each request owns a fresh connection.
     ///
     /// A pooled connection carries one request at a time; concurrent requests
@@ -963,11 +976,15 @@ where
         Ok(Self { wire, connection })
     }
 
-    /// Whether another request may open a stream on this connection.
+    /// Whether another request may open a stream on this connection. A
+    /// server that lowered SETTINGS_MAX_CONCURRENT_STREAMS to 0 admits none
+    /// for now; a request would wait out its timeout there, so a fresh
+    /// connection serves it instead.
     fn reusable(&self) -> bool {
         self.connection.state() == ConnectionState::Open
             && !self.connection.goaway_received()
             && !self.connection.goaway_sent()
+            && self.connection.remote_settings().max_concurrent_streams != 0
     }
 
     /// Before reuse: take in what the server sent while the connection sat
@@ -1236,18 +1253,25 @@ impl AsyncWrite for DialedTransport {
 
 /// Idle connections an [`Http2Client`] keeps per origin
 /// ([`Http2Client::reuse_connections`]); shared by the client's clones.
-struct ConnectionPool {
+/// Generic only so its bookkeeping can be tested without sockets.
+struct ConnectionPool<C = Http2Conn<DialedTransport>> {
     max_idle: usize,
-    idle: Mutex<HashMap<Origin, Vec<(Time, Http2Conn<DialedTransport>)>>>,
+    idle: Mutex<HashMap<Origin, Vec<(Time, C)>>>,
 }
 
 /// Scheme, host and port: what one pooled connection can serve.
 type Origin = (bool, String, u16);
 
-impl ConnectionPool {
+/// Whether a connection idle since `since` has outlived [`POOL_IDLE_TIMEOUT`].
+fn idle_expired(since: Time, now: Time) -> bool {
+    let idle_nanos = now.as_nanos().saturating_sub(since.as_nanos());
+    u128::from(idle_nanos) > POOL_IDLE_TIMEOUT.as_nanos()
+}
+
+impl<C> ConnectionPool<C> {
     /// The most recently used connection to `origin` that has not idled too
     /// long; expired ones are closed.
-    fn take(&self, origin: &Origin, now: Time) -> Option<Http2Conn<DialedTransport>> {
+    fn take(&self, origin: &Origin, now: Time) -> Option<C> {
         let mut expired = Vec::new();
         let taken = {
             let mut idle = self.idle.lock();
@@ -1256,8 +1280,7 @@ impl ConnectionPool {
                 let Some((since, conn)) = conns.pop() else {
                     break None;
                 };
-                let idle_nanos = now.as_nanos().saturating_sub(since.as_nanos());
-                if u128::from(idle_nanos) <= POOL_IDLE_TIMEOUT.as_nanos() {
+                if !idle_expired(since, now) {
                     break Some(conn);
                 }
                 expired.push(conn);
@@ -1271,12 +1294,30 @@ impl ConnectionPool {
         taken
     }
 
-    fn put(&self, origin: Origin, conn: Http2Conn<DialedTransport>, now: Time) {
-        let mut idle = self.idle.lock();
-        let conns = idle.entry(origin).or_default();
-        if conns.len() < self.max_idle {
-            conns.push((now, conn));
+    /// Keep `conn` for reuse, and close the expired idle connections of
+    /// every origin: a client that reaches many hosts would otherwise keep a
+    /// socket to each until a request to that same host came along.
+    fn put(&self, origin: Origin, conn: C, now: Time) {
+        let mut expired = Vec::new();
+        {
+            let mut idle = self.idle.lock();
+            idle.retain(|_, conns| {
+                let mut index = 0;
+                while index < conns.len() {
+                    if idle_expired(conns[index].0, now) {
+                        expired.push(conns.remove(index).1);
+                    } else {
+                        index += 1;
+                    }
+                }
+                !conns.is_empty()
+            });
+            let conns = idle.entry(origin).or_default();
+            if conns.len() < self.max_idle {
+                conns.push((now, conn));
+            }
         }
+        drop(expired);
     }
 }
 
@@ -1286,6 +1327,43 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Wake};
+
+    /// mu5yhv finding 1: clones share the pool, keyed by scheme, host and
+    /// port only. A clone given another connector (another client identity
+    /// or trust policy) took connections authenticated under the first one.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn a_clone_given_another_tls_connector_gets_its_own_pool() {
+        let connector = || {
+            let certs = crate::tls::Certificate::from_pem(include_bytes!(
+                "../../../tests/fixtures/tls/server.crt"
+            ))
+            .expect("test certificate");
+            crate::tls::TlsConnectorBuilder::new()
+                .add_root_certificates(certs)
+                .alpn_h2()
+                .build()
+                .expect("test connector")
+        };
+        let pool = |client: &Http2Client| Arc::clone(client.pool.as_ref().expect("reuse is on"));
+
+        let base = Http2Client::new().reuse_connections(2);
+        let a = base.clone().tls_connector(connector());
+        let b = base.clone().tls_connector(connector());
+        assert!(
+            !Arc::ptr_eq(&pool(&a), &pool(&b)),
+            "clones with different connectors must not share idle connections"
+        );
+        assert!(!Arc::ptr_eq(&pool(&base), &pool(&a)));
+        assert_eq!(pool(&a).max_idle, 2);
+
+        let a_again = a.clone();
+        assert!(
+            Arc::ptr_eq(&pool(&a), &pool(&a_again)),
+            "a clone that keeps its connector still shares"
+        );
+        assert!(Http2Client::new().tls_connector(connector()).pool.is_none());
+    }
 
     #[derive(Default)]
     struct CountWake(AtomicUsize);
@@ -1569,5 +1647,50 @@ mod tests {
         ];
         assert!(metadata.headers(information.clone(), false).is_ok());
         assert!(metadata.headers(information, false).is_err());
+    }
+
+    /// asupersync-mu5yhv (d0's LOW 1): an idle connection was closed only
+    /// when a later request went to its own origin, so a client that reached
+    /// many hosts kept a socket to each. Putting any connection back now
+    /// closes the expired ones of every origin.
+    #[test]
+    fn putting_a_connection_back_closes_the_expired_idle_ones_of_every_origin() {
+        let pool = ConnectionPool::<u32> {
+            max_idle: 4,
+            idle: Mutex::new(HashMap::new()),
+        };
+        let origin = |host: &str| -> Origin { (false, host.to_owned(), 80) };
+        let entry = |host: &str, conn: u32| (host.to_owned(), conn);
+        let pooled = |pool: &ConnectionPool<u32>| {
+            let mut pooled: Vec<(String, u32)> = pool
+                .idle
+                .lock()
+                .iter()
+                .flat_map(|((_, host, _), conns)| conns.iter().map(|(_, c)| (host.clone(), *c)))
+                .collect();
+            pooled.sort();
+            pooled
+        };
+        pool.put(origin("a"), 1, Time::from_secs(0));
+        pool.put(origin("b"), 2, Time::from_secs(10));
+        // 30 s idle is the limit itself: "a" is still kept.
+        pool.put(origin("c"), 3, Time::from_secs(30));
+        assert_eq!(
+            pooled(&pool),
+            vec![entry("a", 1), entry("b", 2), entry("c", 3)]
+        );
+        // 31 s idle: "a" is closed and its origin dropped, though no request
+        // went to "a" again.
+        pool.put(origin("c"), 4, Time::from_secs(31));
+        assert_eq!(
+            pooled(&pool),
+            vec![entry("b", 2), entry("c", 3), entry("c", 4)]
+        );
+        assert!(!pool.idle.lock().contains_key(&origin("a")));
+        pool.put(origin("d"), 5, Time::from_secs(62));
+        assert_eq!(pooled(&pool), vec![entry("d", 5)]);
+        // take still answers with the newest live connection of its origin.
+        pool.put(origin("d"), 6, Time::from_secs(63));
+        assert_eq!(pool.take(&origin("d"), Time::from_secs(63)), Some(6));
     }
 }

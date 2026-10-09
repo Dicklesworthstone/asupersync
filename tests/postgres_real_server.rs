@@ -1562,6 +1562,38 @@ fn pg_real_arrays_bind_and_decode() {
             tags
         );
 
+        // qml5yb LOW 7: the server infers varchar[] and bpchar[] for these
+        // parameters, and array_recv used to refuse the text[] header (42804).
+        log.phase("prepared_varchar_and_bpchar_arrays");
+        let stmt = unwrap_pg(
+            conn.prepare(
+                &cx,
+                "SELECT $1::varchar(20)[] AS short_names, $2::bpchar(3)[] AS codes",
+            )
+            .await,
+            &log,
+            "prepare varchar[]",
+        );
+        let short_names = vec!["red".to_string(), String::new()];
+        let codes = vec!["ab", "xyz"];
+        let params: &[&dyn ToSql] = &[&short_names, &codes];
+        let rows = unwrap_pg(
+            conn.query_prepared(&cx, &stmt, params).await,
+            &log,
+            "query_prepared varchar[]",
+        );
+        assert_eq!(
+            rows[0]
+                .get_typed::<Vec<String>>("short_names")
+                .expect("short_names"),
+            short_names
+        );
+        assert_eq!(
+            rows[0].get_typed::<Vec<String>>("codes").expect("codes"),
+            vec!["ab ".to_string(), "xyz".to_string()],
+            "bpchar(3) pads to its width"
+        );
+
         log.phase("server_literals");
         let rows = unwrap_pg(
             conn.query_unchecked(
@@ -1649,16 +1681,35 @@ fn pg_real_timestamps_and_json_bind_and_decode() {
         log.phase("prepared");
         let before_2000 = UNIX_EPOCH + Duration::from_secs(86_400 * 365);
         let other = serde_json::json!([1, "two", 3.5]);
-        let stmt = unwrap_pg(
+        // The server types an uncast $3 as `timestamp`; the binary instant
+        // would be stored unconverted, unlike row 1's, so it is refused
+        // (br-asupersync-qml5yb).
+        let uncast = unwrap_pg(
             conn.prepare(
                 &cx,
                 "INSERT INTO asupersync_time_json VALUES ($1, $2, $3, $4, $5)",
             )
             .await,
             &log,
-            "prepare",
+            "prepare_uncast",
         );
         let params: &[&dyn ToSql] = &[&2_i32, &before_2000, &before_2000, &other, &other];
+        assert!(
+            matches!(
+                conn.execute_prepared(&cx, &uncast, params).await,
+                Outcome::Err(PgError::Protocol(_))
+            ),
+            "an instant bound where the server inferred timestamp must be refused"
+        );
+        let stmt = unwrap_pg(
+            conn.prepare(
+                &cx,
+                "INSERT INTO asupersync_time_json VALUES ($1, $2, $3::timestamptz, $4, $5)",
+            )
+            .await,
+            &log,
+            "prepare",
+        );
         unwrap_pg(
             conn.execute_prepared(&cx, &stmt, params).await,
             &log,
@@ -1669,7 +1720,8 @@ fn pg_real_timestamps_and_json_bind_and_decode() {
         let rows = unwrap_pg(
             conn.query_unchecked(
                 &cx,
-                "SELECT id, tz, local, doc, docb, tz::text AS tz_text, local::text AS local_text \
+                "SELECT id, tz, local, doc, docb, tz::text AS tz_text, local::text AS local_text, \
+                 local AT TIME ZONE 'Asia/Kolkata' AS local_instant \
                  FROM asupersync_time_json ORDER BY id",
             )
             .await,
@@ -1700,6 +1752,22 @@ fn pg_real_timestamps_and_json_bind_and_decode() {
             second.get_typed::<SystemTime>("tz").expect("tz"),
             before_2000
         );
+        // Both paths store the session's wall time in the `timestamp`
+        // column: 1971-01-01 00:00 UTC is 05:30 in Kolkata.
+        assert_eq!(
+            second.get_str("local_text").expect("local_text"),
+            "1971-01-01 05:30:00"
+        );
+        // A `timestamp` names no instant and is refused; read through the
+        // zone it was written in, each row gives back its instant.
+        assert!(first.get_typed::<SystemTime>("local").is_err());
+        for (row, expected) in [(first, instant), (second, before_2000)] {
+            assert_eq!(
+                row.get_typed::<SystemTime>("local_instant")
+                    .expect("local_instant"),
+                expected
+            );
+        }
         assert_eq!(
             second.get_typed::<serde_json::Value>("docb").expect("docb"),
             other

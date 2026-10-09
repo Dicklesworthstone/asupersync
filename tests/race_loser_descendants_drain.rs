@@ -426,3 +426,110 @@ fn lab_race_drains_a_losing_branchs_grandchild() {
     assert_eq!(value, 3);
     assert!(checked.retired.load(Ordering::Acquire));
 }
+
+/// A losing branch that waits for a task it spawned through
+/// `Scope::join_all_owned`, which passes the branch's cancellation to that
+/// task, is drained (br-asupersync-inleqi). A plain `TaskHandle::join` does
+/// not observe the branch's cancellation, and the branch's region is cancelled
+/// only after the branch finishes, so such a race would wait for the task.
+fn loser_joining_its_own_child_owned_is_drained(workers: usize) {
+    native(workers, |owner| async move {
+        let grandchild = Arc::new(Witness::default());
+        let (_sender, receiver) = mpsc::channel::<()>(1);
+        let spawned = Arc::clone(&grandchild);
+        let awaited = Arc::clone(&grandchild);
+        let result = owner
+            .race_drained_with(vec![
+                boxed(move |child: Cx| async move {
+                    let handle = child
+                        .spawn(move |gcx| descendant(gcx, receiver, spawned))
+                        .expect("the losing branch spawns a child");
+                    let _ = child.scope().join_all_owned(&child, vec![handle]).await;
+                    0_u8
+                }),
+                boxed(move |_child| async move {
+                    awaited
+                        .wait(|seen| seen.parked.load(Ordering::Acquire))
+                        .await;
+                    5_u8
+                }),
+            ])
+            .await;
+        assert_eq!(result.expect("the second branch wins"), 5);
+        assert_drained(&grandchild, "the child the losing branch was joining");
+    });
+}
+
+#[test]
+fn a_loser_joining_its_own_child_owned_is_drained_current_thread() {
+    loser_joining_its_own_child_owned_is_drained(1);
+}
+
+#[test]
+fn a_loser_joining_its_own_child_owned_is_drained_multi_thread() {
+    loser_joining_its_own_child_owned_is_drained(4);
+}
+
+/// A timed race's branch that completes at or after the deadline lost to it,
+/// even when the race engine selects it as the first finished branch: its
+/// descendants are cancelled and drained before the race returns, as when the
+/// deadline is selected (br-asupersync-inleqi M1). The branch sleeps exactly
+/// to the race's deadline on the lab's virtual clock, so the branch and the
+/// deadline become ready together and the seed picks the one the engine
+/// selects.
+#[test]
+fn a_timed_race_drains_a_branch_that_finished_at_its_deadline() {
+    for seed in 0..32_u64 {
+        let config = asupersync::LabConfig::new(0x7173_0000 + seed).with_auto_advance();
+        let ((result, parked, at_return), report) =
+            asupersync::lab::run_async_under_lab_with_config(config, |owner| async move {
+                let grandchild = Arc::new(Witness::default());
+                let (_grandchild_sender, grandchild_receiver) = mpsc::channel::<()>(1);
+                let spawned = Arc::clone(&grandchild);
+                let duration = Duration::from_millis(10);
+                let result = owner
+                    .race_drained_with_timeout(
+                        duration,
+                        vec![boxed(move |child: Cx| async move {
+                            child
+                                .spawn(move |gcx| descendant(gcx, grandchild_receiver, spawned))
+                                .expect("the branch spawns a grandchild");
+                            asupersync::time::sleep(child.now(), duration).await;
+                            1_u8
+                        })],
+                    )
+                    .await;
+                let at_return = (
+                    grandchild.cancelled.load(Ordering::Acquire),
+                    grandchild.retired.load(Ordering::Acquire),
+                    *grandchild.kind.lock().unwrap(),
+                );
+                (result, grandchild.parked.load(Ordering::Acquire), at_return)
+            });
+        assert!(
+            matches!(&result, Err(JoinError::Cancelled(reason)) if reason.kind == CancelKind::Timeout),
+            "seed {seed}: a value at the deadline is not a timely winner, got {result:?}"
+        );
+        assert!(
+            parked,
+            "seed {seed}: the grandchild parked before the deadline"
+        );
+        let (cancelled, retired, kind) = at_return;
+        assert!(
+            cancelled && retired,
+            "seed {seed}: the late branch's grandchild was still running when the race returned"
+        );
+        assert!(
+            matches!(
+                kind,
+                Some(CancelKind::RaceLost | CancelKind::ParentCancelled)
+            ),
+            "seed {seed}: the grandchild was cancelled as a race loser, not {kind:?}"
+        );
+        assert!(report.quiescent, "seed {seed}: the lab run ends quiescent");
+        assert!(
+            report.oracle_report.all_passed(),
+            "seed {seed}: every lab oracle passes"
+        );
+    }
+}

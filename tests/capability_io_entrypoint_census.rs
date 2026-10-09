@@ -13,13 +13,14 @@
 //! refusal counts only when it carries `[ASUP-E009]`; any other error is
 //! recorded as `Failed`. `--nocapture` prints both tables with each error.
 //!
-//! Not covered: TLS connectors (behind the `tls` feature) and the DNS
-//! `Resolver` (it queries real name servers, so it is not hermetic;
-//! `net::lookup_all` stands in for DNS).
+//! Not covered: TLS connectors (behind the `tls` feature). The DNS
+//! `Resolver` is covered hermetically: it queries a name server on loopback
+//! that answers one made-up name.
 
 use asupersync::Cx;
 use asupersync::cx::IoCapabilityDenied;
 use asupersync::cx::cap::{CapSet, CapSetRuntimeMask};
+use asupersync::net::dns::{Resolver, ResolverConfig};
 use asupersync::runtime::{Runtime, RuntimeBuilder};
 use std::io::{Read, Write};
 use std::net::SocketAddr;
@@ -55,6 +56,7 @@ fn verdict<T, E: std::fmt::Display>(result: Result<T, E>) -> (Verdict, String) {
 /// The entry points, in census order.
 const ENTRY_POINTS: &[&str] = &[
     "net::lookup_all",
+    "net::dns::Resolver::lookup_ip",
     "net::TcpStream::connect",
     "net::TcpStream::connect_timeout",
     "net::TcpListener::bind",
@@ -100,11 +102,55 @@ fn one_shot_http_server() -> SocketAddr {
     addr
 }
 
+/// The made-up name the loopback name server answers.
+const CENSUS_HOST: &str = "census.asupersync.test";
+
+/// A UDP name server on loopback, on a std thread, that answers an A query
+/// for `CENSUS_HOST` with 127.0.0.1 and any other query with no records.
+fn loopback_name_server() -> SocketAddr {
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind name server");
+    let addr = socket.local_addr().expect("name server addr");
+    std::thread::spawn(move || {
+        let mut buf = [0_u8; 512];
+        while let Ok((n, peer)) = socket.recv_from(&mut buf) {
+            let query = &buf[..n];
+            // The question follows the 12-byte header: labels, a zero byte,
+            // QTYPE and QCLASS.
+            let mut end = 12;
+            let mut labels = Vec::new();
+            while end < n && query[end] != 0 {
+                let len = usize::from(query[end]);
+                let label = query.get(end + 1..end + 1 + len).unwrap_or_default();
+                labels.push(String::from_utf8_lossy(label).to_ascii_lowercase());
+                end += 1 + len;
+            }
+            if end + 5 > n {
+                continue;
+            }
+            let qtype = u16::from_be_bytes([query[end + 1], query[end + 2]]);
+            let found = qtype == 1 && labels.join(".") == CENSUS_HOST;
+            // Header and question echoed; RA, NOERROR; one answer or none.
+            let mut response = query[..end + 5].to_vec();
+            response[2] = 0x80 | (query[2] & 0x01);
+            response[3] = 0x80;
+            response[6..12].copy_from_slice(&[0, u8::from(found), 0, 0, 0, 0]);
+            if found {
+                // A pointer to the question's name, type A, class IN, TTL 60.
+                response.extend_from_slice(&[0xC0, 0x0C, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4]);
+                response.extend_from_slice(&[127, 0, 0, 1]);
+            }
+            let _ = socket.send_to(&response, peer);
+        }
+    });
+    addr
+}
+
 /// What each call targets; all of it exists before the census task starts.
 struct Fixtures {
     dir: PathBuf,
     tcp_target: SocketAddr,
     http: SocketAddr,
+    name_server: SocketAddr,
     #[cfg(unix)]
     unix_peer: PathBuf,
 }
@@ -119,6 +165,17 @@ async fn census(cx: Cx, fx: Fixtures) -> Vec<(&'static str, Verdict, String)> {
     record(
         "net::lookup_all",
         verdict(asupersync::net::lookup_all("localhost:80").await),
+    );
+    let resolver = Resolver::with_config(ResolverConfig {
+        nameservers: vec![fx.name_server],
+        cache_enabled: false,
+        retries: 0,
+        timeout: Duration::from_secs(5),
+        ..ResolverConfig::default()
+    });
+    record(
+        "net::dns::Resolver::lookup_ip",
+        verdict(resolver.lookup_ip(CENSUS_HOST).await),
     );
     record(
         "net::TcpStream::connect",
@@ -231,6 +288,7 @@ fn run_census(runtime: Runtime, label: &str, restricted: bool) {
         dir: dir.path().to_path_buf(),
         tcp_target: target.local_addr().expect("connect target addr"),
         http: one_shot_http_server(),
+        name_server: loopback_name_server(),
         #[cfg(unix)]
         unix_peer,
     };
