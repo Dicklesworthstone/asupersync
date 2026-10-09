@@ -2,7 +2,7 @@
 //!
 //! Construct one [`TracedHttpClient`] and reuse it across requests. Each request
 //! supplies its parent context explicitly and gets a new child span ID from its
-//! [`Cx`]'s entropy when prepared or sent. There is no thread-local trace, global
+//! [`Cx`](crate::Cx)'s entropy when prepared or sent. There is no thread-local trace, global
 //! client, or new runtime task. Buffered requests retain the underlying client
 //! pooling, cancellation, request deadlines, retries, and response decoding.
 //! [`TracedHttpClient::get_streaming`] returns the native incremental response

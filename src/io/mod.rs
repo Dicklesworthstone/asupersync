@@ -51,6 +51,22 @@
 //! The unbuffered futures separately perform a bounded best-effort drain when
 //! cooperative `Cx` cancellation is observed on a later poll. A race/select
 //! that drops the future without polling it again cannot run that drain.
+//!
+//! # In-memory pipes and standard streams
+//!
+//! [`duplex()`] returns two connected [`DuplexStream`]s. Bytes written to one
+//! are read from the other, through a buffer of at most `max_buf_size` bytes
+//! per direction, and a full buffer makes the writer wait, as on a socket.
+//! Closing follows a socket's half-close: once one end shuts down or is
+//! dropped, the other reads what is buffered and then end-of-file, and a
+//! write to an end whose peer is gone fails with `BrokenPipe`.
+//!
+//! [`stdin()`], [`stdout()`] and [`stderr()`] run each blocking call off the
+//! async workers (on the runtime's blocking pool, or on a dedicated thread
+//! when there is none): the standard streams cannot be made non-blocking
+//! without changing them for every process that shares them. A read in flight
+//! belongs to its [`Stdin`] handle, so a cancelled read loses no input as long
+//! as the handle is kept.
 
 pub mod browser_storage;
 pub mod browser_stream;

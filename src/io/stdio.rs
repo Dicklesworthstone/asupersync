@@ -64,7 +64,7 @@ where
 }
 
 /// An asynchronous handle to the process's standard input; see the
-/// [module documentation](self).
+/// [module documentation](crate::io#in-memory-pipes-and-standard-streams).
 pub struct Stdin {
     state: ReadState,
 }
@@ -253,7 +253,7 @@ macro_rules! output_handle {
 
 output_handle!(
     /// An asynchronous handle to the process's standard output; see the
-    /// [module documentation](self).
+    /// [module documentation](crate::io#in-memory-pipes-and-standard-streams).
     Stdout,
     stdout,
     Target::Stdout,
@@ -262,7 +262,7 @@ output_handle!(
 
 output_handle!(
     /// An asynchronous handle to the process's standard error; see the
-    /// [module documentation](self).
+    /// [module documentation](crate::io#in-memory-pipes-and-standard-streams).
     Stderr,
     stderr,
     Target::Stderr,

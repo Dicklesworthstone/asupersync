@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 /// Creates a connected pair of in-memory streams; see the
-/// [module documentation](self).
+/// [module documentation](crate::io#in-memory-pipes-and-standard-streams).
 ///
 /// `max_buf_size` bounds the bytes buffered in each direction. A
 /// `max_buf_size` of zero is raised to one byte, so a writer can always make
