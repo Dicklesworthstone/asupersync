@@ -2511,12 +2511,16 @@ impl HttpClient {
         self.acquire_connection_with(cx, parsed, true).await
     }
 
-    /// Dials a new connection for a request retried after its reused
-    /// connection turned out stale.
+    /// Connects a request retried after its reused connection turned out
+    /// stale.
     ///
     /// The host's other idle connections are closed first: the server event
     /// that closed one (a restart, or its keep-alive timeout) closed the others
-    /// of the same age too, and the retry must not land on one of them.
+    /// of the same age too, and the retry must not land on one of them. The
+    /// retry then dials a new connection, unless it has to wait at the host's
+    /// connection limit and a connection is released meanwhile: one that has
+    /// just finished an exchange, which it takes. If that one fails too, the
+    /// error is the caller's; there is no second retry.
     async fn acquire_fresh_connection(
         &self,
         cx: &Cx,
@@ -2537,7 +2541,7 @@ impl HttpClient {
         &self,
         cx: &Cx,
         parsed: &ParsedUrl,
-        reuse_idle: bool,
+        mut reuse_idle: bool,
     ) -> Result<AcquiredConnection, ClientError> {
         struct ConnectGuard<'a> {
             client: &'a HttpClient,
@@ -2642,7 +2646,13 @@ impl HttpClient {
                 Poll::Pending
             });
             match crate::time::timeout(timer_now, remaining, std::pin::pin!(woken)).await {
-                Ok(true) => {}
+                // A connection released while this request waited has just
+                // finished an exchange, so even a fresh-connection retry (after
+                // a stale reuse) may take it from the idle set. Skipping the
+                // idle set left it unusable: releases return connections to
+                // idle, so the wait ran out with one sitting there
+                // (br-asupersync-mu5yhv).
+                Ok(true) => reuse_idle = true,
                 Ok(false) => {
                     check_cx(cx)?;
                     // Cancellation is masked: keep waiting for a connection.
@@ -4781,6 +4791,67 @@ mod tests {
         assert_eq!(last_used, Time::from_nanos(123));
         assert_eq!(state, crate::http::pool::PooledConnectionState::Idle);
         assert_eq!(requests_served, 0);
+    }
+
+    /// mu5yhv finding 2: the retry after a stale reused connection acquires
+    /// without reusing idle connections, and kept skipping them while it
+    /// waited at the limit. Releases return connections to the idle set, so
+    /// with `pool_wait_timeout` the retry failed `PoolExhausted` after the
+    /// whole wait while the connection another request had released sat idle.
+    #[test]
+    fn a_fresh_acquire_waiting_at_the_limit_takes_a_connection_released_meanwhile() {
+        use std::time::Duration;
+
+        let client = Arc::new(
+            HttpClient::builder()
+                .max_connections_per_host(1)
+                .pool_wait_timeout(Duration::from_secs(3))
+                .build(),
+        );
+        let parsed = ParsedUrl::parse("http://127.0.0.1:9/retry").expect("parse url");
+        let key = parsed.pool_key();
+        let holder = client
+            .pool
+            .lock()
+            .register_connecting(key.clone(), client.pool_now(), 1);
+
+        // The holder's connection, whose peer stays open, so it is reusable.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let client_side =
+            std::net::TcpStream::connect(listener.local_addr().expect("address")).expect("connect");
+        let (_server_side, _) = listener.accept().expect("accept");
+        let io = ClientIo::Plain(TcpStream::from_std(client_side).expect("wrap stream"));
+        let releaser = {
+            let client = Arc::clone(&client);
+            let key = key.clone();
+            std::thread::spawn(move || {
+                // Release only once the acquire is parked on the pool: a
+                // release that came first would leave an idle connection the
+                // fresh acquire purges, and it would dial the closed port 9.
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while client.pool_released.waiter_count() == 0
+                    && std::time::Instant::now() < deadline
+                {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                client.release_connection(&key, Some(holder), true, io);
+            })
+        };
+
+        let started = std::time::Instant::now();
+        let acquired = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(client.acquire_fresh_connection(&Cx::for_testing(), &parsed));
+        releaser.join().expect("releaser thread");
+        let acquired = acquired.expect("the connection released during the wait is taken");
+        assert_eq!(acquired.pool_id, Some(holder));
+        assert!(!acquired.fresh, "the released connection, not a new dial");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "took {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
