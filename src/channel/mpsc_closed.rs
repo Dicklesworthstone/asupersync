@@ -3,6 +3,7 @@
 use super::{ChannelShared, Sender, UnboundedSender};
 use crate::sync::Notify;
 use std::sync::OnceLock;
+use std::sync::atomic::Ordering;
 
 /// A channel that never observes closure pays no Notify allocation.
 #[derive(Debug, Default)]
@@ -40,7 +41,17 @@ impl<T> Sender<T> {
         if self.is_closed() {
             return;
         }
-        let notify = self.shared.closed.notify.get_or_init(|| Box::new(Notify::new()));
+        let notify = self
+            .shared
+            .closed
+            .notify
+            .get_or_init(|| Box::new(Notify::new()));
+        // Synchronize with any racing closer on weak-memory architectures:
+        // Taking the channel mutex and issuing SeqCst fences guarantees that
+        // notify initialization is visible to the closer and receiver_dropped
+        // is visible to this waiter, preventing store-buffering missed wakeups.
+        drop(self.shared.inner.lock());
+        std::sync::atomic::fence(Ordering::SeqCst);
         // Notify::wait_until samples its broadcast generation BEFORE checking
         // the persistent flag. Closure before initialization is seen by the
         // predicate; closure between check and registration is a replayed edge.
@@ -65,6 +76,7 @@ pub(super) struct WakeClosed<'a, T>(pub(super) &'a ChannelShared<T>);
 
 impl<T> Drop for WakeClosed<'_, T> {
     fn drop(&mut self) {
+        std::sync::atomic::fence(Ordering::SeqCst);
         let Some(notify) = self.0.closed.notify.get() else {
             return;
         };
@@ -85,8 +97,8 @@ impl<T> Drop for WakeClosed<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::{RecvError, SendError, channel, unbounded_channel};
+    use super::*;
     use crate::cx::Cx;
     use std::future::Future;
     use std::pin::Pin;
@@ -97,8 +109,12 @@ mod tests {
     #[derive(Default)]
     struct Count(AtomicUsize);
     impl Wake for Count {
-        fn wake(self: Arc<Self>) { self.wake_by_ref(); }
-        fn wake_by_ref(self: &Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
     }
     fn counter() -> (Arc<Count>, Waker) {
         crate::test_utils::init_test_logging();
@@ -110,7 +126,12 @@ mod tests {
         future.poll(&mut Context::from_waker(waker))
     }
     fn waiters<T>(sender: &Sender<T>) -> usize {
-        sender.shared.closed.notify.get().map_or(0, |notify| notify.waiter_count())
+        sender
+            .shared
+            .closed
+            .notify
+            .get()
+            .map_or(0, |notify| notify.waiter_count())
     }
 
     #[test]
@@ -197,9 +218,13 @@ mod tests {
     struct CloseOnDrop(Sender<u8>);
     // The waker's Drop is the point: it closes the receiver.
     #[allow(clippy::manual_noop_waker)]
-    impl Wake for CloseOnDrop { fn wake(self: Arc<Self>) {} }
+    impl Wake for CloseOnDrop {
+        fn wake(self: Arc<Self>) {}
+    }
     impl Drop for CloseOnDrop {
-        fn drop(&mut self) { self.0.close_receiver(); }
+        fn drop(&mut self) {
+            self.0.close_receiver();
+        }
     }
 
     #[test]
@@ -213,7 +238,10 @@ mod tests {
         assert!(!sender.is_closed());
         let (count, waker) = counter();
         if poll(closed.as_mut(), &waker).is_pending() {
-            assert!(count.0.load(Ordering::SeqCst) > 0, "pending requires a wake");
+            assert!(
+                count.0.load(Ordering::SeqCst) > 0,
+                "pending requires a wake"
+            );
             assert!(poll(closed.as_mut(), &waker).is_ready());
         }
         assert!(sender.is_closed());
@@ -222,8 +250,12 @@ mod tests {
 
     struct PanicWake;
     impl Wake for PanicWake {
-        fn wake(self: Arc<Self>) { panic!("planted wake failure"); }
-        fn wake_by_ref(self: &Arc<Self>) { panic!("planted wake failure"); }
+        fn wake(self: Arc<Self>) {
+            panic!("planted wake failure");
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            panic!("planted wake failure");
+        }
     }
 
     #[test]
@@ -237,16 +269,24 @@ mod tests {
         let (count, waker) = counter();
         let mut closed = Box::pin(sender.closed());
         assert!(poll(closed.as_mut(), &waker).is_pending());
-        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| receiver.close())).is_err());
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| receiver.close())).is_err()
+        );
         assert!(count.0.load(Ordering::SeqCst) > 0);
         assert!(poll(closed.as_mut(), &waker).is_ready());
-        assert!(matches!(poll(reservation.as_mut(), Waker::noop()), Poll::Ready(Err(SendError::Disconnected(())))));
+        assert!(matches!(
+            poll(reservation.as_mut(), Waker::noop()),
+            Poll::Ready(Err(SendError::Disconnected(())))
+        ));
     }
 
     struct Reenter(Sender<u8>, Arc<Count>);
     impl Wake for Reenter {
         fn wake(self: Arc<Self>) {
-            assert!(self.0.shared.inner.try_lock().is_some(), "closure wake under channel lock");
+            assert!(
+                self.0.shared.inner.try_lock().is_some(),
+                "closure wake under channel lock"
+            );
             assert_eq!(self.0.try_send(9), Err(SendError::Disconnected(9)));
             self.1.0.fetch_add(1, Ordering::SeqCst);
         }

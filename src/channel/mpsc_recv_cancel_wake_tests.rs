@@ -331,5 +331,8 @@ fn cancelled_receive_leaves_newly_arrived_value_for_fresh_context() {
     drop(recv);
     let fresh = Cx::for_testing();
     let mut retry = Box::pin(receiver.recv(&fresh));
-    assert!(matches!(retry.as_mut().poll(&mut task), Poll::Ready(Ok(42))));
+    assert!(matches!(
+        retry.as_mut().poll(&mut task),
+        Poll::Ready(Ok(42))
+    ));
 }

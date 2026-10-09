@@ -2959,6 +2959,96 @@ mod tests {
         drop(reserve);
         crate::test_complete!("slab_only_stale_waiter_does_not_block_try_reserve");
     }
+
+    #[test]
+    fn receiver_drop_wakes_parked_reserver_when_recv_waker_drop_panics() {
+        init_test("receiver_drop_wakes_parked_reserver_when_recv_waker_drop_panics");
+
+        struct CountingWaker(Arc<AtomicUsize>);
+        impl std::task::Wake for CountingWaker {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        struct PanicOnDropWaker {
+            armed: AtomicBool,
+            drops: Arc<AtomicUsize>,
+        }
+        impl std::task::Wake for PanicOnDropWaker {
+            fn wake(self: Arc<Self>) {}
+            fn wake_by_ref(self: &Arc<Self>) {}
+        }
+        impl Drop for PanicOnDropWaker {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+                if self.armed.load(Ordering::SeqCst) {
+                    panic!("PanicOnDropWaker dropped");
+                }
+            }
+        }
+
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<()>(1);
+
+        // Fill channel capacity with 1 reserved permit.
+        let _permit = block_on(tx.reserve(&cx)).expect("initial reserve");
+
+        // Park a second reservation attempt with a counting waker.
+        let reserve_wakes = Arc::new(AtomicUsize::new(0));
+        let reserve_waker = Waker::from(Arc::new(CountingWaker(Arc::clone(&reserve_wakes))));
+        let mut reserve_cx = Context::from_waker(&reserve_waker);
+        let mut reserve_fut = Box::pin(tx.reserve(&cx));
+        assert!(reserve_fut.as_mut().poll(&mut reserve_cx).is_pending());
+        assert_eq!(reserve_wakes.load(Ordering::SeqCst), 0);
+
+        // Park receiver with a waker that panics on drop.
+        let panic_drops = Arc::new(AtomicUsize::new(0));
+        let panic_waker_inner = Arc::new(PanicOnDropWaker {
+            armed: AtomicBool::new(true),
+            drops: Arc::clone(&panic_drops),
+        });
+        let panic_waker = Waker::from(panic_waker_inner);
+        {
+            let mut recv_cx = Context::from_waker(&panic_waker);
+            assert_eq!(rx.poll_recv(&cx, &mut recv_cx), Poll::Pending);
+        }
+
+        // Drop the local waker reference so rx holds the sole remaining reference.
+        drop(panic_waker);
+        assert_eq!(panic_drops.load(Ordering::SeqCst), 0);
+
+        // Drop the receiver; this will drop rx's recv_waker, triggering its panicking destructor.
+        let drop_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(rx);
+        }));
+        assert!(
+            drop_result.is_err(),
+            "receiver drop must propagate waker drop panic"
+        );
+        assert_eq!(
+            panic_drops.load(Ordering::SeqCst),
+            1,
+            "panic waker was dropped"
+        );
+
+        // Despite the waker destructor panic, the parked reserve must have been woken.
+        assert!(
+            reserve_wakes.load(Ordering::SeqCst) > 0,
+            "parked reserve waker must be woken even when recv_waker drop panics"
+        );
+
+        // Polling the reserve future must now report Disconnected.
+        assert!(matches!(
+            reserve_fut.as_mut().poll(&mut reserve_cx),
+            Poll::Ready(Err(SendError::<()>::Disconnected(())))
+        ));
+
+        crate::test_complete!("receiver_drop_wakes_parked_reserver_when_recv_waker_drop_panics");
+    }
 }
 
 /// Metamorphic Testing: MPSC backpressure flow invariants

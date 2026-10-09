@@ -2142,9 +2142,21 @@ impl<T> Drop for Receiver<T> {
         // Declared after the extracted items: notify before their destruction,
         // including when retiring an executor waker unwinds.
         let _closed = closed::WakeClosed(&self.shared);
-        drop(recv_waker);
+        // Retire the receiver's own waker under catch_unwind so a destructor
+        // panic does not unwind past sender fan-out or trigger double panics.
+        let recv_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            drop(recv_waker);
+        }));
         // Wake senders outside the lock to avoid wake-under-lock deadlocks.
         wake_detached(wakers);
+        if let Err(payload) = recv_panic {
+            if std::thread::panicking() {
+                // Never trigger a process-aborting double unwind when already unwinding.
+                std::mem::forget(payload);
+            } else {
+                std::panic::resume_unwind(payload);
+            }
+        }
     }
 }
 
