@@ -234,7 +234,7 @@ impl ReflectionService {
     /// * `Required(cb)` → require a REMOTE `Cx`, then run the callback.
     /// * `Anonymous` → require a REMOTE `Cx`, then permit the call.
     #[allow(dead_code)]
-    fn check_auth(&self, method: &str) -> Result<(), Status> {
+    pub(crate) fn check_auth(&self, method: &str) -> Result<(), Status> {
         fn current_remote_cx(method: &str) -> Result<Cx, Status> {
             let Some(cx) = Cx::current() else {
                 return Err(Status::permission_denied(format!(

@@ -336,3 +336,68 @@ fn idle_reflection_deadline_uses_lab_virtual_time_and_reaches_quiescence() {
         assert!(report.lab_test_passed(), "{report:?}");
     }
 }
+
+/// br-asupersync-m5xrg1: descriptor lookups hand out whole schemas, so they
+/// also pass the registry's DescribeService gate. A policy that allows only
+/// ListServices still lists services, but every lookup gets an in-band
+/// PermissionDenied reply.
+#[test]
+fn descriptor_lookups_need_describe_service_not_only_list_services() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let record = Arc::clone(&seen);
+    let service = rpc(
+        registry().with_auth(move |_, method| {
+            record.lock().unwrap().push(method.to_string());
+            if method == "ListServices" {
+                Ok(())
+            } else {
+                Err(Status::permission_denied("schemas withheld"))
+            }
+        }),
+        ReflectionRpcConfig::default(),
+    );
+    let cx = remote();
+    let listed = decode(service.answer(&cx, &Bytes::from_static(LIST)).unwrap());
+    assert!(
+        matches!(listed.reply, Some(Reply::Services(_))),
+        "{listed:?}"
+    );
+    for query in [
+        Query::FileByName("echo.proto".to_string()),
+        Query::FileContainingSymbol("demo.Echo.Ping".to_string()),
+        Query::FileContainingExtension(wire::ExtensionRequest {
+            containing_type: "demo.Record".to_string(),
+            number: 100,
+        }),
+        Query::AllExtensionNumbers("demo.Record".to_string()),
+    ] {
+        let request = WireRequest {
+            host: String::new(),
+            query: Some(query),
+        };
+        let reply = decode(
+            service
+                .answer(&cx, &Bytes::from(request.encode_to_vec()))
+                .unwrap(),
+        );
+        assert!(
+            matches!(&reply.reply, Some(Reply::Error(error)) if error.code == Code::PermissionDenied as i32),
+            "{reply:?}"
+        );
+    }
+    let seen = seen.lock().unwrap();
+    assert_eq!(
+        seen.iter()
+            .filter(|method| *method == "DescribeService")
+            .count(),
+        4,
+        "{seen:?}"
+    );
+    assert_eq!(
+        seen.iter()
+            .filter(|method| *method == "ListServices")
+            .count(),
+        5,
+        "{seen:?}"
+    );
+}
