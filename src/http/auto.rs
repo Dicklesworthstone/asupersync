@@ -198,11 +198,16 @@ where
     }
 
     /// Accepts until the shutdown signal begins draining, then drains both
-    /// protocols' listeners and returns their statistics. Incomplete protocol
-    /// detection and TLS handshakes are cancelled, and their connections are
-    /// released before this method returns. Dropping this future requests
-    /// immediate cleanup from the runtime-owned children; it does not claim
-    /// that their cleanup has already completed.
+    /// protocols' listeners and returns their statistics. Cancelling the task
+    /// that runs this future (its region closing, a runtime drain) ends
+    /// accepting the same way, as an owner's cancellation does for
+    /// `Http1Listener::run_in`. The listening socket closes when accepting
+    /// ends, so new connection attempts are refused during the drain, unless
+    /// either protocol's config sets `lb_compat_keep_socket`.
+    /// Incomplete protocol detection and TLS handshakes are cancelled, and
+    /// their connections are released before this method returns. Dropping
+    /// this future requests immediate cleanup from the runtime-owned children;
+    /// it does not claim that their cleanup has already completed.
     ///
     /// # Errors
     /// A non-transient accept error (after draining the connections already
@@ -260,6 +265,14 @@ where
         let accept_result = self
             .accept_loop(runtime, &http1_queue, &http2_queue, &detecting)
             .await;
+        // Accepting is over: close the listening socket now, as the HTTP/1.1
+        // and HTTP/2 listeners do when their drain starts, so a new client is
+        // refused at once instead of queuing in the backlog through the drain
+        // and then being reset. As with them, `lb_compat_keep_socket` (in
+        // either protocol's config) keeps it bound until the drain is over.
+        let keep_socket =
+            self.config.http1.lb_compat_keep_socket || self.config.http2.lb_compat_keep_socket;
+        let parked_socket = keep_socket.then_some(self.listener);
 
         let _ = self
             .shutdown_signal
@@ -276,7 +289,7 @@ where
         // drain_protocols has requested force-close on that error path.
         shutdown.http1.wait_all_closed().await;
         shutdown.http2.wait_all_closed().await;
-        drop(self.listener);
+        drop(parked_socket);
         shutdown.finish();
         accept_result?;
         Ok(HttpAutoShutdownStats {
@@ -294,15 +307,23 @@ where
     ) -> io::Result<()> {
         let mut shutdown = self.shutdown_signal.subscribe();
         let mut transient_streak: u32 = 0;
+        // Once this task's cancellation is requested, accept fails with
+        // `Interrupted` on every poll and the backoff sleep completes at once:
+        // treated as transient, the loop would spin and never drain. The
+        // cancellation ends accepting instead, like the shutdown signal.
+        let owner = Cx::current();
+        let cancelled = || owner.as_ref().is_some_and(Cx::is_cancel_requested);
         loop {
-            if self.shutdown_signal.is_shutting_down() {
+            if self.shutdown_signal.is_shutting_down() || cancelled() {
                 return Ok(());
             }
             let accepted = {
                 let mut accept = pin!(self.listener.accept());
                 let mut stop = pin!(shutdown.wait());
                 std::future::poll_fn(|cx| {
-                    if self.shutdown_signal.is_shutting_down() || stop.as_mut().poll(cx).is_ready()
+                    if self.shutdown_signal.is_shutting_down()
+                        || cancelled()
+                        || stop.as_mut().poll(cx).is_ready()
                     {
                         return Poll::Ready(None);
                     }
@@ -1083,5 +1104,170 @@ mod tests {
             assert_eq!(shutdown.phase(), ShutdownPhase::Stopped);
             assert_eq!(stats.http1.force_closed + stats.http2.force_closed, 0);
         }));
+    }
+
+    fn localhost_config() -> HttpAutoListenerConfig {
+        HttpAutoListenerConfig::default()
+            .http1(
+                Http1ListenerConfig::default()
+                    .http_config(Http1Config {
+                        allowed_hosts: HostPolicy::allow_list(vec!["localhost".to_owned()]),
+                        ..Http1Config::default()
+                    })
+                    .drain_timeout(Duration::from_secs(60))
+                    .hard_drain_timeout(Duration::from_secs(60)),
+            )
+            .http2(
+                Http2ListenerConfig::default()
+                    .host_policy(HostPolicy::allow_list(vec!["localhost".to_owned()]))
+                    .drain_timeout(Duration::from_secs(60))
+                    .hard_drain_timeout(Duration::from_secs(60)),
+            )
+    }
+
+    async fn get(addr: SocketAddr) -> Vec<u8> {
+        let mut stream = TcpStream::connect(addr).await.expect("connect");
+        AsyncWriteExt::write_all(
+            &mut stream,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .expect("request");
+        let mut response = Vec::new();
+        let _ = AsyncReadExt::read_to_end(&mut stream, &mut response).await;
+        response
+    }
+
+    /// r14 F2 M2 (r11 F4.4): once the task running `run` was cancelled (its
+    /// region closing, a runtime drain), accept failed with `Interrupted` on
+    /// every poll, that counted as transient, and the backoff sleep completed
+    /// at once. The loop spun, nothing drained and `Stopped` never came. The
+    /// cancellation now ends accepting like the shutdown signal.
+    #[test]
+    fn a_cancelled_run_task_stops_accepting_and_publishes_stopped() {
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(2)
+            .build()
+            .expect("runtime");
+        let handle = runtime.handle();
+        runtime.block_on(handle.clone().spawn(async move {
+            let cx = Cx::current().expect("runtime Cx");
+            let listener = HttpAutoListener::bind(
+                "127.0.0.1:0",
+                |_: Request| async { Response::new(200, "OK", Vec::new()) },
+                localhost_config(),
+            )
+            .await
+            .expect("bind");
+            let addr = listener.local_addr().expect("address");
+            let shutdown = listener.shutdown_signal();
+            let run_runtime = handle.clone();
+            let mut run = cx
+                .spawn(move |_| async move { listener.run(&run_runtime).await })
+                .expect("spawn the run task");
+            // A served request shows the accept loop is running.
+            let response = get(addr).await;
+            assert!(
+                response.starts_with(b"HTTP/1.1 200"),
+                "{}",
+                String::from_utf8_lossy(&response)
+            );
+
+            run.abort();
+            let joined = crate::time::timeout(now(), Duration::from_secs(10), run.join(&cx)).await;
+            if joined.is_err() {
+                // Stop a spinning loop through the signal, so this failure
+                // leaves no live task behind.
+                shutdown.trigger_immediate();
+            }
+            assert!(joined.is_ok(), "the cancelled run task never finished");
+            assert_eq!(shutdown.phase(), ShutdownPhase::Stopped);
+        }));
+    }
+
+    /// r14 F2 M1 (r11 F2): the listening socket stayed bound until the whole
+    /// drain was over (60 s by default), so a client connecting meanwhile
+    /// queued in the backlog and was reset at the end. The socket now closes
+    /// when accepting ends, as the HTTP/1.1 and HTTP/2 listeners' do, while
+    /// the request in flight still completes. As with them,
+    /// `lb_compat_keep_socket` keeps it bound through the drain.
+    #[test]
+    fn new_connections_are_refused_once_the_drain_starts() {
+        assert!(
+            drain_refuses_new_connections(false),
+            "a connection made during the drain was not refused"
+        );
+        assert!(
+            !drain_refuses_new_connections(true),
+            "lb_compat_keep_socket must keep the socket connectable through the drain"
+        );
+    }
+
+    /// Whether a connection attempted while a parked request holds the drain
+    /// open is refused, with `lb_compat_keep_socket` set as `keep_socket` in
+    /// the HTTP/1.1 config only.
+    fn drain_refuses_new_connections(keep_socket: bool) -> bool {
+        let mut config = localhost_config();
+        config.http1 = config.http1.lb_compat_keep_socket(keep_socket);
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(2)
+            .build()
+            .expect("runtime");
+        let handle = runtime.handle();
+        runtime.block_on(handle.clone().spawn(async move {
+            let entered = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let handler_entered = Arc::clone(&entered);
+            let handler_release = Arc::clone(&release);
+            let handler = move |_: Request| {
+                let entered = Arc::clone(&handler_entered);
+                let release = Arc::clone(&handler_release);
+                async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    Response::new(200, "OK", Vec::new())
+                }
+            };
+            let listener = HttpAutoListener::bind("127.0.0.1:0", handler, config)
+                .await
+                .expect("bind");
+            let addr = listener.local_addr().expect("address");
+            let shutdown = listener.shutdown_signal();
+            let run_runtime = handle.clone();
+            let run = handle.spawn(async move { listener.run(&run_runtime).await });
+            let in_flight = handle.spawn(get(addr));
+            crate::time::timeout(now(), Duration::from_secs(5), entered.notified())
+                .await
+                .expect("the first request reaches its handler");
+
+            // The parked handler holds the drain open.
+            assert!(shutdown.begin_drain(Duration::from_secs(60)));
+            let mut refused = false;
+            for _ in 0..100 {
+                match TcpStream::connect(addr).await {
+                    Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
+                        refused = true;
+                        break;
+                    }
+                    _ => crate::time::sleep(now(), Duration::from_millis(20)).await,
+                }
+            }
+            release.notify_one();
+            let response = crate::time::timeout(now(), Duration::from_secs(10), in_flight)
+                .await
+                .expect("the request in flight completes");
+            let stats = crate::time::timeout(now(), Duration::from_secs(10), run)
+                .await
+                .expect("the drain completes")
+                .expect("listener result");
+            assert!(
+                response.starts_with(b"HTTP/1.1 200"),
+                "{}",
+                String::from_utf8_lossy(&response)
+            );
+            assert_eq!(shutdown.phase(), ShutdownPhase::Stopped);
+            assert_eq!(stats.http1.force_closed + stats.http2.force_closed, 0);
+            refused
+        }))
     }
 }
