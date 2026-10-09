@@ -3229,6 +3229,57 @@ mod tests {
         );
     }
 
+    /// qml5yb LOW 7: `Vec<String>` and `Vec<&str>` bind as `text[]`. Bound
+    /// through `prepare` where the server typed the parameter `varchar[]` or
+    /// `bpchar[]`, `array_recv` refused them (42804: element type 25 instead
+    /// of 1043). The Bind now carries the array with the parameter's element
+    /// type in its header and the same element bytes.
+    #[test]
+    fn prepared_text_arrays_bind_as_the_varchar_or_bpchar_array_the_server_inferred() {
+        let statement = |param_oid| PgStatement {
+            name: "s1".to_string(),
+            sql: "INSERT INTO t VALUES ($1)".to_string(),
+            param_oids: vec![param_oid],
+            columns: Vec::new(),
+            session_generation: 0,
+        };
+        let contains = |haystack: &[u8], needle: &[u8]| {
+            haystack
+                .windows(needle.len())
+                .any(|window| window == needle)
+        };
+        let owned = vec!["tag".to_string(), String::new()];
+        let borrowed = vec![Some("tag"), None];
+        for value in [&owned as &dyn ToSql, &borrowed as &dyn ToSql] {
+            let mut array = Vec::new();
+            assert_eq!(value.to_sql(&mut array).unwrap(), IsNull::No);
+            assert_eq!(array[8..12], oid::TEXT.to_be_bytes());
+            for (expected, element) in [
+                (oid::VARCHAR_ARRAY, oid::VARCHAR),
+                (oid::BPCHAR_ARRAY, oid::BPCHAR),
+                (oid::TEXT_ARRAY, oid::TEXT),
+            ] {
+                let bind = PgConnection::bind_prepared(&statement(expected), &[value])
+                    .expect("bind message");
+                let mut wanted = array.clone();
+                wanted[8..12].copy_from_slice(&element.to_be_bytes());
+                assert!(
+                    contains(&bind, &wanted),
+                    "{expected}: the array header must name element type {element}"
+                );
+            }
+            // Any other inferred type is left to the server, as before.
+            let other = PgConnection::bind_prepared(&statement(oid::INT4_ARRAY), &[value])
+                .expect("bind message");
+            assert!(contains(&other, &array));
+        }
+        // A scalar and a NULL array are not arrays to retype.
+        let null: Option<Vec<String>> = None;
+        let scalar = "tag".to_string();
+        assert!(PgConnection::bind_prepared(&statement(oid::VARCHAR_ARRAY), &[&null]).is_ok());
+        assert!(PgConnection::bind_prepared(&statement(oid::VARCHAR), &[&scalar]).is_ok());
+    }
+
     /// qml5yb LOW 5: a crafted year or offset overflowed the timestamp text
     /// arithmetic (a panic in debug builds, a wrong time in release).
     #[test]

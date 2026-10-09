@@ -1562,6 +1562,38 @@ fn pg_real_arrays_bind_and_decode() {
             tags
         );
 
+        // qml5yb LOW 7: the server infers varchar[] and bpchar[] for these
+        // parameters, and array_recv used to refuse the text[] header (42804).
+        log.phase("prepared_varchar_and_bpchar_arrays");
+        let stmt = unwrap_pg(
+            conn.prepare(
+                &cx,
+                "SELECT $1::varchar(20)[] AS short_names, $2::bpchar(3)[] AS codes",
+            )
+            .await,
+            &log,
+            "prepare varchar[]",
+        );
+        let short_names = vec!["red".to_string(), String::new()];
+        let codes = vec!["ab", "xyz"];
+        let params: &[&dyn ToSql] = &[&short_names, &codes];
+        let rows = unwrap_pg(
+            conn.query_prepared(&cx, &stmt, params).await,
+            &log,
+            "query_prepared varchar[]",
+        );
+        assert_eq!(
+            rows[0]
+                .get_typed::<Vec<String>>("short_names")
+                .expect("short_names"),
+            short_names
+        );
+        assert_eq!(
+            rows[0].get_typed::<Vec<String>>("codes").expect("codes"),
+            vec!["ab ".to_string(), "xyz".to_string()],
+            "bpchar(3) pads to its width"
+        );
+
         log.phase("server_literals");
         let rows = unwrap_pg(
             conn.query_unchecked(

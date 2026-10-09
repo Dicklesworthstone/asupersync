@@ -1414,6 +1414,32 @@ fn text_is_binary(element_oid: u32) -> bool {
     )
 }
 
+/// A binary `text[]` parameter sent as another text-family array type: its
+/// header's element OID (after the dimension count and the has-NULL flag)
+/// is rewritten, and the elements, whose bytes are the same, are kept.
+struct TextArrayAs<'a> {
+    inner: &'a dyn ToSql,
+    array_oid: u32,
+    element_oid: u32,
+}
+
+impl ToSql for TextArrayAs<'_> {
+    fn to_sql(&self, buf: &mut Vec<u8>) -> Result<IsNull, PgError> {
+        let start = buf.len();
+        let null = self.inner.to_sql(buf)?;
+        if null == IsNull::No && buf.len() >= start + 12 {
+            buf[start + 8..start + 12].copy_from_slice(&self.element_oid.to_be_bytes());
+        }
+        Ok(null)
+    }
+    fn type_oid(&self) -> u32 {
+        self.array_oid
+    }
+    fn format(&self) -> Format {
+        self.inner.format()
+    }
+}
+
 /// PostgreSQL's binary array format: dimension count, has-NULL flag, element
 /// type, then one (length, lower bound) pair per dimension and each element
 /// as a length (-1 for NULL) followed by its bytes.
@@ -8146,6 +8172,39 @@ impl PgConnection {
         Ok(())
     }
 
+    /// The Bind message for `stmt`. A binary `text[]` value (`Vec<String>`,
+    /// `Vec<&str>`) where the server typed the parameter `varchar[]` or
+    /// `bpchar[]` is sent as that array type: `array_recv` refuses a header
+    /// whose element type is not the parameter's (42804), although the
+    /// element bytes are the same. A scalar `String` binds to `varchar` here
+    /// already, and `execute_params` binds the array (br-asupersync-qml5yb).
+    fn bind_prepared(stmt: &PgStatement, params: &[&dyn ToSql]) -> Result<Vec<u8>, PgError> {
+        let retyped: Vec<Option<TextArrayAs<'_>>> = params
+            .iter()
+            .zip(stmt.param_oids.iter().copied().chain(std::iter::repeat(0)))
+            .map(|(param, expected)| {
+                let element_oid = match expected {
+                    oid::VARCHAR_ARRAY => oid::VARCHAR,
+                    oid::BPCHAR_ARRAY => oid::BPCHAR,
+                    _ => return None,
+                };
+                (param.type_oid() == oid::TEXT_ARRAY && param.format() == Format::Binary).then(
+                    || TextArrayAs {
+                        inner: *param,
+                        array_oid: expected,
+                        element_oid,
+                    },
+                )
+            })
+            .collect();
+        let bound: Vec<&dyn ToSql> = params
+            .iter()
+            .zip(&retyped)
+            .map(|(param, retyped)| retyped.as_ref().map_or(*param, |r| r as &dyn ToSql))
+            .collect();
+        build_bind_msg("", &stmt.name, &bound, Format::Text)
+    }
+
     /// Execute a prepared statement returning rows.
     pub async fn query_prepared(
         &mut self,
@@ -8204,7 +8263,7 @@ impl PgConnection {
         {
             return Outcome::Err(err);
         }
-        let bind = match build_bind_msg("", &stmt.name, params, Format::Text) {
+        let bind = match Self::bind_prepared(stmt, params) {
             Ok(b) => b,
             Err(e) => return Outcome::Err(e),
         };
@@ -8310,7 +8369,7 @@ impl PgConnection {
         {
             return Outcome::Err(err);
         }
-        let bind = match build_bind_msg("", &stmt.name, params, Format::Text) {
+        let bind = match Self::bind_prepared(stmt, params) {
             Ok(b) => b,
             Err(e) => return Outcome::Err(e),
         };
