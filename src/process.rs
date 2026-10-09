@@ -820,7 +820,7 @@ impl ExactImageChild {
         self.stderr.take()
     }
 
-    /// Non-blockingly observe the direct child's exit status.
+    /// Non-blockingly observe the direct child's exit status (`wait` or drop reaps it).
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         self.platform.try_wait()
     }
@@ -829,13 +829,13 @@ impl ExactImageChild {
     /// descendants that outlived it.
     pub fn wait(&mut self) -> io::Result<ExitStatus> {
         drop(self.stdin.take());
-        let status = self.platform.wait()?;
+        self.platform.wait_for_exit()?;
         match self.platform.kill_process_tree() {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
-        Ok(status)
+        self.platform.wait()
     }
 
     /// Terminate every process in the child's isolated process tree.
@@ -855,7 +855,7 @@ impl Drop for ExactImageChild {
                 let _ = self.platform.wait();
             }
             Err(_) => {
-                let _ = self.platform.try_wait();
+                let _ = self.platform.try_reap();
             }
         }
     }
@@ -898,7 +898,7 @@ impl ExactImagePlatformChild {
 struct ExactImagePlatformChild {
     pid: nix::unistd::Pid,
     process_group: nix::unistd::Pid,
-    status: Option<ExitStatus>,
+    status: ExactImageExit,
     tree_terminated: bool,
 }
 
@@ -910,15 +910,15 @@ impl ExactImagePlatformChild {
     }
 
     fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        if let Some(status) = self.status {
+        if let Some(status) = self.status.observed() {
             return Ok(Some(status));
         }
         loop {
-            match nix::sys::wait::waitpid(self.pid, Some(nix::sys::wait::WaitPidFlag::WNOHANG)) {
+            match exact_image_peek_exit(self.pid) {
                 Ok(nix::sys::wait::WaitStatus::StillAlive) => return Ok(None),
                 Ok(status) => {
                     if let Some(status) = exact_image_exit_status(status) {
-                        self.status = Some(status);
+                        self.status = ExactImageExit::peeked(status);
                         return Ok(Some(status));
                     }
                 }
@@ -929,14 +929,14 @@ impl ExactImagePlatformChild {
     }
 
     fn wait(&mut self) -> io::Result<ExitStatus> {
-        if let Some(status) = self.status {
+        if let ExactImageExit::Reaped(status) = self.status {
             return Ok(status);
         }
         loop {
             match nix::sys::wait::waitpid(self.pid, None) {
                 Ok(status) => {
                     if let Some(status) = exact_image_exit_status(status) {
-                        self.status = Some(status);
+                        self.status = ExactImageExit::Reaped(status);
                         return Ok(status);
                     }
                 }
@@ -1198,7 +1198,7 @@ fn spawn_exact_image_unix(command: &ExactImageCommand) -> Result<ExactImageChild
         platform: ExactImagePlatformChild {
             pid,
             process_group: pid,
-            status: None,
+            status: ExactImageExit::Running,
             tree_terminated: false,
         },
         stdin: Some(ExactImageChildStdin {
@@ -5449,6 +5449,84 @@ mod tests {
         );
         crate::test_complete!("a_cancelled_wait_with_output_terminates_and_reaps_the_child");
     }
+
+    /// Whether `pid` is an exited child that has not been reaped yet.
+    #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
+    fn is_unreaped_zombie(pid: nix::unistd::Pid) -> nix::Result<bool> {
+        use nix::sys::wait::{Id, WaitPidFlag, WaitStatus, waitid};
+        let status = waitid(
+            Id::Pid(pid),
+            WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT,
+        )?;
+        Ok(!matches!(status, WaitStatus::StillAlive))
+    }
+
+    /// asupersync-7tg3di finding 1: `try_wait` reaped the group leader, so
+    /// the process-group number was free for an unrelated group while the
+    /// handle lived, and drop, `wait` or `kill_process_tree` then sent that
+    /// group SIGKILL. The leader now stays an unreaped zombie, which keeps the
+    /// number reserved, until the group has been killed.
+    #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
+    #[test]
+    fn exact_image_try_wait_keeps_the_group_number_until_the_group_is_killed() {
+        init_test("exact_image_try_wait_keeps_the_group_number_until_the_group_is_killed");
+        for finish in ["wait", "drop"] {
+            let mut child = ExactImageCommand::new("/bin/true")
+                .spawn()
+                .expect("spawn /bin/true");
+            let pid = nix::unistd::Pid::from_raw(i32::try_from(child.id()).expect("pid fits i32"));
+            let status = loop {
+                if let Some(status) = child.try_wait().expect("try_wait") {
+                    break status;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            };
+            assert!(status.success(), "{finish}: {status:?}");
+            assert_eq!(
+                is_unreaped_zombie(pid),
+                Ok(true),
+                "{finish}: try_wait reaped the leader, freeing its group number",
+            );
+            assert_eq!(
+                child.try_wait().expect("second try_wait"),
+                Some(status),
+                "{finish}: the observed status is kept",
+            );
+            if finish == "wait" {
+                assert_eq!(child.wait().expect("wait"), status);
+            }
+            drop(child);
+            assert_eq!(
+                is_unreaped_zombie(pid),
+                Err(nix::errno::Errno::ECHILD),
+                "{finish}: the leader is reaped once the group is killed",
+            );
+        }
+        crate::test_complete!(
+            "exact_image_try_wait_keeps_the_group_number_until_the_group_is_killed"
+        );
+    }
+
+    /// `ExactImageChild::wait` kills the group before it reaps the leader, so
+    /// the leader is reaped exactly once, by `wait`, and its status survives.
+    #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
+    #[test]
+    fn exact_image_wait_reaps_after_the_group_kill() {
+        init_test("exact_image_wait_reaps_after_the_group_kill");
+        let mut child = ExactImageCommand::new("/bin/false")
+            .spawn()
+            .expect("spawn /bin/false");
+        let pid = nix::unistd::Pid::from_raw(i32::try_from(child.id()).expect("pid fits i32"));
+        let status = child.wait().expect("wait");
+        assert_eq!(status.code(), Some(1));
+        assert_eq!(
+            is_unreaped_zombie(pid),
+            Err(nix::errno::Errno::ECHILD),
+            "wait reaps the leader"
+        );
+        assert_eq!(child.wait().expect("second wait"), status);
+        crate::test_complete!("exact_image_wait_reaps_after_the_group_kill");
+    }
 }
 
 #[cfg(all(test, windows))]
@@ -5625,5 +5703,131 @@ impl Child {
         if matches!(self.signal_target, ChildSignalTarget::ProcessGroup(_)) {
             let _ = self.signal_target.send(libc::SIGKILL);
         }
+    }
+}
+
+/// What an exact-image parent knows about its direct child's exit
+/// (asupersync-7tg3di finding 1).
+///
+/// The direct child leads the process group it was spawned into, and the
+/// group number is its pid. Once the child is reaped and no other member is
+/// left, the kernel may hand that number to an unrelated new group, and a
+/// later `killpg` would kill that group instead. So where the platform can
+/// observe an exit without reaping (Linux `waitid` with `WNOWAIT`), the child
+/// stays an unreaped zombie, which keeps the number reserved, until the group
+/// has been killed.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Copy, Debug)]
+enum ExactImageExit {
+    /// Not seen to exit yet.
+    Running,
+    /// Exited and not reaped yet.
+    Unreaped(ExitStatus),
+    /// Exited and reaped.
+    Reaped(ExitStatus),
+}
+
+/// Whether [`exact_image_peek_exit`] leaves an exited child unreaped.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const EXACT_IMAGE_PEEK_KEEPS_ZOMBIE: bool =
+    cfg!(all(target_os = "linux", not(target_env = "uclibc")));
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl ExactImageExit {
+    fn observed(self) -> Option<ExitStatus> {
+        match self {
+            Self::Running => None,
+            Self::Unreaped(status) | Self::Reaped(status) => Some(status),
+        }
+    }
+
+    /// The state after [`exact_image_peek_exit`] reported `status`.
+    fn peeked(status: ExitStatus) -> Self {
+        if EXACT_IMAGE_PEEK_KEEPS_ZOMBIE {
+            Self::Unreaped(status)
+        } else {
+            Self::Reaped(status)
+        }
+    }
+}
+
+/// Reports, without blocking, whether `pid` has exited. On Linux the child is
+/// left unreaped; elsewhere (no `waitid` in nix) it is reaped, as before.
+#[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
+fn exact_image_peek_exit(pid: nix::unistd::Pid) -> nix::Result<nix::sys::wait::WaitStatus> {
+    use nix::sys::wait::{Id, WaitPidFlag};
+    nix::sys::wait::waitid(
+        Id::Pid(pid),
+        WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT,
+    )
+}
+
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "uclibc")))]
+fn exact_image_peek_exit(pid: nix::unistd::Pid) -> nix::Result<nix::sys::wait::WaitStatus> {
+    nix::sys::wait::waitpid(pid, Some(nix::sys::wait::WaitPidFlag::WNOHANG))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl ExactImagePlatformChild {
+    /// Blocks until the direct child exits. On Linux the child is left
+    /// unreaped, so [`ExactImageChild::wait`] kills the group while the zombie
+    /// still reserves its number, and reaps after that.
+    fn wait_for_exit(&mut self) -> io::Result<ExitStatus> {
+        #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
+        {
+            if let Some(status) = self.status.observed() {
+                return Ok(status);
+            }
+            loop {
+                match nix::sys::wait::waitid(
+                    nix::sys::wait::Id::Pid(self.pid),
+                    nix::sys::wait::WaitPidFlag::WEXITED | nix::sys::wait::WaitPidFlag::WNOWAIT,
+                ) {
+                    Ok(status) => {
+                        if let Some(status) = exact_image_exit_status(status) {
+                            self.status = ExactImageExit::Unreaped(status);
+                            return Ok(status);
+                        }
+                    }
+                    Err(nix::errno::Errno::EINTR) => {}
+                    Err(error) => return Err(nix_errno_to_io(error)),
+                }
+            }
+        }
+        #[cfg(not(all(target_os = "linux", not(target_env = "uclibc"))))]
+        {
+            self.wait()
+        }
+    }
+
+    /// Reaps the direct child if it has exited, without blocking.
+    fn try_reap(&mut self) -> io::Result<Option<ExitStatus>> {
+        if let ExactImageExit::Reaped(status) = self.status {
+            return Ok(Some(status));
+        }
+        loop {
+            match nix::sys::wait::waitpid(self.pid, Some(nix::sys::wait::WaitPidFlag::WNOHANG)) {
+                Ok(nix::sys::wait::WaitStatus::StillAlive) => return Ok(None),
+                Ok(status) => {
+                    if let Some(status) = exact_image_exit_status(status) {
+                        self.status = ExactImageExit::Reaped(status);
+                        return Ok(Some(status));
+                    }
+                }
+                Err(nix::errno::Errno::EINTR) => {}
+                Err(error) => return Err(nix_errno_to_io(error)),
+            }
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+impl ExactImagePlatformChild {
+    fn wait_for_exit(&mut self) -> io::Result<ExitStatus> {
+        self.wait()
+    }
+
+    fn try_reap(&mut self) -> io::Result<Option<ExitStatus>> {
+        self.try_wait()
     }
 }
