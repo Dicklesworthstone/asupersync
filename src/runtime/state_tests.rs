@@ -4665,6 +4665,81 @@ fn create_task_infrastructure_in_external_rollback_recycles_externally() {
 }
 
 #[test]
+fn user_entropy_fork_panic_does_not_poison_state_lock() {
+    init_test("user_entropy_fork_panic_does_not_poison_state_lock");
+
+    #[derive(Debug)]
+    struct PanickingForkEntropy;
+
+    impl crate::util::EntropySource for PanickingForkEntropy {
+        fn fill_bytes(&self, dest: &mut [u8]) {
+            dest.fill(0);
+        }
+
+        fn next_u64(&self) -> u64 {
+            0
+        }
+
+        fn fork(&self, _task_id: TaskId) -> Arc<dyn crate::util::EntropySource> {
+            panic!("user entropy fork panic under state lock");
+        }
+
+        fn source_id(&self) -> &'static str {
+            "panicking-fork"
+        }
+    }
+
+    let mut state = RuntimeState::new();
+    state.set_entropy_source(Arc::new(PanickingForkEntropy));
+    let region = state.create_root_region(Budget::INFINITE);
+    let system_cx = state.create_system_cx();
+
+    // 1. Task infrastructure creation must succeed under state lock without panicking.
+    // L3: Previously, self.entropy_source.fork(task_id) was called under the state lock
+    // after add_task, so a panicking fork unwound through create_task_infrastructure,
+    // leaving the state lock poisoned and the task quota leaked.
+    let result = state.create_task_infrastructure::<()>(&system_cx, region, Budget::new(), false);
+    crate::assert_with_log!(
+        result.is_ok(),
+        "task infrastructure creation succeeds with deferred entropy fork",
+        true,
+        result.is_ok()
+    );
+
+    let (task_id, _handle, cx, _result_tx, _effects) = result.expect("task infrastructure created");
+
+    // 2. The task record was admitted cleanly and state remains fully operational (not poisoned).
+    crate::assert_with_log!(
+        state.task(task_id).is_some(),
+        "task record exists in state",
+        true,
+        state.task(task_id).is_some()
+    );
+
+    // 3. Forcing entropy outside the state lock isolates the panic to the caller/task.
+    let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = cx.random_u64();
+    }));
+    crate::assert_with_log!(
+        panic_result.is_err(),
+        "panic occurs on task-level entropy access, not under state lock",
+        true,
+        panic_result.is_err()
+    );
+
+    // 4. Verify state is not poisoned and can continue to perform operations.
+    let child_region = state.create_child_region(region, Budget::INFINITE);
+    crate::assert_with_log!(
+        child_region.is_ok(),
+        "state lock remains operational after user entropy panic",
+        true,
+        child_region.is_ok()
+    );
+
+    crate::test_complete!("user_entropy_fork_panic_does_not_poison_state_lock");
+}
+
+#[test]
 fn drain_ready_async_finalizers_blocks_lower_finalizers_while_async_barrier_runs() {
     init_test("drain_ready_async_finalizers_blocks_lower_finalizers_while_async_barrier_runs");
     let mut state = RuntimeState::new();

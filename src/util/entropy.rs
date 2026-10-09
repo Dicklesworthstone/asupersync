@@ -7,7 +7,7 @@ use crate::types::TaskId;
 use crate::util::DetRng;
 use parking_lot::Mutex;
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicUsize, Ordering},
 };
 
@@ -26,6 +26,52 @@ pub trait EntropySource: std::fmt::Debug + Send + Sync + 'static {
 
     /// Stable identifier for tracing and diagnostics.
     fn source_id(&self) -> &'static str;
+}
+
+/// A deferred entropy fork that delays calling `parent.fork(task)` until first use,
+/// preventing user-supplied `EntropySource::fork` implementations from running under
+/// internal runtime state locks.
+#[derive(Debug)]
+pub struct DeferredFork {
+    parent: Arc<dyn EntropySource>,
+    task: TaskId,
+    forked: OnceLock<Arc<dyn EntropySource>>,
+}
+
+impl DeferredFork {
+    /// Creates a deferred fork that will invoke `parent.fork(task)` lazily on first access.
+    #[must_use]
+    pub fn new(parent: Arc<dyn EntropySource>, task: TaskId) -> Self {
+        Self {
+            parent,
+            task,
+            forked: OnceLock::new(),
+        }
+    }
+
+    /// Access the underlying forked source, forcing evaluation if not already done.
+    #[must_use]
+    pub fn forked(&self) -> &Arc<dyn EntropySource> {
+        self.forked.get_or_init(|| self.parent.fork(self.task))
+    }
+}
+
+impl EntropySource for DeferredFork {
+    fn fill_bytes(&self, dest: &mut [u8]) {
+        self.forked().fill_bytes(dest);
+    }
+
+    fn next_u64(&self) -> u64 {
+        self.forked().next_u64()
+    }
+
+    fn fork(&self, task_id: TaskId) -> Arc<dyn EntropySource> {
+        self.forked().fork(task_id)
+    }
+
+    fn source_id(&self) -> &'static str {
+        self.forked().source_id()
+    }
 }
 
 /// OS-backed entropy source for production use.
@@ -840,5 +886,110 @@ mod tests {
         for handle in handles {
             handle.join().expect("thread panicked");
         }
+    }
+
+    // =========================================================================
+    // DeferredFork Tests
+    // =========================================================================
+
+    #[derive(Debug)]
+    struct FixedEntropy(u64);
+
+    impl EntropySource for FixedEntropy {
+        fn fill_bytes(&self, dest: &mut [u8]) {
+            dest.fill(self.0 as u8);
+        }
+        fn next_u64(&self) -> u64 {
+            self.0
+        }
+        fn fork(&self, _task_id: TaskId) -> Arc<dyn EntropySource> {
+            Arc::new(FixedEntropy(self.0))
+        }
+        fn source_id(&self) -> &'static str {
+            "fixed"
+        }
+    }
+
+    #[derive(Debug)]
+    struct CountingEntropy {
+        forks: AtomicUsize,
+        panics_on_fork: bool,
+    }
+
+    impl EntropySource for CountingEntropy {
+        fn fill_bytes(&self, dest: &mut [u8]) {
+            dest.fill(42);
+        }
+
+        fn next_u64(&self) -> u64 {
+            42
+        }
+
+        fn fork(&self, _task_id: TaskId) -> Arc<dyn EntropySource> {
+            self.forks.fetch_add(1, Ordering::SeqCst);
+            if self.panics_on_fork {
+                panic!("user entropy fork panic");
+            }
+            Arc::new(FixedEntropy(42))
+        }
+
+        fn source_id(&self) -> &'static str {
+            "counting"
+        }
+    }
+
+    #[test]
+    fn deferred_fork_lazily_evaluates_on_first_use() {
+        let parent = Arc::new(CountingEntropy {
+            forks: AtomicUsize::new(0),
+            panics_on_fork: false,
+        });
+
+        let deferred = DeferredFork::new(
+            parent.clone(),
+            TaskId::from_arena(crate::util::ArenaIndex::new(1, 0)),
+        );
+        assert_eq!(
+            parent.forks.load(Ordering::SeqCst),
+            0,
+            "fork must not be called upon DeferredFork creation"
+        );
+
+        assert_eq!(deferred.next_u64(), 42);
+        assert_eq!(
+            parent.forks.load(Ordering::SeqCst),
+            1,
+            "fork evaluated on first use"
+        );
+
+        // Subsequent calls do not re-invoke parent.fork
+        assert_eq!(deferred.next_u64(), 42);
+        assert_eq!(
+            parent.forks.load(Ordering::SeqCst),
+            1,
+            "fork cached in OnceLock"
+        );
+    }
+
+    #[test]
+    fn deferred_fork_isolates_panic_until_access() {
+        let parent = Arc::new(CountingEntropy {
+            forks: AtomicUsize::new(0),
+            panics_on_fork: true,
+        });
+
+        // Creating the deferred fork must not panic
+        let deferred = DeferredFork::new(
+            parent.clone(),
+            TaskId::from_arena(crate::util::ArenaIndex::new(2, 0)),
+        );
+        assert_eq!(parent.forks.load(Ordering::SeqCst), 0);
+
+        // Calling next_u64 triggers the panicking fork
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            deferred.next_u64();
+        }));
+        assert!(result.is_err(), "panic should only occur on actual access");
+        assert_eq!(parent.forks.load(Ordering::SeqCst), 1);
     }
 }

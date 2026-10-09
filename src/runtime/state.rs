@@ -4353,7 +4353,10 @@ impl RuntimeState {
         }
 
         // Create the task's capability context
-        let entropy = self.entropy_source.fork(task_id);
+        let entropy = Arc::new(crate::util::DeferredFork::new(
+            Arc::clone(&self.entropy_source),
+            task_id,
+        ));
         let observability = self
             .observability
             .as_ref()
@@ -4820,7 +4823,12 @@ impl RuntimeState {
         // (br-asupersync-93zkbz).
         let mut inherited = slot.and_then(AdmittedTaskSlot::take_inherited_handles);
         let entropy = inherited.as_mut().map_or_else(
-            || self.entropy_source.fork(task_id),
+            || {
+                Arc::new(crate::util::DeferredFork::new(
+                    Arc::clone(&self.entropy_source),
+                    task_id,
+                )) as Arc<dyn crate::util::EntropySource>
+            },
             |inherited| inherited.deferred_entropy(task_id),
         );
         let observability = self
@@ -5090,7 +5098,10 @@ impl RuntimeState {
             self.io_driver_handle(),
             None,
             self.timer_driver_handle(),
-            Some(self.entropy_source.fork(principal_task_id)),
+            Some(Arc::new(crate::util::DeferredFork::new(
+                Arc::clone(&self.entropy_source),
+                principal_task_id,
+            ))),
             self.logical_clock_mode
                 .build_handle(self.timer_driver_handle()),
         )

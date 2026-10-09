@@ -241,50 +241,11 @@ impl InheritedHandles {
             .entropy
             .take()
             .expect("admission takes a task's inherited entropy once");
-        Arc::new(DeferredFork {
-            parent,
-            task,
-            forked: std::sync::OnceLock::new(),
-        })
+        Arc::new(DeferredFork::new(parent, task))
     }
 }
 
-/// A spawned task's entropy source: its spawner's, forked for the task on
-/// first use. Admission builds the task's context under the runtime lock
-/// and must not run the source's `fork` there. The spawn factory forces the
-/// fork before the task's own code runs, so a panicking fork still reaches
-/// the task's join handle, and every context of the task shares this one
-/// source (br-asupersync-93zkbz).
-#[derive(Debug)]
-struct DeferredFork {
-    parent: Arc<dyn EntropySource>,
-    task: TaskId,
-    forked: std::sync::OnceLock<Arc<dyn EntropySource>>,
-}
-
-impl DeferredFork {
-    fn forked(&self) -> &Arc<dyn EntropySource> {
-        self.forked.get_or_init(|| self.parent.fork(self.task))
-    }
-}
-
-impl EntropySource for DeferredFork {
-    fn fill_bytes(&self, dest: &mut [u8]) {
-        self.forked().fill_bytes(dest);
-    }
-
-    fn next_u64(&self) -> u64 {
-        self.forked().next_u64()
-    }
-
-    fn fork(&self, task_id: TaskId) -> Arc<dyn EntropySource> {
-        self.forked().fork(task_id)
-    }
-
-    fn source_id(&self) -> &'static str {
-        self.forked().source_id()
-    }
-}
+pub(crate) use crate::util::DeferredFork;
 
 /// Opaque ownership token for one auxiliary cancellation-Waker registration.
 ///
@@ -3565,9 +3526,10 @@ impl<Caps> Cx<Caps> {
         self.handles.entropy.as_ref()
     }
 
-    /// Derives an entropy source for a child task.
+    /// Derives an entropy source for a child task, lazily forking to avoid running
+    /// user entropy fork callbacks under the runtime state lock.
     pub(crate) fn child_entropy(&self, task: TaskId) -> Arc<dyn EntropySource> {
-        self.handles.entropy.fork(task)
+        Arc::new(DeferredFork::new(Arc::clone(&self.handles.entropy), task))
     }
 
     /// Returns a cloned entropy handle for capability-aware subsystems.
