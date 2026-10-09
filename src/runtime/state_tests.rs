@@ -10920,6 +10920,85 @@ fn a_panicking_tick_gate_leaves_the_workers_running() {
     crate::test_complete!("a_panicking_tick_gate_leaves_the_workers_running");
 }
 
+#[derive(Default)]
+struct PanicRecordingMetricsInner {
+    panics: parking_lot::Mutex<Vec<&'static str>>,
+}
+
+struct PanicRecordingMetrics(Arc<PanicRecordingMetricsInner>);
+
+impl MetricsProvider for PanicRecordingMetrics {
+    fn task_spawned(&self, _: RegionId, _: TaskId) {}
+    fn task_completed(&self, _: TaskId, _: OutcomeKind, _: Duration) {}
+    fn region_created(&self, _: RegionId, _: Option<RegionId>) {}
+    fn region_closed(&self, _: RegionId, _: Duration) {}
+    fn cancellation_requested(&self, _: RegionId, _: CancelKind) {}
+    fn drain_completed(&self, _: RegionId, _: Duration) {}
+    fn deadline_set(&self, _: RegionId, _: Duration) {}
+    fn deadline_exceeded(&self, _: RegionId) {}
+    fn deadline_warning(&self, _: &str, _: &'static str, _: Duration) {}
+    fn deadline_violation(&self, _: &str, _: Duration) {}
+    fn deadline_remaining(&self, _: &str, _: Duration) {}
+    fn checkpoint_interval(&self, _: &str, _: Duration) {}
+    fn task_stuck_detected(&self, _: &str) {}
+    fn obligation_created(&self, _: RegionId) {}
+    fn obligation_discharged(&self, _: RegionId) {}
+    fn obligation_leaked(&self, _: RegionId) {}
+    fn scheduler_tick(&self, _: usize, _: Duration) {}
+    fn record_panic(&self, location: &'static str) {
+        self.0.panics.lock().push(location);
+    }
+}
+
+/// asupersync-vp02m5: Task panics reach MetricsProvider::record_panic on native
+/// runtimes (current_thread and multi_thread).
+#[test]
+fn task_panics_reach_the_metrics_provider() {
+    use crate::runtime::RuntimeBuilder;
+    use crate::runtime::JoinError;
+
+    init_test_logging();
+    for workers in [None, Some(2)] {
+        let inner = Arc::new(PanicRecordingMetricsInner::default());
+        let provider = PanicRecordingMetrics(Arc::clone(&inner));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let builder = match workers {
+                None => RuntimeBuilder::current_thread(),
+                Some(count) => RuntimeBuilder::multi_thread().worker_threads(count),
+            };
+            let runtime = builder.metrics(provider).build().expect("build runtime");
+            runtime.block_on(async move {
+                let cx = crate::cx::Cx::current().expect("block_on installs a Cx");
+                let mut good = cx.spawn(|_| async move { 42 }).expect("spawn good task");
+                let mut bad = cx
+                    .spawn(|_| async move {
+                        panic!("intentional task execution panic");
+                    })
+                    .expect("spawn bad task");
+                let good_res = good.join(&cx).await;
+                assert!(matches!(good_res, Ok(42)));
+                let bad_res = bad.join(&cx).await;
+                assert!(matches!(bad_res, Err(JoinError::Panicked(_))));
+            });
+            let shut_down = runtime.shutdown_timeout(Duration::from_secs(10));
+            let _ = done_tx.send(shut_down);
+        });
+        let outcome = done_rx.recv_timeout(Duration::from_secs(30));
+        assert!(
+            matches!(outcome, Ok(true)),
+            "{workers:?}: runtime must shut down, got {outcome:?}"
+        );
+        let recorded = inner.panics.lock().clone();
+        assert_eq!(
+            recorded,
+            vec!["task_execution"],
+            "{workers:?}: exactly one task_execution panic should be recorded, got {recorded:?}"
+        );
+    }
+    crate::test_complete!("task_panics_reach_the_metrics_provider");
+}
+
 /// br-asupersync-k27oxe: a race branch's context kept past its sealed region
 /// still spawns once that region has closed. A branch region records its
 /// nearest unsealed ancestor (a nested branch skips its sealed parent), a task

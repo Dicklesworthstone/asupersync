@@ -3492,13 +3492,14 @@ const SCHEDULER_VERIFICATION_DEFAULT: bool = cfg!(any(test, debug_assertions));
 #[derive(Default)]
 struct SchedulerTicks {
     resolved: bool,
+    timing: bool,
     provider: Option<Arc<dyn crate::observability::metrics::MetricsProvider>>,
 }
 
 impl std::fmt::Debug for SchedulerTicks {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SchedulerTicks")
-            .field("timing", &self.provider.is_some())
+            .field("timing", &self.timing)
             .finish()
     }
 }
@@ -3522,13 +3523,12 @@ impl SchedulerTicks {
                 false
             }
         };
-        if wants {
-            self.provider = Some(provider);
-        }
+        self.timing = wants;
+        self.provider = Some(provider);
     }
 
     fn timing(&self) -> bool {
-        self.provider.is_some()
+        self.timing
     }
 
     /// Reports one task poll and its duration, so the provider's poll-time
@@ -3536,9 +3536,23 @@ impl SchedulerTicks {
     /// Callers hold no runtime lock; a panicking provider is contained like
     /// the runtime's other metrics callbacks.
     fn record(&self, nanos: u64) {
-        if let Some(provider) = &self.provider
+        if self.timing
+            && let Some(provider) = &self.provider
             && let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 provider.scheduler_tick(1, Duration::from_nanos(nanos));
+            }))
+        {
+            std::mem::forget(payload);
+        }
+    }
+
+    /// Reports a task execution panic with the canonical "task_execution" tag.
+    /// Callers hold no execution or runtime locks; a panicking provider is
+    /// contained like the runtime's other metrics callbacks (asupersync-vp02m5).
+    fn record_panic(&self, location: &'static str) {
+        if let Some(provider) = &self.provider
+            && let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                provider.record_panic(location);
             }))
         {
             std::mem::forget(payload);
@@ -8658,10 +8672,12 @@ impl ThreeLaneWorker {
         let poll_nanos = tick_start.map(|start| self.capture_now().duration_since(start));
 
         let mut credit_adaptive_epoch = true;
+        let mut panicked = false;
         match poll_result {
             Ok(Poll::Ready(outcome)) => {
                 if matches!(outcome, crate::types::Outcome::Panicked(_)) {
                     credit_adaptive_epoch = false;
+                    panicked = true;
                 }
                 // Map Outcome<(), ()> to Outcome<(), Error> for record.complete()
                 let mut task_outcome = outcome
@@ -8670,6 +8686,7 @@ impl ThreeLaneWorker {
                     guard.stored.take().expect("completed task storage"),
                 ) {
                     credit_adaptive_epoch = false;
+                    panicked = true;
                     if !matches!(task_outcome, crate::types::Outcome::Panicked(_)) {
                         task_outcome = crate::types::Outcome::Panicked(panic);
                     }
@@ -8823,6 +8840,7 @@ impl ThreeLaneWorker {
                 // reward signal, biasing the policy toward a wider cancel
                 // streak for the wrong reason.
                 credit_adaptive_epoch = false;
+                panicked = true;
                 let panic_message = crate::cx::scope::payload_to_string(&payload);
                 // The caught payload is arbitrary user-owned data. Retiring it
                 // can panic again or reenter runtime locks, so preserve only
@@ -8850,6 +8868,9 @@ impl ThreeLaneWorker {
         // The poll is reported once the execution guard has been released.
         if let Some(nanos) = poll_nanos {
             self.scheduler_ticks.record(nanos);
+        }
+        if panicked {
+            self.scheduler_ticks.record_panic("task_execution");
         }
         if credit_adaptive_epoch {
             self.adaptive_on_dispatch();
