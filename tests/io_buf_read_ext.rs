@@ -103,3 +103,47 @@ fn split_over_an_in_memory_reader_yields_a_final_unterminated_segment() {
         assert!(empty.is_empty());
     });
 }
+
+/// Reports end of input once, then stays pending, like a stdin or a blocking
+/// file read whose next read is handed to a thread.
+struct EofThenPending {
+    reads: usize,
+}
+
+impl asupersync::io::AsyncRead for EofThenPending {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        _buf: &mut asupersync::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        self.reads += 1;
+        if self.reads == 1 {
+            std::task::Poll::Ready(Ok(()))
+        } else {
+            std::task::Poll::Pending
+        }
+    }
+}
+
+/// `fill_buf` answers end of input from the fill that saw it. It used to fill
+/// a second time to borrow the bytes for its own lifetime, which started a new
+/// read; when that read was pending, the next poll panicked with "FillBuf
+/// polled after completion" (br-asupersync-68jvck).
+#[test]
+fn fill_buf_at_end_of_input_does_not_read_again() {
+    let mut reader = BufReader::new(EofThenPending { reads: 0 });
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    {
+        let mut fill = std::pin::pin!(reader.fill_buf());
+        match fill.as_mut().poll(&mut context) {
+            std::task::Poll::Ready(Ok(bytes)) => {
+                assert!(bytes.is_empty(), "end of input is empty");
+            }
+            std::task::Poll::Ready(Err(error)) => panic!("fill_buf failed: {error}"),
+            std::task::Poll::Pending => {
+                panic!("fill_buf started another read after end of input")
+            }
+        }
+    }
+    assert_eq!(reader.get_ref().reads, 1, "one read reached the source");
+}
