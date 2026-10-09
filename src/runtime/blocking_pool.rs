@@ -1517,11 +1517,23 @@ fn try_claim_idle_retirement(inner: &BlockingPoolInner) -> bool {
     }
 }
 
+/// Dispatches a cohort-assigned worker makes between turns on which it looks
+/// at the other cohorts' queues first.
+///
+/// `pop_next_blocking_task` reaches another cohort's queue only when the
+/// worker's own queue and the global queue are both empty. A task routed to a
+/// cohort that no live worker serves would therefore wait for as long as the
+/// live workers stay busy (br-asupersync-mopkmt M3). These turns bound that
+/// wait while leaving locality the rule.
+const FOREIGN_COHORT_TURN_INTERVAL: usize = 16;
+
 /// The worker loop for blocking pool threads.
 #[allow(clippy::significant_drop_tightening)] // Condvar wait pattern intentionally holds and rechecks under mutex.
 fn blocking_worker_loop(inner: &BlockingPoolInner, assigned_cohort: Option<usize>) -> bool {
     let mut idle_since: Option<Instant> = None;
     let mut local_dispatch_streak = 0usize;
+    let mut dispatches_since_foreign_turn = 0usize;
+    let mut foreign_cursor = 0usize;
 
     loop {
         // Try to get work from the queue
@@ -1530,10 +1542,20 @@ fn blocking_worker_loop(inner: &BlockingPoolInner, assigned_cohort: Option<usize
                 .affinity
                 .as_ref()
                 .is_some_and(|affinity| local_dispatch_streak < affinity.spill_check_interval);
-        if let Some((task, dequeue_kind)) =
-            pop_next_blocking_task(inner, assigned_cohort, prefer_local_turn)
+        let foreign_turn = match (assigned_cohort, inner.affinity.as_ref()) {
+            (Some(cohort), Some(affinity))
+                if dispatches_since_foreign_turn >= FOREIGN_COHORT_TURN_INTERVAL =>
+            {
+                dispatches_since_foreign_turn = 0;
+                affinity.steal_foreign_cohort_after(cohort, &mut foreign_cursor)
+            }
+            _ => None,
+        };
+        if let Some((task, dequeue_kind)) = foreign_turn
+            .or_else(|| pop_next_blocking_task(inner, assigned_cohort, prefer_local_turn))
         {
             idle_since = None; // Reset idle timer since we got work
+            dispatches_since_foreign_turn = dispatches_since_foreign_turn.saturating_add(1);
             local_dispatch_streak = match dequeue_kind {
                 BlockingTaskDequeueKind::Local => local_dispatch_streak.saturating_add(1),
                 BlockingTaskDequeueKind::Global | BlockingTaskDequeueKind::Spill => 0,
@@ -1696,6 +1718,31 @@ fn blocking_worker_loop(inner: &BlockingPoolInner, assigned_cohort: Option<usize
         }
     }
     false
+}
+
+impl BlockingPoolAffinityState {
+    /// Takes a task from the first other cohort with work, starting at
+    /// `*cursor`, and moves `*cursor` past that cohort, so successive turns
+    /// visit every cohort instead of always draining the lowest-numbered one.
+    fn steal_foreign_cohort_after(
+        &self,
+        own_cohort: usize,
+        cursor: &mut usize,
+    ) -> Option<(BlockingTask, BlockingTaskDequeueKind)> {
+        for step in 0..self.cohort_count {
+            let idx = (*cursor + step) % self.cohort_count;
+            if idx == own_cohort {
+                continue;
+            }
+            if let Some(task) = self.cohort_queues[idx].pop() {
+                self.cohort_pending_counts[idx].fetch_sub(1, Ordering::Relaxed);
+                self.spill_dispatches.fetch_add(1, Ordering::Relaxed);
+                *cursor = (idx + 1) % self.cohort_count;
+                return Some((task, BlockingTaskDequeueKind::Spill));
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]
@@ -2194,6 +2241,144 @@ mod tests {
         assert!(
             pool.inner.thread_handles.lock().is_empty(),
             "the job's worker was joined",
+        );
+    }
+
+    fn labelled_cohort_task(
+        cohort: usize,
+        label: usize,
+        order: &Arc<StdMutex<Vec<usize>>>,
+    ) -> BlockingTask {
+        let order = Arc::clone(order);
+        BlockingTask {
+            work: Box::new(move || {
+                order
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(label);
+            }),
+            priority: 128,
+            preferred_cohort: Some(cohort),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            completion: Arc::new(BlockingTaskCompletion::new(wall_clock_now)),
+        }
+    }
+
+    /// Runs the worker loop on this thread as the worker of `cohort` until
+    /// every queue is empty, and returns the labels in the order they ran.
+    fn drain_as_cohort_worker(
+        inner: &Arc<BlockingPoolInner>,
+        cohort: usize,
+        order: &Arc<StdMutex<Vec<usize>>>,
+    ) -> Vec<usize> {
+        inner.shutdown.store(true, Ordering::Release);
+        assert!(!blocking_worker_loop(inner, Some(cohort)));
+        order
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    #[test]
+    fn a_task_on_a_cohort_no_worker_serves_runs_while_the_worker_has_local_work() {
+        // mopkmt M3: one worker serves cohort 0 and no worker serves cohort 1.
+        // The cohort-1 task used to run only once cohort 0's queue and the
+        // global queue were both empty, so sustained cohort-0 load starved it.
+        let inner = test_blocking_inner_with_affinity(
+            BlockingPoolAffinityProfile::CohortBiased {
+                local_queue_soft_limit: 1024,
+                spill_check_interval: 1024,
+            },
+            Some(2),
+        );
+        let order = Arc::new(StdMutex::new(Vec::new()));
+        let local_tasks = 3 * FOREIGN_COHORT_TURN_INTERVAL;
+        let unserved = labelled_cohort_task(1, usize::MAX, &order);
+        assert!(try_enqueue_task(&inner, unserved));
+        for label in 0..local_tasks {
+            let task = labelled_cohort_task(0, label, &order);
+            assert!(try_enqueue_task(&inner, task));
+        }
+
+        let ran = drain_as_cohort_worker(&inner, 0, &order);
+        assert_eq!(ran.len(), local_tasks + 1, "every task runs");
+        let position = ran
+            .iter()
+            .position(|&label| label == usize::MAX)
+            .expect("the cohort-1 task ran");
+        assert!(
+            position <= FOREIGN_COHORT_TURN_INTERVAL,
+            "the cohort-1 task ran as dispatch {position} of {}, not within the first {} after it was queued",
+            ran.len(),
+            FOREIGN_COHORT_TURN_INTERVAL + 1,
+        );
+    }
+
+    #[test]
+    fn steal_foreign_cohort_after_visits_the_other_cohorts_in_turn() {
+        let inner = test_blocking_inner_with_affinity(
+            BlockingPoolAffinityProfile::CohortBiased {
+                local_queue_soft_limit: 1024,
+                spill_check_interval: 1024,
+            },
+            Some(3),
+        );
+        for cohort in [1, 1, 2] {
+            assert!(try_enqueue_task(&inner, test_blocking_task(Some(cohort))));
+        }
+        let affinity = inner.affinity.as_ref().expect("affinity is enabled");
+        let mut cursor = 0;
+        let mut served = Vec::new();
+        while let Some((task, kind)) = affinity.steal_foreign_cohort_after(0, &mut cursor) {
+            assert_eq!(kind, BlockingTaskDequeueKind::Spill);
+            inner.pending_count.fetch_sub(1, Ordering::Relaxed);
+            served.push(task.preferred_cohort);
+        }
+        assert_eq!(
+            served,
+            vec![Some(1), Some(2), Some(1)],
+            "cohort 2 is served before cohort 1's second task",
+        );
+        assert_eq!(blocking_pool_affinity_metrics(&inner).spill_dispatches, 3);
+    }
+
+    #[test]
+    fn foreign_cohort_turns_rotate_so_one_busy_cohort_does_not_starve_another() {
+        // Cohorts 1 and 2 have no worker; cohort 1 stays busy. Foreign turns
+        // that always started at the lowest cohort would serve cohort 1 every
+        // time and leave the cohort-2 task until everything else had run.
+        let inner = test_blocking_inner_with_affinity(
+            BlockingPoolAffinityProfile::CohortBiased {
+                local_queue_soft_limit: 1024,
+                spill_check_interval: 1024,
+            },
+            Some(3),
+        );
+        let order = Arc::new(StdMutex::new(Vec::new()));
+        let local_tasks = 4 * FOREIGN_COHORT_TURN_INTERVAL;
+        let cohort_one_tasks = 8;
+        for label in 0..cohort_one_tasks {
+            let task = labelled_cohort_task(1, 1000 + label, &order);
+            assert!(try_enqueue_task(&inner, task));
+        }
+        let unserved = labelled_cohort_task(2, usize::MAX, &order);
+        assert!(try_enqueue_task(&inner, unserved));
+        for label in 0..local_tasks {
+            let task = labelled_cohort_task(0, label, &order);
+            assert!(try_enqueue_task(&inner, task));
+        }
+
+        let ran = drain_as_cohort_worker(&inner, 0, &order);
+        let total = local_tasks + cohort_one_tasks + 1;
+        assert_eq!(ran.len(), total, "every task runs");
+        let position = ran
+            .iter()
+            .position(|&label| label == usize::MAX)
+            .expect("the cohort-2 task ran");
+        assert!(
+            position <= 2 * (FOREIGN_COHORT_TURN_INTERVAL + 1),
+            "the cohort-2 task ran as dispatch {position} of {}, not on the second foreign turn",
+            ran.len(),
         );
     }
 
