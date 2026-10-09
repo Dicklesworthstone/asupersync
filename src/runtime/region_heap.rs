@@ -25,9 +25,9 @@
 //!
 //! **Proof outline.**
 //!
-//! 1. *Single reclamation site.* `RegionHeap::reclaim_all()` is called exactly
-//!    once per region, from `RegionRecord::clear_heap()`, which is called from
-//!    `RegionRecord::complete_close()`.
+//! 1. *Single reclamation site.* A region empties its heap with `take_all()`
+//!    (which `reclaim_all()` wraps) once, from `RegionRecord::complete_close()`
+//!    or, for a snapshot restored as closed, `RegionRecord::clear_heap()`.
 //!
 //! 2. *State machine guard.* `complete_close()` performs an atomic
 //!    `state.transition(Finalizing, Closed)`. The `RegionState` state machine
@@ -428,6 +428,17 @@ impl RegionHeap {
     /// This is called automatically when the heap is dropped, but can be
     /// called explicitly for eager reclamation.
     pub fn reclaim_all(&mut self) {
+        drop(self.take_all());
+    }
+
+    /// Reclaims all allocations like [`Self::reclaim_all`], but returns their
+    /// payloads, in ascending index order, instead of dropping them. A region
+    /// drops them after it has released its own lock and before it publishes
+    /// its close, so a destructor that panics cannot leave it half closed and
+    /// one that touches the region does not deadlock on that lock. The
+    /// runtime's own locks may still be held (br-asupersync-fu6cr0 M2).
+    pub(crate) fn take_all(&mut self) -> Vec<Box<dyn Any + Send + Sync>> {
+        let mut payloads = Vec::with_capacity(self.len);
         let reclaimed_count = self.len as u64;
         GLOBAL_ALLOC_COUNT.fetch_sub(reclaimed_count, Ordering::Relaxed);
 
@@ -464,14 +475,21 @@ impl RegionHeap {
                 HeapSlot::Vacant { generation, .. } => (*generation, *generation == u32::MAX),
             };
             let next_free = if retired { None } else { self.free_head };
-            self.slots[i] = HeapSlot::Vacant {
-                next_free,
-                generation,
-            };
+            let previous = std::mem::replace(
+                &mut self.slots[i],
+                HeapSlot::Vacant {
+                    next_free,
+                    generation,
+                },
+            );
+            if let HeapSlot::Occupied(entry) = previous {
+                payloads.push(entry.value);
+            }
             if !retired {
                 self.free_head = Some(i as u32);
             }
         }
+        payloads
     }
 }
 

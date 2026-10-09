@@ -6,7 +6,7 @@
 use crate::record::finalizer::{Finalizer, FinalizerStack};
 use crate::record::task::TaskOutcome;
 use crate::runtime::region_heap::{HeapIndex, RegionHeap};
-use crate::tracing_compat::{Span, debug, info_span};
+use crate::tracing_compat::{Span, debug, info_span, warn};
 use crate::types::rref::{RRef, RRefAccessWitness, RRefError};
 use crate::types::{
     Budget, CancelReason, CapabilityBudget, CurveBudget, RRefAccess, RegionId, TaskId, Time,
@@ -1840,8 +1840,12 @@ impl RegionRecord {
 
         if transitioned {
             self.trace_state_change(RegionState::Closed);
-            inner.heap.reclaim_all();
-            *self.close_receipt.lock() = Some(RegionCloseOutcome {
+            // The payloads are dropped with the region lock released, and
+            // before the receipt is stored and the close waiters are woken,
+            // so whoever sees the close happens-after every destructor
+            // (br-asupersync-fu6cr0 M2).
+            let payloads = inner.heap.take_all();
+            let receipt = RegionCloseOutcome {
                 outcome: inner
                     .close_outcome
                     .clone()
@@ -1851,13 +1855,15 @@ impl RegionRecord {
                     Some(crate::types::Outcome::Panicked(payload)) => Some(payload.clone()),
                     _ => inner.descendant_panic.clone(),
                 },
-            });
+            };
+            drop(inner);
+            drop_region_payloads(self.id, payloads);
+            *self.close_receipt.lock() = Some(receipt);
             let waiters = {
                 let mut notify = self.close_notify.lock();
                 notify.closed = true;
                 std::mem::take(&mut notify.waiters)
             };
-            drop(inner);
             for waker in waiters {
                 waker.wake();
             }
@@ -1890,10 +1896,11 @@ impl RegionRecord {
         self.span.record("state", state_name);
     }
 
-    /// Clears the region heap after closing.
+    /// Clears the region heap after closing. The payloads are dropped after
+    /// the region lock is released.
     fn clear_heap(&self) {
-        let mut inner = self.inner.write();
-        inner.heap.reclaim_all();
+        let payloads = self.inner.write().heap.take_all();
+        drop_region_payloads(self.id, payloads);
     }
 
     /// Resolves a `RRef` by accessing the region heap.
@@ -2192,6 +2199,24 @@ impl RRefAccess for RegionRecord {
         f: F,
     ) -> Result<R, RRefError> {
         self.rref_with_witness(rref, witness, f)
+    }
+}
+
+/// Drops the payloads a closing region took out of its heap, with the region
+/// lock released. Each payload is dropped on its own under `catch_unwind`: a
+/// panicking destructor is logged and the rest are still dropped, and the
+/// caller still stores the close receipt and wakes the close waiters
+/// (br-asupersync-fu6cr0 M2).
+fn drop_region_payloads(region: RegionId, payloads: Vec<Box<dyn std::any::Any + Send + Sync>>) {
+    for payload in payloads {
+        let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(payload)));
+        if dropped.is_err() {
+            let _ = &region;
+            warn!(
+                region_id = ?region,
+                "a region heap payload's destructor panicked after the region closed"
+            );
+        }
     }
 }
 
@@ -2657,6 +2682,131 @@ mod tests {
         assert!(region.begin_finalize());
         assert!(region.complete_close());
 
+        assert_eq!(region.heap_len(), 0);
+    }
+
+    #[derive(Default)]
+    struct CloseWake(std::sync::atomic::AtomicUsize);
+
+    impl std::task::Wake for CloseWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn register_close_waiter(region: &RegionRecord) -> Arc<CloseWake> {
+        let wake = Arc::new(CloseWake::default());
+        region
+            .close_notify
+            .lock()
+            .waiters
+            .push(std::task::Waker::from(Arc::clone(&wake)));
+        wake
+    }
+
+    /// fu6cr0 M2: complete_close dropped the heap's payloads under the region
+    /// lock. A payload's destructor now runs with the lock free, and still
+    /// before the close receipt is stored and the close waiters are woken, so
+    /// a close waiter happens-after it.
+    #[test]
+    fn region_close_drops_heap_payloads_unlocked_before_publishing() {
+        // A heap payload must be Sync and a RegionRecord is not, so the
+        // payload reaches the region through this thread: complete_close
+        // drops it on the calling thread.
+        thread_local! {
+            static OBSERVED: std::cell::RefCell<Option<std::rc::Rc<RegionRecord>>> =
+                const { std::cell::RefCell::new(None) };
+        }
+        struct Observer {
+            wake: Arc<CloseWake>,
+            seen: Arc<Mutex<Option<(bool, bool, usize)>>>,
+        }
+        impl Drop for Observer {
+            fn drop(&mut self) {
+                OBSERVED.with(|slot| {
+                    if let Some(region) = slot.borrow().as_ref() {
+                        *self.seen.lock() = Some((
+                            region.inner.try_read().is_some(),
+                            region.close_receipt.lock().is_some(),
+                            self.wake.0.load(Ordering::SeqCst),
+                        ));
+                    }
+                });
+            }
+        }
+
+        let region = std::rc::Rc::new(RegionRecord::new(test_region_id(), None, Budget::default()));
+        let wake = register_close_waiter(&region);
+        let seen = Arc::new(Mutex::new(None));
+        region
+            .heap_alloc(Observer {
+                wake: Arc::clone(&wake),
+                seen: Arc::clone(&seen),
+            })
+            .expect("heap alloc");
+
+        assert!(region.begin_close(None));
+        assert!(region.begin_finalize());
+        OBSERVED.with(|slot| *slot.borrow_mut() = Some(std::rc::Rc::clone(&region)));
+        assert!(region.complete_close());
+        OBSERVED.with(|slot| *slot.borrow_mut() = None);
+
+        assert_eq!(
+            *seen.lock(),
+            Some((true, false, 0)),
+            "(region lock free, close receipt stored, waiter woken) when the payload dropped"
+        );
+        assert!(region.close_receipt.lock().is_some());
+        assert_eq!(wake.0.load(Ordering::SeqCst), 1);
+    }
+
+    /// fu6cr0 M2: a panicking payload destructor unwound out of complete_close
+    /// with the region Closed but no close receipt and its waiters never woken,
+    /// so a parent waiting on it never closed. The panic now stays inside, and
+    /// the payloads after it are still dropped.
+    #[test]
+    fn a_panicking_heap_payload_does_not_leave_the_region_half_closed() {
+        struct PanicOnDrop;
+        impl Drop for PanicOnDrop {
+            fn drop(&mut self) {
+                panic!("region heap payload destructor");
+            }
+        }
+        struct CountOnDrop(Arc<std::sync::atomic::AtomicUsize>);
+        impl Drop for CountOnDrop {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        let wake = register_close_waiter(&region);
+        let dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        region.heap_alloc(PanicOnDrop).expect("heap alloc");
+        region
+            .heap_alloc(CountOnDrop(Arc::clone(&dropped)))
+            .expect("heap alloc");
+
+        assert!(region.begin_close(None));
+        assert!(region.begin_finalize());
+        let closed =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| region.complete_close()));
+
+        assert_eq!(
+            closed.ok(),
+            Some(true),
+            "the panic stays inside complete_close"
+        );
+        assert!(
+            region.close_receipt.lock().is_some(),
+            "close receipt stored"
+        );
+        assert_eq!(wake.0.load(Ordering::SeqCst), 1, "close waiter woken");
+        assert_eq!(
+            dropped.load(Ordering::SeqCst),
+            1,
+            "later payloads still dropped"
+        );
         assert_eq!(region.heap_len(), 0);
     }
 
