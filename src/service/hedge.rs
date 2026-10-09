@@ -8,6 +8,7 @@
 //! Scale" (Dean & Barroso, 2013).
 
 use super::{Layer, Service};
+use crate::combinator::PeakEwmaHedgeController;
 use crate::time::{Sleep, wall_now};
 use crate::types::Time;
 use std::fmt;
@@ -46,6 +47,13 @@ impl HedgeLayer {
     pub fn with_delay(delay: Duration) -> Self {
         Self::new(HedgeConfig::new(delay))
     }
+
+    /// Create a hedge layer with an adaptive delay controller.
+    #[must_use]
+    pub fn with_adaptive_delay(controller: Arc<PeakEwmaHedgeController>) -> Self {
+        let initial_delay = controller.current_delay();
+        Self::new(HedgeConfig::new(initial_delay).with_adaptive_delay(controller))
+    }
 }
 
 impl<S: Clone> Layer<S> for HedgeLayer {
@@ -71,6 +79,11 @@ pub struct HedgeConfig {
     /// timer. A custom getter makes every request's `Sleep` poll that getter
     /// from a thread of its own (br-asupersync-1sxucf).
     time_getter: Option<fn() -> Time>,
+    /// Optional adaptive delay controller based on Peak-EWMA. When set, each
+    /// request's hedge delay tracks the controller's current estimate rather
+    /// than the static `delay`, and successful primary responses observe their
+    /// latency into the controller (asupersync-m82nx1).
+    adaptive_controller: Option<Arc<PeakEwmaHedgeController>>,
 }
 
 impl HedgeConfig {
@@ -81,6 +94,7 @@ impl HedgeConfig {
             delay,
             max_pending: 10,
             time_getter: None,
+            adaptive_controller: None,
         }
     }
 
@@ -98,6 +112,13 @@ impl HedgeConfig {
         self
     }
 
+    /// Set an adaptive delay controller to dynamically calculate hedge delays.
+    #[must_use]
+    pub fn with_adaptive_delay(mut self, controller: Arc<PeakEwmaHedgeController>) -> Self {
+        self.adaptive_controller = Some(controller);
+        self
+    }
+
     /// Returns the time source used for hedge deadlines.
     #[must_use]
     pub const fn time_getter(&self) -> fn() -> Time {
@@ -105,6 +126,12 @@ impl HedgeConfig {
             Some(time_getter) => time_getter,
             None => wall_clock_now,
         }
+    }
+
+    /// Returns a reference to the adaptive controller, if configured.
+    #[must_use]
+    pub fn adaptive_controller(&self) -> Option<&Arc<PeakEwmaHedgeController>> {
+        self.adaptive_controller.as_ref()
     }
 }
 
@@ -276,7 +303,10 @@ impl<S> Hedge<S> {
     /// Get the configured delay threshold.
     #[must_use]
     pub fn delay(&self) -> Duration {
-        self.config.delay
+        match &self.config.adaptive_controller {
+            Some(controller) => controller.current_delay(),
+            None => self.config.delay,
+        }
     }
 
     /// Get the maximum pending hedge limit.
@@ -441,6 +471,8 @@ where
         hedge_future: Option<S::Future>,
         sleep: Sleep,
         time_getter: fn() -> Time,
+        start_time: Time,
+        adaptive_controller: Option<Arc<PeakEwmaHedgeController>>,
         max_pending: u32,
         stats: Arc<HedgeStats>,
         slot_held: bool,
@@ -480,7 +512,12 @@ where
         stats: Arc<HedgeStats>,
     ) -> Self {
         let time_getter = config.time_getter();
-        let deadline = time_getter().saturating_add_nanos(duration_to_nanos(config.delay));
+        let start_time = time_getter();
+        let delay = match &config.adaptive_controller {
+            Some(controller) => controller.current_delay(),
+            None => config.delay,
+        };
+        let deadline = start_time.saturating_add_nanos(duration_to_nanos(delay));
         let sleep = match config.time_getter {
             Some(time_getter) => Sleep::with_time_getter(deadline, time_getter),
             None => Sleep::new(deadline),
@@ -493,6 +530,8 @@ where
                 hedge_future: None,
                 sleep,
                 time_getter,
+                start_time,
+                adaptive_controller: config.adaptive_controller.clone(),
                 max_pending: config.max_pending,
                 stats,
                 slot_held: false,
@@ -549,6 +588,8 @@ where
                     hedge_future,
                     sleep,
                     time_getter,
+                    start_time,
+                    adaptive_controller,
                     max_pending,
                     stats,
                     slot_held,
@@ -561,6 +602,10 @@ where
                     if let Some(primary_future) = primary.as_mut() {
                         match Pin::new(primary_future).poll(cx) {
                             Poll::Ready(Ok(response)) => {
+                                if let Some(controller) = adaptive_controller.as_ref() {
+                                    let elapsed_nanos = time_getter().duration_since(*start_time);
+                                    controller.observe(Duration::from_nanos(elapsed_nanos));
+                                }
                                 if *slot_held {
                                     stats.finish_started_hedge(false);
                                     *slot_held = false;
@@ -948,6 +993,14 @@ mod tests {
         }
     }
 
+    #[test]
+    fn config_with_adaptive_delay() {
+        let controller = Arc::new(PeakEwmaHedgeController::default_rpc());
+        let config = HedgeConfig::new(Duration::from_millis(50))
+            .with_adaptive_delay(Arc::clone(&controller));
+        assert!(config.adaptive_controller().is_some());
+    }
+
     // ================================================================
     // HedgeLayer
     // ================================================================
@@ -964,6 +1017,13 @@ mod tests {
         let layer = HedgeLayer::with_delay(Duration::from_millis(200));
         let dbg = format!("{layer:?}");
         assert!(dbg.contains("HedgeLayer"));
+    }
+
+    #[test]
+    fn layer_with_adaptive_delay() {
+        let controller = Arc::new(PeakEwmaHedgeController::default_rpc());
+        let layer = HedgeLayer::with_adaptive_delay(Arc::clone(&controller));
+        assert!(layer.config.adaptive_controller().is_some());
     }
 
     #[test]
@@ -1261,6 +1321,102 @@ mod tests {
         let result = Pin::new(&mut future).poll(&mut cx);
         assert!(matches!(result, Poll::Ready(Ok(22))));
         assert_eq!(hedge.hedge_wins(), 1);
+    }
+
+    /// asupersync-m82nx1: backup dispatches according to the controller's delay,
+    /// and a slow primary raises subsequent delay via observe.
+    #[test]
+    fn hedge_adaptive_delay_follows_controller_and_slow_primary_raises_delay() {
+        set_test_time(0);
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        // Controller configured with initial 20ns, min 10ns, max 200ns, decay 0.99
+        let controller = Arc::new(PeakEwmaHedgeController::new(
+            Duration::from_nanos(20),
+            Duration::from_nanos(10),
+            Duration::from_nanos(200),
+            0.99,
+        ));
+
+        // Static delay is set to 100ns, but adaptive delay is 20ns
+        let config = HedgeConfig::new(Duration::from_nanos(100))
+            .with_adaptive_delay(Arc::clone(&controller))
+            .with_time_getter(test_time);
+
+        let mut hedge = Hedge::new(
+            TimedService::new(
+                vec![
+                    // First request: primary ready at 50ns (slow, should trigger hedge at 20ns)
+                    TimedPlan::ok_at(50, 1),
+                    // Hedge backup ready at 25ns
+                    TimedPlan::ok_at(25, 2),
+                    // Second request: primary ready at 160ns (started at 80ns, takes 80ns)
+                    TimedPlan::ok_at(160, 3),
+                    // Third request: primary ready at 300ns (started at 160ns, slow)
+                    TimedPlan::ok_at(300, 4),
+                    // Third request backup ready at 250ns
+                    TimedPlan::ok_at(250, 5),
+                ],
+                Arc::clone(&calls),
+            ),
+            config,
+        );
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // 1. First request: verify backup fires at controller delay (20ns), NOT static delay (100ns)
+        assert!(matches!(hedge.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        let mut first = hedge.call(10);
+        assert!(Pin::new(&mut first).poll(&mut cx).is_pending());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Advance to 15ns - below controller delay (20ns), backup must NOT fire
+        set_test_time(15);
+        assert!(Pin::new(&mut first).poll(&mut cx).is_pending());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Advance to 20ns - reaches controller delay, backup MUST fire
+        set_test_time(20);
+        assert!(Pin::new(&mut first).poll(&mut cx).is_pending());
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "backup fires at controller delay (20ns)");
+        assert_eq!(hedge.hedged_requests(), 1);
+
+        // Advance to 25ns - backup wins
+        set_test_time(25);
+        let res1 = Pin::new(&mut first).poll(&mut cx);
+        assert!(matches!(res1, Poll::Ready(Ok(2))));
+        assert_eq!(hedge.hedge_wins(), 1);
+
+        // 2. Second request: primary completes successfully and updates controller
+        set_test_time(80);
+        assert!(matches!(hedge.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        let mut second = hedge.call(20);
+        assert!(Pin::new(&mut second).poll(&mut cx).is_pending());
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+        // Complete primary at 160ns (elapsed = 80ns).
+        // Since controller delay was 20ns, this slow primary (80ns) feeds observe(80ns).
+        set_test_time(160);
+        let res2 = Pin::new(&mut second).poll(&mut cx);
+        assert!(matches!(res2, Poll::Ready(Ok(3))));
+        // Controller delay should now have increased to 80ns!
+        assert_eq!(controller.current_delay(), Duration::from_nanos(80));
+
+        // 3. Third request: uses updated higher delay (80ns), so at t=160 + 50ns = 210ns it does NOT hedge
+        assert!(matches!(hedge.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        let mut third = hedge.call(30);
+        assert!(Pin::new(&mut third).poll(&mut cx).is_pending());
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+
+        set_test_time(210); // 50ns elapsed, which is > old delay (20ns) but < new delay (80ns)
+        assert!(Pin::new(&mut third).poll(&mut cx).is_pending());
+        assert_eq!(calls.load(Ordering::SeqCst), 4, "backup did not fire at old 20ns threshold");
+
+        // Advance to 240ns (80ns elapsed) -> backup fires!
+        set_test_time(240);
+        assert!(Pin::new(&mut third).poll(&mut cx).is_pending());
+        assert_eq!(calls.load(Ordering::SeqCst), 5, "backup fires at updated 80ns threshold");
     }
 
     #[test]
