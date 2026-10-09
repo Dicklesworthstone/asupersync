@@ -1076,3 +1076,57 @@ mod native_tls {
         }
     }
 }
+
+/// A socket host refuses a TLS `ssl_mode` before connecting. TLS is not
+/// negotiated over a Unix-domain socket, and the mode used to be skipped
+/// there, so a full `caching_sha2_password` authentication sent the password
+/// in cleartext despite `ssl-mode=required` (br-asupersync-i5e6x9).
+#[test]
+fn a_socket_host_refuses_a_tls_ssl_mode_before_connecting() {
+    init_test_logging();
+    for (mode, refused) in [
+        (SslMode::Preferred, true),
+        (SslMode::Required, true),
+        (SslMode::Disabled, false),
+    ] {
+        let mut options = MySqlConnectOptions::parse("mysql://user:pw@localhost/db").unwrap();
+        options.host = "/nonexistent-asupersync-test/mysqld.sock".to_string();
+        options.ssl_mode = mode;
+        let outcome = futures_lite::future::block_on(async {
+            MySqlConnection::connect_with_options(&Cx::for_testing(), options).await
+        });
+        let detail = match &outcome {
+            Outcome::Err(error) => format!("{error:?}"),
+            _ => "not an error".to_string(),
+        };
+        let tls_required = matches!(outcome, Outcome::Err(MySqlError::TlsRequired));
+        assert_eq!(tls_required, refused, "{mode:?}: {detail}");
+        assert!(
+            detail != "not an error",
+            "{mode:?}: the socket does not exist"
+        );
+    }
+}
+
+/// `?socket=` names the socket even when the URL also names a host, as with
+/// sqlx; it used to be ignored then, so the client connected over TCP. A
+/// relative socket path is refused instead of being taken for a host name
+/// (br-asupersync-i5e6x9).
+#[test]
+fn the_socket_parameter_overrides_a_host_and_must_be_absolute() {
+    let socket = "/run/mysqld/mysqld.sock";
+    for url in [
+        format!("mysql://u@db.example/app?socket={socket}"),
+        format!("mysql://u@/app?socket={socket}"),
+    ] {
+        assert_eq!(
+            MySqlConnectOptions::parse(&url).unwrap().host,
+            socket,
+            "{url}"
+        );
+    }
+    assert!(MySqlConnectOptions::parse("mysql://u@db.example/app?socket=mysqld.sock").is_err());
+    assert!(MySqlConnectOptions::parse("mysql://u@/app").is_err());
+    let opts = MySqlConnectOptions::parse("mysql://u@db.example/app").unwrap();
+    assert_eq!(opts.host, "db.example");
+}

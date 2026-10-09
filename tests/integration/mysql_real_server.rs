@@ -1214,6 +1214,8 @@ fn mysql_real_unix_socket_host_connects_over_the_socket() {
     run_test_with_cx(|cx| async move {
         let mut options = MySqlConnectOptions::parse(&cfg.url).expect("parse MYSQL_URL");
         options.host = socket.clone();
+        // TLS is not negotiated over a socket; a TLS ssl_mode is refused there.
+        options.ssl_mode = asupersync::database::mysql::SslMode::Disabled;
         if std::env::var("MYSQL_ALLOW_NATIVE_PASSWORD").is_ok_and(|value| value == "true") {
             options.insecure_legacy_mysql_native_password = true;
         }
