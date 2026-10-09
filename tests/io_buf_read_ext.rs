@@ -147,3 +147,54 @@ fn fill_buf_at_end_of_input_does_not_read_again() {
     }
     assert_eq!(reader.get_ref().reads, 1, "one read reached the source");
 }
+
+/// Always ready: each read returns one byte with no delimiter, until `left`
+/// runs out.
+struct Dribble {
+    left: usize,
+}
+
+impl asupersync::io::AsyncRead for Dribble {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        buf: &mut asupersync::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if self.left > 0 && buf.remaining() > 0 {
+            self.left -= 1;
+            buf.put_slice(b"x");
+        }
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+/// `read_until` and `split` yield after a bounded number of refills, as
+/// `read_line` and `lines` do. Over a source that is always ready they used
+/// to loop until the delimiter or end of input, holding the worker so that a
+/// surrounding timeout could not fire (br-asupersync-68jvck).
+#[test]
+fn read_until_and_split_yield_on_an_always_ready_source() {
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+
+    let mut reader = BufReader::with_capacity(1, Dribble { left: 1_000 });
+    let mut line = Vec::new();
+    {
+        let mut read = std::pin::pin!(reader.read_until(b'\n', &mut line));
+        assert!(
+            read.as_mut().poll(&mut context).is_pending(),
+            "read_until yields before consuming 1000 ready refills"
+        );
+    }
+    assert!(
+        !line.is_empty() && line.len() < 1_000,
+        "{} bytes",
+        line.len()
+    );
+
+    let mut segments = BufReader::with_capacity(1, Dribble { left: 1_000 }).split(b'\n');
+    assert!(
+        asupersync::stream::Stream::poll_next(std::pin::Pin::new(&mut segments), &mut context)
+            .is_pending(),
+        "split yields before consuming 1000 ready refills"
+    );
+}

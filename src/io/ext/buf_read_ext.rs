@@ -138,7 +138,16 @@ impl<R: AsyncBufRead + Unpin + ?Sized> Future for ReadUntil<'_, R> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        let mut steps = 0;
         loop {
+            // Yield after a bounded number of refills, as ReadLine does, so
+            // a source that is always ready cannot hold the worker and a
+            // surrounding timeout can fire (br-asupersync-68jvck).
+            if steps > 32 {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            steps += 1;
             let (used, done) = {
                 let available = std::task::ready!(Pin::new(&mut *this.reader).poll_fill_buf(cx))?;
                 match memchr::memchr(this.delimiter, available) {
@@ -184,7 +193,14 @@ impl<R: AsyncBufRead + Unpin> Stream for Split<R> {
         if this.finished {
             return Poll::Ready(None);
         }
+        let mut steps = 0;
         loop {
+            // Bounded, as in ReadUntil.
+            if steps > 32 {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            steps += 1;
             let (used, found) = {
                 let available = match Pin::new(&mut this.reader).poll_fill_buf(cx) {
                     Poll::Pending => return Poll::Pending,

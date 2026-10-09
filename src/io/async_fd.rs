@@ -35,7 +35,7 @@ use std::fmt;
 use std::io;
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 
 const READ: u8 = 1;
@@ -78,34 +78,76 @@ struct FdReadiness {
     /// direction ready (a spurious direction is cleared by the next
     /// `WouldBlock`).
     armed: AtomicU8,
-    waiters: parking_lot::Mutex<Vec<Waker>>,
+    waiters: parking_lot::Mutex<Vec<FdWaiter>>,
+    next_owner: AtomicU64,
+}
+
+/// One task waiting on the descriptor. `owner` identifies a `ready` future,
+/// which removes its own entry when it is dropped; entries without an owner
+/// come from direct `poll_read_ready`/`poll_write_ready` callers.
+struct FdWaiter {
+    owner: Option<u64>,
+    waker: Waker,
 }
 
 impl FdReadiness {
-    /// Adds `waker` unless it is already listed. A waiter whose future was
-    /// dropped stays listed until the next event; past 32 entries the oldest
-    /// is woken and evicted, so a live one re-registers and a stale one goes.
-    fn register(&self, waker: &Waker) {
+    fn next_owner(&self) -> u64 {
+        self.next_owner.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Lists `waker` for the next event. A `ready` future keeps one entry,
+    /// updated in place and removed when the future is dropped, so it is
+    /// never evicted. A direct poller cannot be told apart from an abandoned
+    /// one, so those entries stay capped at 32: past that the oldest is woken
+    /// and evicted. Evicting `ready` futures too made each evicted waiter
+    /// evict the next, so 33 tasks waiting on one descriptor woke each other
+    /// forever (br-asupersync-68jvck, as for the listeners in dofi11).
+    fn register(&self, owner: Option<u64>, waker: &Waker) {
         let mut waiters = self.waiters.lock();
-        if waiters.iter().any(|existing| existing.will_wake(waker)) {
+        if owner.is_some() {
+            if let Some(entry) = waiters.iter_mut().find(|entry| entry.owner == owner) {
+                entry.waker.clone_from(waker);
+            } else {
+                waiters.push(FdWaiter {
+                    owner,
+                    waker: waker.clone(),
+                });
+            }
             return;
         }
-        if waiters.len() >= 32 {
-            let evicted = waiters.remove(0);
+        if waiters
+            .iter()
+            .any(|existing| existing.owner.is_none() && existing.waker.will_wake(waker))
+        {
+            return;
+        }
+        if waiters.iter().filter(|entry| entry.owner.is_none()).count() >= 32
+            && let Some(index) = waiters.iter().position(|entry| entry.owner.is_none())
+        {
+            let evicted = waiters.remove(index);
             drop(waiters);
-            evicted.wake();
+            evicted.waker.wake();
             waiters = self.waiters.lock();
         }
-        waiters.push(waker.clone());
+        waiters.push(FdWaiter {
+            owner: None,
+            waker: waker.clone(),
+        });
+    }
+
+    fn remove(&self, owner: u64) {
+        self.waiters
+            .lock()
+            .retain(|entry| entry.owner != Some(owner));
     }
 
     /// Wakes every listed waiter but `current`, for a wait the reactor will
     /// not complete: each re-polls and sees the readiness or the error itself.
     fn wake_others(&self, current: &Waker) {
         let mut waiters = std::mem::take(&mut *self.waiters.lock());
-        waiters.retain(|waiter| !waiter.will_wake(current));
+        waiters.retain(|waiter| !waiter.waker.will_wake(current));
         for waiter in waiters {
-            waiter.wake();
+            waiter.waker.wake();
         }
     }
 
@@ -114,8 +156,21 @@ impl FdReadiness {
         self.ready.fetch_or(fired, Ordering::AcqRel);
         let waiters = std::mem::take(&mut *self.waiters.lock());
         for waiter in waiters {
-            waiter.wake();
+            waiter.waker.wake();
         }
+    }
+}
+
+/// Removes a `ready` future's waiter entry when the future ends or is
+/// dropped.
+struct OwnedWait {
+    readiness: Arc<FdReadiness>,
+    owner: u64,
+}
+
+impl Drop for OwnedWait {
+    fn drop(&mut self) {
+        self.readiness.remove(self.owner);
     }
 }
 
@@ -153,8 +208,11 @@ impl<T: AsRawFd> AsyncFd<T> {
     ///
     /// The descriptor is registered with the current task's reactor (or the
     /// process-wide fallback reactor) on the first wait. A descriptor the
-    /// reactor refuses, such as a regular file, is treated as always ready:
-    /// waits on it re-poll after a short backoff instead of failing.
+    /// reactor refuses fails that wait with the reactor's error: a regular
+    /// file or `/dev/null` under Linux epoll gives `PermissionDenied`
+    /// (`EPERM`), as tokio refuses one in `new`. Only a reactor that reports
+    /// registration unsupported makes waits re-poll after a short backoff
+    /// (br-asupersync-68jvck).
     ///
     /// # Errors
     ///
@@ -201,7 +259,7 @@ impl<T: AsRawFd> AsyncFd<T> {
         &'a self,
         cx: &mut Context<'_>,
     ) -> Poll<io::Result<AsyncFdReadyGuard<'a, T>>> {
-        self.poll_ready_bits(cx, READ)
+        self.poll_ready_bits(cx, READ, None)
             .map_ok(|ready| AsyncFdReadyGuard {
                 async_fd: self,
                 ready,
@@ -217,7 +275,7 @@ impl<T: AsRawFd> AsyncFd<T> {
         &'a self,
         cx: &mut Context<'_>,
     ) -> Poll<io::Result<AsyncFdReadyGuard<'a, T>>> {
-        self.poll_ready_bits(cx, WRITE)
+        self.poll_ready_bits(cx, WRITE, None)
             .map_ok(|ready| AsyncFdReadyGuard {
                 async_fd: self,
                 ready,
@@ -251,7 +309,10 @@ impl<T: AsRawFd> AsyncFd<T> {
     /// for [`poll_read_ready`](Self::poll_read_ready).
     pub async fn ready(&self, interest: Interest) -> io::Result<AsyncFdReadyGuard<'_, T>> {
         let wanted = checked_bits(interest)?;
-        let ready = std::future::poll_fn(|cx| self.poll_ready_bits(cx, wanted)).await?;
+        let wait = self.owned_wait();
+        let owner = Some(wait.owner);
+        let ready = std::future::poll_fn(|cx| self.poll_ready_bits(cx, wanted, owner)).await?;
+        drop(wait);
         Ok(AsyncFdReadyGuard {
             async_fd: self,
             ready,
@@ -289,7 +350,10 @@ impl<T: AsRawFd> AsyncFd<T> {
         interest: Interest,
     ) -> io::Result<AsyncFdReadyMutGuard<'_, T>> {
         let wanted = checked_bits(interest)?;
-        let ready = std::future::poll_fn(|cx| self.poll_ready_bits(cx, wanted)).await?;
+        let wait = self.owned_wait();
+        let owner = Some(wait.owner);
+        let ready = std::future::poll_fn(|cx| self.poll_ready_bits(cx, wanted, owner)).await?;
+        drop(wait);
         Ok(AsyncFdReadyMutGuard {
             async_fd: self,
             ready,
@@ -338,7 +402,12 @@ impl<T: AsRawFd> AsyncFd<T> {
 
     /// Ready when a direction in `wanted` is marked ready; otherwise parks the
     /// task on the reactor for those directions.
-    fn poll_ready_bits(&self, cx: &Context<'_>, wanted: u8) -> Poll<io::Result<u8>> {
+    fn poll_ready_bits(
+        &self,
+        cx: &Context<'_>,
+        wanted: u8,
+        owner: Option<u64>,
+    ) -> Poll<io::Result<u8>> {
         if crate::cx::Cx::with_current(|current| current.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
@@ -349,7 +418,7 @@ impl<T: AsRawFd> AsyncFd<T> {
 
         // Listed and armed before the reactor sees the interest, so an event
         // that fires at once still finds this waiter.
-        self.readiness.register(cx.waker());
+        self.readiness.register(owner, cx.waker());
         self.readiness.armed.fetch_or(wanted, Ordering::AcqRel);
         let dispatch = Waker::from(Arc::clone(&self.readiness));
         let source = RawSource(self.get_ref().as_raw_fd());
@@ -380,6 +449,14 @@ impl<T: AsRawFd> AsyncFd<T> {
                 self.readiness.wake_others(cx.waker());
                 Poll::Ready(Err(err))
             }
+        }
+    }
+
+    /// A waiter identity for one `ready` future, removed when it is dropped.
+    fn owned_wait(&self) -> OwnedWait {
+        OwnedWait {
+            readiness: Arc::clone(&self.readiness),
+            owner: self.readiness.next_owner(),
         }
     }
 

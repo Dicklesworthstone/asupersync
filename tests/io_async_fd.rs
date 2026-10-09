@@ -221,3 +221,54 @@ fn waiters_in_separate_tasks_on_a_multi_thread_runtime_are_all_woken() {
     }
     drop(writer.join().expect("writer"));
 }
+
+/// Forty tasks wait on one descriptor that stays idle, then all see it become
+/// readable. Waiters past the 32nd used to evict and wake the oldest, which
+/// re-registered and evicted the next, so the waiting tasks were re-polled
+/// forever while nothing happened (br-asupersync-68jvck).
+#[test]
+fn forty_waiters_on_one_descriptor_park_until_it_is_ready() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (local, mut peer) = nonblocking_pair();
+    let fd = Arc::new(AsyncFd::new(local).expect("wrap"));
+    let polls = Arc::new(AtomicUsize::new(0));
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("runtime");
+    let handle = runtime.handle();
+    let (idle_polls, woken) = runtime.block_on(async move {
+        let waiters: Vec<_> = (0..40)
+            .map(|_| {
+                let fd = Arc::clone(&fd);
+                let polls = Arc::clone(&polls);
+                handle.spawn(async move {
+                    let mut wait = std::pin::pin!(fd.readable());
+                    std::future::poll_fn(|cx| {
+                        polls.fetch_add(1, Ordering::SeqCst);
+                        wait.as_mut().poll(cx)
+                    })
+                    .await
+                    .map(drop)
+                })
+            })
+            .collect();
+        asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(300)).await;
+        let idle_polls = polls.load(Ordering::SeqCst);
+        peer.write_all(b"x").expect("peer write");
+        let mut woken = 0;
+        for waiter in waiters {
+            waiter.await.expect("readable");
+            woken += 1;
+        }
+        (idle_polls, woken)
+    });
+    eprintln!("forty waiters: {idle_polls} polls while idle, {woken} woken");
+    assert_eq!(woken, 40);
+    assert!(
+        idle_polls < 200,
+        "{idle_polls} polls while the descriptor was idle; each waiter should park"
+    );
+}
