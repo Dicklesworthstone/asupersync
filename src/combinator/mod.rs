@@ -177,9 +177,10 @@ pub use rate_limit::{
     RateLimiter, RateLimiterRegistry, SlidingWindowRateLimiter, WaitStrategy,
 };
 pub use retry::{
-    AlwaysRetry, NeverRetry, Retry, RetryError, RetryFailure, RetryIf, RetryPolicy, RetryPredicate,
-    RetryResult, RetryState, calculate_deadline as retry_deadline, calculate_delay,
-    make_retry_result, retry, total_delay_budget,
+    AlwaysRetry, NeverRetry, RateLimitedRetryPolicy, Retry, RetryBudget, RetryError, RetryFailure,
+    RetryIf, RetryPolicy, RetryPredicate, RetryResult, RetryState, RetryTokenBucket,
+    calculate_deadline as retry_deadline, calculate_delay, make_retry_result, retry,
+    total_delay_budget,
 };
 pub use select::{
     Either, Select, SelectAll, SelectAllDrain, SelectAllDrainError, SelectAllDrainResult,

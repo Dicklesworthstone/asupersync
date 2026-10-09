@@ -33,9 +33,11 @@ use crate::types::outcome::PanicPayload;
 use crate::types::{Outcome, Time};
 use crate::util::det_rng::DetRng;
 use core::fmt;
+use parking_lot::Mutex;
 use pin_project::pin_project;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -396,7 +398,8 @@ impl<E: fmt::Debug + fmt::Display> std::error::Error for RetryError<E> {}
 ///
 /// Prevents retry storms by limiting the rate at which retries can be attempted.
 /// Uses a classic token bucket algorithm where tokens refill at a steady rate
-/// and operations consume tokens.
+/// and operations consume tokens. To have [`retry`] loops draw on one, wrap it
+/// in a [`RetryBudget`] and pass that to [`Retry::with_budget`].
 #[derive(Debug, Clone)]
 pub struct RetryTokenBucket {
     /// Maximum number of tokens the bucket can hold.
@@ -531,11 +534,61 @@ impl RateLimitedRetryPolicy {
         self.token_bucket = Some((capacity, refill_rate));
         self
     }
+
+    /// Returns a full [`RetryBudget`] built from this policy's token bucket,
+    /// or `None` if it has none.
+    ///
+    /// Build it once, at `now`, and give clones to every retry loop it should
+    /// bound, with [`Retry::with_budget`] and `self.retry_policy` as the policy.
+    #[must_use]
+    pub fn budget(&self, now: Time) -> Option<RetryBudget> {
+        self.token_bucket.map(|(capacity, refill_rate)| {
+            RetryBudget::new(RetryTokenBucket::new(capacity, refill_rate, now))
+        })
+    }
 }
 
 impl Default for RateLimitedRetryPolicy {
     fn default() -> Self {
         Self::new(RetryPolicy::default())
+    }
+}
+
+/// A retry budget shared by many retry loops.
+///
+/// A [`Retry`] loop given a budget with [`Retry::with_budget`] takes one token
+/// from it before each retry. A first attempt takes none. When no token is
+/// left, the loop does not retry: it fails at once with the error it just got,
+/// as if its attempts had run out. Give clones of one budget to every caller of
+/// a dependency, and their retries together stay within the bucket's rate, so
+/// an outage of that dependency does not turn into a retry storm.
+///
+/// Clones share the same bucket. The bucket refills on the clock the loops
+/// read: the runtime's timer when there is one, the wall clock otherwise. Build
+/// its [`RetryTokenBucket`] with a `now` from that clock.
+#[derive(Debug, Clone)]
+pub struct RetryBudget {
+    bucket: Arc<Mutex<RetryTokenBucket>>,
+}
+
+impl RetryBudget {
+    /// Creates a budget that draws on `bucket`.
+    #[must_use]
+    pub fn new(bucket: RetryTokenBucket) -> Self {
+        Self {
+            bucket: Arc::new(Mutex::new(bucket)),
+        }
+    }
+
+    /// Takes one retry token at `now`. Returns `false` if none is available.
+    pub fn try_acquire(&self, now: Time) -> bool {
+        self.bucket.lock().try_consume(1, now)
+    }
+
+    /// Returns the number of whole tokens left, as of the last refill.
+    #[must_use]
+    pub fn available(&self) -> u32 {
+        self.bucket.lock().available_tokens()
     }
 }
 
@@ -805,6 +858,7 @@ pub struct Retry<F, Fut, P, Pred> {
     policy: P,
     predicate: Pred,
     state: RetryState,
+    budget: Option<RetryBudget>,
     #[pin]
     inner: RetryInner<Fut>,
 }
@@ -820,9 +874,30 @@ where
             policy,
             predicate,
             state: RetryState::new(policy_val),
+            budget: None,
             inner: RetryInner::Idle,
         }
     }
+
+    /// Makes each retry of this loop take a token from `budget` first.
+    ///
+    /// When the budget has no token, the loop fails with the error of the
+    /// attempt that just failed instead of retrying. See [`RetryBudget`].
+    #[must_use]
+    pub fn with_budget(mut self, budget: RetryBudget) -> Self {
+        self.budget = Some(budget);
+        self
+    }
+}
+
+/// The time on the clock a retry loop sleeps on: the current runtime's timer
+/// when it has one, the wall clock otherwise.
+fn retry_clock_now() -> Time {
+    Cx::current().map_or_else(crate::time::wall_now, |current| {
+        current
+            .timer_driver()
+            .map_or_else(crate::time::wall_now, |driver| driver.now())
+    })
 }
 
 impl<F, Fut, P, Pred, T, E> Future for Retry<F, Fut, P, Pred>
@@ -875,13 +950,7 @@ where
                             // Cx::current() will be used by Sleep internally
                             // We need to construct Sleep with a relative duration from "now"
                             // Sleep::after handles getting the time source correctly
-                            let now = Cx::current().map_or_else(crate::time::wall_now, |current| {
-                                current
-                                    .timer_driver()
-                                    .map_or_else(crate::time::wall_now, |driver| driver.now())
-                            });
-
-                            let sleep = Sleep::after(now, delay);
+                            let sleep = Sleep::after(retry_clock_now(), delay);
                             this.inner.set(RetryInner::Sleeping(sleep));
                         }
                     } else {
@@ -927,9 +996,14 @@ where
                                 }
                                 Outcome::Err(e) => {
                                     let attempt = this.state.attempt;
-                                    // Check predicate
+                                    // Check predicate, then the shared budget
+                                    // (only a retry that would happen takes a
+                                    // token).
                                     if this.predicate.should_retry(&e, attempt)
                                         && this.state.has_attempts_remaining()
+                                        && this.budget.as_ref().is_none_or(|budget| {
+                                            budget.try_acquire(retry_clock_now())
+                                        })
                                     {
                                         // Retry
                                         this.inner.set(RetryInner::Idle);
@@ -1595,6 +1669,85 @@ mod tests {
             assert_eq!(err.attempts, 3);
             assert_eq!(err.final_error, "fail forever");
         }
+    }
+
+    /// Runs a five-attempt loop whose every attempt fails, drawing on
+    /// `budget`, and returns its error and how many attempts it made.
+    fn run_failing_loop_with_budget(budget: &RetryBudget) -> (RetryError<&'static str>, u32) {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let counted = std::sync::Arc::clone(&calls);
+        let future = retry(RetryPolicy::immediate(5), AlwaysRetry, move || {
+            counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            std::future::ready(Outcome::<i32, &str>::Err("dependency down"))
+        })
+        .with_budget(budget.clone());
+        let RetryResult::Failed(err) = futures_lite::future::block_on(future) else {
+            panic!("an always-failing loop must fail");
+        };
+        (err, calls.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    #[test]
+    fn a_shared_budget_bounds_the_retries_of_every_loop_that_draws_on_it() {
+        // e9gn8y L6: the token bucket was never consulted by retry(), so it
+        // could not stop a retry storm. Three tokens and no refill: the first
+        // loop retries three times, the second not at all.
+        let budget = RetryBudget::new(RetryTokenBucket::new(3, 0.0, crate::time::wall_now()));
+
+        let (first, first_calls) = run_failing_loop_with_budget(&budget);
+        assert_eq!(first_calls, 4, "one attempt and three budgeted retries");
+        assert_eq!(first.attempts, 4);
+        assert_eq!(first.final_error, "dependency down");
+        assert_eq!(budget.available(), 0);
+
+        let (second, second_calls) = run_failing_loop_with_budget(&budget);
+        assert_eq!(
+            second_calls, 1,
+            "a spent budget leaves only the first attempt"
+        );
+        assert_eq!(second.attempts, 1);
+        assert_eq!(second.final_error, "dependency down");
+    }
+
+    #[test]
+    fn a_retry_budget_is_spent_only_by_retries() {
+        let budget = RetryBudget::new(RetryTokenBucket::new(2, 0.0, crate::time::wall_now()));
+        let ok = retry(RetryPolicy::immediate(5), AlwaysRetry, || {
+            std::future::ready(Outcome::<i32, &str>::Ok(7))
+        })
+        .with_budget(budget.clone());
+        assert!(matches!(
+            futures_lite::future::block_on(ok),
+            RetryResult::Ok(7)
+        ));
+        let never = retry(RetryPolicy::immediate(5), NeverRetry, || {
+            std::future::ready(Outcome::<i32, &str>::Err("permanent"))
+        })
+        .with_budget(budget.clone());
+        assert!(futures_lite::future::block_on(never).is_failed());
+        assert_eq!(
+            budget.available(),
+            2,
+            "first attempts and refused retries take no token"
+        );
+    }
+
+    #[test]
+    fn rate_limited_policy_builds_its_budget() {
+        let now = Time::from_secs(10);
+        assert!(RateLimitedRetryPolicy::default().budget(now).is_none());
+        let budget = RateLimitedRetryPolicy::default()
+            .with_token_bucket(4, 1.0)
+            .budget(now)
+            .expect("a policy with a token bucket has a budget");
+        assert_eq!(budget.available(), 4);
+        assert!(budget.try_acquire(now));
+        assert_eq!(budget.available(), 3);
+        assert!(
+            budget.try_acquire(Time::from_secs(11)),
+            "a second refills one token"
+        );
+        assert_eq!(budget.available(), 3);
     }
 
     // ─── Token Bucket Golden Tests ──────────────────────────────────────────
