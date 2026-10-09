@@ -3099,6 +3099,9 @@ pub struct PgConnectOptions {
     /// server's Unix-domain socket when it is an absolute path (the client
     /// then connects to `<host>/.s.PGSQL.<port>`, and `ssl_mode` does not
     /// apply). Unix-domain sockets are available on Unix platforms only.
+    /// A configured password must be asked for, over a socket too: a server
+    /// that accepts the connection with peer or trust authentication instead
+    /// is refused, so a socket URL relying on those carries no password.
     pub host: String,
     /// Port number (default 5432).
     pub port: u16,
@@ -5751,10 +5754,22 @@ impl PgConnection {
                         0 => {
                             // AuthenticationOk
                             if options.password.is_some() && !auth_challenged {
-                                return Err(PgError::AuthenticationFailed(
-                                    "server accepted connection without challenging configured password"
-                                        .to_string(),
-                                ));
+                                // Over a Unix-domain socket this is peer or
+                                // trust authentication. It is refused all the
+                                // same, since a socket another local process
+                                // squats answers this way too; the message
+                                // says so instead of hinting at an attack.
+                                let socket = unix_socket_path(&options.host, options.port);
+                                let reason = if socket.is_some() {
+                                    "server accepted the Unix-domain socket connection without \
+                                     asking for the configured password (peer or trust \
+                                     authentication); leave the password out of a socket URL \
+                                     that relies on it"
+                                } else {
+                                    "server accepted connection without challenging configured \
+                                     password"
+                                };
+                                return Err(PgError::AuthenticationFailed(reason.to_string()));
                             }
                             return Ok(());
                         }

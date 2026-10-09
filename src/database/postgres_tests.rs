@@ -4481,6 +4481,36 @@ mod tests {
         }
     }
 
+    /// asupersync-qml5yb finding 8: over a Unix-domain socket the server's
+    /// unchallenged AuthenticationOk is peer or trust authentication, and the
+    /// refusal now says that instead of hinting at an attack.
+    #[test]
+    fn an_unchallenged_password_over_a_unix_socket_names_peer_or_trust_authentication() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        std::io::Write::write_all(&mut peer, &backend_message(b'R', &0i32.to_be_bytes())).unwrap();
+
+        let cx = crate::cx::Cx::for_testing();
+        let options = PgConnectOptions {
+            host: "/var/run/postgresql".to_string(),
+            port: 5432,
+            database: "testdb".to_string(),
+            user: "app".to_string(),
+            password: Some(SecretString::new("secret")),
+            application_name: None,
+            connect_timeout: None,
+            ssl_mode: SslMode::Disable,
+        };
+
+        match run(conn.authenticate(&cx, &options)) {
+            Err(PgError::AuthenticationFailed(msg)) => {
+                assert!(msg.contains("Unix-domain socket"), "got: {msg}");
+                assert!(msg.contains("peer or trust authentication"), "got: {msg}");
+                assert!(msg.contains("leave the password out"), "got: {msg}");
+            }
+            other => panic!("expected AuthenticationFailed, got: {other:?}"),
+        }
+    }
+
     #[test]
     fn authenticate_allows_auth_ok_without_challenge_when_no_password_is_configured() {
         let (mut conn, mut peer) = make_test_connection_with_peer();
