@@ -504,17 +504,17 @@ impl GracefulDrainSupervisor {
 }
 
 /// Internal state shared between the signal and its subscribers.
-struct SignalState {
-    phase: AtomicU8,
-    controller: ShutdownController,
-    phase_notify: Notify,
-    force_close_notify: Notify,
-    stopped_notify: Notify,
+pub(crate) struct SignalState {
+    pub(crate) phase: AtomicU8,
+    pub(crate) controller: ShutdownController,
+    pub(crate) phase_notify: Notify,
+    pub(crate) force_close_notify: Notify,
+    pub(crate) stopped_notify: Notify,
     time_source: ShutdownTimeSource,
-    has_drain_deadline: AtomicBool,
-    drain_deadline: AtomicU64,
-    has_drain_start: AtomicBool,
-    drain_start: AtomicU64,
+    pub(crate) has_drain_deadline: AtomicBool,
+    pub(crate) drain_deadline: AtomicU64,
+    pub(crate) has_drain_start: AtomicBool,
+    pub(crate) drain_start: AtomicU64,
 }
 
 /// Broadcast signal for server shutdown coordination.
@@ -542,7 +542,7 @@ struct SignalState {
 /// ```
 #[derive(Clone)]
 pub struct ShutdownSignal {
-    state: Arc<SignalState>,
+    pub(crate) state: Arc<SignalState>,
 }
 
 impl ShutdownSignal {
@@ -739,6 +739,12 @@ impl ShutdownSignal {
             })
             .await;
         }
+    }
+
+    /// Returns a notification future that is signaled on phase changes and drain deadlines.
+    #[must_use]
+    pub fn phase_notified(&self) -> crate::sync::Notified<'_> {
+        self.state.phase_notify.notified()
     }
 
     /// Returns the time when drain began, if applicable.

@@ -1111,13 +1111,13 @@ impl<F> Http1Listener<F> {
                     }
                     DrainStep::Escalate => {
                         self.stats.record_drain_escalated();
-                        let _ = self.shutdown_signal.begin_force_close();
+                        let _ = self.connection_manager.begin_force_close();
                     }
                     DrainStep::Quiescent => break,
                     DrainStep::HardDeadline => {
                         hard_deadline_hit = true;
                         self.stats.record_drain_hard_deadline();
-                        let _ = self.shutdown_signal.begin_force_close();
+                        let _ = self.connection_manager.begin_force_close();
                         break;
                     }
                 }

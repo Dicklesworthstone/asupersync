@@ -75,6 +75,13 @@ pub struct ConnectionInfo {
 /// - Active connection counting for drain coordination
 /// - Notification when all connections close (for shutdown)
 ///
+/// # One Manager per Signal
+///
+/// Each [`ShutdownSignal`] should be associated with at most one [`ConnectionManager`].
+/// When [`ConnectionManager::drain_with_stats`] finishes draining an empty manager, it calls
+/// [`ShutdownSignal::mark_stopped`], transitioning the signal to [`ShutdownPhase::Stopped`]
+/// and immediately force-closing any remaining connections on any other manager sharing the signal.
+///
 /// # Example
 ///
 /// ```
@@ -125,7 +132,8 @@ impl ConnectionManager {
     /// # Arguments
     ///
     /// * `max_connections` — Optional capacity limit. `None` means unlimited.
-    /// * `shutdown_signal` — Shared shutdown signal for drain coordination.
+    /// * `shutdown_signal` — Shared shutdown signal for drain coordination. Each signal
+    ///   should be paired with at most one `ConnectionManager`.
     #[must_use]
     pub fn new(max_connections: Option<usize>, shutdown_signal: ShutdownSignal) -> Self {
         Self::with_time_getter(max_connections, shutdown_signal, wall_clock_now)
@@ -380,6 +388,26 @@ impl ConnectionManager {
         self.shutdown_signal.trigger_immediate();
     }
 
+    /// Transitions from `Running` or `Draining` to `ForceClosing` on the shared
+    /// shutdown signal, snapshotting the active connection count under the registry
+    /// lock if not already recorded.
+    ///
+    /// The snapshot is recorded while holding the connection registry lock before
+    /// notifying shutdown waiters, preventing force-close races against drops.
+    ///
+    /// Returns `true` if this call transitioned the shutdown signal to `ForceClosing`.
+    pub fn begin_force_close(&self) -> bool {
+        {
+            let connections = self.state.lock();
+            self.accepting.store(false, Ordering::Release);
+            if self.force_close_initial_count.load(Ordering::Acquire) == DRAIN_COUNT_UNSET {
+                self.force_close_initial_count
+                    .store(connections.len(), Ordering::Release);
+            }
+        }
+        self.shutdown_signal.begin_force_close()
+    }
+
     /// Returns the number of active connections.
     #[must_use]
     pub fn active_count(&self) -> usize {
@@ -475,16 +503,14 @@ impl ConnectionManager {
     /// 3. If deadline expires, transitions to force-close phase
     /// 4. Returns `ShutdownStats` with drained vs force-closed counts
     ///
-    /// The caller must have already called [`ShutdownSignal::begin_drain`] before
-    /// calling this method. The caller is responsible for force-closing connections
-    /// after this method transitions to `ForceClosing` phase.
+    /// The caller should call [`ConnectionManager::begin_drain`] (or let this method
+    /// sample the active count on start) before awaiting drain completion.
     ///
     /// # Example
     ///
     /// ```ignore
     /// manager.begin_drain(Duration::from_secs(30));
     /// let stats = manager.drain_with_stats().await;
-    /// signal.mark_stopped();
     /// println!("Drained: {}, Force-closed: {}", stats.drained, stats.force_closed);
     /// ```
     pub async fn drain_with_stats(&self) -> super::shutdown::ShutdownStats {
@@ -513,20 +539,23 @@ impl ConnectionManager {
                 if self.shutdown_signal.current_time() >= deadline {
                     // Timeout expired — transition to force close
                     let (drained, remaining) = self.drain_counts(initial_count);
-                    let _ = self.shutdown_signal.begin_force_close();
+                    let _ = self.begin_force_close();
                     return self.shutdown_signal.collect_stats(drained, remaining);
                 }
             }
 
             // Register for the next connection close or deadline notification.
             let notified = self.all_closed.notified();
+            let phase_notified = self.shutdown_signal.phase_notified();
             let force_close = self
                 .shutdown_signal
                 .wait_for_phase(ShutdownPhase::ForceClosing);
             let mut notified = std::pin::pin!(notified);
+            let mut phase_notified = std::pin::pin!(phase_notified);
             // Register now: the re-checks below must not miss a close that
             // lands before the first poll of `notified` (br-asupersync-m8xsjx).
             let _ = notified.as_mut().enable();
+            let _ = phase_notified.as_mut().enable();
             let mut force_close = std::pin::pin!(force_close);
 
             // Re-check state after registration to avoid missing close/timeout
@@ -544,7 +573,7 @@ impl ConnectionManager {
             if let Some(deadline) = self.shutdown_signal.drain_deadline() {
                 if self.shutdown_signal.current_time() >= deadline {
                     let (drained, remaining) = self.drain_counts(initial_count);
-                    let _ = self.shutdown_signal.begin_force_close();
+                    let _ = self.begin_force_close();
                     return self.shutdown_signal.collect_stats(drained, remaining);
                 }
             }
@@ -566,6 +595,7 @@ impl ConnectionManager {
                 poll_fn(|cx| {
                     if notified.as_mut().poll(cx).is_ready()
                         || force_close.as_mut().poll(cx).is_ready()
+                        || phase_notified.as_mut().poll(cx).is_ready()
                     {
                         return std::task::Poll::Ready(());
                     }
@@ -1798,5 +1828,92 @@ mod tests {
         set_test_time(31 * 1_000_000_000);
         let idle = manager.drop_idle_connections();
         assert_eq!(idle.len(), 3);
+    }
+
+    #[test]
+    fn drain_with_stats_retains_force_close_snapshot_via_begin_force_close() {
+        init_test("drain_with_stats_retains_force_close_snapshot_via_begin_force_close");
+        crate::test_utils::run_test(|| async {
+            let signal = ShutdownSignal::new();
+            let manager = ConnectionManager::new(None, signal.clone());
+
+            let g1 = manager.register(test_addr(1)).expect("register 1");
+            let g2 = manager.register(test_addr(2)).expect("register 2");
+            let began = manager.begin_drain(Duration::from_secs(30));
+            crate::assert_with_log!(began, "drain started", true, began);
+
+            // Escalation via manager.begin_force_close() snapshots under registry lock
+            let forced = manager.begin_force_close();
+            crate::assert_with_log!(forced, "force-close transitioned", true, forced);
+
+            // Now connection guards drop after force-close transition
+            drop(g1);
+            drop(g2);
+
+            let stats = manager.drain_with_stats().await;
+            crate::assert_with_log!(stats.drained == 0, "zero drained", 0, stats.drained);
+            crate::assert_with_log!(
+                stats.force_closed == 2,
+                "force-close snapshot retained after deregistration via begin_force_close",
+                2,
+                stats.force_closed
+            );
+            crate::assert_with_log!(
+                signal.phase() == ShutdownPhase::ForceClosing,
+                "phase force-closing",
+                ShutdownPhase::ForceClosing,
+                signal.phase()
+            );
+        });
+        crate::test_complete!("drain_with_stats_retains_force_close_snapshot_via_begin_force_close");
+    }
+
+    #[test]
+    fn drain_wakes_on_phase_notify_when_deadline_stored_after_phase_switch() {
+        init_test("drain_wakes_on_phase_notify_when_deadline_stored_after_phase_switch");
+        let signal = ShutdownSignal::new();
+        let manager = ConnectionManager::new(None, signal.clone());
+        let _g1 = manager.register(test_addr(1)).expect("g1");
+
+        // Simulate the race where phase is switched to Draining but deadline is not yet stored
+        let switched = signal.state.phase.compare_exchange(
+            ShutdownPhase::Running as u8,
+            ShutdownPhase::Draining as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        crate::assert_with_log!(switched.is_ok(), "phase switched", true, switched.is_ok());
+
+        // Spawn drain_with_stats in background
+        let drain_mgr = manager.clone();
+        let stats_slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let stats_ret = std::sync::Arc::clone(&stats_slot);
+        let drain_handle = std::thread::spawn(move || {
+            crate::test_utils::run_test(|| async move {
+                let stats = drain_mgr.drain_with_stats().await;
+                *stats_ret.lock().unwrap() = Some(stats);
+            })
+        });
+
+        // Brief pause to allow drain_with_stats to enter wait_for_drain and register phase_notified
+        std::thread::sleep(Duration::from_millis(15));
+
+        // Now store the deadline and notify phase_notify
+        let now = signal.current_time();
+        let deadline = now.saturating_add_nanos(50_000_000); // 50ms
+        signal.state.drain_deadline.store(deadline.as_nanos(), Ordering::Release);
+        signal.state.has_drain_deadline.store(true, Ordering::Release);
+        signal.state.phase_notify.notify_waiters();
+
+        // The background drain should observe the deadline and complete force-closing
+        drain_handle.join().expect("drain thread panicked");
+        let stats = stats_slot.lock().unwrap().take().expect("stats recorded");
+        crate::assert_with_log!(
+            stats.force_closed == 1,
+            "force closed after deadline",
+            1,
+            stats.force_closed
+        );
+        crate::test_complete!("drain_wakes_on_phase_notify_when_deadline_stored_after_phase_switch");
     }
 }

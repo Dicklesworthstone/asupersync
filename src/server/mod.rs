@@ -45,8 +45,8 @@
 //!
 //! // Initiate graceful shutdown with 30s drain:
 //! manager.begin_drain(Duration::from_secs(30));
-//! manager.wait_all_closed().await;
-//! signal.mark_stopped();
+//! let stats = manager.drain_with_stats().await;
+//! println!("Drained: {}, Force-closed: {}", stats.drained, stats.force_closed);
 //! ```
 
 pub mod connection;
