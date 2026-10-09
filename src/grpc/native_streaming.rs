@@ -637,6 +637,12 @@ fn validate_path(path: &str) -> Result<(), Status> {
 }
 
 fn authority(uri: &str) -> Result<(&str, &str), Status> {
+    // A `unix:` channel (45bf3826f) carries HTTP/2 with the `localhost`
+    // authority, as its own connections do; it has no `scheme://authority`
+    // to parse (br-asupersync-mu5yhv).
+    if uri.starts_with("unix:") {
+        return Ok(("http", "localhost"));
+    }
     let (scheme, rest) = uri.split_once("://").ok_or_else(|| Status::invalid_argument("invalid gRPC URI"))?;
     let authority = rest.strip_suffix('/').unwrap_or(rest);
     if !matches!(scheme, "http" | "https") || authority.is_empty() || authority.len() > 4096
