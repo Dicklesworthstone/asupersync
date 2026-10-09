@@ -172,6 +172,8 @@ pub mod panic_isolation;
 pub mod pool_sizing;
 pub mod rch_health;
 pub mod reactor;
+/// Stateful lab readiness with explicit one-shot, edge and level semantics.
+pub mod reactor_model;
 pub mod region_heap;
 #[cfg(test)]
 mod region_heap_metamorphic_tests;
