@@ -6020,6 +6020,11 @@ mod tests {
             "/*! USE b */",
             "SET SESSION sql_mode = 'ANSI'",
             "/* never ends USE b",
+            // An empty version comment ends before the statement, and
+            // MariaDB runs the text of its own executable comments.
+            "/*!40101*/ USE b",
+            "/*!40101 */ USE b",
+            "/*M!100100 USE b */",
         ] {
             assert!(
                 MySqlConnection::statement_rebinds_prepared_statements(sql),
@@ -6034,6 +6039,7 @@ mod tests {
             "--x\nUSE b",
             "-- only a comment",
             "INSERT INTO t VALUES ('USE b')",
+            "/*!40101*/ SELECT 1",
         ] {
             assert!(
                 !MySqlConnection::statement_rebinds_prepared_statements(sql),

@@ -7415,15 +7415,20 @@ pub fn fuzz_build_stmt_execute_packet(
 
 /// Whether `sql` is a `USE`, or a `SET` that changes sql_mode, once the
 /// comments MySQL skips before a statement are skipped. The text of a
-/// `/*!NNNNN ... */` version comment is part of the statement, so it is read.
-/// A `/*` comment that never ends answers `true`; text that is only a `#` or
-/// `-- ` comment runs nothing and answers `false`.
+/// `/*!NNNNN ... */` version comment (MariaDB's `/*M!NNNNNN ... */` too) is
+/// part of the statement, so it is read; an empty one (`/*!40101*/`) is
+/// skipped. A `/*` comment that never ends answers `true`; text that is only
+/// a `#` or `-- ` comment runs nothing and answers `false`.
 fn mysql_statement_rebinds_prepared_statements(sql: &str) -> bool {
     let mut rest = sql;
     loop {
         rest = rest.trim_start();
-        if let Some(body) = rest.strip_prefix("/*!") {
-            rest = body.trim_start_matches(|c: char| c.is_ascii_digit());
+        if let Some(body) = rest
+            .strip_prefix("/*!")
+            .or_else(|| rest.strip_prefix("/*M!"))
+        {
+            let text = body.trim_start_matches(|c: char| c.is_ascii_digit());
+            rest = text.trim_start().strip_prefix("*/").unwrap_or(text);
         } else if let Some(body) = rest.strip_prefix("/*") {
             let Some((_, after)) = body.split_once("*/") else {
                 return true;
