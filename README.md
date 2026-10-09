@@ -1077,49 +1077,51 @@ Asupersync does more work per task than tokio. Every task gets a region
 membership, a cancellation state machine and a terminal-result channel, and
 two-phase permits are tracked as obligations. That bookkeeping costs time.
 These numbers come from one process running both runtimes. The build was a
-release build with default features. The date was 2026-10-05, and the source
-was that of commit `5ae9d443e`. The same probe ran on three RCH workers: a
+release build with default features. The date was 2026-10-08, and the source
+was that of commit `791a2e356`. The same probe ran on three RCH workers: a
 16-CPU host, a 10-CPU host shared with other builds at the time, and a busy
 64-CPU host. Each figure is p50 per operation at n = 1,000. The ranges span
 the three hosts, so shared-host noise is part of the range: the widest row
-(spawn + join from a task) was 13.5× on the least loaded host.
+(spawn + join from a task) was 14× on the 16-CPU host.
 
 | Operation | Asupersync | tokio | Ratio |
 |-----------|------------|-------|-------|
-| spawn + join from a task, 4 workers | 4.2–12.4 µs | 0.31–0.68 µs | 9–27× |
-| spawn + join from `block_on`, current-thread | 3.0–7.1 µs | 0.21–0.51 µs | 10–14× |
-| `yield_now`, 4 workers | 0.35–0.58 µs | 0.23–0.56 µs | 1.0–2.0× |
-| `yield_now`, current-thread | 0.30–0.57 µs | 0.09–0.15 µs | 3.2–3.9× |
-| mpsc ping-pong round trip, 4 workers | 1.26–1.77 µs | 0.20–0.57 µs | 3.1–6.3× |
-| mpsc ping-pong round trip, current-thread | 1.26–1.76 µs | 0.17–0.30 µs | 5.8–7.5× |
-| fan-out child: `fiber::scope` vs tokio spawn + join, current-thread | 0.21–0.56 µs | 0.21–0.51 µs | 0.9–1.1× |
-| fan-out child: `fiber::scope` vs tokio spawn + join, 4 workers | 0.20–0.39 µs | 0.31–0.68 µs | 0.55–0.85× |
+| spawn + join from a task, 4 workers | 4.4–10.7 µs | 0.30–0.74 µs | 12–23× |
+| spawn + join from `block_on`, current-thread | 2.6–5.5 µs | 0.22–0.58 µs | 7.7–12× |
+| `yield_now`, 4 workers | 0.37–0.61 µs | 0.25–0.38 µs | 1.5–2.0× |
+| `yield_now`, current-thread | 0.30–0.60 µs | 0.09–0.15 µs | 3.4–4.0× |
+| mpsc ping-pong round trip, 4 workers | 1.37–2.13 µs | 0.20–0.48 µs | 4.5–7.0× |
+| mpsc ping-pong round trip, current-thread | 1.29–2.14 µs | 0.17–0.31 µs | 6.8–7.5× |
+| fan-out child: `fiber::scope` vs tokio spawn + join, current-thread | 0.27–0.69 µs | 0.22–0.58 µs | 1.0–1.5× |
+| fan-out child: `fiber::scope` vs tokio spawn + join, 4 workers | 0.27–0.51 µs | 0.30–0.74 µs | 0.7–1.1× |
 
-Server-shaped rows, also from one process. The TCP rows come from the same
-three hosts, and each loopback connection makes 200 round trips of a 64-byte
-message. The HTTP/1.1 rows come from one host, with 200 keep-alive requests per
-connection. The last column is tokio's throughput over asupersync's:
+Server-shaped rows, also from one process. The TCP rows come from the 16- and
+10-CPU hosts and another busy 64-CPU host; each loopback connection makes 200
+round trips of a 64-byte message. The HTTP/1.1 rows come from that 64-CPU host,
+with 200 keep-alive requests per connection. The last column is tokio's
+throughput over asupersync's:
 
 | Workload | Asupersync | tokio | tokio is faster by |
 |----------|------------|-------|--------------------|
-| TCP request/response, 1 connection | 30–44 K round trips/s | 46–76 K | 1.55–1.7× |
-| TCP request/response, 64 connections | 93–129 K round trips/s | 123–144 K | 1.1–1.3× |
-| HTTP/1.1 keep-alive `GET`, 1 connection (one 64-CPU host; vs hyper 1.x) | 22 K requests/s | 44 K | 2.0× |
-| HTTP/1.1 keep-alive `GET`, 64 connections (same host; vs hyper 1.x) | 64 K requests/s | 134 K | 2.1× |
+| TCP request/response, 1 connection | 29–42 K round trips/s | 44–67 K | 1.5–1.6× |
+| TCP request/response, 64 connections | 65–161 K round trips/s | 91–187 K | 1.2–1.6× |
+| HTTP/1.1 keep-alive `GET`, 1 connection (one 64-CPU host; vs hyper 1.x) | 21 K requests/s | 42 K | 2.0× |
+| HTTP/1.1 keep-alive `GET`, 64 connections (same host; vs hyper 1.x) | 65 K requests/s | 122 K | 1.9× |
 
 **Reading the tables:**
 - Spawning a task, current-thread yields and channel round trips are still
   several times slower than tokio. A yield on 4 workers is within 2× of
   tokio's.
-- Loopback TCP round trips are 1.1–1.7× slower, and the HTTP/1.1 server serves
+- Loopback TCP round trips are 1.2–1.6× slower, and the HTTP/1.1 server serves
   about half of hyper's requests per second.
 - For most servers, a few microseconds per task is small next to network and
   disk latency.
 - For workloads that spawn millions of tiny tasks per second, or exchange
   messages in a tight loop, the difference matters.
 - For fine-grained fan-out inside one task, use `fiber::scope`. It costs about
-  as much as a tokio task, but fibers run concurrently on one thread, not in
-  parallel. Tokio's own in-task equivalent is `futures::stream::FuturesUnordered`.
+  as much as a tokio task (0.7–1.5× across the three hosts), but fibers run
+  concurrently on one thread, not in parallel. Tokio's own in-task equivalent
+  is `futures::stream::FuturesUnordered`.
 
 These numbers already include the October 2026 cuts:
 - an O(1) region task set;
@@ -1130,7 +1132,10 @@ These numbers already include the October 2026 cuts:
   2.8×, spawn + join 1.3× in a same-process A/B);
 - a fixed cancel-streak limit of 16 instead of the adaptive selector by default;
 - no reactor wake on an epoll re-arm, and none for an obligation post made on
-  a worker (semaphore acquire/release 1.7–2.1× in a same-process A/B).
+  a worker (semaphore acquire/release 1.7–2.1× in a same-process A/B);
+- a fiber's own context built the first time it is read, not at spawn (fiber
+  fan-out 1.8× faster on 4 workers and 2.6× on current-thread in a
+  same-process A/B).
 
 The remaining work items are listed under `asupersync-issue65-criticisms-kpmoy5.1`.
 
