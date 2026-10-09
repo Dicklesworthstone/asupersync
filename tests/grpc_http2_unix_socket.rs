@@ -316,6 +316,48 @@ fn registered_grpc_duplex_lane_serves_on_a_unix_socket() {
     let _ = std::fs::remove_file(path);
 }
 
+/// asupersync-x4kh5w finding 5: the duplex Unix bind accepted an input
+/// configuration the TCP bind refuses, and the error came only from
+/// `run_streaming_produced`, usually in a spawned task, whose listener drop
+/// also unlinked the socket. A 4 KiB request-body queue clamps the stream
+/// window below the 65,535 bytes live ingress needs; both binds now refuse it.
+#[cfg(feature = "http2-streaming")]
+#[test]
+fn the_duplex_unix_bind_refuses_an_input_config_the_tcp_bind_refuses() {
+    use asupersync::grpc::ServerDuplexConfig;
+
+    let path = socket_path("grpc-duplex-config");
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build runtime");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let server = echo_server(&calls);
+    let mut config = ServerDuplexConfig::default();
+    config.request_body_buffer_bytes = NonZeroUsize::new(4096).expect("non-zero");
+    let bound_path = path.clone();
+    runtime.block_on(async move {
+        let tcp = server
+            .bind_registered_duplex_http2("127.0.0.1:0", localhost(), config.clone())
+            .await;
+        let Err(tcp_refusal) = tcp else {
+            panic!("the TCP bind accepted a 4 KiB request-body queue");
+        };
+        assert_eq!(tcp_refusal.kind(), std::io::ErrorKind::InvalidInput);
+
+        let unix = UnixListener::bind(&bound_path)
+            .await
+            .expect("bind Unix socket");
+        let Err(unix_refusal) = server.bind_registered_duplex_http2_unix(unix, localhost(), config)
+        else {
+            panic!("the Unix bind accepted a 4 KiB request-body queue");
+        };
+        assert_eq!(unix_refusal.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(unix_refusal.to_string(), tcp_refusal.to_string());
+    });
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let _ = std::fs::remove_file(path);
+}
+
 #[test]
 fn channel_unix_targets_reach_a_unix_socket_server() {
     use asupersync::grpc::{Channel, GrpcClient};

@@ -126,7 +126,7 @@ impl Http2StreamingListenerConfig {
             .checked_add(REQUEST_CHUNK_BYTES)
     }
 
-    pub(super) fn validate(&self) -> io::Result<()> {
+    pub(crate) fn validate(&self) -> io::Result<()> {
         if self.listener.settings.initial_window_size < INITIAL_STREAM_CREDIT as u32 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
