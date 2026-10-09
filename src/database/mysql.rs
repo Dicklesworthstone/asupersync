@@ -1378,11 +1378,11 @@ fn caching_sha2_auth(password: &str, nonce: &[u8]) -> Result<Vec<u8>, MySqlError
 pub struct MySqlConnectOptions {
     /// Host name or IP address, or the path of the server's Unix-domain socket
     /// file when it is an absolute path (for example
-    /// `/var/run/mysqld/mysqld.sock`; `port` is then unused). The MySQL server
-    /// treats a socket as a secure transport, and so does this client:
-    /// `ssl_mode` does not apply to it, and `caching_sha2_password` may send
-    /// the password over it for a full authentication, as libmysqlclient does.
-    /// Unix-domain sockets are available on Unix platforms only.
+    /// `/var/run/mysqld/mysqld.sock`; `port` is then unused). TLS is not used
+    /// over a socket, so a socket host needs `ssl_mode` `Disabled`: any other
+    /// mode fails with `TlsRequired` instead of skipping the TLS it asks for.
+    /// `caching_sha2_password` may send the password over it, as with
+    /// libmysqlclient. Unix-domain sockets are available on Unix platforms only.
     pub host: String,
     /// Port number (default 3306).
     pub port: u16,
@@ -1696,9 +1696,7 @@ impl MySqlConnectOptions {
                         // Store requested charset for validation during handshake
                         requested_charset = Some(value);
                     }
-                    // `mysql://user@/db?socket=/var/run/mysqld/mysqld.sock`. It
-                    // is read only when the URL names no host, which used to
-                    // be refused as a missing host.
+                    // `?socket=/var/run/mysqld/mysqld.sock` names the socket.
                     "socket" => socket = Some(value),
                     _ => {
                         // Unknown parameters are silently ignored for forward-compat.
@@ -1707,10 +1705,12 @@ impl MySqlConnectOptions {
             }
         }
 
-        if host.is_empty() {
-            host = socket
-                .filter(|socket| !socket.is_empty())
-                .ok_or_else(|| MySqlError::InvalidUrl("missing host".to_string()))?;
+        // The socket overrides a host, as with sqlx; it must be absolute.
+        match socket.filter(|socket| !socket.is_empty()) {
+            Some(socket) if socket.starts_with('/') => host = socket,
+            Some(_) => return Err(MySqlError::InvalidUrl("socket must be absolute".into())),
+            None if host.is_empty() => return Err(MySqlError::InvalidUrl("missing host".into())),
+            None => {}
         }
 
         Ok(Self {
@@ -2553,7 +2553,10 @@ impl MySqlConnection {
         }
 
         // The outer deadline covers TCP, TLS, and authentication together.
-        // A host that is an absolute path is the server's Unix-domain socket.
+        // A socket host (an absolute path) carries no TLS: refuse a TLS mode.
+        if options.host.starts_with('/') && options.ssl_mode != SslMode::Disabled {
+            return Outcome::Err(MySqlError::TlsRequired);
+        }
         let stream = if options.host.starts_with('/') {
             match Self::connect_unix(&options.host).await {
                 Ok(stream) => stream,
@@ -2566,7 +2569,6 @@ impl MySqlConnection {
                 Err(e) => return Outcome::Err(MySqlError::Io(e)),
             }
         };
-        let over_socket = stream.is_unix();
 
         let mut conn = Self {
             inner: MySqlConnectionInner {
@@ -2609,15 +2611,13 @@ impl MySqlConnection {
         conn.inner.status_flags = handshake.status_flags;
         conn.inner.server_version = handshake.server_version.clone();
 
-        // A Unix-domain socket is a secure transport: ssl_mode does not apply.
-        if !over_socket
-            && Self::should_fail_closed_without_tls(options.ssl_mode, handshake.capabilities)
-        {
+        if Self::should_fail_closed_without_tls(options.ssl_mode, handshake.capabilities) {
             return Outcome::Err(MySqlError::TlsRequired);
         }
 
+        // A socket host never gets here with a TLS mode: it is refused above.
         #[cfg(feature = "tls")]
-        if !over_socket && options.ssl_mode != SslMode::Disabled {
+        if options.ssl_mode != SslMode::Disabled {
             let connector = match connector.map_or_else(Self::default_tls_connector, Ok) {
                 Ok(connector) => connector,
                 Err(error) => return outcome_from_error(error),
