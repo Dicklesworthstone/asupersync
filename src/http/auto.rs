@@ -568,6 +568,10 @@ struct DetectionTasks {
 }
 
 impl DetectionTasks {
+    // See the note on `advance_transaction_generation` in `database::sqlite`:
+    // `fetch_update` is deprecated on the pinned nightly and absent from the
+    // stable subset, so the stable-compatible spelling stays with an allow.
+    #[allow(deprecated)]
     fn acquire(self: &Arc<Self>, max: usize) -> Option<DetectionSlot> {
         self.active
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {

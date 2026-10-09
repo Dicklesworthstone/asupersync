@@ -80,6 +80,9 @@ impl Reactor for GateProbeReactor {
         self.inner.modify(token, interest)
     }
 
+    // `fetch_update` is deprecated on the pinned nightly and absent from the
+    // stable subset (see `database::sqlite`), hence the allow.
+    #[allow(deprecated)]
     fn deregister(&self, token: Token) -> io::Result<()> {
         if self
             .deregister_failures
