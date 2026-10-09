@@ -217,7 +217,7 @@ mod tests {
     use crate::channel::oneshot;
     use crate::runtime::{JoinError, TaskHandle};
     use crate::types::policy::FailFast;
-    use crate::types::{Budget, CancelKind, RegionId, TaskId};
+    use crate::types::{Budget, CancelKind, PanicPayload, RegionId, TaskId};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::Wake;
 
