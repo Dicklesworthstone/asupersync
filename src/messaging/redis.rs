@@ -2477,35 +2477,66 @@ impl RedisConfig {
 
     /// `unix://[user[:password]@]/path/to/redis.sock[?db=N]`, without its
     /// scheme.
+    ///
+    /// The query may also name the credentials as redis-rs and redis-py do
+    /// (`user` or `username`, `pass` or `password`); any other parameter is
+    /// refused rather than ignored, and so is a credential given twice. A bare
+    /// `user@` names the user. The socket path is percent-decoded, and an `@`
+    /// inside it belongs to the path (br-asupersync-x4kh5w).
     fn from_unix_socket_url(url: &str) -> Result<Self, RedisError> {
         let mut config = Self::default();
         let (url, query) = url.split_once('?').unwrap_or((url, ""));
-        let path = if let Some((userinfo, path)) = url.rsplit_once('@') {
+        let (userinfo, path) = match url.split_once('@') {
+            Some((userinfo, path)) if !userinfo.contains('/') => (Some(userinfo), path),
+            _ => (None, url),
+        };
+        if let Some(userinfo) = userinfo {
             if let Some((username, password)) = userinfo.split_once(':') {
                 if !username.is_empty() {
                     config.username = Some(Self::url_decode_credential(username)?);
                 }
                 config.password = Some(Self::url_decode_credential(password)?);
             } else if !userinfo.is_empty() {
-                config.password = Some(Self::url_decode_credential(userinfo)?);
+                config.username = Some(Self::url_decode_credential(userinfo)?);
             }
-            path
-        } else {
-            url
-        };
+        }
         if !path.starts_with('/') {
             return Err(RedisError::InvalidUrl(
                 "a unix:// Redis URL needs an absolute socket path".to_string(),
             ));
         }
-        config.host = path.to_string();
+        let path = Self::url_decode_credential(path)
+            .ok()
+            .filter(|path| !path.contains('\0'))
+            .ok_or_else(|| {
+                RedisError::InvalidUrl(
+                    "invalid percent encoding in a unix:// socket path".to_string(),
+                )
+            })?;
+        config.host = path;
         for pair in query.split('&').filter(|pair| !pair.is_empty()) {
             let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-            if key == "db" {
-                config.database = value
-                    .parse()
-                    .map_err(|_| RedisError::InvalidUrl(format!("invalid database: {value}")))?;
+            let credential = match key {
+                "db" => {
+                    config.database = value.parse().map_err(|_| {
+                        RedisError::InvalidUrl(format!("invalid database: {value}"))
+                    })?;
+                    continue;
+                }
+                "user" | "username" => &mut config.username,
+                "pass" | "password" => &mut config.password,
+                other => {
+                    return Err(RedisError::InvalidUrl(format!(
+                        "unsupported unix:// Redis URL parameter: {other}"
+                    )));
+                }
+            };
+            if credential.is_some() {
+                return Err(RedisError::InvalidUrl(format!(
+                    "the unix:// Redis URL sets {key} twice"
+                )));
             }
+            *credential = Some(Self::url_decode_credential(value)?);
         }
         Ok(config)
     }
@@ -3439,6 +3470,17 @@ impl RedisClient {
 
     fn validate_redirect_target(&self, host: &str, port: u16) -> Result<(), RedisError> {
         let same_endpoint = host == self.config.host && port == self.config.port;
+        // `RedisConnection::connect` dials a host that is a path as a
+        // Unix-domain socket on this machine. Cluster nodes announce IPs and
+        // hostnames, never paths, so a path here comes from a forged or
+        // hostile reply, and following it would hand the caller's command to
+        // whatever local socket it names (br-asupersync-x4kh5w).
+        if !same_endpoint && (host.contains('/') || host.contains('\\')) {
+            return Err(RedisError::Protocol(format!(
+                "refusing redis cluster redirect from {}:{} to a socket path ({host})",
+                self.config.host, self.config.port
+            )));
+        }
         if !same_endpoint && self.config.password.is_some() && !self.config.use_tls {
             return Err(RedisError::Protocol(format!(
                 "refusing plaintext redis cluster redirect from {}:{} to {host}:{port} \
