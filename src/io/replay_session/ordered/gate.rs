@@ -411,18 +411,37 @@ impl ReplayOrder {
         let actual = OrderedEffect::Io(operation);
         let result = {
             let mut state = self.0.lock();
-            match state.check(actual) {
-                Ok(entry) if entry.effect == actual => {
-                    state.active = true;
-                    Poll::Ready(Ok(entry))
+            // Another thread is inside the effect at `index`. I/O that could
+            // wait behind that entry waits for it to finish, as it would before
+            // it started; finish and drop wake both slots. Failing the session
+            // as an overlap here made faithful multi-threaded replays fail at
+            // random (br-asupersync-h08ezk).
+            let behind_active = state.active
+                && state.failure.is_none()
+                && !state.tape.poll_aware
+                && state
+                    .tape
+                    .entries
+                    .get(state.index)
+                    .is_some_and(|entry| can_wait(operation, entry.effect));
+            if behind_active {
+                let slot = usize::from(operation != IoOperation::Read);
+                old = std::mem::replace(&mut state.waiters[slot], candidate.take());
+                Poll::Pending
+            } else {
+                match state.check(actual) {
+                    Ok(entry) if entry.effect == actual => {
+                        state.active = true;
+                        Poll::Ready(Ok(entry))
+                    }
+                    Ok(entry) if !state.tape.poll_aware && can_wait(operation, entry.effect) => {
+                        let slot = usize::from(operation != IoOperation::Read);
+                        old = std::mem::replace(&mut state.waiters[slot], candidate.take());
+                        Poll::Pending
+                    }
+                    Ok(_) => Poll::Ready(Err(state.refuse(actual, OrderReplayMismatch::Effect))),
+                    Err(error) => Poll::Ready(Err(error)),
                 }
-                Ok(entry) if !state.tape.poll_aware && can_wait(operation, entry.effect) => {
-                    let slot = usize::from(operation != IoOperation::Read);
-                    old = std::mem::replace(&mut state.waiters[slot], candidate.take());
-                    Poll::Pending
-                }
-                Ok(_) => Poll::Ready(Err(state.refuse(actual, OrderReplayMismatch::Effect))),
-                Err(error) => Poll::Ready(Err(error)),
             }
         };
         let result = result.map(|result| {
