@@ -3089,7 +3089,9 @@ impl Router {
     /// route its router matches, and the more specific of the two wins: those
     /// paths go to `api` and to the `/admin` router. A path under a mount that
     /// its router does not route counts like a `prefix/*` route and gets that
-    /// router's fallback or 404. A route still wins a tie with a mount.
+    /// router's fallback or 404; the prefix itself (`/admin`) counts as an
+    /// exact route of the prefix, even when the mounted router routes no `/`.
+    /// A route still wins a tie with a mount.
     ///
     /// The setting applies to this router's own choice between its routes and
     /// mounts; enable it on nested routers that have mounts of their own
@@ -3971,7 +3973,7 @@ impl Router {
         match (self.best_route(path), self.best_mount(path)) {
             (Some((route, method_router, params)), Some((segments, router, sub_path))) => {
                 if self.prefer_specific_mounts
-                    && router.resolved_specificity(&sub_path).under_mount(segments) > route
+                    && Self::mount_specificity(router, segments, &sub_path) > route
                 {
                     Some(RouteSelection::Mount(router, sub_path))
                 } else {
@@ -3995,9 +3997,32 @@ impl Router {
             return route.unwrap_or(RouteSpecificity::UNRESOLVED);
         }
         let mount = self.best_mount(path).map(|(segments, router, sub_path)| {
-            router.resolved_specificity(&sub_path).under_mount(segments)
+            Self::mount_specificity(router, segments, &sub_path)
         });
         route.max(mount).unwrap_or(RouteSpecificity::UNRESOLVED)
+    }
+
+    /// What a mount resolves `sub_path` to, seen from this router: what its
+    /// router resolves, under the mount's prefix. A request for the prefix
+    /// itself (`sub_path` "/") that the mounted router does not route still
+    /// names that prefix exactly, so it counts as an exact route of the
+    /// prefix: `/:page` does not take `/admin` from `.nest("/admin", ..)`, and
+    /// an explicit `/admin` route still wins the tie (br-asupersync-x4kh5w
+    /// finding 4).
+    fn mount_specificity(
+        router: &Self,
+        prefix_segments: usize,
+        sub_path: &str,
+    ) -> RouteSpecificity {
+        let resolved = router.resolved_specificity(sub_path);
+        if resolved == RouteSpecificity::UNRESOLVED && sub_path == "/" && prefix_segments > 0 {
+            return RouteSpecificity {
+                exact_path: true,
+                ..RouteSpecificity::UNRESOLVED
+            }
+            .under_mount(prefix_segments);
+        }
+        resolved.under_mount(prefix_segments)
     }
 
     /// The most specific matching route; the first registered among equals.

@@ -100,3 +100,58 @@ fn prefer_specific_mounts_keeps_a_param_or_wildcard_route_from_shadowing_a_mount
         StatusCode::OK
     );
 }
+
+fn unauthorized_handler() -> StatusCode {
+    StatusCode::UNAUTHORIZED
+}
+
+/// br-asupersync-x4kh5w finding 4: with the option, `/:page` still answered
+/// `GET /admin` when the mounted router routes no `/` (only a fallback, or
+/// layers), because the unresolved mount scored like `/admin/*`, below the
+/// exact `/:page`. The prefix itself now counts as an exact route of it.
+#[test]
+fn prefer_specific_mounts_gives_the_bare_prefix_to_a_mount_that_routes_no_root() {
+    let admin = || {
+        Router::new()
+            .route("/users", get(FnHandler::new(created_handler)))
+            .fallback(FnHandler::new(unauthorized_handler))
+    };
+    let app = Router::new()
+        .route("/:page", get(FnHandler::new(ok_handler)))
+        .nest("/admin", admin())
+        .prefer_specific_mounts(true);
+    for path in ["/admin", "/admin/"] {
+        assert_eq!(
+            app.handle(Request::new("GET", path)).status,
+            StatusCode::UNAUTHORIZED,
+            "{path} belongs to the admin router"
+        );
+    }
+    assert_eq!(
+        app.handle(Request::new("GET", "/admin/users")).status,
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        app.handle(Request::new("GET", "/about")).status,
+        StatusCode::OK
+    );
+
+    // An explicit route for the prefix still wins the tie.
+    let app = Router::new()
+        .route("/admin", get(FnHandler::new(ok_handler)))
+        .nest("/admin", admin())
+        .prefer_specific_mounts(true);
+    assert_eq!(
+        app.handle(Request::new("GET", "/admin")).status,
+        StatusCode::OK
+    );
+
+    // Without the option the default order is unchanged.
+    let default_order = Router::new()
+        .route("/:page", get(FnHandler::new(ok_handler)))
+        .nest("/admin", admin());
+    assert_eq!(
+        default_order.handle(Request::new("GET", "/admin")).status,
+        StatusCode::OK
+    );
+}
