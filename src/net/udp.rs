@@ -1427,6 +1427,20 @@ fn empty_udp_receive_buffer_error(op: &str) -> io::Error {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[inline]
+fn is_wsaemsgsize(err: &io::Error) -> bool {
+    #[cfg(windows)]
+    {
+        err.raw_os_error() == Some(windows_sys::Win32::Networking::WinSock::WSAEMSGSIZE)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = err;
+        false
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn recv_batch_payload_buffer(spare_payloads: &mut Vec<Vec<u8>>, packet_size: usize) -> Vec<u8> {
     let mut buf = spare_payloads
         .pop()
@@ -1446,7 +1460,7 @@ fn recv_batch_payload_buffer(spare_payloads: &mut Vec<Vec<u8>>, packet_size: usi
 
 #[cfg(not(target_arch = "wasm32"))]
 fn recycle_unused_recv_batch_payload(spare_payloads: &mut Vec<Vec<u8>>, buf: Vec<u8>) {
-    if buf.capacity() <= UDP_MAX_PACKET_SIZE {
+    if buf.capacity() <= UDP_MAX_PACKET_SIZE.saturating_add(1) {
         spare_payloads.push(buf);
     }
 }
@@ -3597,28 +3611,41 @@ impl UdpSocket {
 
             // One reusable scratch buffer serves every receive in the batch;
             // each datagram is copied out into an exactly-sized payload Vec.
-            // This replaces the old per-datagram `packet_size` (up to 64 KiB)
-            // allocation + zero fill with an `n`-byte allocation + copy, and
-            // keeps downstream zero-copy consumers (which hold the payload
-            // alive as shared `Bytes` backing) from pinning oversized buffers.
-            let mut scratch = recv_batch_payload_buffer(spare_payloads, packet_size);
-            let (bytes_read, src_addr) = match self.poll_recv_from(cx, &mut scratch) {
-                Poll::Ready(Ok(received)) => received,
-                Poll::Ready(Err(err)) => {
-                    recycle_unused_recv_batch_payload(spare_payloads, scratch);
-                    return Poll::Ready(Err(err));
+            // Sizing scratch with a guard byte (`packet_size + 1`) allows unambiguous
+            // detection of truncated datagrams (`bytes_read > packet_size`) while
+            // avoiding false positives for exact MTU-sized packets (`bytes_read == packet_size`).
+            let guard_size = packet_size.saturating_add(1);
+            let mut scratch = recv_batch_payload_buffer(spare_payloads, guard_size);
+            let (bytes_read, src_addr) = loop {
+                match self.poll_recv_from(cx, &mut scratch) {
+                    Poll::Ready(Ok(received)) => break received,
+                    Poll::Ready(Err(err)) if is_wsaemsgsize(&err) => {
+                        // Winsock reports datagrams larger than the buffer as WSAEMSGSIZE (10040)
+                        // rather than truncating into the buffer. Skip the oversized datagram and
+                        // poll again so a stray oversized packet does not kill the batch.
+                    }
+                    Poll::Ready(Err(err)) => {
+                        recycle_unused_recv_batch_payload(spare_payloads, scratch);
+                        return Poll::Ready(Err(err));
+                    }
+                    Poll::Pending => {
+                        recycle_unused_recv_batch_payload(spare_payloads, scratch);
+                        return Poll::Pending;
+                    }
                 }
-                Poll::Pending => {
-                    recycle_unused_recv_batch_payload(spare_payloads, scratch);
-                    return Poll::Pending;
-                }
+            };
+
+            let (stored_len, possibly_truncated) = if bytes_read > packet_size {
+                (packet_size, true)
+            } else {
+                (bytes_read, false)
             };
 
             let mut batch = UdpRecvBatch {
                 packets: Vec::with_capacity(max_packets),
                 report: UdpBatchIoReport {
                     packets_processed: 1,
-                    bytes_processed: bytes_read,
+                    bytes_processed: stored_len,
                     fallback_used: max_packets > 1,
                     native_send_batch_used: false,
                     gso_send_used: false,
@@ -3627,8 +3654,8 @@ impl UdpSocket {
             };
             batch.packets.push(UdpInboundDatagram {
                 src_addr,
-                payload: scratch[..bytes_read].to_vec(),
-                possibly_truncated: bytes_read == packet_size,
+                payload: scratch[..stored_len].to_vec(),
+                possibly_truncated,
             });
 
             for _ in 1..max_packets {
@@ -3639,16 +3666,24 @@ impl UdpSocket {
 
                 match self.inner.recv_from(&mut scratch) {
                     Ok((n, addr)) => {
+                        let (stored_len, possibly_truncated) = if n > packet_size {
+                            (packet_size, true)
+                        } else {
+                            (n, false)
+                        };
                         batch.report.packets_processed += 1;
-                        batch.report.bytes_processed += n;
+                        batch.report.bytes_processed += stored_len;
                         batch.packets.push(UdpInboundDatagram {
                             src_addr: addr,
-                            payload: scratch[..n].to_vec(),
-                            possibly_truncated: n == packet_size,
+                            payload: scratch[..stored_len].to_vec(),
+                            possibly_truncated,
                         });
                     }
                     Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                         break;
+                    }
+                    Err(err) if is_wsaemsgsize(&err) => {
+                        // Winsock oversized datagram: skip and continue receiving remaining packets.
                     }
                     Err(err) => {
                         batch.report.error = Some(err.to_string());
@@ -5594,6 +5629,45 @@ mod tests {
             let stream_normal = RecvStream::new(&mut socket, 512);
             // Normal size should pass through unchanged
             assert_eq!(stream_normal.buf.len(), 512);
+        });
+    }
+
+    #[test]
+    fn recv_batch_from_guard_byte_distinguishes_exact_from_truncated_datagrams() {
+        future::block_on(async {
+            let mut receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let mut sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let receiver_addr = receiver.local_addr().unwrap();
+
+            // 1. Send exact packet_size (64 bytes)
+            let exact_payload = vec![0xAA; 64];
+            sender.send_to(&exact_payload, receiver_addr).await.unwrap();
+
+            // Receive with packet_size = 64
+            let batch = receiver.recv_batch_from(1, 64).await.unwrap();
+            assert_eq!(batch.packets.len(), 1);
+            assert_eq!(batch.packets[0].payload.len(), 64);
+            assert_eq!(batch.packets[0].payload, exact_payload);
+            assert!(
+                !batch.packets[0].possibly_truncated,
+                "exact MTU packet must NOT be flagged as truncated"
+            );
+
+            // 2. Send oversized datagram (65 bytes) with packet_size = 64
+            let oversized_payload = vec![0xBB; 65];
+            sender
+                .send_to(&oversized_payload, receiver_addr)
+                .await
+                .unwrap();
+
+            let batch = receiver.recv_batch_from(1, 64).await.unwrap();
+            assert_eq!(batch.packets.len(), 1);
+            assert_eq!(batch.packets[0].payload.len(), 64);
+            assert_eq!(batch.packets[0].payload, &oversized_payload[..64]);
+            assert!(
+                batch.packets[0].possibly_truncated,
+                "oversized packet must be flagged as truncated"
+            );
         });
     }
 

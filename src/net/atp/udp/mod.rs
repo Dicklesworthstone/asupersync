@@ -5,7 +5,7 @@
 //! and a deterministic lab packet path for replay.
 
 use crate::cx::Cx;
-use crate::net::udp::UDP_MAX_PACKET_SIZE;
+use crate::net::udp::{UDP_MAX_BATCH_SIZE, UDP_MAX_PACKET_SIZE};
 use crate::net::{
     UDP_MAX_GSO_SEGMENTS, UdpBatchIoReport, UdpBufferConfig, UdpBufferTuneReport, UdpCapability,
     UdpInboundDatagram, UdpOutboundDatagram, UdpRecvBatch, UdpSocket, UdpSocketCapabilities,
@@ -71,16 +71,43 @@ impl AtpUdpSocketConfig {
                 "max_packet_size must be > 0",
             ));
         }
+        if self.max_packet_size > UDP_MAX_PACKET_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "max_packet_size ({}) exceeds UDP_MAX_PACKET_SIZE ({})",
+                    self.max_packet_size, UDP_MAX_PACKET_SIZE
+                ),
+            ));
+        }
         if self.max_send_batch == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "max_send_batch must be > 0",
             ));
         }
+        if self.max_send_batch > UDP_MAX_BATCH_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "max_send_batch ({}) exceeds UDP_MAX_BATCH_SIZE ({})",
+                    self.max_send_batch, UDP_MAX_BATCH_SIZE
+                ),
+            ));
+        }
         if self.max_recv_batch == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "max_recv_batch must be > 0",
+            ));
+        }
+        if self.max_recv_batch > UDP_MAX_BATCH_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "max_recv_batch ({}) exceeds UDP_MAX_BATCH_SIZE ({})",
+                    self.max_recv_batch, UDP_MAX_BATCH_SIZE
+                ),
             ));
         }
         Ok(())
@@ -267,10 +294,12 @@ impl AtpUdpSocket {
         cx: &Cx,
         packets: &[AtpUdpPacket<'_>],
     ) -> io::Result<UdpBatchIoReport> {
-        let mut total = UdpBatchIoReport {
-            fallback_used: packets.len() > 1,
-            ..UdpBatchIoReport::default()
-        };
+        checkpoint_io(cx)?;
+        if packets.is_empty() {
+            return Ok(UdpBatchIoReport::default());
+        }
+
+        let mut total = UdpBatchIoReport::default();
 
         for chunk in packets.chunks(self.config.max_send_batch) {
             checkpoint_io(cx)?;
@@ -289,18 +318,30 @@ impl AtpUdpSocket {
                 });
             }
 
-            let report = self.socket.send_batch_to(&batch).await?;
-            total.packets_processed += report.packets_processed;
-            total.bytes_processed += report.bytes_processed;
-            total.fallback_used |= report.fallback_used;
-            total.native_send_batch_used |= report.native_send_batch_used;
-            total.gso_send_used |= report.gso_send_used;
-            self.pressure.send_batches += 1;
+            match self.socket.send_batch_to(&batch).await {
+                Ok(report) => {
+                    total.packets_processed += report.packets_processed;
+                    total.bytes_processed += report.bytes_processed;
+                    total.fallback_used |= report.fallback_used;
+                    total.native_send_batch_used |= report.native_send_batch_used;
+                    total.gso_send_used |= report.gso_send_used;
+                    self.pressure.send_batches += 1;
 
-            if let Some(error) = report.error {
-                self.pressure.send_pressure_events += 1;
-                total.error = Some(error);
-                break;
+                    if let Some(error) = report.error {
+                        self.pressure.send_pressure_events += 1;
+                        total.error = Some(error);
+                        break;
+                    }
+                }
+                Err(err) => {
+                    self.pressure.send_pressure_events += 1;
+                    if total.packets_processed > 0 {
+                        total.error = Some(err.to_string());
+                        break;
+                    } else {
+                        return Err(err);
+                    }
+                }
             }
         }
 
@@ -527,6 +568,7 @@ struct LabUdpEndpointState {
     packets: VecDeque<UdpInboundDatagram>,
     recv_waker: Option<Waker>,
     closed: bool,
+    generation: u64,
 }
 
 #[derive(Debug)]
@@ -536,6 +578,7 @@ struct LabAtpUdpNetworkState {
     stats: BTreeMap<SocketAddr, LabUdpLinkStats>,
     next_ephemeral_port: u16,
     max_queue_packets: usize,
+    next_generation: u64,
 }
 
 impl LabAtpUdpNetworkState {
@@ -546,6 +589,7 @@ impl LabAtpUdpNetworkState {
             stats: BTreeMap::new(),
             next_ephemeral_port: LAB_UDP_EPHEMERAL_PORT_START,
             max_queue_packets: max_queue_packets.max(1),
+            next_generation: 1,
         }
     }
 
@@ -602,7 +646,7 @@ impl LabAtpUdpNetwork {
 
     /// Bind one endpoint. Port zero receives a deterministic ephemeral port.
     pub fn bind(&self, requested: SocketAddr) -> io::Result<LabAtpUdpNetworkSocket> {
-        let local_addr = {
+        let (local_addr, generation) = {
             let mut state = self.inner.lock();
             let local_addr = state.allocate_addr(requested)?;
             if state
@@ -615,16 +659,25 @@ impl LabAtpUdpNetwork {
                     format!("lab UDP address already bound: {local_addr}"),
                 ));
             }
-            state
-                .endpoints
-                .insert(local_addr, LabUdpEndpointState::default());
+            let generation = state.next_generation;
+            state.next_generation = state.next_generation.saturating_add(1);
+            state.endpoints.insert(
+                local_addr,
+                LabUdpEndpointState {
+                    packets: VecDeque::new(),
+                    recv_waker: None,
+                    closed: false,
+                    generation,
+                },
+            );
             state.policies.remove(&local_addr);
             state.stats.insert(local_addr, LabUdpLinkStats::default());
-            local_addr
+            (local_addr, generation)
         };
         Ok(LabAtpUdpNetworkSocket {
             network: self.clone(),
             local_addr,
+            generation,
             connected_peer: None,
         })
     }
@@ -685,6 +738,7 @@ impl LabAtpUdpNetwork {
 pub struct LabAtpUdpNetworkSocket {
     network: LabAtpUdpNetwork,
     local_addr: SocketAddr,
+    generation: u64,
     connected_peer: Option<SocketAddr>,
 }
 
@@ -743,14 +797,13 @@ impl LabAtpUdpNetworkSocket {
         }
         let policy = {
             let state = self.network.inner.lock();
-            let source_closed = state
-                .endpoints
-                .get(&self.local_addr)
-                .is_none_or(|endpoint| endpoint.closed);
+            let endpoint = state.endpoints.get(&self.local_addr);
+            let source_closed =
+                endpoint.is_none_or(|ep| ep.closed || ep.generation != self.generation);
             if source_closed {
                 return Err(io::Error::new(
                     io::ErrorKind::NotConnected,
-                    "lab UDP source is closed",
+                    "lab UDP source is closed or handle is stale",
                 ));
             }
             let destination_closed = state
@@ -777,14 +830,13 @@ impl LabAtpUdpNetworkSocket {
 
         let wake = {
             let mut state = self.network.inner.lock();
-            let source_closed = state
-                .endpoints
-                .get(&self.local_addr)
-                .is_none_or(|endpoint| endpoint.closed);
+            let endpoint = state.endpoints.get(&self.local_addr);
+            let source_closed =
+                endpoint.is_none_or(|ep| ep.closed || ep.generation != self.generation);
             if source_closed {
                 return Err(io::Error::new(
                     io::ErrorKind::NotConnected,
-                    "lab UDP source is closed",
+                    "lab UDP source is closed or handle is stale",
                 ));
             }
             let destination_closed = state
@@ -935,6 +987,12 @@ impl LabAtpUdpNetworkSocket {
                 "lab UDP endpoint is not bound",
             )));
         };
+        if endpoint.generation != self.generation {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "lab UDP handle is stale after close and rebind",
+            )));
+        }
         if endpoint.closed {
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::NotConnected,
@@ -975,6 +1033,7 @@ impl LabAtpUdpNetworkSocket {
             state
                 .endpoints
                 .get_mut(&self.local_addr)
+                .filter(|endpoint| endpoint.generation == self.generation)
                 .and_then(|endpoint| {
                     endpoint.closed = true;
                     endpoint.packets.clear();
