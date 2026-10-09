@@ -1474,6 +1474,11 @@ impl OracleReport {
             );
             if let Some(ref v) = entry.violation {
                 let _ = write!(&mut out, " -- {v}");
+            } else if entry.stats.entities_tracked == 0 && entry.stats.events_recorded == 0 {
+                // A pass with nothing observed checked nothing; most such
+                // oracles are ones LabRuntime does not feed
+                // (OracleRegistry::is_fed_by_lab_runtime, br-asupersync-52hxjz).
+                let _ = write!(&mut out, " -- checked nothing: no events");
             }
             let _ = writeln!(&mut out);
         }
@@ -2140,6 +2145,41 @@ mod tests {
         let json = report.to_json();
         assert!(json.is_object());
         assert!(json["entries"].is_array());
+    }
+
+    /// A passing entry that tracked nothing and recorded no events says so in
+    /// the text report, so it does not read as a check that ran
+    /// (br-asupersync-52hxjz).
+    #[test]
+    fn a_pass_with_nothing_observed_says_it_checked_nothing() {
+        let entry = |invariant: &str, entities_tracked, events_recorded| OracleEntryReport {
+            invariant: invariant.to_owned(),
+            passed: true,
+            violation: None,
+            stats: OracleStats {
+                entities_tracked,
+                events_recorded,
+            },
+        };
+        let report = OracleReport {
+            entries: vec![entry("task_leak", 2, 5), entry("actor_leak", 0, 0)],
+            total: 2,
+            passed: 2,
+            failed: 0,
+            check_time_nanos: 0,
+        };
+        let text = report.to_text();
+        let line = |name: &str| {
+            text.lines()
+                .find(|line| line.contains(name))
+                .unwrap_or_else(|| panic!("no {name} line in:\n{text}"))
+                .to_owned()
+        };
+        assert_eq!(line("task_leak"), "[PASS] task_leak (tracked=2, events=5)");
+        assert_eq!(
+            line("actor_leak"),
+            "[PASS] actor_leak (tracked=0, events=0) -- checked nothing: no events"
+        );
     }
 
     #[test]

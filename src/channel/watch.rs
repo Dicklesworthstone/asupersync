@@ -839,7 +839,12 @@ impl<T> Receiver<T> {
     /// returns at once without waiting for a change. Otherwise every newer
     /// value is checked as it is published. The predicate runs under the
     /// value's read lock, and the returned [`Ref`] is the value it accepted:
-    /// no send can slip in between.
+    /// no send can slip in between. So the predicate must not send on this
+    /// channel or borrow it: a send would wait for the lock the predicate
+    /// holds.
+    ///
+    /// While it waits, it holds one more receiver of the channel, which
+    /// [`Sender::receiver_count`] counts (br-asupersync-973voq).
     ///
     /// ```ignore
     /// let ready = rx.wait_for(&cx, |state| *state == State::Ready).await?;
