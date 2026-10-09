@@ -445,7 +445,7 @@ impl<T, Caps> LockFuture<'_, '_, T, Caps> {
     fn poll_deadline_sleep(&mut self, context: &mut Context<'_>) -> Option<Time> {
         let sleep = self.deadline_sleep.as_mut()?;
         let deadline = sleep.deadline();
-        match Pin::new(&mut **sleep).poll(context) {
+        match Pin::new(&mut **sleep).poll_deadline(context) {
             Poll::Ready(()) => Some(deadline),
             Poll::Pending => None,
         }
@@ -517,10 +517,10 @@ impl<'a, T, Caps> Future for LockFuture<'a, '_, T, Caps> {
         let result = self.as_mut().poll_lock(context);
         if result.is_ready() {
             // Retire auxiliary executor references even if the caller keeps
-            // the completed future allocated. No mutex state guard is live.
-            self.cancelled = None;
-            self.deadline_sleep = None;
-            return result;
+            // the completed future allocated. No mutex state guard is live;
+            // a guard in `result` is not poisoned by a panicking waker drop.
+            let helpers = (self.cancelled.take(), self.deadline_sleep.take());
+            return retire_after_completion(helpers, result);
         }
 
         let cx = self.cx;
@@ -1125,6 +1125,22 @@ impl MutexState {
     /// locators, so they keep their lines.
     fn is_held(&self) -> bool {
         self.locked || self.granted_waiter.is_some()
+    }
+}
+
+/// Drop a completed lock wait's cancel observer and deadline timer, then hand
+/// back its result. Dropping them can run user `RawWaker` destructors; if one
+/// panics, the result (and the guard it may hold) is released normally before
+/// the panic resumes, so a panic outside any critical section does not poison
+/// the mutex (br-asupersync-x2cqdf L2). Defined after the unsafe-ledger line
+/// locators, so they keep their lines.
+fn retire_after_completion<H, R>(helpers: H, result: R) -> R {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(helpers))) {
+        Ok(()) => result,
+        Err(payload) => {
+            drop(result);
+            std::panic::resume_unwind(payload)
+        }
     }
 }
 

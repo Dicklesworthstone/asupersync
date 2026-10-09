@@ -312,6 +312,8 @@ where
             }
             if self.request_pending {
                 match inner.poll_outbound(task) {
+                    // The peer closed the connection: read what it sent below.
+                    Poll::Ready(Err(_)) if inner.write_failure.is_some() => {}
                     Poll::Ready(Err(error)) => return Poll::Ready(Some(Err(inner.finish(error)))),
                     Poll::Ready(Ok(())) => {
                         inner.unflushed_read_frames = 0;
@@ -321,32 +323,31 @@ where
                             .expect("live duplex connection")
                             .has_pending_frames_for_stream(inner.stream_id)
                         {
-                            // A keepalive ACK arrives on the read side only. While an
-                            // upload keeps flushing within its window, read what is
-                            // already available before publishing the send boundary,
-                            // or a healthy peer's ACK stays unread until the probe
-                            // deadline fails the call (br-asupersync-ymueix). Drain it
-                            // on every flush, not one frame per probe: response frames
+                            // While an upload keeps flushing within its window, read
+                            // what is already available before publishing the send
+                            // boundary. Otherwise a keepalive ACK stays unread until
+                            // the probe deadline fails the call (br-asupersync-ymueix),
+                            // and the peer's early status, reset or GOAWAY waits until
+                            // a send window fills (br-asupersync-244ump). Drain it on
+                            // every flush, not one frame per probe: response frames
                             // queued between probes would otherwise hold the next
                             // ACK past its deadline (br-asupersync-sm29gx).
-                            if inner.keepalive.is_some() {
-                                for _ in 0..POLL_STEPS {
-                                    // Messages are decoded only at the top of
-                                    // the next poll. Stop before another DATA
-                                    // frame could pass the retention bound.
-                                    if inner.response.ended
-                                        || inner.body.len().saturating_add(FRAME_BYTES)
-                                            > inner.body_limit
-                                    {
-                                        break;
+                            for _ in 0..POLL_STEPS {
+                                // Messages are decoded only at the top of
+                                // the next poll. Stop before another DATA
+                                // frame could pass the retention bound.
+                                if inner.response.ended
+                                    || inner.body.len().saturating_add(FRAME_BYTES)
+                                        > inner.body_limit
+                                {
+                                    break;
+                                }
+                                match inner.poll_received(task) {
+                                    Poll::Ready(Ok(())) => {}
+                                    Poll::Ready(Err(error)) => {
+                                        return Poll::Ready(Some(Err(inner.finish(error))));
                                     }
-                                    match inner.poll_received(task) {
-                                        Poll::Ready(Ok(())) => {}
-                                        Poll::Ready(Err(error)) => {
-                                            return Poll::Ready(Some(Err(inner.finish(error))));
-                                        }
-                                        Poll::Pending => break,
-                                    }
+                                    Poll::Pending => break,
                                 }
                             }
                             self.request_pending = false;
