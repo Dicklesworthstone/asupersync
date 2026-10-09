@@ -245,17 +245,30 @@ impl Http2Client {
 
     /// Supply certificate trust and TLS configuration for HTTPS. The
     /// connector must offer `h2`; a different negotiated ALPN is rejected.
+    ///
+    /// With [`Self::reuse_connections`] on, the client gets its own empty
+    /// pool here, with the same limit. A clone given another connector, that
+    /// is another client identity or trust policy, so never reuses a
+    /// connection that was authenticated under this one's
+    /// (br-asupersync-mu5yhv).
     #[cfg(feature = "tls")]
     #[must_use]
     pub fn tls_connector(mut self, connector: crate::tls::TlsConnector) -> Self {
         self.tls_connector = Some(connector);
+        if let Some(pool) = &self.pool {
+            self.pool = Some(Arc::new(ConnectionPool {
+                max_idle: pool.max_idle,
+                idle: Mutex::new(HashMap::new()),
+            }));
+        }
         self
     }
 
     /// Keep up to `max_idle` connections per origin (scheme, host and port)
     /// open after [`Http2RequestBuilder::send`] completes a request, so later
     /// requests from this client, or a clone of it, reuse them instead of
-    /// dialing (and TLS-handshaking) again. `0`, the default, keeps the
+    /// dialing (and TLS-handshaking) again. A clone later given its own
+    /// [`Self::tls_connector`] stops sharing. `0`, the default, keeps the
     /// original behavior: each request owns a fresh connection.
     ///
     /// A pooled connection carries one request at a time; concurrent requests
@@ -1286,6 +1299,43 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Wake};
+
+    /// mu5yhv finding 1: clones share the pool, keyed by scheme, host and
+    /// port only. A clone given another connector (another client identity
+    /// or trust policy) took connections authenticated under the first one.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn a_clone_given_another_tls_connector_gets_its_own_pool() {
+        let connector = || {
+            let certs = crate::tls::Certificate::from_pem(include_bytes!(
+                "../../../tests/fixtures/tls/server.crt"
+            ))
+            .expect("test certificate");
+            crate::tls::TlsConnectorBuilder::new()
+                .add_root_certificates(certs)
+                .alpn_h2()
+                .build()
+                .expect("test connector")
+        };
+        let pool = |client: &Http2Client| Arc::clone(client.pool.as_ref().expect("reuse is on"));
+
+        let base = Http2Client::new().reuse_connections(2);
+        let a = base.clone().tls_connector(connector());
+        let b = base.clone().tls_connector(connector());
+        assert!(
+            !Arc::ptr_eq(&pool(&a), &pool(&b)),
+            "clones with different connectors must not share idle connections"
+        );
+        assert!(!Arc::ptr_eq(&pool(&base), &pool(&a)));
+        assert_eq!(pool(&a).max_idle, 2);
+
+        let a_again = a.clone();
+        assert!(
+            Arc::ptr_eq(&pool(&a), &pool(&a_again)),
+            "a clone that keeps its connector still shares"
+        );
+        assert!(Http2Client::new().tls_connector(connector()).pool.is_none());
+    }
 
     #[derive(Default)]
     struct CountWake(AtomicUsize);
