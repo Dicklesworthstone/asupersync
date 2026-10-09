@@ -54,7 +54,9 @@
 //!   cancellation); the scope's body keeps running. Awaiting the panicked
 //!   fiber's handle yields [`JoinError::Panicked`]; a panic no handle
 //!   observed is re-raised when the scope finishes, so it cannot vanish
-//!   silently.
+//!   silently. If the scope future is dropped before it finishes (a timeout,
+//!   a lost race), its fibers are dropped with it, and so are the panics no
+//!   handle observed.
 //! - **Scheduling.** Each poll of the scope polls the body and every ready
 //!   fiber once. A fiber that wakes itself is polled again on the task's next
 //!   turn, so a busy fiber cannot monopolize the worker.
@@ -152,6 +154,13 @@ std::thread_local! {
     /// Address of the [`ReadyQueue`] of the scope this thread is polling
     /// right now, or 0.
     static POLLING_SCOPE: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Calls of `FiberCtx::inherit_cancel` on this thread, for the test that
+    /// the task's cancellation is passed to each fiber once.
+    static INHERIT_CALLS: Cell<usize> = const { Cell::new(0) };
 }
 
 /// Fibers that need polling, plus the waker of the task polling the scope.
@@ -294,6 +303,8 @@ impl FiberCtx {
     /// Passes the task's or a sibling's cancellation on. Like
     /// `Cx::inherit_cancel`, it does nothing once the fiber has one.
     fn inherit_cancel(&self, reason: &CancelReason) {
+        #[cfg(test)]
+        INHERIT_CALLS.with(|calls| calls.set(calls.get() + 1));
         let mut recorded = false;
         let built = self.built_or_record(|pending| {
             if pending.is_empty() {
@@ -416,6 +427,9 @@ struct ScopeState<'env> {
     task_cx: Option<Arc<Cx>>,
     /// Raised when a fiber panics; the scope then cancels its siblings.
     fiber_panicked: Arc<AtomicBool>,
+    /// The task's cancellation has been passed to the fibers live then;
+    /// fibers started since get it when they start.
+    task_cancel_passed: AtomicBool,
 }
 
 /// Handle to the fibers of one [`scope`], given to the scope's body.
@@ -612,6 +626,7 @@ impl<'env> FiberScope<'env> {
                 unobserved_panics: Arc::new(Mutex::new(Vec::new())),
                 task_cx: Cx::current().map(Arc::new),
                 fiber_panicked: Arc::new(AtomicBool::new(false)),
+                task_cancel_passed: AtomicBool::new(false),
             }),
         }
     }
@@ -680,6 +695,14 @@ impl<'env> FiberScope<'env> {
             set.live += 1;
             (index, fiber_ctx)
         };
+        // The task's cancellation was passed only to the fibers live then
+        // (`ScopeState::propagate_cancellation`); this one gets it now.
+        if self.state.task_cancel_passed.load(Ordering::Acquire)
+            && let (Some(ctx), Some(task_cx)) = (&fiber_ctx, &self.state.task_cx)
+            && let Some(reason) = task_cx.observable_cancel_reason()
+        {
+            ctx.inherit_cancel(&reason);
+        }
         self.state.queue.schedule(index);
         FiberHandle {
             completion,
@@ -716,17 +739,14 @@ impl ScopeState<'_> {
     }
 
     /// Passes cancellation on to the live fibers' contexts: the task's own,
-    /// when it is observable (requested and not masked), and a fail-fast
-    /// cancellation after a fiber panicked. Cancelling a fiber's context
-    /// wakes the fiber (its cancel waker), so it is polled in this pass or
-    /// the next. A fiber that has not read its context yet gets the
-    /// cancellation when it does, and is woken once now.
+    /// once, when it first becomes observable (requested and not masked),
+    /// and a fail-fast cancellation after a fiber panicked. Cancelling a
+    /// fiber's context wakes the fiber (its cancel waker), so it is polled in
+    /// this pass or the next. A fiber that has not read its context yet gets
+    /// the cancellation when it does, and is woken once now.
     fn propagate_cancellation(&self) {
         let panicked = self.fiber_panicked.swap(false, Ordering::AcqRel);
-        let from_task = self
-            .task_cx
-            .as_ref()
-            .and_then(|task_cx| task_cx.observable_cancel_reason());
+        let from_task = self.task_cancel_to_pass();
         if !panicked && from_task.is_none() {
             return;
         }
@@ -748,6 +768,19 @@ impl ScopeState<'_> {
                 ctx.inherit_cancel(reason);
             }
         }
+    }
+
+    /// The task's cancellation reason the first time it is observable, and
+    /// `None` after that: it is passed on once, and fibers started later get
+    /// it when they start. Passing it again on every poll made draining N
+    /// cancelled fibers cost O(N²).
+    fn task_cancel_to_pass(&self) -> Option<CancelReason> {
+        if self.task_cancel_passed.load(Ordering::Acquire) {
+            return None;
+        }
+        let reason = self.task_cx.as_ref()?.observable_cancel_reason()?;
+        self.task_cancel_passed.store(true, Ordering::Release);
+        Some(reason)
     }
 
     /// Polls every ready fiber once. Returns whether any fiber is still live.
@@ -867,7 +900,8 @@ impl Drop for CloseOnDrop<'_, '_> {
 /// # Panics
 ///
 /// Re-raises a fiber panic that no handle observed, after every fiber has
-/// finished.
+/// finished. A scope future dropped before then drops those panics with its
+/// fibers.
 pub async fn scope<'env, B, Fut>(body: B) -> Fut::Output
 where
     B: FnOnce(FiberScope<'env>) -> Fut,
@@ -2015,5 +2049,63 @@ mod tests {
             })
         });
         assert_eq!(kind, CancelKind::Shutdown);
+    }
+
+    // --- The task's cancellation is passed on once ---
+
+    #[test]
+    fn the_tasks_cancellation_is_passed_to_each_fiber_once() {
+        let calls = within_watchdog(|| {
+            let task_cx = Cx::for_testing();
+            let task_ref = &task_cx;
+            block_on_in(&task_cx, async {
+                scope(|s| async move {
+                    let fibers: Vec<_> = (0..3)
+                        .map(|_| {
+                            s.spawn(async {
+                                let _ = until_cancelled().await;
+                                // A cleanup that takes several polls.
+                                for _ in 0..5 {
+                                    crate::runtime::yield_now().await;
+                                }
+                            })
+                        })
+                        .collect();
+                    crate::runtime::yield_now().await;
+                    INHERIT_CALLS.with(|calls| calls.set(0));
+                    task_ref.cancel_with(CancelKind::Shutdown, Some("the task is cancelled"));
+                    for fiber in fibers {
+                        fiber.await.expect("fiber");
+                    }
+                })
+                .await;
+                INHERIT_CALLS.with(Cell::get)
+            })
+        });
+        assert_eq!(
+            calls, 3,
+            "one inherit per live fiber, not one per scope poll"
+        );
+    }
+
+    #[test]
+    fn a_fiber_started_after_the_task_was_cancelled_sees_the_cancellation() {
+        let reason = within_watchdog(|| {
+            let task_cx = Cx::for_testing();
+            let task_ref = &task_cx;
+            block_on_in(&task_cx, async {
+                scope(|s| async move {
+                    let first = s.spawn(until_cancelled());
+                    crate::runtime::yield_now().await;
+                    task_ref.cancel_with(CancelKind::Shutdown, Some("the task is cancelled"));
+                    first.await.expect("first fiber");
+                    // The cancellation has been passed to the live fibers
+                    // already; a fiber started now still gets it.
+                    s.spawn(until_cancelled()).await.expect("late fiber")
+                })
+                .await
+            })
+        });
+        assert_eq!(reason.kind, CancelKind::Shutdown);
     }
 }
