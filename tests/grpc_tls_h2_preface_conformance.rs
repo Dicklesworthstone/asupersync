@@ -504,6 +504,7 @@ SrXuVI5uunTgPWuOtJOP+KM=
                 .with_tls(acceptor());
                 let address = listener.local_addr().unwrap();
                 let manager = listener.connection_manager().clone();
+                let stats = listener.stats_handle();
                 let run_runtime = handle.clone();
                 let run = handle
                     .try_spawn(async move { listener.run(&run_runtime).await })
@@ -541,6 +542,7 @@ SrXuVI5uunTgPWuOtJOP+KM=
                     until(|| manager.active_count() == 0).await;
                 }
                 assert_eq!(calls.load(Ordering::SeqCst), 0);
+                assert_eq!(stats.snapshot().tls_handshake_rejections_total, 2);
                 assert!(manager.begin_drain(Duration::from_secs(2)));
                 run.await.unwrap();
             }));
@@ -610,6 +612,7 @@ SrXuVI5uunTgPWuOtJOP+KM=
                 assert_eq!(silent.read(&mut byte).await.unwrap(), 0);
                 until(|| manager.active_count() == 0).await;
                 assert_eq!(stats.snapshot().accepted_total, 1);
+                assert_eq!(stats.snapshot().tls_handshake_rejections_total, 1);
                 assert_eq!(calls.load(Ordering::SeqCst), 0);
 
                 let mut peer = Peer::connect(address).await;
@@ -668,6 +671,39 @@ SrXuVI5uunTgPWuOtJOP+KM=
                 assert_eq!(calls.load(Ordering::SeqCst), 1);
                 let mut byte = [0u8; 1];
                 assert_eq!(silent.read(&mut byte).await.unwrap(), 0);
+            }));
+        }
+
+        #[test]
+        fn tls_listener_peer_dropping_tcp_without_close_notify_closes_cleanly() {
+            let runtime = RuntimeBuilder::new().worker_threads(2).build().unwrap();
+            let handle = runtime.handle();
+            runtime.block_on(bounded(async move {
+                let listener = Http2Listener::bind_with_config(
+                    "127.0.0.1:0",
+                    |_| async { Response::new(200, "OK", Vec::new()) },
+                    config(),
+                )
+                .await
+                .unwrap()
+                .with_tls(acceptor());
+                let address = listener.local_addr().unwrap();
+                let manager = listener.connection_manager().clone();
+                let run_runtime = handle.clone();
+                let run = handle
+                    .try_spawn(async move { listener.run(&run_runtime).await })
+                    .unwrap();
+
+                // Connect a peer, send preface + settings, then abruptly drop TCP without close_notify
+                let peer = Peer::connect(address).await;
+                until(|| manager.active_count() == 1).await;
+                // Dropping `peer` abruptly drops the underlying TCP socket without sending close_notify
+                drop(peer);
+                until(|| manager.active_count() == 0).await;
+
+                assert!(manager.begin_drain(Duration::from_secs(2)));
+                run.await.unwrap();
+                assert_eq!(manager.active_count(), 0);
             }));
         }
     }

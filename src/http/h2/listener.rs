@@ -47,6 +47,8 @@ use crate::server::shutdown::{
 use crate::stream::Stream;
 #[cfg(feature = "tls")]
 use crate::tls::{TlsAcceptor, TlsStream};
+#[cfg(feature = "tls")]
+use crate::tracing_compat::debug;
 use crate::tracing_compat::error;
 use crate::types::{Budget, CancelKind, CancelReason, Time};
 use crate::web::WebBodyDiagnostic;
@@ -265,7 +267,17 @@ impl AsyncRead for H2Transport {
             #[cfg(not(target_arch = "wasm32"))]
             Self::Handoff(stream) => Pin::new(stream).poll_read(cx, buf),
             #[cfg(feature = "tls")]
-            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_read(cx, buf),
+            Self::Tls(stream) => {
+                match Pin::new(stream.as_mut()).poll_read(cx, buf) {
+                    Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::UnexpectedEof => {
+                        // Transport closed without close_notify: cleartext closes cleanly on EOF.
+                        // Treat UnexpectedEof as EOF so the H2 transport terminates gracefully
+                        // instead of turning it into INTERNAL_ERROR and queueing a broken-pipe GOAWAY.
+                        Poll::Ready(Ok(()))
+                    }
+                    other => other,
+                }
+            }
         }
     }
 }
@@ -441,6 +453,7 @@ pub struct Http2ListenerStats {
     last_drain_requests_at_start: AtomicU64,
     last_drain_requests_stranded: AtomicU64,
     last_drain_duration_ms: AtomicU64,
+    tls_handshake_rejections_total: AtomicU64,
     time_getter: fn() -> Time,
 }
 
@@ -469,6 +482,8 @@ pub struct Http2ListenerStatsSnapshot {
     pub last_drain_requests_stranded: u64,
     /// Duration of the most recent drain in whole milliseconds.
     pub last_drain_duration_ms: u64,
+    /// Total TLS handshake failures, timeouts, and ALPN rejections.
+    pub tls_handshake_rejections_total: u64,
 }
 
 impl std::fmt::Debug for Http2ListenerStats {
@@ -506,6 +521,10 @@ impl std::fmt::Debug for Http2ListenerStats {
                 "drains_quiescent_total",
                 &self.drains_quiescent_total.load(Ordering::Relaxed),
             )
+            .field(
+                "tls_handshake_rejections_total",
+                &self.tls_handshake_rejections_total.load(Ordering::Relaxed),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -530,6 +549,7 @@ impl Http2ListenerStats {
             last_drain_requests_at_start: AtomicU64::new(0),
             last_drain_requests_stranded: AtomicU64::new(0),
             last_drain_duration_ms: AtomicU64::new(0),
+            tls_handshake_rejections_total: AtomicU64::new(0),
             time_getter,
         }
     }
@@ -547,6 +567,18 @@ impl Http2ListenerStats {
 
     fn record_spawn_failure(&self) {
         self.spawn_failures_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a rejected TLS handshake (failure, timeout, or ALPN mismatch).
+    pub fn record_tls_handshake_rejection(&self) {
+        self.tls_handshake_rejections_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Returns the total TLS handshake failures, timeouts, and ALPN rejections.
+    #[must_use]
+    pub fn tls_handshake_rejections_total(&self) -> u64 {
+        self.tls_handshake_rejections_total.load(Ordering::Relaxed)
     }
 
     fn record_drain_started(&self, in_flight: usize) {
@@ -599,6 +631,9 @@ impl Http2ListenerStats {
             last_drain_requests_at_start: self.last_drain_requests_at_start.load(Ordering::Relaxed),
             last_drain_requests_stranded: self.last_drain_requests_stranded.load(Ordering::Relaxed),
             last_drain_duration_ms: self.last_drain_duration_ms.load(Ordering::Relaxed),
+            tls_handshake_rejections_total: self
+                .tls_handshake_rejections_total
+                .load(Ordering::Relaxed),
         }
     }
 }
@@ -3397,6 +3432,8 @@ async fn h2_tcp_transport(
     #[cfg(feature = "tls")] tls_acceptor: Option<TlsAcceptor>,
     shutdown_signal: &ShutdownSignal,
     transport_timeouts: H2TransportTimeouts,
+    peer_addr: Option<SocketAddr>,
+    stats: &Http2ListenerStats,
 ) -> io::Result<Option<H2Transport>> {
     #[cfg(feature = "tls")]
     if let Some(acceptor) = tls_acceptor {
@@ -3409,13 +3446,28 @@ async fn h2_tcp_transport(
             acceptor.accept(socket),
         );
         let tls = match race_force_close(shutdown_signal, handshake).await {
-            Some(Ok(result)) => result.map_err(io::Error::other)?,
+            Some(Ok(result)) => match result {
+                Ok(stream) => stream,
+                Err(err) => {
+                    stats.record_tls_handshake_rejection();
+                    debug!(
+                        error = %err,
+                        peer = ?peer_addr,
+                        "HTTP/2 TLS handshake failed; dropping connection"
+                    );
+                    let _ = (&err, &peer_addr);
+                    return Ok(None);
+                }
+            },
             Some(Err(_)) => {
+                stats.record_tls_handshake_rejection();
                 task_cx.trace("h2_transport_tls_handshake_deadline_expired");
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "HTTP/2 TLS handshake deadline expired",
-                ));
+                debug!(
+                    peer = ?peer_addr,
+                    "HTTP/2 TLS handshake deadline expired; dropping connection"
+                );
+                let _ = &peer_addr;
+                return Ok(None);
             }
             None => return Ok(None),
         };
@@ -3423,15 +3475,26 @@ async fn h2_tcp_transport(
         // listener only speaks h2 and must reject those outcomes before the
         // preface, SETTINGS, or any request handler can reach the wire.
         if tls.alpn_protocol() != Some(b"h2".as_slice()) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "HTTP/2 TLS requires h2 ALPN negotiation",
-            ));
+            stats.record_tls_handshake_rejection();
+            debug!(
+                peer = ?peer_addr,
+                "HTTP/2 TLS requires h2 ALPN negotiation; rejecting connection"
+            );
+            let _ = &peer_addr;
+            // Best-effort close_notify bounded by the handshake deadline
+            let mut tls = tls;
+            let _ = crate::time::timeout(
+                task_cx.now(),
+                transport_timeouts.tls_handshake,
+                crate::io::AsyncWriteExt::shutdown(&mut tls),
+            )
+            .await;
+            return Ok(None);
         }
         return Ok(Some(H2Transport::Tls(Box::new(tls))));
     }
     #[cfg(not(feature = "tls"))]
-    let _ = (task_cx, shutdown_signal, transport_timeouts);
+    let _ = (task_cx, shutdown_signal, transport_timeouts, peer_addr, stats);
     Ok(Some(H2Transport::Plain(socket)))
 }
 
@@ -3460,6 +3523,7 @@ async fn serve_h2_connection<F, Fut>(
     transport_timeouts: H2TransportTimeouts,
     request_limits: H2RequestLimits,
     #[cfg(feature = "http2-streaming")] streaming: Option<StreamingDispatch>,
+    stats: Arc<Http2ListenerStats>,
 ) -> io::Result<()>
 where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
@@ -3480,6 +3544,8 @@ where
                 tls_acceptor,
                 &shutdown_signal,
                 transport_timeouts,
+                peer_addr,
+                &stats,
             )
             .await?;
             let Some(transport) = transport else {
@@ -5642,6 +5708,7 @@ impl<F> Http2Listener<F> {
             let streaming = streaming.clone();
             // Check the connection's Send boundary once before the runtime's
             // nested task wrappers instantiate it for each handler type.
+            let stats_for_conn = Arc::clone(&self.stats);
             let connection: Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async move {
                 let peer_addr = addr;
                 if let Err(err) = serve_h2_connection(
@@ -5669,6 +5736,7 @@ impl<F> Http2Listener<F> {
                     request_limits,
                     #[cfg(feature = "http2-streaming")]
                     streaming,
+                    stats_for_conn,
                 )
                 .await
                 {
@@ -7556,6 +7624,7 @@ mod tests {
         stats.record_accepted();
         stats.record_transient_accept_error();
         stats.record_spawn_failure();
+        stats.record_tls_handshake_rejection();
         stats.record_drain_started(3);
         stats.record_drain_escalated();
         stats.record_drain_hard_deadline();
@@ -7579,6 +7648,7 @@ mod tests {
         assert_eq!(snapshot.accepted_total, 1);
         assert_eq!(snapshot.transient_accept_errors_total, 1);
         assert_eq!(snapshot.spawn_failures_total, 1);
+        assert_eq!(snapshot.tls_handshake_rejections_total, 1);
         assert_eq!(snapshot.last_accept_at_ms, 321);
         assert_eq!(snapshot.drains_started_total, 1);
         assert_eq!(snapshot.drain_escalations_total, 1);
