@@ -3257,4 +3257,93 @@ mod legacy_streaming {
         }
         test_complete!("legacy_client_server_and_bidi_streaming_cross_native_http2");
     }
+
+    /// Two clones of one bidi response stream, read by two tasks that both
+    /// park before anything is sent (asupersync-mu5yhv finding 3): every echo
+    /// reaches one of them and both see the end. The call used to keep one
+    /// waker for its response side, so the reader that parked first was never
+    /// woken and this case hung until the watchdog.
+    fn run_clone_case(workers: usize) {
+        let runtime = if workers == 1 {
+            RuntimeBuilder::current_thread()
+        } else {
+            RuntimeBuilder::new().worker_threads(workers)
+        }
+        .build()
+        .expect("legacy streaming runtime");
+        let handle = runtime.handle();
+        let task_handle = handle.clone();
+        runtime.block_on(handle.spawn(async move {
+            let server = Server::builder().add_service(Streams).build();
+            let server = Arc::new(server);
+            let listener = server
+                .bind_registered_duplex_http2(
+                    "127.0.0.1:0",
+                    HostPolicy::allow_all(),
+                    ServerDuplexConfig::default(),
+                )
+                .await
+                .expect("bind legacy streaming listener");
+            let address = listener.local_addr().unwrap();
+            let manager = listener.connection_manager().clone();
+            let listener_runtime = task_handle.clone();
+            let serving = task_handle
+                .spawn(async move { listener.run_streaming_produced(&listener_runtime).await });
+            let channel = Channel::builder(format!("http://127.0.0.1:{}", address.port()))
+                .connect_timeout(LIMIT)
+                .timeout(LIMIT)
+                .connect()
+                .await
+                .expect("legacy streaming channel");
+            let mut client = GrpcClient::new(channel);
+
+            let (mut sink, responses) = client
+                .bidi_streaming::<Bytes, Bytes>("/legacy.Streams/Echo")
+                .await
+                .expect("bidi dials the server");
+            let readers: Vec<_> = [responses.clone(), responses]
+                .into_iter()
+                .map(|mut responses| {
+                    task_handle.spawn(async move {
+                        let mut markers = Vec::new();
+                        while let Some(echo) = next_response(&mut responses).await {
+                            markers.push(echo.expect("echo")[0]);
+                        }
+                        markers
+                    })
+                })
+                .collect();
+            // Nothing has been sent, so both readers park on the call.
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(200)).await;
+            for marker in 0..4_u8 {
+                sink.send(Bytes::from(vec![marker; 16])).await.unwrap();
+            }
+            sink.close().await.unwrap();
+            let mut markers = Vec::new();
+            for reader in readers {
+                markers.extend(reader.await);
+            }
+            markers.sort_unstable();
+            assert_eq!(markers, vec![0, 1, 2, 3]);
+            drop(sink);
+
+            assert!(manager.begin_drain(Duration::from_secs(5)));
+            serving.await.expect("legacy streaming listener drain");
+            log_test_event(
+                "legacy_bidi_response_clones_read_from_two_tasks",
+                json!({ "bead": "asupersync-mu5yhv", "workers": workers }),
+            );
+        }));
+        drop(handle);
+        assert!(runtime.shutdown_timeout(LIMIT));
+    }
+
+    #[test]
+    fn legacy_bidi_response_stream_clones_read_from_two_tasks_both_see_the_end() {
+        init_test("legacy_bidi_response_stream_clones_read_from_two_tasks_both_see_the_end");
+        for workers in [1, 2] {
+            owned_stream_watchdog(move || run_clone_case(workers));
+        }
+        test_complete!("legacy_bidi_response_stream_clones_read_from_two_tasks_both_see_the_end");
+    }
 }

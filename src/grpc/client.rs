@@ -2849,6 +2849,9 @@ pub struct ResponseStream<T> {
 struct NativeResponses<T> {
     handle: Arc<LegacyResponseHandle>,
     convert: fn(Box<dyn Any + Send>) -> Result<T, Status>,
+    /// This handle's id on the call; each clone gets its own, so clones
+    /// parked in different tasks are each woken.
+    responder: u64,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2857,6 +2860,7 @@ impl<T> Clone for NativeResponses<T> {
         Self {
             handle: Arc::clone(&self.handle),
             convert: self.convert,
+            responder: self.handle.call().new_responder(),
         }
     }
 }
@@ -2928,6 +2932,7 @@ impl<T> ResponseStream<T> {
         stream.native = Some(NativeResponses {
             handle: Arc::new(LegacyResponseHandle::new(call)),
             convert: downcast_native_response::<T>,
+            responder: 0,
         });
         stream
     }
@@ -3147,7 +3152,7 @@ impl<T> ResponseStream<T> {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<T, Status>>> {
         let call = native.handle.call();
-        let end = match call.poll_message(cx) {
+        let end = match call.poll_message(cx, native.responder) {
             Poll::Pending => return Poll::Pending,
             Poll::Ready(Some(Ok(message))) => return Poll::Ready(Some((native.convert)(message))),
             Poll::Ready(Some(Err(status))) => Some(Err(status)),
@@ -3568,6 +3573,7 @@ impl<T> ResponseFuture<T> {
             native: Some(NativeResponses {
                 handle: Arc::new(LegacyResponseHandle::new(call)),
                 convert: downcast_native_response::<T>,
+                responder: 0,
             }),
         }
     }
@@ -3586,7 +3592,8 @@ impl<T: Send> Future for ResponseFuture<T> {
         let this = self.get_mut();
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(native) = &this.native {
-            let output = match native.handle.call().poll_single_response(cx) {
+            let call = native.handle.call();
+            let output = match call.poll_single_response(cx, native.responder) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Ok((message, metadata))) => (native.convert)(message)
                     .map(|message| Response::with_metadata(message, metadata)),
@@ -4412,6 +4419,140 @@ mod tests {
             poll_stream(&mut second_reader, &second_reader_waker),
             Poll::Ready(None)
         ));
+    }
+
+    /// What a native call fed by a test has received: its messages, its end,
+    /// and the waker of its last pending poll, as a transport keeps it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[derive(Default)]
+    struct Feed {
+        messages: VecDeque<u32>,
+        ended: bool,
+        waker: Option<Waker>,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    struct FedCall(Arc<Mutex<Feed>>);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl FedCall {
+        /// Queue a message, or the end, and wake the call as arriving data does.
+        fn deliver(feed: &Mutex<Feed>, message: Option<u32>) {
+            let waker = {
+                let mut feed = lock_unpoisoned(feed);
+                match message {
+                    Some(message) => feed.messages.push_back(message),
+                    None => feed.ended = true,
+                }
+                feed.waker.take()
+            };
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl legacy_native::LegacyCall for FedCall {
+        fn poll_event(
+            &mut self,
+            task: &mut Context<'_>,
+        ) -> Poll<Option<Result<legacy_native::LegacyEvent, Status>>> {
+            let mut feed = lock_unpoisoned(&self.0);
+            if let Some(message) = feed.messages.pop_front() {
+                let message = legacy_native::LegacyEvent::Message(Box::new(message));
+                return Poll::Ready(Some(Ok(message)));
+            }
+            if feed.ended {
+                return Poll::Ready(None);
+            }
+            feed.waker = Some(task.waker().clone());
+            Poll::Pending
+        }
+
+        fn queue_message(&mut self, _message: Box<dyn Any + Send>) -> Result<(), Status> {
+            Ok(())
+        }
+
+        fn close_requests(&mut self) -> Result<(), Status> {
+            Ok(())
+        }
+
+        fn initial_metadata(&self) -> Option<Metadata> {
+            None
+        }
+
+        fn trailers(&self) -> Option<Metadata> {
+            None
+        }
+
+        fn status(&self) -> Option<Status> {
+            None
+        }
+
+        fn cancel(&mut self) {}
+    }
+
+    /// Clones of a network call's response stream polled from two tasks
+    /// (asupersync-mu5yhv finding 3): the call kept one waker for its whole
+    /// response side, so the clone that parked first was never woken again,
+    /// not even by the end of the call, and its `next()` hung.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_response_stream_clones_parked_in_two_tasks_are_each_woken() {
+        init_test("native_response_stream_clones_parked_in_two_tasks_are_each_woken");
+        let feed = Arc::new(Mutex::new(Feed::default()));
+        let call = LegacyNativeCall::new(
+            Box::new(FedCall(Arc::clone(&feed))),
+            LegacyShape::ServerStreaming,
+        );
+        let mut first_reader = ResponseStream::<u32>::native(call);
+        let mut second_reader = first_reader.clone();
+        let first_wake_count = Arc::new(AtomicUsize::new(0));
+        let second_wake_count = Arc::new(AtomicUsize::new(0));
+        let first_reader_waker = counting_waker(&first_wake_count);
+        let second_reader_waker = counting_waker(&second_wake_count);
+
+        // Both clones park on the call, the second one last.
+        assert!(poll_stream(&mut first_reader, &first_reader_waker).is_pending());
+        assert!(poll_stream(&mut second_reader, &second_reader_waker).is_pending());
+
+        // A message arrives: both parked clones are woken; the second takes it.
+        FedCall::deliver(&feed, Some(7));
+        assert_eq!(
+            first_wake_count.load(Ordering::SeqCst),
+            1,
+            "first cloned reader lost its wakeup",
+        );
+        assert_eq!(
+            second_wake_count.load(Ordering::SeqCst),
+            1,
+            "second cloned reader should also be notified",
+        );
+        assert!(matches!(
+            poll_stream(&mut second_reader, &second_reader_waker),
+            Poll::Ready(Some(Ok(7)))
+        ));
+
+        // The first clone parks again (twice: it keeps one entry) while the
+        // second is busy elsewhere and does not poll. The end wakes it.
+        assert!(poll_stream(&mut first_reader, &first_reader_waker).is_pending());
+        assert!(poll_stream(&mut first_reader, &first_reader_waker).is_pending());
+        FedCall::deliver(&feed, None);
+        assert_eq!(
+            first_wake_count.load(Ordering::SeqCst),
+            2,
+            "the end of the call should wake the parked clone",
+        );
+        assert!(matches!(
+            poll_stream(&mut first_reader, &first_reader_waker),
+            Poll::Ready(None)
+        ));
+        assert!(matches!(
+            poll_stream(&mut second_reader, &second_reader_waker),
+            Poll::Ready(None)
+        ));
+        crate::test_complete!("native_response_stream_clones_parked_in_two_tasks_are_each_woken");
     }
 
     #[test]
