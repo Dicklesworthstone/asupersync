@@ -10174,8 +10174,8 @@ impl RuntimeState {
                                     reason: reason.to_string(),
                                 });
 
-                        // Atomic check-and-transition: begin_finalize() internally validates
-                        // that child_count() == 0 && task_count() == 0 under proper locking
+                        // Atomic check-and-transition: begin_finalize() transitions
+                        // Closing/Draining -> Finalizing under proper locking
                         let transition = {
                             let old_state = region.state();
                             if region.begin_finalize() {

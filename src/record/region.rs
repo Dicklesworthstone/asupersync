@@ -179,8 +179,8 @@ impl RegionState {
 /// 2. **Acquire write lock** — `inner.write()` serialises all mutations.
 /// 3. **Re-check state** — a second `state.load(Acquire)` under the lock
 ///    guards against a concurrent `begin_close` that landed between steps
-///    1 and 2. Because `begin_close` transitions the atomic before
-///    acquiring the inner lock, the re-check is linearisable.
+///    1 and 2. Because `begin_close` transitions the atomic under
+///    the inner write lock, the re-check is linearisable.
 /// 4. **Check limit** — under the same write guard, compare the live count
 ///    against the configured `Option<usize>` limit.
 /// 5. **Commit** — push/increment within the write guard, then drop the
@@ -593,6 +593,10 @@ impl ObligationAdmissionHandle {
                     .pending_obligations
                     .checked_add(1)
                     .ok_or(Error::Destination(Admission::CapacityExhausted))?;
+                source
+                    .pending_obligations
+                    .checked_sub(1)
+                    .ok_or(Error::SourceResolved)?;
             }
             target
                 .unapplied_obligations
@@ -4512,5 +4516,60 @@ mod tests {
         let mut buf = Vec::new();
         region.copy_task_ids_into(&mut buf);
         assert_eq!(buf, expected);
+    }
+
+    #[test]
+    fn transfer_to_zero_source_pending_refuses_without_claim_or_target_leak() {
+        use crate::runtime::obligation_mailbox::ObligationTransferError;
+
+        let region_source = RegionRecord::new(
+            RegionId::from_arena(ArenaIndex::new(10, 0)),
+            None,
+            Budget::INFINITE,
+        );
+        let region_target = RegionRecord::new(
+            RegionId::from_arena(ArenaIndex::new(11, 0)),
+            None,
+            Budget::INFINITE,
+        );
+        let task_source = TaskId::from_arena(ArenaIndex::new(100, 0));
+        let task_target = TaskId::from_arena(ArenaIndex::new(101, 0));
+
+        let source_handle = region_source.obligation_admission_handle(task_source);
+        let target_handle = region_target.obligation_admission_handle(task_target);
+
+        // source has 0 pending obligations
+        assert_eq!(region_source.pending_obligations(), 0);
+        assert_eq!(region_target.pending_obligations(), 0);
+
+        let mut claim_invoked = false;
+        let mut publish_invoked = false;
+        let result = source_handle.transfer_to(
+            &target_handle,
+            || {
+                claim_invoked = true;
+                Ok(())
+            },
+            || {
+                publish_invoked = true;
+            },
+        );
+
+        assert!(
+            matches!(result, Err(ObligationTransferError::SourceResolved)),
+            "must return SourceResolved when source pending count is zero"
+        );
+        assert!(!claim_invoked, "claim callback must not be invoked");
+        assert!(!publish_invoked, "publish callback must not be invoked");
+        assert_eq!(
+            region_source.pending_obligations(),
+            0,
+            "source pending count untouched"
+        );
+        assert_eq!(
+            region_target.pending_obligations(),
+            0,
+            "destination pending count must not leak or increment"
+        );
     }
 }
