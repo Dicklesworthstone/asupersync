@@ -254,3 +254,36 @@ fn truncated_content_cannot_become_a_successful_response() {
         assert_unchanged(&response, &before);
     }
 }
+
+/// A body declared empty (Content-Length: 0) with a content coding is the empty
+/// representation. It used to fail as a truncated stream, so an opted-in client
+/// request failed where other clients accept the response (br-asupersync-ecnp0m).
+#[test]
+fn an_empty_body_with_a_coding_decodes_to_the_empty_representation() {
+    for coding in ["gzip", "deflate", "br", "gzip, br"] {
+        let mut response = Response::new(200, "OK", Vec::new())
+            .with_header("Content-Encoding", coding)
+            .with_header("Content-Length", "0");
+        response
+            .decode_content(&Method::Get, DecompressionLimit::new(1024))
+            .unwrap_or_else(|error| panic!("{coding}: {error}"));
+        assert!(response.body.is_empty(), "{coding}");
+        assert!(
+            response.headers.iter().all(|(name, _)| {
+                !name.eq_ignore_ascii_case("content-encoding")
+                    && !name.eq_ignore_ascii_case("content-length")
+            }),
+            "{coding}: the coding and length no longer describe the body"
+        );
+    }
+    // Without a declared length an empty body may be content cut off before
+    // its first byte, so it still fails and leaves the response unchanged.
+    let mut response = Response::new(200, "OK", Vec::new()).with_header("Content-Encoding", "gzip");
+    let before = response.clone();
+    assert!(
+        response
+            .decode_content(&Method::Get, DecompressionLimit::new(1024))
+            .is_err()
+    );
+    assert_unchanged(&response, &before);
+}

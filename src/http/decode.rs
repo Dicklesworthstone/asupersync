@@ -12,12 +12,16 @@ const MAX_CONTENT_CODINGS: usize = 8;
 impl Response {
     /// Decode this buffered response's Content-Encoding in reverse application order.
     ///
-    /// Decoding is explicit: sending a request does not enable it or change
-    /// Accept-Encoding automatically. Supply the original request method so HEAD
+    /// Decoding is explicit: a response is decoded by this call, which an
+    /// `HttpClient` also makes only when its opt-in
+    /// `HttpClientBuilder::response_decompression` is enabled (that option also
+    /// sends Accept-Encoding). Supply the original request method so HEAD
     /// and successful CONNECT responses retain their representation metadata.
     /// Informational, 204, 205, and 304 responses are also left unchanged.
     /// Encoded partial representations are rejected rather than guessing which
-    /// bytes the Content-Range describes.
+    /// bytes the Content-Range describes. A body declared empty by
+    /// `Content-Length: 0` is the empty representation whatever its codings;
+    /// an empty body without that declaration fails like any truncated stream.
     ///
     /// The mandatory limit applies to every intermediate decoded representation
     /// and the final body, including identity bodies. At most eight content
@@ -80,6 +84,17 @@ impl Response {
                 "cannot decode an encoded partial representation",
             ));
         }
+        // A body declared empty (Content-Length: 0) with a content coding holds
+        // no encoded data: it is the empty representation, which other clients
+        // accept. Decoding it would fail as a truncated stream and fail the
+        // whole response (br-asupersync-ecnp0m). Without that declaration an
+        // empty body may be content cut off before its first byte, so it still
+        // fails like any other truncated stream.
+        if self.body.is_empty() && declared_empty(&self.headers) {
+            self.headers.retain(|(name, _)| !invalidated_field(name));
+            self.trailers.retain(|(name, _)| !invalidated_field(name));
+            return Ok(());
+        }
 
         // Keep the original response intact until every layer has completed,
         // including each codec's trailer/checksum validation in finish().
@@ -101,6 +116,16 @@ impl Response {
         self.trailers.retain(|(name, _)| !invalidated_field(name));
         Ok(())
     }
+}
+
+// Whether the message framing declared the body empty: at least one
+// Content-Length field, and every one of them 0.
+fn declared_empty(headers: &[(String, String)]) -> bool {
+    let mut lengths = headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .peekable();
+    lengths.peek().is_some() && lengths.all(|(_, value)| value.trim() == "0")
 }
 
 fn check_size(size: usize, limit: DecompressionLimit) -> io::Result<()> {
