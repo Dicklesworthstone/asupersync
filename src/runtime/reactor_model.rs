@@ -11,6 +11,13 @@
 //! supported. Scheduled conditions use the existing lab reactor's virtual clock.
 //! No OS I/O, background thread, wall clock, or ambient runtime is introduced.
 //!
+//! [`fail_next`](LabReactorModel::fail_next) and
+//! [`fail_after`](LabReactorModel::fail_after) return actual `io::Error`s from
+//! selected reactor calls, rather than merely setting an event's `ERROR` bit.
+//! Scripts can target a token, delay a failure by matching attempts, and drive
+//! retry, registration rollback, poll-error, and cancellation-cleanup paths.
+//! A failed operation does not mutate readiness or advance virtual time.
+//!
 //! This is an opt-in model, not a change to legacy `LabReactor` semantics or the
 //! default `LabRuntime`. Supply an `Arc<LabReactorModel>` wherever a `Reactor`
 //! is accepted. It models readiness, not the contents of a socket: simulated
@@ -44,7 +51,7 @@
 use super::reactor::{Event, Events, Interest, LabReactor, Reactor, Source, Token};
 use crate::types::Time;
 use parking_lot::Mutex;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::time::Duration;
 
@@ -57,6 +64,72 @@ pub enum ReadinessMode {
     OneShot,
     /// Deliver while a matching condition remains set.
     Level,
+}
+
+/// A reactor entry point that can fail under an explicit lab script.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ReactorOperation {
+    /// Install a source and token.
+    Register,
+    /// Change interest or re-arm an existing source.
+    Modify,
+    /// Remove a source and its pending conditions.
+    Deregister,
+    /// Wait for readiness in virtual time.
+    Poll,
+    /// Interrupt a reactor wait.
+    Wake,
+}
+
+impl ReactorOperation {
+    const fn index(self) -> usize {
+        match self {
+            Self::Register => 0,
+            Self::Modify => 1,
+            Self::Deregister => 2,
+            Self::Poll => 3,
+            Self::Wake => 4,
+        }
+    }
+
+    const fn has_token(self) -> bool {
+        matches!(self, Self::Register | Self::Modify | Self::Deregister)
+    }
+}
+
+/// Counts for one reactor entry point, including calls that failed validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ReactorFaultStats {
+    /// Total calls, including injected failures and ordinary backend errors.
+    pub attempts: u64,
+    /// Calls that returned a scripted error.
+    pub injected_failures: u64,
+    /// Remaining failure rules for this operation, across all token selectors.
+    pub pending_failures: usize,
+}
+
+/// Exact attribution of the most recently injected reactor-operation failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct InjectedReactorFailure {
+    /// Entry point that returned the error.
+    pub operation: ReactorOperation,
+    /// Actual token passed to the failed call; absent for poll and wake.
+    pub token: Option<Token>,
+    /// Error kind returned to the caller.
+    pub kind: io::ErrorKind,
+    /// One-based attempt number for this operation, across all tokens.
+    pub attempt: u64,
+}
+
+#[derive(Debug)]
+struct FailureRule {
+    operation: ReactorOperation,
+    token: Option<Token>,
+    skip: usize,
+    kind: io::ErrorKind,
 }
 
 const READINESS: Interest = Interest::from_bits(
@@ -104,6 +177,40 @@ impl RegistrationState {
 #[derive(Debug, Default)]
 struct ModelState {
     registrations: BTreeMap<Token, RegistrationState>,
+    failures: VecDeque<FailureRule>,
+    attempts: [u64; 5],
+    injected_failures: [u64; 5],
+    last_failure: Option<InjectedReactorFailure>,
+}
+
+impl ModelState {
+    fn check_failure(&mut self, operation: ReactorOperation, token: Option<Token>) -> io::Result<()> {
+        let index = operation.index();
+        self.attempts[index] = self.attempts[index].saturating_add(1);
+        let Some(position) = self.failures.iter().position(|rule| {
+            rule.operation == operation && (rule.token.is_none() || rule.token == token)
+        }) else {
+            return Ok(());
+        };
+        let rule = &mut self.failures[position];
+        if rule.skip != 0 {
+            rule.skip -= 1;
+            return Ok(());
+        }
+        let rule = self.failures.remove(position).expect("matched failure rule exists");
+        let attempt = self.attempts[index];
+        self.injected_failures[index] = self.injected_failures[index].saturating_add(1);
+        self.last_failure = Some(InjectedReactorFailure {
+            operation,
+            token,
+            kind: rule.kind,
+            attempt,
+        });
+        Err(io::Error::new(
+            rule.kind,
+            format!("scripted {operation:?} failure on attempt {attempt} for {token:?}"),
+        ))
+    }
 }
 
 /// An opt-in readiness state machine backed by the existing lab event clock.
@@ -145,6 +252,84 @@ impl LabReactorModel {
             state: Mutex::new(ModelState::default()),
             mode,
         }
+    }
+
+    /// Fails the next matching call with `kind`, before backend state changes.
+    ///
+    /// `None` matches any token for register/modify/deregister. Poll and wake
+    /// require `None`. Rules for unrelated operations or tokens are not consumed.
+    /// See [`Self::fail_after`] for ordering and matching semantics.
+    ///
+    /// # Errors
+    /// Returns `InvalidInput` for a token selector on poll or wake.
+    pub fn fail_next(
+        &self,
+        operation: ReactorOperation,
+        token: Option<Token>,
+        kind: io::ErrorKind,
+    ) -> io::Result<()> {
+        self.fail_after(operation, token, 0, kind)
+    }
+
+    /// Queues one failure after skipping `matching_calls` matching attempts.
+    ///
+    /// The first matching rule owns a call: either its countdown decreases or
+    /// it fails and is removed. A later rule cannot also fire on that call.
+    /// Rules for other operations/tokens progress independently. Matching is
+    /// before ordinary backend validation, so attempts that would return
+    /// `AlreadyExists` or `NotFound` also count. Token selectors are literal;
+    /// callers using their own token allocator must account for token reuse.
+    ///
+    /// The script and serialized call order determine failures, with no random
+    /// source or wall clock. Only script bookkeeping changes on a failure.
+    /// A failed poll clears its output buffer but consumes no readiness, wake,
+    /// scheduled condition, or virtual timeout. A failed wake sets no wake flag.
+    ///
+    /// # Errors
+    /// Returns `InvalidInput` for a token selector on poll or wake.
+    pub fn fail_after(
+        &self,
+        operation: ReactorOperation,
+        token: Option<Token>,
+        matching_calls: usize,
+        kind: io::ErrorKind,
+    ) -> io::Result<()> {
+        if token.is_some() && !operation.has_token() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "poll and wake failure rules cannot select a token",
+            ));
+        }
+        self.state.lock().failures.push_back(FailureRule {
+            operation,
+            token,
+            skip: matching_calls,
+            kind,
+        });
+        Ok(())
+    }
+
+    /// Clears pending failure rules without erasing counters or last-failure evidence.
+    pub fn clear_failures(&self) {
+        self.state.lock().failures.clear();
+    }
+
+    /// Returns counters and outstanding failure rules for one operation.
+    #[must_use]
+    pub fn fault_stats(&self, operation: ReactorOperation) -> ReactorFaultStats {
+        let state = self.state.lock();
+        let index = operation.index();
+        ReactorFaultStats {
+            attempts: state.attempts[index],
+            injected_failures: state.injected_failures[index],
+            pending_failures: state.failures.iter().filter(|rule| rule.operation == operation).count(),
+        }
+    }
+
+    /// Returns the last injected error's operation, actual token and attempt number.
+    #[must_use]
+    pub fn last_failure(&self) -> Option<InjectedReactorFailure> {
+        self.state.lock().last_failure
     }
 
     /// Returns the current virtual time.
@@ -273,6 +458,7 @@ fn validate_readiness(ready: Interest) -> io::Result<()> {
 impl Reactor for LabReactorModel {
     fn register(&self, source: &dyn Source, token: Token, interest: Interest) -> io::Result<()> {
         let mut state = self.state.lock();
+        state.check_failure(ReactorOperation::Register, Some(token))?;
         if state.registrations.contains_key(&token) {
             return Err(io::Error::new(io::ErrorKind::AlreadyExists, "token already registered"));
         }
@@ -293,6 +479,7 @@ impl Reactor for LabReactorModel {
 
     fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
         let mut state = self.state.lock();
+        state.check_failure(ReactorOperation::Modify, Some(token))?;
         let registration = state.registrations.get_mut(&token).ok_or_else(not_registered)?;
         registration.interest = interest;
         registration.armed = true;
@@ -303,6 +490,7 @@ impl Reactor for LabReactorModel {
 
     fn deregister(&self, token: Token) -> io::Result<()> {
         let mut state = self.state.lock();
+        state.check_failure(ReactorOperation::Deregister, Some(token))?;
         if !state.registrations.contains_key(&token) {
             return Err(not_registered());
         }
@@ -314,6 +502,7 @@ impl Reactor for LabReactorModel {
     fn poll(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<usize> {
         events.clear();
         let mut state = self.state.lock();
+        state.check_failure(ReactorOperation::Poll, None)?;
         let already_ready = state
             .registrations
             .values()
@@ -343,7 +532,11 @@ impl Reactor for LabReactorModel {
     }
 
     fn wake(&self) -> io::Result<()> {
-        self.events.wake()
+        let mut state = self.state.lock();
+        state.check_failure(ReactorOperation::Wake, None)?;
+        let result = self.events.wake();
+        drop(state);
+        result
     }
 
     fn registration_count(&self) -> usize {
@@ -354,7 +547,7 @@ impl Reactor for LabReactorModel {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::runtime::IoDriverHandle;
+    use crate::runtime::{IoDriver, IoDriverHandle};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Wake, Waker};
@@ -570,6 +763,280 @@ mod tests {
         drop(registration);
         assert!(driver.is_empty());
         assert_eq!(model.registration_count(), 0);
+    }
+
+    #[test]
+    fn failed_registration_rolls_back_the_production_driver_waker_slot() {
+        let model = Arc::new(LabReactorModel::new());
+        let driver = IoDriverHandle::new(model.clone());
+        model
+            .fail_next(ReactorOperation::Register, None, io::ErrorKind::OutOfMemory)
+            .unwrap();
+        let result = driver.register(&std::io::stdin(), Interest::READABLE, Waker::noop().clone());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::OutOfMemory);
+        assert!(driver.is_empty());
+        assert_eq!(model.registration_count(), 0);
+        let failure = model.last_failure().unwrap();
+        assert_eq!(failure.operation, ReactorOperation::Register);
+        assert_eq!(failure.kind, io::ErrorKind::OutOfMemory);
+        assert_eq!(failure.attempt, 1);
+        assert!(failure.token.is_some());
+
+        let registration = driver
+            .register(&std::io::stdin(), Interest::READABLE, Waker::noop().clone())
+            .unwrap();
+        assert_eq!(driver.waker_count(), 1);
+        assert_eq!(model.registration_count(), 1);
+        assert_eq!(model.fault_stats(ReactorOperation::Register), ReactorFaultStats {
+            attempts: 2,
+            injected_failures: 1,
+            pending_failures: 0,
+        });
+        drop(registration);
+        assert!(driver.is_empty());
+        assert_eq!(model.registration_count(), 0);
+    }
+
+    #[test]
+    fn failed_rearm_keeps_interest_readiness_and_disarming_until_a_successful_retry() {
+        let model = Arc::new(LabReactorModel::new());
+        let driver = IoDriverHandle::new(model.clone());
+        let count = Arc::new(CountWakes(AtomicUsize::new(0)));
+        let waker = Waker::from(count.clone());
+        let mut registration = driver
+            .register(&std::io::stdin(), Interest::READABLE, waker.clone())
+            .unwrap();
+        let token = registration.token();
+        let ready = Interest::READABLE | Interest::WRITABLE;
+        model.set_ready(token, ready).unwrap();
+        assert_eq!(driver.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(), 1);
+        assert!(!model.is_armed(token).unwrap());
+        model
+            .fail_next(ReactorOperation::Modify, Some(token), io::ErrorKind::PermissionDenied)
+            .unwrap();
+        assert_eq!(
+            registration.rearm(Interest::WRITABLE, &waker).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(registration.interest(), Interest::READABLE);
+        assert_eq!(model.readiness(token).unwrap(), ready);
+        assert!(!model.is_armed(token).unwrap());
+        assert_eq!(driver.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(), 0);
+        assert_eq!(count.0.load(Ordering::SeqCst), 1);
+        assert!(registration.rearm(Interest::WRITABLE, &waker).unwrap());
+        let mut captured = Vec::new();
+        assert_eq!(driver.turn_with(Some(Duration::ZERO), |event, interest| {
+            captured.push((*event, interest));
+        }).unwrap(), 1);
+        assert_eq!(captured, vec![(Event::writable(token), Some(Interest::WRITABLE))]);
+        assert_eq!(count.0.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn failed_poll_clears_stale_output_but_consumes_no_time_wake_or_scheduled_condition() {
+        let model = LabReactorModel::new();
+        let token = Token::new(30);
+        register(&model, token, Interest::READABLE);
+        model.schedule_ready(token, Interest::READABLE, Duration::from_secs(5)).unwrap();
+        model.wake().unwrap();
+        model.fail_next(ReactorOperation::Poll, None, io::ErrorKind::Interrupted).unwrap();
+        let mut events = Events::with_capacity(4);
+        events.push(Event::errored(Token::new(999)));
+        assert_eq!(model.poll(&mut events, None).unwrap_err().kind(), io::ErrorKind::Interrupted);
+        assert!(events.is_empty());
+        assert_eq!(model.now(), Time::ZERO);
+        assert!(model.is_armed(token).unwrap());
+        assert_eq!(model.readiness(token).unwrap(), Interest::NONE);
+        assert_eq!(model.next_event_time(), Some(Time::from_secs(5)));
+        // The wake pending before the failure still interrupts this wait.
+        assert_eq!(model.poll(&mut events, None).unwrap(), 0);
+        assert_eq!(model.now(), Time::ZERO);
+        assert_eq!(model.poll(&mut events, None).unwrap(), 1);
+        assert_eq!(events.iter().copied().collect::<Vec<_>>(), vec![Event::readable(token)]);
+        assert_eq!(model.now(), Time::from_secs(5));
+        assert_eq!(model.fault_stats(ReactorOperation::Poll).attempts, 3);
+    }
+
+    #[test]
+    fn token_specific_countdowns_ignore_unrelated_operations_and_other_tokens() {
+        let model = LabReactorModel::new();
+        let target = Token::new(31);
+        let other = Token::new(32);
+        register(&model, target, Interest::READABLE);
+        register(&model, other, Interest::READABLE);
+        model
+            .fail_after(ReactorOperation::Modify, Some(target), 1, io::ErrorKind::Interrupted)
+            .unwrap();
+        for _ in 0..3 {
+            model.modify(other, Interest::WRITABLE).unwrap();
+            model.wake().unwrap();
+            assert!(poll(&model).is_empty());
+        }
+        model.modify(target, Interest::READABLE).unwrap();
+        assert_eq!(model.modify(target, Interest::WRITABLE).unwrap_err().kind(), io::ErrorKind::Interrupted);
+        assert_eq!(model.last_failure(), Some(InjectedReactorFailure {
+            operation: ReactorOperation::Modify,
+            token: Some(target),
+            kind: io::ErrorKind::Interrupted,
+            attempt: 5,
+        }));
+        model.modify(target, Interest::WRITABLE).unwrap();
+        assert_eq!(model.fault_stats(ReactorOperation::Modify).attempts, 6);
+        assert_eq!(model.fault_stats(ReactorOperation::Modify).pending_failures, 0);
+    }
+
+    #[test]
+    fn only_the_first_matching_rule_owns_each_call_and_other_operations_can_progress() {
+        let model = LabReactorModel::new();
+        let token = Token::new(33);
+        register(&model, token, Interest::READABLE);
+        model.fail_after(ReactorOperation::Modify, None, 1, io::ErrorKind::Interrupted).unwrap();
+        model.fail_next(ReactorOperation::Modify, Some(token), io::ErrorKind::PermissionDenied).unwrap();
+        model.fail_next(ReactorOperation::Wake, None, io::ErrorKind::BrokenPipe).unwrap();
+        model.modify(token, Interest::READABLE).unwrap();
+        assert_eq!(model.wake().unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(model.modify(token, Interest::READABLE).unwrap_err().kind(), io::ErrorKind::Interrupted);
+        assert_eq!(model.modify(token, Interest::READABLE).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        model.modify(token, Interest::READABLE).unwrap();
+        assert_eq!(model.fault_stats(ReactorOperation::Modify).injected_failures, 2);
+        assert_eq!(model.fault_stats(ReactorOperation::Wake).injected_failures, 1);
+    }
+
+    #[test]
+    fn failed_deregistration_keeps_the_source_and_its_pending_conditions() {
+        let model = LabReactorModel::new();
+        let token = Token::new(34);
+        register(&model, token, Interest::READABLE);
+        model.schedule_ready(token, Interest::READABLE, Duration::from_secs(1)).unwrap();
+        model.fail_next(ReactorOperation::Deregister, Some(token), io::ErrorKind::Other).unwrap();
+        assert_eq!(model.deregister(token).unwrap_err().kind(), io::ErrorKind::Other);
+        assert_eq!(model.registration_count(), 1);
+        assert!(model.is_armed(token).unwrap());
+        let mut events = Events::with_capacity(4);
+        assert_eq!(model.poll(&mut events, None).unwrap(), 1);
+        assert_eq!(events.iter().copied().collect::<Vec<_>>(), vec![Event::readable(token)]);
+        model.deregister(token).unwrap();
+        assert_eq!(model.registration_count(), 0);
+        register(&model, token, Interest::READABLE);
+        assert!(poll(&model).is_empty());
+    }
+
+    #[test]
+    fn scripted_errors_exercise_every_production_deregistration_and_drop_retry() {
+        for explicit in [false, true] {
+            let max_failures = if explicit { 3 } else { 1 };
+            for failures in 0..=max_failures {
+                let model = Arc::new(LabReactorModel::new());
+                let driver = IoDriverHandle::new(model.clone());
+                let registration = driver
+                    .register(&std::io::stdin(), Interest::READABLE, Waker::noop().clone())
+                    .unwrap();
+                let token = registration.token();
+                for _ in 0..failures {
+                    model.fail_next(ReactorOperation::Deregister, Some(token), io::ErrorKind::Other).unwrap();
+                }
+                if explicit {
+                    assert_eq!(registration.deregister().is_ok(), failures < 2);
+                } else {
+                    drop(registration);
+                }
+                assert!(driver.is_empty(), "explicit={explicit}, failures={failures}");
+                assert_eq!(model.registration_count(), 0);
+                assert_eq!(model.fault_stats(ReactorOperation::Deregister), ReactorFaultStats {
+                    attempts: failures + 1,
+                    injected_failures: failures,
+                    pending_failures: 0,
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_wake_does_not_interrupt_the_next_virtual_wait() {
+        let model = LabReactorModel::new();
+        let token = Token::new(35);
+        register(&model, token, Interest::READABLE);
+        model.schedule_ready(token, Interest::READABLE, Duration::from_secs(5)).unwrap();
+        model.fail_next(ReactorOperation::Wake, None, io::ErrorKind::BrokenPipe).unwrap();
+        assert_eq!(model.wake().unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+        let mut events = Events::with_capacity(4);
+        assert_eq!(model.poll(&mut events, None).unwrap(), 1);
+        assert_eq!(model.now(), Time::from_secs(5));
+        model.clear_ready(token, Interest::READABLE).unwrap();
+        model.modify(token, Interest::READABLE).unwrap();
+        model.schedule_ready(token, Interest::READABLE, Duration::from_secs(2)).unwrap();
+        model.wake().unwrap();
+        assert_eq!(model.poll(&mut events, None).unwrap(), 0);
+        assert_eq!(model.now(), Time::from_secs(5));
+        assert_eq!(model.poll(&mut events, None).unwrap(), 1);
+        assert_eq!(model.now(), Time::from_secs(7));
+    }
+
+    #[test]
+    fn invalid_failure_selectors_and_clearing_scripts_preserve_diagnostic_evidence() {
+        let model = LabReactorModel::new();
+        for operation in [ReactorOperation::Poll, ReactorOperation::Wake] {
+            assert_eq!(
+                model.fail_next(operation, Some(Token::new(1)), io::ErrorKind::Other).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+            assert_eq!(model.fault_stats(operation).pending_failures, 0);
+            assert_eq!(model.fault_stats(operation).attempts, 0);
+        }
+        model.fail_next(ReactorOperation::Wake, None, io::ErrorKind::Other).unwrap();
+        assert!(model.wake().is_err());
+        let before = model.last_failure();
+        model.fail_next(ReactorOperation::Wake, None, io::ErrorKind::BrokenPipe).unwrap();
+        model.clear_failures();
+        assert_eq!(model.last_failure(), before);
+        assert_eq!(model.fault_stats(ReactorOperation::Wake).injected_failures, 1);
+        assert_eq!(model.fault_stats(ReactorOperation::Wake).pending_failures, 0);
+        model.wake().unwrap();
+        assert_eq!(model.last_failure(), before);
+    }
+
+    #[test]
+    fn both_production_driver_poll_paths_recover_without_waking_on_the_failed_turn() {
+        for shared in [false, true] {
+            let model = Arc::new(LabReactorModel::new());
+            let count = Arc::new(CountWakes(AtomicUsize::new(0)));
+            let waker = Waker::from(count.clone());
+            let mut callbacks = 0;
+            model.fail_next(ReactorOperation::Poll, None, io::ErrorKind::Interrupted).unwrap();
+            if shared {
+                let driver = IoDriverHandle::new(model.clone());
+                let registration = driver.register(&std::io::stdin(), Interest::READABLE, waker).unwrap();
+                model.set_ready(registration.token(), Interest::READABLE).unwrap();
+                assert_eq!(driver.try_turn_with(Some(Duration::ZERO), |_, _| callbacks += 1).unwrap_err().kind(), io::ErrorKind::Interrupted);
+                assert_eq!(callbacks, 0);
+                assert_eq!(count.0.load(Ordering::SeqCst), 0);
+                assert_eq!(driver.poll_error_count(), 1);
+                assert_eq!(driver.stats().polls, 0);
+                assert_eq!(driver.try_turn_with(Some(Duration::ZERO), |_, _| callbacks += 1).unwrap(), Some(1));
+                drop(registration);
+                assert!(driver.is_empty());
+            } else {
+                let mut driver = IoDriver::new(model.clone());
+                let token = driver.register(&std::io::stdin(), Interest::READABLE, waker).unwrap();
+                model.set_ready(token, Interest::READABLE).unwrap();
+                assert_eq!(driver.turn_with(Some(Duration::ZERO), |_, _| callbacks += 1).unwrap_err().kind(), io::ErrorKind::Interrupted);
+                assert_eq!(callbacks, 0);
+                assert_eq!(count.0.load(Ordering::SeqCst), 0);
+                assert_eq!(driver.poll_error_count(), 1);
+                assert_eq!(driver.stats().polls, 0);
+                assert_eq!(driver.turn_with(Some(Duration::ZERO), |_, _| callbacks += 1).unwrap(), 1);
+                driver.deregister(token).unwrap();
+                assert!(driver.is_empty());
+            }
+            assert_eq!(count.0.load(Ordering::SeqCst), 1);
+            assert_eq!(callbacks, 1);
+            assert_eq!(model.registration_count(), 0);
+            assert_eq!(model.fault_stats(ReactorOperation::Poll), ReactorFaultStats {
+                attempts: 2,
+                injected_failures: 1,
+                pending_failures: 0,
+            });
+        }
     }
 
     #[cfg(target_os = "linux")]
