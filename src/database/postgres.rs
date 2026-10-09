@@ -630,6 +630,15 @@ pub trait ToSql: Sync {
     fn format(&self) -> Format {
         Format::Binary
     }
+
+    /// Whether this is a `SystemTime` (or an `Option`, reference or array of
+    /// them): a prepared statement refuses one where the server typed the
+    /// parameter as a built-in type other than `timestamptz`. Implementations
+    /// outside this crate keep the default, so their binds behave as before.
+    #[doc(hidden)]
+    fn binds_system_time(&self) -> bool {
+        false
+    }
 }
 
 /// Decode a PostgreSQL wire-format value into a Rust type.
@@ -781,6 +790,9 @@ impl<T: ToSql> ToSql for Option<T> {
             None => Format::Binary,
         }
     }
+    fn binds_system_time(&self) -> bool {
+        self.as_ref().is_some_and(ToSql::binds_system_time)
+    }
 }
 
 impl<T: ToSql + ?Sized> ToSql for &T {
@@ -792,6 +804,9 @@ impl<T: ToSql + ?Sized> ToSql for &T {
     }
     fn format(&self) -> Format {
         (*self).format()
+    }
+    fn binds_system_time(&self) -> bool {
+        (*self).binds_system_time()
     }
 }
 
@@ -1100,14 +1115,20 @@ impl ToSql for Untyped<'_> {
 /// Microseconds from the Unix epoch to PostgreSQL's epoch, 2000-01-01 UTC.
 const PG_EPOCH_UNIX_MICROS: i64 = 946_684_800_000_000;
 
+/// PostgreSQL's `FirstNormalObjectId`: OIDs below it are the built-in types;
+/// domains, extension types and other user-defined types get one at or above.
+const FIRST_NORMAL_OBJECT_ID: u32 = 16_384;
+
 /// `SystemTime` binds as `timestamptz`, in binary (microseconds since
 /// 2000-01-01 UTC; a sub-microsecond remainder is truncated toward the past).
 /// Bound into a `timestamp without time zone` column by
 /// [`PgConnection::execute_params`], the instant is converted to the session's
 /// `TimeZone`, as PostgreSQL converts any `timestamptz`. A prepared statement
-/// whose parameter the server typed as anything but `timestamptz` refuses it
-/// (cast the parameter, `$1::timestamptz`): there the binary value would be
-/// stored unconverted, as UTC wall-clock time.
+/// whose parameter the server typed as another built-in type refuses it (cast
+/// the parameter, `$1::timestamptz`): in a `timestamp` the binary value would
+/// be stored unconverted, as UTC wall-clock time, and other types would read
+/// its bytes as their own. A domain or other user-defined type is left to the
+/// server, which decodes a domain over `timestamptz` correctly.
 impl ToSql for std::time::SystemTime {
     fn to_sql(&self, buf: &mut Vec<u8>) -> Result<IsNull, PgError> {
         let micros = system_time_unix_micros(*self)?
@@ -1118,6 +1139,9 @@ impl ToSql for std::time::SystemTime {
     }
     fn type_oid(&self) -> u32 {
         oid::TIMESTAMPTZ
+    }
+    fn binds_system_time(&self) -> bool {
+        true
     }
 }
 
@@ -1390,6 +1414,9 @@ impl<T: PgArrayElement> ToSql for [T] {
     fn type_oid(&self) -> u32 {
         T::ARRAY_OID
     }
+    fn binds_system_time(&self) -> bool {
+        self.iter().any(ToSql::binds_system_time)
+    }
 }
 
 impl<T: PgArrayElement> ToSql for Vec<T> {
@@ -1398,6 +1425,9 @@ impl<T: PgArrayElement> ToSql for Vec<T> {
     }
     fn type_oid(&self) -> u32 {
         T::ARRAY_OID
+    }
+    fn binds_system_time(&self) -> bool {
+        self.as_slice().binds_system_time()
     }
 }
 
@@ -3280,8 +3310,8 @@ fn percent_decode(input: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
-/// Query parameters that [`PgConnectOptions::parse`] reads only in libpq's
-/// socket form, where the URL names no host and `?host=` gives it.
+/// Query parameters that [`PgConnectOptions::parse`] reads only when the
+/// host is a Unix-domain socket directory.
 #[derive(Default)]
 struct SocketFormParams<'a> {
     port: Option<&'a str>,
@@ -3289,6 +3319,8 @@ struct SocketFormParams<'a> {
     password: Option<&'a str>,
     /// A parameter of that form this client cannot honour.
     unsupported: Option<&'a str>,
+    /// One of `port`, `user` and `password` given more than once.
+    repeated: Option<&'a str>,
 }
 
 impl PgConnectOptions {
@@ -3299,9 +3331,10 @@ impl PgConnectOptions {
     /// A Unix-domain socket directory is given percent-encoded as the host
     /// (`postgres://user@%2Fvar%2Frun%2Fpostgresql/db`) or, with no host in
     /// the URL, as the `host` parameter (`postgres:///db?host=/var/run/postgresql`).
-    /// In that second form the `port`, `user` and `password` parameters are
-    /// read too; `requirepeer` and `dbname` are refused, and so is a value the
-    /// URL already gives. URLs that name a host ignore those parameters.
+    /// For a socket the `port`, `user` and `password` parameters are read
+    /// too; `requirepeer` and `dbname` are refused, and so is a value the URL
+    /// already gives or gives twice. URLs that name a TCP host ignore those
+    /// parameters.
     /// Use [`Self::parse_with_tls`] for `verify-ca`, `verify-full`, or
     /// `sslrootcert`, which cannot be represented by this legacy struct alone.
     pub fn parse(url: &str) -> Result<Self, PgError> {
@@ -3340,7 +3373,6 @@ impl PgConnectOptions {
         }
 
         // Split auth@host
-        let userinfo_given = auth_host.contains('@');
         let (user, password, host_port) = if let Some((auth, host)) = auth_host.rsplit_once('@') {
             let (user, password) = auth
                 .split_once(':')
@@ -3349,6 +3381,8 @@ impl PgConnectOptions {
         } else {
             ("postgres".to_string(), None, auth_host)
         };
+        // The authority names a user (not `@host` or `:pw@host`).
+        let user_given = auth_host.contains('@') && !user.is_empty();
 
         // Split host:port (handle IPv6 addresses like [::1]:5432)
         let (host, port) = if host_port.starts_with('[') {
@@ -3449,10 +3483,17 @@ impl PgConnectOptions {
                     // It is read only when the URL names no host, where it
                     // used to be refused as a missing host.
                     "host" => host_param = Some(percent_decode(value)),
-                    // Read only in that form too, below.
-                    "port" => socket_params.port = Some(value),
-                    "user" => socket_params.user = Some(value),
-                    "password" => socket_params.password = Some(value),
+                    // Read only for a socket host, below.
+                    "port" | "user" | "password" => {
+                        let slot = match key {
+                            "port" => &mut socket_params.port,
+                            "user" => &mut socket_params.user,
+                            _ => &mut socket_params.password,
+                        };
+                        if slot.replace(value).is_some() {
+                            socket_params.repeated = Some(key);
+                        }
+                    }
                     "dbname" | "requirepeer" => socket_params.unsupported = Some(key),
                     _ => {} // ignore unknown parameters
                 }
@@ -3479,12 +3520,13 @@ impl PgConnectOptions {
             tls = tls.verification(verification);
         }
         let (mut user, mut password, mut port) = (user, password, port);
-        if host.is_empty() {
-            // libpq's socket form names the rest of its target in the query as
-            // well. Ignoring `port` or `user` connected to another cluster's
-            // socket, or as `postgres`, without an error, so they are read
-            // here. A value the URL gives twice, or a parameter this client
-            // cannot honour (`requirepeer`, `dbname`), is refused
+        let decoded_host = percent_decode(host);
+        if host.is_empty() || unix_socket_path(&decoded_host, port).is_some() {
+            // libpq's socket forms name the rest of their target in the query
+            // as well. Ignoring `port` or `user` connected to another
+            // cluster's socket, or as `postgres`, without an error, so they
+            // are read here. A value the URL gives twice, or a parameter this
+            // client cannot honour (`requirepeer`, `dbname`), is refused
             // (br-asupersync-qml5yb).
             if let Some(key) = socket_params.unsupported {
                 return Err(PgError::InvalidUrl(format!(
@@ -3492,6 +3534,9 @@ impl PgConnectOptions {
                 )));
             }
             let twice = |name: &str| PgError::InvalidUrl(format!("the URL gives the {name} twice"));
+            if let Some(key) = socket_params.repeated {
+                return Err(twice(key));
+            }
             if let Some(value) = socket_params.port {
                 if host_port.contains(':') {
                     return Err(twice("port"));
@@ -3501,7 +3546,7 @@ impl PgConnectOptions {
                     .map_err(|_| PgError::InvalidUrl(format!("invalid port: {value}")))?;
             }
             if let Some(value) = socket_params.user {
-                if userinfo_given {
+                if user_given {
                     return Err(twice("user"));
                 }
                 user = percent_decode(value);
@@ -3518,7 +3563,7 @@ impl PgConnectOptions {
                 .filter(|host| !host.is_empty())
                 .ok_or_else(|| PgError::InvalidUrl("missing host".to_string()))?
         } else {
-            percent_decode(host)
+            decoded_host
         };
         Ok((
             Self {
@@ -8131,9 +8176,9 @@ impl PgConnection {
     /// reads the bytes as the other type and stores a wrong value without
     /// an error: `100i64` for a `double precision` parameter stored
     /// 4.94e-322. Those pairs are refused before anything is written, and so
-    /// is a binary `timestamptz` (a `SystemTime`) where the server inferred
-    /// another type. NULLs carry no bytes and pass; other mismatches are left
-    /// to the server.
+    /// is a `SystemTime` where the server inferred another built-in type.
+    /// NULLs carry no bytes and pass; other mismatches are left to the
+    /// server.
     fn validate_prepared_bind_types(
         stmt: &PgStatement,
         params: &[&dyn ToSql],
@@ -8144,13 +8189,17 @@ impl PgConnection {
             let sent = param.type_oid();
             let crossed = (INTEGERS.contains(&sent) && FLOATS.contains(&expected))
                 || (FLOATS.contains(&sent) && INTEGERS.contains(&expected));
-            // An instant (`SystemTime`) where the server typed anything else,
+            // A `SystemTime` where the server typed another built-in type,
             // `timestamp without time zone` above all: the binary value would
             // be stored unconverted, as UTC wall-clock time, while the same
             // value through `execute_params` is converted to the session's
-            // zone (br-asupersync-qml5yb).
-            let misplaced_instant = (sent == oid::TIMESTAMPTZ && expected != oid::TIMESTAMPTZ)
-                || (sent == oid::TIMESTAMPTZ_ARRAY && expected != oid::TIMESTAMPTZ_ARRAY);
+            // zone (br-asupersync-qml5yb). Other `ToSql` types bind as they
+            // did in v0.4.3, and a user-defined type (a domain over
+            // `timestamptz`, OID 16384 or above) is left to the server.
+            let misplaced_instant = param.binds_system_time()
+                && expected < FIRST_NORMAL_OBJECT_ID
+                && ((sent == oid::TIMESTAMPTZ && expected != oid::TIMESTAMPTZ)
+                    || (sent == oid::TIMESTAMPTZ_ARRAY && expected != oid::TIMESTAMPTZ_ARRAY));
             if !(crossed || misplaced_instant)
                 || param.format() != Format::Binary
                 || matches!(param.to_sql(&mut Vec::new())?, IsNull::Yes)

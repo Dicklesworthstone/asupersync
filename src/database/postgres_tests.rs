@@ -3138,10 +3138,27 @@ mod tests {
             .expect("userinfo with a host parameter");
         assert_eq!((opts.user.as_str(), opts.port), ("app", 6000));
 
+        // A percent-encoded socket host reads them too: `port` used to be
+        // ignored there, reaching the 5432 cluster's socket.
+        let opts = PgConnectOptions::parse(
+            "postgres://%2Fvar%2Frun%2Fpostgresql/app?port=5433&user=app&password=pw",
+        )
+        .expect("percent-encoded socket host");
+        assert_eq!(opts.host, "/var/run/postgresql");
+        assert_eq!((opts.port, opts.user.as_str()), (5433, "app"));
+        assert_eq!(opts.password.as_ref().map(SecretString::as_str), Some("pw"));
+
+        // An empty authority user is no user: the parameter gives it.
+        let opts = PgConnectOptions::parse("postgres://:pw@/app?host=/tmp&user=app")
+            .expect("empty authority user");
+        assert_eq!(opts.user, "app");
+        assert_eq!(opts.password.as_ref().map(SecretString::as_str), Some("pw"));
+
         // A URL that names its host keeps ignoring them, as v0.4.3 did.
         let opts =
             PgConnectOptions::parse("postgres://h:5434/app?port=5433&user=app").expect("tcp form");
         assert_eq!((opts.port, opts.user.as_str()), (5434, "postgres"));
+        assert!(PgConnectOptions::parse("postgres://h/app?user=a&user=b&requirepeer=x").is_ok());
     }
 
     #[test]
@@ -3153,6 +3170,12 @@ mod tests {
             "postgres://u:pw@/app?host=/tmp&password=other",
             "postgres://:5433/app?host=/tmp&port=5434",
             "postgres:///app?host=/tmp&port=not-a-port",
+            "postgres:///app?host=/tmp&user=a&user=b",
+            "postgres:///app?host=/tmp&port=5433&port=5434",
+            "postgres://%2Ftmp/app?requirepeer=postgres",
+            "postgres://%2Ftmp/app?dbname=other",
+            "postgres://u@%2Ftmp/app?user=other",
+            "postgres://%2Ftmp:5433/app?port=5434",
         ] {
             assert!(
                 matches!(PgConnectOptions::parse(url), Err(PgError::InvalidUrl(_))),
@@ -3227,6 +3250,39 @@ mod tests {
                 .is_ok(),
             "a NULL carries no bytes"
         );
+        assert!(
+            PgConnection::validate_prepared_bind_types(
+                &statement(oid::TIMESTAMP),
+                &[&Some(instant)]
+            )
+            .is_err()
+        );
+
+        // The server types a parameter that fills a domain over timestamptz
+        // as the domain, a user-defined OID, which decodes the value itself.
+        assert!(
+            PgConnection::validate_prepared_bind_types(&statement(16_384), &[&instant]).is_ok()
+        );
+
+        // A v0.4.3-era ToSql that sends binary timestamptz into a timestamp
+        // parameter binds as it did then.
+        struct UtcMicros(i64);
+        impl ToSql for UtcMicros {
+            fn to_sql(&self, buf: &mut Vec<u8>) -> Result<IsNull, PgError> {
+                buf.extend_from_slice(&self.0.to_be_bytes());
+                Ok(IsNull::No)
+            }
+            fn type_oid(&self) -> u32 {
+                oid::TIMESTAMPTZ
+            }
+        }
+        assert!(
+            PgConnection::validate_prepared_bind_types(
+                &statement(oid::TIMESTAMP),
+                &[&UtcMicros(0)]
+            )
+            .is_ok()
+        );
     }
 
     /// qml5yb LOW 7: `Vec<String>` and `Vec<&str>` bind as `text[]`. Bound
@@ -3296,9 +3352,11 @@ mod tests {
                 "{text}"
             );
         }
+        // A five-digit year still decodes (below year 30828, the end of a
+        // Windows SystemTime).
         assert!(
             std::time::SystemTime::from_sql(
-                b"100000-01-01 00:00:00+00",
+                b"29999-01-01 00:00:00+00",
                 oid::TIMESTAMPTZ,
                 Format::Text
             )
