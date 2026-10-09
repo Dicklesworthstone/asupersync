@@ -460,6 +460,8 @@ fn unix_channel_targets_use_the_localhost_authority() {
         "unix:///run/app.sock",
         "unix:/run/app.sock",
         "unix:app.sock",
+        "UNIX:///run/app.sock",
+        "Unix:app.sock",
     ] {
         assert_eq!(authority(uri).expect(uri), ("http", "localhost"));
     }

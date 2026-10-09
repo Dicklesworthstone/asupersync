@@ -2866,6 +2866,14 @@ impl<T> Clone for NativeResponses<T> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+impl<T> Drop for NativeResponses<T> {
+    fn drop(&mut self) {
+        // The waker this handle may have left parked on the call goes with it.
+        self.handle.call().forget_responder(self.responder);
+    }
+}
+
 impl<T> Clone for ResponseStream<T> {
     fn clone(&self) -> Self {
         Self {
@@ -4554,6 +4562,42 @@ mod tests {
             Poll::Ready(None)
         ));
         crate::test_complete!("native_response_stream_clones_parked_in_two_tasks_are_each_woken");
+    }
+
+    /// A response stream clone that parks and is dropped while the call is
+    /// quiet forgets its waker (asupersync-mu5yhv finding 3 follow-up): each
+    /// such clone used to leave one parked on the call until the next wake.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_dropped_response_stream_clone_forgets_its_parked_waker() {
+        init_test("a_dropped_response_stream_clone_forgets_its_parked_waker");
+        let feed = Arc::new(Mutex::new(Feed::default()));
+        let call = LegacyNativeCall::new(
+            Box::new(FedCall(Arc::clone(&feed))),
+            LegacyShape::ServerStreaming,
+        );
+        let probe = Arc::clone(&call);
+        let mut reader = ResponseStream::<u32>::native(call);
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let waker = counting_waker(&wake_count);
+        assert!(poll_stream(&mut reader, &waker).is_pending());
+        for _ in 0..100 {
+            let mut clone = reader.clone();
+            assert!(poll_stream(&mut clone, &waker).is_pending());
+        }
+
+        assert_eq!(
+            probe.parked_responders(),
+            1,
+            "only the live reader stays parked"
+        );
+        FedCall::deliver(&feed, Some(7));
+        assert_eq!(wake_count.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            poll_stream(&mut reader, &waker),
+            Poll::Ready(Some(Ok(7)))
+        ));
+        crate::test_complete!("a_dropped_response_stream_clone_forgets_its_parked_waker");
     }
 
     #[test]

@@ -341,8 +341,9 @@ impl Server {
         Http2Listener<impl Fn(StreamingServerRequest) -> DuplexFuture + Send + Sync + 'static>,
     > {
         let (handler, input) = self.registered_duplex_handler(host_policy, config)?;
-        // As the TCP bind does: refused before the listener exists, so the
-        // caller still owns the socket file.
+        // As the TCP bind does: refused here, before a listener is returned,
+        // rather than later from run_streaming_produced. The UnixListener is
+        // dropped with the error, which unlinks its socket file.
         input.validate()?;
         Ok(
             self.with_http2_keepalive(Http2Listener::from_unix_listener_streaming(

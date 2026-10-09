@@ -27,6 +27,7 @@
 
 use std::any::Any;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 
@@ -259,9 +260,6 @@ struct CallState {
     responses: VecDeque<Box<dyn Any + Send>>,
     /// Terminal status once the call ended; `Code::Ok` for success.
     finished: Option<Status>,
-    /// The last responder id handed out; the handle created with the call
-    /// is responder 0.
-    last_responder: u64,
 }
 
 impl CallState {
@@ -283,6 +281,9 @@ impl CallState {
 pub(super) struct LegacyNativeCall {
     state: Mutex<CallState>,
     fanout: Arc<Fanout>,
+    /// The last responder id handed out; the handle created with the call
+    /// is responder 0. Atomic, so cloning a handle takes no lock.
+    last_responder: AtomicU64,
 }
 
 impl LegacyNativeCall {
@@ -296,18 +297,31 @@ impl LegacyNativeCall {
                 request_closed: shape == LegacyShape::ServerStreaming,
                 responses: VecDeque::new(),
                 finished: None,
-                last_responder: 0,
             }),
             fanout: Arc::new(Fanout::default()),
+            last_responder: AtomicU64::new(0),
         })
     }
 
     /// A fresh responder id for another response handle on this call, such
     /// as a clone of its response stream.
     pub(super) fn new_responder(&self) -> u64 {
-        let mut state = lock_unpoisoned(&self.state);
-        state.last_responder += 1;
-        state.last_responder
+        self.last_responder.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Forgets the waker a dropped response handle left parked, so handles
+    /// cloned and dropped while the call is quiet do not pile up until the
+    /// next wake.
+    pub(super) fn forget_responder(&self, responder: u64) {
+        lock_unpoisoned(&self.fanout.wakers)
+            .responses
+            .retain(|(id, _)| *id != responder);
+    }
+
+    /// Response handles with a waker parked on the call.
+    #[cfg(test)]
+    pub(super) fn parked_responders(&self) -> usize {
+        lock_unpoisoned(&self.fanout.wakers).responses.len()
     }
 
     /// Progress the call for `role` until `done` holds, the call ends, or the
