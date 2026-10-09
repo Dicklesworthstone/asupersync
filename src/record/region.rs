@@ -214,8 +214,9 @@ pub struct RegionLimits {
     pub max_obligations: Option<usize>,
     /// Maximum live bytes allocated in the region heap.
     pub max_heap_bytes: Option<usize>,
-    /// Optional min-plus curve budget for hard admission bounds. Not
-    /// consulted yet: admission checks the counts above, not this budget.
+    /// Optional min-plus curve budget for hard admission bounds. When set,
+    /// task admission enforces the min-plus network calculus backlog bound
+    /// against live tasks.
     pub curve_budget: Option<CurveBudget>,
 }
 
@@ -235,8 +236,7 @@ impl RegionLimits {
         Self::UNLIMITED
     }
 
-    /// Attaches a curve budget for admission control bounds. Admission does
-    /// not consult it yet (see [`RegionLimits::curve_budget`]).
+    /// Attaches a curve budget for admission control bounds.
     #[must_use]
     pub fn with_curve_budget(mut self, curve_budget: CurveBudget) -> Self {
         self.curve_budget = Some(curve_budget);
@@ -1407,7 +1407,13 @@ impl RegionRecord {
 
         let bypass_limit = cleanup_task && state == RegionState::Finalizing;
         if !bypass_limit {
-            if let Some(limit) = inner.limits.max_tasks {
+            let mut effective_limit = inner.limits.max_tasks;
+            if let Some(ref curve) = inner.limits.curve_budget {
+                let horizon = curve.arrival.horizon().max(curve.service.horizon());
+                let bound = usize::try_from(curve.backlog_bound(horizon)).unwrap_or(usize::MAX);
+                effective_limit = Some(effective_limit.map_or(bound, |l| l.min(bound)));
+            }
+            if let Some(limit) = effective_limit {
                 if inner.tasks.len() >= limit {
                     return Err(AdmissionError::LimitReached {
                         kind: AdmissionKind::Task,
@@ -2197,6 +2203,7 @@ mod tests {
     )]
     use super::*;
     use crate::record::finalizer::Finalizer;
+    use crate::types::MinPlusCurve;
     use crate::util::ArenaIndex;
     use parking_lot::Mutex;
 
@@ -2340,6 +2347,70 @@ mod tests {
         // Reserve obligations
         assert!(region.try_reserve_obligation().is_ok());
         assert!(region.try_reserve_obligation().is_err());
+    }
+
+    #[test]
+    fn region_curve_budget_admission_limits() {
+        let arrival = MinPlusCurve::from_token_bucket(2, 1, 10);
+        let service = MinPlusCurve::from_rate_latency(1, 0, 10);
+        let budget = CurveBudget { arrival, service };
+        assert_eq!(budget.backlog_bound(10), 2);
+
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        region.set_limits(RegionLimits::unlimited().with_curve_budget(budget));
+
+        let t1 = TaskId::from_arena(ArenaIndex::new(1, 0));
+        let t2 = TaskId::from_arena(ArenaIndex::new(2, 0));
+        let t3 = TaskId::from_arena(ArenaIndex::new(3, 0));
+
+        assert!(region.add_task(t1).is_ok());
+        assert!(region.add_task(t2).is_ok());
+
+        // Third task exceeds backlog bound (limit 2)
+        let err = region.add_task(t3).unwrap_err();
+        assert_eq!(
+            err,
+            AdmissionError::LimitReached {
+                kind: AdmissionKind::Task,
+                limit: 2,
+                live: 2,
+            }
+        );
+
+        // Cleanup task bypasses limit when finalizing
+        region.begin_close(None);
+        assert!(region.begin_finalize());
+        assert!(region.add_cleanup_task(t3).is_ok());
+    }
+
+    #[test]
+    fn region_curve_budget_combined_with_max_tasks() {
+        let arrival = MinPlusCurve::from_token_bucket(5, 1, 10);
+        let service = MinPlusCurve::from_rate_latency(1, 0, 10);
+        let budget = CurveBudget { arrival, service };
+        assert_eq!(budget.backlog_bound(10), 5);
+
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        // max_tasks = 2 is more restrictive than curve_budget = 5
+        let mut limits = RegionLimits::unlimited().with_curve_budget(budget);
+        limits.max_tasks = Some(2);
+        region.set_limits(limits);
+
+        let t1 = TaskId::from_arena(ArenaIndex::new(1, 0));
+        let t2 = TaskId::from_arena(ArenaIndex::new(2, 0));
+        let t3 = TaskId::from_arena(ArenaIndex::new(3, 0));
+
+        assert!(region.add_task(t1).is_ok());
+        assert!(region.add_task(t2).is_ok());
+        let err = region.add_task(t3).unwrap_err();
+        assert_eq!(
+            err,
+            AdmissionError::LimitReached {
+                kind: AdmissionKind::Task,
+                limit: 2,
+                live: 2,
+            }
+        );
     }
 
     #[test]
