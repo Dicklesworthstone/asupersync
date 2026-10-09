@@ -96,6 +96,26 @@ fn stdio_helper() {
                 output.write_all(END.as_bytes()).await.expect("write");
                 output.flush().await.expect("flush");
             }
+            "unflushed-then-read" => {
+                // No flush and no further write: the line must still leave
+                // while the helper waits for input.
+                output.write_all(b"ready\n").await.expect("write");
+                let mut received = Vec::new();
+                input.read_to_end(&mut received).await.expect("read");
+            }
+            "dropped-handle" => {
+                output.write_all(BEGIN.as_bytes()).await.expect("write");
+                output
+                    .write_all(b"written after the drop")
+                    .await
+                    .expect("write");
+                output.write_all(END.as_bytes()).await.expect("write");
+                // The last write is still in flight. Dropping the handle must
+                // not lose it; nothing touches the stream again.
+                drop(output);
+                asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(500))
+                    .await;
+            }
             other => panic!("unknown helper role {other}"),
         }
     });
@@ -148,4 +168,104 @@ fn a_read_cancelled_by_a_timeout_loses_no_input() {
     let status = child.wait().expect("wait");
     assert!(status.success());
     assert_eq!(between_markers(&rest), b"after the timeout");
+}
+
+/// A write starts when `write` accepts it. It used to wait for the handle's
+/// next operation, so a helper that wrote a line without flushing and then
+/// waited for input never sent the line its parent was waiting for
+/// (br-asupersync-68jvck).
+#[test]
+fn a_write_leaves_before_the_next_operation_on_the_handle() {
+    let mut child = helper("unflushed-then-read").spawn().expect("spawn helper");
+    let child_stdin = child.stdin.take().expect("stdin pipe");
+    let child_stdout = child.stdout.take().expect("stdout pipe");
+    let (seen_tx, seen_rx) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut lines = BufReader::new(child_stdout);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if lines.read_line(&mut line).expect("read line") == 0 {
+                let _ = seen_tx.send(false);
+                return;
+            }
+            // libtest prints "test stdio_helper ... " without a newline
+            // before the helper runs, so the helper's line ends this one.
+            if line.ends_with("ready\n") {
+                let _ = seen_tx.send(true);
+                let mut rest = Vec::new();
+                let _ = lines.read_to_end(&mut rest);
+                return;
+            }
+        }
+    });
+    let seen = seen_rx.recv_timeout(Duration::from_secs(10));
+    // Release the helper either way.
+    drop(child_stdin);
+    let status = child.wait().expect("wait");
+    reader.join().expect("reader");
+    assert!(status.success());
+    assert_eq!(
+        seen,
+        Ok(true),
+        "the unflushed line reached the parent while the helper waited for input"
+    );
+}
+
+/// Bytes accepted by `write` are written even when the handle is dropped
+/// right after, as the module documents (br-asupersync-68jvck).
+#[test]
+fn a_dropped_handle_still_writes_what_it_accepted() {
+    let output = helper("dropped-handle").output().expect("run helper");
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(END),
+        "the last write before the drop reached stdout: {stdout:?}"
+    );
+    assert_eq!(between_markers(&output.stdout), b"written after the drop");
+}
+
+/// The standard-stream handles are I/O entry points that take no `Cx`: a task
+/// whose context lacks the IO capability is refused with `[ASUP-E009]`, as by
+/// `fs::File::open` and the net entry points (br-asupersync-68jvck).
+#[test]
+fn a_task_without_io_is_refused_the_standard_streams() {
+    use asupersync::Cx;
+    use asupersync::cx::IoCapabilityDenied;
+    use asupersync::cx::cap::{CapSet, CapSetRuntimeMask};
+    type NoIo = CapSet<true, true, true, false, true>;
+
+    fn refused(result: std::io::Result<usize>, operation: &str) {
+        let error = result.expect_err("refused");
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "{error}"
+        );
+        let denied = error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<IoCapabilityDenied>())
+            .unwrap_or_else(|| panic!("not an IoCapabilityDenied: {error}"));
+        assert_eq!(denied.operation(), operation);
+    }
+
+    let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+    runtime.block_on(async {
+        let cx = Cx::current().expect("root cx");
+        let mut task = {
+            let _no_io = Cx::push_restriction(<NoIo as CapSetRuntimeMask>::MASK);
+            Cx::current()
+                .expect("narrowed cx")
+                .spawn(move |_cx| async move {
+                    assert!(Cx::current().expect("task cx").io().is_none());
+                    refused(stdout().write(b"x").await, "io::stdout");
+                    refused(stderr().write(b"x").await, "io::stderr");
+                    let mut buf = [0_u8; 8];
+                    refused(stdin().read(&mut buf).await, "io::stdin");
+                })
+                .expect("spawn")
+        };
+        task.join(&cx).await.expect("the restricted task completes");
+    });
 }

@@ -110,12 +110,16 @@ impl<'a, R: AsyncBufRead + Unpin + ?Sized> Future for FillBuf<'a, R> {
         // Poll through a reborrow first, so the reader can be kept for the
         // next poll if no data is ready. Once it is, a second fill returns
         // the same buffered bytes, now borrowed for the future's lifetime.
+        // End of input is answered directly: a second fill of an empty
+        // buffer would start another read, which can be pending after the
+        // reader was given up (br-asupersync-68jvck).
         match Pin::new(&mut *reader).poll_fill_buf(cx) {
             Poll::Pending => {
                 self.reader = Some(reader);
                 Poll::Pending
             }
             Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Ready(Ok([])) => Poll::Ready(Ok(&[])),
             Poll::Ready(Ok(_)) => Pin::new(reader).poll_fill_buf(cx),
         }
     }

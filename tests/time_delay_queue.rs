@@ -7,7 +7,8 @@
 //! are inserted and removed while it is polled, ended streams drop out, and a
 //! pending stream's later item still wakes the map.
 
-use asupersync::runtime::RuntimeBuilder;
+use asupersync::Cx;
+use asupersync::runtime::{RuntimeBuilder, yield_now};
 use asupersync::stream::{Stream, StreamExt, StreamMap, iter};
 use asupersync::time::DelayQueue;
 use asupersync::types::{Budget, Time};
@@ -102,6 +103,86 @@ fn an_earlier_insert_wakes_a_poll_parked_on_a_later_deadline() {
         let reset = poll_fn(|cx| queue.poll_expired(cx)).await;
         assert_eq!(reset.map(|e| e.into_inner()), Some("reset"));
     });
+}
+
+/// A cancelled task parked on a queue stays parked until an entry comes due.
+/// The queue's timer used to be polled as a cancellation point: it completed
+/// at once under the pending cancel, was re-armed, and the task was re-polled
+/// on every scheduler turn until the deadline really passed
+/// (br-asupersync-973voq).
+#[test]
+fn a_cancelled_wait_on_a_delay_queue_parks_instead_of_spinning() {
+    let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+    let polls = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&polls);
+    let handle = runtime.handle();
+    let (yielded, waited) = runtime.block_on(handle.spawn(async move {
+        let cx = Cx::current().expect("a spawned task has a Cx");
+        let mut waiter = cx
+            .spawn(move |_cx| async move {
+                let mut queue = DelayQueue::new();
+                queue.insert("due", Duration::from_millis(300));
+                let expired = poll_fn(|context| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    queue.poll_expired(context)
+                })
+                .await;
+                expired.map(|e| e.into_inner())
+            })
+            .expect("spawn the waiter");
+        for _ in 0..10 {
+            yield_now().await;
+        }
+        waiter.abort();
+        let started = Instant::now();
+        let yielded = waiter.join(&cx).await.ok().flatten();
+        (yielded, started.elapsed())
+    }));
+    let polls = polls.load(Ordering::SeqCst);
+    eprintln!("cancelled delay-queue wait: polls={polls} waited={waited:?} yielded={yielded:?}");
+    assert!(
+        polls < 10,
+        "the cancelled waiter was polled {polls} times while its entry was not due"
+    );
+    assert!(waited < Duration::from_secs(5));
+}
+
+/// A poll that found the queue empty is woken by the next insert
+/// (br-asupersync-973voq).
+#[test]
+fn an_insert_wakes_a_poll_that_found_the_queue_empty() {
+    let counter = Arc::new(CountingWaker::default());
+    let waker = Waker::from(Arc::clone(&counter));
+    let mut context = Context::from_waker(&waker);
+    let mut queue = DelayQueue::new();
+    assert!(matches!(
+        queue.poll_expired(&mut context),
+        Poll::Ready(None)
+    ));
+    queue.insert("mine", Duration::from_secs(3600));
+    assert_eq!(
+        counter.0.load(Ordering::SeqCst),
+        1,
+        "the poll that saw the queue empty is woken"
+    );
+}
+
+/// A key from one queue is never valid in another; both used to number their
+/// entries from zero, so a foreign key could remove an unrelated entry
+/// (br-asupersync-973voq).
+#[test]
+fn a_key_from_another_queue_is_not_valid() {
+    let mut queue = DelayQueue::new();
+    queue.insert("mine", Duration::from_secs(3600));
+    let mut other = DelayQueue::new();
+    let foreign = other.insert("theirs", Duration::from_secs(3600));
+    assert!(
+        !queue.contains(&foreign),
+        "a key from another queue is not valid here"
+    );
+    assert!(queue.try_remove(&foreign).is_none());
+    assert_eq!(queue.len(), 1);
+    assert!(other.contains(&foreign));
 }
 
 #[test]

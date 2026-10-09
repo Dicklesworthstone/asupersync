@@ -12,11 +12,16 @@
 //!   read returns those bytes. Dropping the handle while a read waits leaves
 //!   that blocking read running until input arrives, and its bytes are lost;
 //!   keep one `Stdin` for the life of the program.
-//! - [`Stdout`] and [`Stderr`] write behind: `write` copies the bytes and
-//!   returns, and the blocking write runs in the background. The next
-//!   `write`, `flush` or `shutdown` waits for it and reports its error.
-//!   Bytes accepted by `write` are written even if the handle is dropped
-//!   first; `flush` before exiting to know they arrived.
+//! - [`Stdout`] and [`Stderr`] write behind: `write` copies the bytes,
+//!   starts the blocking write and returns. The next `write`, `flush` or
+//!   `shutdown` waits for it and reports its error. Bytes accepted by
+//!   `write` are written even if the handle is dropped first; `flush`
+//!   before exiting to know they arrived.
+//!
+//! Like the other I/O entry points that take no [`Cx`](crate::Cx), the
+//! handles consult the calling task's context: a task whose context lacks
+//! the IO capability is refused with `[ASUP-E009]`
+//! ([`IoCapabilityDenied`](crate::cx::IoCapabilityDenied)).
 //!
 //! Each handle orders its own operations. Separate handles to one stream do
 //! not coordinate, so concurrent writers can interleave chunks, as with
@@ -41,7 +46,8 @@ use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use std::future::Future;
 use std::io::{self, Read, Write};
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::sync::Arc;
+use std::task::{Context, Poll, Waker};
 
 /// The most bytes one blocking read or write moves.
 const CHUNK_BYTES: usize = 64 * 1024;
@@ -110,6 +116,7 @@ impl AsyncRead for Stdin {
                     if buf.remaining() == 0 {
                         return Poll::Ready(Ok(()));
                     }
+                    crate::cx::io_gate::require_ambient_io("io::stdin")?;
                     let len = buf.remaining().min(CHUNK_BYTES);
                     this.state = ReadState::Reading(off_worker(move || {
                         let mut bytes = vec![0_u8; len];
@@ -147,6 +154,110 @@ enum Target {
     Stderr,
 }
 
+impl Target {
+    const fn operation(self) -> &'static str {
+        match self {
+            Self::Stdout => "io::stdout",
+            Self::Stderr => "io::stderr",
+        }
+    }
+}
+
+/// The result slot of a write or flush running on the blocking pool.
+#[derive(Default)]
+struct Completion {
+    state: parking_lot::Mutex<(Option<io::Result<()>>, Option<Waker>)>,
+}
+
+impl Completion {
+    fn finish(&self, result: io::Result<()>) {
+        let waker = {
+            let mut state = self.state.lock();
+            state.0 = Some(result);
+            state.1.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+
+    fn poll(&self, cx: &Context<'_>) -> Poll<io::Result<()>> {
+        let mut state = self.state.lock();
+        if let Some(result) = state.0.take() {
+            return Poll::Ready(result);
+        }
+        match &state.1 {
+            Some(waker) if waker.will_wake(cx.waker()) => {}
+            _ => state.1 = Some(cx.waker().clone()),
+        }
+        Poll::Pending
+    }
+}
+
+/// Finishes a [`Completion`] with an error when the pool drops its job
+/// without running it (the pool is shutting down) or the job panics.
+struct Unfinished(Option<Arc<Completion>>);
+
+impl Drop for Unfinished {
+    fn drop(&mut self) {
+        if let Some(completion) = self.0.take() {
+            completion.finish(Err(io::Error::other(
+                "the standard stream operation did not complete: the blocking pool \
+                 refused it or it panicked",
+            )));
+        }
+    }
+}
+
+/// A write or flush in flight. It starts when it is created, and dropping it
+/// does not cancel it, so bytes accepted by `write` are written even if the
+/// handle is dropped first (br-asupersync-68jvck).
+enum InFlight {
+    /// On the runtime's blocking pool, which runs it whether or not anyone
+    /// waits for the result.
+    Pool(Arc<Completion>),
+    /// On a dedicated thread, outside a runtime or in one without a pool.
+    /// Polled once when created, which starts the thread.
+    Thread(Blocking<()>),
+    /// Finished when it was started; its result is reported next.
+    Done(io::Result<()>),
+}
+
+impl InFlight {
+    fn start<Op>(cx: &mut Context<'_>, op: Op) -> Self
+    where
+        Op: FnOnce() -> io::Result<()> + Send + 'static,
+    {
+        if let Some(pool) =
+            crate::cx::Cx::current().and_then(|cx| cx.blocking_pool_handle_for_inheritance())
+        {
+            let completion = Arc::new(Completion::default());
+            let mut unfinished = Unfinished(Some(Arc::clone(&completion)));
+            // The handle is not kept: dropping it does not cancel the job.
+            let _job = pool.spawn(move || {
+                let result = op();
+                if let Some(completion) = unfinished.0.take() {
+                    completion.finish(result);
+                }
+            });
+            return Self::Pool(completion);
+        }
+        let mut thread = off_worker(op);
+        match thread.as_mut().poll(cx) {
+            Poll::Ready(result) => Self::Done(result),
+            Poll::Pending => Self::Thread(thread),
+        }
+    }
+
+    fn poll(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self {
+            Self::Pool(completion) => completion.poll(cx),
+            Self::Thread(thread) => thread.as_mut().poll(cx),
+            Self::Done(result) => Poll::Ready(std::mem::replace(result, Ok(()))),
+        }
+    }
+}
+
 /// Write-behind state shared by [`Stdout`] and [`Stderr`].
 struct Writer {
     target: Target,
@@ -155,8 +266,8 @@ struct Writer {
 
 enum WriteState {
     Idle,
-    Writing(Blocking<()>),
-    Flushing(Blocking<()>),
+    Writing(InFlight),
+    Flushing(InFlight),
 }
 
 impl Writer {
@@ -173,7 +284,7 @@ impl Writer {
             WriteState::Idle => return Poll::Ready(Ok(())),
             WriteState::Writing(operation) | WriteState::Flushing(operation) => operation,
         };
-        let result = std::task::ready!(operation.as_mut().poll(cx));
+        let result = std::task::ready!(operation.poll(cx));
         self.state = WriteState::Idle;
         Poll::Ready(result)
     }
@@ -183,10 +294,11 @@ impl Writer {
         if data.is_empty() {
             return Poll::Ready(Ok(0));
         }
+        let target = self.target;
+        crate::cx::io_gate::require_ambient_io(target.operation())?;
         let chunk = data[..data.len().min(CHUNK_BYTES)].to_vec();
         let written = chunk.len();
-        let target = self.target;
-        self.state = WriteState::Writing(off_worker(move || match target {
+        self.state = WriteState::Writing(InFlight::start(cx, move || match target {
             Target::Stdout => io::stdout().lock().write_all(&chunk),
             Target::Stderr => io::stderr().lock().write_all(&chunk),
         }));
@@ -200,7 +312,8 @@ impl Writer {
                 WriteState::Writing(_) => std::task::ready!(self.poll_settle(cx))?,
                 WriteState::Idle => {
                     let target = self.target;
-                    self.state = WriteState::Flushing(off_worker(move || match target {
+                    crate::cx::io_gate::require_ambient_io(target.operation())?;
+                    self.state = WriteState::Flushing(InFlight::start(cx, move || match target {
                         Target::Stdout => io::stdout().lock().flush(),
                         Target::Stderr => io::stderr().lock().flush(),
                     }));

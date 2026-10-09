@@ -579,17 +579,38 @@ fn grpc_content_type_is_allowed(value: &str) -> bool {
 
 /// Whether `request` is a gRPC call.
 ///
-/// Its `content-type` is `application/grpc` or one of its `+codec` variants,
-/// the test the gRPC transport applies. Use it to route a shared listener's
-/// requests to [`Server::registered_unary_handler`].
+/// It arrived over HTTP/2, and its `content-type` is `application/grpc` or
+/// one of its `+codec` variants, the test the gRPC transport applies. Use it
+/// to route a shared listener's requests to
+/// [`Server::registered_unary_handler`]. gRPC needs HTTP/2 trailers for its
+/// status, so an HTTP/1.x request with a gRPC content type is not one: it
+/// goes to the other handler.
 #[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub fn is_grpc_request(request: &HttpRequest) -> bool {
-    request
-        .headers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
-        .is_some_and(|(_, value)| grpc_content_type_is_allowed(value))
+    request.version == crate::http::h1::types::Version::Http2
+        && request
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+            .is_some_and(|(_, value)| grpc_content_type_is_allowed(value))
+}
+
+/// The answer to a gRPC request that did not arrive over HTTP/2: a plain
+/// `505`, sent before anything is decoded or dispatched. A gRPC response
+/// carries its status in trailers, which HTTP/1.x cannot send, so running the
+/// call would commit its effects and then drop the connection with no answer
+/// (br-asupersync-313vbb).
+#[cfg(not(target_arch = "wasm32"))]
+fn refuse_unless_http2(request: &HttpRequest) -> Option<HttpResponse> {
+    (request.version != crate::http::h1::types::Version::Http2).then(|| {
+        HttpResponse::new(
+            505,
+            "HTTP Version Not Supported",
+            b"gRPC requires HTTP/2\n".to_vec(),
+        )
+        .with_header("content-type", "text/plain")
+    })
 }
 
 fn grpc_te_header_is_allowed(value: &str) -> bool {
@@ -1521,7 +1542,9 @@ impl Server {
     /// answer HTTP/1.1 on the same port (gRPC clients speak HTTP/2).
     /// [`Self::http2_listener_config`] gives gRPC's transport limits for the
     /// HTTP/2 side. Registered unary methods are served; streaming methods
-    /// answer `UNIMPLEMENTED`, as on `bind_registered_http2`.
+    /// answer `UNIMPLEMENTED`, as on `bind_registered_http2`. A request that
+    /// did not arrive over HTTP/2 is answered `505 HTTP Version Not Supported`
+    /// without running anything.
     ///
     /// ```ignore
     /// let grpc = server.registered_unary_handler()?;
@@ -1590,6 +1613,9 @@ impl Server {
         F: Fn(GrpcTransportRequest) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Response<Bytes>, Status>> + Send + 'static,
     {
+        if let Some(refusal) = refuse_unless_http2(&request) {
+            return refusal;
+        }
         let (path, request, trailing_metadata) = match self.decode_http2_unary_request(request) {
             Ok(decoded) => decoded,
             Err(status) => return Self::http2_status_response(&status),
@@ -1615,6 +1641,9 @@ impl Server {
 
     #[cfg(not(target_arch = "wasm32"))]
     async fn dispatch_http2_registered_unary(&self, request: HttpRequest) -> HttpResponse {
+        if let Some(refusal) = refuse_unless_http2(&request) {
+            return refusal;
+        }
         let (path, request, trailing_metadata) = match self.decode_http2_unary_request(request) {
             Ok(decoded) => decoded,
             Err(status) => return Self::http2_status_response(&status),
