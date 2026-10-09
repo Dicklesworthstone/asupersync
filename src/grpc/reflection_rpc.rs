@@ -6,7 +6,8 @@
 //! and serve via `bind_registered_duplex_http2` / `serve_duplex_http2`.
 //!
 //! The registry's existing `ListServices` authorization gate protects EVERY
-//! query, under the explicit request context. The default remains locked and
+//! query, under the explicit request context, and a descriptor lookup must
+//! also pass its `DescribeService` gate. The default remains locked and
 //! even anonymous development mode requires the registry's REMOTE capability.
 //! Server interceptors remain responsible for authenticating request metadata.
 //! Supplying descriptors explicitly authorizes their ENTIRE contents for
@@ -108,7 +109,8 @@ impl ReflectionService {
     /// Register application handlers with this registry to populate ListServices;
     /// supplying descriptors alone does not claim those handlers are callable.
     /// The registry's `with_auth` / `allow_anonymous` policy is preserved. Every
-    /// wire query uses its `ListServices` gate, including descriptor lookups.
+    /// wire query uses its `ListServices` gate, and descriptor lookups also its
+    /// `DescribeService` gate (a refusal is that query's in-band error).
     /// To expose reflection's own schema, include its standard proto descriptor
     /// and explicitly register the desired RPC view in the registry too.
     pub fn rpc_service(
@@ -185,9 +187,15 @@ impl ReflectionRpcService {
         }
         let request = WireRequest::decode(bytes.as_ref())
             .map_err(|_| Status::invalid_argument("invalid reflection request protobuf"))?;
-        let reply = self.reply(&request, services).unwrap_or_else(|status| {
-            Reply::Error(wire::ErrorReply { code: status.code() as i32, message: status.message().to_owned() })
-        });
+        let reply = self
+            .authorize_lookup(cx, &request)
+            .and_then(|()| self.reply(&request, services))
+            .unwrap_or_else(|status| {
+                Reply::Error(wire::ErrorReply {
+                    code: status.code() as i32,
+                    message: status.message().to_owned(),
+                })
+            });
         let response = WireResponse {
             valid_host: request.host.clone(), original_request: Some(request), reply: Some(reply),
         };
@@ -196,6 +204,18 @@ impl ReflectionRpcService {
         }
         checkpoint(cx)?;
         Ok(Bytes::from(response.encode_to_vec()))
+    }
+
+    // A descriptor lookup returns whole FileDescriptorProtos, so it also needs
+    // DescribeService, the method the registry checks before describing a
+    // service. Otherwise a policy that allows only ListServices hands out every
+    // schema (br-asupersync-m5xrg1).
+    fn authorize_lookup(&self, cx: &Cx, request: &WireRequest) -> Result<(), Status> {
+        if matches!(request.query, Some(Query::ListServices(_)) | None) {
+            return Ok(());
+        }
+        let _ambient = cx.clone().set_current_restricted();
+        self.shared.registry.check_auth("DescribeService")
     }
 
     fn reply(&self, request: &WireRequest, services: Vec<String>) -> Result<Reply, Status> {
