@@ -138,6 +138,12 @@ impl RetirementBarrier {
         let displaced = self.waker.lock().take();
         drop(displaced);
     }
+
+    /// Returns true if a waker is currently registered on this barrier.
+    #[cfg(test)]
+    pub(crate) fn has_waker(&self) -> bool {
+        self.waker.lock().is_some()
+    }
 }
 
 /// Error returned when joining a spawned task fails.
