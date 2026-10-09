@@ -5,6 +5,11 @@
 //! offset with `into_parts`. These are in-process continuation primitives, not
 //! transactions: completed I/O cannot be rolled back and remote delivery is not
 //! acknowledged. Retry after an I/O error only when the endpoint permits it.
+//!
+//! Cooperative cancellation returns [`io::ErrorKind::Interrupted`]. Callers
+//! with a retry loop on `Interrupted` must check [`Cx::is_cancel_requested`] to
+//! distinguish cancellation from an endpoint-level interruption (such as POSIX
+//! `EINTR`); retrying on a cancelled context will spin without making progress.
 
 use super::{AsyncRead, ReadBuf};
 use crate::cx::{CancelWakerToken, Cx};
@@ -39,9 +44,9 @@ impl Cancellation<'_> {
     }
 
     fn check(&self) -> io::Result<()> {
-        self.cx.checkpoint().map_err(|_| {
-            io::Error::new(io::ErrorKind::Interrupted, "exact I/O session cancelled")
-        })
+        self.cx
+            .checkpoint()
+            .map_err(|_| io::Error::new(io::ErrorKind::Interrupted, "exact I/O session cancelled"))
     }
 }
 
@@ -93,7 +98,12 @@ impl<R> fmt::Debug for ReadExactSession<'_, R> {
 impl<'a, R> ReadExactSession<'a, R> {
     /// Retain the reader and destination; performs no I/O and allocates nothing.
     pub fn new(reader: R, buffer: &'a mut [u8]) -> Self {
-        Self { reader, buffer, pos: 0, poison: None }
+        Self {
+            reader,
+            buffer,
+            pos: 0,
+            poison: None,
+        }
     }
 
     /// Bytes reported filled by the reader across all runs.
@@ -145,6 +155,10 @@ impl<R: AsyncRead + Unpin> ReadExactSession<'_, R> {
     /// Dropping this future retains all reported bytes and the resume offset in
     /// the session. Cooperative cancellation returns `Interrupted`, including
     /// when the reader is parked; a new live context can resume the session.
+    /// Callers retrying on `ErrorKind::Interrupted` should check
+    /// `cx.is_cancel_requested()` to distinguish cooperative cancellation from
+    /// an endpoint-level `EINTR`: retrying on a cancelled context will spin
+    /// without making progress.
     /// A zero-byte successful read before completion returns `UnexpectedEof`.
     /// Other I/O errors are returned unchanged, with reported progress retained.
     ///
@@ -202,7 +216,8 @@ impl<R: AsyncRead + Unpin> ReadExactSession<'_, R> {
             }
             task_cx.waker().wake_by_ref();
             Poll::Pending
-        }).await
+        })
+        .await
     }
 }
 

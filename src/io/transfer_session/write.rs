@@ -19,6 +19,11 @@ use std::task::Poll;
 /// task or `Clone` bound is required. Like `write_all`, completion does NOT flush
 /// or shut down the writer; those are separate operations owned by the caller.
 ///
+/// Cooperative cancellation returns [`io::ErrorKind::Interrupted`]. Callers
+/// with a retry loop on `Interrupted` must check [`Cx::is_cancel_requested`] to
+/// distinguish cancellation from an endpoint-level interruption (such as POSIX
+/// `EINTR`); retrying on a cancelled context will spin without making progress.
+///
 /// ```no_run
 /// # async fn example(cx: &asupersync::Cx) -> std::io::Result<()> {
 /// use asupersync::io::WriteAllSession;
@@ -50,7 +55,12 @@ impl<W> fmt::Debug for WriteAllSession<'_, W> {
 impl<'a, W> WriteAllSession<'a, W> {
     /// Retain the writer and source; performs no I/O and allocates nothing.
     pub fn new(writer: W, buffer: &'a [u8]) -> Self {
-        Self { writer, buffer, pos: 0, poison: None }
+        Self {
+            writer,
+            buffer,
+            pos: 0,
+            poison: None,
+        }
     }
 
     /// Bytes accepted by successful writes across all runs, not remote acks.
@@ -101,10 +111,14 @@ impl<W: AsyncWrite + Unpin> WriteAllSession<'_, W> {
     /// Write or resume the source, returning cumulative accepted-write bytes.
     ///
     /// Cooperative cancellation wakes even when the writer is parked and returns
-    /// `Interrupted` without forgetting progress. Drop the borrowing future to
-    /// pause, then retry on this same session with a live context. I/O errors and
-    /// `WriteZero` retain the accepted prefix; retry only when the endpoint's
-    /// protocol permits it. Automatic retries are deliberately absent.
+    /// `Interrupted` without forgetting progress. Callers retrying on
+    /// `ErrorKind::Interrupted` should check `cx.is_cancel_requested()` to
+    /// distinguish cooperative cancellation from an endpoint-level `EINTR`:
+    /// retrying on a cancelled context will spin without making progress.
+    /// Drop the borrowing future to pause, then retry on this same session with
+    /// a live context. I/O errors and `WriteZero` retain the accepted prefix;
+    /// retry only when the endpoint's protocol permits it. Automatic retries are
+    /// deliberately absent.
     ///
     /// Completed runs are idempotent even with a cancelled context. Every poll
     /// makes at most 32 writer calls. A provider panic propagates unchanged and
@@ -138,7 +152,10 @@ impl<W: AsyncWrite + Unpin> WriteAllSession<'_, W> {
                         if written > offered.len() {
                             let reason = "exact I/O writer accepted more bytes than offered";
                             self.poison = Some(reason);
-                            return Poll::Ready(Err(io::Error::new(io::ErrorKind::InvalidData, reason)));
+                            return Poll::Ready(Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                reason,
+                            )));
                         }
                         // No suspension or user code between acceptance and
                         // persisting its offset in the caller-retained owner.
@@ -151,7 +168,8 @@ impl<W: AsyncWrite + Unpin> WriteAllSession<'_, W> {
             }
             task_cx.waker().wake_by_ref();
             Poll::Pending
-        }).await
+        })
+        .await
     }
 }
 

@@ -1,6 +1,8 @@
 //! Two-direction continuation over the same retained transfer engine.
 
-use super::{Cancellation, CopySessionProgress, DEFAULT_CAPACITY, Direction, POLL_BUDGET, Step, buffer};
+use super::{
+    Cancellation, CopySessionProgress, DEFAULT_CAPACITY, Direction, POLL_BUDGET, Step, buffer,
+};
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite};
 use std::fmt;
@@ -43,7 +45,10 @@ impl<A, B> fmt::Debug for BidirectionalCopySession<A, B> {
             .field("progress", &self.progress())
             .field("a_to_b_capacity", &self.a_to_b.buffer.len())
             .field("b_to_a_capacity", &self.b_to_a.buffer.len())
-            .field("poisoned", &(self.a_to_b.poison.is_some() || self.b_to_a.poison.is_some()))
+            .field(
+                "poisoned",
+                &(self.a_to_b.poison.is_some() || self.b_to_a.poison.is_some()),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -52,39 +57,57 @@ impl<A, B> BidirectionalCopySession<A, B> {
     /// Retain the duplex endpoints and two 8 KiB buffers, without performing I/O.
     #[must_use]
     pub fn new(a: A, b: B) -> Self {
-        Self { a, b,
+        Self {
+            a,
+            b,
             a_to_b: Direction::new(vec![0; DEFAULT_CAPACITY]),
-            b_to_a: Direction::new(vec![0; DEFAULT_CAPACITY]) }
+            b_to_a: Direction::new(vec![0; DEFAULT_CAPACITY]),
+        }
     }
 
     /// Use explicit positive buffer bounds for A-to-B and B-to-A, respectively.
     /// Zero capacity or an allocation failure is refused before any I/O.
     pub fn with_capacities(a: A, b: B, a_to_b: usize, b_to_a: usize) -> io::Result<Self> {
         if a_to_b == 0 || b_to_a == 0 {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "copy buffer capacities must be nonzero"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "copy buffer capacities must be nonzero",
+            ));
         }
-        Ok(Self { a, b,
+        Ok(Self {
+            a,
+            b,
             a_to_b: Direction::new(buffer(a_to_b)?),
-            b_to_a: Direction::new(buffer(b_to_a)?) })
+            b_to_a: Direction::new(buffer(b_to_a)?),
+        })
     }
 
     /// Observe both directions without polling or consuming bytes.
     #[must_use]
     pub fn progress(&self) -> BidirectionalCopyProgress {
-        BidirectionalCopyProgress { a_to_b: self.a_to_b.progress(), b_to_a: self.b_to_a.progress() }
+        BidirectionalCopyProgress {
+            a_to_b: self.a_to_b.progress(),
+            b_to_a: self.b_to_a.progress(),
+        }
     }
 
     /// Both directions reached EOF, flushed and completed write-side shutdown.
     #[must_use]
-    pub fn is_complete(&self) -> bool { self.a_to_b.complete(true) && self.b_to_a.complete(true) }
+    pub fn is_complete(&self) -> bool {
+        self.a_to_b.complete(true) && self.b_to_a.complete(true)
+    }
 
     /// Bytes already read from A that have not yet been accepted by B.
     #[must_use]
-    pub fn pending_a_to_b(&self) -> &[u8] { &self.a_to_b.buffer[self.a_to_b.pos..self.a_to_b.len] }
+    pub fn pending_a_to_b(&self) -> &[u8] {
+        &self.a_to_b.buffer[self.a_to_b.pos..self.a_to_b.len]
+    }
 
     /// Bytes already read from B that have not yet been accepted by A.
     #[must_use]
-    pub fn pending_b_to_a(&self) -> &[u8] { &self.b_to_a.buffer[self.b_to_a.pos..self.b_to_a.len] }
+    pub fn pending_b_to_a(&self) -> &[u8] {
+        &self.b_to_a.buffer[self.b_to_a.pos..self.b_to_a.len]
+    }
 
     /// Recover `(a, b, pending_a_to_b, pending_b_to_a)` without discarding bytes.
     /// Write each pending suffix to its destination BEFORE reading its source.
@@ -93,7 +116,12 @@ impl<A, B> BidirectionalCopySession<A, B> {
     /// not justified merely because these values can be recovered.
     #[must_use]
     pub fn into_parts(self) -> (A, B, Vec<u8>, Vec<u8>) {
-        (self.a, self.b, self.a_to_b.into_pending(), self.b_to_a.into_pending())
+        (
+            self.a,
+            self.b,
+            self.a_to_b.into_pending(),
+            self.b_to_a.into_pending(),
+        )
     }
 }
 
@@ -106,8 +134,12 @@ where
     ///
     /// Returns cumulative `(a_to_b, b_to_a)` accepted-write byte counts. A
     /// cancelled context returns Interrupted with buffers and half-close progress
-    /// intact. Retry with a live context only when both endpoint protocols permit
-    /// it. There is no implicit retry, busy polling, detached work or drop-time I/O.
+    /// intact. Callers retrying on `ErrorKind::Interrupted` should check
+    /// `cx.is_cancel_requested()` to distinguish cooperative cancellation from
+    /// an endpoint-level `EINTR`: retrying on a cancelled context will spin
+    /// without making progress. Retry with a live context only when both endpoint
+    /// protocols permit it. There is no implicit retry, busy polling, detached
+    /// work or drop-time I/O.
     /// Completed runs return the same counters without calling either endpoint.
     /// A provider panic poisons the WHOLE pair: both directions share endpoints.
     pub async fn run(&mut self, cx: &Cx) -> io::Result<(u64, u64)> {
@@ -123,12 +155,16 @@ where
             }
             cancellation.register(task_cx);
             for _ in 0..(POLL_BUDGET / 2) {
-                if let Err(error) = cancellation.check() { return Poll::Ready(Err(error)); }
+                if let Err(error) = cancellation.check() {
+                    return Poll::Ready(Err(error));
+                }
                 let a = match self.a_to_b.step(&mut self.a, &mut self.b, task_cx, true) {
                     Ok(step) => step,
                     Err(error) => return Poll::Ready(Err(error)),
                 };
-                if let Err(error) = cancellation.check() { return Poll::Ready(Err(error)); }
+                if let Err(error) = cancellation.check() {
+                    return Poll::Ready(Err(error));
+                }
                 let b = match self.b_to_a.step(&mut self.b, &mut self.a, task_cx, true) {
                     Ok(step) => step,
                     Err(error) => return Poll::Ready(Err(error)),
@@ -143,7 +179,8 @@ where
             }
             task_cx.waker().wake_by_ref();
             Poll::Pending
-        }).await
+        })
+        .await
     }
 }
 

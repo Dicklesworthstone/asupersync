@@ -21,6 +21,7 @@ impl Wake for WakeCount {
 enum Stop {
     Pending,
     Error,
+    Interrupted,
     Eof,
     Panic,
 }
@@ -36,7 +37,14 @@ struct Reader {
 
 impl Reader {
     fn new(bytes: &[u8], limit: usize, stop: Stop) -> Self {
-        Self { bytes: bytes.to_vec(), pos: 0, limit, chunk: 3, polls: 0, stop }
+        Self {
+            bytes: bytes.to_vec(),
+            pos: 0,
+            limit,
+            chunk: 3,
+            polls: 0,
+            stop,
+        }
     }
 }
 
@@ -52,11 +60,16 @@ impl AsyncRead for Reader {
             return match this.stop {
                 Stop::Pending => Poll::Pending,
                 Stop::Error => Poll::Ready(Err(io::Error::from_raw_os_error(17))),
+                Stop::Interrupted => Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "reader interrupted",
+                ))),
                 Stop::Eof => Poll::Ready(Ok(())),
                 Stop::Panic => panic!("exact read panic sentinel"),
             };
         }
-        let n = buffer.remaining()
+        let n = buffer
+            .remaining()
             .min(this.bytes.len() - this.pos)
             .min(this.limit - this.pos)
             .min(this.chunk);
@@ -90,15 +103,18 @@ fn every_partial_boundary_survives_drop_error_and_eof_without_replacing_the_pref
         for stop in [Stop::Pending, Stop::Error, Stop::Eof] {
             let cx = Cx::for_testing();
             let mut destination = vec![255; input.len()];
-            let mut session = ReadExactSession::new(
-                Reader::new(&input, prefix, stop), &mut destination,
-            );
+            let mut session =
+                ReadExactSession::new(Reader::new(&input, prefix, stop), &mut destination);
             let result = poll_once(&mut session, &cx);
             match stop {
                 Stop::Pending => assert!(result.is_pending()),
-                Stop::Error => assert!(matches!(result, Poll::Ready(Err(error)) if error.raw_os_error() == Some(17))),
-                Stop::Eof => assert!(matches!(result, Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::UnexpectedEof)),
-                Stop::Panic => unreachable!(),
+                Stop::Error => assert!(
+                    matches!(result, Poll::Ready(Err(error)) if error.raw_os_error() == Some(17))
+                ),
+                Stop::Eof => assert!(
+                    matches!(result, Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::UnexpectedEof)
+                ),
+                Stop::Interrupted | Stop::Panic => unreachable!(),
             }
             assert_eq!(session.bytes_read(), prefix);
             assert_eq!(session.filled(), &input[..prefix]);
@@ -120,7 +136,9 @@ fn cancelled_context_does_not_consume_and_a_live_context_resumes() {
     assert!(poll_once(&mut session, &cx).is_pending());
     cx.cancel_with(crate::types::CancelKind::User, Some("pause exact read"));
     let polls = session.reader.polls;
-    assert!(matches!(poll_once(&mut session, &cx), Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::Interrupted));
+    assert!(
+        matches!(poll_once(&mut session, &cx), Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::Interrupted)
+    );
     assert_eq!(session.reader.polls, polls);
     assert_eq!(session.filled(), b"pa");
     session.reader.limit = usize::MAX;
@@ -139,18 +157,32 @@ fn idle_cancellation_wakes_the_current_waiter_and_drop_retires_it() {
     let mut session = ReadExactSession::new(Reader::new(b"x", 0, Stop::Pending), &mut bytes);
     {
         let mut run = std::pin::pin!(session.run(&cx));
-        assert!(run.as_mut().poll(&mut Context::from_waker(&old_waker)).is_pending());
-        assert!(run.as_mut().poll(&mut Context::from_waker(&current_waker)).is_pending());
+        assert!(
+            run.as_mut()
+                .poll(&mut Context::from_waker(&old_waker))
+                .is_pending()
+        );
+        assert!(
+            run.as_mut()
+                .poll(&mut Context::from_waker(&current_waker))
+                .is_pending()
+        );
         cx.cancel_with(crate::types::CancelKind::User, Some("wake exact read"));
         assert_eq!(old.0.load(Ordering::SeqCst), 0);
         assert!(current.0.load(Ordering::SeqCst) > 0);
-        assert!(matches!(run.as_mut().poll(&mut Context::from_waker(&current_waker)),
-            Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::Interrupted));
+        assert!(
+            matches!(run.as_mut().poll(&mut Context::from_waker(&current_waker)),
+            Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::Interrupted)
+        );
     }
     let fresh = Cx::for_testing();
     {
         let mut run = std::pin::pin!(session.run(&fresh));
-        assert!(run.as_mut().poll(&mut Context::from_waker(&current_waker)).is_pending());
+        assert!(
+            run.as_mut()
+                .poll(&mut Context::from_waker(&current_waker))
+                .is_pending()
+        );
     }
     let before = current.0.load(Ordering::SeqCst);
     fresh.cancel_with(crate::types::CancelKind::User, Some("after drop"));
@@ -161,13 +193,17 @@ fn idle_cancellation_wakes_the_current_waiter_and_drop_retires_it() {
 fn completed_and_empty_sessions_do_not_poll_a_provider_or_check_cancellation() {
     let cx = Cx::for_testing();
     let mut destination = [0; 4];
-    let mut session = ReadExactSession::new(Reader::new(b"dataextra", 9, Stop::Panic), &mut destination);
+    let mut session =
+        ReadExactSession::new(Reader::new(b"dataextra", 9, Stop::Panic), &mut destination);
     assert_eq!(finish(&mut session, &cx), 4);
     let polls = session.reader.polls;
     cx.cancel_with(crate::types::CancelKind::User, Some("done"));
     assert_eq!(finish(&mut session, &cx), 4);
     assert_eq!(session.reader.polls, polls);
-    assert_eq!(session.reader.pos, 4, "must not read past the frame boundary");
+    assert_eq!(
+        session.reader.pos, 4,
+        "must not read past the frame boundary"
+    );
     let mut empty = [];
     let mut session = ReadExactSession::new(Reader::new(b"", 0, Stop::Panic), &mut empty);
     assert_eq!(finish(&mut session, &cx), 0);
@@ -178,15 +214,24 @@ fn completed_and_empty_sessions_do_not_poll_a_provider_or_check_cancellation() {
 fn panic_propagates_and_poison_refuses_unknown_reader_effects() {
     let cx = Cx::for_testing();
     let mut destination = [0; 7];
-    let mut session = ReadExactSession::new(Reader::new(b"payload", 2, Stop::Panic), &mut destination);
-    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| poll_once(&mut session, &cx))).unwrap_err();
-    assert_eq!(panic.downcast_ref::<&str>(), Some(&"exact read panic sentinel"));
+    let mut session =
+        ReadExactSession::new(Reader::new(b"payload", 2, Stop::Panic), &mut destination);
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        poll_once(&mut session, &cx)
+    }))
+    .unwrap_err();
+    assert_eq!(
+        panic.downcast_ref::<&str>(),
+        Some(&"exact read panic sentinel")
+    );
     assert!(session.is_poisoned());
     assert!(!session.is_complete());
     assert_eq!(session.filled(), b"pa");
     session.reader.limit = usize::MAX;
     let polls = session.reader.polls;
-    assert!(matches!(poll_once(&mut session, &cx), Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::InvalidData));
+    assert!(
+        matches!(poll_once(&mut session, &cx), Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::InvalidData)
+    );
     assert_eq!(session.reader.polls, polls);
 }
 
@@ -201,7 +246,11 @@ fn cooperative_quantum_preserves_progress_and_wakes_before_yielding() {
     let waker = Waker::from(Arc::clone(&count));
     {
         let mut run = std::pin::pin!(session.run(&cx));
-        assert!(run.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+        assert!(
+            run.as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
     }
     assert_eq!(session.bytes_read(), POLL_BUDGET);
     assert_eq!(session.reader.polls, POLL_BUDGET);
@@ -213,7 +262,8 @@ fn cooperative_quantum_preserves_progress_and_wakes_before_yielding() {
 fn extraction_keeps_the_advanced_reader_buffer_and_offset_together() {
     let cx = Cx::for_testing();
     let mut destination = [0; 7];
-    let mut session = ReadExactSession::new(Reader::new(b"payload", 2, Stop::Pending), &mut destination);
+    let mut session =
+        ReadExactSession::new(Reader::new(b"payload", 2, Stop::Pending), &mut destination);
     assert!(poll_once(&mut session, &cx).is_pending());
     assert!(!format!("{session:?}").contains("payload"));
     let (reader, buffer, offset) = session.into_parts();
@@ -228,7 +278,9 @@ struct ReportThenStop {
 
 impl AsyncRead for ReportThenStop {
     fn poll_read(
-        self: Pin<&mut Self>, _: &mut Context<'_>, buffer: &mut ReadBuf<'_>,
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         buffer.put_slice(b"x");
         if self.error {
@@ -246,7 +298,9 @@ fn progress_reported_with_pending_or_error_is_never_forgotten() {
         let mut destination = [0; 2];
         let mut session = ReadExactSession::new(ReportThenStop { error }, &mut destination);
         if error {
-            assert!(matches!(poll_once(&mut session, &cx), Poll::Ready(Err(error)) if error.raw_os_error() == Some(19)));
+            assert!(
+                matches!(poll_once(&mut session, &cx), Poll::Ready(Err(error)) if error.raw_os_error() == Some(19))
+            );
             assert_eq!(session.filled(), b"x");
         } else {
             assert_eq!(finish(&mut session, &cx), 2);
@@ -298,4 +352,91 @@ fn a_reader_that_replaces_its_read_buffer_poisons_the_session() {
             Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::InvalidData
         ));
     }
+}
+
+#[test]
+fn reader_returning_interrupted_is_distinguishable_from_cancellation_and_resumes() {
+    let cx = Cx::for_testing();
+    let mut destination = [0; 7];
+    let mut session = ReadExactSession::new(
+        Reader::new(b"payload", 2, Stop::Interrupted),
+        &mut destination,
+    );
+    let result = poll_once(&mut session, &cx);
+    assert!(
+        matches!(result, Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::Interrupted)
+    );
+    // Reader-produced Interrupted occurs while cx cancellation was NOT requested.
+    assert!(!cx.is_cancel_requested());
+    assert_eq!(session.bytes_read(), 2);
+    assert_eq!(session.filled(), b"pa");
+    // Retry on the same session with the endpoint cleared succeeds.
+    session.reader.limit = usize::MAX;
+    assert_eq!(finish(&mut session, &cx), 7);
+    assert_eq!(session.filled(), b"payload");
+    assert!(session.is_complete());
+}
+
+struct InnerCancelReader<'a> {
+    cx: &'a Cx,
+    bytes: Vec<u8>,
+    pos: usize,
+    chunk: usize,
+    polls: usize,
+    cancel_on_poll: usize,
+}
+
+impl AsyncRead for InnerCancelReader<'_> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        this.polls += 1;
+        let n = buffer
+            .remaining()
+            .min(this.bytes.len() - this.pos)
+            .min(this.chunk);
+        buffer.put_slice(&this.bytes[this.pos..this.pos + n]);
+        this.pos += n;
+        if this.polls == this.cancel_on_poll {
+            this.cx
+                .cancel_with(crate::types::CancelKind::User, Some("inner poll cancel"));
+        }
+        Poll::Ready(Ok(()))
+    }
+}
+
+#[test]
+fn cancellation_inside_inner_poll_delivering_bytes_records_progress_without_further_poll() {
+    let cx = Cx::for_testing();
+    let mut destination = [0; 10];
+    let mut session = ReadExactSession::new(
+        InnerCancelReader {
+            cx: &cx,
+            bytes: b"0123456789".to_vec(),
+            pos: 0,
+            chunk: 3,
+            polls: 0,
+            cancel_on_poll: 1,
+        },
+        &mut destination,
+    );
+    let result = poll_once(&mut session, &cx);
+    assert!(
+        matches!(result, Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::Interrupted)
+    );
+    assert!(cx.is_cancel_requested());
+    // The 3 bytes delivered during the poll must be counted before the cancellation check stopped the loop.
+    assert_eq!(session.bytes_read(), 3);
+    assert_eq!(session.filled(), b"012");
+    // No second poll must occur in the same run once cancellation is observed.
+    assert_eq!(session.reader.polls, 1);
+
+    // Resuming on a fresh live context completes the exact read.
+    let fresh_cx = Cx::for_testing();
+    assert_eq!(finish(&mut session, &fresh_cx), 10);
+    assert_eq!(session.filled(), b"0123456789");
+    assert!(session.is_complete());
 }
