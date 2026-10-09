@@ -16,10 +16,13 @@ use crate::types::Time;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fmt;
-use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
+
+/// Source of entry generations for every queue.
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// Identifies an entry of a [`DelayQueue`] for [`DelayQueue::remove`] and
 /// [`DelayQueue::reset`]. A key stops being valid when its entry expires or is
@@ -107,7 +110,6 @@ pub struct DelayQueue<T> {
     entries: slab::Slab<Entry<T>>,
     /// Earliest deadline first; ties in insertion order.
     heap: BinaryHeap<Reverse<(Time, u64, usize)>>,
-    next_generation: u64,
     timer: Option<Sleep>,
     /// The deadline `timer` is armed for.
     armed_for: Option<Time>,
@@ -128,7 +130,6 @@ impl<T> DelayQueue<T> {
         Self {
             entries: slab::Slab::with_capacity(capacity),
             heap: BinaryHeap::with_capacity(capacity),
-            next_generation: 0,
             timer: None,
             armed_for: None,
             waker: None,
@@ -142,7 +143,7 @@ impl<T> DelayQueue<T> {
 
     /// Inserts `value`, due at `deadline`.
     pub fn insert_at(&mut self, value: T, deadline: Time) -> Key {
-        let generation = self.bump_generation();
+        let generation = Self::bump_generation();
         let index = self.entries.insert(Entry {
             data: value,
             deadline,
@@ -204,7 +205,7 @@ impl<T> DelayQueue<T> {
             self.live_generation(key).is_some(),
             "DelayQueue::reset: the key is not valid in this queue"
         );
-        let schedule = self.bump_generation();
+        let schedule = Self::bump_generation();
         let entry = &mut self.entries[key.index];
         entry.deadline = deadline;
         entry.schedule = schedule;
@@ -255,13 +256,21 @@ impl<T> DelayQueue<T> {
     /// Yields the next entry whose deadline has passed, earliest first.
     ///
     /// Returns `Ready(None)` when the queue is empty and `Pending` until the
-    /// earliest deadline passes. A pending poll is woken when that deadline
-    /// passes or an insert or reset makes an earlier one.
+    /// earliest deadline passes. A pending poll, or one that found the queue
+    /// empty, is woken when that deadline passes or an insert or reset makes
+    /// an earlier one.
+    ///
+    /// Waiting here is not a cancellation point: a cancelled task stays
+    /// parked until an entry comes due, then can observe the cancellation
+    /// with [`Cx::checkpoint`](crate::Cx::checkpoint). To stop sooner, bound
+    /// the wait with a timeout.
     pub fn poll_expired(&mut self, cx: &mut Context<'_>) -> Poll<Option<Expired<T>>> {
         loop {
             let Some(&Reverse((deadline, schedule, index))) = self.heap.peek() else {
                 self.timer = None;
                 self.armed_for = None;
+                // A later insert wakes the task that saw the queue empty.
+                store_waker(&mut self.waker, cx);
                 return Poll::Ready(None);
             };
             let live = self
@@ -292,21 +301,25 @@ impl<T> DelayQueue<T> {
                 self.armed_for = Some(deadline);
             }
             let timer = self.timer.as_mut().expect("armed above");
-            if Pin::new(timer).poll(cx).is_pending() {
+            // The timer is only a wake source, not a cancellation point: a
+            // cancel-aware poll completes at once while the task is
+            // cancelled, and re-arming it would spin until the deadline
+            // really passed (as stream::debounce did, jqhteu).
+            if Pin::new(timer).poll_deadline(cx).is_pending() {
                 store_waker(&mut self.waker, cx);
                 return Poll::Pending;
             }
-            // The timer fired (or completed early because the task was
-            // cancelled); the loop re-checks the clock before yielding.
+            // The timer fired; the loop re-checks the clock before yielding.
             self.timer = None;
             self.armed_for = None;
         }
     }
 
-    fn bump_generation(&mut self) -> u64 {
-        let generation = self.next_generation;
-        self.next_generation += 1;
-        generation
+    fn bump_generation() -> u64 {
+        // Process-wide, so a key from another queue never matches a live
+        // entry here (both would otherwise count from zero). The values only
+        // order this queue's heap items, and they still increase.
+        NEXT_GENERATION.fetch_add(1, AtomicOrdering::Relaxed)
     }
 
     fn live_generation(&self, key: &Key) -> Option<u64> {
