@@ -606,8 +606,21 @@ impl WorkerLoan<'_> {
             // nested drive and must retain them.
             let mut orphaned = Vec::new();
             spawn_mailbox::drain_local_spawn_lane(usize::MAX, &mut orphaned);
+            // Failing a request drops its pending-spawn credit on its region.
+            // Advance those regions afterwards, as admission denial does: a
+            // Closing region may have been waiting on nothing else
+            // (br-asupersync-01oghn L1).
+            let regions: Vec<_> = orphaned.iter().map(|request| request.region).collect();
             for request in orphaned {
                 request.resolve_failed(SpawnError::RuntimeUnavailable);
+            }
+            if !regions.is_empty()
+                && let Some(worker) = self.worker.as_ref()
+            {
+                let mut state = worker.state.lock().unwrap_or_else(PoisonError::into_inner);
+                for region in regions {
+                    state.advance_region_state(region);
+                }
             }
             spawn_mailbox::restore_local_spawn_lane(outer_requests);
         }
@@ -1074,6 +1087,68 @@ mod tests {
         assert_eq!(ran_on.get(), Some(std::thread::current().id()));
         assert_eq!(pending.count(), 0, "pending admission credit is released");
         assert_eq!(Rc::strong_count(&ran_on), 1, "local capture is retired");
+    }
+
+    /// 01oghn L1: a drive that ends with this runtime's local requests still
+    /// queued fails them, which releases their regions' pending-spawn credit.
+    /// A Closing region whose last blocker was such a request must then
+    /// advance; it used to stay Closing.
+    #[test]
+    fn an_orphaned_local_request_lets_its_closing_region_finish() {
+        use crate::record::region::RegionState;
+        use crate::runtime::RuntimeState;
+        use crate::runtime::spawn_mailbox::LocalSpawnRequest;
+        use crate::sync::ContendedMutex;
+        use crate::types::{Budget, Outcome};
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let child = state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("child region");
+        let pending = state.region(child).expect("child").pending_spawn_handle();
+        let state = Arc::new(ContendedMutex::new("orphaned_local_request", state));
+        let mailbox = Arc::new(SpawnMailbox::new());
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        scheduler.attach_spawn_mailbox(Arc::clone(&mailbox));
+        let worker = scheduler.take_workers().pop().expect("one real worker");
+        let driver = CurrentThreadDriver::new(None, worker.local_store_key());
+        let mut loan = WorkerLoan {
+            driver: &driver,
+            worker: Some(Box::new(worker)),
+            return_to: LoanReturn::Background,
+        };
+
+        loan.with_thread_context(|_, _| {
+            spawn_mailbox::enqueue_local_spawn_for_mailbox(
+                LocalSpawnRequest {
+                    task_id: mailbox.allocate_task_id(),
+                    region: child,
+                    budget: Budget::INFINITE,
+                    factory: Box::new(|_| Box::pin(async { Outcome::Ok(()) })),
+                    on_unadmitted_cancel: None,
+                    on_admission_error: None,
+                    pending_reservation: Some(pending.reserve()),
+                    admitted_slot: None,
+                },
+                &mailbox,
+            );
+            // The region's body is done and the drive ends here, curtailed,
+            // with the request still queued.
+            let state = state.lock().unwrap_or_else(PoisonError::into_inner);
+            assert!(state.region(child).expect("child").begin_close(None));
+        });
+
+        assert_eq!(pending.count(), 0, "the failed request released its credit");
+        let after = state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .region(child)
+            .map(crate::record::region::RegionRecord::state);
+        assert!(
+            !matches!(after, Some(RegionState::Closing)),
+            "the region is still Closing with nothing left to wait for: {after:?}",
+        );
     }
 
     /// Reproduce the state visible to R1 when its handover was refused and
