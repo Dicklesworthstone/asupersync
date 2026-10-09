@@ -445,7 +445,7 @@ impl<T, Caps> LockFuture<'_, '_, T, Caps> {
     fn poll_deadline_sleep(&mut self, context: &mut Context<'_>) -> Option<Time> {
         let sleep = self.deadline_sleep.as_mut()?;
         let deadline = sleep.deadline();
-        match Pin::new(&mut **sleep).poll(context) {
+        match Pin::new(&mut **sleep).poll_deadline(context) {
             Poll::Ready(()) => Some(deadline),
             Poll::Pending => None,
         }

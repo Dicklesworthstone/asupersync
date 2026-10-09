@@ -300,3 +300,27 @@ fn explicit_independent_context_wakes_lock_waits_on_native_runtime() {
         independent_authority(Cx::current().unwrap()).await;
     }));
 }
+
+/// The deadline of `lock_until` measures time, not the running task's
+/// cancellation. With an ambient context other than the lock's `cx`, it used
+/// the cancel-aware `Sleep::poll`, so cancelling the running task made the
+/// wait return `TimedOut` an hour early (and each `.await` could finish that
+/// way without yielding) (br-asupersync-x2cqdf).
+#[test]
+fn ambient_cancellation_is_not_a_lock_until_timeout() {
+    let ambient = Cx::for_testing();
+    let _current = Cx::set_current(Some(ambient.clone()));
+    let authority = Cx::for_testing();
+    let mutex = Mutex::new(());
+    let _held = mutex.try_lock().unwrap();
+    let (_, waker) = counter();
+    let deadline = crate::time::wall_now() + std::time::Duration::from_secs(3600);
+    let mut waiting = Box::pin(mutex.lock_until(&authority, deadline));
+    assert!(poll(waiting.as_mut(), &waker).is_pending());
+    ambient.cancel_fast(CancelKind::User);
+    assert!(
+        poll(waiting.as_mut(), &waker).is_pending(),
+        "an hour-long deadline cannot have passed"
+    );
+    assert_eq!(mutex.waiters(), 1);
+}
