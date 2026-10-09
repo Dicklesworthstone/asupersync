@@ -11,6 +11,10 @@
 //! serializes backend polls; another group's turn waits only within its own
 //! timeout instead of returning the local-follower `None` result.
 
+// This split implementation shares its parent module's private driver and
+// reactor machinery as one unit (as otel/queued.rs and transport_rq/bonded.rs
+// do).
+#[allow(clippy::wildcard_imports)]
 use super::*;
 use parking_lot::Condvar;
 use std::sync::OnceLock;
@@ -469,9 +473,10 @@ mod tests {
                 self.published_early.store(true, Ordering::SeqCst);
             }
             let result = self.backend.deregister(token);
-            if self.panic_next.swap(false, Ordering::SeqCst) {
-                panic!("injected retirement callback panic");
-            }
+            assert!(
+                !self.panic_next.swap(false, Ordering::SeqCst),
+                "injected retirement callback panic"
+            );
             result
         }
 
@@ -532,6 +537,8 @@ mod tests {
         replacement: Arc<Mutex<Option<IoDriverHandle>>>,
     }
 
+    // The waker exists for its destructor, so Waker::noop() cannot stand in.
+    #[allow(clippy::manual_noop_waker)]
     impl Wake for ReenterOnDrop {
         fn wake(self: Arc<Self>) {}
     }
