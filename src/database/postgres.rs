@@ -1102,8 +1102,12 @@ const PG_EPOCH_UNIX_MICROS: i64 = 946_684_800_000_000;
 
 /// `SystemTime` binds as `timestamptz`, in binary (microseconds since
 /// 2000-01-01 UTC; a sub-microsecond remainder is truncated toward the past).
-/// Bound into a `timestamp without time zone` column, the instant is converted
-/// to the session's `TimeZone`, as PostgreSQL converts any `timestamptz`.
+/// Bound into a `timestamp without time zone` column by
+/// [`PgConnection::execute_params`], the instant is converted to the session's
+/// `TimeZone`, as PostgreSQL converts any `timestamptz`. A prepared statement
+/// whose parameter the server typed as anything but `timestamptz` refuses it
+/// (cast the parameter, `$1::timestamptz`): there the binary value would be
+/// stored unconverted, as UTC wall-clock time.
 impl ToSql for std::time::SystemTime {
     fn to_sql(&self, buf: &mut Vec<u8>) -> Result<IsNull, PgError> {
         let micros = system_time_unix_micros(*self)?
@@ -1117,12 +1121,23 @@ impl ToSql for std::time::SystemTime {
     }
 }
 
-/// `timestamptz` and `timestamp` decode into `SystemTime`. A `timestamp`
-/// carries no offset and is read as UTC. Text values must be in the ISO
+/// `timestamptz` decodes into `SystemTime`. Text values must be in the ISO
 /// `DateStyle` (the server default); `infinity` and `-infinity` have no
 /// `SystemTime` and fail to decode.
+///
+/// A `timestamp without time zone` is refused: it is a wall-clock time in a
+/// zone the value does not record, so no instant follows from it. Select it as
+/// `col AT TIME ZONE 'UTC'` (or the zone it was written in), which is a
+/// `timestamptz` (br-asupersync-qml5yb).
 impl FromSql for std::time::SystemTime {
-    fn from_sql(data: &[u8], _oid: u32, format: Format) -> Result<Self, PgError> {
+    fn from_sql(data: &[u8], oid: u32, format: Format) -> Result<Self, PgError> {
+        if oid == oid::TIMESTAMP {
+            return Err(PgError::Protocol(
+                "a timestamp without time zone has no SystemTime; select it AT TIME ZONE \
+                 'UTC' (or the zone it was written in) to get a timestamptz"
+                    .into(),
+            ));
+        }
         let unix_micros = match format {
             Format::Binary => {
                 let raw: [u8; 8] = data
@@ -1147,7 +1162,7 @@ impl FromSql for std::time::SystemTime {
         .ok_or_else(timestamp_out_of_range)
     }
     fn accepts(oid: u32) -> bool {
-        matches!(oid, oid::TIMESTAMP | oid::TIMESTAMPTZ)
+        oid == oid::TIMESTAMPTZ
     }
 }
 
@@ -1219,6 +1234,12 @@ fn parse_pg_timestamp_text(data: &[u8]) -> Result<i64, PgError> {
         return Err(invalid());
     };
     let (year, month, day) = (number(year)?, number(month)?, number(day)?);
+    // PostgreSQL's timestamps end in year 294276; a larger year can only be
+    // crafted text, and would overflow the arithmetic below
+    // (br-asupersync-qml5yb).
+    if year > 294_276 {
+        return Err(timestamp_out_of_range());
+    }
     let year = if before_christ { 1 - year } else { year };
 
     let (clock, offset) = time
@@ -1258,7 +1279,7 @@ fn parse_pg_timestamp_text(data: &[u8]) -> Result<i64, PgError> {
             let hours = number(offset_parts.next().ok_or_else(invalid)?)?;
             let minutes = offset_parts.next().map_or(Ok(0), number)?;
             let seconds = offset_parts.next().map_or(Ok(0), number)?;
-            if offset_parts.next().is_some() || minutes > 59 || seconds > 59 {
+            if offset_parts.next().is_some() || hours > 24 || minutes > 59 || seconds > 59 {
                 return Err(invalid());
             }
             let total = hours * 3_600 + minutes * 60 + seconds;
@@ -3208,6 +3229,17 @@ fn percent_decode(input: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
+/// Query parameters that [`PgConnectOptions::parse`] reads only in libpq's
+/// socket form, where the URL names no host and `?host=` gives it.
+#[derive(Default)]
+struct SocketFormParams<'a> {
+    port: Option<&'a str>,
+    user: Option<&'a str>,
+    password: Option<&'a str>,
+    /// A parameter of that form this client cannot honour.
+    unsupported: Option<&'a str>,
+}
+
 impl PgConnectOptions {
     /// Parse a connection URL.
     ///
@@ -3216,6 +3248,9 @@ impl PgConnectOptions {
     /// A Unix-domain socket directory is given percent-encoded as the host
     /// (`postgres://user@%2Fvar%2Frun%2Fpostgresql/db`) or, with no host in
     /// the URL, as the `host` parameter (`postgres:///db?host=/var/run/postgresql`).
+    /// In that second form the `port`, `user` and `password` parameters are
+    /// read too; `requirepeer` and `dbname` are refused, and so is a value the
+    /// URL already gives. URLs that name a host ignore those parameters.
     /// Use [`Self::parse_with_tls`] for `verify-ca`, `verify-full`, or
     /// `sslrootcert`, which cannot be represented by this legacy struct alone.
     pub fn parse(url: &str) -> Result<Self, PgError> {
@@ -3254,6 +3289,7 @@ impl PgConnectOptions {
         }
 
         // Split auth@host
+        let userinfo_given = auth_host.contains('@');
         let (user, password, host_port) = if let Some((auth, host)) = auth_host.rsplit_once('@') {
             let (user, password) = auth
                 .split_once(':')
@@ -3300,6 +3336,7 @@ impl PgConnectOptions {
         // Parse query parameters
         let mut ssl_mode = SslMode::Prefer;
         let mut host_param = None;
+        let mut socket_params = SocketFormParams::default();
         let mut application_name = None;
         let mut connect_timeout = None;
         let mut tls = PgTlsOptions::default();
@@ -3361,6 +3398,11 @@ impl PgConnectOptions {
                     // It is read only when the URL names no host, where it
                     // used to be refused as a missing host.
                     "host" => host_param = Some(percent_decode(value)),
+                    // Read only in that form too, below.
+                    "port" => socket_params.port = Some(value),
+                    "user" => socket_params.user = Some(value),
+                    "password" => socket_params.password = Some(value),
+                    "dbname" | "requirepeer" => socket_params.unsupported = Some(key),
                     _ => {} // ignore unknown parameters
                 }
             }
@@ -3384,6 +3426,41 @@ impl PgConnectOptions {
 
         if let Some(verification) = verification {
             tls = tls.verification(verification);
+        }
+        let (mut user, mut password, mut port) = (user, password, port);
+        if host.is_empty() {
+            // libpq's socket form names the rest of its target in the query as
+            // well. Ignoring `port` or `user` connected to another cluster's
+            // socket, or as `postgres`, without an error, so they are read
+            // here. A value the URL gives twice, or a parameter this client
+            // cannot honour (`requirepeer`, `dbname`), is refused
+            // (br-asupersync-qml5yb).
+            if let Some(key) = socket_params.unsupported {
+                return Err(PgError::InvalidUrl(format!(
+                    "the {key} parameter is not supported"
+                )));
+            }
+            let twice = |name: &str| PgError::InvalidUrl(format!("the URL gives the {name} twice"));
+            if let Some(value) = socket_params.port {
+                if host_port.contains(':') {
+                    return Err(twice("port"));
+                }
+                port = value
+                    .parse()
+                    .map_err(|_| PgError::InvalidUrl(format!("invalid port: {value}")))?;
+            }
+            if let Some(value) = socket_params.user {
+                if userinfo_given {
+                    return Err(twice("user"));
+                }
+                user = percent_decode(value);
+            }
+            if let Some(value) = socket_params.password {
+                if password.is_some() {
+                    return Err(twice("password"));
+                }
+                password = Some(percent_decode(value));
+            }
         }
         let host = if host.is_empty() {
             host_param
@@ -7990,8 +8067,10 @@ impl PgConnection {
     /// float where it inferred an integer, has the same width, so the server
     /// reads the bytes as the other type and stores a wrong value without
     /// an error: `100i64` for a `double precision` parameter stored
-    /// 4.94e-322. Those pairs are refused before anything is written. NULLs
-    /// carry no bytes and pass; other mismatches are left to the server.
+    /// 4.94e-322. Those pairs are refused before anything is written, and so
+    /// is a binary `timestamptz` (a `SystemTime`) where the server inferred
+    /// another type. NULLs carry no bytes and pass; other mismatches are left
+    /// to the server.
     fn validate_prepared_bind_types(
         stmt: &PgStatement,
         params: &[&dyn ToSql],
@@ -8002,18 +8081,29 @@ impl PgConnection {
             let sent = param.type_oid();
             let crossed = (INTEGERS.contains(&sent) && FLOATS.contains(&expected))
                 || (FLOATS.contains(&sent) && INTEGERS.contains(&expected));
-            if !crossed
+            // An instant (`SystemTime`) where the server typed anything else,
+            // `timestamp without time zone` above all: the binary value would
+            // be stored unconverted, as UTC wall-clock time, while the same
+            // value through `execute_params` is converted to the session's
+            // zone (br-asupersync-qml5yb).
+            let misplaced_instant = (sent == oid::TIMESTAMPTZ && expected != oid::TIMESTAMPTZ)
+                || (sent == oid::TIMESTAMPTZ_ARRAY && expected != oid::TIMESTAMPTZ_ARRAY);
+            if !(crossed || misplaced_instant)
                 || param.format() != Format::Binary
                 || matches!(param.to_sql(&mut Vec::new())?, IsNull::Yes)
             {
                 continue;
             }
+            let number = position + 1;
+            let consequence = if crossed {
+                "the binary value would be stored as a different number".to_string()
+            } else {
+                format!("cast it (${number}::timestamptz) so the server converts the instant")
+            };
             return Err(PgError::Protocol(format!(
-                "prepared statement '{}' parameter ${} is bound as type OID {sent}, but the \
-                 server expects type OID {expected}; the binary value would be stored as a \
-                 different number",
-                stmt.name,
-                position + 1
+                "prepared statement '{}' parameter ${number} is bound as type OID {sent}, but \
+                 the server expects type OID {expected}; {consequence}",
+                stmt.name
             )));
         }
         Ok(())

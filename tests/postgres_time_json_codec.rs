@@ -93,11 +93,10 @@ fn timestamps_decode_from_iso_text_output_with_offsets_and_eras() {
         text("1900-01-01 00:19:32+00:19:32", oid::TIMESTAMPTZ).unwrap(),
         at(-2_208_988_800, 0)
     );
-    // `timestamp` has no offset and is read as UTC.
-    assert_eq!(
-        text("2026-10-08 06:45:50", oid::TIMESTAMP).unwrap(),
-        instant
-    );
+    // A `timestamp` has no offset, so it names no instant: it is refused
+    // rather than read as UTC, which disagreed with what `execute_params`
+    // stores under any other session zone (br-asupersync-qml5yb).
+    assert!(text("2026-10-08 06:45:50", oid::TIMESTAMP).is_err());
     // Five-digit years, and BC dates (1 BC is astronomical year 0).
     assert_eq!(
         text("10000-01-01 00:00:00+00", oid::TIMESTAMPTZ).unwrap(),
@@ -121,7 +120,7 @@ fn timestamps_decode_from_iso_text_output_with_offsets_and_eras() {
         assert!(text(refused, oid::TIMESTAMPTZ).is_err(), "{refused}");
     }
     assert!(<SystemTime as FromSql>::accepts(oid::TIMESTAMPTZ));
-    assert!(<SystemTime as FromSql>::accepts(oid::TIMESTAMP));
+    assert!(!<SystemTime as FromSql>::accepts(oid::TIMESTAMP));
     assert!(!<SystemTime as FromSql>::accepts(oid::DATE));
 }
 

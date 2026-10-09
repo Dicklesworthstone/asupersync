@@ -3115,6 +3115,146 @@ mod tests {
         }
     }
 
+    /// qml5yb HIGH 2: in libpq's socket form the query names the whole
+    /// target. `port` and `user` used to be ignored, so this URL reached the
+    /// 5432 cluster's socket as `postgres`.
+    #[test]
+    fn connect_options_socket_form_reads_port_user_and_password() {
+        let opts = PgConnectOptions::parse(
+            "postgres:///app?host=/var/run/postgresql&port=5433&user=app&password=p%40ss",
+        )
+        .expect("libpq socket form");
+        assert_eq!(opts.host, "/var/run/postgresql");
+        assert_eq!(opts.port, 5433);
+        assert_eq!(opts.user, "app");
+        assert_eq!(
+            opts.password.as_ref().map(SecretString::as_str),
+            Some("p@ss")
+        );
+        assert_eq!(opts.database, "app");
+
+        // Credentials in the authority still work in that form.
+        let opts = PgConnectOptions::parse("postgres://app:pw@/app?host=/tmp&port=6000")
+            .expect("userinfo with a host parameter");
+        assert_eq!((opts.user.as_str(), opts.port), ("app", 6000));
+
+        // A URL that names its host keeps ignoring them, as v0.4.3 did.
+        let opts =
+            PgConnectOptions::parse("postgres://h:5434/app?port=5433&user=app").expect("tcp form");
+        assert_eq!((opts.port, opts.user.as_str()), (5434, "postgres"));
+    }
+
+    #[test]
+    fn connect_options_socket_form_refuses_what_it_cannot_honour() {
+        for url in [
+            "postgres:///app?host=/tmp&requirepeer=postgres",
+            "postgres:///app?host=/tmp&dbname=other",
+            "postgres://u@/app?host=/tmp&user=other",
+            "postgres://u:pw@/app?host=/tmp&password=other",
+            "postgres://:5433/app?host=/tmp&port=5434",
+            "postgres:///app?host=/tmp&port=not-a-port",
+        ] {
+            assert!(
+                matches!(PgConnectOptions::parse(url), Err(PgError::InvalidUrl(_))),
+                "{url} must be refused"
+            );
+        }
+    }
+
+    /// qml5yb HIGH 1: a `timestamp without time zone` holds no instant. Read
+    /// as UTC, it differed from what `execute_params` stored under any other
+    /// session zone, so it is refused; `timestamptz` decodes as before.
+    #[test]
+    fn system_time_refuses_a_timestamp_without_time_zone() {
+        let micros_since_2000: i64 = 1_000_000;
+        let binary = micros_since_2000.to_be_bytes();
+        assert!(std::time::SystemTime::from_sql(&binary, oid::TIMESTAMPTZ, Format::Binary).is_ok());
+        assert!(std::time::SystemTime::from_sql(&binary, oid::TIMESTAMP, Format::Binary).is_err());
+        assert!(
+            std::time::SystemTime::from_sql(b"2026-10-08 06:45:50", oid::TIMESTAMP, Format::Text)
+                .is_err()
+        );
+        assert!(<std::time::SystemTime as FromSql>::accepts(
+            oid::TIMESTAMPTZ
+        ));
+        assert!(!<std::time::SystemTime as FromSql>::accepts(oid::TIMESTAMP));
+    }
+
+    /// qml5yb HIGH 1: a prepared statement's parameter is typed by the
+    /// server. A binary `timestamptz` where it inferred `timestamp` (or any
+    /// other type) would be stored unconverted, as UTC wall-clock time.
+    #[test]
+    fn prepared_bind_refuses_an_instant_where_the_server_inferred_another_type() {
+        let statement = |param_oid| PgStatement {
+            name: "s1".to_string(),
+            sql: "INSERT INTO t VALUES ($1)".to_string(),
+            param_oids: vec![param_oid],
+            columns: Vec::new(),
+            session_generation: 0,
+        };
+        let instant = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_791_445_550);
+        let instants = vec![instant];
+        let null: Option<std::time::SystemTime> = None;
+
+        assert!(
+            PgConnection::validate_prepared_bind_types(&statement(oid::TIMESTAMPTZ), &[&instant])
+                .is_ok()
+        );
+        for expected in [oid::TIMESTAMP, oid::INT8, oid::FLOAT8, oid::TEXT] {
+            let err = PgConnection::validate_prepared_bind_types(&statement(expected), &[&instant])
+                .expect_err("an instant where the server inferred another type");
+            assert!(
+                matches!(err, PgError::Protocol(ref msg) if msg.contains("$1::timestamptz")),
+                "{expected}: {err:?}"
+            );
+        }
+        assert!(
+            PgConnection::validate_prepared_bind_types(
+                &statement(oid::TIMESTAMPTZ_ARRAY),
+                &[&instants]
+            )
+            .is_ok()
+        );
+        assert!(
+            PgConnection::validate_prepared_bind_types(
+                &statement(oid::TIMESTAMP_ARRAY),
+                &[&instants]
+            )
+            .is_err()
+        );
+        assert!(
+            PgConnection::validate_prepared_bind_types(&statement(oid::TIMESTAMP), &[&null])
+                .is_ok(),
+            "a NULL carries no bytes"
+        );
+    }
+
+    /// qml5yb LOW 5: a crafted year or offset overflowed the timestamp text
+    /// arithmetic (a panic in debug builds, a wrong time in release).
+    #[test]
+    fn timestamp_text_with_an_impossible_year_or_offset_is_refused() {
+        for text in [
+            "922337203685477580-01-01 00:00:00+00",
+            "294277-01-01 00:00:00+00",
+            "2026-10-08 06:45:50+922337203685477580",
+            "2026-10-08 06:45:50+25",
+        ] {
+            assert!(
+                std::time::SystemTime::from_sql(text.as_bytes(), oid::TIMESTAMPTZ, Format::Text)
+                    .is_err(),
+                "{text}"
+            );
+        }
+        assert!(
+            std::time::SystemTime::from_sql(
+                b"100000-01-01 00:00:00+00",
+                oid::TIMESTAMPTZ,
+                Format::Text
+            )
+            .is_ok()
+        );
+    }
+
     // ================================================================
     // PgValue accessor coverage
     // ================================================================
