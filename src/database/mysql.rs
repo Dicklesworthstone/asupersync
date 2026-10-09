@@ -5263,14 +5263,14 @@ impl MySqlConnection {
     /// MySQL binds a statement to the default database and the parse-time
     /// sql_mode in effect when it was prepared, and re-binds neither later.
     fn statement_rebinds_prepared_statements(sql: &str) -> bool {
-        let trimmed = sql.trim_start();
-        let verb = trimmed
-            .split(|c: char| c.is_ascii_whitespace() || c == ';' || c == '`')
-            .next()
-            .unwrap_or("");
-        verb.eq_ignore_ascii_case("USE")
-            || (verb.eq_ignore_ascii_case("SET")
-                && trimmed.to_ascii_lowercase().contains("sql_mode"))
+        // The verb is read past leading `/* */`, `-- ` and `#` comments and
+        // inside a `/*! */` version comment, whose text MySQL runs. Trusted
+        // SQL skips the static check that refused comments, and a
+        // comment-prefixed `USE` kept the cache, so statements prepared for
+        // the old database kept reaching it. A comment that never ends clears
+        // the cache (fail closed). The helper sits below the line-pinned code
+        // (br-asupersync-qml5yb).
+        mysql_statement_rebinds_prepared_statements(sql)
     }
 
     /// Before a statement that re-binds prepared statements, empty the
@@ -7411,6 +7411,43 @@ pub fn fuzz_build_stmt_execute_packet(
     buf.write_u32_le(1);
     write_stmt_execute_params(&mut buf, params)?;
     Ok(buf.build_packet().bytes)
+}
+
+/// Whether `sql` is a `USE`, or a `SET` that changes sql_mode, once the
+/// comments MySQL skips before a statement are skipped. The text of a
+/// `/*!NNNNN ... */` version comment is part of the statement, so it is read.
+/// A `/*` comment that never ends answers `true`; text that is only a `#` or
+/// `-- ` comment runs nothing and answers `false`.
+fn mysql_statement_rebinds_prepared_statements(sql: &str) -> bool {
+    let mut rest = sql;
+    loop {
+        rest = rest.trim_start();
+        if let Some(body) = rest.strip_prefix("/*!") {
+            rest = body.trim_start_matches(|c: char| c.is_ascii_digit());
+        } else if let Some(body) = rest.strip_prefix("/*") {
+            let Some((_, after)) = body.split_once("*/") else {
+                return true;
+            };
+            rest = after;
+        } else if rest.starts_with('#')
+            || rest
+                .strip_prefix("--")
+                .is_some_and(|after| after.chars().next().is_none_or(char::is_whitespace))
+        {
+            let Some((_, after)) = rest.split_once('\n') else {
+                return false;
+            };
+            rest = after;
+        } else {
+            break;
+        }
+    }
+    let verb = rest
+        .split(|c: char| c.is_ascii_whitespace() || matches!(c, ';' | '`' | '/' | '('))
+        .next()
+        .unwrap_or("");
+    verb.eq_ignore_ascii_case("USE")
+        || (verb.eq_ignore_ascii_case("SET") && rest.to_ascii_lowercase().contains("sql_mode"))
 }
 
 #[cfg(test)]

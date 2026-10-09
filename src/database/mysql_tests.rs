@@ -6001,6 +6001,47 @@ mod tests {
         payload
     }
 
+    /// qml5yb HIGH 3: trusted SQL skips the static check that refused
+    /// comments, and a comment before `USE` or a version-comment `SET
+    /// sql_mode` hid the verb, so the prepared-statement cache was kept and
+    /// later statements reached the old database.
+    #[test]
+    fn comment_prefixed_use_and_sql_mode_changes_clear_the_prepared_cache() {
+        for sql in [
+            "USE b",
+            "use`b`",
+            "USE/* x */b",
+            "/* switch tenant */ USE b",
+            "/* a */ /* b */\n  USE b",
+            "-- x\nUSE b",
+            "--\tx\nUSE b",
+            "# x\nUSE b",
+            "/*!40101 SET SQL_MODE='ANSI_QUOTES' */",
+            "/*! USE b */",
+            "SET SESSION sql_mode = 'ANSI'",
+            "/* never ends USE b",
+        ] {
+            assert!(
+                MySqlConnection::statement_rebinds_prepared_statements(sql),
+                "{sql:?} must clear the prepared-statement cache"
+            );
+        }
+        for sql in [
+            "SELECT * FROM users",
+            "SELECT 1 FROM t USE INDEX (i)",
+            "/* USE b */ SELECT 1",
+            "SET NAMES utf8mb4",
+            "--x\nUSE b",
+            "-- only a comment",
+            "INSERT INTO t VALUES ('USE b')",
+        ] {
+            assert!(
+                !MySqlConnection::statement_rebinds_prepared_statements(sql),
+                "{sql:?} must keep the prepared-statement cache"
+            );
+        }
+    }
+
     /// H1: MySQL binds a prepared statement to the default database it was
     /// prepared in. After `USE tenant_b`, prepare of the same SQL returned
     /// the cached statement, still bound to the earlier database, so its
