@@ -32,7 +32,8 @@ use crate::io::AsyncReadExt;
 use crate::net::tcp::listener::TcpListener;
 use crate::net::tcp::stream::TcpStream;
 use crate::runtime::RuntimeHandle;
-use crate::server::shutdown::{ShutdownSignal, ShutdownStats};
+use crate::server::connection::ConnectionManager;
+use crate::server::shutdown::{ShutdownPhase, ShutdownSignal, ShutdownStats};
 use crate::sync::Notify;
 #[cfg(feature = "tls")]
 use crate::tls::TlsAcceptor;
@@ -188,7 +189,9 @@ where
     }
 
     /// The signal that stops accepting: `begin_drain` on it drains both
-    /// protocols' listeners, each within its own drain timeouts.
+    /// protocols' listeners, each within its own drain timeouts. An immediate
+    /// stop or escalation to force-close interrupts both protocols. `Stopped`
+    /// is published after the listeners and detection resources finish.
     #[must_use]
     pub fn shutdown_signal(&self) -> ShutdownSignal {
         self.shutdown_signal.clone()
@@ -197,7 +200,9 @@ where
     /// Accepts until the shutdown signal begins draining, then drains both
     /// protocols' listeners and returns their statistics. Incomplete protocol
     /// detection and TLS handshakes are cancelled, and their connections are
-    /// released before this method returns.
+    /// released before this method returns. Dropping this future requests
+    /// immediate cleanup from the runtime-owned children; it does not claim
+    /// that their cleanup has already completed.
     ///
     /// # Errors
     /// A non-transient accept error (after draining the connections already
@@ -219,16 +224,37 @@ where
             move |request: Request| (*handler)(request),
             self.config.http2.clone(),
         );
-        let http1_manager = http1.connection_manager().clone();
-        let http2_manager = http2.connection_manager().clone();
+        let mut shutdown = ProtocolShutdown {
+            signal: self.shutdown_signal.clone(),
+            http1: http1.connection_manager().clone(),
+            http2: http2.connection_manager().clone(),
+            completed: false,
+        };
         let http1_runtime = runtime.clone();
-        let http1_run = runtime
-            .try_spawn(async move { http1.run(&http1_runtime).await })
-            .map_err(|error| io::Error::other(format!("spawn HTTP/1.1 listener: {error}")))?;
+        let http1_run = match runtime.try_spawn(async move { http1.run(&http1_runtime).await }) {
+            Ok(run) => run,
+            Err(error) => {
+                drop(self.listener);
+                shutdown.finish();
+                return Err(io::Error::other(format!("spawn HTTP/1.1 listener: {error}")));
+            }
+        };
         let http2_runtime = runtime.clone();
-        let http2_run = runtime
-            .try_spawn(async move { http2.run(&http2_runtime).await })
-            .map_err(|error| io::Error::other(format!("spawn HTTP/2 listener: {error}")))?;
+        let http2_run = match runtime.try_spawn(async move { http2.run(&http2_runtime).await }) {
+            Ok(run) => run,
+            Err(error) => {
+                // The first spawn already owns a live accept loop. Stop and
+                // join it before reporting that the second spawn was refused.
+                shutdown.signal.trigger_immediate();
+                shutdown.force_protocols();
+                let _ = http1_run.await;
+                http1_queue.close();
+                http2_queue.close();
+                drop(self.listener);
+                shutdown.finish();
+                return Err(io::Error::other(format!("spawn HTTP/2 listener: {error}")));
+            }
+        };
 
         let detecting = Arc::new(DetectionTasks::default());
         let accept_result = self
@@ -238,15 +264,20 @@ where
         let _ = self
             .shutdown_signal
             .begin_drain(http1_drain.max(http2_drain));
-        let _ = http1_manager.begin_drain(http1_drain);
-        let _ = http2_manager.begin_drain(http2_drain);
-        let http1_stats = http1_run.await;
-        let http2_stats = http2_run.await;
+        let _ = shutdown.http1.begin_drain(http1_drain);
+        let _ = shutdown.http2.begin_drain(http2_drain);
+        let (http1_stats, http2_stats) = drain_protocols(&shutdown, http1_run, http2_run).await;
         // Wait until neither accept loop can observe a closed queue as an
         // accept error. Close then fences pushes that raced the stop check.
         http1_queue.close();
         http2_queue.close();
         detecting.wait_idle().await;
+        // A failed listener can return before its root-owned connections do.
+        // drain_protocols has requested force-close on that error path.
+        shutdown.http1.wait_all_closed().await;
+        shutdown.http2.wait_all_closed().await;
+        drop(self.listener);
+        shutdown.finish();
         accept_result?;
         Ok(HttpAutoShutdownStats {
             http1: http1_stats?,
@@ -320,6 +351,87 @@ where
             let _ = runtime.try_spawn(detection.hand_off(connection));
         }
     }
+}
+
+/// A dropped/panicking run must not leave root-owned protocol and detection
+/// tasks accepting forever. Drop requests cleanup, never publishes quiescence.
+struct ProtocolShutdown {
+    signal: ShutdownSignal,
+    http1: ConnectionManager,
+    http2: ConnectionManager,
+    completed: bool,
+}
+
+impl ProtocolShutdown {
+    fn force_protocols(&self) {
+        // Use the managers, not just their signals: they close admission and
+        // capture the exact force-close counts before waking connection tasks.
+        self.http1.force_close();
+        self.http2.force_close();
+    }
+
+    fn finish(&mut self) {
+        self.completed = true;
+        self.signal.mark_stopped();
+    }
+}
+
+impl Drop for ProtocolShutdown {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.signal.trigger_immediate();
+            self.force_protocols();
+        }
+    }
+}
+
+/// Keep forwarding a later force-close while BOTH protocol joins are driven.
+/// Neither an early result nor an error from one listener drops the other.
+async fn drain_protocols(
+    shutdown: &ProtocolShutdown,
+    http1: impl Future<Output = io::Result<ShutdownStats>>,
+    http2: impl Future<Output = io::Result<ShutdownStats>>,
+) -> (io::Result<ShutdownStats>, io::Result<ShutdownStats>) {
+    let mut http1 = pin!(http1);
+    let mut http2 = pin!(http2);
+    let mut force = pin!(shutdown.signal.wait_for_phase(ShutdownPhase::ForceClosing));
+    let mut forwarded = false;
+    let mut first = None;
+    let mut second = None;
+    std::future::poll_fn(|cx| {
+        if !forwarded && force.as_mut().poll(cx).is_ready() {
+            shutdown.force_protocols();
+            forwarded = true;
+        }
+        if first.is_none()
+            && let Poll::Ready(result) = http1.as_mut().poll(cx)
+        {
+            first = Some(result);
+        }
+        if second.is_none()
+            && let Poll::Ready(result) = http2.as_mut().poll(cx)
+        {
+            second = Some(result);
+        }
+        if !forwarded
+            && (first.as_ref().is_some_and(Result::is_err)
+                || second.as_ref().is_some_and(Result::is_err))
+        {
+            shutdown.signal.trigger_immediate();
+            shutdown.force_protocols();
+            forwarded = true;
+        }
+        if first.is_some() && second.is_some() {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    })
+    .await;
+    (
+        first.expect("HTTP/1.1 join completed"),
+        second.expect("HTTP/2 join completed"),
+    )
 }
 
 /// Detection only reads an unadmitted connection or performs its handshake:
@@ -488,6 +600,10 @@ impl Drop for DetectionSlot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http::h1::server::{HostPolicy, Http1Config};
+    use crate::http::h1::types::Response;
+    use crate::http::h2::client::Http2Client;
+    use crate::io::AsyncWriteExt;
     use crate::runtime::RuntimeBuilder;
     use std::sync::atomic::AtomicBool;
     use std::task::{Context, Wake, Waker};
@@ -668,5 +784,300 @@ mod tests {
         let mut detection = detection();
         detection.tls = Some(TlsAcceptorBuilder::new(chain, key).build().expect("acceptor"));
         stalled_connection_closes_on_shutdown(detection);
+    }
+
+    fn protocol_shutdown() -> ProtocolShutdown {
+        ProtocolShutdown {
+            signal: ShutdownSignal::new(),
+            http1: ConnectionManager::new(None, ShutdownSignal::new()),
+            http2: ConnectionManager::new(None, ShutdownSignal::new()),
+            completed: false,
+        }
+    }
+
+    fn empty_stats() -> ShutdownStats {
+        ShutdownStats {
+            drained: 0,
+            force_closed: 0,
+            duration: Duration::ZERO,
+            drain_report: None,
+        }
+    }
+
+    #[test]
+    fn force_close_is_forwarded_before_and_during_protocol_drain() {
+        for immediate in [false, true] {
+            let mut shutdown = protocol_shutdown();
+            let second_done = AtomicBool::new(false);
+            let flag = Arc::new(WakeFlag(AtomicBool::new(false)));
+            let waker = Waker::from(Arc::clone(&flag));
+            let mut cx = Context::from_waker(&waker);
+            assert!(shutdown.signal.begin_drain(Duration::from_secs(60)));
+            if immediate {
+                shutdown.signal.trigger_immediate();
+            }
+            let first = std::future::ready(Ok(empty_stats()));
+            let second = std::future::poll_fn(|_| {
+                if second_done.load(Ordering::Acquire) {
+                    Poll::Ready(Ok(empty_stats()))
+                } else {
+                    Poll::Pending
+                }
+            });
+            let mut drain = Box::pin(drain_protocols(&shutdown, first, second));
+            assert!(drain.as_mut().poll(&mut cx).is_pending());
+            if !immediate {
+                assert_eq!(shutdown.http1.shutdown_phase(), ShutdownPhase::Running);
+                assert_eq!(shutdown.http2.shutdown_phase(), ShutdownPhase::Running);
+                assert!(shutdown.signal.begin_force_close());
+                assert!(flag.0.load(Ordering::Acquire));
+                assert!(drain.as_mut().poll(&mut cx).is_pending());
+            }
+            assert_eq!(shutdown.http1.shutdown_phase(), ShutdownPhase::ForceClosing);
+            assert_eq!(shutdown.http2.shutdown_phase(), ShutdownPhase::ForceClosing);
+            second_done.store(true, Ordering::Release);
+            assert!(matches!(
+                drain.as_mut().poll(&mut cx),
+                Poll::Ready((Ok(_), Ok(_)))
+            ));
+            drop(drain);
+            shutdown.finish();
+            let signal = shutdown.signal.clone();
+            drop(shutdown);
+            assert_eq!(signal.phase(), ShutdownPhase::Stopped);
+        }
+    }
+
+    #[test]
+    fn protocol_error_forces_the_sibling_but_still_awaits_it() {
+        let shutdown = protocol_shutdown();
+        let second_done = AtomicBool::new(false);
+        let second = std::future::poll_fn(|_| {
+            if second_done.load(Ordering::Acquire) {
+                Poll::Ready(Ok(empty_stats()))
+            } else {
+                Poll::Pending
+            }
+        });
+        let first = std::future::ready(Err(io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            "listener failed",
+        )));
+        let mut drain = pin!(drain_protocols(&shutdown, first, second));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(drain.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(shutdown.signal.phase(), ShutdownPhase::ForceClosing);
+        assert_eq!(shutdown.http1.shutdown_phase(), ShutdownPhase::ForceClosing);
+        assert_eq!(shutdown.http2.shutdown_phase(), ShutdownPhase::ForceClosing);
+        second_done.store(true, Ordering::Release);
+        match drain.as_mut().poll(&mut cx) {
+            Poll::Ready((Err(error), Ok(_))) => {
+                assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+            }
+            _ => panic!("preserve the first error and join the sibling"),
+        }
+    }
+
+    #[test]
+    fn dropping_the_protocol_owner_requests_cleanup_not_quiescence() {
+        let shutdown = protocol_shutdown();
+        let signal = shutdown.signal.clone();
+        let managers = [shutdown.http1.clone(), shutdown.http2.clone()];
+        let peer = SocketAddr::from(([127, 0, 0, 1], 1234));
+        let connections = managers
+            .each_ref()
+            .map(|manager| manager.register(peer).expect("admit"));
+        drop(shutdown);
+        assert_eq!(signal.phase(), ShutdownPhase::ForceClosing);
+        for manager in &managers {
+            assert_eq!(manager.shutdown_phase(), ShutdownPhase::ForceClosing);
+            assert!(manager.register(peer).is_none());
+            assert_eq!(
+                manager.active_count(),
+                1,
+                "cleanup has only been requested"
+            );
+        }
+        drop(connections);
+        for manager in &managers {
+            assert!(manager.is_empty());
+        }
+        assert!(
+            !signal.is_stopped(),
+            "only an awaited run may publish completion"
+        );
+    }
+
+    struct ActiveRequest(Arc<AtomicUsize>);
+
+    impl Drop for ActiveRequest {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    #[allow(clippy::too_many_lines)] // Keep the native failure/rescue lifecycle together.
+    fn native_force_close(http2: bool, immediate: bool) {
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(2)
+            .build()
+            .expect("runtime");
+        let handle = runtime.handle();
+        runtime.block_on(handle.clone().spawn(async move {
+            let entered = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let active = Arc::new(AtomicUsize::new(0));
+            let handler_entered = Arc::clone(&entered);
+            let handler_release = Arc::clone(&release);
+            let handler_active = Arc::clone(&active);
+            let handler = move |_: Request| {
+                let entered = Arc::clone(&handler_entered);
+                let release = Arc::clone(&handler_release);
+                let active = Arc::clone(&handler_active);
+                async move {
+                    active.fetch_add(1, Ordering::AcqRel);
+                    let _active = ActiveRequest(active);
+                    let mut finish = pin!(release.notified());
+                    let mut announced = false;
+                    std::future::poll_fn(|cx| {
+                        let result = finish.as_mut().poll(cx);
+                        if !announced {
+                            announced = true;
+                            entered.notify_one();
+                        }
+                        result
+                    })
+                    .await;
+                    Response::new(200, "OK", Vec::new())
+                }
+            };
+            let config = HttpAutoListenerConfig::default()
+                .http1(
+                    Http1ListenerConfig::default()
+                        .http_config(Http1Config {
+                            allowed_hosts: HostPolicy::allow_list(vec!["localhost".to_owned()]),
+                            ..Http1Config::default()
+                        })
+                        .drain_timeout(Duration::from_secs(60))
+                        .hard_drain_timeout(Duration::from_secs(60)),
+                )
+                .http2(
+                    Http2ListenerConfig::default()
+                        .host_policy(HostPolicy::allow_list(vec!["localhost".to_owned()]))
+                        .drain_timeout(Duration::from_secs(60))
+                        .hard_drain_timeout(Duration::from_secs(60)),
+                );
+            let listener = HttpAutoListener::bind("127.0.0.1:0", handler, config)
+                .await
+                .expect("bind");
+            let addr = listener.local_addr().expect("address");
+            let shutdown = listener.shutdown_signal();
+            let run_runtime = handle.clone();
+            let mut run = Box::pin(handle.spawn(async move { listener.run(&run_runtime).await }));
+            let client = handle.spawn(async move {
+                let mut stream = TcpStream::connect(addr).await.expect("connect");
+                if http2 {
+                    let cx = Cx::current().expect("client context");
+                    Http2Client::new()
+                        .get(format!("http://localhost:{}/held", addr.port()))
+                        .send_on(&cx, stream)
+                        .await
+                        .is_ok_and(|response| response.status == 200)
+                } else {
+                    AsyncWriteExt::write_all(
+                        &mut stream,
+                        b"GET /held HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .expect("request");
+                    let mut response = Vec::new();
+                    let _ = AsyncReadExt::read_to_end(&mut stream, &mut response).await;
+                    response.starts_with(b"HTTP/1.1 200")
+                }
+            });
+            crate::time::timeout(now(), Duration::from_secs(5), entered.notified())
+                .await
+                .expect("handler must be parked before shutdown");
+            assert_eq!(active.load(Ordering::Acquire), 1);
+            if immediate {
+                shutdown.trigger_immediate();
+            } else {
+                assert!(shutdown.begin_drain(Duration::from_secs(60)));
+                assert!(shutdown.begin_force_close());
+            }
+            let result = crate::time::timeout(now(), Duration::from_secs(5), run.as_mut()).await;
+            let (without_rescue, stats) = match result {
+                Ok(stats) => (true, stats),
+                Err(_) => {
+                    // Release the parked handler on the old/broken path so
+                    // the regression fails without leaving a live task behind.
+                    release.notify_waiters();
+                    let stats = crate::time::timeout(now(), Duration::from_secs(5), run.as_mut())
+                        .await
+                        .expect("rescue must finish the listener");
+                    (false, stats)
+                }
+            };
+            let stats = stats.expect("listener result");
+            let succeeded = crate::time::timeout(now(), Duration::from_secs(5), client)
+                .await
+                .expect("client completion");
+            assert_eq!(
+                active.load(Ordering::Acquire),
+                0,
+                "handler resources released"
+            );
+            assert!(without_rescue, "force-close was not forwarded to the protocol");
+            assert!(
+                !succeeded,
+                "the held handler must not produce its success response"
+            );
+            assert_eq!(shutdown.phase(), ShutdownPhase::Stopped);
+            let (served, idle) = if http2 {
+                (stats.http2, stats.http1)
+            } else {
+                (stats.http1, stats.http2)
+            };
+            assert_eq!(served.force_closed, 1);
+            assert_eq!(served.drained, 0);
+            assert_eq!(idle.force_closed, 0);
+        }));
+    }
+
+    #[test]
+    fn http1_force_close_releases_a_running_request() {
+        for immediate in [false, true] {
+            native_force_close(false, immediate);
+        }
+    }
+
+    #[test]
+    fn http2_force_close_releases_a_running_request() {
+        for immediate in [false, true] {
+            native_force_close(true, immediate);
+        }
+    }
+
+    #[test]
+    fn graceful_run_publishes_stopped() {
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(2)
+            .build()
+            .expect("runtime");
+        let handle = runtime.handle();
+        runtime.block_on(handle.clone().spawn(async move {
+            let listener = HttpAutoListener::bind(
+                "127.0.0.1:0",
+                |_: Request| async { Response::new(200, "OK", Vec::new()) },
+                HttpAutoListenerConfig::default(),
+            )
+            .await
+            .expect("bind");
+            let shutdown = listener.shutdown_signal();
+            assert!(shutdown.begin_drain(Duration::from_secs(60)));
+            let stats = listener.run(&handle).await.expect("drain");
+            assert_eq!(shutdown.phase(), ShutdownPhase::Stopped);
+            assert_eq!(stats.http1.force_closed + stats.http2.force_closed, 0);
+        }));
     }
 }
