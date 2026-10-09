@@ -739,8 +739,8 @@ where
     F: FnOnce() -> Result<T, DnsError> + Send + 'static,
     T: Send + 'static,
 {
-    // Always a dedicated thread, whatever the ambient `Cx`'s blocking pool
-    // (phase 0); a cancelled caller stops waiting for it.
+    // Gated like net::lookup_all; then a dedicated thread a cancelled caller stops waiting for.
+    crate::cx::io_gate::require_ambient_io("net::dns::Resolver")?;
     unless_cancelled(crate::cx::Cx::current(), spawn_blocking_on_thread(f)).await
 }
 
