@@ -426,3 +426,46 @@ fn lab_race_drains_a_losing_branchs_grandchild() {
     assert_eq!(value, 3);
     assert!(checked.retired.load(Ordering::Acquire));
 }
+
+/// A losing branch that waits for a task it spawned through
+/// `Scope::join_all_owned`, which passes the branch's cancellation to that
+/// task, is drained (br-asupersync-inleqi). A plain `TaskHandle::join` does
+/// not observe the branch's cancellation, and the branch's region is cancelled
+/// only after the branch finishes, so such a race would wait for the task.
+fn loser_joining_its_own_child_owned_is_drained(workers: usize) {
+    native(workers, |owner| async move {
+        let grandchild = Arc::new(Witness::default());
+        let (_sender, receiver) = mpsc::channel::<()>(1);
+        let spawned = Arc::clone(&grandchild);
+        let awaited = Arc::clone(&grandchild);
+        let result = owner
+            .race_drained_with(vec![
+                boxed(move |child: Cx| async move {
+                    let handle = child
+                        .spawn(move |gcx| descendant(gcx, receiver, spawned))
+                        .expect("the losing branch spawns a child");
+                    let _ = child.scope().join_all_owned(&child, vec![handle]).await;
+                    0_u8
+                }),
+                boxed(move |_child| async move {
+                    awaited
+                        .wait(|seen| seen.parked.load(Ordering::Acquire))
+                        .await;
+                    5_u8
+                }),
+            ])
+            .await;
+        assert_eq!(result.expect("the second branch wins"), 5);
+        assert_drained(&grandchild, "the child the losing branch was joining");
+    });
+}
+
+#[test]
+fn a_loser_joining_its_own_child_owned_is_drained_current_thread() {
+    loser_joining_its_own_child_owned_is_drained(1);
+}
+
+#[test]
+fn a_loser_joining_its_own_child_owned_is_drained_multi_thread() {
+    loser_joining_its_own_child_owned_is_drained(4);
+}

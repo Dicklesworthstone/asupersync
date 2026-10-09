@@ -387,6 +387,15 @@ impl Cx<cap::All> {
     /// the owning region remains the asynchronous cleanup boundary on drop.
     /// Noncooperative user code can prevent draining; no preemption is promised.
     ///
+    /// A branch that waits for a task it spawned must wait cancel-aware.
+    /// [`TaskHandle::join`](crate::runtime::TaskHandle::join) does not observe
+    /// the branch's cancellation, and the branch's region (with that task) is
+    /// cancelled only after the branch finishes. A losing branch blocked in such
+    /// a join therefore waits until that task finishes on its own. Join through
+    /// [`Scope::join_all_owned`](super::Scope::join_all_owned) instead, which
+    /// passes the branch's cancellation to the tasks it waits for
+    /// (br-asupersync-inleqi).
+    ///
     /// # Errors
     /// Empty input or synchronous admission refusal returns `JoinError::Cancelled` with a
     /// resource-unavailable reason. Parent cancellation retains its cause.

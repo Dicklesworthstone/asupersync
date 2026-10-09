@@ -4645,6 +4645,12 @@ impl Cx<cap::All> {
     /// `rx.recv(&cx)`) never sees it, so the drain waits until that branch
     /// finishes on its own. Prefer [`Cx::race_drained_with`], whose factories
     /// receive their child context, or call [`Cx::current`] inside the branch.
+    /// The same holds for a branch that waits for a task it spawned.
+    /// [`TaskHandle::join`](crate::runtime::TaskHandle::join) does not observe
+    /// the branch's cancellation, and the branch's region is cancelled only
+    /// after the branch finishes. Join such a task through
+    /// [`Scope::join_all_owned`](crate::cx::Scope::join_all_owned), which passes
+    /// the branch's cancellation on (br-asupersync-inleqi).
     ///
     /// On an empty branch list this is pending until the context is cancelled,
     /// mirroring [`Cx::race`].
