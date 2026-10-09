@@ -561,6 +561,16 @@ signature, a key for replay caches. Locations are not covered by the
 signature, so a token's bytes can change without changing what it authorizes;
 the replay key does not (`asupersync-s45073`).
 
+### Retry budgets
+
+`RetryBudget` is a token bucket that many `retry` loops share, so retries
+against a failing dependency stay within a rate instead of becoming a retry
+storm. `Retry::with_budget(budget)` makes each retry (never a first attempt)
+take a token. With none left, the loop fails at once with the error it just
+got. `RateLimitedRetryPolicy::budget(now)` builds one from the policy's token
+bucket. `RetryBudget`, `RetryTokenBucket` and `RateLimitedRetryPolicy` are
+re-exported from `asupersync::combinator` (`asupersync-e9gn8y`).
+
 ### Fixed
 
 - HTTP/1 answers a rejected request head with `400`/`413`/`431` instead of
@@ -1079,6 +1089,115 @@ Security:
   store unchanged, and the serialized key seeds are wiped after each write.
   Before, a failed revocation left the key revoked only in memory, so it was
   valid again after a restart.
+
+### Fixed by the 2026-10-08 and 2026-10-09 audits
+
+- Blocking pool with cohort affinity: every 16 dispatches, a worker looks at
+  the other cohorts' queues, in turn. A task routed to a cohort that no live
+  worker serves is no longer starved while the live workers stay busy
+  (`mopkmt`).
+- `ExactImageChild` (Linux):
+  - `try_wait` leaves the exited leader unreaped, so its process-group number
+    stays reserved;
+  - `wait` and drop kill the group before they reap;
+  - so a group number freed and reused by an unrelated group is never sent
+    SIGKILL (`7tg3di`). macOS keeps reaping in `try_wait`.
+- Current-thread runtime: a drive cut short with local spawn requests still
+  queued advances their regions after failing the requests, so a Closing
+  region waiting only on them can finish (`01oghn`).
+- Regions: a closing region drops its heap payloads with its lock released,
+  one at a time under `catch_unwind`, and only then publishes the close. A
+  panicking destructor no longer leaves it half closed, and whoever sees the
+  close still happens after every destructor (`fu6cr0`).
+- Metrics: a `RuntimeBuilder::metrics` provider's `record_panic` is called
+  with `"task_execution"` for every task that panics, on both runtime shapes.
+  Before, only the legacy `scheduler::Worker` called it (`vp02m5`).
+- Redis:
+  - a cluster `-MOVED`/`-ASK` redirect to a host that is a socket path is
+    refused;
+  - `unix://` and `redis+unix://` URLs read `user`/`username` and
+    `pass`/`password` from the query, and a bare `user@` names the user;
+  - other parameters, and a credential given twice, are refused;
+  - the socket path is percent-decoded (`x4kh5w`).
+- HTTP clients (`mu5yhv`):
+  - `Http2Client::tls_connector` gives the client its own connection pool, so
+    clones with different TLS identities never reuse each other's
+    connections;
+  - with `pool_wait_timeout`, a fresh-connection retry waiting at the limit
+    takes a connection released during its wait;
+  - an `Http2Client` with `reuse_connections` does not reuse a connection
+    whose server currently admits no stream (`SETTINGS_MAX_CONCURRENT_STREAMS`
+    0), and returning a connection to the pool closes the expired idle
+    connections of every origin, not only of the origin used next.
+- gRPC:
+  - `Channel::server_streaming_on` accepts `unix:` channels, in any case
+    (`mu5yhv`);
+  - clones of a legacy `GrpcClient` streaming call's `ResponseStream`, read
+    from different tasks, are each woken by messages and by the end of the
+    call (`mu5yhv`);
+  - with `ChannelBuilder::reuse_connections`, a unary call that ends with a
+    non-OK `grpc-status` keeps its connection pooled (`mu5yhv`);
+  - `Server::bind_registered_duplex_http2_unix` refuses an input
+    configuration the TCP bind refuses, before it returns the listener
+    (`x4kh5w`);
+  - a `unix:` target's query and fragment are not part of its socket path,
+    and an absolute path is percent-decoded, as grpc-go reads it
+    (`unix:///tmp/my%20app.sock` is `/tmp/my app.sock`); a relative
+    `unix:path` is used as written (`mu5yhv`);
+  - `Channel::connect` refuses a `unix:` target this platform cannot dial (a
+    non-Unix platform, or a socket path too long for `sockaddr_un`) instead
+    of failing every call as a retryable UNAVAILABLE (`x4kh5w`).
+- Web: with `Router::prefer_specific_mounts`, a request for a mount's prefix
+  itself (`/admin`) goes to the mounted router even when it routes no `/`,
+  so its fallback and layers answer it instead of a `/:page` route
+  (`x4kh5w`).
+- W3C trace context: an incoming `tracestate` holding a control character
+  other than a tab, or DEL, is dropped, as an over-long one is, instead of
+  being forwarded and failing every outgoing request of the trace. Spaces and
+  tabs around it are trimmed; other bytes, non-ASCII included, are kept
+  (`mu5yhv`).
+- `HttpAutoListener::run` (`313vbb`):
+  - cancelling the task that runs it stops accepting and drains, instead of
+    spinning on `Interrupted` accept errors;
+  - the listening socket closes as soon as accepting ends, so new clients
+    are refused during the drain, as with the HTTP/1.1 and HTTP/2 listeners.
+    As with them, `lb_compat_keep_socket` (in either protocol's config) keeps
+    it bound until the drain is over.
+- PostgreSQL (`qml5yb`):
+  - `SystemTime` maps to `timestamptz` only. Decoding a `timestamp without
+    time zone` into it is refused, because that value names no instant.
+  - A prepared statement whose parameter the server typed as another built-in
+    type refuses a `SystemTime` (cast it, `$n::timestamptz`). Other `ToSql`
+    types, and parameters the server typed as a domain, bind as before. (The
+    check reads a new `#[doc(hidden)]` provided `ToSql` method; existing
+    implementations need no change.)
+  - A prepared statement binds a `Vec<String>` or `Vec<&str>` where the
+    server typed the parameter `varchar[]` or `bpchar[]`; it was refused with
+    42804.
+  - For a Unix-socket host, given as `postgres:///db?host=/dir` or
+    percent-encoded as the host, `port`, `user` and `password` are read;
+    `requirepeer`, `dbname`, repeated values and a second `host` are
+    refused. (v0.4.3 parsed `%2F` socket-host URLs without those checks,
+    but it had no Unix-socket support, so they never connected.)
+  - Crafted timestamp text can no longer overflow the parser.
+  - A binary array refuses an element whose `ToSql` encodes as text, unless
+    the element type is `text`, `varchar`, `bpchar` or `json`. A downstream
+    `PgArrayElement` could otherwise store a wrong value with no error.
+  - Over a Unix socket, a configured password the server never asks for (peer
+    or trust authentication) is still refused, with a message that says so.
+- MySQL: a comment-prefixed `USE` or a version-comment `SET sql_mode` clears
+  the prepared-statement cache like a plain one. An executable comment
+  (`/*!NNNNN ... */`, MariaDB's `/*M!`) is read both as the statement and as
+  skipped, since the server decides which by version, and either reading
+  that changes the database clears the cache (`qml5yb`).
+- Resource sampling (`1ir2em`):
+  - a downgrade waits until usage falls by the hysteresis margin;
+  - Emergency is entered inside a cooldown;
+  - descriptor and connection pressure use the soft `NOFILE` limit and, on
+    Linux, this process's own sockets;
+  - on macOS and the BSDs, where only the lifetime peak RSS (`ru_maxrss`) is
+    available, memory is not measured, so one burst can no longer hold
+    admission at Emergency for the life of the process.
 
 ### UDP launch-time sends and the socket error queue (Linux, GH #73)
 
