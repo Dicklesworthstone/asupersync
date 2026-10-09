@@ -5282,7 +5282,7 @@ fn atp_replay(args: &AtpReplayArgs, output: &mut Output) -> Result<(), CliError>
 
     if !payload.replay_successful {
         return Err(
-            CliError::new("atp_replay_failed", "ATP replay did not reproduce cleanly")
+            CliError::new("atp_replay_failed", "ATP replay found no failure witness")
                 .context("artifact_dir", payload.artifact_dir)
                 .exit_code(ExitCode::USER_ERROR),
         );
@@ -8017,9 +8017,9 @@ struct AtpReplayOutput {
 impl Outputtable for AtpReplayOutput {
     fn human_format(&self) -> String {
         let status = if self.replay_successful {
-            "reproduced"
+            "verified: the recorded trace witnesses every recorded violation (not re-executed)"
         } else {
-            "not reproduced"
+            "no failure witness in the recorded trace"
         };
         let mut lines = vec![
             format!("ATP Replay: {status}"),
@@ -14632,6 +14632,17 @@ ambient_discovery = true
             values[0]["requested_oracles"],
             serde_json::json!(["manifest_integrity"])
         );
+
+        // The human report names what was checked; nothing is re-executed.
+        let capture = SharedWrite::default();
+        let mut output = Output::with_writer(OutputFormat::Human, capture.clone());
+        atp_replay(&args, &mut output).expect("atp replay succeeds");
+        let rendered = capture.contents();
+        assert!(
+            rendered.starts_with("ATP Replay: verified: the recorded trace witnesses every recorded violation (not re-executed)"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("reproduced"), "{rendered}");
     }
 
     #[test]
