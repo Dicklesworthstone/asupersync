@@ -6341,6 +6341,207 @@ mod tests {
     }
 
     #[test]
+    fn quic_receiver_aggregator_union_of_peers_decodes_object() {
+        let config = QuicConfig {
+            symbol_size: 64,
+            max_block_size: 256,
+            repair_overhead: 1.0,
+            ..trusted_quic_config()
+        };
+        let entries = vec![("payload.bin".to_string(), varied_bytes(256, 42))];
+        let manifest = manifest_from_entries("multi-peer-union", true, &entries);
+        let mut decoders = decoders_from_manifest(&manifest, &config).expect("decoders");
+        let object_id = decoders[0].object_id;
+
+        let peer1_path = PathId::new(1);
+        let peer2_path = PathId::new(2);
+        let aggregator = multi_peer_quic_receive_aggregator([
+            (peer1_path, "peer-1"),
+            (peer2_path, "peer-2"),
+        ]);
+
+        let symbols = entries[0]
+            .1
+            .chunks_exact(usize::from(config.symbol_size))
+            .enumerate()
+            .map(|(esi, payload)| {
+                Symbol::new(
+                    SymbolId::new(object_id, 0, u32::try_from(esi).expect("esi fits")),
+                    payload.to_vec(),
+                    SymbolKind::Source,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(symbols.len(), 4, "4 source symbols for 256 bytes at symbol_size 64");
+
+        // Peer 1 sends only ESI 0 and ESI 1 (rank 2 < rank 4, cannot decode alone)
+        let p1_s0 = feed_multi_peer_aggregated_symbol_for_entry(
+            &mut decoders,
+            0,
+            AuthenticatedSymbol::new_unauthenticated(symbols[0].clone()),
+            &aggregator,
+            peer1_path,
+            Time::ZERO,
+        )
+        .expect("peer 1 symbol 0 accepted");
+        let p1_s1 = feed_multi_peer_aggregated_symbol_for_entry(
+            &mut decoders,
+            0,
+            AuthenticatedSymbol::new_unauthenticated(symbols[1].clone()),
+            &aggregator,
+            peer1_path,
+            Time::from_millis(1),
+        )
+        .expect("peer 1 symbol 1 accepted");
+        assert_eq!(p1_s0, 1);
+        assert_eq!(p1_s1, 1);
+        assemble_completed_entries(&mut decoders);
+        assert!(
+            !decoders[0].complete,
+            "peer 1 alone has only 2 of 4 symbols and cannot decode"
+        );
+
+        // Peer 2 sends the remaining ESI 2 and ESI 3 (rank 2 < rank 4 alone)
+        let p2_s2 = feed_multi_peer_aggregated_symbol_for_entry(
+            &mut decoders,
+            0,
+            AuthenticatedSymbol::new_unauthenticated(symbols[2].clone()),
+            &aggregator,
+            peer2_path,
+            Time::from_millis(2),
+        )
+        .expect("peer 2 symbol 2 accepted");
+        let p2_s3 = feed_multi_peer_aggregated_symbol_for_entry(
+            &mut decoders,
+            0,
+            AuthenticatedSymbol::new_unauthenticated(symbols[3].clone()),
+            &aggregator,
+            peer2_path,
+            Time::from_millis(3),
+        )
+        .expect("peer 2 symbol 3 accepted");
+        assert_eq!(p2_s2, 1);
+        assert_eq!(p2_s3, 1);
+
+        // The UNION of symbols across peer 1 and peer 2 reaches rank K=4!
+        assemble_completed_entries(&mut decoders);
+        assert!(
+            decoders[0].complete,
+            "union of symbols across peer 1 and peer 2 must reach rank K and decode"
+        );
+        assert_eq!(decoders[0].data, entries[0].1);
+        let receipt = verify_in_memory_receipt(&manifest, &decoders);
+        assert!(receipt.committed);
+        assert!(receipt.sha_ok);
+        assert!(receipt.merkle_ok);
+
+        let stats = aggregator.stats();
+        assert_eq!(stats.total_processed, 4);
+        assert_eq!(stats.dedup.unique_symbols, 4);
+        assert_eq!(stats.dedup.duplicates_detected, 0);
+        assert_eq!(stats.paths.total_received, 4);
+    }
+
+    #[test]
+    fn quic_receiver_aggregator_multi_peer_union_with_cross_peer_duplicates() {
+        let config = QuicConfig {
+            symbol_size: 64,
+            max_block_size: 256,
+            repair_overhead: 1.0,
+            ..trusted_quic_config()
+        };
+        let entries = vec![("dedup_payload.bin".to_string(), varied_bytes(256, 77))];
+        let manifest = manifest_from_entries("multi-peer-dedup", true, &entries);
+        let mut decoders = decoders_from_manifest(&manifest, &config).expect("decoders");
+        let object_id = decoders[0].object_id;
+
+        let peer1_path = PathId::new(1);
+        let peer2_path = PathId::new(2);
+        let aggregator = multi_peer_quic_receive_aggregator([
+            (peer1_path, "peer-1"),
+            (peer2_path, "peer-2"),
+        ]);
+
+        let symbols = entries[0]
+            .1
+            .chunks_exact(usize::from(config.symbol_size))
+            .enumerate()
+            .map(|(esi, payload)| {
+                Symbol::new(
+                    SymbolId::new(object_id, 0, u32::try_from(esi).expect("esi fits")),
+                    payload.to_vec(),
+                    SymbolKind::Source,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        // Peer 1 sends ESI 0, 1, 2
+        for symbol in &symbols[0..3] {
+            let accepted = feed_multi_peer_aggregated_symbol_for_entry(
+                &mut decoders,
+                0,
+                AuthenticatedSymbol::new_unauthenticated(symbol.clone()),
+                &aggregator,
+                peer1_path,
+                Time::ZERO,
+            )
+            .expect("symbol accepted");
+            assert_eq!(accepted, 1);
+        }
+        assemble_completed_entries(&mut decoders);
+        assert!(!decoders[0].complete, "peer 1 lacks symbol 3");
+
+        // Peer 2 sends ESI 1 (duplicate), ESI 2 (duplicate), and ESI 3 (novel)
+        let dup1 = feed_multi_peer_aggregated_symbol_for_entry(
+            &mut decoders,
+            0,
+            AuthenticatedSymbol::new_unauthenticated(symbols[1].clone()),
+            &aggregator,
+            peer2_path,
+            Time::from_millis(5),
+        )
+        .expect("duplicate handled");
+        assert_eq!(dup1, 0, "duplicate ESI 1 must be suppressed pre-decoder");
+
+        let dup2 = feed_multi_peer_aggregated_symbol_for_entry(
+            &mut decoders,
+            0,
+            AuthenticatedSymbol::new_unauthenticated(symbols[2].clone()),
+            &aggregator,
+            peer2_path,
+            Time::from_millis(6),
+        )
+        .expect("duplicate handled");
+        assert_eq!(dup2, 0, "duplicate ESI 2 must be suppressed pre-decoder");
+
+        let novel = feed_multi_peer_aggregated_symbol_for_entry(
+            &mut decoders,
+            0,
+            AuthenticatedSymbol::new_unauthenticated(symbols[3].clone()),
+            &aggregator,
+            peer2_path,
+            Time::from_millis(7),
+        )
+        .expect("novel symbol accepted");
+        assert_eq!(novel, 1, "novel ESI 3 must be delivered to decoder");
+
+        assemble_completed_entries(&mut decoders);
+        assert!(decoders[0].complete, "union with deduplicated symbols completes decode");
+        assert_eq!(decoders[0].data, entries[0].1);
+        let receipt = verify_in_memory_receipt(&manifest, &decoders);
+        assert!(receipt.committed);
+        assert!(receipt.sha_ok);
+        assert!(receipt.merkle_ok);
+
+        let stats = aggregator.stats();
+        assert_eq!(stats.total_processed, 6);
+        assert_eq!(stats.dedup.unique_symbols, 4);
+        assert_eq!(stats.dedup.duplicates_detected, 2);
+        assert_eq!(stats.paths.total_received, 6);
+        assert_eq!(stats.paths.total_duplicates, 2);
+    }
+
+    #[test]
     fn quic_receiver_feedback_synthesizes_missing_source_symbol_requests() {
         let config = QuicConfig {
             symbol_size: 128,

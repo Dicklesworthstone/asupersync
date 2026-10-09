@@ -6346,6 +6346,32 @@ fn primary_quic_receive_aggregator(remote: impl Into<String>) -> MultipathAggreg
     aggregator
 }
 
+/// Create a [`MultipathAggregator`] for multi-peer QUIC reception.
+///
+/// Registers all configured peer paths with their unique [`PathId`].
+/// Immediate delivery is enabled so symbols that arrive out-of-order across
+/// independent peers are dispatched directly to the RaptorQ decoder pipeline
+/// rather than stalling behind missing sequences.
+#[must_use]
+pub fn multi_peer_quic_receive_aggregator(
+    peers: impl IntoIterator<Item = (PathId, impl Into<String>)>,
+) -> MultipathAggregator {
+    let aggregator = MultipathAggregator::new(AggregatorConfig {
+        reorder: ReordererConfig {
+            immediate_delivery: true,
+            ..ReordererConfig::default()
+        },
+        ..AggregatorConfig::default()
+    });
+    for (path_id, remote) in peers {
+        let label = format!("quic-peer-{}", path_id.0);
+        aggregator
+            .paths()
+            .register(TransportPath::new(path_id, label, remote));
+    }
+    aggregator
+}
+
 fn authenticated_symbol_with_existing_tag(
     symbol: Symbol,
     source: &AuthenticatedSymbol,
@@ -6516,6 +6542,51 @@ fn feed_aggregated_symbol_for_entry_deferred(
         duplicate,
     );
     Ok(accepted)
+}
+
+/// Feed an authenticated symbol from a specific peer path into the multi-peer receive aggregator.
+///
+/// Deduplicates across all peers. If the symbol is unique, feeds it into the per-entry decoder.
+/// Returns the number of symbols accepted by the decoder (0 or 1).
+#[allow(dead_code)]
+fn feed_multi_peer_aggregated_symbol_for_entry(
+    decoders: &mut [QuicEntryDecoder],
+    entry: u32,
+    auth_symbol: AuthenticatedSymbol,
+    aggregator: &MultipathAggregator,
+    path: PathId,
+    now: Time,
+) -> Result<u64, QuicTransportError> {
+    feed_aggregated_symbol_for_entry(
+        decoders,
+        entry,
+        auth_symbol,
+        QuicReceiveAggregation::new(aggregator, path, now),
+    )
+}
+
+/// Deferred feed of an authenticated symbol from a specific peer path into the multi-peer receive aggregator.
+#[allow(dead_code)]
+fn feed_multi_peer_aggregated_symbol_for_entry_deferred(
+    cx: &Cx,
+    decoders: &mut [QuicEntryDecoder],
+    entry: u32,
+    auth_symbol: AuthenticatedSymbol,
+    aggregator: &MultipathAggregator,
+    path: PathId,
+    now: Time,
+    config: &QuicConfig,
+    decode_stats: &mut QuicDecodeStats,
+) -> Result<u64, QuicTransportError> {
+    feed_aggregated_symbol_for_entry_deferred(
+        cx,
+        decoders,
+        entry,
+        auth_symbol,
+        QuicReceiveAggregation::new(aggregator, path, now).with_trace(cx),
+        config,
+        decode_stats,
+    )
 }
 
 #[allow(dead_code)]
