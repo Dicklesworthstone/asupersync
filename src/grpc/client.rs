@@ -1510,7 +1510,7 @@ impl NativeH2Target {
         let target = parse_channel_uri(uri)
             .map_err(|error| Status::unavailable(format!("invalid gRPC channel target: {error}")))?;
         if let Some(path) = target.unix_path {
-            return Self::unix(path, use_tls, dial_addr);
+            return Self::unix(&path, use_tls, dial_addr);
         }
         let use_tls = use_tls || target.use_tls;
         let host = target.host;
@@ -2411,7 +2411,7 @@ struct ChannelUri<'a> {
     port: Option<u16>,
     use_tls: bool,
     /// The socket path of a `unix:` target.
-    unix_path: Option<&'a str>,
+    unix_path: Option<std::borrow::Cow<'a, str>>,
 }
 
 fn parse_channel_uri(uri: &str) -> Result<ChannelUri<'_>, GrpcError> {
@@ -2554,11 +2554,17 @@ fn parse_channel_uri(uri: &str) -> Result<ChannelUri<'_>, GrpcError> {
 /// The socket path of a gRPC `unix:` target: `unix:path` (relative or
 /// absolute) or `unix:///absolute/path`, as gRPC's naming documentation
 /// spells them. `None` for any other URI.
-fn unix_target_path(uri: &str) -> Option<Result<&str, GrpcError>> {
+///
+/// As in grpc-go, whose resolver reads the parsed URL: a query or fragment is
+/// not part of the path, and an absolute path is percent-decoded
+/// (`unix:///tmp/my%20app.sock` is `/tmp/my app.sock`), while a relative
+/// `unix:path` is used as written (br-asupersync-mu5yhv finding 6).
+fn unix_target_path(uri: &str) -> Option<Result<std::borrow::Cow<'_, str>, GrpcError>> {
     let rest = uri
         .get(..5)
         .filter(|scheme| scheme.eq_ignore_ascii_case("unix:"))
         .map(|_| &uri[5..])?;
+    let rest = rest.split(['?', '#']).next().unwrap_or_default();
     let path = match rest.strip_prefix("//") {
         Some(absolute) if absolute.starts_with('/') => absolute,
         Some(_) => {
@@ -2568,6 +2574,16 @@ fn unix_target_path(uri: &str) -> Option<Result<&str, GrpcError>> {
         }
         None => rest,
     };
+    let path = if path.starts_with('/') {
+        let Some(decoded) = percent_decode_socket_path(path) else {
+            return Some(Err(GrpcError::transport(
+                "unix: channel URI has an invalid percent escape in its socket path",
+            )));
+        };
+        decoded
+    } else {
+        std::borrow::Cow::Borrowed(path)
+    };
     if path.is_empty() || path.contains('\0') {
         return Some(Err(GrpcError::transport(
             "unix: channel URI needs a socket path without NUL bytes",
@@ -2576,13 +2592,68 @@ fn unix_target_path(uri: &str) -> Option<Result<&str, GrpcError>> {
     Some(Ok(path))
 }
 
+/// Whether this platform can dial the socket `path`. A target it never can
+/// is refused when the channel is built, instead of failing every call with
+/// an UNAVAILABLE that callers retry (d0's LOW 3 on br-asupersync-x4kh5w).
+fn unix_target_dialable(path: &str) -> Result<(), GrpcError> {
+    if !cfg!(unix) {
+        return Err(GrpcError::transport_kind(
+            TransportErrorKind::ProtocolViolation,
+            "unix: gRPC channel targets need a Unix platform",
+        ));
+    }
+    // sockaddr_un's sun_path, which also holds the terminating NUL: 108
+    // bytes on Linux, 104 on macOS and the BSDs.
+    let sun_path = if cfg!(any(target_os = "linux", target_os = "android")) {
+        108
+    } else {
+        104
+    };
+    if path.len() >= sun_path {
+        return Err(GrpcError::transport_kind(
+            TransportErrorKind::ProtocolViolation,
+            format!(
+                "unix: channel socket path is {} bytes; a socket path here must be shorter \
+                 than {sun_path}",
+                path.len()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// `path` with its `%XX` escapes decoded; `None` for an incomplete or
+/// non-hex escape, or bytes that are not UTF-8.
+fn percent_decode_socket_path(path: &str) -> Option<std::borrow::Cow<'_, str>> {
+    if !path.contains('%') {
+        return Some(std::borrow::Cow::Borrowed(path));
+    }
+    let bytes = path.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let escape = bytes.get(index + 1..index + 3)?;
+            if !escape.iter().all(u8::is_ascii_hexdigit) {
+                return None;
+            }
+            decoded.push(u8::from_str_radix(std::str::from_utf8(escape).ok()?, 16).ok()?);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok().map(std::borrow::Cow::Owned)
+}
+
 fn validate_channel_security(
     uri: &str,
     config: &ChannelConfig,
     has_tls_connector: bool,
     has_explicit_dial_addr: bool,
 ) -> Result<(), GrpcError> {
-    if unix_target_path(uri).is_some() {
+    if let Some(path) = unix_target_path(uri) {
         if config.use_tls || has_tls_connector {
             return Err(GrpcError::transport_kind(
                 TransportErrorKind::ProtocolViolation,
@@ -2595,7 +2666,7 @@ fn validate_channel_security(
                 "unix: channel targets cannot use an explicit dial address",
             ));
         }
-        return Ok(());
+        return unix_target_dialable(&path?);
     }
     let (scheme, _) = uri
         .split_once("://")
@@ -4598,6 +4669,61 @@ mod tests {
             Poll::Ready(Some(Ok(7)))
         ));
         crate::test_complete!("a_dropped_response_stream_clone_forgets_its_parked_waker");
+    }
+
+    /// A unix: target's path was used verbatim (asupersync-mu5yhv finding
+    /// 6): `unix:///tmp/my%20app.sock` dialled a file named with a literal
+    /// `%20`, and a query or fragment stayed in the file name.
+    #[test]
+    fn unix_channel_targets_decode_an_absolute_path_and_drop_query_and_fragment() {
+        let path = |uri: &str| {
+            parse_channel_uri(uri)
+                .ok()
+                .and_then(|target| target.unix_path)
+                .map(std::borrow::Cow::into_owned)
+        };
+        assert_eq!(
+            path("unix:///tmp/my%20app.sock").as_deref(),
+            Some("/tmp/my app.sock")
+        );
+        assert_eq!(
+            path("unix:/tmp/my%20app.sock").as_deref(),
+            Some("/tmp/my app.sock")
+        );
+        assert_eq!(
+            path("unix:///run/x.sock?foo#bar").as_deref(),
+            Some("/run/x.sock")
+        );
+        assert_eq!(path("UNIX:///run/x.sock").as_deref(), Some("/run/x.sock"));
+        // A relative path is used as written, as grpc-go uses the URL's
+        // opaque part.
+        assert_eq!(
+            path("unix:relative%20name.sock").as_deref(),
+            Some("relative%20name.sock")
+        );
+        for refused in [
+            "unix:///tmp/cut%2",
+            "unix:///tmp/bad%zz",
+            "unix:///tmp/nul%00",
+            "unix:///tmp/not-utf8-%ff",
+            "unix:?only-a-query",
+        ] {
+            assert!(parse_channel_uri(refused).is_err(), "{refused}");
+        }
+    }
+
+    /// d0's LOW 3 on asupersync-x4kh5w: Channel::connect accepted a unix:
+    /// target whose path no sockaddr_un holds, and every call made on it then
+    /// failed UNAVAILABLE, which callers retry.
+    #[cfg(unix)]
+    #[test]
+    fn a_unix_target_the_platform_cannot_dial_is_refused_by_connect() {
+        let too_long = format!("unix:///tmp/{}.sock", "a".repeat(200));
+        let refused = futures_lite::future::block_on(Channel::connect(too_long))
+            .expect_err("a socket path longer than sun_path");
+        assert!(refused.to_string().contains("socket path"), "{refused}");
+        // Building a channel dials nothing, so a short path is accepted.
+        assert!(futures_lite::future::block_on(Channel::connect("unix:///tmp/ok.sock")).is_ok());
     }
 
     #[test]
