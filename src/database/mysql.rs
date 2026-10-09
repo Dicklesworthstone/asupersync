@@ -7416,10 +7416,18 @@ pub fn fuzz_build_stmt_execute_packet(
 /// Whether `sql` is a `USE`, or a `SET` that changes sql_mode, once the
 /// comments MySQL skips before a statement are skipped. The text of a
 /// `/*!NNNNN ... */` version comment (MariaDB's `/*M!NNNNNN ... */` too) is
-/// part of the statement, so it is read; an empty one (`/*!40101*/`) is
-/// skipped. A `/*` comment that never ends answers `true`; text that is only
-/// a `#` or `-- ` comment runs nothing and answers `false`.
+/// part of the statement, so it is read. A server older than the comment's
+/// version skips it instead (and MySQL skips every `/*M!` comment), so the
+/// statement after the comment is read as well, and either reading that
+/// rebinds answers `true`. A `/*` comment that never ends answers `true`, and
+/// so does SQL with more than 16 executable comments; text that is only a
+/// `#` or `-- ` comment runs nothing and answers `false`.
 fn mysql_statement_rebinds_prepared_statements(sql: &str) -> bool {
+    let mut executable_comments = 16;
+    mysql_statement_rebinds_within(sql, &mut executable_comments)
+}
+
+fn mysql_statement_rebinds_within(sql: &str, executable_comments: &mut u32) -> bool {
     let mut rest = sql;
     loop {
         rest = rest.trim_start();
@@ -7428,7 +7436,19 @@ fn mysql_statement_rebinds_prepared_statements(sql: &str) -> bool {
             .or_else(|| rest.strip_prefix("/*M!"))
         {
             let text = body.trim_start_matches(|c: char| c.is_ascii_digit());
-            rest = text.trim_start().strip_prefix("*/").unwrap_or(text);
+            let Some((_, skipped)) = text.split_once("*/") else {
+                return true;
+            };
+            // Each executable comment is read both ways; the budget bounds
+            // the work SQL full of them could cost.
+            if *executable_comments == 0 {
+                return true;
+            }
+            *executable_comments -= 1;
+            if mysql_statement_rebinds_within(skipped, executable_comments) {
+                return true;
+            }
+            rest = text;
         } else if let Some(body) = rest.strip_prefix("/*") {
             let Some((_, after)) = body.split_once("*/") else {
                 return true;

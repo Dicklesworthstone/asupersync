@@ -3319,7 +3319,7 @@ struct SocketFormParams<'a> {
     password: Option<&'a str>,
     /// A parameter of that form this client cannot honour.
     unsupported: Option<&'a str>,
-    /// One of `port`, `user` and `password` given more than once.
+    /// One of `host`, `port`, `user` and `password` given more than once.
     repeated: Option<&'a str>,
 }
 
@@ -3482,7 +3482,11 @@ impl PgConnectOptions {
                     // host (usually a Unix-socket directory) as a parameter.
                     // It is read only when the URL names no host, where it
                     // used to be refused as a missing host.
-                    "host" => host_param = Some(percent_decode(value)),
+                    "host" => {
+                        if host_param.replace(percent_decode(value)).is_some() {
+                            socket_params.repeated = Some(key);
+                        }
+                    }
                     // Read only for a socket host, below.
                     "port" | "user" | "password" => {
                         let slot = match key {
@@ -3536,6 +3540,10 @@ impl PgConnectOptions {
             let twice = |name: &str| PgError::InvalidUrl(format!("the URL gives the {name} twice"));
             if let Some(key) = socket_params.repeated {
                 return Err(twice(key));
+            }
+            // A socket directory in the authority and a `host` parameter.
+            if !host.is_empty() && host_param.is_some() {
+                return Err(twice("host"));
             }
             if let Some(value) = socket_params.port {
                 if host_port.contains(':') {

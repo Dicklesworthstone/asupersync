@@ -4671,6 +4671,64 @@ mod tests {
         crate::test_complete!("a_dropped_response_stream_clone_forgets_its_parked_waker");
     }
 
+    /// The last waker parked for a response handle can belong to a task
+    /// whose future owns another clone of the same stream, whose drop takes
+    /// the fan-out lock. A waker forgotten (handle dropped) or replaced
+    /// (re-registered from another task) used to be dropped under that lock,
+    /// and the thread deadlocked on itself.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn dropping_a_parked_waker_that_owns_a_stream_clone_does_not_deadlock() {
+        init_test("dropping_a_parked_waker_that_owns_a_stream_clone_does_not_deadlock");
+        // Holds the clone only to drop it with the waker.
+        struct OwnsAClone {
+            _clone: Mutex<Option<ResponseStream<u32>>>,
+        }
+        // The waker exists to own the clone, so Waker::noop() cannot stand in.
+        #[allow(clippy::manual_noop_waker)]
+        impl Wake for OwnsAClone {
+            fn wake(self: Arc<Self>) {}
+        }
+        let parked_reader = || {
+            let feed = Arc::new(Mutex::new(Feed::default()));
+            let call = LegacyNativeCall::new(
+                Box::new(FedCall(Arc::clone(&feed))),
+                LegacyShape::ServerStreaming,
+            );
+            let mut reader = ResponseStream::<u32>::native(call);
+            let owner = Arc::new(OwnsAClone {
+                _clone: Mutex::new(Some(reader.clone())),
+            });
+            // Only the call keeps this waker once the poll returns.
+            assert!(poll_stream(&mut reader, &Waker::from(owner)).is_pending());
+            reader
+        };
+        let finishes = |name: &str, step: Box<dyn FnOnce() + Send>| {
+            let (done, finished) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                step();
+                let _ = done.send(());
+            });
+            assert!(
+                finished.recv_timeout(Duration::from_secs(5)).is_ok(),
+                "{name} deadlocked"
+            );
+        };
+
+        let reader = parked_reader();
+        finishes("dropping the reader", Box::new(move || drop(reader)));
+
+        let mut reader = parked_reader();
+        finishes(
+            "re-registering from another task",
+            Box::new(move || {
+                let other = counting_waker(&Arc::new(AtomicUsize::new(0)));
+                assert!(poll_stream(&mut reader, &other).is_pending());
+            }),
+        );
+        crate::test_complete!("dropping_a_parked_waker_that_owns_a_stream_clone_does_not_deadlock");
+    }
+
     /// A unix: target's path was used verbatim (asupersync-mu5yhv finding
     /// 6): `unix:///tmp/my%20app.sock` dialled a file named with a literal
     /// `%20`, and a query or fragment stayed in the file name.

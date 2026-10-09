@@ -3158,7 +3158,9 @@ mod tests {
         let opts =
             PgConnectOptions::parse("postgres://h:5434/app?port=5433&user=app").expect("tcp form");
         assert_eq!((opts.port, opts.user.as_str()), (5434, "postgres"));
-        assert!(PgConnectOptions::parse("postgres://h/app?user=a&user=b&requirepeer=x").is_ok());
+        assert!(
+            PgConnectOptions::parse("postgres://h/app?user=a&user=b&requirepeer=x&host=/x").is_ok()
+        );
     }
 
     #[test]
@@ -3176,6 +3178,8 @@ mod tests {
             "postgres://%2Ftmp/app?dbname=other",
             "postgres://u@%2Ftmp/app?user=other",
             "postgres://%2Ftmp:5433/app?port=5434",
+            "postgres://%2Ftmp/app?host=/run/pg",
+            "postgres:///app?host=/tmp&host=/run/pg",
         ] {
             assert!(
                 matches!(PgConnectOptions::parse(url), Err(PgError::InvalidUrl(_))),

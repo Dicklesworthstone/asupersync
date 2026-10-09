@@ -191,18 +191,25 @@ struct FanoutWakers {
 }
 
 impl Fanout {
+    /// A waker this replaces is dropped after the lock is released: dropping
+    /// it can free a task whose future drops a handle of this call, which
+    /// takes this lock again.
     fn register(&self, role: Role, waker: &Waker) {
         let mut wakers = lock_unpoisoned(&self.wakers);
         let slot = match role {
             Role::Sink => &mut wakers.sink,
             Role::Response(responder) => {
                 let responses = &mut wakers.responses;
-                match responses.iter_mut().find(|(id, _)| *id == responder) {
-                    // `Waker::clone_from` keeps an entry that already wakes
-                    // the same task.
-                    Some((_, current)) => current.clone_from(waker),
-                    None => responses.push((responder, waker.clone())),
-                }
+                let replaced = match responses.iter_mut().find(|(id, _)| *id == responder) {
+                    Some((_, current)) if current.will_wake(waker) => None,
+                    Some((_, current)) => Some(std::mem::replace(current, waker.clone())),
+                    None => {
+                        responses.push((responder, waker.clone()));
+                        None
+                    }
+                };
+                drop(wakers);
+                drop(replaced);
                 return;
             }
         };
@@ -210,7 +217,9 @@ impl Fanout {
             .as_ref()
             .is_some_and(|current| current.will_wake(waker))
         {
-            *slot = Some(waker.clone());
+            let replaced = slot.replace(waker.clone());
+            drop(wakers);
+            drop(replaced);
         }
     }
 
@@ -311,11 +320,15 @@ impl LegacyNativeCall {
 
     /// Forgets the waker a dropped response handle left parked, so handles
     /// cloned and dropped while the call is quiet do not pile up until the
-    /// next wake.
+    /// next wake. The waker is dropped after the lock is released: dropping
+    /// it can free a task whose future drops another handle of this call.
     pub(super) fn forget_responder(&self, responder: u64) {
-        lock_unpoisoned(&self.fanout.wakers)
-            .responses
-            .retain(|(id, _)| *id != responder);
+        let forgotten = {
+            let mut wakers = lock_unpoisoned(&self.fanout.wakers);
+            let index = wakers.responses.iter().position(|(id, _)| *id == responder);
+            index.map(|index| wakers.responses.remove(index))
+        };
+        drop(forgotten);
     }
 
     /// Response handles with a waker parked on the call.

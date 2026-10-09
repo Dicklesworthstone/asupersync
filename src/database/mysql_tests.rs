@@ -6025,6 +6025,11 @@ mod tests {
             "/*!40101*/ USE b",
             "/*!40101 */ USE b",
             "/*M!100100 USE b */",
+            // A server older than the comment's version skips it, and MySQL
+            // skips every /*M! comment, so the statement after it counts too.
+            "/*M!999999 x */ USE b",
+            "/*!99999 x */ USE b",
+            "/*!40101 USE b",
         ] {
             assert!(
                 MySqlConnection::statement_rebinds_prepared_statements(sql),
@@ -6040,12 +6045,23 @@ mod tests {
             "-- only a comment",
             "INSERT INTO t VALUES ('USE b')",
             "/*!40101*/ SELECT 1",
+            "/*!40101 SELECT 1 */ SELECT 2",
         ] {
             assert!(
                 !MySqlConnection::statement_rebinds_prepared_statements(sql),
                 "{sql:?} must keep the prepared-statement cache"
             );
         }
+        // Each executable comment is read both ways, within a budget: SQL
+        // with more than 16 of them clears the cache rather than cost more.
+        let few = format!("{} SELECT 1", "/*!*/".repeat(3));
+        assert!(!MySqlConnection::statement_rebinds_prepared_statements(
+            &few
+        ));
+        let many = format!("{} SELECT 1", "/*!*/".repeat(17));
+        assert!(MySqlConnection::statement_rebinds_prepared_statements(
+            &many
+        ));
     }
 
     /// H1: MySQL binds a prepared statement to the default database it was
