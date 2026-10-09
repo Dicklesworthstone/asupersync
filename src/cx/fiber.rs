@@ -252,6 +252,11 @@ struct FiberCtx {
     /// Cancellations that arrived before the context was built, replayed in
     /// order when it is, to the same effect they would have had on it.
     pending: Mutex<Vec<PendingCancel>>,
+    /// The fiber's waker. Once the context is built it is the context's
+    /// cancel waker, as the scheduler's waker is a task's, so a cancellation
+    /// polls the fiber again even when it waits on something that registers
+    /// no cancel waker of its own (a semaphore, an RwLock, a nested scope).
+    wake: Waker,
 }
 
 #[derive(Debug)]
@@ -263,11 +268,12 @@ enum PendingCancel {
 }
 
 impl FiberCtx {
-    fn new(task_cx: Arc<Cx>) -> Self {
+    fn new(task_cx: Arc<Cx>, wake: Waker) -> Self {
         Self {
             task_cx,
             cx: OnceLock::new(),
             pending: Mutex::new(Vec::new()),
+            wake,
         }
     }
 
@@ -288,18 +294,25 @@ impl FiberCtx {
     /// Passes the task's or a sibling's cancellation on. Like
     /// `Cx::inherit_cancel`, it does nothing once the fiber has one.
     fn inherit_cancel(&self, reason: &CancelReason) {
+        let mut recorded = false;
         let built = self.built_or_record(|pending| {
             if pending.is_empty() {
                 pending.push(PendingCancel::Inherit(reason.clone()));
+                recorded = true;
             }
         });
         if let Some(cx) = built {
             cx.inherit_cancel(reason);
+        } else if recorded {
+            // No context of the fiber's own can wake it yet: poll it once, so
+            // a wait on the task's context sees the task's cancellation.
+            self.wake.wake_by_ref();
         }
     }
 
     /// [`FiberHandle::cancel`].
     fn cancel_from_handle(&self) {
+        let mut recorded = false;
         let built = self.built_or_record(|pending| {
             if !pending
                 .iter()
@@ -314,10 +327,13 @@ impl FiberCtx {
                 .with_task(task.task_id())
                 .with_message(HANDLE_CANCEL_MESSAGE);
                 pending.push(PendingCancel::Handle(reason));
+                recorded = true;
             }
         });
         if let Some(cx) = built {
             cx.cancel_with(CancelKind::User, Some(HANDLE_CANCEL_MESSAGE));
+        } else if recorded {
+            self.wake.wake_by_ref();
         }
     }
 }
@@ -344,6 +360,13 @@ impl LazyCurrentCx for FiberCtx {
                 PendingCancel::Handle(reason) => cx.cancel_with_reason(reason),
             }
         }
+        // Installed after the replay, which the fiber being polled sees
+        // directly. From now on a cancellation of this context polls the
+        // fiber again, as the scheduler's cancel waker does for a task.
+        let cancel_waker = Arc::new(crate::types::task_context::CancelWaker::new(
+            self.wake.clone(),
+        ));
+        cx.inner.write().cancel_waker = Some(cancel_waker);
         self.cx.get_or_init(|| cx)
     }
 }
@@ -618,12 +641,7 @@ impl<'env> FiberScope<'env> {
             FiberCompletion(Arc::clone(&completion)),
             Arc::clone(&self.state.fiber_panicked),
         ));
-        let fiber_ctx = self
-            .state
-            .task_cx
-            .as_ref()
-            .map(|task_cx| Arc::new(FiberCtx::new(Arc::clone(task_cx))));
-        let index = {
+        let (index, fiber_ctx) = {
             let mut guard = self.state.set.lock();
             let set = &mut *guard;
             assert!(
@@ -634,7 +652,6 @@ impl<'env> FiberScope<'env> {
                 let slot = &mut set.slots[index];
                 slot.wake.queued.store(true, Ordering::Release);
                 slot.future = Some(fiber);
-                slot.ctx.clone_from(&fiber_ctx);
                 index
             } else {
                 let index = set.slots.len();
@@ -647,12 +664,21 @@ impl<'env> FiberScope<'env> {
                     future: Some(fiber),
                     waker: Some(Waker::from(Arc::clone(&wake))),
                     wake,
-                    ctx: fiber_ctx.clone(),
+                    ctx: None,
                 });
                 index
             };
+            // The fiber's context wakes the fiber through its slot's waker.
+            let slot = &mut set.slots[index];
+            let fiber_ctx = self.state.task_cx.as_ref().map(|task_cx| {
+                Arc::new(FiberCtx::new(
+                    Arc::clone(task_cx),
+                    Waker::from(Arc::clone(&slot.wake)),
+                ))
+            });
+            slot.ctx.clone_from(&fiber_ctx);
             set.live += 1;
-            index
+            (index, fiber_ctx)
         };
         self.state.queue.schedule(index);
         FiberHandle {
@@ -691,9 +717,10 @@ impl ScopeState<'_> {
 
     /// Passes cancellation on to the live fibers' contexts: the task's own,
     /// when it is observable (requested and not masked), and a fail-fast
-    /// cancellation after a fiber panicked. A cancelled fiber's waits wake,
-    /// so it is polled in this pass or the next. A fiber that has not read
-    /// its context yet gets the cancellation when it does.
+    /// cancellation after a fiber panicked. Cancelling a fiber's context
+    /// wakes the fiber (its cancel waker), so it is polled in this pass or
+    /// the next. A fiber that has not read its context yet gets the
+    /// cancellation when it does, and is woken once now.
     fn propagate_cancellation(&self) {
         let panicked = self.fiber_panicked.swap(false, Ordering::AcqRel);
         let from_task = self
@@ -1910,5 +1937,83 @@ mod tests {
         release.send_blocking(()).expect("the fiber still waits");
         let report = lab.run_until_quiescent_with_report();
         assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    // --- A cancellation polls the fiber again (br-asupersync-tc55xq) ---
+
+    /// Waits as a semaphore or RwLock acquire does: it registers no cancel
+    /// waker and sees cancellation only when it is polled again. It checks
+    /// `waited_on`, or else the ambient context (the fiber's own).
+    fn sees_cancel_only_when_polled(waited_on: Option<Cx>) -> impl Future<Output = CancelKind> {
+        poll_fn(move |_| {
+            let cx = waited_on
+                .clone()
+                .unwrap_or_else(|| Cx::current().expect("an ambient context"));
+            if cx.checkpoint().is_err() {
+                let reason = cx
+                    .cancel_reason()
+                    .expect("a cancelled context has a reason");
+                Poll::Ready(reason.kind)
+            } else {
+                Poll::Pending
+            }
+        })
+    }
+
+    #[test]
+    fn a_handle_cancel_polls_a_fiber_whose_wait_registered_no_cancel_waker() {
+        let kind = within_watchdog(|| {
+            let task_cx = Cx::for_testing();
+            block_on_in(&task_cx, async {
+                scope(|s| async move {
+                    let wait = s.spawn(sees_cancel_only_when_polled(None));
+                    crate::runtime::yield_now().await;
+                    wait.cancel();
+                    wait.await.expect("fiber")
+                })
+                .await
+            })
+        });
+        assert_eq!(kind, CancelKind::User);
+    }
+
+    #[test]
+    fn cancelling_a_fiber_reaches_the_fibers_of_a_scope_nested_in_it() {
+        let reason = within_watchdog(|| {
+            let task_cx = Cx::for_testing();
+            block_on_in(&task_cx, async {
+                scope(|s| async move {
+                    let outer = s.spawn(async {
+                        scope(|inner| async move {
+                            inner.spawn(until_cancelled()).await.expect("inner fiber")
+                        })
+                        .await
+                    });
+                    crate::runtime::yield_now().await;
+                    outer.cancel();
+                    outer.await.expect("outer fiber")
+                })
+                .await
+            })
+        });
+        assert_eq!(reason.kind, CancelKind::User);
+    }
+
+    #[test]
+    fn the_tasks_cancellation_polls_a_fiber_waiting_on_the_tasks_context() {
+        let kind = within_watchdog(|| {
+            let task_cx = Cx::for_testing();
+            let task_ref = &task_cx;
+            block_on_in(&task_cx, async {
+                scope(|s| async move {
+                    let wait = s.spawn(sees_cancel_only_when_polled(Some(task_ref.clone())));
+                    crate::runtime::yield_now().await;
+                    task_ref.cancel_with(CancelKind::Shutdown, Some("the task is cancelled"));
+                    wait.await.expect("fiber")
+                })
+                .await
+            })
+        });
+        assert_eq!(kind, CancelKind::Shutdown);
     }
 }
