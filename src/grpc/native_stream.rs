@@ -361,6 +361,9 @@ pub struct NativeServerStream<IO, C> {
     inbound: BytesMut,
     outbound: BytesMut,
     outbound_flushed: bool,
+    // Set once a write fails because the peer closed the connection; the
+    // stream then only reads (see write_failed).
+    write_failure: Option<Status>,
     body: BytesMut,
     response: ResponseHead,
     body_limit: usize,
@@ -529,7 +532,7 @@ where
             io: Some(io), connection: Some(connection), frames: FrameCodec::new(), codec,
             cx: cx.clone(), cancel_waker: None, clock, deadline, timer,
             inbound: BytesMut::new(), outbound: BytesMut::from(CLIENT_PREFACE),
-            outbound_flushed: false,
+            outbound_flushed: false, write_failure: None,
             body: BytesMut::new(), response: ResponseHead::new(config.max_metadata_bytes, config.accept_gzip),
             body_limit, stream_id, final_status: None, ready_messages: 0,
             unflushed_read_frames: 0,
@@ -686,6 +689,8 @@ where
                         self.unflushed_read_frames = 0;
                         return Poll::Ready(Ok(()));
                     }
+                    // The peer closed the connection: read what it sent.
+                    Poll::Ready(Err(_)) if self.write_failure.is_some() => {}
                     Poll::Ready(Err(error)) => return Poll::Ready(Err(self.finish(error))),
                     // Keep reading while the write is parked (see poll_received).
                     Poll::Pending => {}
@@ -753,15 +758,19 @@ where
         // to finish before looking for the peer's response. Both peers may be
         // waiting for the other direction to drain. The write cursor remains
         // in `outbound`, including across a dropped headers()/message() wait.
-        match self.poll_outbound(task) {
-            Poll::Ready(Ok(())) => self.unflushed_read_frames = 0,
-            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-            Poll::Pending if self.unflushed_read_frames >= MAX_UNFLUSHED_READ_FRAMES => {
-                // poll_outbound registered the write/flush waker (or requested
-                // a cooperative continuation). Do not self-wake a parked writer.
-                return Poll::Pending;
+        if self.write_failure.is_none() {
+            match self.poll_outbound(task) {
+                Poll::Ready(Ok(())) => self.unflushed_read_frames = 0,
+                // The peer closed the connection: read what it sent first.
+                Poll::Ready(Err(_)) if self.write_failure.is_some() => {}
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Pending if self.unflushed_read_frames >= MAX_UNFLUSHED_READ_FRAMES => {
+                    // poll_outbound registered the write/flush waker (or requested
+                    // a cooperative continuation). Do not self-wake a parked writer.
+                    return Poll::Pending;
+                }
+                Poll::Pending => {}
             }
-            Poll::Pending => {}
         }
         for _ in 0..POLL_STEPS {
             match self.frames.decode(&mut self.inbound) {
@@ -785,14 +794,19 @@ where
             match Pin::new(self.io.as_mut().expect("live transport")).poll_read(task, &mut read) {
                 Poll::Ready(Ok(())) => {
                     if read.filled().is_empty() {
-                        return Poll::Ready(Err(Status::unavailable("HTTP/2 EOF before terminal gRPC status")));
+                        return Poll::Ready(Err(self.write_failure.clone().unwrap_or_else(|| {
+                            Status::unavailable("HTTP/2 EOF before terminal gRPC status")
+                        })));
                     }
                     if self.inbound.len().saturating_add(read.filled().len()) > 2 * FRAME_BYTES {
                         return Poll::Ready(Err(Status::resource_exhausted("native HTTP/2 input buffer bound exceeded")));
                     }
                     self.inbound.extend_from_slice(read.filled());
                 }
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(self.transport_status(error))),
+                Poll::Ready(Err(error)) => {
+                    let status = self.transport_status(error);
+                    return Poll::Ready(Err(self.write_failure.clone().unwrap_or(status)));
+                }
                 Poll::Pending => return Poll::Pending,
             }
         }
@@ -802,6 +816,9 @@ where
 
     fn poll_outbound(&mut self, task: &mut Context<'_>) -> Poll<Result<(), Status>> {
         self.outbound_flushed = false;
+        if let Some(failure) = &self.write_failure {
+            return Poll::Ready(Err(failure.clone()));
+        }
         for _ in 0..POLL_STEPS {
             if self.outbound.is_empty() {
                 // The preface must be followed by SETTINGS. A PING also must
@@ -830,7 +847,7 @@ where
                                 self.outbound_flushed = true;
                                 Poll::Ready(Ok(()))
                             }
-                            Poll::Ready(Err(error)) => Poll::Ready(Err(self.transport_status(error))),
+                            Poll::Ready(Err(error)) => Poll::Ready(Err(self.write_failed(error))),
                             Poll::Pending => Poll::Pending,
                         };
                     }
@@ -842,7 +859,7 @@ where
                     return Poll::Ready(Err(Status::internal("transport overreported HTTP/2 write progress")));
                 }
                 Poll::Ready(Ok(written)) => self.outbound.advance(written),
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(self.transport_status(error))),
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(self.write_failed(error))),
                 Poll::Pending => return Poll::Pending,
             }
         }
@@ -876,6 +893,28 @@ where
 
     fn transport_status(&self, error: std::io::Error) -> Status {
         check_cancellation(&self.cx).err().unwrap_or_else(|| io_status(error))
+    }
+
+    // A server that ended the call and closed the connection (a draining
+    // grpc-go server does) fails our next write, while its response and
+    // terminal status may already be waiting to be read. Reporting the write
+    // failure would turn even an OK into a retryable UNAVAILABLE, and a retry
+    // would repeat a completed upload. So stop writing and read: the peer's
+    // status wins, and this failure is reported only if none arrives
+    // (br-asupersync-244ump).
+    fn write_failed(&mut self, error: std::io::Error) -> Status {
+        let peer_closed = matches!(
+            error.kind(),
+            std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+        );
+        let status = self.transport_status(error);
+        if peer_closed && check_cancellation(&self.cx).is_ok() {
+            self.outbound = BytesMut::new();
+            self.write_failure = Some(status.clone());
+        }
+        status
     }
 
     fn finish(&mut self, status: Status) -> Status {

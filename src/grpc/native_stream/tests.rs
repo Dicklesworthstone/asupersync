@@ -17,6 +17,8 @@ struct Probe {
     position: AtomicUsize,
     readable: AtomicUsize,
     drops: AtomicUsize,
+    // Writes past this many bytes fail as if the peer had closed the socket.
+    write_limit: Mutex<Option<usize>>,
 }
 
 struct FixtureIo {
@@ -44,8 +46,13 @@ impl AsyncRead for FixtureIo {
 
 impl AsyncWrite for FixtureIo {
     fn poll_write(self: Pin<&mut Self>, _: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
+        let limit = *self.probe.write_limit.lock().unwrap();
+        let mut writes = self.probe.writes.lock().unwrap();
+        if limit.is_some_and(|limit| writes.len() >= limit) {
+            return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+        }
         let length = bytes.len().min(self.max_chunk);
-        self.probe.writes.lock().unwrap().extend_from_slice(&bytes[..length]);
+        writes.extend_from_slice(&bytes[..length]);
         Poll::Ready(Ok(length))
     }
     fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
@@ -862,4 +869,77 @@ mod duplex {
             assert!(!cx.is_cancel_requested());
         }
     }
+}
+
+/// br-asupersync-244ump: a server that sent its response and closed the
+/// connection makes the client's next write fail. The client reads what the
+/// server already sent and reports that status, not the write failure; the
+/// write failure is the result only when no status arrives.
+#[test]
+fn a_write_failed_by_a_closed_peer_reports_the_status_it_already_sent() {
+    let closed = |bytes: Vec<u8>| {
+        let (io, probe) = fixture(bytes, 4096, true);
+        *probe.write_limit.lock().unwrap() = Some(CLIENT_PREFACE.len());
+        (call(io), probe)
+    };
+
+    let mut bytes = start();
+    bytes.extend(frame(0, 0, &message(b"receipt")));
+    bytes.extend(headers(&[("grpc-status", "0")], true));
+    let (mut stream, probe) = closed(bytes);
+    assert_eq!(run(stream.message()).unwrap().unwrap().as_ref(), b"receipt");
+    assert!(run(stream.message()).unwrap().is_none());
+    assert_eq!(stream.status().unwrap().code(), Code::Ok);
+    assert_eq!(
+        probe.writes.lock().unwrap().len(),
+        CLIENT_PREFACE.len(),
+        "nothing is written after the failed write"
+    );
+
+    let mut bytes = frame(4, 0, &[]);
+    bytes.extend(headers(
+        &[
+            (":status", "200"),
+            ("content-type", "application/grpc"),
+            ("grpc-status", "7"),
+        ],
+        true,
+    ));
+    let (mut stream, _) = closed(bytes);
+    assert_eq!(
+        run(stream.message()).unwrap_err().code(),
+        Code::PermissionDenied
+    );
+
+    let (mut stream, _) = closed(frame(4, 0, &[]));
+    assert_eq!(run(stream.message()).unwrap_err().code(), Code::Unavailable);
+}
+
+/// br-asupersync-244ump: an upload reads after every flush, keepalive or not,
+/// so a status the server sent before the upload finished is reported at the
+/// next send boundary instead of after a send window fills.
+#[test]
+fn an_upload_reports_an_early_status_at_its_next_send_boundary() {
+    let mut bytes = frame(4, 0, &[]);
+    bytes.extend(headers(
+        &[
+            (":status", "200"),
+            ("content-type", "application/grpc"),
+            ("grpc-status", "7"),
+        ],
+        true,
+    ));
+    let (io, _probe) = fixture(bytes, 4096, false);
+    let mut stream = NativeDuplexStream::new(
+        &Cx::for_testing(),
+        io,
+        "localhost",
+        "/test.Upload/Collect",
+        Request::new(()),
+        IdentityCodec,
+        NativeStreamConfig::default(),
+    )
+    .unwrap();
+    let error = run(stream.next_event()).unwrap_err();
+    assert_eq!(error.code(), Code::PermissionDenied);
 }
