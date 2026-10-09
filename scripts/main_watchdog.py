@@ -63,6 +63,10 @@ SCHEMA_VERSION = "main-watchdog-v1"
 WATCHDOG_BEAD = "asupersync-bi2462.147"
 DEFAULT_STATE_DIR = Path(os.environ.get("RCH_TARGET_BASE", "/data/tmp")) / "asupersync_main_watchdog"
 WEB_API_IDENTITY_SUFFIX = "@users.noreply.github.com"
+# Tracker writes go straight to .beads/issues.jsonl, as the shared checkout's agents write it.
+# In DB mode the local beads.db falls behind that JSONL and br then refuses every export, so
+# beads filed here stayed DB-only: bi2462.147.103-.122 reached the JSONL a day late (435d9811e).
+BR = ["br", "--no-db"]
 
 VERDICT_GREEN = "green"
 VERDICT_RED = "red"
@@ -990,10 +994,10 @@ def report_heals(
         closable = all(heal["close"] for heal in group)
         if not closable:
             lines.append("Other targets this bead tracks are still red; it stays open.")
-        run(["br", "comments", "add", bead, "-m", "\n".join(lines), "--author", "main-watchdog"], capture_output=True, check=False)
+        run([*BR, "comments", "add", bead, "-m", "\n".join(lines), "--author", "main-watchdog"], capture_output=True, check=False)
         if closable and issue.get("status") == "open" and not issue.get("assignee"):
             run(
-                ["br", "close", bead, "--reason", f"healed at {group[0]['sha'][:9]} (main watchdog)", "--actor", "main-watchdog"],
+                [*BR, "close", bead, "--reason", f"healed at {group[0]['sha'][:9]} (main watchdog)", "--actor", "main-watchdog"],
                 capture_output=True,
                 check=False,
             )
@@ -1674,7 +1678,7 @@ def post_receipts(plan: dict[str, Any], receipts: list[dict[str, Any]]) -> None:
         path = handle.name
     for bead in cited:
         target = bead if bead.startswith("asupersync-") else bead.removeprefix("br-")
-        subprocess.run(["br", "comments", "add", target, "-f", path, "--author", "main-watchdog"], capture_output=True, check=False)
+        subprocess.run([*BR, "comments", "add", target, "-f", path, "--author", "main-watchdog"], capture_output=True, check=False)
 
 
 def existing_bead_for(new_targets: list[str], open_issues: list[dict[str, Any]]) -> str | None:
@@ -1715,7 +1719,7 @@ def file_bead(payload: dict[str, Any]) -> str | None:
         desc_path = handle.name
     proc = subprocess.run(
         [
-            "br", "create", "--title", payload["title"], "-t", payload["type"], "-p", str(payload["priority"]),
+            *BR, "create", "--title", payload["title"], "-t", payload["type"], "-p", str(payload["priority"]),
             "-l", ",".join(payload["labels"]), "--parent", payload["parent"], "--description-file", desc_path,
             "--actor", "main-watchdog", "--json",
         ],
@@ -2564,11 +2568,11 @@ def close_covered_escalations(
             f"main-watchdog: `{row['sha'][:9]}` is covered by the run at `{row['receipt_head'][:9]}` recorded "
             f"{row['receipt_at']}: every lane was green or red only through known reds that have their own beads."
         )
-        run(["br", "comments", "add", bead, "-m", note, "--author", "main-watchdog"], capture_output=True, check=False)
+        run([*BR, "comments", "add", bead, "-m", note, "--author", "main-watchdog"], capture_output=True, check=False)
         closed = issue.get("status") == "open" and not issue.get("assignee")
         if closed:
             run(
-                ["br", "close", bead, "--reason", f"covered at {row['receipt_head'][:9]} (main watchdog)", "--actor", "main-watchdog"],
+                [*BR, "close", bead, "--reason", f"covered at {row['receipt_head'][:9]} (main watchdog)", "--actor", "main-watchdog"],
                 capture_output=True,
                 check=False,
             )
