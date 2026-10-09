@@ -333,3 +333,131 @@ fn retiring_an_old_registration_does_not_clear_a_replacement_owner() {
     drop(new);
     assert!(ready.waiter.lock().is_none());
 }
+
+#[test]
+fn owner_executor_waker_does_not_outlive_dropped_join_set_in_retirement_barrier() {
+    let cx = Cx::for_testing();
+    let barrier = crate::runtime::task_handle::RetirementBarrier::pending();
+    let (send, receive) = oneshot::channel();
+    let handle = TaskHandle::with_retirement_barrier_for_test(
+        TaskId::new_for_test(1, 0),
+        receive,
+        Weak::new(),
+        Arc::clone(&barrier),
+    );
+    send.send(&cx, Ok(Ok(42))).unwrap();
+
+    let mut set = JoinSet::<u32, &'static str, FailFast>::in_cx(&cx);
+    set.insert_member(handle);
+
+    let (count, waker) = counter();
+    let mut task = Context::from_waker(&waker);
+    let mut waiting = Box::pin(set.join_all_cancel_on_owner(&cx));
+
+    assert!(waiting.as_mut().poll(&mut task).is_pending());
+    assert_eq!(Arc::strong_count(&count), 3, "barrier registered owner waker");
+
+    drop(waiting);
+    assert_eq!(
+        Arc::strong_count(&count),
+        2,
+        "dropping JoinSet cleared owner waker from retirement barrier"
+    );
+
+    barrier.open_and_wake();
+    assert_eq!(
+        count.0.load(Ordering::SeqCst),
+        0,
+        "open_and_wake must not spuriously wake dropped owner waker"
+    );
+}
+
+#[test]
+fn register_before_scan_ordering_in_next_outcome_wakes_waiter() {
+    struct DropAction<F: FnMut()>(Option<F>);
+    impl<F: FnMut()> Drop for DropAction<F> {
+        fn drop(&mut self) {
+            if let Some(mut f) = self.0.take() {
+                f();
+            }
+        }
+    }
+    struct ActionWaker<F: FnMut() + Send + Sync + 'static>(Arc<parking_lot::Mutex<DropAction<F>>>);
+    impl<F: FnMut() + Send + Sync + 'static> Wake for ActionWaker<F> {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    let cx = Cx::for_testing();
+    let mut set = JoinSet::<u32, &'static str, FailFast>::in_cx(&cx);
+
+    let (send_0, handle_0) = member(0);
+    let (_send_1, handle_1) = member(1);
+    let (_send_2, handle_2) = member(2);
+
+    set.insert_member(handle_0);
+    set.insert_member(handle_1);
+    set.insert_member(handle_2);
+
+    let ready = Arc::clone(&set.ready);
+    let send_0 = Arc::new(parking_lot::Mutex::new(Some(send_0)));
+
+    // Member 1 waker: on drop publishes member 0's result
+    let s0 = Arc::clone(&send_0);
+    let cx_clone = cx.clone();
+    let action_1 = Arc::new(parking_lot::Mutex::new(DropAction(Some(move || {
+        if let Some(s) = s0.lock().take() {
+            s.send(&cx_clone, Ok(Ok(0))).unwrap();
+        }
+    }))));
+    let waker_1 = Waker::from(Arc::new(ActionWaker(action_1)));
+
+    // Member 2 waker: on drop fires MemberWake for member 1
+    let r1 = Arc::clone(&ready);
+    let action_2 = Arc::new(parking_lot::Mutex::new(DropAction(Some(move || {
+        Waker::from(Arc::new(MemberWake {
+            index: 1,
+            ready: Arc::clone(&r1),
+        }))
+        .wake();
+    }))));
+    let waker_2 = Waker::from(Arc::new(ActionWaker(action_2)));
+
+    // Park member 1's oneshot receiver with waker_1
+    assert!(
+        set.members
+            .get_mut(&1)
+            .unwrap()
+            .handle
+            .poll_join(&mut Context::from_waker(&waker_1))
+            .is_pending()
+    );
+
+    // Park member 2's oneshot receiver with waker_2
+    assert!(
+        set.members
+            .get_mut(&2)
+            .unwrap()
+            .handle
+            .poll_join(&mut Context::from_waker(&waker_2))
+            .is_pending()
+    );
+
+    // Remove 0 and 1 from candidates so that only 2 is candidate at scan entry
+    set.ready.candidates.lock().remove(&0);
+    set.ready.candidates.lock().remove(&1);
+
+    // Poll join_next once with a counting waker
+    let (count, waiter) = counter();
+    let mut task = Context::from_waker(&waiter);
+    let mut waiting = Box::pin(set.join_next(&cx));
+
+    assert!(waiting.as_mut().poll(&mut task).is_pending());
+
+    // Because collector.refresh ran BEFORE the candidate scan:
+    // When member 2 was polled during the scan, waker_2 was displaced and dropped,
+    // which woke MemberWake for 1. MemberWake for 1 saw the registered waiter and woke it!
+    assert!(
+        count.0.load(Ordering::SeqCst) > 0,
+        "register-before-scan ordering must wake the parked collector"
+    );
+}

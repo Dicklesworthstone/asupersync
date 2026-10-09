@@ -131,6 +131,13 @@ impl RetirementBarrier {
         drop(displaced);
         self.is_open()
     }
+
+    /// Clears any registered waker without opening the barrier or waking it.
+    /// Called when the waiting handle or future is dropped.
+    pub(crate) fn clear_waker(&self) {
+        let displaced = self.waker.lock().take();
+        drop(displaced);
+    }
 }
 
 /// Error returned when joining a spawned task fails.
@@ -1023,6 +1030,12 @@ impl<T> TaskHandle<T> {
     }
 }
 
+impl<T> Drop for TaskHandle<T> {
+    fn drop(&mut self) {
+        self.barrier.clear_waker();
+    }
+}
+
 /// Future returned by [`TaskHandle::join`].
 ///
 /// This future aborts the task if dropped before completion, ensuring correct
@@ -1128,6 +1141,7 @@ impl<T> std::future::Future for JoinFuture<'_, T> {
 
 impl<T> Drop for JoinFuture<'_, T> {
     fn drop(&mut self) {
+        self.barrier.clear_waker();
         // Abort the task if we stop waiting for it.
         // This makes TaskHandle::join cancel-safe and race-safe.
         if !*self.terminal_state && !self.drop_abort_defused {

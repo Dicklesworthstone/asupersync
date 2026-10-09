@@ -470,6 +470,79 @@ mod tests {
         assert!(!finished_cx.is_cancel_requested());
     }
 
+    #[test]
+    fn owner_cancel_first_with_sibling_panic_during_drain_prefers_panic() {
+        let cx = Cx::for_testing();
+        let owner = Cx::for_testing();
+        let scope =
+            crate::cx::Scope::<FailFast>::new(RegionId::new_for_test(9, 0), Budget::INFINITE);
+        let mut set = JoinSet::new(&scope);
+        let (send_0, handle_0) = manual_member::<u32>(1);
+        let (send_1, handle_1) = manual_member::<u32>(2);
+        set.insert_member(handle_0);
+        set.insert_member(handle_1);
+
+        let count = Arc::new(WakeCount::default());
+        let waker = Waker::from(Arc::clone(&count));
+        let mut task = Context::from_waker(&waker);
+        let mut joining = Box::pin(set.try_join_all(&owner));
+
+        // Initial poll with both running returns pending
+        assert!(joining.as_mut().poll(&mut task).is_pending());
+
+        // Cancel owner first
+        owner.cancel_fast(CancelKind::User);
+        assert!(joining.as_mut().poll(&mut task).is_pending());
+
+        // During drain, sibling 1 panics!
+        send_1
+            .send(
+                &cx,
+                Err(JoinError::Panicked(PanicPayload::new(
+                    "sibling panicked during drain",
+                ))),
+            )
+            .unwrap();
+        // Sibling 0 finishes ok
+        send_0.send(&cx, Ok(Ok(100))).unwrap();
+
+        // Finish collection: panic takes precedence over owner cancellation
+        match joining.as_mut().poll(&mut task) {
+            Poll::Ready(Outcome::Panicked(payload)) => {
+                assert!(payload.message().contains("sibling panicked during drain"));
+            }
+            other => panic!("expected Panicked outcome, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn two_failures_in_same_poll_prefers_lower_spawn_index() {
+        let cx = Cx::for_testing();
+        let scope =
+            crate::cx::Scope::<FailFast>::new(RegionId::new_for_test(10, 0), Budget::INFINITE);
+        let mut set = JoinSet::new(&scope);
+        let (send_0, handle_0) = manual_member::<u32>(1);
+        let (send_1, handle_1) = manual_member::<u32>(2);
+        set.insert_member(handle_0);
+        set.insert_member(handle_1);
+
+        // Both members publish errors before the poll occurs
+        send_0.send(&cx, Ok(Err("error from member 0"))).unwrap();
+        send_1.send(&cx, Ok(Err("error from member 1"))).unwrap();
+
+        let count = Arc::new(WakeCount::default());
+        let waker = Waker::from(Arc::clone(&count));
+        let mut task = Context::from_waker(&waker);
+        let mut joining = Box::pin(set.try_join_all(&cx));
+
+        match joining.as_mut().poll(&mut task) {
+            Poll::Ready(Outcome::Err(err)) => {
+                assert_eq!(err, "error from member 0", "lower spawn index must be chosen");
+            }
+            other => panic!("expected Err from member 0, got: {other:?}"),
+        }
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     mod native {
         use super::*;

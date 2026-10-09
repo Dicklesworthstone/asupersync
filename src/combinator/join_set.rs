@@ -415,8 +415,9 @@ where
         self.drain_all(cx).await
     }
 
-    /// Returns the terminal-outcome summary observed so far by
-    /// [`join_next`](Self::join_next).
+    /// Returns the terminal-outcome summary observed so far by collection
+    /// methods on this set (such as [`join_next`](Self::join_next),
+    /// [`try_join_next`](Self::try_join_next), and owner collection APIs).
     ///
     /// `join_all` and `cancel_all` consume the set and return all outcomes
     /// directly, so callers can build their own aggregate from that complete
