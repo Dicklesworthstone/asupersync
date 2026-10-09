@@ -1343,9 +1343,12 @@ impl FromSql for serde_json::Value {
 /// `Vec<T>` and `[T]` of these types bind as the matching array type, so a
 /// batch lookup such as `WHERE id = ANY($1)` takes a `Vec<i64>`, and
 /// `Option<T>` elements bind SQL NULLs. Arrays are sent in binary format; each
-/// element is encoded by its own [`ToSql`] implementation. Decoding goes
-/// through `Vec<T>`'s [`FromSql`] implementation, for any element type `T`
-/// that implements [`FromSql`].
+/// element is encoded by its own [`ToSql`] implementation, which must produce
+/// the binary form of [`Self::ELEMENT_OID`]. An element whose
+/// [`ToSql::format`] is [`Format::Text`] is refused, except for the text
+/// types (`text`, `varchar`, `bpchar`, `json`), whose text is their binary
+/// form. Decoding goes through `Vec<T>`'s [`FromSql`] implementation, for any
+/// element type `T` that implements [`FromSql`].
 pub trait PgArrayElement: ToSql {
     /// The array type a `[Self]` binds as.
     const ARRAY_OID: u32;
@@ -1402,6 +1405,15 @@ fn array_length(value: usize, what: &str) -> Result<i32, PgError> {
     i32::try_from(value).map_err(|_| PgError::Protocol(format!("array {what} exceeds i32::MAX")))
 }
 
+/// Element types whose text form is also their binary form, so an element
+/// that encodes itself as text is still valid inside a binary array.
+fn text_is_binary(element_oid: u32) -> bool {
+    matches!(
+        element_oid,
+        oid::TEXT | oid::VARCHAR | oid::BPCHAR | oid::JSON
+    )
+}
+
 /// PostgreSQL's binary array format: dimension count, has-NULL flag, element
 /// type, then one (length, lower bound) pair per dimension and each element
 /// as a length (-1 for NULL) followed by its bytes.
@@ -1428,6 +1440,16 @@ fn encode_binary_array<T: PgArrayElement>(
                 buf.extend_from_slice(&(-1_i32).to_be_bytes());
             }
             IsNull::No => {
+                // The server reads every element as the binary form of the
+                // element type: a text-encoded int4 "1234" would be stored
+                // as 825373492.
+                if value.format() == Format::Text && !text_is_binary(T::ELEMENT_OID) {
+                    return Err(PgError::Protocol(format!(
+                        "array element of type OID {} encodes as text; a binary array needs \
+                         its binary form",
+                        T::ELEMENT_OID
+                    )));
+                }
                 buf.extend_from_slice(&array_length(element.len(), "element")?.to_be_bytes());
                 buf.extend_from_slice(&element);
             }

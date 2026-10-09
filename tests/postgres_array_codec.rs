@@ -5,7 +5,9 @@
 //! through a real server.
 #![cfg(feature = "postgres")]
 
-use asupersync::database::postgres::{Format, FromSql, IsNull, ToSql, oid};
+use asupersync::database::postgres::{
+    Format, FromSql, IsNull, PgArrayElement, PgError, ToSql, oid,
+};
 
 fn encode(value: &dyn ToSql) -> Vec<u8> {
     let mut buf = Vec::new();
@@ -117,4 +119,51 @@ fn arrays_round_trip_through_the_binary_format() {
     let mut trailing = bytes.clone();
     trailing.push(0);
     assert!(Vec::<i32>::from_sql(&trailing, oid::INT4_ARRAY, Format::Binary).is_err());
+}
+
+/// A downstream id type whose `ToSql` sends the decimal text, which is valid
+/// for a scalar `int4` parameter (`Format::Text`).
+struct UserId(i32);
+
+impl ToSql for UserId {
+    fn to_sql(&self, buf: &mut Vec<u8>) -> Result<IsNull, PgError> {
+        buf.extend_from_slice(self.0.to_string().as_bytes());
+        Ok(IsNull::No)
+    }
+    fn type_oid(&self) -> u32 {
+        oid::INT4
+    }
+    fn format(&self) -> Format {
+        Format::Text
+    }
+}
+
+impl PgArrayElement for UserId {
+    const ARRAY_OID: u32 = oid::INT4_ARRAY;
+    const ELEMENT_OID: u32 = oid::INT4;
+}
+
+/// asupersync-qml5yb finding 6: arrays are sent in binary format, so a
+/// text-encoding element was copied in as is and the server read `b"1234"`
+/// as the int4 825373492: a wrong id stored or matched, with no error. Such
+/// an element is now refused; text types, whose text is their binary form,
+/// still bind.
+#[test]
+fn a_binary_array_refuses_an_element_that_encodes_itself_as_text() {
+    let mut buf = Vec::new();
+    let error = vec![UserId(1234)]
+        .to_sql(&mut buf)
+        .expect_err("a text-encoded int4 inside a binary int4[]");
+    assert!(error.to_string().contains("encodes as text"), "{error}");
+    // A NULL element has no bytes to check.
+    let nulls: Vec<Option<UserId>> = vec![None];
+    assert_eq!(
+        encode(&nulls),
+        be(&[1, 1, oid::INT4.cast_signed(), 1, 1, -1])
+    );
+
+    let mut expected = be(&[1, 0, oid::TEXT.cast_signed(), 1, 1, 1]);
+    expected.push(b'a');
+    assert_eq!(encode(&vec!["a".to_owned()]), expected);
+    assert_eq!(encode(&vec!["a"]), expected);
 }
