@@ -6556,7 +6556,9 @@ impl TriggerConfig {
     /// band's threshold before the band is left (br-asupersync-1ir2em).
     #[must_use]
     pub fn calculate_downgrade_floor(&self, measurement: &ResourceMeasurement) -> DegradationLevel {
-        let usage_ratio = measurement.usage_ratio() + self.hysteresis;
+        // The epsilon absorbs the sum's rounding: 0.70 + 0.10 is just under
+        // 0.80 in f64, which left Light a point early.
+        let usage_ratio = measurement.usage_ratio() + self.hysteresis + 1e-9;
         // `is_critical` with the same margin: within 5% of the maximum.
         let critical = usage_ratio >= 0.95;
         if usage_ratio >= self.hard_threshold {
@@ -7110,9 +7112,19 @@ mod tests {
     fn thfiyk_collect_memory_usage_returns_real_rss() {
         let pressure = Arc::new(ResourcePressure::new());
         let collector = SystemResourceCollector::new(pressure, Duration::from_secs(1));
-        let m = collector
-            .collect_memory_usage()
-            .expect("memory usage read should succeed on supported platform");
+        let read = collector.collect_memory_usage();
+        // macOS and the BSDs read only the lifetime peak (ru_maxrss), which is
+        // refused as current usage (1ir2em HIGH-1).
+        if RSS_READING_IS_LIFETIME_PEAK {
+            match read {
+                Err(ResourceMonitorError::SystemAccessFailed { reason }) => {
+                    assert!(reason.contains("ru_maxrss"), "{reason}");
+                }
+                other => panic!("a lifetime peak is not current usage: {other:?}"),
+            }
+            return;
+        }
+        let m = read.expect("memory usage read should succeed on supported platform");
         // The old constant-only reader always returned 512 MiB exactly; the real
         // reader yields the live VmRSS / ru_maxrss which is virtually
         // never that exact value. We assert (a) non-zero current
@@ -7211,8 +7223,9 @@ mod tests {
 
     /// 1ir2em MEDIUM-2: `EMFILE` comes at the soft descriptor limit, which
     /// both the descriptor and the connection measurements now use as their
-    /// ceiling; the connection count is this process's sockets, so it never
-    /// exceeds its descriptor count.
+    /// ceiling; the connection count is this process's own sockets. (It is
+    /// not compared with the descriptor count: the two scans run at different
+    /// times while other tests open and close sockets.)
     #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
     fn descriptor_and_connection_pressure_use_the_soft_limit_and_own_sockets() {
@@ -7227,12 +7240,7 @@ mod tests {
             .map(|_| std::os::unix::net::UnixStream::pair().expect("socket pair"))
             .collect();
         let sockets = platform::process_connection_count().expect("connection count");
-        let descriptors = platform::process_fd_count().expect("fd count");
         assert!(sockets >= 9, "our listener and eight pair ends: {sockets}");
-        assert!(
-            sockets <= descriptors,
-            "{sockets} sockets counted, but the process holds {descriptors} descriptors"
-        );
         let connections = collector.collect_network_usage().expect("network usage");
         assert_eq!(connections.max_limit, fds.max_limit);
         drop((listener, pairs));
@@ -7255,6 +7263,8 @@ mod tests {
             (86, DegradationLevel::Emergency, DegradationLevel::Emergency),
             (80, DegradationLevel::Emergency, DegradationLevel::Moderate),
             (72, DegradationLevel::Moderate, DegradationLevel::Light),
+            (70, DegradationLevel::Moderate, DegradationLevel::Light),
+            (69, DegradationLevel::Light, DegradationLevel::None),
             (50, DegradationLevel::Light, DegradationLevel::None),
             (90, DegradationLevel::Light, DegradationLevel::Moderate),
         ] {
