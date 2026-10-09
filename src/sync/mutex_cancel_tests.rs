@@ -324,3 +324,53 @@ fn ambient_cancellation_is_not_a_lock_until_timeout() {
     );
     assert_eq!(mutex.waiters(), 1);
 }
+
+/// A waker payload whose destructor panics once armed. Every clone of a
+/// `Waker::from(Arc<..>)` shares it, so it runs when the last clone drops.
+struct PanicsWhenLastDropped(Arc<std::sync::atomic::AtomicBool>);
+// Its Drop is the point; `Waker::noop()` carries no payload to drop.
+#[allow(clippy::manual_noop_waker)]
+impl Wake for PanicsWhenLastDropped {
+    fn wake(self: Arc<Self>) {}
+    fn wake_by_ref(self: &Arc<Self>) {}
+}
+impl Drop for PanicsWhenLastDropped {
+    fn drop(&mut self) {
+        if self.0.swap(false, Ordering::SeqCst) {
+            panic!("waker destructor panicked");
+        }
+    }
+}
+
+/// Completing an acquisition drops the wait's cancel observer, which holds
+/// the last clones of a user waker. A panic in that waker's destructor used
+/// to unwind through the guard just acquired and poison the mutex, although
+/// no critical section ran (br-asupersync-x2cqdf L2). The panic still reaches
+/// the caller; the mutex ends unlocked and not poisoned.
+#[test]
+fn panicking_waker_destructor_after_acquire_does_not_poison() {
+    let cx = Cx::for_testing();
+    let mutex = Mutex::new(5);
+    let held = mutex.try_lock().unwrap();
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut waiting = Box::pin(mutex.lock(&cx));
+    {
+        let waker = Waker::from(Arc::new(PanicsWhenLastDropped(Arc::clone(&armed))));
+        assert!(poll(waiting.as_mut(), &waker).is_pending());
+    }
+    // The hand-off consumes the queued clone; the cancel observer's clones
+    // are the last ones left.
+    drop(held);
+    armed.store(true, Ordering::SeqCst);
+    let (_, other) = counter();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = poll(waiting.as_mut(), &other);
+    }));
+    assert!(
+        outcome.is_err(),
+        "the destructor's panic reaches the caller"
+    );
+    assert!(!armed.load(Ordering::SeqCst), "the armed destructor ran");
+    assert!(!mutex.is_poisoned(), "no critical section ran");
+    assert_eq!(*mutex.try_lock().expect("unlocked after the panic"), 5);
+}
