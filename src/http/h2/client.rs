@@ -268,7 +268,7 @@ impl Http2Client {
     /// open after [`Http2RequestBuilder::send`] completes a request, so later
     /// requests from this client, or a clone of it, reuse them instead of
     /// dialing (and TLS-handshaking) again. A clone later given its own
-    /// [`Self::tls_connector`] stops sharing. `0`, the default, keeps the
+    /// `tls_connector` stops sharing. `0`, the default, keeps the
     /// original behavior: each request owns a fresh connection.
     ///
     /// A pooled connection carries one request at a time; concurrent requests
