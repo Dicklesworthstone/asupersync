@@ -265,7 +265,7 @@ pub enum DynamicChildState {
     Submitted,
     /// Stop requested; the controller still needs to join.
     Stopping,
-    /// Controller joined; the enclosing region is being closed.
+    /// Controller joined; the enclosing region is draining, or has closed while awaiting reap.
     Draining,
     /// Closure or cleanup failed; name and capacity remain reserved until shutdown.
     Quarantined,
@@ -471,6 +471,17 @@ impl<E> Child<E> {
 /// underlying region admission retain their own limits. Nothing is spawned by
 /// merely creating this owner. Methods do not hold a runtime or application lock
 /// while polling a child, waiting for closure or invoking user code.
+///
+/// # Escalation and Storm Containment
+///
+/// Under [`DynamicSupervisor`], each admitted dynamic child tree executes inside its own
+/// per-name boundary region below the dynamic root. If a child tree's controller triggers
+/// [`EscalationPolicy::Escalate`](crate::supervision::EscalationPolicy::Escalate), that escalation cancels only that child's per-name boundary
+/// region; it does not cancel sibling child trees or the dynamic supervisor's owner context.
+/// The escalation outcome is preserved in the child's completion report when reaped (via
+/// [`wait_child`](DynamicSupervisor::wait_child) or [`next_completed`](DynamicSupervisor::next_completed)).
+/// If cross-child restart containment or storm limiting across dynamic children is required,
+/// configure a [`SharedRestartDomain`](crate::supervision::SharedRestartDomain) via [`Scope::open_dynamic_supervisor_with_restarts`](crate::cx::Scope::open_dynamic_supervisor_with_restarts).
 #[must_use = "explicitly shut down or let the enclosing region drain this owner"]
 pub struct DynamicSupervisor<E> {
     owner: Cx,
@@ -563,7 +574,7 @@ impl<E> DynamicSupervisor<E> {
     /// Configured reservation ceiling.
     #[must_use]
     pub const fn capacity(&self) -> usize { self.max_children }
-    /// Whether explicit shutdown has sealed admission.
+    /// Whether admission has been sealed (via explicit shutdown, owner cancellation, or shared restart limits).
     #[must_use]
     pub const fn is_closing(&self) -> bool { self.sealed }
     /// Shared accounting remains available after names have been reaped.

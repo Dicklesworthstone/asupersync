@@ -409,7 +409,13 @@ pub enum RestartPolicy {
 pub enum EscalationPolicy {
     /// Stop the failing actor permanently.
     ///
-    /// The supervisor continues running other children.
+    /// When a child exhausts its restart budget or intensity, it is drained and
+    /// stopped without restarting. The supervisor continues running any remaining
+    /// children. If all children stop, the supervisor finishes with
+    /// [`outcome`](ManagedSupervisorReport::outcome) equal to `Outcome::Ok(())`
+    /// (since budget exhaustion under Stop is a handled policy stop, not an unhandled
+    /// supervisor escalation); the failed child's outcome is preserved in
+    /// [`children`](ManagedSupervisorReport::children).
     #[default]
     Stop,
 
@@ -2034,6 +2040,10 @@ mod managed {
         /// Explicit supervisor-region cleanup outcome, when recorded.
         pub cleanup_outcome: Option<crate::record::task::TaskOutcome>,
         /// Controller stop reason. Child domain errors remain in `children`.
+        /// Under [`EscalationPolicy::Stop`], when a child exhausts its restart
+        /// budget, that child is permanently stopped while the supervisor continues;
+        /// the supervisor's overall outcome remains `Ok(())`, with the child's
+        /// failure preserved in [`children`](Self::children).
         /// Cancellation before successful close/report publication changes Ok
         /// to Cancelled; an explicit infrastructure/cleanup error or panic is
         /// retained. Cancellation after publication cannot rewrite the report.

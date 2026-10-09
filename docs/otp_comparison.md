@@ -22,8 +22,8 @@
 | `init` / `terminate` | `on_start` / `on_stop` with separate budgets | Implemented | Init unmasked (skipped if cancelled); drain + on_stop masked with bounded budget |
 | Supervisor | `SupervisorBuilder` + compiled topology | Implemented | Deterministic child ordering; restart decisions are immutable trace facts |
 | `one_for_one` | `RestartPolicy::OneForOne` | Implemented | Identical semantics |
-| `one_for_all` | `RestartPolicy::OneForAll` | Implemented | Identical semantics; sibling stop in reverse start order |
-| `rest_for_one` | `RestartPolicy::RestForOne` | Implemented | Identical semantics |
+| `one_for_all` | `RestartPolicy::OneForAll` | Implemented | Concurrent sibling cancellation before reverse-start-order drain (unlike OTP's sequential stop-one-and-wait) |
+| `rest_for_one` | `RestartPolicy::RestForOne` | Implemented | Concurrent affected-sibling cancellation before reverse-start-order drain |
 | `max_restarts` / `max_seconds` | `RestartConfig { max_restarts, window }` | Implemented | Window uses virtual time (deterministic in lab) |
 | Backoff | `BackoffStrategy::None \| Fixed \| Exponential` | Implemented | Virtual-time delays; deterministic under replay |
 | Link (bidirectional) | Per-link `ExitPolicy` (Propagate / Trap / Ignore) | Implemented | Policy is per-link, not global `process_flag(trap_exit)` |
