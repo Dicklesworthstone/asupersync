@@ -117,9 +117,9 @@ impl PeakEwmaHedgeController {
         }
     }
 
-    /// Get the current dynamically calculated hedge configuration.
+    /// Get the current dynamically calculated hedge delay.
     #[must_use]
-    pub fn current_config(&self) -> HedgeConfig {
+    pub fn current_delay(&self) -> Duration {
         let mut delay_nanos = self.estimate_nanos.load(Ordering::Relaxed);
 
         if delay_nanos < self.min_delay {
@@ -128,7 +128,13 @@ impl PeakEwmaHedgeController {
             delay_nanos = self.max_delay;
         }
 
-        HedgeConfig::new(Duration::from_nanos(delay_nanos))
+        Duration::from_nanos(delay_nanos)
+    }
+
+    /// Get the current dynamically calculated hedge configuration.
+    #[must_use]
+    pub fn current_config(&self) -> HedgeConfig {
+        HedgeConfig::new(self.current_delay())
     }
 }
 
