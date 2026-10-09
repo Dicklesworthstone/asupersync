@@ -296,3 +296,50 @@ fn cooperative_quantum_yields_and_counter_exhaustion_never_becomes_eof() {
     assert!(!session.progress().read_eof);
     invariant(session.progress());
 }
+
+/// A reader that fills a buffer of its own in place of the one it was handed.
+struct SwapReader {
+    len: usize,
+}
+impl AsyncRead for SwapReader {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let other: &'static mut [u8] = Box::leak(vec![0; self.len].into_boxed_slice());
+        *buf = ReadBuf::new(other);
+        buf.put_slice(&vec![0xCD; self.len]);
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// A reader's fill in a replaced buffer must not be copied out of the session's
+/// own buffer: it used to forward stale bytes to the writer as data (shorter
+/// fill) or panic slicing past the buffer (longer fill) (br-asupersync-qop6q8).
+#[test]
+fn a_reader_that_replaces_its_read_buffer_poisons_the_copy() {
+    let cx = Cx::for_testing();
+    for len in [4, 16] {
+        let mut session = CopySession::with_capacity(
+            SwapReader { len },
+            Writer::new(usize::MAX, Fault::Pending),
+            8,
+        )
+        .unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            poll_once(&mut session, &cx)
+        }));
+        let Ok(Poll::Ready(Err(error))) = result else {
+            panic!("len {len}: expected an InvalidData error, not progress or a panic");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            session.writer.bytes.is_empty(),
+            "no stale bytes reached the writer"
+        );
+        assert_eq!(session.progress().read, 0);
+        assert!(matches!(poll_once(&mut session, &cx),
+            Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::InvalidData));
+    }
+}

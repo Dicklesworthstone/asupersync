@@ -254,3 +254,48 @@ fn progress_reported_with_pending_or_error_is_never_forgotten() {
         }
     }
 }
+
+/// A reader that fills a buffer of its own in place of the one it was handed
+/// (`ReadBuf` is covariant, so safe code can do this).
+struct SwapReader {
+    len: usize,
+}
+
+impl AsyncRead for SwapReader {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let other: &'static mut [u8] = Box::leak(vec![0; self.len].into_boxed_slice());
+        *buffer = ReadBuf::new(other);
+        buffer.put_slice(&vec![0xCD; self.len]);
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// Bytes a reader put in a replaced buffer never reached the destination, so
+/// they must not count as read: the session used to report Ok(8) for an
+/// 8-byte destination it never wrote, or panic slicing past its end with the
+/// session left unpoisoned (br-asupersync-qop6q8).
+#[test]
+fn a_reader_that_replaces_its_read_buffer_poisons_the_session() {
+    let cx = Cx::for_testing();
+    for len in [4, 16] {
+        let mut destination = [0xEE; 8];
+        let mut session = ReadExactSession::new(SwapReader { len }, &mut destination);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            poll_once(&mut session, &cx)
+        }));
+        let Ok(Poll::Ready(Err(error))) = result else {
+            panic!("len {len}: expected an InvalidData error, not progress or a panic");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(session.is_poisoned());
+        assert_eq!(session.bytes_read(), 0, "no foreign bytes are counted");
+        assert!(matches!(
+            poll_once(&mut session, &cx),
+            Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::InvalidData
+        ));
+    }
+}

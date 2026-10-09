@@ -16,6 +16,17 @@ use std::task::{Context, Poll};
 
 const POLL_BUDGET: usize = 32;
 const POISONED: &str = "exact I/O provider panicked; endpoint effects are unknown";
+const REPLACED_BUFFER: &str =
+    "exact I/O reader replaced the read buffer it was given; endpoint effects are unknown";
+
+/// Whether a reader left its fill in the buffer it was handed: no longer than
+/// the `offered` bytes and starting at `start`. `ReadBuf` is covariant in its
+/// lifetime, so a reader can swap in a buffer over other memory; counting that
+/// fill would record bytes the destination never received. An empty fill moves
+/// nothing, wherever it points.
+pub(super) fn filled_in_place(filled: &[u8], start: *const u8, offered: usize) -> bool {
+    filled.is_empty() || (filled.len() <= offered && std::ptr::eq(filled.as_ptr(), start))
+}
 
 struct Cancellation<'a> {
     cx: &'a Cx,
@@ -156,9 +167,22 @@ impl<R: AsyncRead + Unpin> ReadExactSession<'_, R> {
                 if let Err(error) = cancellation.check() {
                     return Poll::Ready(Err(error));
                 }
+                let offered = self.buffer.len() - self.pos;
+                let start = self.buffer[self.pos..].as_ptr();
                 let mut buffer = ReadBuf::new(&mut self.buffer[self.pos..]);
                 self.poison = Some(POISONED);
                 let result = Pin::new(&mut self.reader).poll_read(task_cx, &mut buffer);
+                // A reader can replace the ReadBuf it was handed with one over
+                // other memory; bytes it filled there never reached this
+                // destination, and what it took from its source is unknown
+                // (br-asupersync-qop6q8).
+                if !filled_in_place(buffer.filled(), start, offered) {
+                    self.poison = Some(REPLACED_BUFFER);
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        REPLACED_BUFFER,
+                    )));
+                }
                 self.poison = None;
                 // Record before every return, including unusual providers that
                 // append bytes before returning Pending or an I/O error.

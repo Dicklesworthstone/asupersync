@@ -24,6 +24,8 @@ use std::task::{Context, Poll};
 
 const DEFAULT_CAPACITY: usize = 8 * 1024;
 const POLL_BUDGET: usize = 32;
+const REPLACED_BUFFER: &str =
+    "copy session reader replaced the read buffer it was given; endpoint effects are unknown";
 
 /// Cumulative observations for one direction, retained across every `run`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,8 +137,16 @@ impl Direction {
         }
         self.pos = 0;
         self.len = 0;
+        let start = self.buffer.as_ptr();
         let mut buf = ReadBuf::new(&mut self.buffer[..capacity]);
         let result = guarded(&mut self.poison, || Pin::new(reader).poll_read(cx, &mut buf));
+        // A reader that swapped in a buffer over other memory would have its
+        // fill copied out of this one: stale bytes as data, or a slice panic
+        // (br-asupersync-qop6q8).
+        if !super::transfer_session::filled_in_place(buf.filled(), start, capacity) {
+            self.poison = Some(REPLACED_BUFFER);
+            return Err(io::Error::new(io::ErrorKind::InvalidData, REPLACED_BUFFER));
+        }
         self.len = buf.filled().len();
         self.read += self.len as u64;
         match result {
