@@ -14,7 +14,10 @@
 //! - The value belongs to the wrapped future, not to the task that polls it.
 //!   A task spawned inside the scope does not see it; wrap the child's future
 //!   in its own `scope` (for example `KEY.scope(KEY.get(), child)`) to pass
-//!   it on.
+//!   it on. Neither does a `spawn_blocking` closure: pass the value into the
+//!   closure. (Where blocking work runs inline, in the lab or a runtime
+//!   without a blocking pool, the closure happens to see it; do not rely on
+//!   that, br-asupersync-973voq.)
 //! - Scopes nest. An inner scope of the same key shadows the outer value until
 //!   the inner future completes.
 //! - The wrapped future is dropped inside its scope, so its destructors can
@@ -320,7 +323,9 @@ impl<T: 'static, F> PinnedDrop for TaskLocalFuture<T, F> {
         if std::mem::needs_drop::<F>() && this.future.is_some() {
             // Drop the unfinished future inside its scope so its destructors
             // see the value. If the scope cannot be entered (a borrow is
-            // live, or the thread is exiting) it is dropped outside it.
+            // live, or the thread is exiting) it is dropped without it, and
+            // its destructors see whatever value is current (inside
+            // `KEY.with(..)`, the outer scope's).
             let mut future = this.future;
             let _ = this.local.scope_inner(this.slot, || future.set(None));
         }
