@@ -406,6 +406,10 @@ mod inner {
 
     impl<T> ContendedMutex<T> {
         /// Creates a new instrumented mutex with the given name and value.
+        ///
+        /// # Panics
+        ///
+        /// Panics if `name` is outside the lock-name policy (see `lock_ordering::enforce_lock_name_policy`).
         pub fn new(name: &'static str, value: T) -> Self {
             let policy = lock_ordering::enforce_lock_name_policy(name);
             Self {
@@ -608,6 +612,9 @@ mod inner {
 
     impl<T> ContendedMutex<T> {
         /// Creates a new mutex with the given name and value.
+        ///
+        /// Note: When the `lock-metrics` feature is enabled, panics if `name` is outside
+        /// the lock-name policy (see `lock_ordering::enforce_lock_name_policy`).
         #[inline]
         pub fn new(name: &'static str, value: T) -> Self {
             let rank = lock_ordering::rank_for_lock_name(name);

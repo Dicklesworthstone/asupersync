@@ -223,7 +223,7 @@ unsafe impl<T: Send> Send for RwLock<T> {}
 unsafe impl<T: Send + Sync> Sync for RwLock<T> {}
 
 impl<T> RwLock<T> {
-    /// Creates a new lock with the given value and name for lock ordering.
+    /// Creates a new lock. Under `lock-metrics`, panics if `name` violates lock policy.
     #[inline]
     #[must_use]
     pub fn with_name(name: &'static str, value: T) -> Self {
@@ -259,9 +259,6 @@ impl<T> RwLock<T> {
         }
         Ok(self.data.into_inner())
     }
-}
-
-impl<T> RwLock<T> {
     /// Returns true if the lock is poisoned.
     #[inline]
     #[must_use]
@@ -315,6 +312,7 @@ impl<T> RwLock<T> {
         Ok(RwLockWriteGuard {
             lock: self,
             lock_order,
+            panicking_at_acquire: std::thread::panicking(),
         })
     }
 
@@ -951,6 +949,7 @@ impl<'a, T, Caps> Future for WriteFuture<'a, '_, T, Caps> {
                         return Poll::Ready(Ok(RwLockWriteGuard {
                             lock: this.lock,
                             lock_order,
+                            panicking_at_acquire: std::thread::panicking(),
                         }));
                     }
                 }
@@ -977,6 +976,7 @@ impl<'a, T, Caps> Future for WriteFuture<'a, '_, T, Caps> {
                 return Poll::Ready(Ok(RwLockWriteGuard {
                     lock: this.lock,
                     lock_order,
+                    panicking_at_acquire: std::thread::panicking(),
                 }));
             }
 
@@ -1039,8 +1039,7 @@ impl<T: std::fmt::Debug> std::fmt::Debug for RwLockReadGuard<'_, T> {
 impl<T> Drop for RwLockReadGuard<'_, T> {
     #[inline]
     fn drop(&mut self) {
-        // End diagnostic ownership before release_reader can invoke a
-        // user-controlled Waker that panics.
+        // End diagnostic ownership before release_reader can invoke a user-controlled Waker that panics.
         lock_ordering::record_guard_release(&mut self.lock_order);
         self.lock.release_reader();
     }
@@ -1051,6 +1050,7 @@ impl<T> Drop for RwLockReadGuard<'_, T> {
 pub struct RwLockWriteGuard<'a, T> {
     lock: &'a RwLock<T>,
     lock_order: lock_ordering::GuardLockOrder,
+    panicking_at_acquire: bool,
 }
 
 unsafe impl<T: Send> Send for RwLockWriteGuard<'_, T> {}
@@ -1083,7 +1083,7 @@ impl<T: std::fmt::Debug> std::fmt::Debug for RwLockWriteGuard<'_, T> {
 impl<T> Drop for RwLockWriteGuard<'_, T> {
     #[inline]
     fn drop(&mut self) {
-        if std::thread::panicking() {
+        if !self.panicking_at_acquire && std::thread::panicking() {
             self.lock.poisoned.store(true, Ordering::Release);
         }
         lock_ordering::record_guard_release(&mut self.lock_order);
@@ -1185,13 +1185,11 @@ impl<T> Deref for OwnedRwLockReadGuard<T> {
         unsafe { &*self.lock.data.get() }
     }
 }
-
 impl<T: std::fmt::Debug> std::fmt::Debug for OwnedRwLockReadGuard<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Debug::fmt(&**self, f)
     }
 }
-
 impl<T> Drop for OwnedRwLockReadGuard<T> {
     #[inline]
     fn drop(&mut self) {
@@ -1205,6 +1203,7 @@ impl<T> Drop for OwnedRwLockReadGuard<T> {
 pub struct OwnedRwLockWriteGuard<T> {
     lock: Arc<RwLock<T>>,
     lock_order: lock_ordering::GuardLockOrder,
+    panicking_at_acquire: bool,
 }
 
 impl<T> OwnedRwLockWriteGuard<T> {
@@ -1222,14 +1221,15 @@ impl<T> OwnedRwLockWriteGuard<T> {
     /// Tries to acquire an owned write guard without waiting.
     pub fn try_write(lock: Arc<RwLock<T>>) -> Result<Self, TryWriteError> {
         let lock_order = lock.try_acquire_write_state()?;
-        Ok(Self { lock, lock_order })
+        Ok(Self {
+            lock,
+            lock_order,
+            panicking_at_acquire: std::thread::panicking(),
+        })
     }
 
     /// Executes a closure with exclusive access to the data.
-    pub fn with_write<F, R>(&mut self, f: F) -> R
-    where
-        F: FnOnce(&mut T) -> R,
-    {
+    pub fn with_write<F: FnOnce(&mut T) -> R, R>(&mut self, f: F) -> R {
         assert!(!self.lock.is_poisoned(), "rwlock poisoned");
         f(unsafe { &mut *self.lock.data.get() })
     }
@@ -1260,7 +1260,7 @@ impl<T: std::fmt::Debug> std::fmt::Debug for OwnedRwLockWriteGuard<T> {
 impl<T> Drop for OwnedRwLockWriteGuard<T> {
     #[inline]
     fn drop(&mut self) {
-        if std::thread::panicking() {
+        if !self.panicking_at_acquire && std::thread::panicking() {
             self.lock.poisoned.store(true, Ordering::Release);
         }
         lock_ordering::record_guard_release(&mut self.lock_order);
@@ -1522,6 +1522,7 @@ impl<T, Caps> Future for OwnedWriteFuture<'_, T, Caps> {
                         return Poll::Ready(Ok(OwnedRwLockWriteGuard {
                             lock: Arc::clone(&this.lock),
                             lock_order,
+                            panicking_at_acquire: std::thread::panicking(),
                         }));
                     }
                 }
@@ -1548,6 +1549,7 @@ impl<T, Caps> Future for OwnedWriteFuture<'_, T, Caps> {
                 return Poll::Ready(Ok(OwnedRwLockWriteGuard {
                     lock: Arc::clone(&this.lock),
                     lock_order,
+                    panicking_at_acquire: std::thread::panicking(),
                 }));
             }
 
@@ -5462,5 +5464,87 @@ mod metamorphic_tests {
         );
         crate::sync::lock_ordering::clear_held_locks();
         crate::test_complete!("failed_try_read_write_returns_err_without_false_lock_order_panic");
+    }
+
+    #[test]
+    fn write_guard_acquired_during_unwinding_does_not_poison_rwlock() {
+        let lock = RwLock::new(42);
+
+        struct Cleanup<'a> {
+            lock: &'a RwLock<i32>,
+        }
+        impl Drop for Cleanup<'_> {
+            fn drop(&mut self) {
+                assert!(std::thread::panicking());
+                let mut guard = self
+                    .lock
+                    .try_write()
+                    .expect("try_write during unwinding should succeed");
+                *guard += 1;
+            }
+        }
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _cleanup = Cleanup { lock: &lock };
+            panic!("intentional panic to trigger unwinding cleanup");
+        }));
+        assert!(result.is_err());
+
+        assert!(
+            !lock.is_poisoned(),
+            "rwlock must not be poisoned by write guard acquired during unwinding"
+        );
+        let guard = lock
+            .try_read()
+            .expect("lock should be acquirable after unwinding cleanup");
+        assert_eq!(*guard, 43);
+    }
+
+    #[test]
+    fn owned_write_guard_acquired_during_unwinding_does_not_poison_rwlock() {
+        let lock = Arc::new(RwLock::new(100));
+
+        struct OwnedCleanup {
+            lock: Arc<RwLock<i32>>,
+        }
+        impl Drop for OwnedCleanup {
+            fn drop(&mut self) {
+                assert!(std::thread::panicking());
+                let mut guard = OwnedRwLockWriteGuard::try_write(Arc::clone(&self.lock))
+                    .expect("try_write during unwinding should succeed");
+                *guard += 5;
+            }
+        }
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _cleanup = OwnedCleanup {
+                lock: Arc::clone(&lock),
+            };
+            panic!("intentional panic for owned cleanup");
+        }));
+        assert!(result.is_err());
+
+        assert!(
+            !lock.is_poisoned(),
+            "rwlock must not be poisoned by owned write guard acquired during unwinding"
+        );
+        let guard = lock
+            .try_read()
+            .expect("lock should be acquirable after owned unwinding cleanup");
+        assert_eq!(*guard, 105);
+    }
+
+    #[test]
+    fn panic_while_holding_write_guard_poisons_rwlock() {
+        let lock = RwLock::new(10);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = lock.try_write().unwrap();
+            panic!("panic while holding guard");
+        }));
+        assert!(result.is_err());
+        assert!(
+            lock.is_poisoned(),
+            "panic while holding write guard must poison rwlock"
+        );
     }
 }
