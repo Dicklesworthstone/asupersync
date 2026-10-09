@@ -1664,6 +1664,12 @@ where
         self.time_getter
     }
 
+    /// Returns the configuration for this pool.
+    #[must_use]
+    pub const fn config(&self) -> &PoolConfig {
+        &self.config
+    }
+
     /// Acquire a resource and admit its return liability before returning it.
     ///
     /// Waiting, creation, cancellation and timeout retain [`Pool::acquire`]

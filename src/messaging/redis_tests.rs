@@ -7818,4 +7818,54 @@ mod tests {
             );
         }
     }
+
+    /// asupersync-v3bolt: RedisClient::connect_with_pool_config allows customizing
+    /// pool capacity and timeouts. When max_size is 1 and acquire_timeout is 50ms,
+    /// a second concurrent session fails with PoolExhausted while the first holds
+    /// the only connection.
+    #[test]
+    fn connect_with_pool_config_customizes_pool_limits_and_timeout() {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept first client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            write_hello3_ok(&mut stream);
+
+            // Keep the stream alive while session 1 holds it and session 2 attempts acquire
+            let mut buf = [0u8; 16];
+            let _ = stream.read(&mut buf);
+        });
+
+        run_test_with_cx(|cx| async move {
+            let url = format!("redis://{}:{}", addr.ip(), addr.port());
+            let config = RedisConfig::from_url(&url).expect("valid redis url");
+            let pool_config = PoolConfig::with_max_size(1)
+                .acquire_timeout(Duration::from_millis(50));
+
+            let client = RedisClient::connect_with_pool_config(&cx, config, pool_config)
+                .await
+                .expect("connect with custom pool config");
+
+            assert_eq!(client.pool_config().max_size, 1);
+            assert_eq!(client.pool_config().acquire_timeout, Duration::from_millis(50));
+
+            // First session acquires the only connection in the pool
+            let session1 = client.session(&cx).await.expect("first session acquires sole connection");
+
+            // Second session must time out waiting for a connection and fail with PoolExhausted
+            let err = client.session(&cx).await.expect_err("second session must fail due to pool exhaustion");
+            assert!(
+                matches!(err, RedisError::PoolExhausted),
+                "expected RedisError::PoolExhausted, got {err:?}"
+            );
+
+            drop(session1);
+        });
+
+        server.join().expect("server join");
+    }
 }

@@ -3324,8 +3324,26 @@ impl RedisClient {
     /// feature) the `tls_connector` used for `rediss://`, such as one
     /// trusting a private CA. Start from [`RedisConfig::from_url`] and adjust
     /// the fields.
+    ///
+    /// Uses default connection pool settings (max size 10, acquire timeout 30s).
+    /// To customize connection pool settings, use [`Self::connect_with_pool_config`].
     #[allow(clippy::unused_async)]
     pub async fn connect_with_config(cx: &Cx, config: RedisConfig) -> Result<Self, RedisError> {
+        Self::connect_with_pool_config(cx, config, PoolConfig::with_max_size(10)).await
+    }
+
+    /// Connect to Redis with explicit [`RedisConfig`] and [`PoolConfig`].
+    ///
+    /// Allows configuring pool capacity (`max_size`, `min_size`), acquisition timeout
+    /// (`acquire_timeout`), lifecycle limits (`idle_timeout`, `max_lifetime`),
+    /// health checks, and connection warmup (`warmup_connections`).
+    /// (asupersync-v3bolt)
+    #[allow(clippy::unused_async)]
+    pub async fn connect_with_pool_config(
+        cx: &Cx,
+        config: RedisConfig,
+        pool_config: PoolConfig,
+    ) -> Result<Self, RedisError> {
         cx.checkpoint().map_err(|_| RedisError::Cancelled)?;
         let config_for_factory = config.clone();
         let resp3_push_backlog =
@@ -3338,7 +3356,7 @@ impl RedisClient {
             Box::pin(async move { RedisConnection::connect(config, Some(backlog)).await })
         });
 
-        let pool = GenericPool::new(factory, PoolConfig::with_max_size(10));
+        let pool = GenericPool::new(factory, pool_config);
 
         Ok(Self {
             config,
@@ -3346,6 +3364,18 @@ impl RedisClient {
             slot_map: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             resp3_push_backlog,
         })
+    }
+
+    /// Returns the pool configuration used by this client.
+    #[must_use]
+    pub fn pool_config(&self) -> &PoolConfig {
+        self.pool.config()
+    }
+
+    /// Returns the current connection pool statistics.
+    #[must_use]
+    pub fn pool_stats(&self) -> crate::sync::PoolStats {
+        self.pool.stats()
     }
 
     /// Snapshot of the current slot → node-address map.
