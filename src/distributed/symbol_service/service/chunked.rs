@@ -1,7 +1,9 @@
 //! Bounded multi-frame transfer inside the existing authenticated V1 service.
 
 use super::{put_key, read_key, receipt};
-use crate::distributed::symbol_service::{SymbolBatchKey, SymbolReplicaStore, SymbolStoreError};
+use crate::distributed::symbol_service::{
+    EncodedSymbolBatch, SymbolBatchKey, SymbolBatchLimits, SymbolReplicaStore, SymbolStoreError,
+};
 use crate::distributed::{ComputationSchemaRegistryError, HasSchema, SchemaDescriptor};
 use crate::remote::{NodeId, RemoteComputationRegistry, RemoteOutcome};
 use crate::types::Time;
@@ -160,6 +162,80 @@ impl Drop for StagedCommit<'_> {
     }
 }
 
+// A durable backend is only constructed by DurableChunkedSymbolService, whose
+// registration dispatches every operation through a Cx-owned blocking worker.
+// The public in-memory constructor and registration retain their existing path.
+enum ChunkedBackend {
+    Memory(Arc<SymbolReplicaStore>),
+    #[cfg(not(target_arch = "wasm32"))]
+    Durable(Arc<super::super::durable::DurableSymbolReplicaStore>),
+}
+
+impl ChunkedBackend {
+    fn replica_id(&self) -> &str {
+        match self {
+            Self::Memory(store) => store.replica_id(),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Durable(store) => store.replica_id(),
+        }
+    }
+
+    fn batch_limits(&self) -> SymbolBatchLimits {
+        match self {
+            Self::Memory(store) => store.batch_limits,
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Durable(store) => store.batch_limits(),
+        }
+    }
+
+    fn get(&self, peer: &NodeId, key: SymbolBatchKey) -> Result<Arc<EncodedSymbolBatch>, SymbolStoreError> {
+        match self {
+            Self::Memory(store) => store.get(peer, key),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Durable(store) => {
+                use super::super::durable::{DurableSymbolError, JournalStatus};
+                match store.get(peer, key) {
+                    Err(DurableSymbolError::Store(SymbolStoreError::NotFound))
+                        if store.status() != JournalStatus::Writable =>
+                    {
+                        // Existing committed objects remain readable/replayable,
+                        // but a partial-tail journal cannot admit a new upload.
+                        Err(SymbolStoreError::StorageUnavailable)
+                    }
+                    result => result.map_err(durable_error),
+                }
+            }
+        }
+    }
+
+    fn put(&self, peer: &NodeId, bytes: &[u8]) -> Result<Arc<EncodedSymbolBatch>, SymbolStoreError> {
+        match self {
+            Self::Memory(store) => store.put(peer, bytes),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Durable(store) => store.put(peer, bytes).map_err(durable_error),
+        }
+    }
+
+    #[cfg(test)]
+    fn stats(&self) -> super::super::SymbolStoreStats {
+        match self {
+            Self::Memory(store) => store.stats(),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Durable(store) => store.stats(),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn durable_error(error: super::super::durable::DurableSymbolError) -> SymbolStoreError {
+    use super::super::durable::DurableSymbolError;
+    match error {
+        DurableSymbolError::Store(error) => error,
+        DurableSymbolError::JournalLimit => SymbolStoreError::Limit("journal bytes"),
+        _ => SymbolStoreError::StorageUnavailable,
+    }
+}
+
 /// Authenticated-origin staging followed by atomic, fully verified publication.
 ///
 /// Uploads have a fixed lifetime from BEGIN; replaying or appending cannot renew
@@ -176,7 +252,7 @@ impl Drop for StagedCommit<'_> {
 /// remote stage until expiry, or an already committed batch. It does not imply
 /// remote quiescence, disk durability, rollback, or exactly-once delivery.
 pub struct ChunkedSymbolService {
-    store: Arc<SymbolReplicaStore>,
+    store: ChunkedBackend,
     limits: SymbolChunkedLimits,
     staging: Mutex<Staging>,
     #[cfg(test)]
@@ -193,6 +269,17 @@ impl ChunkedSymbolService {
     /// Wrap existing immutable storage without I/O or spawning tasks.
     #[must_use]
     pub fn new(store: Arc<SymbolReplicaStore>, limits: SymbolChunkedLimits) -> Self {
+        Self::with_backend(ChunkedBackend::Memory(store), limits)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn new_durable(
+        store: Arc<super::super::durable::DurableSymbolReplicaStore>, limits: SymbolChunkedLimits,
+    ) -> Self {
+        Self::with_backend(ChunkedBackend::Durable(store), limits)
+    }
+
+    fn with_backend(store: ChunkedBackend, limits: SymbolChunkedLimits) -> Self {
         Self { store, limits, staging: Mutex::new(Staging::default()),
             #[cfg(test)]
             commit_hook: Mutex::new(None),
@@ -211,7 +298,7 @@ impl ChunkedSymbolService {
     /// Returns the number removed. Retained immutable batches are unaffected.
     pub fn reap_expired(&self, now: Time) -> usize { self.staging.lock().reap(now) }
 
-    fn handle(&self, peer: &NodeId, now: Time, input: &[u8]) -> Result<Vec<u8>, SymbolStoreError> {
+    pub(super) fn handle(&self, peer: &NodeId, now: Time, input: &[u8]) -> Result<Vec<u8>, SymbolStoreError> {
         if !super::super::valid_identity(peer.as_str()) { return Err(SymbolStoreError::InvalidIdentity); }
         let (operation, body) = split_request(input, self.store.replica_id())?;
         let mut state = self.staging.lock();
@@ -226,8 +313,9 @@ impl ChunkedSymbolService {
         loop {
             if let Some(completion) = state.entries.get(&id).and_then(|stage| stage.commit.clone()) {
                 // Preserve the original per-attempt ordering without holding up
-                // every origin. The owner is bounded synchronous in-memory work,
-                // not a task that can suspend on I/O; unwind also wakes us.
+                // every origin. In-memory owners are bounded synchronous work;
+                // durable owners and their waiters run on blocking workers.
+                // Unwinding also wakes every request for this exact owner.
                 drop(state);
                 completion.wait();
                 state = self.staging.lock();
@@ -242,11 +330,15 @@ impl ChunkedSymbolService {
                         if stage.upload != upload { return Err(SymbolStoreError::Conflict); }
                         return progress(upload, stage.bytes.len(), self.limits.max_chunk_bytes);
                     }
-                    if let Ok(batch) = self.store.get(peer, upload.key) {
-                        if batch.as_ref().as_ref().len() != upload.total || batch.symbol_count() != upload.count {
-                            return Err(SymbolStoreError::Identity);
+                    match self.store.get(peer, upload.key) {
+                        Ok(batch) => {
+                            if batch.as_ref().as_ref().len() != upload.total || batch.symbol_count() != upload.count {
+                                return Err(SymbolStoreError::Identity);
+                            }
+                            return progress(upload, upload.total, self.limits.max_chunk_bytes);
                         }
-                        return progress(upload, upload.total, self.limits.max_chunk_bytes);
+                        Err(SymbolStoreError::NotFound) => {}
+                        Err(error) => return Err(error),
                     }
                     if state.entries.len() >= self.limits.max_uploads { return Err(SymbolStoreError::Limit("staged uploads")); }
                     let reserved = state.reserved.checked_add(upload.total).ok_or(SymbolStoreError::Overflow)?;
@@ -342,7 +434,8 @@ impl ChunkedSymbolService {
 
     fn validate_upload(&self, upload: Upload) -> Result<(), SymbolStoreError> {
         if upload.count == 0 { return Err(SymbolStoreError::Empty); }
-        if upload.total > self.store.batch_limits.max_encoded_bytes || upload.count as usize > self.store.batch_limits.max_symbols {
+        let limits = self.store.batch_limits();
+        if upload.total > limits.max_encoded_bytes || upload.count as usize > limits.max_symbols {
             return Err(SymbolStoreError::Limit("batch bytes or symbols"));
         }
         let minimum = (upload.count as usize).checked_mul(42).and_then(|bytes| bytes.checked_add(32))
@@ -375,8 +468,8 @@ impl ChunkedSymbolService {
     }
 }
 
-struct RequestSchema;
-struct ResponseSchema;
+pub(super) struct RequestSchema;
+pub(super) struct ResponseSchema;
 impl HasSchema for RequestSchema {
     fn schema() -> SchemaDescriptor { SchemaDescriptor::primitive("asupersync.symbol-service.chunked.request.v1") }
 }

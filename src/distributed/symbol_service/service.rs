@@ -167,3 +167,8 @@ pub(super) mod chunked;
 mod durable;
 #[cfg(not(target_arch = "wasm32"))]
 pub use durable::{DurableSymbolServiceHandle, register_durable_symbol_service};
+
+#[cfg(not(target_arch = "wasm32"))]
+mod durable_chunked;
+#[cfg(not(target_arch = "wasm32"))]
+pub use durable_chunked::{DurableChunkedSymbolService, register_durable_chunked_symbol_service};

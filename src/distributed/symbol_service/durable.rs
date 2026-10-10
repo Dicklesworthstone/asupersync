@@ -112,6 +112,7 @@ impl From<io::Error> for DurableSymbolError {
 /// is created. A retained receipt says nothing about restoration of task futures.
 pub struct DurableSymbolReplicaStore {
     replica: String,
+    batch_limits: SymbolBatchLimits,
     state: Mutex<Journal<File>>,
 }
 
@@ -138,7 +139,7 @@ impl DurableSymbolReplicaStore {
         validate_identity(&replica)?;
         lock(&file)?;
         let journal = Journal::create(file, &replica, symbol_key, journal_key, limits)?;
-        Ok(Self { replica, state: Mutex::new(journal) })
+        Ok(Self { replica, batch_limits: limits.batch, state: Mutex::new(journal) })
     }
 
     /// Reopen, authenticate and sync a bounded journal before serving any data.
@@ -157,12 +158,15 @@ impl DurableSymbolReplicaStore {
         validate_identity(&replica)?;
         lock(&file)?;
         let journal = Journal::open(file, &replica, symbol_key, journal_key, limits)?;
-        Ok(Self { replica, state: Mutex::new(journal) })
+        Ok(Self { replica, batch_limits: limits.batch, state: Mutex::new(journal) })
     }
 
     /// Receiver identity used by the existing symbol-service receipt.
     #[must_use]
     pub fn replica_id(&self) -> &str { &self.replica }
+
+    // Immutable configuration can be read without waiting behind a disk commit.
+    pub(super) const fn batch_limits(&self) -> SymbolBatchLimits { self.batch_limits }
 
     /// Retained committed batches and canonical bytes (not on-disk framing).
     #[must_use]

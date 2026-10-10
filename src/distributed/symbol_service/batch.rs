@@ -78,6 +78,11 @@ pub enum SymbolStoreError {
     /// No batch with this exact key exists in the authenticated peer's namespace.
     #[error("symbol batch not found")]
     NotFound,
+    /// A durable backend cannot safely serve or commit the requested batch.
+    /// Inspect that local store's status for details; a refused response does not
+    /// establish that an attempted disk write was rolled back.
+    #[error("durable symbol storage is unavailable")]
+    StorageUnavailable,
 }
 
 /// Owned plaintext wire bytes, redacted in Debug and zeroized on final drop.
