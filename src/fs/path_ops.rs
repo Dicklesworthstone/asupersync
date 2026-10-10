@@ -1310,7 +1310,7 @@ mod tests {
             );
 
             // Verify another task on the SAME single worker can make progress while commit is parked
-            let other_handle = runtime.spawn(async { 42 });
+            let mut other_handle = runtime.spawn_local(async { 42 });
             assert_eq!(
                 other_handle.await.unwrap(),
                 42,
