@@ -5,7 +5,7 @@
 
 use asupersync::bytes::BytesMut;
 use asupersync::codec::Decoder as _;
-use asupersync::cx::Cx;
+use asupersync::cx::{ChildRegionSpec, Cx};
 use asupersync::http::h1::listener::Http1ListenerConfig;
 use asupersync::http::h1::server::{HostPolicy, Http1Config};
 use asupersync::http::h1::types::{Request, Response};
@@ -17,14 +17,20 @@ use asupersync::http::h2::{ErrorCode, FrameCodec, Header, HpackEncoder};
 use asupersync::http::{HttpAutoListener, HttpAutoListenerConfig};
 use asupersync::io::{AsyncReadExt, AsyncWriteExt};
 use asupersync::net::TcpStream;
-use asupersync::runtime::RuntimeBuilder;
+use asupersync::record::RegionLimits;
+use asupersync::runtime::{Runtime, RuntimeBuilder, RuntimeHandle, yield_now};
+use asupersync::server::shutdown::ShutdownPhase;
 use asupersync::sync::Notify;
+use asupersync::trace::{TraceData, TraceEventKind};
+use asupersync::types::{CancelReason, RegionId, TaskId};
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::task::Poll;
+use std::time::{Duration, Instant};
 
 fn config() -> HttpAutoListenerConfig {
     let localhost = HostPolicy::allow_list(vec!["localhost".to_owned()]);
@@ -188,6 +194,295 @@ impl H2Peer {
                 _ => {}
             }
         }
+    }
+}
+
+fn native_runtime(workers: usize) -> RuntimeBuilder {
+    if workers == 1 {
+        RuntimeBuilder::current_thread()
+    } else {
+        RuntimeBuilder::multi_thread()
+            .worker_threads(workers)
+            .with_sharded_state(true)
+    }
+}
+
+fn run_lifecycle<F, Fut>(runtime: Runtime, body: F)
+where
+    F: FnOnce(RuntimeHandle) -> Fut,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let work = body(runtime.handle());
+    runtime.block_on(async move {
+        asupersync::time::timeout(
+            Cx::current().unwrap().now(),
+            Duration::from_secs(20),
+            work,
+        )
+        .await
+        .expect("shared-port lifecycle must finish");
+    });
+    let started = Instant::now();
+    while !runtime.is_quiescent() {
+        assert!(started.elapsed() < Duration::from_secs(5), "HTTP tasks must retire");
+        runtime.block_on(yield_now());
+    }
+    assert!(runtime.task_inspector(Default::default()).list_tasks().is_empty());
+    assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+    assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
+}
+
+async fn wait_for_service_tasks(
+    handle: &RuntimeHandle,
+    region: RegionId,
+    count: usize,
+) -> BTreeSet<TaskId> {
+    let inspector = handle.task_inspector(Default::default()).unwrap();
+    bounded(async {
+        loop {
+            let tasks: Vec<_> = inspector
+                .by_region(region)
+                .into_iter()
+                .filter(|task| !task.is_terminal())
+                .collect();
+            if tasks.len() == count && tasks.iter().all(|task| task.poll_count > 0) {
+                return tasks.into_iter().map(|task| task.id).collect();
+            }
+            yield_now().await;
+        }
+    })
+    .await
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OwnedStop {
+    Region,
+    Owner,
+    Coordinator,
+    DropFuture,
+}
+
+async fn owned_service_lifecycle(handle: RuntimeHandle, stop: OwnedStop) {
+    let cx = Cx::current().unwrap();
+    let service = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+    let service_id = service.region_id();
+    assert_ne!(service_id, cx.region_id());
+    let owner = service.cx().clone();
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let handler_observed = Arc::clone(&observed);
+    let listener = HttpAutoListener::bind(
+        "127.0.0.1:0",
+        move |request: Request| {
+            let observed = Arc::clone(&handler_observed);
+            async move {
+                observed.lock().unwrap().push((
+                    request.uri.clone(),
+                    Cx::current().unwrap().region_id(),
+                ));
+                report(request).await
+            }
+        },
+        config().detect_timeout(Duration::from_secs(60)),
+    )
+    .await
+    .unwrap();
+    let address = listener.local_addr().unwrap();
+    let shutdown = listener.shutdown_signal();
+    let drop_future = Arc::new(Notify::new());
+    let drop_signal = Arc::clone(&drop_future);
+    let supplied = owner.clone();
+    let mut run = service
+        .cx()
+        .spawn(move |coordinator| async move {
+            // This principal context and the actual polling task are distinct.
+            // Aborting only the latter must still stop native accept/backoff.
+            assert_ne!(coordinator.task_id(), supplied.task_id());
+            let mut serving = Box::pin(listener.run_in(&supplied));
+            let mut dropped = Box::pin(drop_signal.notified());
+            std::future::poll_fn(|task| {
+                if stop == OwnedStop::DropFuture && dropped.as_mut().poll(task).is_ready() {
+                    return Poll::Ready(None);
+                }
+                serving.as_mut().poll(task).map(Some)
+            })
+            .await
+        })
+        .unwrap();
+
+    let mut http1 = bounded(TcpStream::connect(address)).await.unwrap();
+    assert!(
+        bounded(http1_get(&mut http1, "/owned-http1"))
+            .await
+            .ends_with("Http11 /owned-http1 peer=true")
+    );
+    drop(http1);
+    let mut http2 = H2Peer::connect(address, Vec::new()).await;
+    http2.request(1, "/owned-http2").await;
+    assert_eq!(
+        http2.response_body(1).await,
+        b"Http2 /owned-http2 peer=true"
+    );
+
+    // Cleanup alone could pass with root-spawned connections. Verify the real
+    // handler contexts belong to the chosen service subtree before stopping it.
+    let parents: BTreeMap<_, _> = handle
+        .trace_snapshot()
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match (event.kind, event.data) {
+            (TraceEventKind::RegionCreated, TraceData::Region { region, parent: Some(parent) }) => {
+                Some((region, parent))
+            }
+            _ => None,
+        })
+        .collect();
+    let observed = observed.lock().unwrap().clone();
+    assert_eq!(observed.len(), 2);
+    for (request, mut region) in observed {
+        let mut visited = BTreeSet::new();
+        while region != service_id {
+            assert!(visited.insert(region), "cyclic region ancestry for {request}");
+            region = *parents
+                .get(&region)
+                .unwrap_or_else(|| panic!("{request} escaped service region {service_id:?}"));
+        }
+    }
+
+    // The steady baseline is the coordinator, two protocol drivers and the
+    // idle HTTP/2 connection. Each additional silent peer must add a task in
+    // this same region, proving detector admission instead of assuming accept.
+    wait_for_service_tasks(&handle, service_id, 4).await;
+    let mut undecided = bounded(TcpStream::connect(address)).await.unwrap();
+    let baseline = wait_for_service_tasks(&handle, service_id, 5).await;
+    let mut partial_http1 = bounded(TcpStream::connect(address)).await.unwrap();
+    let with_detector = wait_for_service_tasks(&handle, service_id, 6).await;
+    assert!(baseline.is_subset(&with_detector));
+    let added: Vec<_> = with_detector.difference(&baseline).copied().collect();
+    assert_eq!(added.len(), 1, "the silent peer admits exactly one detector");
+    let detector = added[0];
+    bounded(partial_http1.write_all(b"GET /pending HTTP/1.1\r\nHost: localhost\r\n"))
+        .await
+        .unwrap();
+    // Wait for this exact detector to retire and a newly polled connection
+    // task to replace it. The task count alone cannot prove HTTP/1 handoff.
+    bounded(async {
+        loop {
+            let tasks = wait_for_service_tasks(&handle, service_id, 6).await;
+            if !tasks.contains(&detector) {
+                assert!(baseline.is_subset(&tasks));
+                assert_eq!(tasks.difference(&baseline).count(), 1);
+                break;
+            }
+            yield_now().await;
+        }
+    })
+    .await;
+    assert_eq!(shutdown.phase(), ShutdownPhase::Running);
+
+    let reason = CancelReason::user("stop owned shared-port service");
+    match stop {
+        OwnedStop::Region => service.cancel(reason).unwrap(),
+        OwnedStop::Owner => owner.cancel_with_reason(reason),
+        OwnedStop::Coordinator => {
+            assert!(!owner.is_cancel_requested());
+            run.abort_with_reason(reason);
+        }
+        OwnedStop::DropFuture => drop_future.notify_one(),
+    }
+    let result = bounded(run.join(&cx))
+        .await
+        .expect("the coordinator retains its completed shutdown result");
+    if stop == OwnedStop::DropFuture {
+        assert!(result.is_none());
+        assert_eq!(shutdown.phase(), ShutdownPhase::ForceClosing);
+    } else {
+        let stats = result.unwrap().expect("both protocols drained");
+        assert_eq!(shutdown.phase(), ShutdownPhase::Stopped);
+        assert!(stats.http1.drain_report.unwrap().reached_quiescence);
+        assert!(stats.http2.drain_report.unwrap().reached_quiescence);
+    }
+    if stop == OwnedStop::Coordinator {
+        assert!(!owner.is_cancel_requested(), "only the ambient task was aborted");
+    }
+    bounded(service.close()).await.unwrap();
+    assert!(handle.task_inspector(Default::default()).unwrap().by_region(service_id).is_empty());
+    assert!(!cx.is_cancel_requested(), "closing the service must not cancel its parent");
+
+    // Region close is a resource barrier, including undecided and partial
+    // requests. No timer or task cancellation on these clients creates EOF.
+    let mut bytes = Vec::new();
+    bounded(undecided.read_to_end(&mut bytes)).await.unwrap();
+    assert!(bytes.is_empty());
+    let closed = bounded(partial_http1.read_to_end(&mut bytes)).await;
+    assert!(
+        closed.is_ok()
+            || closed.is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionReset),
+        "an incomplete HTTP/1 head must release its socket"
+    );
+    bounded(async { while http2.next().await.is_some() {} }).await;
+}
+
+#[test]
+fn a_child_region_owns_both_protocols_and_every_pending_detector() {
+    for workers in [1, 2] {
+        run_lifecycle(native_runtime(workers).build().unwrap(), |handle| {
+            owned_service_lifecycle(handle, OwnedStop::Region)
+        });
+    }
+}
+
+#[test]
+fn either_explicit_owner_or_ambient_coordinator_cancellation_drains_run_in() {
+    for workers in [1, 2] {
+        for stop in [OwnedStop::Owner, OwnedStop::Coordinator] {
+            run_lifecycle(native_runtime(workers).build().unwrap(), move |handle| {
+                owned_service_lifecycle(handle, stop)
+            });
+        }
+    }
+}
+
+#[test]
+fn dropping_run_in_keeps_cleanup_owned_until_the_region_closes() {
+    for workers in [1, 2] {
+        run_lifecycle(native_runtime(workers).build().unwrap(), |handle| {
+            owned_service_lifecycle(handle, OwnedStop::DropFuture)
+        });
+    }
+}
+
+#[test]
+fn a_refused_protocol_task_wakes_a_quiet_accept_and_drains_its_sibling() {
+    for workers in [1, 2] {
+        let runtime = native_runtime(workers)
+            .root_region_limits(RegionLimits {
+                // The block_on coordinator and first listener fit. The second
+                // listener is refused asynchronously by Cx's spawn gateway.
+                max_tasks: Some(2),
+                ..RegionLimits::unlimited()
+            })
+            .build()
+            .unwrap();
+        run_lifecycle(runtime, |handle| async move {
+            let cx = Cx::current().unwrap();
+            let listener = HttpAutoListener::bind("127.0.0.1:0", report, config())
+                .await
+                .unwrap();
+            let shutdown = listener.shutdown_signal();
+            // No peer and no shutdown signal wake accept. Only the retained
+            // child-terminal observer can stop and drain this listener.
+            let error = bounded(listener.run_in(&cx)).await.unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+            assert_eq!(shutdown.phase(), ShutdownPhase::Stopped);
+            let active = handle
+                .task_inspector(Default::default())
+                .unwrap()
+                .list_tasks()
+                .into_iter()
+                .filter(|task| !task.is_terminal())
+                .count();
+            assert_eq!(active, 1, "the admitted sibling must retire before return");
+        });
     }
 }
 
