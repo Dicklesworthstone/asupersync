@@ -7,6 +7,9 @@
 //! The separately selected compact profile also owns a fixed-size intent file;
 //! only its two pending-epoch slots are reused, after their prior work is durable.
 
+// The parent loads this file through `#[path]`, so an undecorated child module
+// would resolve beside it (receiver_journal/compact.rs), not under file/.
+#[path = "file/compact.rs"]
 mod compact;
 
 use super::super::{
