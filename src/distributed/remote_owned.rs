@@ -14,12 +14,12 @@ use crate::remote::{
     RemoteTaskId, spawn_remote,
 };
 use crate::runtime::obligation_mailbox::{ObligationAdmissionError, ObligationToken};
-use crate::runtime::{JoinError, SpawnError};
+use crate::runtime::{JoinError, SpawnError, TaskHandle};
 use crate::time::{Sleep, TimerDriverHandle};
-use crate::types::{CancelReason, Outcome, RegionId, Time};
+use crate::types::{CancelReason, Outcome, RegionId, TaskId, Time};
 use std::fmt;
 use std::future::{Future, poll_fn};
-use std::task::Poll;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 /// Explicit admission-to-cancellation budget and child-region constraints.
@@ -55,6 +55,153 @@ pub enum RemoteRunError {
     /// Existing region admission failed.
     #[error(transparent)]
     Open(#[from] ChildRegionError),
+}
+
+/// Admission or observation failure for a spawned owned remote invocation.
+/// Remote protocol outcomes remain inside [`RemoteRunReport`].
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum RemoteRunHandleError {
+    /// The invocation could not obtain its required authority or child region.
+    #[error(transparent)]
+    Run(#[from] RemoteRunError),
+    /// The owner task could not be submitted to the calling region.
+    #[error(transparent)]
+    Spawn(#[from] SpawnError),
+    /// The owner task panicked, was refused or cancelled before starting, or
+    /// its terminal report was already consumed.
+    #[error(transparent)]
+    Join(#[from] JoinError),
+}
+
+/// A remotely executing invocation whose local owner runs independently of
+/// result polling and remains part of the caller's region.
+///
+/// The owner drives the same checked lease, protocol cancellation, and child
+/// close as [`run_remote`]. Dropping this handle requests cancellation; the
+/// runtime retains the owner until that cleanup finishes. Dropping only a
+/// [`join`](Self::join) future leaves the invocation running and permits a later
+/// join. Neither operation creates detached cleanup work.
+///
+/// [`abort`](Self::abort) and the invocation deadline initiate cancellation.
+/// They do not prove remote quiescence. The native remote runtime bounds silent
+/// peers by its lease and drain policy; a custom [`crate::remote::RemoteRuntime`]
+/// must supply its own eventual terminal result or drain can remain pending.
+#[must_use = "dropping the owned remote handle requests cancellation"]
+pub struct RemoteRunHandle {
+    task: TaskHandle<Result<RemoteRunReport, RemoteRunError>>,
+    deadline: Time,
+}
+
+impl fmt::Debug for RemoteRunHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RemoteRunHandle")
+            .field("local_task_id", &self.task.task_id())
+            .field("deadline", &self.deadline)
+            .field("finished", &self.task.is_finished())
+            .finish_non_exhaustive()
+    }
+}
+
+impl RemoteRunHandle {
+    /// Returns the local owner task, which retains the invocation's child
+    /// region until its close receipt has been collected. Before admission the
+    /// ID is provisional, just as for [`TaskHandle::task_id`].
+    #[must_use]
+    pub fn local_task_id(&self) -> TaskId {
+        self.task.task_id()
+    }
+
+    /// Returns the cancellation deadline captured when the invocation was
+    /// submitted, before local task admission or any result polling.
+    #[must_use]
+    pub fn deadline(&self) -> Time {
+        self.deadline
+    }
+
+    /// Whether the owner has retired and its terminal report can be observed.
+    /// A failed admission is also terminal; inspect the join result for success.
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.task.is_finished()
+    }
+
+    /// Requests cancellation of this invocation without waiting for cleanup.
+    /// Join or close it to obtain the actual terminal and child-close report.
+    pub fn abort(&self) {
+        self.abort_with_reason(CancelReason::user("owned remote handle abort"));
+    }
+
+    /// Requests cancellation with the supplied attribution. Repeated requests
+    /// follow the runtime's ordinary reason-strengthening rules.
+    pub fn abort_with_reason(&self, reason: CancelReason) {
+        if !self.task.terminal_published() {
+            self.task.abort_with_reason(reason);
+        }
+    }
+
+    /// Observes the owner without consuming a pending result or changing its
+    /// cancellation state.
+    ///
+    /// # Errors
+    /// Returns the exact owner admission, invocation, or join failure. Repeated
+    /// observation after consuming a terminal returns
+    /// [`JoinError::PolledAfterCompletion`].
+    pub fn try_join(&mut self) -> Result<Option<RemoteRunReport>, RemoteRunHandleError> {
+        match self.task.try_join()? {
+            Some(report) => report.map(Some).map_err(RemoteRunHandleError::Run),
+            None => Ok(None),
+        }
+    }
+
+    /// Polls the owner report without cancelling if the caller stops polling.
+    /// The wake registration stays on this handle until terminal observation
+    /// or handle drop, as with [`TaskHandle::poll_join`].
+    ///
+    /// # Errors
+    /// Returns the same errors as [`try_join`](Self::try_join).
+    pub fn poll_join(
+        &mut self,
+        task: &mut Context<'_>,
+    ) -> Poll<Result<RemoteRunReport, RemoteRunHandleError>> {
+        self.task.poll_join(task).map(|result| {
+            result
+                .map_err(RemoteRunHandleError::Join)
+                .and_then(|report| report.map_err(RemoteRunHandleError::Run))
+        })
+    }
+
+    /// Waits for the exact invocation and local child-close report.
+    ///
+    /// This is an uninterruptible observation: cancellation of the observing
+    /// context does not erase cleanup or its result. Use [`abort`](Self::abort)
+    /// or [`close`](Self::close) to cancel the invocation itself. Dropping this
+    /// waiting future preserves the handle and its pending report.
+    ///
+    /// # Errors
+    /// Returns the same errors as [`try_join`](Self::try_join).
+    pub async fn join(&mut self, _cx: &Cx) -> Result<RemoteRunReport, RemoteRunHandleError> {
+        poll_fn(|task| self.poll_join(task)).await
+    }
+
+    /// Requests cancellation and waits for the protocol and child-region
+    /// cleanup report. Caller cancellation cannot truncate that observation.
+    ///
+    /// # Errors
+    /// Returns the same errors as [`try_join`](Self::try_join).
+    pub async fn close(&mut self, cx: &Cx) -> Result<RemoteRunReport, RemoteRunHandleError> {
+        self.abort_with_reason(
+            cx.cancel_reason()
+                .unwrap_or_else(|| CancelReason::user("owned remote handle close")),
+        );
+        self.join(cx).await
+    }
+}
+
+impl Drop for RemoteRunHandle {
+    fn drop(&mut self) {
+        self.abort_with_reason(CancelReason::user("owned remote handle dropped"));
+    }
 }
 
 /// Failure in the local proxy, independently of remote protocol outcomes.
@@ -299,18 +446,101 @@ pub async fn run_remote(
     run_admitted(cx, node, computation, input, config, None).await
 }
 
+/// Starts a named remote invocation as owned background work in the caller's
+/// region and immediately returns its cancellation and result handle.
+///
+/// Unlike constructing a [`run_remote`] future, successful submission starts
+/// the owner independently of whether its handle is ever polled. It opens an
+/// invocation child region and uses the same checked Lease and protocol driver
+/// as `run_remote`; no remote request is sent before local proxy and lease
+/// admission. The timeout starts at this call and includes owner-task admission
+/// delay. If that interval elapses before the owner starts, no remote work is
+/// dispatched.
+///
+/// Parent cancellation reaches the owner and invocation subtree. Parent close
+/// waits for that subtree even if the handle has never been joined or has been
+/// dropped. An abort after the invocation starts preserves its typed report
+/// through the owner task's acknowledged-cancellation boundary.
+///
+/// Remote success still requires [`RemoteRunReport::is_success`]. A native
+/// runtime's lease/drain limits bound a silent peer; custom remote runtimes keep
+/// the terminal-delivery requirement documented on [`run_remote`].
+///
+/// # Errors
+/// Rejects missing remote or timer authority, prior cancellation, and an unusable
+/// timeout before submitting the owner. A missing local spawn gateway returns
+/// [`RemoteRunHandleError::Spawn`]. Later task or child-region admission failures
+/// are returned by the handle, with no remote dispatch.
+pub fn spawn_remote_owned(
+    cx: &Cx,
+    node: NodeId,
+    computation: ComputationName,
+    input: RemoteInput,
+    config: RemoteRunConfig,
+) -> Result<RemoteRunHandle, RemoteRunHandleError> {
+    let (clock, deadline) = prepare_run(cx, &config)?;
+    let task = cx.spawn(move |owner| async move {
+        let result = if clock.now() >= deadline {
+            Err(RemoteRunError::Timeout)
+        } else {
+            run_prepared(
+                &owner,
+                node,
+                computation,
+                input,
+                config.child,
+                (clock, deadline),
+                None,
+            )
+            .await
+        };
+        // The report is terminal bookkeeping. Preserve it even when the
+        // operation's cancellation arrived during child-region close.
+        let _ = owner.checkpoint();
+        result
+    })?;
+    Ok(RemoteRunHandle { task, deadline })
+}
+
+fn prepare_run(
+    cx: &Cx,
+    config: &RemoteRunConfig,
+) -> Result<(TimerDriverHandle, Time), RemoteRunError> {
+    if cx.is_cancel_requested() {
+        return Err(RemoteRunError::Cancelled);
+    }
+    let cap = cx.remote().ok_or(RemoteRunError::NoCapability)?;
+    if cap.runtime().is_none() {
+        return Err(RemoteRunError::NoRemoteRuntime);
+    }
+    let clock = cx.timer_driver().ok_or(RemoteRunError::NoTimer)?;
+    let now = clock.now();
+    let deadline = now + config.timeout;
+    if config.timeout.is_zero() || deadline <= now {
+        return Err(RemoteRunError::Timeout);
+    }
+    Ok((clock, deadline))
+}
+
 async fn run_admitted(
     cx: &Cx, node: NodeId, computation: ComputationName, input: RemoteInput,
     config: RemoteRunConfig, admission: Option<admission::Permit>,
 ) -> Result<RemoteRunReport, RemoteRunError> {
-    if cx.is_cancel_requested() { return Err(RemoteRunError::Cancelled); }
-    let cap = cx.remote().ok_or(RemoteRunError::NoCapability)?;
-    if cap.runtime().is_none() { return Err(RemoteRunError::NoRemoteRuntime); }
-    let clock = cx.timer_driver().ok_or(RemoteRunError::NoTimer)?;
-    let now = clock.now();
-    let deadline = now + config.timeout;
-    if config.timeout.is_zero() || deadline <= now { return Err(RemoteRunError::Timeout); }
-    let child = cx.open_child_region(config.child).await?;
+    let timing = prepare_run(cx, &config)?;
+    run_prepared(cx, node, computation, input, config.child, timing, admission).await
+}
+
+async fn run_prepared(
+    cx: &Cx,
+    node: NodeId,
+    computation: ComputationName,
+    input: RemoteInput,
+    child_spec: ChildRegionSpec,
+    timing: (TimerDriverHandle, Time),
+    admission: Option<admission::Permit>,
+) -> Result<RemoteRunReport, RemoteRunError> {
+    let (clock, deadline) = timing;
+    let child = cx.open_child_region(child_spec).await?;
     let region_id = child.region_id();
     let mut handle = None;
     let mut result = None;
@@ -337,7 +567,9 @@ async fn run_admitted(
                 return Poll::Ready(RemoteRunTrigger::Cancelled(
                     cx.cancel_reason().unwrap_or_else(CancelReason::parent_cancelled)));
             }
-            if clock.now() >= deadline || timer.as_mut().poll(task).is_ready() {
+            // This operation belongs to the explicit Cx. Cancellation of an
+            // unrelated ambient polling task must not look like elapsed time.
+            if clock.now() >= deadline || timer.as_mut().poll_deadline(task).is_ready() {
                 return Poll::Ready(RemoteRunTrigger::Deadline);
             }
             if let Poll::Ready(value) = handle.as_mut().expect("admitted proxy").poll_join(task) {

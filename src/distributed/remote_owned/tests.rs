@@ -291,3 +291,277 @@ fn consumed_remote_cancelled_error_is_not_replaced_by_polled_after_completion() 
     drop(run); apply_obligation_posts(&mut lab.state, &mailbox, 16);
     assert_eq!(mailbox.stats().aborted, 1);
 }
+
+#[test]
+fn owned_spawn_refuses_missing_authority_or_runtime_before_dispatch() {
+    native(|cx| async move {
+        let spawn = |cx: &Cx, bounds| {
+            spawn_remote_owned(
+                cx, NodeId::new("worker"), ComputationName::new("test"),
+                RemoteInput::empty(), bounds,
+            )
+        };
+        assert!(matches!(spawn(&cx, config()),
+            Err(RemoteRunHandleError::Run(RemoteRunError::NoCapability))));
+        let fallback = cx.clone().with_remote_cap(RemoteCap::new());
+        assert!(matches!(spawn(&fallback, config()),
+            Err(RemoteRunHandleError::Run(RemoteRunError::NoRemoteRuntime))));
+        let transport = Transport::new(Mode::Immediate);
+        let no_timer = Cx::for_testing().with_remote_cap(transport.cap());
+        assert!(matches!(spawn(&no_timer, config()),
+            Err(RemoteRunHandleError::Run(RemoteRunError::NoTimer))));
+        let no_gateway = Cx::new_with_drivers(
+            cx.region_id(), cx.task_id(), Budget::INFINITE,
+            None, None, None, Some(clock()), None,
+        ).with_remote_cap(transport.cap());
+        assert!(matches!(spawn(&no_gateway, config()),
+            Err(RemoteRunHandleError::Spawn(SpawnError::RuntimeUnavailable))));
+        let cx = cx.with_remote_cap(transport.cap());
+        let mut zero = config();
+        zero.timeout = Duration::ZERO;
+        assert!(matches!(spawn(&cx, zero),
+            Err(RemoteRunHandleError::Run(RemoteRunError::Timeout))));
+        let cancelled = Cx::for_testing().with_remote_cap(transport.cap());
+        cancelled.cancel_with(CancelKind::User, Some("before owned spawn"));
+        assert!(matches!(spawn(&cancelled, config()),
+            Err(RemoteRunHandleError::Run(RemoteRunError::Cancelled))));
+        assert_eq!(transport.sent.load(Ordering::Acquire), 0);
+        assert!(transport.pending.lock().is_empty());
+    });
+}
+
+#[test]
+fn owned_spawn_deadline_includes_time_before_local_task_admission() {
+    let (mut lab, cx, mailbox, transport) = fixture(1, Mode::Immediate);
+    let mut handle = spawn_remote_owned(
+        &cx, NodeId::new("worker"), ComputationName::new("test"),
+        RemoteInput::empty(), config(),
+    ).unwrap();
+    let deadline = handle.deadline();
+    assert_eq!(deadline, cx.timer_driver().unwrap().now() + config().timeout);
+    assert!(handle.try_join().unwrap().is_none());
+    // No scheduler turn has admitted the owner. Its original cancellation
+    // interval must not restart when the queued factory finally runs.
+    lab.advance_time_to(deadline);
+    lab.run_until_idle();
+    assert!(matches!(handle.try_join(),
+        Err(RemoteRunHandleError::Run(RemoteRunError::Timeout))));
+    assert!(handle.is_finished());
+    assert!(matches!(handle.try_join(),
+        Err(RemoteRunHandleError::Join(JoinError::PolledAfterCompletion))));
+    assert_eq!(transport.sent.load(Ordering::Acquire), 0);
+    assert!(transport.pending.lock().is_empty());
+    assert_eq!(mailbox.stats().reserved, 0);
+    assert_eq!(mailbox.stats().leaked, 0);
+}
+
+#[test]
+fn owned_spawn_cancelled_before_first_poll_never_dispatches_remote_work() {
+    let (mut lab, cx, mailbox, transport) = fixture(1, Mode::Immediate);
+    let mut handle = spawn_remote_owned(
+        &cx, NodeId::new("worker"), ComputationName::new("test"),
+        RemoteInput::empty(), config(),
+    ).unwrap();
+    let reason = CancelReason::user("owned remote cancelled before admission");
+    handle.abort_with_reason(reason.clone());
+    lab.run_until_idle();
+    assert!(matches!(handle.try_join(),
+        Err(RemoteRunHandleError::Join(JoinError::Cancelled(actual))) if actual == reason));
+    assert!(handle.is_finished());
+    assert_eq!(transport.sent.load(Ordering::Acquire), 0);
+    assert!(transport.pending.lock().is_empty());
+    assert_eq!(mailbox.stats().reserved, 0);
+    assert_eq!(mailbox.stats().leaked, 0);
+}
+
+#[test]
+fn owned_spawn_task_quota_refusal_is_terminal_without_remote_registration() {
+    let (mut lab, cx, mailbox, transport) = fixture(1, Mode::Immediate);
+    let region = lab.state.region(cx.region_id()).unwrap();
+    let mut limits = region.limits();
+    limits.max_tasks = Some(1); // The fixture's original holder occupies it.
+    region.set_limits(limits);
+    let mut handle = spawn_remote_owned(
+        &cx, NodeId::new("worker"), ComputationName::new("test"),
+        RemoteInput::empty(), config(),
+    ).unwrap();
+    lab.run_until_idle();
+    assert!(matches!(handle.try_join(),
+        Err(RemoteRunHandleError::Join(JoinError::Cancelled(reason)))
+            if reason.kind == CancelKind::User
+                && reason.message.as_ref().is_some_and(|message| message.contains("[ASUP-E006]"))));
+    assert!(handle.is_finished());
+    assert!(matches!(handle.try_join(),
+        Err(RemoteRunHandleError::Join(JoinError::PolledAfterCompletion))));
+    assert_eq!(transport.sent.load(Ordering::Acquire), 0);
+    assert!(transport.pending.lock().is_empty());
+    assert_eq!(mailbox.stats().reserved, 0);
+    assert_eq!(mailbox.stats().leaked, 0);
+}
+
+struct FinishDeferred(Arc<Transport>);
+impl Drop for FinishDeferred {
+    fn drop(&mut self) {
+        let pending = std::mem::take(&mut *self.0.pending.lock());
+        for (_, sender) in pending {
+            let _ = sender.send_blocking(Err(RemoteError::LeaseExpired));
+        }
+    }
+}
+
+#[test]
+fn consumed_owned_remote_report_stays_terminal_without_a_drop_abort() {
+    let (mut lab, cx, _, transport) = fixture(1, Mode::Deferred);
+    let _finish = FinishDeferred(Arc::clone(&transport));
+    let mut handle = spawn_remote_owned(
+        &cx, NodeId::new("worker"), ComputationName::new("test"),
+        RemoteInput::empty(), config(),
+    ).unwrap();
+    lab.run_until_idle();
+    assert_eq!(transport.sent.load(Ordering::Acquire), 1);
+    assert!(handle.try_join().unwrap().is_none());
+    // Retain the owner's actual context past record retirement, so a stale
+    // implicit abort cannot disappear merely because its weak handle expired.
+    let owner = lab.state.task(handle.local_task_id()).unwrap().cx.clone().unwrap();
+    transport.deliver(Ok(RemoteOutcome::Success(b"consumed report".to_vec())));
+    lab.run_until_idle();
+    let report = handle.try_join().unwrap().expect("retired owner report");
+    assert!(report.is_success());
+    assert!(handle.task.terminal_published(), "consumption must remain terminal");
+    assert!(handle.is_finished());
+    assert!(!owner.is_cancel_requested());
+    let commands = cx.spawn_gateway_ref().unwrap().mailbox();
+    assert!(commands.handle_cancels_are_empty());
+    drop(handle);
+    // No scheduler turn intervenes: check both immediate Cx publication and
+    // the callback-free command lane that Drop would otherwise enqueue into.
+    assert!(!owner.is_cancel_requested());
+    assert!(commands.handle_cancels_are_empty());
+    assert_eq!(transport.cancels.load(Ordering::Acquire), 0);
+    assert_eq!(transport.clears.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn explicit_remote_authority_is_not_timed_out_by_ambient_task_cancellation() {
+    native(|cx| async move {
+        let transport = Transport::new(Mode::Deferred);
+        let _finish = FinishDeferred(Arc::clone(&transport));
+        let authority = cx.clone().with_remote_cap(transport.cap());
+        let cancelled_polls = Arc::new(AtomicUsize::new(0));
+        let repolled = Arc::new(Notify::new());
+        let observed_polls = Arc::clone(&cancelled_polls);
+        let observed_repoll = Arc::clone(&repolled);
+        let mut invocation = cx.spawn(move |running| async move {
+            assert_ne!(authority.task_id(), running.task_id());
+            let mut run = std::pin::pin!(run_remote(
+                &authority, NodeId::new("worker"), ComputationName::new("test"),
+                RemoteInput::empty(), config(),
+            ));
+            let result = poll_fn(|task| {
+                let ambient_cancelled = running.is_cancel_requested();
+                let progress = run.as_mut().poll(task);
+                if ambient_cancelled && progress.is_pending() {
+                    assert!(!authority.is_cancel_requested());
+                    observed_polls.fetch_add(1, Ordering::Release);
+                    observed_repoll.notify_waiters();
+                }
+                progress
+            }).await;
+            // Preserve the actual operation report after observing the
+            // independent cancellation of this task that polled it.
+            let _ = running.checkpoint();
+            result
+        }).unwrap();
+        // The single worker cannot return here until the proxy has actually
+        // parked on its remote receive and the owner's deadline is armed.
+        transport.changed.wait_until(|| transport.sent.load(Ordering::Acquire) == 1).await;
+        invocation.abort_with_reason(CancelReason::user("cancel only the ambient polling task"));
+        repolled.wait_until(|| cancelled_polls.load(Ordering::Acquire) > 0).await;
+        assert!(!cx.is_cancel_requested());
+        assert_eq!(transport.cancels.load(Ordering::Acquire), 0);
+        transport.deliver(Ok(RemoteOutcome::Success(b"explicit authority result".to_vec())));
+        let report = invocation.join(&cx).await.unwrap().unwrap();
+        assert!(matches!(report.trigger, RemoteRunTrigger::Finished));
+        assert!(report.is_success());
+        let reply = report.task.unwrap();
+        assert_eq!(reply.settlement, RemoteLeaseSettlement::Committed);
+        assert!(reply.cancellation.is_none());
+        assert!(matches!(reply.outcome,
+            Outcome::Ok(RemoteOutcome::Success(bytes)) if bytes == b"explicit authority result"));
+        assert_eq!(transport.cancels.load(Ordering::Acquire), 0);
+        assert_eq!(transport.clears.load(Ordering::Acquire), 1);
+        assert!(transport.pending.lock().is_empty());
+    });
+}
+
+#[test]
+fn dropping_only_an_owned_remote_join_future_does_not_cancel_the_invocation() {
+    native(|cx| async move {
+        let transport = Transport::new(Mode::Deferred);
+        let _finish = FinishDeferred(Arc::clone(&transport));
+        let cx = cx.with_remote_cap(transport.cap());
+        let mut handle = spawn_remote_owned(
+            &cx, NodeId::new("worker"), ComputationName::new("test"),
+            RemoteInput::empty(), config(),
+        ).unwrap();
+        // On this current-thread runtime, the proxy cannot yield control back
+        // here until its result receive has actually returned Pending.
+        transport.changed.wait_until(|| transport.sent.load(Ordering::Acquire) == 1).await;
+        let mut waiting = Box::pin(handle.join(&cx));
+        poll_fn(|task| {
+            assert!(waiting.as_mut().poll(task).is_pending());
+            Poll::Ready(())
+        }).await;
+        drop(waiting);
+        // Give any incorrectly enqueued abort a real scheduler turn before
+        // publishing the otherwise successful protocol terminal.
+        let mut turn = cx.spawn(|_| async {}).unwrap();
+        turn.join(&cx).await.unwrap();
+        assert_eq!(transport.cancels.load(Ordering::Acquire), 0);
+        assert!(handle.try_join().unwrap().is_none());
+        transport.deliver(Ok(RemoteOutcome::Success(b"retained result".to_vec())));
+        let report = handle.join(&cx).await.unwrap();
+        assert!(report.is_success(), "a dropped wait must not abort its owned invocation");
+        assert!(matches!(report.task.unwrap().outcome,
+            Outcome::Ok(RemoteOutcome::Success(bytes)) if bytes == b"retained result"));
+        assert_eq!(transport.cancels.load(Ordering::Acquire), 0);
+        assert_eq!(transport.clears.load(Ordering::Acquire), 1);
+        assert!(transport.pending.lock().is_empty());
+    });
+}
+
+#[test]
+fn owned_remote_close_keeps_its_report_with_an_already_cancelled_observer() {
+    native(|cx| async move {
+        let transport = Transport::new(Mode::Deferred);
+        let _finish = FinishDeferred(Arc::clone(&transport));
+        let cx = cx.with_remote_cap(transport.cap());
+        let mut handle = spawn_remote_owned(
+            &cx, NodeId::new("worker"), ComputationName::new("test"),
+            RemoteInput::empty(), config(),
+        ).unwrap();
+        transport.changed.wait_until(|| transport.sent.load(Ordering::Acquire) == 1).await;
+        let observer = Cx::for_testing();
+        observer.cancel_with(CancelKind::User, Some("cancelled remote result observer"));
+        let expected = observer.cancel_reason().unwrap();
+        let terminal = expected.clone();
+        let seen = Arc::clone(&transport);
+        let mut delivery = cx.spawn(move |_| async move {
+            seen.changed.wait_until(|| seen.cancels.load(Ordering::Acquire) == 1).await;
+            seen.deliver(Ok(RemoteOutcome::Cancelled(terminal)));
+        }).unwrap();
+        let report = handle.close(&observer).await.unwrap();
+        delivery.join(&cx).await.unwrap();
+        assert!(matches!(report.trigger, RemoteRunTrigger::Cancelled(ref reason) if reason == &expected));
+        assert!(!report.is_success());
+        assert!(report.close.is_ok());
+        assert!(report.cancel_error.is_none());
+        let reply = report.task.unwrap();
+        assert_eq!(reply.settlement, RemoteLeaseSettlement::Aborted);
+        assert_eq!(reply.cancellation.as_ref(), Some(&expected));
+        assert!(matches!(reply.outcome, Outcome::Ok(RemoteOutcome::Cancelled(reason)) if reason == expected));
+        assert_eq!(transport.cancels.load(Ordering::Acquire), 1);
+        assert_eq!(transport.clears.load(Ordering::Acquire), 1);
+        assert!(!cx.is_cancel_requested());
+    });
+}

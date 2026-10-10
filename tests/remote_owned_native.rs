@@ -10,8 +10,8 @@
 use asupersync::cx::ChildRegionSpec;
 use asupersync::distributed::remote_owned::{
     RemoteAdmissionError, RemoteAdmissionLimits, RemoteAdmissionUsage, RemoteExecutor,
-    RemoteExecutorError, RemoteLeaseSettlement, RemotePeerLimits, RemoteRunConfig, RemoteRunReport,
-    RemoteRunTrigger, run_remote,
+    RemoteExecutorError, RemoteLeaseSettlement, RemotePeerLimits, RemoteRunConfig, RemoteRunHandleError,
+    RemoteRunReport, RemoteRunTrigger, run_remote, spawn_remote_owned,
 };
 use asupersync::distributed::{ComputationSchemaRegistry, HasSchema, SchemaDescriptor};
 use asupersync::observability::diagnostics::Reason;
@@ -24,7 +24,7 @@ use asupersync::remote::{
     RemoteProtocolVersion, RemoteRuntime, RemoteServiceSessionCommand, RemoteServiceSessionEvent,
     RemoteServiceWireRequest, RemoteTaskId, RemoteTaskState, spawn_remote,
 };
-use asupersync::runtime::{RuntimeBuilder, RuntimeHandle, TaskHandle};
+use asupersync::runtime::{JoinError, RuntimeBuilder, RuntimeHandle, TaskHandle};
 use asupersync::stream::StreamExt;
 use asupersync::sync::Notify;
 use asupersync::tls::{
@@ -74,7 +74,10 @@ impl Drop for Stop {
     }
 }
 #[derive(Clone, Copy)]
-enum Case { Success, Cancel, Deadline, Drop, RenewalSuccess, RenewalCancel }
+enum Case {
+    Success, Cancel, Deadline, Drop, RenewalSuccess, RenewalCancel,
+    SpawnedSuccess, SpawnedCancel, SpawnedDrop, SpawnedParentClose,
+}
 fn config() -> RemoteRunConfig {
     RemoteRunConfig { timeout: Duration::from_secs(5), child: ChildRegionSpec::inherit() }
 }
@@ -179,10 +182,37 @@ fn exercise_with_admission(workers: usize, case: Case, bounded: bool) {
         ).unwrap());
         let work_input = if bounded { vec![1; 8] } else { Vec::new() };
 
-        if matches!(case, Case::Success | Case::RenewalSuccess) {
+        if matches!(case, Case::Success | Case::RenewalSuccess | Case::SpawnedSuccess) {
             let started = Instant::now();
-            let report = invoke(executor.as_ref(), &cx, "worker", "echo",
-                RemoteInput::new(b"native-secret".to_vec()), config()).await.unwrap();
+            let report = if matches!(case, Case::SpawnedSuccess) {
+                let mut invocation = spawn_remote_owned(
+                    &cx, NodeId::new("worker"), ComputationName::new("echo"),
+                    RemoteInput::new(b"native-secret".to_vec()), config(),
+                ).unwrap();
+                let mut other = spawn_remote_owned(
+                    &cx, NodeId::new("worker"), ComputationName::new("echo"),
+                    RemoteInput::new(b"parallel".to_vec()), config(),
+                ).unwrap();
+                assert_ne!(invocation.local_task_id(), other.local_task_id());
+                // Neither result handle is polled while the real remote work
+                // starts, completes, and closes its local invocation subtree.
+                asupersync::time::timeout(cx.now(), Duration::from_secs(5), async {
+                    while !invocation.is_finished() || !other.is_finished() {
+                        asupersync::time::sleep(cx.now(), Duration::from_millis(1)).await;
+                    }
+                }).await.expect("spawned invocations run without join polling");
+                let other_report = other.try_join().unwrap().expect("second terminal report");
+                assert!(other_report.is_success());
+                assert!(matches!(other_report.task.unwrap().outcome,
+                    Outcome::Ok(RemoteOutcome::Success(bytes)) if bytes == b"parallel"));
+                let report = invocation.try_join().unwrap().expect("first terminal report");
+                assert!(matches!(invocation.try_join(),
+                    Err(RemoteRunHandleError::Join(JoinError::PolledAfterCompletion))));
+                report
+            } else {
+                invoke(executor.as_ref(), &cx, "worker", "echo",
+                    RemoteInput::new(b"native-secret".to_vec()), config()).await.unwrap()
+            };
             assert!(
                 report.is_success(),
                 "{report:?}; proxy error: {:?}",
@@ -212,6 +242,75 @@ fn exercise_with_admission(workers: usize, case: Case, bounded: bool) {
                 }
             }).await.expect("native driver retires after successful terminal publication");
             assert_eq!(remote.active_operations(), 0);
+        } else if matches!(case, Case::SpawnedCancel | Case::SpawnedDrop | Case::SpawnedParentClose) {
+            let mut parent = Some(cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap());
+            let mut invocation = Some(spawn_remote_owned(
+                parent.as_ref().unwrap().cx(), NodeId::new("worker"), ComputationName::new("wait"),
+                RemoteInput::empty(), config(),
+            ).unwrap());
+            asupersync::time::timeout(cx.now(), Duration::from_secs(5),
+                witness.changed.wait_until(|| witness.parked.load(Ordering::Acquire)))
+                .await.expect("unpolled handle started a real parked remote handler");
+            let (region, holder) = witness.origin.lock().expect("actual origin IDs");
+            wait_for_lease(&cx, &diagnostics, region, holder).await;
+            assert!(!witness.cancelled.load(Ordering::Acquire));
+            let mut closing = None;
+            match case {
+                Case::SpawnedCancel => invocation.as_ref().unwrap().abort_with_reason(
+                    CancelReason::user("spawned invocation cancellation")),
+                Case::SpawnedDrop => drop(invocation.take()),
+                Case::SpawnedParentClose => {
+                    closing = Some(Box::pin(parent.take().unwrap().close()));
+                }
+                _ => unreachable!(),
+            }
+            let mut cancelled = std::pin::pin!(
+                witness.changed.wait_until(|| witness.cancelled.load(Ordering::Acquire)));
+            asupersync::time::timeout(cx.now(), Duration::from_secs(3), poll_fn(|task| {
+                if let Some(close) = &mut closing {
+                    assert!(close.as_mut().poll(task).is_pending(),
+                        "parent close must retain the parked remote invocation");
+                }
+                cancelled.as_mut().poll(task)
+            })).await.expect("owned handle lifecycle forwarded remote cancellation");
+            assert!(holds_lease(&diagnostics, region, holder),
+                "checked lease must remain during withheld remote cleanup");
+            assert_eq!(remote.active_operations(), 1);
+            if let Some(invocation) = &invocation {
+                assert!(!invocation.is_finished(), "Cancel is not a terminal report");
+            }
+            let other = run_remote(&cx, NodeId::new("worker"), ComputationName::new("echo"),
+                RemoteInput::new(b"unrelated".to_vec()), config()).await.unwrap();
+            assert!(other.is_success(), "one invocation does not stop the remote runtime");
+            witness.release.store(true, Ordering::Release);
+            witness.changed.notify_waiters();
+            if let Some(close) = closing {
+                asupersync::time::timeout(cx.now(), Duration::from_secs(3), close).await
+                    .expect("parent close waits for remote cleanup").expect("parent closed");
+            }
+            if let Some(mut invocation) = invocation {
+                let report = asupersync::time::timeout(cx.now(), Duration::from_secs(3),
+                    invocation.join(&cx)).await.expect("spawned owner drain").expect("typed report");
+                assert!(!report.is_success());
+                assert!(matches!(report.trigger, RemoteRunTrigger::Cancelled(_)));
+                assert!(report.close.is_ok());
+                assert!(report.cancel_error.is_none());
+                let reply = report.task.expect("proxy terminal report");
+                assert_eq!(reply.settlement, RemoteLeaseSettlement::Aborted);
+                assert!(matches!(reply.outcome, Outcome::Ok(RemoteOutcome::Cancelled(_))));
+            }
+            if let Some(parent) = parent {
+                asupersync::time::timeout(cx.now(), Duration::from_secs(3), parent.close()).await
+                    .expect("dropped handle remains owned until drain").expect("parent closed");
+            }
+            assert!(witness.dropped.load(Ordering::Acquire));
+            assert!(!holds_lease(&diagnostics, region, holder));
+            asupersync::time::timeout(cx.now(), Duration::from_secs(3), async {
+                while remote.active_operations() != 0 {
+                    asupersync::time::sleep(cx.now(), Duration::from_millis(1)).await;
+                }
+            }).await.expect("remote driver retires the spawned invocation");
+            assert!(!cx.is_cancel_requested());
         } else if matches!(case, Case::Drop) {
             let mut running = Box::pin(invoke(executor.as_ref(), &cx, "worker", "wait", RemoteInput::new(work_input), config()));
             let mut started = std::pin::pin!(witness.changed.wait_until(|| witness.parked.load(Ordering::Acquire)));
@@ -1396,6 +1495,22 @@ fn native_child_remote_authority_respects_parent_presence_and_runtime_mask() {
 #[test]
 fn native_v3_success_has_a_checked_commit_and_closed_local_child() {
     for workers in [1, 2] { exercise(workers, Case::Success); }
+}
+#[test]
+fn spawned_owned_remote_handles_run_concurrently_without_join_polling() {
+    for workers in [1, 2] { exercise(workers, Case::SpawnedSuccess); }
+}
+#[test]
+fn spawned_owned_remote_abort_retains_lease_and_report_until_protocol_cleanup() {
+    for workers in [1, 2] { exercise(workers, Case::SpawnedCancel); }
+}
+#[test]
+fn dropped_owned_remote_handle_keeps_cleanup_in_its_parent_region() {
+    for workers in [1, 2] { exercise(workers, Case::SpawnedDrop); }
+}
+#[test]
+fn parent_close_drains_an_owned_remote_handle_that_was_never_polled() {
+    for workers in [1, 2] { exercise(workers, Case::SpawnedParentClose); }
 }
 #[test]
 fn owned_native_automatic_renewal_keeps_production_computation_alive() {
