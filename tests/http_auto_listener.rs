@@ -3,6 +3,8 @@
 //! cleartext HTTP/1.1 and HTTP/2 with prior knowledge are told apart by the
 //! connection preface, and over TLS by the negotiated ALPN protocol.
 
+#![recursion_limit = "256"]
+
 use asupersync::bytes::BytesMut;
 use asupersync::codec::Decoder as _;
 use asupersync::cx::{ChildRegionSpec, Cx};
