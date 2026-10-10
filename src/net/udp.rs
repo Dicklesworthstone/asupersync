@@ -1751,40 +1751,69 @@ pub struct ReactorRegistration {
 #[cfg(unix)]
 #[derive(Debug, Default)]
 struct SharedWaiters {
-    waiters: parking_lot::Mutex<Vec<std::task::Waker>>,
+    /// One entry per waiting call future, keyed by its owner id
+    /// ([`next_shared_waiter_owner`]).
+    waiters: parking_lot::Mutex<Vec<(u64, std::task::Waker)>>,
+}
+
+/// A fresh owner id for one call future's entry in a socket's shared waiter
+/// list ([`ReactorRegistration::arm_shared`]).
+#[cfg(unix)]
+pub fn next_shared_waiter_owner() -> u64 {
+    static NEXT_OWNER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT_OWNER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 #[cfg(unix)]
 impl SharedWaiters {
-    /// Adds `waker` unless it is already listed. A waiter whose future was
-    /// dropped stays listed until the next event; past 32 entries the oldest
-    /// is woken and evicted, so a live one re-registers and a stale one goes.
-    fn register(&self, waker: &std::task::Waker) {
-        let mut waiters = self.waiters.lock();
-        if waiters.iter().any(|existing| existing.will_wake(waker)) {
-            return;
-        }
-        if waiters.len() >= 32 {
-            let evicted = waiters.remove(0);
-            drop(waiters);
-            evicted.wake();
-            waiters = self.waiters.lock();
-        }
-        waiters.push(waker.clone());
+    /// Stores `waker` as `owner`'s entry, replacing the waker it held. The
+    /// call future that owns the entry removes it when dropped
+    /// ([`Self::forget`]), so the list holds one entry per waiting call and
+    /// nothing is evicted. A 32-entry cap that woke the evicted waiter made
+    /// 33 or more waiting tasks wake each other forever
+    /// (br-asupersync-reactor-audit-dofi11).
+    fn register(&self, owner: u64, waker: &std::task::Waker) {
+        let displaced = {
+            let mut waiters = self.waiters.lock();
+            if let Some((_, existing)) = waiters.iter_mut().find(|(id, _)| *id == owner) {
+                (!existing.will_wake(waker)).then(|| std::mem::replace(existing, waker.clone()))
+            } else {
+                waiters.push((owner, waker.clone()));
+                None
+            }
+        };
+        // A waker drops outside the list's lock.
+        drop(displaced);
     }
 
-    /// Removes every waiter and returns all but `current`.
-    fn take_others(&self, current: &std::task::Waker) -> Vec<std::task::Waker> {
-        let mut waiters = std::mem::take(&mut *self.waiters.lock());
-        waiters.retain(|waiter| !waiter.will_wake(current));
+    /// Removes `owner`'s entry, returning its waker for the caller to drop
+    /// after releasing its own locks.
+    fn forget(&self, owner: u64) -> Option<std::task::Waker> {
+        let mut waiters = self.waiters.lock();
+        let position = waiters.iter().position(|(id, _)| *id == owner)?;
+        Some(waiters.swap_remove(position).1)
+    }
+
+    /// Removes every waiter and returns all but `current`'s.
+    fn take_others(&self, current: u64) -> Vec<std::task::Waker> {
+        let waiters = std::mem::take(&mut *self.waiters.lock());
         waiters
+            .into_iter()
+            .filter(|(id, _)| *id != current)
+            .map(|(_, waker)| waker)
+            .collect()
     }
 
     fn wake_all(&self) {
         let waiters = std::mem::take(&mut *self.waiters.lock());
-        for waiter in waiters {
+        for (_, waiter) in waiters {
             waiter.wake();
         }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.waiters.lock().len()
     }
 }
 
@@ -1942,23 +1971,43 @@ impl ReactorRegistration {
     /// wakeup. When no reactor will deliver a wake (`SelfWake` or an error),
     /// the other listed waiters are returned: the caller wakes them after
     /// releasing the lock that guards `self`, so each re-polls on its own.
+    ///
+    /// `owner` ([`next_shared_waiter_owner`]) names the calling future's one
+    /// entry in the list; the future removes it with
+    /// [`forget_shared`](Self::forget_shared) when dropped.
     #[cfg(unix)]
     pub(crate) fn arm_shared(
         &mut self,
         source: &dyn crate::runtime::reactor::Source,
         interest: Interest,
+        owner: u64,
         waker: &std::task::Waker,
     ) -> (io::Result<Armed>, Vec<std::task::Waker>) {
         let waiters = Arc::clone(self.shared_waiters.get_or_insert_with(Default::default));
-        waiters.register(waker);
+        waiters.register(owner, waker);
         let dispatch = std::task::Waker::from(Arc::clone(&waiters));
         let armed = self.arm(source, interest, &dispatch);
         let stranded = if matches!(armed, Ok(Armed::Parked)) {
             Vec::new()
         } else {
-            waiters.take_others(waker)
+            waiters.take_others(owner)
         };
         (armed, stranded)
+    }
+
+    /// Removes `owner`'s entry from the shared waiter list, returning its
+    /// waker for the caller to drop after releasing the lock guarding `self`.
+    #[cfg(unix)]
+    pub(crate) fn forget_shared(&self, owner: u64) -> Option<std::task::Waker> {
+        self.shared_waiters
+            .as_ref()
+            .and_then(|waiters| waiters.forget(owner))
+    }
+
+    /// How many call futures are listed as shared waiters.
+    #[cfg(all(unix, test))]
+    pub(crate) fn shared_waiter_count(&self) -> usize {
+        self.shared_waiters.as_deref().map_or(0, SharedWaiters::len)
     }
 
     /// Hands the live registration and its fallback flag to another owner of
