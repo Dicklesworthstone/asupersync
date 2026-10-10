@@ -914,16 +914,17 @@ impl RateLimiter {
     pub fn reset(&self) {
         let initial_tokens = self.policy.burst;
 
+        // Refill, clear and zero under the queue lock (taken before `state`,
+        // the order process_queue uses), so no enqueue, grant or cancel lands
+        // between them. A grant between a refill and the clear took tokens for
+        // an entry the clear then dropped, leaving the bucket short.
+        let mut queue = self.wait_queue.write();
         {
             let mut state = self.state.lock();
             state.tokens = initial_tokens;
             state.fractional = 0;
             state.last_refill = 0;
         }
-
-        // Clear and zero under one lock so no enqueue, grant or cancel lands
-        // between them.
-        let mut queue = self.wait_queue.write();
         queue.clear();
         self.pending_queue_count.store(0, Ordering::Relaxed);
         drop(queue);
@@ -1550,6 +1551,45 @@ mod tests {
         resetter.join().expect("resetter thread");
         rl.reset();
         assert!(rl.try_acquire(1, now), "the fast path stays open");
+    }
+
+    #[test]
+    fn reset_racing_a_grant_leaves_the_bucket_full() {
+        // br-asupersync-e9gn8y L3: reset refilled the bucket, released the
+        // state lock, then cleared the queue. A process_queue in between
+        // granted the queued waiter from the fresh tokens and the clear dropped
+        // that grant, so the bucket stayed short after the reset. Either order
+        // of the two whole operations leaves it full. The window is narrow,
+        // so this loops.
+        let now = Time::from_millis(0);
+        for _ in 0..20_000 {
+            let rl = Arc::new(RateLimiter::new(RateLimitPolicy {
+                rate: 1,
+                burst: 1,
+                wait_strategy: WaitStrategy::Block,
+                ..Default::default()
+            }));
+            assert!(rl.try_acquire(1, now));
+            let entry_id = rl.enqueue(1, now).expect("queued behind the empty bucket");
+            assert_ne!(entry_id, IMMEDIATE_ACQUIRE_SENTINEL);
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let granter = {
+                let rl = Arc::clone(&rl);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let _ = rl.process_queue(now);
+                })
+            };
+            barrier.wait();
+            rl.reset();
+            granter.join().expect("granter thread");
+            assert_eq!(
+                rl.available_tokens(),
+                1,
+                "a grant the reset discarded kept its token"
+            );
+        }
     }
 
     #[test]
