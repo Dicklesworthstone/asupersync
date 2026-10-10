@@ -537,16 +537,34 @@ impl<H: Handler> Handler for TimeoutMiddleware<H> {
         Box::pin(async move {
             let start = (self.time_getter)();
             let effective = self.effective_timeout(&cx, start);
-            let resp = self.inner.call(&cx, req).await;
-            let elapsed = Duration::from_nanos((self.time_getter)().duration_since(start));
+            let effective_nanos = u64::try_from(effective.as_nanos()).unwrap_or(u64::MAX);
+            let deadline = start.saturating_add_nanos(effective_nanos);
 
-            if elapsed > effective {
-                Response::new(
-                    StatusCode::GATEWAY_TIMEOUT,
-                    format!("Request timed out after {elapsed:?}").into_bytes(),
-                )
-            } else {
-                resp
+            let timeout_fut = crate::time::TimeoutFuture::with_time_getter(
+                self.inner.call(&cx, req),
+                deadline,
+                self.time_getter,
+            );
+
+            match timeout_fut.await {
+                Ok(resp) => {
+                    let elapsed = Duration::from_nanos((self.time_getter)().duration_since(start));
+                    if elapsed > effective {
+                        Response::new(
+                            StatusCode::GATEWAY_TIMEOUT,
+                            format!("Request timed out after {elapsed:?}").into_bytes(),
+                        )
+                    } else {
+                        resp
+                    }
+                }
+                Err(_) => {
+                    let elapsed = Duration::from_nanos((self.time_getter)().duration_since(start));
+                    Response::new(
+                        StatusCode::GATEWAY_TIMEOUT,
+                        format!("Request timed out after {elapsed:?}").into_bytes(),
+                    )
+                }
             }
         })
     }
@@ -3360,6 +3378,31 @@ mod tests {
         let resp = mw.call(make_request());
         assert_eq!(resp.status, StatusCode::CREATED);
         assert_eq!(resp.body.as_ref(), b"advanced");
+    }
+
+    struct PendingHandler;
+
+    impl Handler for PendingHandler {
+        fn call(
+            &self,
+            _cx: &crate::Cx,
+            _req: Request,
+        ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    #[test]
+    fn timeout_preempts_pending_handler() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        let resp = runtime.block_on(async {
+            let cx = crate::Cx::for_testing();
+            let mw = TimeoutMiddleware::new(PendingHandler, Duration::from_millis(5));
+            Handler::call(&mw, &cx, make_request()).await
+        });
+        assert_eq!(resp.status, StatusCode::GATEWAY_TIMEOUT);
     }
 
     // --- CircuitBreakerMiddleware ---
