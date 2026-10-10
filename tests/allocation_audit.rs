@@ -1949,3 +1949,37 @@ fn spawn_join_allocations_per_task_stay_within_budget() {
 /// instrumentation features, and still catches a regression of five or more
 /// allocations per task.
 const SPAWN_JOIN_ALLOCATION_BUDGET: f64 = 29.0;
+
+/// A copy that crosses a `Chain`'s boundary allocates no more than the same
+/// copy from one contiguous slice (br-asupersync-vs1vdk U7). It used to copy
+/// each half into its own temporary `Bytes` before copying both again.
+#[test]
+fn chain_copy_across_the_boundary_allocates_like_a_contiguous_copy() {
+    use asupersync::bytes::Buf;
+
+    let _guard = ALLOC_TEST_GUARD.lock();
+    init_test("chain_copy_across_the_boundary_allocates_like_a_contiguous_copy");
+    let data: &[u8] = b"hello world!";
+
+    let mut contiguous = data;
+    let before = AllocSnapshot::take();
+    let expected = contiguous.copy_to_bytes(8);
+    let contiguous_allocs = AllocSnapshot::take().allocs_since(&before);
+
+    let mut chain = (&data[..5]).chain(&data[5..]);
+    let before = AllocSnapshot::take();
+    let crossing = chain.copy_to_bytes(8);
+    let crossing_allocs = AllocSnapshot::take().allocs_since(&before);
+
+    assert_eq!(crossing.as_ref(), expected.as_ref());
+    assert_eq!(chain.remaining(), 4);
+    assert!(
+        crossing_allocs <= contiguous_allocs,
+        "a copy across the boundary made {crossing_allocs} allocations, a contiguous copy {contiguous_allocs}"
+    );
+    test_complete!(
+        "chain_copy_across_the_boundary_allocates_like_a_contiguous_copy",
+        crossing_allocs = crossing_allocs,
+        contiguous_allocs = contiguous_allocs
+    );
+}

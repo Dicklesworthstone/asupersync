@@ -115,9 +115,16 @@ impl<T: Buf, U: Buf> Buf for Chain<T, U> {
                 len,
                 self.remaining()
             );
+            // Copy straight from each half's chunks: copy_to_bytes on a half
+            // that is not shared storage would allocate a temporary first.
             let mut ret = Vec::with_capacity(len);
-            ret.extend_from_slice(&self.a.copy_to_bytes(a_rem));
-            ret.extend_from_slice(&self.b.copy_to_bytes(len - a_rem));
+            while ret.len() < len {
+                let chunk = self.chunk();
+                let n = chunk.len().min(len - ret.len());
+                assert!(n > 0, "a Buf with bytes remaining returned an empty chunk");
+                ret.extend_from_slice(&chunk[..n]);
+                self.advance(n);
+            }
             crate::bytes::Bytes::from(ret)
         }
     }
