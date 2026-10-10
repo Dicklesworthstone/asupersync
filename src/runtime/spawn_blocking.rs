@@ -725,12 +725,39 @@ struct FallbackThread(Option<thread::JoinHandle<()>>);
 impl Drop for FallbackThread {
     fn drop(&mut self) {
         if let Some(handle) = self.0.take() {
-            if handle.is_finished() {
-                let _ = handle.join();
-            } else {
-                UNJOINED_FALLBACK_THREADS.lock().push(handle);
-            }
+            reap_thread(handle);
         }
+    }
+}
+
+/// Releases helper threads the caller no longer owns without detaching any
+/// (GitHub #80): first joins the parked threads that have finished, then joins
+/// each given thread that has finished and parks the rest. It never waits on
+/// a thread still running its closure (a join only waits out a finished
+/// thread's thread-local destructors), so executor threads may call it. Timer
+/// fallback threads (`time::sleep`) use it too.
+pub(crate) fn reap_threads(handles: impl IntoIterator<Item = thread::JoinHandle<()>>) {
+    join_finished_fallback_threads();
+    for handle in handles {
+        reap_thread(handle);
+    }
+}
+
+/// Whether a thread is parked here and, if so, whether it has finished.
+#[cfg(test)]
+pub(crate) fn parked_thread(id: thread::ThreadId) -> Option<bool> {
+    UNJOINED_FALLBACK_THREADS
+        .lock()
+        .iter()
+        .find(|handle| handle.thread().id() == id)
+        .map(thread::JoinHandle::is_finished)
+}
+
+fn reap_thread(handle: thread::JoinHandle<()>) {
+    if handle.is_finished() {
+        let _ = handle.join();
+    } else {
+        UNJOINED_FALLBACK_THREADS.lock().push(handle);
     }
 }
 
@@ -980,11 +1007,7 @@ mod tests {
 
     /// The fallback thread's handle while it is parked, if it is.
     fn parked_fallback_thread(id: thread::ThreadId) -> Option<bool> {
-        UNJOINED_FALLBACK_THREADS
-            .lock()
-            .iter()
-            .find(|handle| handle.thread().id() == id)
-            .map(thread::JoinHandle::is_finished)
+        parked_thread(id)
     }
 
     /// Waits until a parked fallback thread has finished, then makes another
