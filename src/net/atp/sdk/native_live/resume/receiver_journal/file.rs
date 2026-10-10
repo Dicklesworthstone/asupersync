@@ -514,6 +514,55 @@ impl ReceiverJournalFile {
             .clone()
             .ok_or_else(|| io::Error::from(io::ErrorKind::WouldBlock))
     }
+
+    /// Resolve a crash during this file profile's final verification and sync.
+    ///
+    /// Call after reopening the original protected pair, before moving it into a
+    /// receiver. This synchronously re-hashes the exact retained data inode,
+    /// requires its length and SHA-256 to equal the final intent, synchronizes
+    /// data and its parent, then appends and synchronizes the Committed checkpoint.
+    /// Run before runtime startup or on a blocking thread, as with open_existing.
+    /// No bytes are written to the data file, and neither file is repaired,
+    /// replaced or truncated. A Receiving checkpoint cannot be promoted.
+    ///
+    /// This operation is specific to the built-in file sink: its application
+    /// commit only verifies and syncs this file. It cannot establish the outcome
+    /// of an external application commit when this journal was paired with a
+    /// different sink. Such effects require their own recovery evidence.
+    ///
+    /// A completed pair is revalidated and returns the same historical receipt
+    /// without adding another record. The receipt does not assert peer delivery.
+    /// Normal restoration continues to refuse unresolved Finalizing checkpoints;
+    /// after success, bind_restored/into_service_session can resend only Proof.
+    pub fn resolve_finalizing(&mut self) -> io::Result<LiveStreamReceipt> {
+        let mut saved = self.checkpoint()?;
+        if saved.phase == ReceiverCheckpointPhase::Receiving {
+            return Err(io::Error::other("receiver has no final commit intent"));
+        }
+        {
+            let state = self.storage.state.lock();
+            if state.poisoned || state.file.metadata()?.len() != state.bytes {
+                return Err(invalid());
+            }
+            self.storage.verify(&state.file)?;
+            let current = state.latest.as_ref().ok_or_else(invalid)?;
+            if current.to_canonical_bytes()?.as_slice() != saved.to_canonical_bytes()?.as_slice() {
+                return Err(invalid());
+            }
+        }
+        let receipt = saved.receipt();
+        self.storage.commit(&receipt)?;
+        if saved.phase == ReceiverCheckpointPhase::Finalizing {
+            saved.phase = ReceiverCheckpointPhase::Committed;
+            if let Err(error) = self.storage.append(saved.clone()) {
+                self.failure = Some((error.kind(), error.raw_os_error()));
+                return Err(error);
+            }
+            self.latest = Some(saved);
+        }
+        Ok(receipt)
+    }
+
     fn sink(&self) -> io::Result<ReceiverFileSink> {
         Ok(ReceiverFileSink {
             file: AsyncFile::from_std(self.storage.data.try_clone()?),
@@ -869,6 +918,206 @@ mod tests {
     fn append_data(store: &ReceiverJournalFile, bytes: &[u8]) {
         (&store.storage.data).write_all(bytes).unwrap();
         store.storage.data.sync_all().unwrap();
+    }
+
+    fn finalizing_files(
+        limits: ReceiverFileLimits,
+        empty: bool,
+    ) -> (PathBuf, PathBuf, LiveStreamReceipt) {
+        let (journal, data) = files();
+        let (start, pending, stable) = checkpoints();
+        let store = ReceiverJournalFile::create_new(&journal, &data, limits).unwrap();
+        store.storage.append(start.clone()).unwrap();
+        let mut finalizing = if empty {
+            start
+        } else {
+            store.storage.append(pending).unwrap();
+            append_data(&store, b"abcdefgh");
+            store.storage.append(stable.clone()).unwrap();
+            stable
+        };
+        finalizing.phase = ReceiverCheckpointPhase::Finalizing;
+        store.storage.append(finalizing.clone()).unwrap();
+        (journal, data, finalizing.receipt())
+    }
+
+    #[test]
+    fn resolve_finalizing_revalidates_and_records_completion_without_replacing_files() {
+        for empty in [false, true] {
+            let (journal, data, expected) = finalizing_files(limits(), empty);
+            let history = std::fs::read(&journal).unwrap();
+            let payload = std::fs::read(&data).unwrap();
+            let journal_inode = std::fs::metadata(&journal).unwrap().ino();
+            let data_inode = std::fs::metadata(&data).unwrap().ino();
+            let mut store = ReceiverJournalFile::open_existing(&journal, &data).unwrap();
+            let before = store.checkpoint().unwrap();
+            let observer = store.observer();
+            assert_eq!(before.phase(), ReceiverCheckpointPhase::Finalizing);
+            assert!(before.committed_receipt().is_none());
+            let records = store.storage.state.lock().records;
+            assert_eq!(store.resolve_finalizing().unwrap(), expected);
+            assert_eq!(store.storage.state.lock().records, records + 1);
+            let saved = store.checkpoint().unwrap();
+            assert_eq!(saved.phase(), ReceiverCheckpointPhase::Committed);
+            assert_eq!(saved.committed_receipt(), Some(expected.clone()));
+            assert_eq!(saved.attempts(), before.attempts());
+            assert_eq!(saved.maximum_attempts(), before.maximum_attempts());
+            assert_eq!(
+                observer.checkpoint().unwrap().committed_receipt(),
+                Some(expected.clone())
+            );
+            let committed_history = std::fs::read(&journal).unwrap();
+            assert!(committed_history.starts_with(&history));
+            assert!(committed_history.len() > history.len());
+            assert_eq!(store.resolve_finalizing().unwrap(), expected);
+            assert_eq!(std::fs::read(&journal).unwrap(), committed_history);
+            assert_eq!(store.storage.state.lock().records, records + 1);
+            assert_eq!(std::fs::read(&data).unwrap(), payload);
+            assert_eq!(std::fs::metadata(&journal).unwrap().ino(), journal_inode);
+            assert_eq!(std::fs::metadata(&data).unwrap().ino(), data_inode);
+            drop(store);
+            let reopened = ReceiverJournalFile::open_existing(&journal, &data).unwrap();
+            assert_eq!(
+                reopened.checkpoint().unwrap().committed_receipt(),
+                Some(expected)
+            );
+            // Ordinary handoff still rejects Finalizing, but this durable
+            // completion is eligible for authenticated Proof-only restoration.
+            let session = reopened.service_session().unwrap();
+            assert_eq!(std::fs::read(&journal).unwrap(), committed_history);
+            assert!(ReceiverJournalFile::open_existing(&journal, &data).is_err());
+            drop(session);
+        }
+    }
+
+    #[test]
+    fn resolve_finalizing_refuses_modified_data_length_and_replaced_identity() {
+        for corruption in ["hash", "short", "extra", "inode", "link"] {
+            let (journal, data, _) = finalizing_files(limits(), false);
+            let history = std::fs::read(&journal).unwrap();
+            let mut store = ReceiverJournalFile::open_existing(&journal, &data).unwrap();
+            match corruption {
+                "hash" => {
+                    let mut file = OpenOptions::new().write(true).open(&data).unwrap();
+                    file.write_all(b"X").unwrap();
+                    file.sync_all().unwrap();
+                }
+                "short" => {
+                    let file = OpenOptions::new().write(true).open(&data).unwrap();
+                    file.set_len(4).unwrap();
+                    file.sync_all().unwrap();
+                }
+                "extra" => append_data(&store, b"X"),
+                "inode" => {
+                    std::fs::rename(&data, data.with_extension("retained-original")).unwrap();
+                    let mut replacement = OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .mode(0o600)
+                        .open(&data)
+                        .unwrap();
+                    replacement.write_all(b"abcdefgh").unwrap();
+                    replacement.sync_all().unwrap();
+                }
+                "link" => std::fs::hard_link(&data, data.with_extension("second-link")).unwrap(),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                store.resolve_finalizing().unwrap_err().kind(),
+                io::ErrorKind::InvalidData,
+                "{corruption}"
+            );
+            assert_eq!(std::fs::read(&journal).unwrap(), history, "{corruption}");
+            assert_eq!(
+                store.observer().checkpoint().unwrap().phase(),
+                ReceiverCheckpointPhase::Finalizing
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_finalizing_requires_intent_and_confirmed_journal_ownership() {
+        let (journal, data) = files();
+        let (start, _, _) = checkpoints();
+        let store = ReceiverJournalFile::create_new(&journal, &data, limits()).unwrap();
+        store.storage.append(start).unwrap();
+        drop(store);
+        let mut store = ReceiverJournalFile::open_existing(&journal, &data).unwrap();
+        let history = std::fs::read(&journal).unwrap();
+        assert_eq!(
+            store.resolve_finalizing().unwrap_err().to_string(),
+            "receiver has no final commit intent"
+        );
+        assert_eq!(std::fs::read(&journal).unwrap(), history);
+
+        let (journal, data, _) = finalizing_files(limits(), false);
+        let mut store = ReceiverJournalFile::open_existing(&journal, &data).unwrap();
+        let history = std::fs::read(&journal).unwrap();
+        // A pending checkpoint owns the storage operation. Resolution must not
+        // run concurrently with it or discard a dropped wait's pending result.
+        store.pending = Some(Box::pin(std::future::pending()));
+        assert_eq!(
+            store.resolve_finalizing().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(std::fs::read(&journal).unwrap(), history);
+        drop(store);
+
+        let mut store = ReceiverJournalFile::open_existing(&journal, &data).unwrap();
+        let mut external = OpenOptions::new().append(true).open(&journal).unwrap();
+        external.write_all(&[0]).unwrap();
+        external.sync_all().unwrap();
+        let modified = std::fs::read(&journal).unwrap();
+        assert_eq!(
+            store.resolve_finalizing().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(std::fs::read(&journal).unwrap(), modified);
+        store.storage.state.lock().poisoned = true;
+        assert_eq!(
+            store.resolve_finalizing().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(std::fs::read(&journal).unwrap(), modified);
+    }
+
+    #[test]
+    fn resolve_finalizing_cannot_claim_completion_when_the_terminal_record_does_not_fit() {
+        let (journal, data, _) = finalizing_files(
+            ReceiverFileLimits {
+                max_snapshots: 4,
+                ..limits()
+            },
+            false,
+        );
+        let history = std::fs::read(&journal).unwrap();
+        let mut store = ReceiverJournalFile::open_existing(&journal, &data).unwrap();
+        assert_eq!(store.storage.state.lock().records, 4);
+        assert_eq!(
+            store.resolve_finalizing().unwrap_err().kind(),
+            io::ErrorKind::StorageFull
+        );
+        assert_eq!(
+            store.checkpoint().unwrap_err().kind(),
+            io::ErrorKind::StorageFull
+        );
+        assert_eq!(
+            store.observer().checkpoint().unwrap().phase(),
+            ReceiverCheckpointPhase::Finalizing
+        );
+        assert_eq!(std::fs::read(&journal).unwrap(), history);
+        assert_eq!(std::fs::read(&data).unwrap(), b"abcdefgh");
+        drop(store);
+        let mut reopened = ReceiverJournalFile::open_existing(&journal, &data).unwrap();
+        assert_eq!(
+            reopened.checkpoint().unwrap().phase(),
+            ReceiverCheckpointPhase::Finalizing
+        );
+        assert_eq!(
+            reopened.resolve_finalizing().unwrap_err().kind(),
+            io::ErrorKind::StorageFull
+        );
+        assert_eq!(std::fs::read(&journal).unwrap(), history);
     }
 
     #[test]

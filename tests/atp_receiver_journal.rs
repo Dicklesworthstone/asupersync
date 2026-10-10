@@ -682,6 +682,74 @@ fn killed_receivers_restore_acknowledged_and_partially_written_epochs_without_du
 }
 
 #[test]
+fn explicitly_resolved_file_commit_recovers_only_proof_in_a_new_receiver_process() {
+    for workers in [1, 2] {
+        let root = directory();
+        let journal = root.join("receiver.wal");
+        let data = root.join("receiver.data");
+        let mut original = Process::spawn(
+            &root,
+            "commit",
+            workers,
+            "127.0.0.1:0".parse().unwrap(),
+        );
+        let address = original.ready();
+        let mut peer = Peer::connect(address);
+        let state = peer.hello();
+        let prefix = peer.epoch(&state[60..108], &DATA[..8]);
+        assert_eq!(peer.read(FrameType::Control).unwrap(), prefix);
+        let mut final_value = prefix.clone();
+        final_value.extend_from_slice(&Sha256::digest(&DATA[..8]));
+        peer.send(FrameType::ObjectComplete, final_value);
+        assert_eq!(original.witness("parked")["commit"], true);
+        assert_eq!(records(&journal).last().unwrap()[280], 1);
+        original.crash();
+        drop(peer);
+
+        // This fixture's only effect is the retained file; no external
+        // application transaction is being inferred from its bytes. Recover
+        // explicitly as that file profile before starting another runtime.
+        let before = std::fs::read(&journal).unwrap();
+        let inode = std::fs::metadata(&data).unwrap().ino();
+        let mut recovery = ReceiverJournalFile::open_existing(&journal, &data).unwrap();
+        let receipt = recovery.resolve_finalizing().unwrap();
+        assert_eq!(receipt.prefix.bytes, 8);
+        assert_eq!(
+            receipt.source_sha256.as_slice(),
+            Sha256::digest(&DATA[..8]).as_slice()
+        );
+        assert_eq!(
+            recovery.checkpoint().unwrap().committed_receipt(),
+            Some(receipt.clone())
+        );
+        let resolved = std::fs::read(&journal).unwrap();
+        assert!(resolved.starts_with(&before));
+        assert_eq!(records(&journal).last().unwrap()[280], 2);
+        assert_eq!(recovery.resolve_finalizing().unwrap(), receipt);
+        assert_eq!(std::fs::read(&journal).unwrap(), resolved);
+        drop(recovery);
+
+        let mut restored = Process::spawn(&root, "resolved-receipt", workers, address);
+        assert_eq!(restored.ready(), address);
+        let mut peer = Peer::connect(address);
+        let state = peer.hello();
+        assert_eq!(state[140], 1);
+        assert_eq!(&state[60..108], prefix);
+        assert_eq!(&state[108..140], Sha256::digest(&DATA[..8]).as_slice());
+        peer.finish(&prefix, &DATA[..8]);
+        let done = restored.done();
+        assert!(restored.wait().success());
+        assert_eq!(done["status"], "complete");
+        assert_eq!(done["receipt_reused"], true);
+        assert_eq!(done["attempts"], 2);
+        assert_eq!(done["sink_written_bytes"], 8);
+        assert_eq!(std::fs::read(&data).unwrap(), &DATA[..8]);
+        assert_eq!(std::fs::metadata(&data).unwrap().ino(), inode);
+        assert!(std::fs::read(&journal).unwrap().starts_with(&resolved));
+    }
+}
+
+#[test]
 fn corrupt_data_wrong_client_and_uncertain_commit_are_refused_before_restored_listening() {
     for case in ["prefix", "extra", "client", "unresolved"] {
         let root = directory();

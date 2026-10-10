@@ -771,9 +771,7 @@ impl<W: LiveStreamCommitSink + Unpin> ResumableReceiver<W> {
                 self.final_receipt = Some(receipt.clone());
                 // Persist uncertainty before invoking any application publication.
                 self.checkpoint_boundary(cx, &mut journal).await?;
-                self.finalize(cx).await?;
-                // A Proof cannot overtake the durable successful-commit observation.
-                self.checkpoint_boundary(cx, &mut journal).await?;
+                self.finalize_checkpointed(cx, &mut journal).await?;
                 let proof = bounded(
                     cx,
                     timeout,

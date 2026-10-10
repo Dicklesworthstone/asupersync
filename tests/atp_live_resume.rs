@@ -12,6 +12,9 @@ use asupersync::codec::Decoder;
 use asupersync::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use asupersync::net::atp::protocol::codec::AtpFrameCodec;
 use asupersync::net::atp::protocol::frames::{Frame, FrameType, ProtocolVersion};
+use asupersync::net::atp::sdk::native_auth::live::commit::resume::receiver_journal::{
+    ReceiverCheckpoint, ReceiverCheckpointPhase, ReceiverCheckpointStore,
+};
 use asupersync::net::atp::sdk::native_auth::live::commit::resume::{
     RESUMABLE_LIVE_ALPN, ResumeError,
 };
@@ -41,7 +44,7 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 fn fixture() -> serde_json::Value {
@@ -205,6 +208,7 @@ struct Probe {
     cancel_polled: AtomicBool,
     release_write: AtomicBool,
     release_commit: AtomicBool,
+    commit_waker: Mutex<Option<Waker>>,
 }
 struct Source {
     bytes: &'static [u8],
@@ -233,6 +237,8 @@ struct Sink {
     park_write: bool,
     park_commit: bool,
     fail_write: bool,
+    fail_commit: bool,
+    wake_while_parked: bool,
 }
 impl AsyncWrite for Sink {
     fn poll_write(
@@ -284,9 +290,15 @@ impl LiveStreamCommitSink for Sink {
             Sha256::digest(&*self.probe.bytes.lock().unwrap()).as_slice()
         );
         if self.park_commit && !self.probe.release_commit.load(Ordering::SeqCst) {
+            *self.probe.commit_waker.lock().unwrap() = Some(ctx.waker().clone());
             self.probe.commit_parked.store(true, Ordering::SeqCst);
-            ctx.waker().wake_by_ref();
+            if self.wake_while_parked {
+                ctx.waker().wake_by_ref();
+            }
             return Poll::Pending;
+        }
+        if self.fail_commit {
+            return Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe)));
         }
         assert_eq!(
             self.probe.commits.fetch_add(1, Ordering::SeqCst),
@@ -310,6 +322,8 @@ fn sink(probe: &Arc<Probe>) -> Sink {
         park_write: false,
         park_commit: false,
         fail_write: false,
+        fail_commit: false,
+        wake_while_parked: true,
     }
 }
 
@@ -920,6 +934,262 @@ fn attributed_cancellation_drains_commit_then_a_fresh_attempt_recovers_its_proof
         assert_eq!(probe.commits.load(Ordering::SeqCst), 1);
         assert_eq!(probe.reads.load(Ordering::SeqCst), 2);
     });
+}
+
+#[test]
+fn a_receiver_persists_its_drained_commit_before_returning_interruption() {
+    #[derive(Default)]
+    struct JournalProbe {
+        latest: Mutex<Option<ReceiverCheckpoint>>,
+        terminal_parked: AtomicBool,
+        release: AtomicBool,
+        waker: Mutex<Option<Waker>>,
+    }
+    struct Store {
+        probe: Arc<JournalProbe>,
+        fail: bool,
+    }
+    impl ReceiverCheckpointStore for Store {
+        fn poll_store(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            checkpoint: &ReceiverCheckpoint,
+        ) -> Poll<io::Result<()>> {
+            if checkpoint.phase() == ReceiverCheckpointPhase::Committed {
+                *self.probe.waker.lock().unwrap() = Some(cx.waker().clone());
+                self.probe.terminal_parked.store(true, Ordering::SeqCst);
+                if !self.probe.release.load(Ordering::SeqCst) {
+                    return Poll::Pending;
+                }
+                if self.fail {
+                    return Poll::Ready(Err(io::Error::from(io::ErrorKind::PermissionDenied)));
+                }
+            }
+            let mut latest = self.probe.latest.lock().unwrap();
+            if let Some(previous) = latest.as_ref() {
+                checkpoint.validate_successor(previous)?;
+            }
+            *latest = Some(checkpoint.clone());
+            Poll::Ready(Ok(()))
+        }
+    }
+    struct ReleaseOnDrop(Arc<Probe>, Arc<JournalProbe>);
+    impl ReleaseOnDrop {
+        fn commit(&self) {
+            self.0.release_commit.store(true, Ordering::SeqCst);
+            if let Some(waker) = self.0.commit_waker.lock().unwrap().take() {
+                waker.wake();
+            }
+        }
+        fn journal(&self) {
+            self.1.release.store(true, Ordering::SeqCst);
+            if let Some(waker) = self.1.waker.lock().unwrap().take() {
+                waker.wake();
+            }
+        }
+    }
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.commit();
+            self.journal();
+        }
+    }
+    fn assert_cancelled_commit(error: LiveStreamError, reason: &CancelReason) {
+        match error {
+            LiveStreamError::Commit(error) => match *error {
+                LiveStreamCommitError::CommittedWithoutProof { source, .. } => assert!(
+                    matches!(*source, LiveStreamError::Cancelled(Some(actual)) if &actual == reason)
+                ),
+                other => panic!("lost committed outcome: {other:?}"),
+            },
+            other => panic!("lost cancellation attribution: {other:?}"),
+        }
+    }
+
+    for workers in [1, 2] {
+        for (fail_commit, fail_store, timeout_store) in [
+            (false, false, false),
+            (false, true, false),
+            (true, false, false),
+            (false, false, true),
+        ] {
+            run(workers, async move {
+                let cx = Cx::current().unwrap();
+                let scope = cx.scope();
+                let tx = sender("allowed");
+                let rx = receiver();
+                let probe = Arc::new(Probe::default());
+                let journal = Arc::new(JournalProbe::default());
+                let release = ReleaseOnDrop(Arc::clone(&probe), Arc::clone(&journal));
+                let mut output = sink(&probe);
+                output.park_commit = true;
+                output.fail_commit = fail_commit;
+                output.wake_while_parked = false;
+                let mut incoming = rx
+                    .bind_resumable_committing(
+                        &cx,
+                        "127.0.0.1:0".parse().unwrap(),
+                        client_id(),
+                        output,
+                        3,
+                    )
+                    .await
+                    .unwrap();
+                let address = incoming.local_addr().unwrap();
+                let mut outgoing = tx
+                    .resumable_reader(&cx, address, source(&probe, b"abcdefgh"), 3)
+                    .unwrap();
+                let mut store = Store {
+                    probe: Arc::clone(&journal),
+                    fail: fail_store,
+                };
+                let mut receiving = cx
+                    .spawn_in(&scope, move |child| {
+                        let future: Pin<Box<dyn Future<Output = _> + Send>> = Box::pin(async move {
+                            let report = incoming.receive_journaled(&child, &mut store).await;
+                            (incoming, store, report)
+                        });
+                        future
+                    })
+                    .unwrap();
+                let mut sending = cx
+                    .spawn_in(&scope, move |child| {
+                        let future: Pin<Box<dyn Future<Output = _> + Send>> = Box::pin(async move {
+                            let report = outgoing.send(&child).await;
+                            (outgoing, report)
+                        });
+                        future
+                    })
+                    .unwrap();
+                witness(&cx, || probe.commit_parked.load(Ordering::SeqCst)).await;
+                assert_eq!(
+                    journal.latest.lock().unwrap().as_ref().unwrap().phase(),
+                    ReceiverCheckpointPhase::Finalizing
+                );
+                let reason = CancelReason::user("cancel journaled commit attempt");
+                if !timeout_store {
+                    receiving.abort_with_reason(reason.clone());
+                    witness(&cx, || probe.cancel_polled.load(Ordering::SeqCst)).await;
+                }
+                assert!(!receiving.is_finished());
+                release.commit();
+                if !fail_commit {
+                    // Neither gate self-wakes. Reaching this parked terminal store
+                    // proves the cancelled task continued beyond application commit.
+                    witness(&cx, || journal.terminal_parked.load(Ordering::SeqCst)).await;
+                    assert!(!receiving.is_finished());
+                    assert_eq!(probe.commits.load(Ordering::SeqCst), 1);
+                    assert_eq!(rx.active_streams(), 1);
+                    assert_eq!(
+                        journal.latest.lock().unwrap().as_ref().unwrap().phase(),
+                        ReceiverCheckpointPhase::Finalizing
+                    );
+                    if timeout_store {
+                        // This is the deadline stimulus, after the actual store
+                        // Pending witness. The store stays blocked beyond the
+                        // five-second operation timeout and must still drain.
+                        asupersync::time::sleep(cx.now(), Duration::from_secs(6)).await;
+                        assert!(!receiving.is_finished());
+                    }
+                    release.journal();
+                }
+                let (mut incoming, mut store, received) = receiving
+                    .join(&cx)
+                    .await
+                    .expect("acknowledged cancellation retains the journal owner");
+                let (mut outgoing, sent) = sending.join(&cx).await.unwrap();
+                assert!(sent.outcome.is_err(), "no Proof may precede the terminal record");
+                assert_eq!(*probe.bytes.lock().unwrap(), b"abcdefgh");
+                if fail_commit {
+                    assert!(received.completed.is_none());
+                    assert!(!journal.terminal_parked.load(Ordering::SeqCst));
+                    assert_eq!(probe.commits.load(Ordering::SeqCst), 0);
+                    match received.outcome.unwrap_err() {
+                        ResumeError::Transfer(LiveStreamError::Commit(error)) => match *error {
+                            LiveStreamCommitError::Unconfirmed { source, interruption, .. } => {
+                                assert_eq!(source.kind(), io::ErrorKind::BrokenPipe);
+                                assert!(matches!(
+                                    *interruption.unwrap(),
+                                    LiveStreamError::Cancelled(Some(actual)) if actual == reason
+                                ));
+                            }
+                            other => panic!("failed commit was promoted: {other:?}"),
+                        },
+                        other => panic!("lost commit failure: {other:?}"),
+                    }
+                } else if fail_store {
+                    assert!(received.completed.is_some());
+                    match received.outcome.unwrap_err() {
+                        ResumeError::ReceiverJournal(error) => {
+                            assert!(!error.stored);
+                            assert_eq!(
+                                error.source.unwrap().kind(),
+                                io::ErrorKind::PermissionDenied
+                            );
+                            assert_cancelled_commit(*error.interruption.unwrap(), &reason);
+                        }
+                        other => panic!("lost terminal journal failure: {other:?}"),
+                    }
+                } else {
+                    assert!(received.completed.is_some());
+                    if timeout_store {
+                        match received.outcome.unwrap_err() {
+                            ResumeError::ReceiverJournal(error) => {
+                                assert!(error.stored);
+                                assert!(error.source.is_none());
+                                assert!(matches!(
+                                    *error.interruption.unwrap(),
+                                    LiveStreamError::Timeout("receiver checkpoint")
+                                ));
+                            }
+                            other => panic!("lost terminal store timeout: {other:?}"),
+                        }
+                    } else {
+                        match received.outcome.unwrap_err() {
+                            ResumeError::Transfer(error) => assert_cancelled_commit(error, &reason),
+                            other => panic!("lost drained cancellation: {other:?}"),
+                        }
+                    }
+                    let saved = journal.latest.lock().unwrap().clone().unwrap();
+                    assert_eq!(saved.phase(), ReceiverCheckpointPhase::Committed);
+                    assert_eq!(saved.committed_receipt(), received.completed);
+                    // Restore a new receiver from the persisted record and retained
+                    // bytes. Only Proof is repeated; the sink panics on a second commit.
+                    drop(incoming);
+                    assert_eq!(rx.active_streams(), 0);
+                    let mut restored = rx
+                        .bind_restored_receiver(
+                            &cx,
+                            address,
+                            client_id(),
+                            sink(&probe),
+                            b"abcdefgh".as_slice(),
+                            saved,
+                        )
+                        .await
+                        .unwrap();
+                    let (sent, received) = zip(
+                        outgoing.send(&cx),
+                        restored.receive_journaled(&cx, &mut store),
+                    )
+                    .await;
+                    assert_eq!(sent.outcome.unwrap(), received.outcome.unwrap());
+                    assert!(received.receipt_reused);
+                    assert_eq!(probe.commits.load(Ordering::SeqCst), 1);
+                    assert_eq!(probe.reads.load(Ordering::SeqCst), 2);
+                    drop(restored);
+                    return;
+                }
+                assert_eq!(
+                    journal.latest.lock().unwrap().as_ref().unwrap().phase(),
+                    ReceiverCheckpointPhase::Finalizing
+                );
+                let failed = incoming.receive_journaled(&cx, &mut store).await;
+                assert!(matches!(failed.outcome, Err(ResumeError::LocalFailure)));
+                assert_eq!(failed.attempts, 1);
+            });
+        }
+    }
 }
 
 #[test]

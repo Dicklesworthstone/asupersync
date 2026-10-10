@@ -446,7 +446,9 @@ pub trait ReceiverCheckpointStore {
 pub struct ReceiverCheckpointPersistError {
     /// Storage ultimately succeeded, possibly after the operation was interrupted.
     pub stored: bool,
-    /// Cancellation or timeout that caused a started persistence call to drain.
+    /// Cancellation or timeout retained while persistence or application commit
+    /// drained. A completed application commit keeps its committed-without-proof
+    /// error here when recording that completion subsequently fails.
     pub interruption: Option<Box<LiveStreamError>>,
     /// Original store failure, never converted into a rollback claim.
     #[source]
@@ -473,6 +475,58 @@ impl Future for Persist<'_> {
 }
 
 impl<W: LiveStreamCommitSink + Unpin> ResumableReceiver<W> {
+    pub(super) async fn finalize_checkpointed(
+        &mut self,
+        cx: &Cx,
+        journal: &mut Store<'_>,
+    ) -> Result<(), ResumeError> {
+        let finalized = self.finalize(cx).await;
+        if self.completed.is_none() {
+            // Failed or unstarted application commits remain unresolved.
+            return finalized;
+        }
+        let Some(store) = journal.as_mut() else {
+            return finalized;
+        };
+        let checkpoint = ReceiverCheckpoint::capture(self)?;
+        let mut operation = Persist {
+            store: &mut **store,
+            checkpoint: &checkpoint,
+            failed: &mut self.failed,
+            started: false,
+        };
+        let observed = bounded(
+            cx,
+            self.config.operation_timeout,
+            "receiver checkpoint",
+            &mut operation,
+        )
+        .await;
+        let (result, interruption) = match observed {
+            Ok(()) => return finalized,
+            Err(LiveStreamError::Io(error)) => (Err(error), None),
+            // Successful application commit already happened. Recording that
+            // fact is terminal bookkeeping and needs no fresh admission from
+            // its interrupted Cx. Unlike an ordinary checkpoint, even a write
+            // not yet polled must now start and drain. Keep observing timeout
+            // and cancellation so their existing result shapes are preserved.
+            Err(error) => (operation.await, Some(Box::new(error))),
+        };
+        if result.is_ok() && finalized.is_err() {
+            return finalized;
+        }
+        let interruption = match finalized {
+            Err(ResumeError::Transfer(error)) => Some(Box::new(error)),
+            _ => interruption,
+        };
+        Err(Box::new(ReceiverCheckpointPersistError {
+            stored: result.is_ok(),
+            interruption,
+            source: result.err(),
+        })
+        .into())
+    }
+
     pub(super) async fn checkpoint_boundary(
         &mut self,
         cx: &Cx,
@@ -521,6 +575,9 @@ impl<W: LiveStreamCommitSink + Unpin> ResumableReceiver<W> {
     /// Use the same store for every attempt. Ordinary receive explicitly bypasses
     /// persistence. A started store drains after cancellation/timeout; keep its
     /// owner and this receiver together in a scope-owned task until joined.
+    /// Once application commit succeeds, its terminal checkpoint is persisted
+    /// before returning even if the commit completed while draining cancellation.
+    /// A checkpoint failure still retains the local commit receipt in the report.
     pub async fn receive_journaled<S: ReceiverCheckpointStore + Send + Unpin>(
         &mut self,
         cx: &Cx,
