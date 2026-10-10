@@ -1818,6 +1818,10 @@ mod managed {
     use std::task::{Poll, Waker};
 
     const SCAN_QUANTUM: usize = 32;
+    const GENERATION_DRAIN_MESSAGE: &str = "managed supervisor generation drain";
+
+    #[cfg(test)]
+    type TerminalPublicationHook = dyn Fn(usize, &Cx, ManagedGeneration, bool) + Send + Sync;
 
     /// Restart eligibility for the executing managed entry point.
     ///
@@ -1842,7 +1846,8 @@ mod managed {
                 Self::Transient => {
                     matches!(completed.outcome, Outcome::Panicked(_))
                         || matches!(completed.task_outcome, Err(JoinError::Panicked(_)))
-                        || (completed.task_outcome.is_ok()
+                        || ((completed.task_outcome.is_ok()
+                            || completed.cancelled_by_later_generation_drain())
                             && matches!(completed.outcome, Outcome::Err(_)))
                 }
                 Self::Temporary => false,
@@ -2028,6 +2033,25 @@ mod managed {
         pub cleanup_outcome: Option<crate::record::task::TaskOutcome>,
     }
 
+    impl<E> ManagedChildCompletion<E> {
+        /// The controller can cancel this task after its typed result was
+        /// published but before the spawn wrapper classified its completion.
+        /// That bookkeeping cancellation must not suppress an earlier child
+        /// failure. Independent cancellation still retains its usual meaning.
+        fn cancelled_by_later_generation_drain(&self) -> bool {
+            !self.shutdown_requested_before_completion
+                && matches!(
+                    &self.task_outcome,
+                    Err(JoinError::Cancelled(reason))
+                        if reason.kind == crate::types::CancelKind::User
+                            && reason.origin_region == self.generation.region
+                            && reason.origin_task == Some(self.generation.task)
+                            && reason.message.as_deref() == Some(GENERATION_DRAIN_MESSAGE)
+                            && reason.cause.is_none()
+                )
+        }
+    }
+
     /// Terminal controller receipt, available only after all owned regions close.
     #[derive(Debug)]
     pub struct ManagedSupervisorReport<E> {
@@ -2079,6 +2103,8 @@ mod managed {
         config: SupervisionConfig,
         registry: Option<Arc<Mutex<NameRegistry>>>,
         shared_restarts: Option<Arc<crate::cx::dynamic_supervisor::SharedRestartDomain>>,
+        #[cfg(test)]
+        terminal_publication_hook: Option<Arc<TerminalPublicationHook>>,
     }
 
     impl<E> std::fmt::Debug for ManagedSupervisor<E> {
@@ -2200,6 +2226,8 @@ mod managed {
                 config,
                 registry,
                 shared_restarts: None,
+                #[cfg(test)]
+                terminal_publication_hook: None,
             })
         }
     }
@@ -2238,7 +2266,7 @@ mod managed {
                         region.region_id(),
                         region.cx().now(),
                     )
-                    .with_message("managed supervisor generation drain");
+                    .with_message(GENERATION_DRAIN_MESSAGE);
                     if let Some(handle) = &self.handle {
                         reason = reason.with_task(handle.task_id());
                     }
@@ -2631,6 +2659,8 @@ mod managed {
             }));
             let child_publication = Arc::clone(&publication);
             let factory = Arc::clone(&self.supervisor.bindings[index].factory);
+            #[cfg(test)]
+            let terminal_publication_hook = self.supervisor.terminal_publication_hook.clone();
             let region_id = region.region_id();
             let registry = self.supervisor.registry.clone();
             let registration = registry.as_ref().and_then(|registry| {
@@ -2733,6 +2763,13 @@ mod managed {
                     let mut publication = child_publication.lock();
                     let shutdown_requested = publication.shutdown_requested;
                     publication.terminal = Some((completed_at, outcome, shutdown_requested));
+                    #[cfg(test)]
+                    {
+                        drop(publication);
+                        if let Some(hook) = terminal_publication_hook {
+                            hook(index, &cx, identity, shutdown_requested);
+                        }
+                    }
                 })
             };
             let handle = crate::combinator::TerminationTally::track_spawn(&self.terminated, spawn)
@@ -4801,6 +4838,325 @@ mod managed {
                     Err(JoinError::Cancelled(_))
                 ));
                 assert!(!completed.shutdown_requested_before_completion);
+            }
+        }
+
+        #[test]
+        fn managed_transient_failure_recognizes_only_its_own_later_generation_drain() {
+            let generation = ManagedGeneration {
+                number: 3,
+                region: RegionId::new_for_test(11, 2),
+                task: TaskId::new_for_test(17, 4),
+            };
+            let drain = CancelReason::with_origin(
+                crate::types::CancelKind::User,
+                generation.region,
+                Time::from_nanos(20),
+            )
+            .with_task(generation.task)
+            .with_message(GENERATION_DRAIN_MESSAGE);
+            let mut completed = ManagedChildCompletion {
+                name: "child".into(),
+                generation,
+                completed_at: Time::from_nanos(10),
+                outcome: Outcome::Err("published application failure"),
+                task_outcome: Err(JoinError::Cancelled(drain.clone())),
+                shutdown_requested_before_completion: false,
+                region_outcome: None,
+                cleanup_outcome: None,
+            };
+            assert!(ManagedRestartMode::Transient.eligible(&completed));
+            assert!(!ManagedRestartMode::Temporary.eligible(&completed));
+
+            let mut stronger = drain.clone();
+            stronger.kind = crate::types::CancelKind::Shutdown;
+            for independent in [
+                CancelReason::user("independent cancellation"),
+                drain.clone().with_task(TaskId::new_for_test(17, 5)),
+                drain.clone().with_region(RegionId::new_for_test(11, 3)),
+                drain.clone().with_message("independent cancellation"),
+                drain.clone().with_cause(CancelReason::timeout()),
+                stronger,
+            ] {
+                completed.task_outcome = Err(JoinError::Cancelled(independent));
+                assert!(
+                    !ManagedRestartMode::Transient.eligible(&completed),
+                    "an unrelated or stronger cancellation must remain terminal: {completed:?}"
+                );
+            }
+            completed.task_outcome = Err(JoinError::Cancelled(drain));
+            completed.shutdown_requested_before_completion = true;
+            assert!(!completed.cancelled_by_later_generation_drain());
+            completed.shutdown_requested_before_completion = false;
+            completed.outcome = Outcome::Ok(());
+            assert!(!ManagedRestartMode::Transient.eligible(&completed));
+            completed.outcome = Outcome::Cancelled(CancelReason::user("typed cancellation"));
+            assert!(!ManagedRestartMode::Transient.eligible(&completed));
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum NativePublishedTerminal {
+            Failure,
+            Success,
+            Cancelled,
+            IndependentlyCancelledFailure,
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        fn native_generation_drain_publication_case(
+            policy: RestartPolicy,
+            sharded: bool,
+            terminal: NativePublishedTerminal,
+        ) {
+            struct CancellationWake(std::sync::mpsc::SyncSender<()>);
+
+            impl std::task::Wake for CancellationWake {
+                fn wake(self: Arc<Self>) {
+                    let _ = self.0.try_send(());
+                }
+
+                fn wake_by_ref(self: &Arc<Self>) {
+                    let _ = self.0.try_send(());
+                }
+            }
+
+            let runtime = crate::runtime::RuntimeBuilder::new()
+                .worker_threads(2)
+                .with_sharded_state(sharded)
+                .build()
+                .expect("native generation publication runtime");
+            assert_eq!(runtime.config().worker_threads, 2);
+            let starts = Arc::new(Mutex::new(Vec::new()));
+            let finalized = Arc::new(AtomicUsize::new(0));
+            let (trigger_tx, trigger_rx) = oneshot::channel::<()>();
+            let trigger = Arc::new(Mutex::new(Some(trigger_rx)));
+            let trigger_starts = Arc::clone(&starts);
+            let trigger_binding = ManagedChildBinding::new(
+                "trigger",
+                ManagedRestartMode::Transient,
+                move |cx: Cx, generation: ManagedGeneration| {
+                    trigger_starts.lock().push((0, generation));
+                    let wait = (generation.number == 1)
+                        .then(|| trigger.lock().take().expect("one original trigger"));
+                    async move {
+                        if let Some(mut wait) = wait {
+                            wait.recv(&cx).await.expect("test releases the trigger");
+                            Outcome::Err("trigger failed")
+                        } else {
+                            Outcome::Ok(())
+                        }
+                    }
+                },
+            );
+            let sibling_starts = Arc::clone(&starts);
+            let sibling_finalized = Arc::clone(&finalized);
+            let sibling_binding = ManagedChildBinding::new(
+                "sibling",
+                ManagedRestartMode::Transient,
+                move |cx: Cx, generation: ManagedGeneration| {
+                    if generation.number > 1 {
+                        assert_eq!(
+                            sibling_finalized.load(Ordering::Acquire),
+                            1,
+                            "the original generation's finalizer precedes its replacement"
+                        );
+                    }
+                    sibling_starts.lock().push((1, generation));
+                    async move {
+                        if generation.number > 1 {
+                            return Outcome::Ok(());
+                        }
+                        match terminal {
+                            NativePublishedTerminal::Failure => {
+                                Outcome::Err("sibling failed before drain")
+                            }
+                            NativePublishedTerminal::Success => Outcome::Ok(()),
+                            NativePublishedTerminal::Cancelled => {
+                                Outcome::Cancelled(CancelReason::user("typed sibling cancellation"))
+                            }
+                            NativePublishedTerminal::IndependentlyCancelledFailure => {
+                                cx.cancel_with(
+                                    crate::types::CancelKind::User,
+                                    Some("independent sibling cancellation"),
+                                );
+                                Outcome::Err("late independent error")
+                            }
+                        }
+                    }
+                },
+            );
+            let (published_tx, published_rx) = std::sync::mpsc::channel();
+            let (release_independent, held_independent) = std::sync::mpsc::sync_channel(1);
+            let held_independent = Arc::new(Mutex::new(held_independent));
+            let saw_drain = Arc::new(AtomicUsize::new(0));
+            let observed_drain = Arc::clone(&saw_drain);
+            let mut managed = topology(&["trigger", "sibling"], policy)
+                .bind_managed(vec![trigger_binding, sibling_binding], config(policy, 2))
+                .unwrap();
+            managed.terminal_publication_hook = Some(Arc::new(
+                move |index, cx, generation, shutdown_requested| {
+                    if index != 1 || generation.number != 1 {
+                        return;
+                    }
+                    assert!(
+                        !shutdown_requested,
+                        "the typed terminal must precede the controller's drain"
+                    );
+                    let (cancel_tx, cancel_rx) = std::sync::mpsc::sync_channel(1);
+                    let waker = Waker::from(Arc::new(CancellationWake(cancel_tx)));
+                    let token = cx.refresh_cancel_waker(None, &waker);
+                    // This hook runs after the real typed publication lock
+                    // was released, but before the spawned future returns
+                    // Ready to the runtime's completion observer. The test
+                    // releases the failing trigger only after this witness.
+                    published_tx.send(generation).unwrap();
+                    if terminal == NativePublishedTerminal::IndependentlyCancelledFailure {
+                        held_independent
+                            .lock()
+                            .recv_timeout(Duration::from_secs(10))
+                            .expect("test registered the original finalizer before releasing it");
+                    } else {
+                        cancel_rx
+                            .recv_timeout(Duration::from_secs(10))
+                            .expect("controller generation drain reaches the held native task");
+                        let reason = cx.cancel_reason().expect("attributed generation drain");
+                        assert_eq!(reason.kind, crate::types::CancelKind::User);
+                        assert_eq!(reason.origin_region, generation.region);
+                        assert_eq!(reason.origin_task, Some(generation.task));
+                        assert_eq!(reason.message.as_deref(), Some(GENERATION_DRAIN_MESSAGE));
+                        assert!(reason.cause.is_none());
+                        assert!(cx.is_cancel_requested());
+                        assert!(
+                            !cx.inner.read().cancel_acknowledged,
+                            "the runtime must classify this terminal as unacknowledged cancellation"
+                        );
+                        observed_drain.fetch_add(1, Ordering::Release);
+                    }
+                    cx.clear_cancel_waker(token);
+                },
+            ));
+            let (report_tx, report_rx) = std::sync::mpsc::channel();
+            let owner = runtime.handle().spawn(async move {
+                let cx = Cx::current().expect("native supervisor owner");
+                report_tx.send(managed.run(&cx).await).unwrap();
+            });
+            let original = published_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("sibling publishes before the trigger is released");
+            let finalizer_completed = Arc::clone(&finalized);
+            assert!(
+                runtime.handle().register_sync_finalizer_for_testing(
+                    original.region,
+                    move || {
+                        finalizer_completed.fetch_add(1, Ordering::Release);
+                    },
+                ),
+                "the held original generation is still open before the drain"
+            );
+            trigger_tx.send_blocking(()).unwrap();
+            if terminal == NativePublishedTerminal::IndependentlyCancelledFailure {
+                release_independent.send(()).unwrap();
+            }
+            let report = report_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("supervisor drains all generations and publishes its report");
+            runtime.block_on(owner);
+            let should_restart = terminal == NativePublishedTerminal::Failure;
+            assert!(report.outcome.is_ok(), "{report:?}");
+            assert_eq!(report.started, if should_restart { 4 } else { 3 });
+            assert_eq!(report.joined, report.started);
+            assert_eq!(report.restart_batches, 1);
+            assert_eq!(report.escalations, 0);
+            assert!(report.region_outcome.is_some());
+            assert_eq!(report.children.len(), 2);
+            assert!(
+                report
+                    .children
+                    .iter()
+                    .all(|child| child.region_outcome.is_some())
+            );
+            assert!(report.children.iter().all(|child| {
+                child.cleanup_outcome.as_ref().is_none_or(Outcome::is_ok)
+            }));
+            let sibling = report
+                .children
+                .iter()
+                .find(|child| child.name == "sibling")
+                .unwrap();
+            let sibling_generations: Vec<_> = starts
+                .lock()
+                .iter()
+                .filter_map(|(index, generation)| (*index == 1).then_some(*generation))
+                .collect();
+            assert_eq!(sibling_generations.len(), if should_restart { 2 } else { 1 });
+            assert_eq!(sibling_generations[0], original);
+            if should_restart {
+                assert_eq!(sibling.generation.number, 2);
+                assert_ne!(sibling.generation.task, original.task);
+                assert_ne!(sibling.generation.region, original.region);
+                assert!(sibling.outcome.is_ok());
+                assert!(sibling.task_outcome.is_ok());
+            } else {
+                assert_eq!(sibling.generation, original);
+                assert!(!sibling.shutdown_requested_before_completion);
+                assert!(matches!(sibling.task_outcome, Err(JoinError::Cancelled(_))));
+                match terminal {
+                    NativePublishedTerminal::Success => assert!(sibling.outcome.is_ok()),
+                    NativePublishedTerminal::Cancelled => assert!(sibling.outcome.is_cancelled()),
+                    NativePublishedTerminal::IndependentlyCancelledFailure => {
+                        assert!(sibling.outcome.is_err());
+                        assert!(matches!(
+                            &sibling.task_outcome,
+                            Err(JoinError::Cancelled(reason))
+                                if reason.message.as_deref() == Some("independent sibling cancellation")
+                        ));
+                    }
+                    NativePublishedTerminal::Failure => unreachable!(),
+                }
+            }
+            assert_eq!(
+                saw_drain.load(Ordering::Acquire),
+                usize::from(terminal != NativePublishedTerminal::IndependentlyCancelledFailure)
+            );
+            assert_eq!(finalized.load(Ordering::Acquire), 1);
+            let retirement_started = std::time::Instant::now();
+            while !runtime.is_quiescent() {
+                assert!(
+                    retirement_started.elapsed() < Duration::from_secs(10),
+                    "all native tasks and obligations retire"
+                );
+                std::thread::yield_now();
+            }
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        #[test]
+        fn managed_transient_failure_published_before_generation_drain_restarts_native() {
+            for policy in [RestartPolicy::OneForAll, RestartPolicy::RestForOne] {
+                for sharded in [false, true] {
+                    native_generation_drain_publication_case(
+                        policy,
+                        sharded,
+                        NativePublishedTerminal::Failure,
+                    );
+                }
+            }
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        #[test]
+        fn managed_generation_drain_preserves_transient_success_and_cancellation_native() {
+            for policy in [RestartPolicy::OneForAll, RestartPolicy::RestForOne] {
+                for sharded in [false, true] {
+                    for terminal in [
+                        NativePublishedTerminal::Success,
+                        NativePublishedTerminal::Cancelled,
+                        NativePublishedTerminal::IndependentlyCancelledFailure,
+                    ] {
+                        native_generation_drain_publication_case(policy, sharded, terminal);
+                    }
+                }
             }
         }
 
