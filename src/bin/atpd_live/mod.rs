@@ -87,6 +87,9 @@ enum Command {
         /// New private in-place data file inside the sole configured inbox.
         #[arg(long)]
         data: PathBuf,
+        /// Opt into the compact WAL with this new private intent file outside the inbox.
+        #[arg(long)]
+        intent: Option<PathBuf>,
         #[command(flatten)]
         options: receiver_journal::CreateOptions,
     },
@@ -98,6 +101,9 @@ enum Command {
         journal: PathBuf,
         #[arg(long)]
         data: PathBuf,
+        /// Original compact-profile intent file; required if creation used --intent.
+        #[arg(long)]
+        intent: Option<PathBuf>,
         #[command(flatten)]
         options: receiver_journal::WaitOptions,
     },
@@ -244,14 +250,16 @@ pub fn run() -> io::Result<()> {
             config,
             journal,
             data,
+            intent,
             options,
-        } => receiver_journal::receive(settings::load(&config)?, journal, data, options),
+        } => receiver_journal::receive(settings::load(&config)?, journal, data, intent, options),
         Command::ResumeReceiver {
             config,
             journal,
             data,
+            intent,
             options,
-        } => receiver_journal::resume(settings::load(&config)?, journal, data, options),
+        } => receiver_journal::resume(settings::load(&config)?, journal, data, intent, options),
         Command::SendJournaled {
             config,
             input,
