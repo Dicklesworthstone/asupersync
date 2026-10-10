@@ -2214,6 +2214,9 @@ pub struct UdpSocket {
     /// `SO_TXTIME` set through this handle: plain sends are refused (GH #73).
     #[cfg(target_os = "linux")]
     txtime: Option<UdpTxTimeConfig>,
+    /// `IP_RECVERR` / `IPV6_RECVERR` set through this handle.
+    #[cfg(target_os = "linux")]
+    recverr: std::sync::atomic::AtomicBool,
 }
 
 impl UdpSocket {
@@ -2252,6 +2255,8 @@ impl UdpSocket {
                             gso_demoted: false,
                             #[cfg(target_os = "linux")]
                             txtime: None,
+                            #[cfg(target_os = "linux")]
+                            recverr: std::sync::atomic::AtomicBool::new(false),
                         });
                     }
                     Err(err) => last_err = Some(err),
@@ -3707,6 +3712,10 @@ impl UdpSocket {
             gso_demoted: self.gso_demoted,
             #[cfg(target_os = "linux")]
             txtime: self.txtime,
+            #[cfg(target_os = "linux")]
+            recverr: std::sync::atomic::AtomicBool::new(
+                self.recverr.load(std::sync::atomic::Ordering::Relaxed),
+            ),
         })
     }
 
@@ -3750,6 +3759,8 @@ impl UdpSocket {
                 gso_demoted: false,
                 #[cfg(target_os = "linux")]
                 txtime: None,
+                #[cfg(target_os = "linux")]
+                recverr: std::sync::atomic::AtomicBool::new(false),
             })
         }
     }

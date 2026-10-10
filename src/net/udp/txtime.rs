@@ -482,16 +482,23 @@ impl UdpSocket {
     pub fn set_recverr(&self, on: bool) -> io::Result<()> {
         match self.inner.local_addr()? {
             SocketAddr::V4(_) => {
-                setsockopt(&*self.inner, sockopt::Ipv4RecvErr, &on).map_err(io::Error::from)
+                setsockopt(&*self.inner, sockopt::Ipv4RecvErr, &on).map_err(io::Error::from)?;
             }
             SocketAddr::V6(_) => {
                 setsockopt(&*self.inner, sockopt::Ipv6RecvErr, &on).map_err(io::Error::from)?;
                 // IPv4-mapped traffic on a dual-stack socket is governed by
                 // IP_RECVERR; a v6-only socket may refuse it, which is fine.
                 let _ = setsockopt(&*self.inner, sockopt::Ipv4RecvErr, &on);
-                Ok(())
             }
         }
+        self.recverr.store(on, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Whether `IP_RECVERR` / `IPV6_RECVERR` has been set through this handle.
+    #[must_use]
+    pub fn recverr(&self) -> bool {
+        self.recverr.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Sends `buf` to `target` with launch time `launch_time_ns` (nanoseconds
@@ -594,11 +601,20 @@ impl UdpSocket {
                 // socket error (for example an ICMP port unreachable on a
                 // connected socket without IP_RECVERR) sits in the socket's
                 // error field, which MSG_ERRQUEUE does not clear. Re-arming on
-                // it would spin, so read and clear it with SO_ERROR and
-                // return it.
+                // it would spin, so read and clear it with SO_ERROR.
+                //
+                // On sockets without IP_RECVERR, this is the only way the error
+                // is surfaced, so return it as an Err. On sockets with
+                // IP_RECVERR, any sk_err cleared here is a duplicate of the
+                // ICMP error already delivered via MSG_ERRQUEUE, so discard it
+                // and re-arm to avoid duplicate error delivery.
                 match socket::getsockopt(&*self.inner, sockopt::SocketError) {
                     Ok(0) => {}
-                    Ok(code) => return Poll::Ready(Err(io::Error::from_raw_os_error(code))),
+                    Ok(code) => {
+                        if !self.recverr() {
+                            return Poll::Ready(Err(io::Error::from_raw_os_error(code)));
+                        }
+                    }
                     Err(errno) => return Poll::Ready(Err(io::Error::from(errno))),
                 }
                 if let Err(err) = self.register_interest(cx, Interest::ERROR) {
@@ -721,5 +737,18 @@ mod tests {
         assert_eq!(sockaddr_in6_to_std(&v6), Some("[::1]:9".parse().unwrap()));
         v6.sin6_family = 0;
         assert_eq!(sockaddr_in6_to_std(&v6), None);
+    }
+
+    #[test]
+    fn recverr_state_tracking_and_clone() {
+        let std_sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let socket = UdpSocket::from_std(std_sock).unwrap();
+        assert!(!socket.recverr());
+        socket.set_recverr(true).unwrap();
+        assert!(socket.recverr());
+        let cloned = socket.try_clone().unwrap();
+        assert!(cloned.recverr());
+        socket.set_recverr(false).unwrap();
+        assert!(!socket.recverr());
     }
 }
