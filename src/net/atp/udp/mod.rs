@@ -86,15 +86,6 @@ impl AtpUdpSocketConfig {
                 "max_send_batch must be > 0",
             ));
         }
-        if self.max_send_batch > UDP_MAX_BATCH_SIZE {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "max_send_batch ({}) exceeds UDP_MAX_BATCH_SIZE ({})",
-                    self.max_send_batch, UDP_MAX_BATCH_SIZE
-                ),
-            ));
-        }
         if self.max_recv_batch == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -299,19 +290,34 @@ impl AtpUdpSocket {
             return Ok(UdpBatchIoReport::default());
         }
 
+        // Refuse an oversized packet before anything is sent: an error
+        // returned after earlier chunks went out would read as "nothing sent"
+        // and a retry would duplicate them.
+        if packets
+            .iter()
+            .any(|packet| packet.payload.len() > self.config.max_packet_size)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "UDP packet exceeds configured maximum",
+            ));
+        }
+
         let mut total = UdpBatchIoReport::default();
 
         for chunk in packets.chunks(self.config.max_send_batch) {
-            checkpoint_io(cx)?;
+            // A cancellation after some chunks went out is reported with
+            // them, like a send error after partial progress.
+            if let Err(err) = checkpoint_io(cx) {
+                if total.packets_processed > 0 {
+                    total.error = Some(err.to_string());
+                    break;
+                }
+                return Err(err);
+            }
             let mut batch: SmallVec<[UdpOutboundDatagram<'_>; ATP_UDP_DEFAULT_BATCH_SIZE]> =
                 SmallVec::with_capacity(chunk.len());
             for packet in chunk {
-                if packet.payload.len() > self.config.max_packet_size {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "UDP packet exceeds configured maximum",
-                    ));
-                }
                 batch.push(UdpOutboundDatagram {
                     dst_addr: packet.dst_addr,
                     payload: packet.payload,
@@ -934,6 +940,14 @@ impl LabAtpUdpNetworkSocket {
                 "lab UDP endpoint is not bound",
             )));
         };
+        // A handle from before a close and rebind must not take the new
+        // endpoint's datagrams or replace its receive waker.
+        if endpoint.generation != self.generation {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "lab UDP handle is stale after close and rebind",
+            )));
+        }
         if endpoint.closed {
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::NotConnected,
@@ -1092,6 +1106,104 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+
+    // br-asupersync-vs1vdk U5: v0.4.3 accepted any non-zero max_send_batch
+    // (send_batch_to splits a large batch itself); fb479e039 refused values
+    // above UDP_MAX_BATCH_SIZE at bind.
+    #[test]
+    fn config_accepts_a_send_batch_above_one_kernel_batch() {
+        assert!(
+            AtpUdpSocketConfig {
+                max_send_batch: UDP_MAX_BATCH_SIZE * 2,
+                ..AtpUdpSocketConfig::default()
+            }
+            .validate()
+            .is_ok()
+        );
+    }
+
+    // br-asupersync-vs1vdk U4: an oversized packet in a later chunk was
+    // refused after the earlier chunks had been sent, and the caller got only
+    // the error: a retry sent those packets twice.
+    #[test]
+    fn send_packets_refuses_an_oversized_packet_before_sending_any() {
+        run_test_with_cx(|cx| async move {
+            let receiver = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind receiver");
+            receiver
+                .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+                .expect("receiver timeout");
+            let receiver_addr = receiver.local_addr().expect("receiver address");
+            let mut socket = AtpUdpSocket::bind(
+                &cx,
+                "127.0.0.1:0",
+                AtpUdpSocketConfig {
+                    max_packet_size: 64,
+                    max_send_batch: 2,
+                    ..AtpUdpSocketConfig::default()
+                },
+            )
+            .await
+            .expect("bind ATP socket");
+            let small = [7_u8; 8];
+            let large = [7_u8; 100];
+            let packets = [
+                AtpUdpPacket {
+                    dst_addr: receiver_addr,
+                    payload: &small,
+                },
+                AtpUdpPacket {
+                    dst_addr: receiver_addr,
+                    payload: &small,
+                },
+                AtpUdpPacket {
+                    dst_addr: receiver_addr,
+                    payload: &large,
+                },
+            ];
+            let error = socket
+                .send_packets(&cx, &packets)
+                .await
+                .expect_err("an oversized packet is refused");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            let mut buf = [0_u8; 128];
+            assert!(
+                receiver.recv_from(&mut buf).is_err(),
+                "nothing was sent before the refusal"
+            );
+        });
+    }
+
+    // br-asupersync-vs1vdk U3: poll_recv_from did not check the endpoint
+    // generation, so a handle from before a close and rebind took the new
+    // endpoint's datagram (and replaced its receive waker).
+    #[test]
+    fn a_stale_lab_handle_cannot_receive_for_a_rebound_endpoint() {
+        run_test_with_cx(|cx| async move {
+            let network = LabAtpUdpNetwork::with_queue_capacity(4);
+            let sender_addr: SocketAddr = "127.0.0.1:42021".parse().expect("sender address");
+            let addr: SocketAddr = "127.0.0.1:42022".parse().expect("rebound address");
+            let mut sender = network.bind(sender_addr).expect("bind sender");
+            let mut stale = network.bind(addr).expect("bind first owner");
+            stale.close();
+            let _rebound = network.bind(addr).expect("rebind closed address");
+            sender
+                .send_to(&cx, b"for the rebound owner", addr)
+                .await
+                .expect("enqueue lab datagram");
+
+            let mut buf = [0_u8; 64];
+            let polled = stale.poll_recv_from(&Context::from_waker(Waker::noop()), &mut buf);
+            assert!(
+                matches!(polled, Poll::Ready(Err(ref error)) if error.kind() == io::ErrorKind::NotConnected),
+                "{polled:?}"
+            );
+            assert_eq!(
+                network.queued_datagrams(addr),
+                Some(1),
+                "the datagram stays queued for the rebound endpoint"
+            );
+        });
     }
 
     #[test]
