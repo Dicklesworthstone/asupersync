@@ -42,6 +42,7 @@ use std::time::Duration;
 use subtle::ConstantTimeEq;
 
 const REQUEST_TIMEOUT_MESSAGE: &str = "request timeout";
+const CONNECT_TIMEOUT_MESSAGE: &str = "connection attempt timed out";
 
 fn timeout_now(cx: &Cx) -> Time {
     cx.timer_driver()
@@ -1562,6 +1563,7 @@ fn build_default_nats_tls_connector() -> Result<TlsConnector, NatsError> {
 /// v0.4.3 test-internals surface keeps its established behavior.
 struct NatsConnection {
     config: NatsConfig,
+    connect_policy: NatsConnectPolicy,
     stream: NatsStream,
     read_buf: NatsReadBuffer,
     state: Arc<SharedState>,
@@ -1692,9 +1694,57 @@ where
     .await
 }
 
+/// One timer covers an entire connection attempt. Bind it to the explicit
+/// owner's driver so a supervisor with a different clock cannot expire it
+/// early or leave it parked. `nats_io` checks both owners before this timer,
+/// preserving cancellation attribution when cancellation races the timeout.
+/// Erase this cold-path future so reconnecting inside a JetStream operation
+/// does not deepen its already long `Send` proof chain.
+fn nats_connect_attempt<'a, T: Send + 'a>(
+    cx: &'a Cx,
+    timeout: Option<Duration>,
+    future: impl Future<Output = Result<T, NatsError>> + Send + 'a,
+) -> Pin<Box<dyn Future<Output = Result<T, NatsError>> + Send + 'a>> {
+    Box::pin(async move {
+        let timer = timeout.map(|duration| {
+            let driver = cx
+                .timer_driver()
+                .or_else(|| Cx::current().and_then(|current| current.timer_driver()));
+            match driver {
+                Some(driver) => {
+                    crate::time::Sleep::with_timer_driver(driver.now() + duration, driver)
+                }
+                None => crate::time::Sleep::after(crate::time::wall_now(), duration),
+            }
+        });
+        nats_io(cx, async {
+            let Some(timer) = timer else {
+                return future.await;
+            };
+            let mut timer = std::pin::pin!(timer);
+            let mut future = std::pin::pin!(future);
+            std::future::poll_fn(|task_cx| {
+                if timer.as_mut().poll_deadline(task_cx).is_ready() {
+                    return Poll::Ready(Err(NatsError::Io(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        CONNECT_TIMEOUT_MESSAGE,
+                    ))));
+                }
+                future.as_mut().poll(task_cx)
+            })
+            .await
+        })
+        .await
+    })
+}
+
 impl NatsConnection {
     /// Connect with explicit configuration.
-    pub async fn connect_with_config(cx: &Cx, config: NatsConfig) -> Result<Self, NatsError> {
+    async fn connect_with_policy(
+        cx: &Cx,
+        config: NatsConfig,
+        connect_policy: NatsConnectPolicy,
+    ) -> Result<Self, NatsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
         cx.trace(&format!(
             "nats: connecting to {}:{}",
@@ -1707,6 +1757,7 @@ impl NatsConnection {
         let read_buf_limit = config.max_read_buffer;
         let mut client = Self {
             config,
+            connect_policy,
             stream: stream.into(),
             read_buf: NatsReadBuffer::with_limit(read_buf_limit),
             state: Arc::new(SharedState::new()),
@@ -1760,6 +1811,9 @@ impl NatsConnection {
         // already been upgraded; otherwise this remains the legacy
         // cleartext NATS handshake.
         client.send_connect(cx).await?;
+        if connect_policy.confirm_connect {
+            client.confirm_connect(cx).await?;
+        }
         client.connected = true;
         client.state.connected.store(true, Ordering::Release);
 
@@ -1963,6 +2017,32 @@ impl NatsConnection {
         Ok(())
     }
 
+    /// Confirm that the server processed CONNECT before exposing a usable
+    /// connection. Every handshake error is terminal, including a permission
+    /// error: no application command has been sent on this connection yet.
+    async fn confirm_connect(&mut self, cx: &Cx) -> Result<(), NatsError> {
+        self.send_keepalive_ping(cx).await?;
+        let answered_at = self.state.pings_sent.load(Ordering::Acquire);
+        loop {
+            cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+            match self.try_parse_message()? {
+                Some(NatsMessage::Pong)
+                    if self.state.pongs.load(Ordering::Acquire) >= answered_at =>
+                {
+                    return Ok(());
+                }
+                Some(NatsMessage::Err(error)) => return Err(NatsError::Server(error)),
+                Some(NatsMessage::Ping) => self.send_server_pong(cx).await?,
+                Some(NatsMessage::Info(info)) => {
+                    *self.state.server_info.lock() = Some(info);
+                }
+                Some(NatsMessage::Msg(message)) => self.dispatch_message(message),
+                Some(NatsMessage::Ok | NatsMessage::Pong) => {}
+                None => self.read_more(cx).await?,
+            }
+        }
+    }
+
     /// Attempt to reconnect when the TCP connection is lost, continuing
     /// `streak` when the connection it last produced failed before it was
     /// stable. `refused` says the server ended that connection with an
@@ -2033,43 +2113,47 @@ impl NatsConnection {
             // Check for cancellation
             cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
-            // Attempt TCP reconnection
+            // One bound spans TCP and the entire handshake, including replay.
+            // Failed attempts consume the existing attempt/backoff budget;
+            // a peer withholding INFO must not hold the supervisor forever.
             let addr = format!("{}:{}", self.config.host, self.config.port);
-            match nats_io(cx, TcpStream::connect(addr)).await {
-                Ok(new_stream) => {
-                    cx.trace(&format!(
-                        "nats: TCP reconnected to {}:{} (attempt {})",
-                        self.config.host, self.config.port, attempt
-                    ));
+            let timeout = self.connect_policy.timeout;
+            let result = nats_connect_attempt(cx, timeout, async {
+                let new_stream = nats_io(cx, TcpStream::connect(addr)).await?;
+                cx.trace(&format!(
+                    "nats: TCP reconnected to {}:{} (attempt {})",
+                    self.config.host, self.config.port, attempt
+                ));
 
-                    // Replace the stream and reset buffer
-                    self.stream = new_stream.into();
-                    self.read_buf = NatsReadBuffer::with_limit(self.config.max_read_buffer);
-                    self.connected = false;
-                    // The old connection's unanswered PINGs never get a PONG.
-                    self.state.pings_sent.store(0, Ordering::Release);
-                    self.state.pongs.store(0, Ordering::Release);
-
-                    // Complete NATS handshake
-                    match self.complete_reconnect_handshake(cx).await {
-                        Ok(()) => {
-                            cx.trace("nats: reconnection successful");
-                            *streak = ReconnectStreak {
-                                attempts: attempt,
-                                next_delay: Some(delay),
-                                reconnected_at: Some(timeout_now(cx)),
-                            };
-                            return Ok(());
-                        }
-                        Err(NatsError::Cancelled) => return Err(NatsError::Cancelled),
-                        Err(e) => {
-                            cx.trace(&format!("nats: handshake failed during reconnect: {}", e));
-                        }
-                    }
+                self.stream = new_stream.into();
+                self.read_buf = NatsReadBuffer::with_limit(self.config.max_read_buffer);
+                self.connected = false;
+                // The old connection's unanswered PINGs never get a PONG.
+                self.state.pings_sent.store(0, Ordering::Release);
+                self.state.pongs.store(0, Ordering::Release);
+                self.complete_reconnect_handshake(cx).await
+            })
+            .await;
+            match result {
+                Ok(()) => {
+                    cx.trace("nats: reconnection successful");
+                    *streak = ReconnectStreak {
+                        attempts: attempt,
+                        next_delay: Some(delay),
+                        reconnected_at: Some(timeout_now(cx)),
+                    };
+                    return Ok(());
                 }
-                Err(NatsError::Cancelled) => return Err(NatsError::Cancelled),
-                Err(e) => {
-                    cx.trace(&format!("nats: TCP reconnect failed: {}", e));
+                Err(error) => {
+                    self.connected = false;
+                    self.state.connected.store(false, Ordering::Release);
+                    let _ = self.stream.shutdown(std::net::Shutdown::Both);
+                    self.stream = NatsStream::Closed;
+                    self.read_buf = NatsReadBuffer::with_limit(self.config.max_read_buffer);
+                    if matches!(error, NatsError::Cancelled) {
+                        return Err(NatsError::Cancelled);
+                    }
+                    cx.trace(&format!("nats: connection attempt failed during reconnect: {error}"));
                 }
             }
         }
@@ -2112,6 +2196,9 @@ impl NatsConnection {
 
         // Send CONNECT command
         self.send_connect(cx).await?;
+        if self.connect_policy.confirm_connect {
+            self.confirm_connect(cx).await?;
+        }
 
         let replayed_subscriptions = self.replay_subscriptions_after_reconnect(cx).await?;
         self.connected = true;
@@ -3315,6 +3402,78 @@ impl Default for NatsKeepalive {
     }
 }
 
+/// Connection-attempt policy for [`NatsClient::connect_with_policy`].
+///
+/// The default preserves [`NatsClient::connect_with_config`]: no additional
+/// connection timeout, no PING/PONG confirmation of CONNECT, and the default
+/// client keepalive. The caller's cancellation and budget still apply.
+/// This separate type keeps the exhaustively constructible [`NatsConfig`]
+/// compatible with existing callers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NatsConnectPolicy {
+    timeout: Option<Duration>,
+    confirm_connect: bool,
+    keepalive: NatsKeepalive,
+}
+
+impl NatsConnectPolicy {
+    /// Create a policy with the existing connection behavior.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Bound each complete connection attempt, including name resolution,
+    /// TCP, INFO, TLS, CONNECT, the verbose acknowledgement and optional
+    /// PING/PONG confirmation. Reconnection also includes subscription replay.
+    ///
+    /// A fresh timeout starts for each reconnect attempt, after its backoff;
+    /// progress within an attempt never resets it. A zero timeout refuses the
+    /// attempt before opening a socket. Expiry returns [`NatsError::Io`] with
+    /// [`io::ErrorKind::TimedOut`]; cancellation remains [`NatsError::Cancelled`].
+    #[must_use]
+    pub const fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// Wait for a PONG after CONNECT before reporting success or replaying
+    /// subscriptions. This surfaces a server's authentication refusal during
+    /// connection establishment even when [`NatsConfig::verbose`] is false.
+    /// Pair this with [`Self::with_timeout`] to bound an unresponsive peer.
+    #[must_use]
+    pub const fn with_connect_confirmation(mut self, enabled: bool) -> Self {
+        self.confirm_connect = enabled;
+        self
+    }
+
+    /// Choose the keepalive used after establishment. As with
+    /// [`NatsClient::connect_with_keepalive`], it runs only in supervised mode.
+    #[must_use]
+    pub const fn with_keepalive(mut self, keepalive: NatsKeepalive) -> Self {
+        self.keepalive = keepalive;
+        self
+    }
+
+    /// The complete-attempt timeout, or `None` for the existing unbounded policy.
+    #[must_use]
+    pub const fn timeout(&self) -> Option<Duration> {
+        self.timeout
+    }
+
+    /// Whether CONNECT is confirmed with a PING/PONG exchange.
+    #[must_use]
+    pub const fn confirms_connect(&self) -> bool {
+        self.confirm_connect
+    }
+
+    /// The client keepalive used after the connection is established.
+    #[must_use]
+    pub const fn keepalive(&self) -> NatsKeepalive {
+        self.keepalive
+    }
+}
+
 /// When the supervisor's next keepalive `PING` is due.
 struct KeepaliveClock {
     interval: Duration,
@@ -3536,7 +3695,46 @@ impl NatsClient {
         config: NatsConfig,
         keepalive: NatsKeepalive,
     ) -> Result<Self, NatsError> {
-        let connection = NatsConnection::connect_with_config(cx, config).await?;
+        Self::connect_with_policy(
+            cx,
+            config,
+            NatsConnectPolicy::new().with_keepalive(keepalive),
+        )
+        .await
+    }
+
+    /// Connect with explicit establishment and keepalive policy.
+    ///
+    /// [`NatsConnectPolicy::with_timeout`] bounds the entire attempt instead
+    /// of independently granting each handshake stage a fresh timeout. Every
+    /// subsequent reconnect uses the same policy and the existing
+    /// [`NatsConfig`] attempt limit and backoff. A failed or timed-out attempt
+    /// closes its transport before any retry; no partial handshake is reused.
+    ///
+    /// ```no_run
+    /// # async fn connect(cx: &asupersync::Cx) -> Result<(), asupersync::messaging::nats::NatsError> {
+    /// use asupersync::messaging::nats::{NatsClient, NatsConfig, NatsConnectPolicy};
+    /// use std::time::Duration;
+    ///
+    /// let config = NatsConfig::from_url("nats://127.0.0.1:4222")?;
+    /// let policy = NatsConnectPolicy::new()
+    ///     .with_timeout(Duration::from_secs(5))
+    ///     .with_connect_confirmation(true);
+    /// let mut client = NatsClient::connect_with_policy(cx, config, policy).await?;
+    /// client.close(cx).await
+    /// # }
+    /// ```
+    pub async fn connect_with_policy(
+        cx: &Cx,
+        config: NatsConfig,
+        policy: NatsConnectPolicy,
+    ) -> Result<Self, NatsError> {
+        let connection = nats_connect_attempt(
+            cx,
+            policy.timeout,
+            NatsConnection::connect_with_policy(cx, config, policy),
+        )
+        .await?;
         let config = connection.config.clone();
         let state = Arc::clone(&connection.state);
 
@@ -3551,7 +3749,7 @@ impl NatsClient {
         let (commands, receiver) = mpsc::channel(NATS_SUPERVISOR_COMMAND_CAPACITY);
         let task = cx
             .spawn(move |supervisor_cx| async move {
-                run_nats_supervisor(&supervisor_cx, connection, receiver, keepalive).await;
+                run_nats_supervisor(&supervisor_cx, connection, receiver, policy.keepalive).await;
             })
             .map_err(|_| NatsError::NotConnected)?;
 
@@ -4635,9 +4833,10 @@ mod tests {
             let driver = Cx::current().expect("native NATS driver context");
             let config = NatsConfig::from_url(&format!("nats://{addr}"))
                 .expect("parse cancellation peer URL");
-            let mut connection = NatsConnection::connect_with_config(&driver, config)
-                .await
-                .expect("connect cancellation peer");
+            let mut connection =
+                NatsConnection::connect_with_policy(&driver, config, NatsConnectPolicy::default())
+                    .await
+                    .expect("connect cancellation peer");
             let owner_baseline = operation_owner
                 .inner
                 .read()
@@ -4832,6 +5031,158 @@ mod tests {
             call.as_mut().poll(&mut task_cx),
             Poll::Ready(Err(NatsError::Cancelled))
         ));
+    }
+
+    #[test]
+    fn nats_connect_policy_defaults_and_zero_timeout_pm29wb() {
+        use std::sync::atomic::AtomicBool;
+
+        let default = NatsConnectPolicy::default();
+        assert_eq!(default.timeout(), None);
+        assert!(!default.confirms_connect());
+        assert_eq!(default.keepalive(), NatsKeepalive::default());
+
+        let owner = Cx::for_testing();
+        let attempted = AtomicBool::new(false);
+        let mut call = nats_connect_attempt(&owner, Some(Duration::ZERO), async {
+            attempted.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+        let mut task_cx = std::task::Context::from_waker(Waker::noop());
+        let Poll::Ready(Err(error)) = call.as_mut().poll(&mut task_cx) else {
+            panic!("zero timeout must refuse the connection before polling transport work");
+        };
+        assert!(error.is_timeout(), "{error:?}");
+        assert!(!attempted.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn nats_connect_attempt_keeps_one_deadline_on_the_owner_clock_pm29wb() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, RegionId, TaskId};
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+        struct CountWakes(AtomicUsize);
+        impl std::task::Wake for CountWakes {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        struct ReleaseOnDrop(Arc<AtomicBool>);
+        impl Drop for ReleaseOnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let owner_clock = Arc::new(VirtualClock::starting_at(Time::from_secs(100)));
+        let owner_timer = TimerDriverHandle::with_virtual_clock(owner_clock.clone());
+        let driver_clock = Arc::new(VirtualClock::starting_at(Time::from_secs(10_000)));
+        let driver_timer = TimerDriverHandle::with_virtual_clock(driver_clock.clone());
+        let make_cx = |task, timer| {
+            Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(task, 0),
+                Budget::new(),
+                None,
+                None,
+                None,
+                Some(timer),
+                None,
+            )
+        };
+        let owner = make_cx(1, owner_timer.clone());
+        let driver = make_cx(2, driver_timer.clone());
+        let _current = Cx::set_current(Some(driver));
+        let first_stage_done = Arc::new(AtomicBool::new(false));
+        let second_stage_started = Arc::new(AtomicBool::new(false));
+        let released = Arc::new(AtomicBool::new(false));
+        let attempt = {
+            let first = Arc::clone(&first_stage_done);
+            let second = Arc::clone(&second_stage_started);
+            let released = Arc::clone(&released);
+            async move {
+                let _release = ReleaseOnDrop(released);
+                std::future::poll_fn(|_| {
+                    if first.load(Ordering::SeqCst) {
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
+                })
+                .await;
+                second.store(true, Ordering::SeqCst);
+                std::future::pending::<Result<(), NatsError>>().await
+            }
+        };
+        let mut call = nats_connect_attempt(&owner, Some(Duration::from_millis(100)), attempt);
+        let wakes = Arc::new(CountWakes(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut task_cx = std::task::Context::from_waker(&waker);
+        assert!(call.as_mut().poll(&mut task_cx).is_pending());
+        assert!(!second_stage_started.load(Ordering::SeqCst));
+
+        driver_clock.advance(1_000_000_000);
+        let _ = driver_timer.process_timers();
+        assert!(call.as_mut().poll(&mut task_cx).is_pending());
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+
+        owner_clock.advance(60_000_000);
+        let _ = owner_timer.process_timers();
+        first_stage_done.store(true, Ordering::SeqCst);
+        assert!(call.as_mut().poll(&mut task_cx).is_pending());
+        assert!(second_stage_started.load(Ordering::SeqCst));
+
+        owner_clock.advance(40_000_000);
+        let _ = owner_timer.process_timers();
+        assert!(wakes.0.load(Ordering::SeqCst) > 0);
+        let Poll::Ready(Err(error)) = call.as_mut().poll(&mut task_cx) else {
+            panic!("the second stage received a new timeout instead of the remaining 40 ms");
+        };
+        assert!(error.is_timeout(), "{error:?}");
+        assert!(released.load(Ordering::SeqCst));
+        assert_eq!(owner_timer.pending_count(), 0);
+    }
+
+    #[test]
+    fn nats_connect_attempt_cancellation_wins_an_expired_timeout_pm29wb() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, CancelKind, RegionId, TaskId};
+
+        for cancel_driver in [false, true] {
+            let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+            let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+            let owner = Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(1, 0),
+                Budget::new(),
+                None,
+                None,
+                None,
+                Some(timer.clone()),
+                None,
+            );
+            let driver = Cx::for_testing();
+            let _current = Cx::set_current(Some(driver.clone()));
+            let mut call = nats_connect_attempt(
+                &owner,
+                Some(Duration::from_millis(100)),
+                std::future::pending::<Result<(), NatsError>>(),
+            );
+            let mut task_cx = std::task::Context::from_waker(Waker::noop());
+            assert!(call.as_mut().poll(&mut task_cx).is_pending());
+            let cancelled = if cancel_driver { &driver } else { &owner };
+            cancelled.cancel_with(CancelKind::User, Some("cancel NATS connection attempt"));
+            clock.advance(100_000_000);
+            let _ = timer.process_timers();
+            assert!(matches!(
+                call.as_mut().poll(&mut task_cx),
+                Poll::Ready(Err(NatsError::Cancelled))
+            ));
+            assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+            assert!(driver.inner.read().cancel_waker_registrations.is_empty());
+            assert_eq!(timer.pending_count(), 0);
+        }
     }
 
     #[test]
@@ -5188,6 +5539,7 @@ mod tests {
             let state = Arc::new(SharedState::new());
             let mut client = NatsConnection {
                 config: NatsConfig::default(),
+                connect_policy: NatsConnectPolicy::default(),
                 stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
                 state: Arc::clone(&state),
@@ -5230,6 +5582,7 @@ mod tests {
 
             let mut client = NatsConnection {
                 config: NatsConfig::default(),
+                connect_policy: NatsConnectPolicy::default(),
                 stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
                 state,
@@ -5280,6 +5633,7 @@ mod tests {
                 .expect("connect first reconnect client");
             let mut client = NatsConnection {
                 config: NatsConfig::default(),
+                connect_policy: NatsConnectPolicy::default(),
                 stream: first_stream.into(),
                 read_buf: NatsReadBuffer::new(),
                 state: Arc::clone(&state),
@@ -5349,6 +5703,7 @@ mod tests {
             insert_replay_subscription(&state, 42, "svc.echo", None);
             let mut client = NatsConnection {
                 config: NatsConfig::default(),
+                connect_policy: NatsConnectPolicy::default(),
                 stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
                 state: Arc::clone(&state),
@@ -6399,6 +6754,7 @@ mod tests {
                     max_payload: 32,
                     ..Default::default()
                 },
+                connect_policy: NatsConnectPolicy::default(),
                 stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
                 state,
@@ -6463,6 +6819,7 @@ mod tests {
 
             let mut client = NatsConnection {
                 config: NatsConfig::default(),
+                connect_policy: NatsConnectPolicy::default(),
                 stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
                 state: Arc::clone(&state),
@@ -6519,6 +6876,7 @@ mod tests {
             );
             let mut client = NatsConnection {
                 config: NatsConfig::default(),
+                connect_policy: NatsConnectPolicy::default(),
                 stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
                 state: Arc::clone(&state),
@@ -6569,6 +6927,7 @@ mod tests {
                 .expect("connect client");
             let mut client = NatsConnection {
                 config: NatsConfig::default(),
+                connect_policy: NatsConnectPolicy::default(),
                 stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
                 state: Arc::new(SharedState::new()),
@@ -6623,6 +6982,7 @@ mod tests {
                 .expect("connect client");
             let mut client = NatsConnection {
                 config: NatsConfig::default(),
+                connect_policy: NatsConnectPolicy::default(),
                 stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
                 state: Arc::new(SharedState::new()),
@@ -6677,6 +7037,7 @@ mod tests {
                 .expect("connect client");
             let mut client = NatsConnection {
                 config: NatsConfig::default(),
+                connect_policy: NatsConnectPolicy::default(),
                 stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
                 state: Arc::new(SharedState::new()),
@@ -6756,6 +7117,7 @@ mod tests {
             let state = Arc::new(SharedState::new());
             let mut client = NatsConnection {
                 config: NatsConfig::default(),
+                connect_policy: NatsConnectPolicy::default(),
                 stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
                 state: Arc::clone(&state),
@@ -6900,6 +7262,7 @@ mod tests {
                 .expect("connect client");
             let mut client = NatsConnection {
                 config: NatsConfig::default(),
+                connect_policy: NatsConnectPolicy::default(),
                 stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
                 state: Arc::new(SharedState::new()),
@@ -7022,6 +7385,7 @@ mod tests {
                 .expect("connect client");
             let mut client = NatsConnection {
                 config: NatsConfig::default(),
+                connect_policy: NatsConnectPolicy::default(),
                 stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
                 state: Arc::new(SharedState::new()),
@@ -7313,6 +7677,7 @@ mod tests {
                 .expect("connect client");
             let mut client = NatsConnection {
                 config: NatsConfig::default(),
+                connect_policy: NatsConnectPolicy::default(),
                 stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
                 state: Arc::new(SharedState::new()),
@@ -7386,6 +7751,7 @@ mod tests {
                 .expect("connect client");
             let mut client = NatsConnection {
                 config: NatsConfig::default(),
+                connect_policy: NatsConnectPolicy::default(),
                 stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
                 state: Arc::new(SharedState::new()),
@@ -7448,6 +7814,7 @@ mod tests {
             };
             let client = NatsConnection {
                 config: NatsConfig::default(),
+                connect_policy: NatsConnectPolicy::default(),
                 stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
                 state: Arc::clone(&state),
