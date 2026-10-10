@@ -271,6 +271,10 @@ impl BytesMut {
     ///
     /// Self becomes `[0, at)`, returns `[at, len)`.
     ///
+    /// This is O(n) in the tail length: the tail is split off from the
+    /// underlying `Vec<u8>` to produce an independent `BytesMut` (unlike
+    /// the `bytes` crate's O(1) shared-backing slice).
+    ///
     /// # Panics
     ///
     /// Panics if `at > len`.

@@ -16,7 +16,7 @@
 //! Unlike the `bytes` crate, this implementation uses safe Rust throughout,
 //! avoiding raw pointers in favor of `Arc<Vec<u8>>` and `Vec<u8>`. This
 //! trades some performance for safety, alignment with asupersync's
-//! `#![forbid(unsafe_code)]` policy, and simplicity.
+//! `#![deny(unsafe_code)]` policy, and simplicity.
 //!
 //! # Cancel-Safety
 //!
