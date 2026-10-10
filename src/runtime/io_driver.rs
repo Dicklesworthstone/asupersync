@@ -71,6 +71,11 @@ const fn interest_map_capacity(events_capacity: usize) -> usize {
 /// its wait, unlike `try_turn_with`, so contention needs a preliminary wake.
 /// The caller must still perform its required wake AFTER acquiring the gate:
 /// this preliminary wake alone cannot fence a later handle turn (8ynh18).
+///
+/// One wake is not enough either. Another poller, such as the scheduler
+/// leader, can consume it before the locked turn starts to wait, and the
+/// mutator then blocked for that turn's whole timeout. So the wake repeats
+/// until the gate is taken.
 fn lock_for_mutation<'a>(
     driver: &'a Mutex<IoDriver>,
     reactor: &dyn Reactor,
@@ -78,9 +83,16 @@ fn lock_for_mutation<'a>(
     if let Some(guard) = driver.try_lock() {
         return guard;
     }
-    let _ = reactor.wake();
-    driver.lock()
+    loop {
+        let _ = reactor.wake();
+        if let Some(guard) = driver.try_lock_for(LOCK_FOR_MUTATION_REWAKE) {
+            return guard;
+        }
+    }
 }
+
+/// How long [`lock_for_mutation`] waits for the gate between wakes.
+const LOCK_FOR_MUTATION_REWAKE: Duration = Duration::from_millis(1);
 
 /// Statistics for I/O driver diagnostics.
 ///

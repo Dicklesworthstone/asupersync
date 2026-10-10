@@ -43,6 +43,8 @@ struct GateProbeReactor {
     deregister_failures: AtomicUsize,
     backend: IoReactorBackend,
     poll_wait: Mutex<Option<Arc<PollWait>>>,
+    // Wakes still to drop unseen, as another poller consuming them would.
+    swallowed_wakes: Mutex<usize>,
 }
 
 impl GateProbeReactor {
@@ -54,6 +56,7 @@ impl GateProbeReactor {
             deregister_failures: AtomicUsize::new(0),
             backend,
             poll_wait: Mutex::new(None),
+            swallowed_wakes: Mutex::new(0),
         }
     }
 
@@ -107,6 +110,13 @@ impl Reactor for GateProbeReactor {
     }
 
     fn wake(&self) -> io::Result<()> {
+        {
+            let mut swallowed = self.swallowed_wakes.lock();
+            if *swallowed > 0 {
+                *swallowed -= 1;
+                return Ok(());
+            }
+        }
         let guarded = self
             .driver
             .get()
@@ -254,6 +264,16 @@ fn mutation_interrupts_locked_turn(
     backend: IoReactorBackend,
     operation: impl FnOnce(IoRegistration, &IoDriverHandle, &UnixStream) -> io::Result<()> + Send,
 ) {
+    mutation_interrupts_locked_turn_after_lost_wakes(backend, 0, operation);
+}
+
+/// [`mutation_interrupts_locked_turn`], with the first `lost_wakes` wakes
+/// consumed unseen once the locked turn is waiting.
+fn mutation_interrupts_locked_turn_after_lost_wakes(
+    backend: IoReactorBackend,
+    lost_wakes: usize,
+    operation: impl FnOnce(IoRegistration, &IoDriverHandle, &UnixStream) -> io::Result<()> + Send,
+) {
     let (driver, reactor, source, _peer) = fixture(backend);
     let registration = register(&driver, &source);
     let (entered_tx, entered_rx) = mpsc::channel();
@@ -269,6 +289,7 @@ fn mutation_interrupts_locked_turn(
     std::thread::scope(|scope| {
         let polling = scope.spawn(|| driver.lock().turn(None));
         let entered = entered_rx.recv_timeout(watchdog);
+        *reactor.swallowed_wakes.lock() = lost_wakes;
         let driver_ref = &driver;
         let source_ref = &source;
         let mutation = scope.spawn(move || {
@@ -294,6 +315,22 @@ fn mutation_interrupts_locked_turn(
     });
     assert!(driver.is_empty());
     assert_eq!(reactor.registration_count(), 0);
+}
+
+/// r14 F1 item 1: another poller, such as the scheduler leader, can consume
+/// lock_for_mutation's preliminary wake before a public locked turn starts to
+/// wait. With a single wake, the mutator then blocked for that turn's whole
+/// wait, here forever. It now wakes again until it holds the driver gate.
+#[test]
+fn a_consumed_preliminary_wake_is_repeated_until_the_mutation_gets_the_gate() {
+    for backend in [IoReactorBackend::Injected, IoReactorBackend::Epoll] {
+        mutation_interrupts_locked_turn_after_lost_wakes(backend, 3, |old, driver, source| {
+            let new = driver.register(source, Interest::READABLE, Waker::noop().clone())?;
+            drop(new);
+            drop(old);
+            Ok(())
+        });
+    }
 }
 
 #[test]
