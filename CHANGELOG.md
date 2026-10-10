@@ -146,6 +146,10 @@ match outcome {
 The derive itself is correct and is not changing. Thanks to the
 `mcp_agent_mail_rust` maintainers for reporting the concrete breakage.
 
+### Semantic note — `ActiveTransfer::next_progress` suspends instead of non-blocking poll
+
+`net::atp::sdk::ActiveTransfer::next_progress` changed from a non-blocking `try_recv` to an `async` suspending wait until the next progress update or transfer completion. The signature is unchanged, but calling it in a tight synchronous loop is no longer necessary or recommended; callers should `await` updates sequentially.
+
 ### Breaking CLI change — plaintext ATP-over-TCP is refused off loopback
 
 `atp send`, `atp recv`, `atp serve` and `asupersync atp serve` now refuse

@@ -379,6 +379,8 @@ struct SendArgs {
     ///
     /// Direct RQ requires it unless lab mode is explicit. QUIC additionally
     /// uses it for a live client proof before exposing destination delta state.
+    /// Note: CLI arguments and environment variables may be visible in process
+    /// listings (`ps`, `/proc`). Prefer `--rq-auth-key-stdin` to pass key material securely.
     #[arg(long, value_name = "HEX")]
     rq_auth_key_hex: Option<String>,
     /// Read one 64-hex ATP authentication key line from local stdin.
@@ -509,6 +511,8 @@ struct RecvArgs {
     ///
     /// RQ uses it for symbols. QUIC additionally uses it to verify a live
     /// client proof before reading receiver delta state.
+    /// Note: CLI arguments and environment variables may be visible in process
+    /// listings (`ps`, `/proc`). Prefer `--rq-auth-key-stdin` to pass key material securely.
     #[arg(long, value_name = "HEX")]
     rq_auth_key_hex: Option<String>,
     /// Read one 64-hex ATP authentication key line from stdin.
@@ -582,6 +586,8 @@ struct BondDonateArgs {
     repair_overhead: f64,
     /// Hex-encoded 32-byte RQ symbol-auth key, or set ATP_RQ_AUTH_KEY_HEX.
     /// All bonded donors and the receiver must share the same key.
+    /// Note: CLI arguments and environment variables may be visible in process
+    /// listings (`ps`, `/proc`). Prefer `--rq-auth-key-stdin` to pass key material securely.
     #[arg(long, value_name = "HEX")]
     rq_auth_key_hex: Option<String>,
     /// Read one 64-hex RQ authentication key line from stdin.
@@ -646,6 +652,8 @@ struct BondRecvArgs {
     repair_overhead: f64,
     /// Hex-encoded 32-byte RQ symbol-auth key, or set ATP_RQ_AUTH_KEY_HEX.
     /// All bonded donors and the receiver must share the same key.
+    /// Note: CLI arguments and environment variables may be visible in process
+    /// listings (`ps`, `/proc`). Prefer `--rq-auth-key-stdin` to pass key material securely.
     #[arg(long, value_name = "HEX")]
     rq_auth_key_hex: Option<String>,
     /// Explicitly disable RQ symbol authentication for loopback/lab-only runs.
@@ -733,6 +741,8 @@ struct BondPullArgs {
     /// Hex-encoded 32-byte RQ symbol-auth key, or set ATP_RQ_AUTH_KEY_HEX.
     /// Generated per-transfer when omitted and delivered to the donors over
     /// protected SSH stdin (mirrors the `atp send` SSH bootstrap).
+    /// Note: CLI arguments and environment variables may be visible in process
+    /// listings (`ps`, `/proc`). Prefer `--rq-auth-key-stdin` to pass key material securely.
     #[arg(long, value_name = "HEX")]
     rq_auth_key_hex: Option<String>,
     /// Read one 64-hex RQ authentication key line from local stdin.
@@ -774,6 +784,8 @@ struct BondDescriptorArgs {
     )]
     max_block_size: MaxBlockSizeArg,
     /// Hex-encoded 32-byte RQ symbol-auth key, or set ATP_RQ_AUTH_KEY_HEX.
+    /// Note: CLI arguments and environment variables may be visible in process
+    /// listings (`ps`, `/proc`). Prefer `--rq-auth-key-stdin` to pass key material securely.
     #[arg(long, value_name = "HEX")]
     rq_auth_key_hex: Option<String>,
     /// Read one 64-hex RQ authentication key line from stdin.

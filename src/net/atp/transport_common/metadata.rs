@@ -2768,6 +2768,20 @@ pub(crate) fn inode_key_if_regular_sync(
     Ok(None)
 }
 
+#[cfg(unix)]
+fn is_permitted_xattr_name(name: &str) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        name.starts_with("user.")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        !name.starts_with("security.")
+            && !name.starts_with("system.")
+            && !name.starts_with("trusted.")
+    }
+}
+
 /// Apply captured metadata to a committed filesystem entry at `out_path`.
 ///
 /// Applies in a safe order — times, then xattrs, then ownership, then mode last
@@ -2842,9 +2856,18 @@ pub fn apply_entry_metadata_sync(
     // `xattr::set` is the no-follow path operation (`lsetxattr` on Linux and
     // macOS), so a swapped symlink cannot redirect the write through the FIFO
     // path. Other special file kinds retain the conservative skip behavior.
+    // Unpermitted/privileged namespaces (e.g. security.capability, system.posix_acl_access)
+    // are rejected to prevent privilege escalation from untrusted peers.
     if !meta.xattrs.is_empty() && (!special_file || fifo) {
         let mut any_applied = false;
         for (name, value) in &meta.xattrs {
+            if !is_permitted_xattr_name(name) {
+                report.mark_skipped(
+                    "xattr",
+                    format!("{name}: rejected outside permitted xattr namespace"),
+                );
+                continue;
+            }
             match xattr::set(out_path, name, value) {
                 Ok(()) => any_applied = true,
                 Err(e) => report.mark_skipped("xattr", format!("{name}: {e}")),
@@ -4283,6 +4306,43 @@ mod tests {
             Some(b"must-not-redirect".to_vec()),
             "FIFO xattr application followed a swapped symlink"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_metadata_filters_unpermitted_xattr_namespaces() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let path = root.path().join("xattr-filter-target");
+        std::fs::write(&path, b"content").expect("write fixture");
+
+        let meta = EntryMetadata {
+            xattrs: std::collections::BTreeMap::from([
+                (
+                    "security.capability".to_string(),
+                    b"\x01\x00\x00\x00".to_vec(),
+                ),
+                (
+                    "system.posix_acl_access".to_string(),
+                    b"\x02\x00\x00\x00".to_vec(),
+                ),
+                ("trusted.overlay".to_string(), b"overlay".to_vec()),
+            ]),
+            ..EntryMetadata::default()
+        };
+
+        let report = apply_entry_metadata_sync(&path, &meta).expect("apply metadata");
+        assert!(
+            report.applied.is_empty(),
+            "privileged xattrs must not be applied"
+        );
+        assert_eq!(report.skipped.len(), 3);
+        for (field, reason) in &report.skipped {
+            assert_eq!(*field, "xattr");
+            assert!(
+                reason.contains("rejected outside permitted xattr namespace"),
+                "unexpected skip reason: {reason}"
+            );
+        }
     }
 
     #[test]
