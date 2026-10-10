@@ -237,10 +237,13 @@ async fn wait_for_service_tasks(
     region: RegionId,
     count: usize,
 ) -> BTreeSet<TaskId> {
-    let inspector = handle.task_inspector(Default::default()).unwrap();
     bounded(async {
         loop {
-            let tasks: Vec<_> = inspector
+            // A TaskInspector is not Send: take a fresh one per scan so none
+            // is held across the yield below (run_lifecycle needs a Send future).
+            let tasks: Vec<_> = handle
+                .task_inspector(Default::default())
+                .unwrap()
                 .by_region(region)
                 .into_iter()
                 .filter(|task| !task.is_terminal())
@@ -387,7 +390,10 @@ async fn owned_service_lifecycle(handle: RuntimeHandle, stop: OwnedStop) {
             assert!(!owner.is_cancel_requested());
             run.abort_with_reason(reason);
         }
-        OwnedStop::DropFuture => drop_future.notify_one(),
+        OwnedStop::DropFuture => {
+            // Wakes the parked run future, or stores the permit it consumes next.
+            drop_future.notify_one();
+        }
     }
     let result = bounded(run.join(&cx))
         .await
