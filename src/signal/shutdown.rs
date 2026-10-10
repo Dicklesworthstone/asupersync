@@ -118,11 +118,11 @@ impl ReloadController {
         self.state.requests.load(Ordering::Acquire)
     }
 
-    /// Installs an opt-in SIGHUP listener for this reload controller.
+    /// Installs an opt-in SIGHUP listener thread for this controller.
     ///
-    /// The listener is Unix-only because SIGHUP has no portable Windows
-    /// equivalent. Unsupported platforms return a deterministic
-    /// [`io::ErrorKind::Unsupported`] error.
+    /// Spawns a dedicated OS thread on Unix blocking on SIGHUP events.
+    /// Unsupported platforms return `io::ErrorKind::Unsupported`.
+    /// The thread exits once the controller is dropped and a signal arrives.
     ///
     /// Calling this method more than once is idempotent.
     pub fn listen_for_sighup(self: &Arc<Self>) -> io::Result<()> {
@@ -440,16 +440,16 @@ impl ShutdownController {
         self.state.initiated.load(Ordering::Acquire)
     }
 
-    /// Spawns a background task to listen for shutdown signals.
+    /// Spawns dedicated OS threads to listen for shutdown signals.
     ///
-    /// This is a convenience method that sets up signal handling
-    /// (when available) to automatically trigger shutdown.
+    /// Sets up signal handling to automatically trigger shutdown upon
+    /// receiving any watched OS signal (SIGINT, SIGTERM, or BREAK).
     ///
-    /// # Note
+    /// # Lifecycle and Invariants
     ///
-    /// The listeners are installed at most once per controller. When a watched
-    /// signal arrives, the controller transitions to shutdown just as if
-    /// [`ShutdownController::shutdown`] had been called manually.
+    /// - Spawns 2 OS threads on Unix, 3 on Windows (one per signal kind).
+    /// - One-shot: the first signal arrival transitions the controller.
+    /// - If signal registration fails, no listener thread is retained.
     pub fn listen_for_signals(self: &Arc<Self>) {
         if self
             .state

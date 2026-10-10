@@ -610,7 +610,6 @@ impl TcpStream {
     /// Borrowed halves do not register with the reactor; each `WouldBlock`
     /// arms a 1 ms timer. For zero-overhead parking on the reactor, use
     /// [`into_split()`](Self::into_split) instead.
-    ///
     #[must_use]
     pub fn split(&self) -> (ReadHalf<'_>, WriteHalf<'_>) {
         #[cfg(target_arch = "wasm32")]

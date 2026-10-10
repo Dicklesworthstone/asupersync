@@ -17,7 +17,7 @@ use std::collections::HashMap;
 #[cfg(any(unix, windows))]
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(any(unix, windows))]
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, RwLock};
 #[cfg(any(unix, windows))]
 use std::thread;
 
@@ -305,16 +305,16 @@ impl SignalDispatcher {
         let shutdown_event = WindowsEventHandle(shutdown_event_raw);
         let signal_pending_event = WindowsEventHandle(signal_pending_event_raw);
 
-        // On Windows, signal_hook::iterator is unavailable. Use low-level
-        // register() which installs CRT signal handlers that invoke our
-        // callback directly.
+        let mut registered_ids = Vec::with_capacity(4);
+        // On Windows, low-level register() installs CRT signal handlers
+        // that invoke our callback directly. Handlers run in signal
+        // context where locking is forbidden; we use atomic-only stores
+        // in SignalSlot and call SetEvent (documented signal-safe).
+        // Track registered hook IDs so error paths unregister cleanly.
+        // If registration fails, all hooks are unregistered and the
+        // event handles are closed before returning Err.
         //
-        // CRT signal handlers run in signal context where locking is
-        // forbidden. We use `record_delivery_signal_safe` (atomic-only)
-        // in the handler AND additionally call `SetEvent` on
-        // signal_pending_event — `SetEvent` is documented signal-safe
-        // on Win32 CTRL handlers (it's a single kernel-syscall path
-        // with no allocator / no locks observable from user space).
+        //
         for kind in all_signal_kinds() {
             let raw = raw_signal_for_kind(kind);
             debug_assert_eq!(signal_kind_from_raw(raw), Some(kind));
@@ -325,34 +325,36 @@ impl SignalDispatcher {
             // event AFTER joining the poller. CRT signal handlers are
             // process-global and may technically outlive the
             // dispatcher; in practice the dispatcher is created once
-            // at runtime startup and dropped at process exit, so the
-            // ordering is safe.
+            // at runtime startup and dropped at process exit.
             let pending = signal_pending_event;
             // SAFETY: closure body uses only atomic stores
             // (record_delivery_signal_safe) and SetEvent on a kernel
             // event handle — both signal-safe operations on Windows
             // CTRL handlers.
+            //
             unsafe {
-                signal_hook::low_level::register(raw, move || {
+                match signal_hook::low_level::register(raw, move || {
                     slot.record_delivery_signal_safe();
                     let _ = pending.set_event();
-                })?;
+                }) {
+                    Ok(id) => registered_ids.push(id),
+                    Err(err) => {
+                        for id in registered_ids {
+                            signal_hook::low_level::unregister(id);
+                        }
+                        let _ = shutdown_event.close();
+                        let _ = signal_pending_event.close();
+                        return Err(err);
+                    }
+                }
             }
         }
-
-        // Poller thread waits on [shutdown, signal_pending] with
-        // INFINITE timeout. Returns:
-        //   WAIT_OBJECT_0     (0) → shutdown_event was set, exit loop
-        //   WAIT_OBJECT_0 + 1 (1) → signal_pending_event was set, drain
-        //                            atomics and re-wait
-        //   anything else (incl. WAIT_FAILED, WAIT_ABANDONED_*) → bail
-        //                            so we don't spin on persistent error
         const SHUTDOWN_INDEX: u32 = WAIT_OBJECT_0;
         const SIGNAL_PENDING_INDEX: u32 = WAIT_OBJECT_0 + 1;
-
         let poller_slots: Vec<Arc<SignalSlot>> = slots.values().cloned().collect();
         let poller_shutdown_handle = shutdown_event;
         let poller_pending_handle = signal_pending_event;
+        let registered_hooks = registered_ids;
         let poller_handle = thread::Builder::new()
             .name("asupersync-signal-poll-win".to_string())
             .spawn(move || {
@@ -361,12 +363,10 @@ impl SignalDispatcher {
                 let handles: [windows_sys::Win32::Foundation::HANDLE; 2] = [s_handle.0, p_handle.0];
                 let mut last_seen: Vec<u64> = vec![0; poller_slots.len()];
                 loop {
-                    // SAFETY: handles array contains two valid event
-                    // handles created by CreateEventW above; they
-                    // remain valid for the lifetime of this thread
-                    // (closed only by SignalDispatcher::Drop AFTER
-                    // join). bWaitAll = FALSE so the call returns as
-                    // soon as ANY handle is signaled.
+                    // SAFETY: handles contains valid event handles.
+                    // Closed by SignalDispatcher::Drop AFTER join.
+                    // bWaitAll = FALSE: returns when any handle signals.
+                    //
                     let rc = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, INFINITE) };
                     match rc {
                         SHUTDOWN_INDEX => break,
@@ -389,7 +389,14 @@ impl SignalDispatcher {
                     }
                 }
             })
-            .map_err(|e| io::Error::other(format!("failed to spawn signal poller: {e}")))?;
+            .map_err(|e| {
+                for id in registered_hooks {
+                    signal_hook::low_level::unregister(id);
+                }
+                let _ = shutdown_event.close();
+                let _ = signal_pending_event.close();
+                io::Error::other(format!("failed to spawn signal poller: {e}"))
+            })?;
 
         Ok(Self {
             slots,
@@ -499,13 +506,27 @@ fn notify_waiters_contained(notify: &Notify) {
 }
 
 #[cfg(any(unix, windows))]
-static SIGNAL_DISPATCHER: OnceLock<io::Result<SignalDispatcher>> = OnceLock::new();
+static SIGNAL_DISPATCHER: RwLock<Option<&'static SignalDispatcher>> = RwLock::new(None);
 
 #[cfg(any(unix, windows))]
 fn dispatcher_for(kind: SignalKind) -> Result<&'static SignalDispatcher, SignalError> {
-    let result = SIGNAL_DISPATCHER.get_or_init(SignalDispatcher::start);
-    match result {
-        Ok(dispatcher) => Ok(dispatcher),
+    if let Ok(guard) = SIGNAL_DISPATCHER.read() {
+        if let Some(dispatcher) = *guard {
+            return Ok(dispatcher);
+        }
+    }
+    let mut lock = SIGNAL_DISPATCHER.write().map_err(|_| {
+        SignalError::unsupported(kind, "signal dispatcher lock poisoned")
+    })?;
+    if let Some(dispatcher) = *lock {
+        return Ok(dispatcher);
+    }
+    match SignalDispatcher::start() {
+        Ok(dispatcher) => {
+            let leaked: &'static SignalDispatcher = Box::leak(Box::new(dispatcher));
+            *lock = Some(leaked);
+            Ok(leaked)
+        }
         Err(err) => Err(SignalError::unsupported(
             kind,
             format!("failed to initialize signal dispatcher: {err}"),
