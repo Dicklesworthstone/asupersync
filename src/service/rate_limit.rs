@@ -678,6 +678,20 @@ where
     type Error = RateLimitError<S::Error>;
     type Future = RateLimitFuture<S::Future, S::Error>;
 
+    fn release_readiness(&mut self) -> super::ReadinessRelease {
+        let reservations = std::mem::replace(
+            &mut self.reservations,
+            LocalReservationState::new(
+                Arc::clone(&self.state),
+                max_bucket_tokens(self.rate, self.period.is_zero()),
+            ),
+        );
+        let sleep = self.sleep.take();
+        let outer = super::ReadinessRelease::new(move || drop((reservations, sleep)));
+        let inner = self.inner.release_readiness();
+        super::ReadinessRelease::new(move || drop((inner, outer)))
+    }
+
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         let now = (self.time_getter)();
         self.poll_ready_with_time::<Request>(now, cx)

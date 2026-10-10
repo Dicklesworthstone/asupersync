@@ -412,6 +412,11 @@ where
     type Error = HedgeError<S::Error>;
     type Future = HedgeFuture<S, Request>;
 
+    fn release_readiness(&mut self) -> super::ReadinessRelease {
+        self.ready_observed = false;
+        self.inner.release_readiness()
+    }
+
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         match self.inner.poll_ready(cx) {
             Poll::Ready(Ok(())) => {
@@ -466,7 +471,7 @@ where
     NotReady,
     Running {
         primary: Option<S::Future>,
-        hedge_service: Option<S>,
+        hedge_service: Option<super::service::ReadinessService<S, Request>>,
         hedge_request: Option<Request>,
         hedge_future: Option<S::Future>,
         sleep: Sleep,
@@ -525,7 +530,7 @@ where
         Self {
             state: HedgeFutureState::Running {
                 primary: Some(primary),
-                hedge_service,
+                hedge_service: hedge_service.map(super::service::ReadinessService::new),
                 hedge_request: Some(request),
                 hedge_future: None,
                 sleep,

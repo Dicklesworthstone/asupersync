@@ -1142,6 +1142,7 @@ impl<S, T: Strategy> LoadBalancer<S, T> {
             if slow_start_view.is_some_and(|view| !backend.slow_start.permits(view)) {
                 continue;
             }
+            let release_scope = super::service::ReadinessReleaseScope::new();
             let mut svc = backend.service.lock();
 
             let (mut readiness, woke_during_poll) = poll_service_ready_once::<S, Request>(
@@ -1173,18 +1174,29 @@ impl<S, T: Strategy> LoadBalancer<S, T> {
                     let load_metric = load_guard.defuse();
                     drop(svc);
 
-                    return Ok(LoadBalancedFuture {
+                    let future = LoadBalancedFuture {
                         inner: Some(fut),
                         service_marker: PhantomData,
                         load_metric: Some(load_metric),
-                    });
+                    };
+                    // The future owns the load decrement before deferred
+                    // cleanup can reenter or panic after the service unlocks.
+                    drop(release_scope);
+                    return Ok(future);
                 }
                 Poll::Ready(Err(err)) => {
+                    let release = svc.release_readiness();
+                    drop(svc);
+                    drop(release);
                     if first_error.is_none() {
                         first_error = Some(err);
                     }
                 }
-                Poll::Pending => {}
+                Poll::Pending => {
+                    let release = svc.release_readiness();
+                    drop(svc);
+                    drop(release);
+                }
             }
         }
         if let Some(err) = first_error {
@@ -1294,6 +1306,55 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    #[test]
+    fn nested_circuit_cleanup_unlocks_and_preserves_load_on_panic() {
+        use super::super::readiness_tests::{ReadyReleaseProbe, ReleaseCallback};
+        use super::super::{CircuitBreaker, CircuitBreakerError};
+
+        for panic_on_cleanup in [false, true] {
+            let callback: ReleaseCallback = Arc::new(Mutex::new(None));
+            let breaker = CircuitBreaker::with_time_getter(
+                ReadyReleaseProbe(Arc::clone(&callback)),
+                crate::combinator::CircuitBreakerPolicy {
+                    failure_threshold: 1,
+                    open_duration: Duration::from_secs(3600),
+                    ..crate::combinator::CircuitBreakerPolicy::default()
+                },
+                || crate::types::Time::ZERO,
+            );
+            let permit = breaker
+                .breaker()
+                .should_allow(crate::types::Time::ZERO)
+                .unwrap();
+            breaker
+                .breaker()
+                .record_failure(permit, "open", crate::types::Time::ZERO);
+            let balancer = LoadBalancer::new(RoundRobin::new(), vec![breaker]);
+            let backend = Arc::clone(&balancer.backends.lock()[0]);
+            let weak = Arc::downgrade(&backend);
+            let released = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let observed = Arc::clone(&released);
+            *callback.lock() = Some(Box::new(move || {
+                assert!(weak.upgrade().unwrap().service.try_lock().is_some());
+                observed.fetch_add(1, Ordering::SeqCst);
+                assert!(!panic_on_cleanup, "cleanup panic");
+            }));
+
+            let result = catch_unwind(AssertUnwindSafe(|| balancer.call_balanced(1)));
+            if panic_on_cleanup {
+                assert!(result.is_err());
+            } else {
+                let mut response = result.unwrap().unwrap();
+                assert!(matches!(
+                    Pin::new(&mut response).poll(&mut Context::from_waker(&noop_waker())),
+                    Poll::Ready(Err(LoadBalanceError::Inner(CircuitBreakerError::Open { .. })))
+                ));
+            }
+            assert_eq!(released.load(Ordering::SeqCst), 1);
+            assert_eq!(backend.load.load(), 0);
+        }
     }
 
     fn backend_names<const N: usize>(names: [&str; N]) -> Vec<String> {

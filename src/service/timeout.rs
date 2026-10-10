@@ -218,6 +218,11 @@ where
     type Error = TimeoutError<S::Error>;
     type Future = TimeoutFuture<S::Future>;
 
+    fn release_readiness(&mut self) -> super::ReadinessRelease {
+        self.ready_observed = false;
+        self.inner.release_readiness()
+    }
+
     #[inline]
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         match self.inner.poll_ready(cx) {

@@ -423,6 +423,11 @@ where
     type Error = CircuitBreakerError<S::Error>;
     type Future = CircuitBreakerFuture<S::Future, C>;
 
+    fn release_readiness(&mut self) -> super::ReadinessRelease {
+        self.ready_observed = false;
+        self.inner.release_readiness()
+    }
+
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         match self.inner.poll_ready(cx) {
             Poll::Ready(Ok(())) => {
@@ -448,9 +453,11 @@ where
         let permit = match self.breaker.should_allow((self.time_getter)()) {
             Ok(permit) => permit,
             Err(InnerCircuitBreakerError::Open { remaining }) => {
+                drop(self.inner.release_readiness());
                 return CircuitBreakerFuture::open(remaining);
             }
             Err(InnerCircuitBreakerError::HalfOpenFull) => {
+                drop(self.inner.release_readiness());
                 return CircuitBreakerFuture::half_open_full();
             }
             Err(InnerCircuitBreakerError::Inner(())) => unreachable!(),

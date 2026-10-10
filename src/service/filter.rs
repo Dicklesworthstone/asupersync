@@ -75,12 +75,13 @@ impl<E: std::error::Error + 'static> std::error::Error for FilterError<E> {
 ///
 /// The predicate `P` receives a reference to the request and returns
 /// `true` to allow or `false` to reject.
+/// A rejection releases the unused readiness reservation. Poll readiness again
+/// before dispatching the next request, including on the same connection.
 pub struct Filter<S, P> {
     inner: S,
     predicate: P,
     // Tracks an inner readiness observation that has not yet been consumed by
-    // an accepted request. Rejected requests preserve this window because the
-    // inner service may already be holding state for the authorized call.
+    // a request. Rejection releases the inner reservation as well.
     ready_observed: bool,
 }
 
@@ -141,6 +142,11 @@ where
     type Error = FilterError<S::Error>;
     type Future = FilterFuture<S::Future>;
 
+    fn release_readiness(&mut self) -> super::ReadinessRelease {
+        self.ready_observed = false;
+        self.inner.release_readiness()
+    }
+
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         if self.ready_observed {
             return Poll::Ready(Ok(()));
@@ -161,6 +167,9 @@ where
 
     fn call(&mut self, req: Request) -> Self::Future {
         if !(self.predicate)(&req) {
+            // Rejection finishes this readiness attempt. Keeping its permit
+            // would let an idle rejected connection starve other handles.
+            drop(self.release_readiness());
             FilterFuture::rejected()
         } else if !self.ready_observed {
             FilterFuture::not_ready()
@@ -351,6 +360,16 @@ mod tests {
         type Response = i32;
         type Error = &'static str;
         type Future = std::future::Ready<Result<i32, Self::Error>>;
+
+        fn release_readiness(&mut self) -> super::super::ReadinessRelease {
+            if !std::mem::replace(&mut self.reserved, false) {
+                return super::super::ReadinessRelease::default();
+            }
+            let available = Arc::clone(&self.available);
+            super::super::ReadinessRelease::new(move || {
+                available.fetch_add(1, Ordering::SeqCst);
+            })
+        }
 
         fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
             self.ready_polls.fetch_add(1, Ordering::SeqCst);
@@ -601,8 +620,8 @@ mod tests {
     }
 
     #[test]
-    fn rejected_request_preserves_ready_window_for_next_accepted_call() {
-        init_test("rejected_request_preserves_ready_window_for_next_accepted_call");
+    fn rejected_request_releases_capacity_and_requires_fresh_readiness() {
+        init_test("rejected_request_releases_capacity_and_requires_fresh_readiness");
         let ready_polls = Arc::new(AtomicUsize::new(0));
         let available = Arc::new(AtomicUsize::new(1));
         let inner = StrictReservingService::new(Arc::clone(&ready_polls), Arc::clone(&available));
@@ -636,18 +655,29 @@ mod tests {
             rejected_ok
         );
 
+        assert_eq!(
+            available.load(Ordering::SeqCst),
+            1,
+            "a rejected request returns capacity while its handle remains alive"
+        );
+        let mut unready = filter.call(11);
+        assert!(matches!(
+            Pin::new(&mut unready).poll(&mut cx),
+            Poll::Ready(Err(FilterError::NotReady))
+        ));
+
         let ready_again = filter.poll_ready(&mut cx);
         let ready_again_ok = matches!(ready_again, Poll::Ready(Ok(())));
         crate::assert_with_log!(
             ready_again_ok,
-            "existing readiness window is preserved across rejection",
+            "a fresh readiness window is acquired after rejection",
             true,
             ready_again_ok
         );
         crate::assert_with_log!(
-            ready_polls.load(Ordering::SeqCst) == 1,
-            "re-poll short-circuits without touching the reserved inner service",
-            1,
+            ready_polls.load(Ordering::SeqCst) == 2,
+            "re-poll must reserve the inner service again",
+            2,
             ready_polls.load(Ordering::SeqCst)
         );
 
@@ -656,7 +686,7 @@ mod tests {
         let accepted_ok = matches!(accepted_result, Poll::Ready(Ok(11)));
         crate::assert_with_log!(
             accepted_ok,
-            "accepted follow-up request consumes the preserved readiness window",
+            "accepted follow-up request consumes the new readiness window",
             true,
             accepted_ok
         );
@@ -672,11 +702,11 @@ mod tests {
         let third_not_ready = matches!(third_result, Poll::Ready(Err(FilterError::NotReady)));
         crate::assert_with_log!(
             third_not_ready,
-            "accepted request still consumes the preserved readiness ticket",
+            "accepted request consumes the new readiness ticket",
             true,
             third_not_ready
         );
-        crate::test_complete!("rejected_request_preserves_ready_window_for_next_accepted_call");
+        crate::test_complete!("rejected_request_releases_capacity_and_requires_fresh_readiness");
     }
 
     // ================================================================

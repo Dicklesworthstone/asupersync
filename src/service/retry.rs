@@ -353,20 +353,20 @@ where
 {
     /// Polling the inner service for readiness.
     PollReady {
-        service: S,
+        service: super::service::ReadinessService<S, Request>,
         policy: P,
         request: Option<Request>,
     },
     /// Calling the inner service.
     Calling {
-        service: S,
+        service: super::service::ReadinessService<S, Request>,
         policy: P,
         request: Option<Request>,
         future: S::Future,
     },
     /// Waiting for retry policy decision.
     Checking {
-        service: S,
+        service: super::service::ReadinessService<S, Request>,
         request: Option<Request>,
         result: Option<Result<S::Response, S::Error>>,
         retry_future: P::Future,
@@ -386,7 +386,7 @@ where
     pub fn new(service: S, policy: P, request: Request) -> Self {
         Self {
             state: RetryState::PollReady {
-                service,
+                service: super::service::ReadinessService::new(service),
                 policy,
                 request: Some(request),
             },

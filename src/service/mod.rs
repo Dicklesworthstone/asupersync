@@ -65,7 +65,10 @@ pub use service::{
     TowerAdapterWithProvider,
 };
 pub use service::{
-    AsupersyncService, AsupersyncServiceExt, MapErr, MapResponse, Oneshot, Ready, Service,
+    AsupersyncService, AsupersyncServiceExt, MapErr, MapResponse, Oneshot, ReadinessRelease, Ready, Service,
     ServiceExt,
 };
 pub use timeout::{Timeout, TimeoutError, TimeoutLayer};
+
+#[cfg(test)]
+mod readiness_tests;

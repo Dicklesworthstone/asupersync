@@ -24,11 +24,191 @@ pub trait Service<Request> {
 
     /// Dispatches a request to the service.
     fn call(&mut self, req: Request) -> Self::Future;
+
+    /// Relinquishes this handle's unused readiness reservation or queued wait.
+    ///
+    /// Call this when a request is shed, rejected, or stops waiting before
+    /// `call`. A fresh `poll_ready` is required before another dispatch. Work
+    /// already transferred into a call future is unaffected.
+    ///
+    /// Implementations detach their readiness state here and return its cleanup
+    /// in the owned action. They must not invoke wakers or other user callbacks
+    /// while detaching: shared adapters call this method under their service
+    /// mutex, then drop the action after unlocking. Wrappers forward the action.
+    /// The default preserves existing implementations that reserve no capacity.
+    fn release_readiness(&mut self) -> ReadinessRelease {
+        ReadinessRelease::default()
+    }
+}
+
+/// Detached readiness cleanup, run when this value is dropped.
+///
+/// Construct this after removing a reservation from its service. Keep it alive
+/// until any service/coordinator locks have been released. Cleanup is synchronous
+/// and must return; it may release permits, unregister waiters, or wake peers.
+/// Combining actions by capturing them in a new action runs no cleanup early.
+/// Shared adapters also defer actions dropped by nested middleware until their
+/// outermost synchronous service call has unlocked.
+#[derive(Default)]
+pub struct ReadinessRelease {
+    cleanup: Option<Box<dyn FnOnce() + 'static>>,
+}
+
+impl ReadinessRelease {
+    /// Own a detached reservation and its cleanup without running it yet.
+    #[must_use]
+    pub fn new(cleanup: impl FnOnce() + 'static) -> Self {
+        Self {
+            cleanup: Some(Box::new(cleanup)),
+        }
+    }
+}
+
+impl std::fmt::Debug for ReadinessRelease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReadinessRelease")
+            .field("pending", &self.cleanup.is_some())
+            .finish()
+    }
+}
+
+#[derive(Default)]
+struct DeferredReadinessReleases {
+    depth: usize,
+    pending: Vec<ReadinessRelease>,
+}
+
+thread_local! {
+    static DEFERRED_READINESS_RELEASES: std::cell::RefCell<DeferredReadinessReleases> =
+        const { std::cell::RefCell::new(DeferredReadinessReleases {
+            depth: 0,
+            pending: Vec::new(),
+        }) };
+}
+
+/// Defers transitive readiness cleanup while a shared service is locked.
+///
+/// Declare this before acquiring the service mutex and never retain it across
+/// an await. A nested middleware may release readiness from poll_ready or call;
+/// its action then runs only after the outermost scope unlocks, including on
+/// unwind. The marker prevents moving an active scope to another thread.
+pub(super) struct ReadinessReleaseScope {
+    marker: PhantomData<std::rc::Rc<()>>,
+}
+
+impl ReadinessReleaseScope {
+    pub(super) fn new() -> Self {
+        DEFERRED_READINESS_RELEASES.with(|releases| {
+            releases.borrow_mut().depth += 1;
+        });
+        Self {
+            marker: PhantomData,
+        }
+    }
+}
+
+impl Drop for ReadinessReleaseScope {
+    fn drop(&mut self) {
+        let pending = DEFERRED_READINESS_RELEASES.with(|releases| {
+            let mut releases = releases.borrow_mut();
+            releases.depth -= 1;
+            if releases.depth == 0 {
+                std::mem::take(&mut releases.pending)
+            } else {
+                Vec::new()
+            }
+        });
+        // Drop outside the RefCell borrow so cleanup may reenter shared
+        // services. Keeping queued actions as RAII values also runs the rest
+        // if an earlier callback panics while this vector is being dropped.
+        drop(pending);
+    }
+}
+
+impl Drop for ReadinessRelease {
+    fn drop(&mut self) {
+        let mut cleanup = self.cleanup.take();
+        if cleanup.is_none() {
+            return;
+        }
+        // try_with also permits detached actions to finish during thread-local
+        // teardown, when no shared-service scope can remain active.
+        let _ = DEFERRED_READINESS_RELEASES.try_with(|releases| {
+            let mut releases = releases.borrow_mut();
+            if releases.depth != 0 {
+                releases.pending.push(Self {
+                    cleanup: cleanup.take(),
+                });
+            }
+        });
+        if let Some(cleanup) = cleanup {
+            if std::thread::panicking() {
+                if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(cleanup))
+                {
+                    std::mem::forget(payload);
+                }
+            } else {
+                cleanup();
+            }
+        }
+    }
+}
+
+/// Owns the readiness attempt of a service retained by an adapter future.
+pub(super) struct ReadinessService<S, Request>
+where
+    S: Service<Request>,
+{
+    inner: S,
+    armed: bool,
+    marker: PhantomData<fn(Request)>,
+}
+
+impl<S, Request> ReadinessService<S, Request>
+where
+    S: Service<Request>,
+{
+    pub(super) fn new(inner: S) -> Self {
+        Self {
+            inner,
+            armed: false,
+            marker: PhantomData,
+        }
+    }
+
+    pub(super) fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), S::Error>> {
+        self.armed = true;
+        let result = self.inner.poll_ready(cx);
+        if matches!(&result, Poll::Ready(Err(_))) {
+            self.armed = false;
+            drop(self.inner.release_readiness());
+        }
+        result
+    }
+
+    pub(super) fn call(&mut self, request: Request) -> S::Future {
+        let future = self.inner.call(request);
+        self.armed = false;
+        future
+    }
+}
+
+impl<S, Request> Drop for ReadinessService<S, Request>
+where
+    S: Service<Request>,
+{
+    fn drop(&mut self) {
+        if self.armed {
+            drop(self.inner.release_readiness());
+        }
+    }
 }
 
 /// Extension trait providing convenience adapters for services.
 pub trait ServiceExt<Request>: Service<Request> {
     /// Waits until the service is ready to accept a request.
+    /// Dropping this future after a pending poll releases its readiness wait.
+    /// A successful wait retains readiness for the subsequent `call`.
     fn ready(&mut self) -> Ready<'_, Self, Request>
     where
         Self: Sized,
@@ -893,13 +1073,17 @@ where
 #[derive(Debug)]
 pub struct Ready<'a, S: ?Sized, Request> {
     service: &'a mut S,
+    release: fn(&mut S) -> ReadinessRelease,
+    armed: bool,
     _marker: PhantomData<fn(Request)>,
 }
 
-impl<'a, S: ?Sized, Request> Ready<'a, S, Request> {
+impl<'a, S: Service<Request> + ?Sized, Request> Ready<'a, S, Request> {
     fn new(service: &'a mut S) -> Self {
         Self {
             service,
+            release: <S as Service<Request>>::release_readiness,
+            armed: false,
             _marker: PhantomData,
         }
     }
@@ -914,7 +1098,25 @@ where
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        this.service.poll_ready(cx)
+        this.armed = true;
+        let result = this.service.poll_ready(cx);
+        match &result {
+            Poll::Ready(Ok(())) => this.armed = false,
+            Poll::Ready(Err(_)) => {
+                this.armed = false;
+                drop((this.release)(this.service));
+            }
+            Poll::Pending => {}
+        }
+        result
+    }
+}
+
+impl<S: ?Sized, Request> Drop for Ready<'_, S, Request> {
+    fn drop(&mut self) {
+        if self.armed {
+            drop((self.release)(self.service));
+        }
     }
 }
 
@@ -958,7 +1160,7 @@ where
     S: Service<Request>,
 {
     Ready {
-        service: S,
+        service: ReadinessService<S, Request>,
         request: Option<Request>,
     },
     Calling {
@@ -975,7 +1177,7 @@ where
     pub fn new(service: S, request: Request) -> Self {
         Self {
             state: OneshotState::Ready {
-                service,
+                service: ReadinessService::new(service),
                 request: Some(request),
             },
         }
