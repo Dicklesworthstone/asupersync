@@ -119,9 +119,13 @@ impl RetirementBarrier {
         let candidate = waker.clone();
         let displaced = {
             let mut slot = self.waker.lock();
-            if slot
-                .as_ref()
-                .is_some_and(|existing| existing.will_wake(waker))
+            // Never store once the barrier is open: `open_and_wake` takes the
+            // slot for the last time after publishing `open`, so a waker
+            // stored after that would stay parked until the barrier drops.
+            if self.is_open()
+                || slot
+                    .as_ref()
+                    .is_some_and(|existing| existing.will_wake(waker))
             {
                 None
             } else {
@@ -133,10 +137,23 @@ impl RetirementBarrier {
     }
 
     /// Clears any registered waker without opening the barrier or waking it.
-    /// Called when the waiting handle or future is dropped.
+    /// Called when the waiting handle or future is dropped. An open barrier
+    /// holds no waker (see `register_and_is_open`), so the common case takes
+    /// no lock. The displaced waker is a foreign value dropped on the
+    /// caller's `Drop` path: a panicking destructor is contained, and its
+    /// payload leaked, instead of unwinding through the caller.
     pub(crate) fn clear_waker(&self) {
+        if self.is_open() {
+            return;
+        }
         let displaced = self.waker.lock().take();
-        drop(displaced);
+        if let Some(waker) = displaced {
+            if let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(waker)))
+            {
+                std::mem::forget(payload);
+            }
+        }
     }
 
     /// Returns true if a waker is currently registered on this barrier.
@@ -825,6 +842,7 @@ impl<T> TaskHandle<T> {
             requested_cancel_reason: self.requested_cancel_reason.as_ref(),
             terminal_state,
             barrier,
+            registered: false,
             drop_abort_defused: false,
             drop_reason: None,
         }
@@ -864,6 +882,7 @@ impl<T> TaskHandle<T> {
             requested_cancel_reason: self.requested_cancel_reason.as_ref(),
             terminal_state,
             barrier,
+            registered: false,
             drop_abort_defused: false,
             drop_reason: Some(reason),
         }
@@ -1062,6 +1081,10 @@ pub struct JoinFuture<'a, T> {
     /// closed this future does not poll the receiver, so an early terminal is
     /// never consumed or surfaced until the scheduler opens it post-retirement.
     barrier: Arc<RetirementBarrier>,
+    /// Whether this future stored its waker on the barrier. Only then does
+    /// dropping it clear the slot: a waker the handle's own `poll_join`
+    /// registered is not this future's to drop.
+    registered: bool,
     drop_abort_defused: bool,
     drop_reason: Option<CancelReason>,
 }
@@ -1119,8 +1142,11 @@ impl<T> std::future::Future for JoinFuture<'_, T> {
         // the receiver, so an early terminal is never surfaced before the
         // record commits (br-asupersync-yhueis). The value stays in the
         // channel, so the unpolled-ready drop fast path still observes it.
-        if !this.barrier.is_open() && !this.barrier.register_and_is_open(cx.waker()) {
-            return std::task::Poll::Pending;
+        if !this.barrier.is_open() {
+            this.registered = true;
+            if !this.barrier.register_and_is_open(cx.waker()) {
+                return std::task::Poll::Pending;
+            }
         }
         // JoinError needs to be mapped if recv fails with RecvError
         match std::pin::Pin::new(&mut this.inner).poll(cx) {
@@ -1152,24 +1178,24 @@ impl<T> std::future::Future for JoinFuture<'_, T> {
 
 impl<T> Drop for JoinFuture<'_, T> {
     fn drop(&mut self) {
-        self.barrier.clear_waker();
         // Abort the task if we stop waiting for it.
         // This makes TaskHandle::join cancel-safe and race-safe.
-        if !*self.terminal_state && !self.drop_abort_defused {
-            // Completion already happened if the oneshot is already ready (or
-            // closed) — even if this future never polled it because the barrier
-            // was still closed. Gate-first never consumes the value while
-            // gated, so the receiver still reflects readiness here; dropping
-            // must not stamp cancellation between producer publication and
-            // record retirement (br-asupersync-yhueis / 6976).
-            if self.inner.receiver_finished() {
-                return;
-            }
+        // Completion already happened if the oneshot is already ready (or
+        // closed) — even if this future never polled it because the barrier
+        // was still closed. Gate-first never consumes the value while gated,
+        // so the receiver still reflects readiness here; dropping must not
+        // stamp cancellation between producer publication and record
+        // retirement (br-asupersync-yhueis / 6976).
+        if !*self.terminal_state && !self.drop_abort_defused && !self.inner.receiver_finished() {
             if let Some(reason) = self.drop_reason.take() {
                 self.abort_with_reason(reason);
             } else {
                 self.abort_with_reason(CancelReason::user("abort"));
             }
+        }
+        // After the abort, so a foreign waker destructor cannot skip it.
+        if self.registered {
+            self.barrier.clear_waker();
         }
     }
 }
@@ -2391,6 +2417,105 @@ mod tests {
             other => panic!("expected the gated Ok(42) after open, got {other:?}"),
         }
         crate::test_complete!("retirement_barrier_gates_terminal_until_opened_then_delivers_value");
+    }
+
+    // br-asupersync-v8yh9s T1: the handle's poll_join and its join() futures
+    // share one barrier slot. A join() future dropped without registering
+    // (here never polled, its result already published) cleared the slot, so
+    // opening the barrier woke nobody and the poll_join waiter hung.
+    #[test]
+    fn a_dropped_join_future_keeps_the_handles_poll_join_registration() {
+        init_test("a_dropped_join_future_keeps_the_handles_poll_join_registration");
+        let cx = test_cx();
+        let task_id = TaskId::from_arena(ArenaIndex::new(41, 7));
+        let (tx, rx) = task_result_channel::<i32>();
+        let barrier = RetirementBarrier::pending();
+        let mut handle = handle_with_barrier(
+            task_id,
+            rx,
+            std::sync::Arc::downgrade(&cx.inner),
+            std::sync::Arc::clone(&barrier),
+        );
+        publish_terminal_result(tx, Ok(7));
+        let wakes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let waker = counting_waker(std::sync::Arc::clone(&wakes));
+        let mut poll_cx = Context::from_waker(&waker);
+        assert!(handle.poll_join(&mut poll_cx).is_pending());
+
+        drop(handle.join(&cx));
+        barrier.open_and_wake();
+        assert_eq!(
+            wakes.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "opening the barrier must wake the poll_join waiter"
+        );
+        match handle.poll_join(&mut poll_cx) {
+            Poll::Ready(Ok(value)) => assert_eq!(value, 7),
+            other => panic!("expected Ok(7) after open, got {other:?}"),
+        }
+        crate::test_complete!("a_dropped_join_future_keeps_the_handles_poll_join_registration");
+    }
+
+    // br-asupersync-v8yh9s T2: dropping a join() future dropped its registered
+    // waker first, outside any unwind guard. A waker whose destructor panics
+    // unwound out of the drop before the drop-abort, so the task was not
+    // cancelled.
+    #[test]
+    fn a_panicking_waker_destructor_does_not_skip_the_join_drop_abort() {
+        init_test("a_panicking_waker_destructor_does_not_skip_the_join_drop_abort");
+        struct PanicsWhenDropped;
+        // The destructor is the point of this waker, so Waker::noop() cannot
+        // stand in for it.
+        #[allow(clippy::manual_noop_waker)]
+        impl std::task::Wake for PanicsWhenDropped {
+            fn wake(self: std::sync::Arc<Self>) {}
+        }
+        impl Drop for PanicsWhenDropped {
+            fn drop(&mut self) {
+                panic!("waker destructor");
+            }
+        }
+        let cx = test_cx();
+        let task_id = TaskId::from_arena(ArenaIndex::new(41, 8));
+        let (_tx, rx) = task_result_channel::<i32>();
+        let barrier = RetirementBarrier::pending();
+        let mut handle = handle_with_barrier(
+            task_id,
+            rx,
+            std::sync::Arc::downgrade(&cx.inner),
+            std::sync::Arc::clone(&barrier),
+        );
+        let mut join = Box::pin(handle.join(&cx));
+        {
+            let waker = Waker::from(std::sync::Arc::new(PanicsWhenDropped));
+            assert!(
+                join.as_mut()
+                    .poll(&mut Context::from_waker(&waker))
+                    .is_pending()
+            );
+        }
+        // The barrier now holds the waker's last reference.
+        let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(join)));
+        assert!(dropped.is_ok(), "the waker's panic must not unwind out");
+        assert!(
+            cx.is_cancel_requested(),
+            "dropping an unfinished join() future still aborts its task"
+        );
+        crate::test_complete!("a_panicking_waker_destructor_does_not_skip_the_join_drop_abort");
+    }
+
+    // br-asupersync-v8yh9s T3: a waker registered after the barrier opened
+    // stayed in the slot (nothing takes it again), so every handle and join
+    // future had to lock the barrier on drop to clear it.
+    #[test]
+    fn an_open_barrier_never_stores_a_waker() {
+        init_test("an_open_barrier_never_stores_a_waker");
+        let barrier = RetirementBarrier::pending();
+        barrier.open_and_wake();
+        let waker = counting_waker(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+        assert!(barrier.register_and_is_open(&waker));
+        assert!(!barrier.has_waker());
+        crate::test_complete!("an_open_barrier_never_stores_a_waker");
     }
 
     // An open barrier (standalone handle, admission denial, unwired paths) must
