@@ -27,6 +27,8 @@ pub mod h1;
 pub mod h2;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod handoff;
+#[cfg(not(target_arch = "wasm32"))]
+mod listener_cancel;
 
 // Conformance tests for H1 vs H2 header decoder equivalence
 #[cfg(test)]
