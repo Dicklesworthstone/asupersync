@@ -3034,8 +3034,11 @@ fn unary_reuse_keeps_a_connection_whose_call_ended_with_a_grpc_error() {
 #[cfg(feature = "http2-streaming")]
 mod legacy_streaming {
     use super::*;
+    use asupersync::grpc::MAX_STREAM_BUFFERED;
     use asupersync::grpc::server::{RegisteredRequestStream, ServerDuplexConfig};
     use asupersync::grpc::service::ServiceHandlerFuture;
+    use asupersync::time::{sleep, wall_now};
+    use asupersync::types::CancelReason;
 
     const PAYLOAD: usize = 96 * 1024;
     const LIMIT: Duration = Duration::from_secs(10);
@@ -3043,6 +3046,7 @@ mod legacy_streaming {
         MethodDescriptor::client_streaming("Sum", "/legacy.Streams/Sum"),
         MethodDescriptor::bidi_streaming("Echo", "/legacy.Streams/Echo"),
         MethodDescriptor::server_streaming("Repeat", "/legacy.Streams/Repeat"),
+        MethodDescriptor::bidi_streaming("Flood", "/legacy.Streams/Flood"),
     ];
     static DESCRIPTOR: ServiceDescriptor = ServiceDescriptor::new("Streams", "legacy", METHODS);
 
@@ -3086,6 +3090,44 @@ mod legacy_streaming {
         }
     }
 
+    /// More responses than a legacy call buffers, sent before reading any
+    /// request; then the requests are read and dropped until they end, so
+    /// the call stays open while the client uploads.
+    struct Flood {
+        requests: RegisteredRequestStream,
+        left: usize,
+    }
+
+    /// Set once a Flood stream has yielded its last response; the window
+    /// test's cancel case waits for it before treating stalled uploads as a
+    /// sink held at the window (they can first stall on request credit).
+    static FLOOD_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    impl Streaming for Flood {
+        type Message = Bytes;
+
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            task: &mut Context<'_>,
+        ) -> Poll<Option<Result<Bytes, Status>>> {
+            if self.left > 0 {
+                self.left -= 1;
+                if self.left == 0 {
+                    FLOOD_DONE.store(true, Ordering::SeqCst);
+                }
+                return Poll::Ready(Some(Ok(Bytes::from_static(b"flood"))));
+            }
+            loop {
+                match Pin::new(&mut self.requests).poll_next(task) {
+                    Poll::Ready(Some(Ok(_))) => {}
+                    Poll::Ready(Some(Err(status))) => return Poll::Ready(Some(Err(status))),
+                    Poll::Ready(None) => return Poll::Ready(None),
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+        }
+    }
+
     impl ServiceHandler for Streams {
         fn descriptor(&self) -> &ServiceDescriptor {
             &DESCRIPTOR
@@ -3119,10 +3161,16 @@ mod legacy_streaming {
         fn call_bidirectional_streaming<'a>(
             &'a self,
             _cx: &'a Cx,
-            _path: &'a str,
+            path: &'a str,
             request: Request<RegisteredRequestStream>,
         ) -> ServiceStreamingFuture<'a> {
             Box::pin(async move {
+                if path == "/legacy.Streams/Flood" {
+                    return Ok(RegisteredServerStream::new(Flood {
+                        requests: request.into_inner(),
+                        left: MAX_STREAM_BUFFERED + 8,
+                    }));
+                }
                 let mut trailers = Metadata::new();
                 assert!(trailers.insert("x-echo", "done"));
                 Ok(RegisteredServerStream::new(EchoBack(request.into_inner()))
@@ -3388,5 +3436,149 @@ mod legacy_streaming {
             owned_stream_watchdog(move || run_clone_case(workers));
         }
         test_complete!("legacy_bidi_response_stream_clones_read_from_two_tasks_both_see_the_end");
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum WindowEnd {
+        Deadline,
+        Cancel,
+    }
+
+    /// A sink held at the response window (`MAX_STREAM_BUFFERED` unread
+    /// responses) does not poll the call. Before br-asupersync-46olky the
+    /// call's deadline timer and cancellation woke it only to park it again,
+    /// so `send` never returned. It now returns the call's status.
+    fn run_window_case(workers: usize, end: WindowEnd) {
+        let runtime = if workers == 1 {
+            RuntimeBuilder::current_thread()
+        } else {
+            RuntimeBuilder::new().worker_threads(workers)
+        }
+        .build()
+        .expect("legacy window runtime");
+        let handle = runtime.handle();
+        let task_handle = handle.clone();
+        FLOOD_DONE.store(false, Ordering::SeqCst);
+        runtime.block_on(handle.spawn(async move {
+            let cx = Cx::current().expect("runtime task installs an ambient Cx");
+            let server = Arc::new(Server::builder().add_service(Streams).build());
+            let listener = server
+                .bind_registered_duplex_http2(
+                    "127.0.0.1:0",
+                    HostPolicy::allow_all(),
+                    ServerDuplexConfig::default(),
+                )
+                .await
+                .expect("bind legacy window listener");
+            let address = listener.local_addr().unwrap();
+            let manager = listener.connection_manager().clone();
+            let listener_runtime = task_handle.clone();
+            let serving = task_handle
+                .spawn(async move { listener.run_streaming_produced(&listener_runtime).await });
+
+            let deadline = match end {
+                WindowEnd::Deadline => Duration::from_secs(2),
+                WindowEnd::Cancel => LIMIT,
+            };
+            let channel = Channel::builder(format!("http://127.0.0.1:{}", address.port()))
+                .connect_timeout(LIMIT)
+                .timeout(deadline)
+                .connect()
+                .await
+                .expect("legacy window channel");
+            let progress = Arc::new(AtomicUsize::new(0));
+            let sent = Arc::clone(&progress);
+            let mut call = cx
+                .spawn(move |_call_cx| async move {
+                    let mut client = GrpcClient::new(channel);
+                    let (mut sink, mut responses) = client
+                        .bidi_streaming::<Bytes, Bytes>("/legacy.Streams/Flood")
+                        .await
+                        .expect("bidi dials the server");
+                    // Upload without reading. Each send also reads the
+                    // flood until MAX_STREAM_BUFFERED responses hold it.
+                    let send_status = loop {
+                        match sink.send(Bytes::from_static(b"upload")).await {
+                            Ok(()) => {
+                                sent.fetch_add(1, Ordering::SeqCst);
+                            }
+                            Err(status) => break status,
+                        }
+                    };
+                    let mut drained = 0_usize;
+                    let terminal = loop {
+                        match next_response(&mut responses).await {
+                            Some(Ok(message)) => {
+                                assert_eq!(message.as_ref(), b"flood");
+                                drained += 1;
+                            }
+                            Some(Err(status)) => break Some(status),
+                            None => break None,
+                        }
+                    };
+                    (send_status, drained, terminal)
+                })
+                .expect("spawn the uploading call");
+            if end == WindowEnd::Cancel {
+                // Abort once the server has sent the whole flood and the
+                // uploads have stopped since; the drained count below
+                // proves the sink was held at the window.
+                let started = Instant::now();
+                let (mut last, mut unchanged) = (0, 0);
+                while unchanged < 3 {
+                    assert!(started.elapsed() < LIMIT, "the uploads never stopped");
+                    sleep(wall_now(), Duration::from_millis(100)).await;
+                    let now = progress.load(Ordering::SeqCst);
+                    if FLOOD_DONE.load(Ordering::SeqCst) && now > 0 && now == last {
+                        unchanged += 1;
+                    } else {
+                        (last, unchanged) = (now, 0);
+                    }
+                }
+                call.abort_with_reason(CancelReason::user("abort a sink held at the window"));
+            }
+            let (send_status, drained, terminal) = call
+                .join(&cx)
+                .await
+                .expect("the uploading call returns its typed result");
+            let expected = match end {
+                WindowEnd::Deadline => Code::DeadlineExceeded,
+                WindowEnd::Cancel => Code::Cancelled,
+            };
+            assert_eq!(send_status.code(), expected, "{send_status:?}");
+            // A full window and no more: the sink stopped reading there.
+            assert_eq!(drained, MAX_STREAM_BUFFERED);
+            assert_eq!(terminal.map(|status| status.code()), Some(expected));
+            let uploads = progress.load(Ordering::SeqCst);
+            assert!(uploads > 0);
+
+            assert!(manager.begin_drain(Duration::from_secs(5)));
+            serving.await.expect("legacy window listener drain");
+            log_test_event(
+                "legacy_sink_held_at_the_response_window",
+                json!({
+                    "bead": "asupersync-46olky",
+                    "workers": workers,
+                    "end": format!("{end:?}"),
+                    "uploads": uploads,
+                    "drained": drained,
+                }),
+            );
+        }));
+        drop(handle);
+        assert!(runtime.shutdown_timeout(LIMIT));
+    }
+
+    #[test]
+    fn legacy_sink_held_at_the_response_window_ends_at_its_deadline_or_cancellation() {
+        init_test("legacy_sink_held_at_the_response_window_ends_at_its_deadline_or_cancellation");
+        for workers in [1, 2] {
+            for end in [WindowEnd::Deadline, WindowEnd::Cancel] {
+                owned_stream_watchdog(move || run_window_case(workers, end));
+            }
+        }
+        test_complete!(
+            "legacy_sink_held_at_the_response_window_ends_at_its_deadline_or_cancellation"
+        );
     }
 }

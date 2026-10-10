@@ -262,6 +262,12 @@ where
         self.inner.cancel();
     }
 
+    /// Cancellation and deadline checks without transport I/O, for a holder
+    /// that is not driving the call (see `NativeServerStream::gate_without_io`).
+    pub(crate) fn gate_without_io(&mut self, task: &mut Context<'_>) -> Result<(), Status> {
+        self.inner.gate_without_io(task)
+    }
+
     pub(crate) fn poll_event(
         &mut self,
         task: &mut Context<'_>,

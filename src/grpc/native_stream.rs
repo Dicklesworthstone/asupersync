@@ -611,7 +611,20 @@ where
         }
     }
 
-    fn gate(&mut self, task: &mut Context<'_>) -> Result<(), Status> {
+    /// Check cancellation and the deadline for an owner that holds the call
+    /// without driving it (a legacy request sink parked at its response
+    /// window), registering `task` for both. Unlike `gate` this admits no
+    /// keepalive probe and reads nothing. An error, or an already ended call,
+    /// returns the call's final status.
+    pub(crate) fn gate_without_io(&mut self, task: &mut Context<'_>) -> Result<(), Status> {
+        if let Some(status) = &self.final_status {
+            return Err(status.clone());
+        }
+        let _ambient = Cx::set_current(Some(self.cx.clone()));
+        self.gate_deadline(task).map_err(|error| self.finish(error))
+    }
+
+    fn gate_deadline(&mut self, task: &mut Context<'_>) -> Result<(), Status> {
         check_cancellation(&self.cx)?;
         self.cancel_waker = Some(self.cx.refresh_cancel_waker(self.cancel_waker, task.waker()));
         check_cancellation(&self.cx)?;
@@ -621,6 +634,11 @@ where
         {
             return Err(Status::deadline_exceeded("native gRPC stream deadline exceeded"));
         }
+        Ok(())
+    }
+
+    fn gate(&mut self, task: &mut Context<'_>) -> Result<(), Status> {
+        self.gate_deadline(task)?;
         let expired = self.keepalive.as_mut().and_then(|keepalive| keepalive.poll(task).err());
         if let Some(error) = expired {
             // The peer may already have ended the response, its trailers unread

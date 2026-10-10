@@ -4571,6 +4571,11 @@ mod tests {
         }
 
         fn cancel(&mut self) {}
+
+        // No deadline or cancellation of its own.
+        fn poll_gate(&mut self, _task: &mut Context<'_>) -> Result<(), Status> {
+            Ok(())
+        }
     }
 
     /// Clones of a network call's response stream polled from two tasks

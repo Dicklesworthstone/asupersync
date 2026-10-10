@@ -18,7 +18,8 @@
 //! response stream, or clones of one response stream, may live in different
 //! tasks without losing a wakeup.
 //! Responses read while uploading are buffered up to `MAX_STREAM_BUFFERED`;
-//! a sink then waits for the response side to drain them.
+//! a sink then waits for the response side to drain them, or for the call's
+//! deadline or cancellation, which end it there too.
 //!
 //! Dropping an open sink, an unfinished response future, or the last clone of
 //! a response stream cancels the call. Dropping every handle closes its
@@ -59,6 +60,10 @@ pub(super) trait LegacyCall: Send {
     /// The call's recorded final status, once it ended for any reason.
     fn status(&self) -> Option<Status>;
     fn cancel(&mut self);
+    /// Check cancellation and the deadline without reading or writing,
+    /// registering `task` for both. `Err` carries the status the call ended
+    /// with (now or earlier).
+    fn poll_gate(&mut self, task: &mut Context<'_>) -> Result<(), Status>;
 }
 
 impl<IO, C> LegacyCall for NativeDuplexStream<IO, C>
@@ -101,6 +106,10 @@ where
     fn cancel(&mut self) {
         NativeDuplexStream::cancel(self);
     }
+
+    fn poll_gate(&mut self, task: &mut Context<'_>) -> Result<(), Status> {
+        NativeDuplexStream::gate_without_io(self, task)
+    }
 }
 
 impl<IO, C> LegacyCall for NativeServerStream<IO, C>
@@ -138,6 +147,10 @@ where
 
     fn cancel(&mut self) {
         NativeServerStream::cancel(self);
+    }
+
+    fn poll_gate(&mut self, task: &mut Context<'_>) -> Result<(), Status> {
+        NativeServerStream::gate_without_io(self, task)
     }
 }
 
@@ -354,9 +367,16 @@ impl LegacyNativeCall {
                 return Poll::Ready(());
             }
             // An unconsumed response window holds the sink until the
-            // response side drains it (it wakes the sink when it pops).
+            // response side drains it (it wakes the sink when it pops). The
+            // sink does not poll the call there, so it checks the call's
+            // cancellation and deadline itself: either ends the call.
             if role == Role::Sink && state.responses.len() >= MAX_STREAM_BUFFERED {
-                return Poll::Pending;
+                let Err(status) = state.call.poll_gate(&mut call_task) else {
+                    return Poll::Pending;
+                };
+                state.finish(status);
+                self.wake_other(role);
+                continue;
             }
             match state.call.poll_event(&mut call_task) {
                 Poll::Ready(Some(Ok(LegacyEvent::RequestFlushed))) => {
