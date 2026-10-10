@@ -19,7 +19,7 @@ use asupersync::net::atp::protocol::frames::{Frame, FrameType, ProtocolVersion};
 use asupersync::net::atp::sdk::native_auth::live::commit::LiveStreamCommitSink;
 use asupersync::net::atp::sdk::native_auth::live::commit::resume::receiver_journal::ReceiverCheckpointPhase;
 use asupersync::net::atp::sdk::native_auth::live::commit::resume::receiver_journal::file::{
-    JournaledFileReceiver, ReceiverFileLimits, ReceiverJournalFile,
+    JournaledFileReceiver, ReceiverCompactFileLimits, ReceiverFileLimits, ReceiverJournalFile,
 };
 use asupersync::net::atp::sdk::native_auth::live::commit::resume::{ResumeError, ResumeReport};
 use asupersync::net::atp::sdk::native_auth::live::{
@@ -202,6 +202,84 @@ fn records(path: &Path) -> Vec<Vec<u8>> {
         hash.update(&saved[..saved.len() - 32]);
         assert_eq!(hash.finalize().as_slice(), &saved[saved.len() - 32..]);
         assert_eq!(&saved[8..40], client().as_bytes());
+        previous = checksum;
+        result.push(saved);
+        offset = end + 32;
+    }
+    assert_eq!(offset, bytes.len());
+    result
+}
+
+// Independent V2 reader, including rehydration and both original commitments.
+// These fixture files are small; production replay has its separate bounded,
+// record-at-a-time implementation.
+fn compact_records(path: &Path) -> Vec<Vec<u8>> {
+    let bytes = std::fs::read(path).unwrap();
+    let data = std::fs::read(path.with_extension("data")).unwrap();
+    let slots = std::fs::read(path.with_extension("intent")).unwrap();
+    assert_eq!(slots.len(), 131_328);
+    assert!((128..=65_536).contains(&bytes.len()));
+    assert_eq!(&bytes[..8], b"ATPRFL02");
+    let chain_hash = |previous: &[u8], body: &[u8]| -> Vec<u8> {
+        let mut hash = Sha256::new();
+        hash.update(b"asupersync.atp.receiver-file-journal.v2");
+        hash.update(previous);
+        hash.update(body);
+        hash.finalize().to_vec()
+    };
+    let mut previous = chain_hash(&[], &bytes[..96]);
+    assert_eq!(previous, bytes[96..128]);
+    let mut offset = 128;
+    let mut result = Vec::new();
+    while offset < bytes.len() {
+        assert!(offset + 16 <= bytes.len());
+        let size = u32::from_be_bytes(bytes[offset + 8..offset + 12].try_into().unwrap()) as usize;
+        assert!(matches!(size, 317 | 429));
+        assert_eq!(
+            u64::from_be_bytes(bytes[offset..offset + 8].try_into().unwrap()),
+            result.len() as u64
+        );
+        assert_eq!(&bytes[offset + 12..offset + 16], &[0; 4]);
+        let end = offset + 16 + size;
+        assert!(end + 32 <= bytes.len());
+        let checksum = chain_hash(&previous, &bytes[offset..end]);
+        assert_eq!(checksum, bytes[end..end + 32]);
+        let saved = bytes[offset + 16..end].to_vec();
+        assert_eq!(&saved[..8], b"ATPRCV01");
+        assert_eq!(&saved[8..40], client().as_bytes());
+        let length = u32::from_be_bytes(saved[281..285].try_into().unwrap()) as usize;
+        let mut full = saved[..285].to_vec();
+        if length != 0 {
+            assert!((81..=65_616).contains(&length));
+            assert_eq!(size, 429);
+            let epoch = u64::from_be_bytes(saved[160..168].try_into().unwrap());
+            let start = u64::from_be_bytes(saved[168..176].try_into().unwrap()) as usize;
+            let payload = if data.len() >= start + length - 80 {
+                let mut payload = saved[285..365].to_vec();
+                payload.extend_from_slice(&data[start..start + length - 80]);
+                payload
+            } else {
+                let slot = (epoch % 2) as usize * 65_664;
+                assert_eq!(&slots[slot..slot + 8], b"ATPRIN02");
+                assert_eq!(
+                    u32::from_be_bytes(slots[slot + 8..slot + 12].try_into().unwrap()) as usize,
+                    length
+                );
+                slots[slot + 48..slot + 48 + length].to_vec()
+            };
+            assert_eq!(&payload[..80], &saved[285..365]);
+            let mut hash = Sha256::new();
+            hash.update(b"asupersync.atp.receiver-intent.v2");
+            hash.update(&payload);
+            assert_eq!(hash.finalize().as_slice(), &saved[365..397]);
+            full.extend_from_slice(&payload);
+        } else {
+            assert_eq!(size, 317);
+        }
+        let mut hash = Sha256::new();
+        hash.update(b"asupersync.atp.receiver-checkpoint.v1");
+        hash.update(&full);
+        assert_eq!(hash.finalize().as_slice(), &saved[size - 32..]);
         previous = checksum;
         result.push(saved);
         offset = end + 32;
@@ -499,8 +577,28 @@ fn receiver_journal_process_worker() {
         .unwrap();
     let journal = root.join("receiver.wal");
     let data = root.join("receiver.data");
-    let creating = matches!(mode.as_str(), "begin" | "partial" | "commit" | "capacity");
-    let store = if creating {
+    let creating = matches!(
+        mode.as_str(),
+        "begin" | "partial" | "commit" | "capacity" | "compact-begin" | "compact-partial"
+    );
+    let store = if mode.starts_with("compact-") {
+        let intent = root.join("receiver.intent");
+        if creating {
+            ReceiverJournalFile::create_new_compact(
+                &journal,
+                &data,
+                &intent,
+                ReceiverCompactFileLimits {
+                    max_data_bytes: 64,
+                    max_snapshots: 32,
+                    max_journal_bytes: 65_536,
+                },
+            )
+            .unwrap()
+        } else {
+            ReceiverJournalFile::open_existing_compact(&journal, &data, &intent).unwrap()
+        }
+    } else if creating {
         ReceiverJournalFile::create_new(
             &journal,
             &data,
@@ -541,7 +639,7 @@ fn receiver_journal_process_worker() {
             assert_eq!(authority.active_streams(), 0);
             return json!({"rejected_before_bind": true});
         }
-        if matches!(work_mode.as_str(), "partial" | "commit") {
+        if matches!(work_mode.as_str(), "partial" | "commit" | "compact-partial") {
             let file = OpenOptions::new()
                 .read(true)
                 .append(true)
@@ -550,7 +648,11 @@ fn receiver_journal_process_worker() {
             let sink = ParkedSink {
                 file: AsyncFile::from_std(file),
                 written: 0,
-                park_at: (work_mode == "partial").then_some(11),
+                park_at: if work_mode == "compact-partial" {
+                    Some(27)
+                } else {
+                    (work_mode == "partial").then_some(11)
+                },
                 commit_park: work_mode == "commit",
                 root: work_root.clone(),
                 witnessed: false,
@@ -897,5 +999,189 @@ fn public_native_sender_and_journaled_receiver_finish_nonempty_and_empty_files()
             assert!(snapshots.iter().any(|s| s[280] == 1));
             assert_eq!(snapshots.last().unwrap()[280], 2);
         }
+    }
+}
+
+#[test]
+fn compact_journal_reuses_slots_across_native_partial_kill_and_proof_only_restart() {
+    const CONTENT: &[u8] = b"abcdefghijklmnopqrstuvwxyz012345";
+    for workers in [1, 2] {
+        let root = directory();
+        let journal = root.join("receiver.wal");
+        let data = root.join("receiver.data");
+        let intent = root.join("receiver.intent");
+        let mut original = Process::spawn(
+            &root,
+            "compact-partial",
+            workers,
+            "127.0.0.1:0".parse().unwrap(),
+        );
+        let address = original.ready();
+        let mut peer = Peer::connect(address);
+        let hello = peer.hello();
+        let mut prefix = hello[60..108].to_vec();
+        for epoch in CONTENT[..24].chunks_exact(8) {
+            prefix = peer.epoch(&prefix, epoch);
+            assert_eq!(peer.read(FrameType::Control).unwrap(), prefix);
+        }
+        let pending_prefix = peer.epoch(&prefix, &CONTENT[24..]);
+        let parked = original.witness("parked");
+        assert_eq!(parked["written"], 27);
+        assert_eq!(parked["commit"], false);
+        assert_eq!(std::fs::read(&data).unwrap(), &CONTENT[..27]);
+        let saved = compact_records(&journal).pop().unwrap();
+        assert_eq!(u64::from_be_bytes(saved[168..176].try_into().unwrap()), 24);
+        assert_eq!(u32::from_be_bytes(saved[281..285].try_into().unwrap()), 88);
+        assert_eq!(saved[280], 0);
+        assert!(
+            ReceiverJournalFile::open_existing_compact(&journal, &data, &intent).is_err()
+        );
+        let inodes: Vec<_> = [&journal, &data, &intent]
+            .iter()
+            .map(|path| std::fs::metadata(path).unwrap().ino())
+            .collect();
+        original.crash();
+        drop(peer);
+        let history = std::fs::read(&journal).unwrap();
+        let slots = std::fs::read(&intent).unwrap();
+
+        let mut restored = Process::spawn(&root, "compact-restore", workers, address);
+        assert_eq!(restored.ready(), address);
+        let mut peer = Peer::connect(address);
+        let state = peer.hello();
+        assert_eq!(&state[60..108], prefix);
+        assert_eq!(&state[108..140], Sha256::digest(&CONTENT[..24]).as_slice());
+        assert_eq!(state[140], 0);
+        // Attempt metadata must not rewrite the active partially written slot.
+        assert_eq!(std::fs::read(&intent).unwrap(), slots);
+        assert_eq!(peer.epoch(&prefix, &CONTENT[24..]), pending_prefix);
+        assert_eq!(peer.read(FrameType::Control).unwrap(), pending_prefix);
+        peer.finish(&pending_prefix, CONTENT);
+        let done = restored.done();
+        assert!(restored.wait().success());
+        drop(peer);
+        assert_eq!(done["status"], "complete");
+        assert_eq!(done["attempts"], 2);
+        assert_eq!(done["sink_written_bytes"], 32);
+        assert_eq!(done["sha256"], hex::encode(Sha256::digest(CONTENT)));
+        assert_eq!(done["receipt_reused"], false);
+        assert_eq!(std::fs::read(&data).unwrap(), CONTENT);
+        assert_eq!(std::fs::read(&intent).unwrap(), slots);
+        assert!(std::fs::read(&journal).unwrap().starts_with(&history));
+        assert_eq!(compact_records(&journal).last().unwrap()[280], 2);
+
+        let mut receipt = Process::spawn(&root, "compact-receipt", workers, address);
+        assert_eq!(receipt.ready(), address);
+        let mut peer = Peer::connect(address);
+        let state = peer.hello();
+        assert_eq!(state[140], 1);
+        assert_eq!(&state[60..108], pending_prefix);
+        peer.finish(&pending_prefix, CONTENT);
+        let done = receipt.done();
+        assert!(receipt.wait().success());
+        assert_eq!(done["receipt_reused"], true);
+        assert_eq!(done["attempts"], 3);
+        assert_eq!(done["sink_written_bytes"], 32);
+        assert_eq!(std::fs::read(&data).unwrap(), CONTENT);
+        assert_eq!(std::fs::read(&intent).unwrap(), slots);
+        for (path, inode) in [&journal, &data, &intent].iter().zip(inodes) {
+            assert_eq!(std::fs::metadata(path).unwrap().ino(), inode);
+        }
+    }
+}
+
+#[test]
+fn compact_native_file_transfer_exceeds_its_wal_budget_and_reopens_exact_content() {
+    for workers in [1, 2] {
+        let root = directory();
+        let journal = root.join("receiver.wal");
+        let data = root.join("receiver.data");
+        let intent = root.join("receiver.intent");
+        let content: Vec<u8> = (0..512 * 1024)
+            .map(|offset| (offset / 65_536) as u8 ^ (offset % 251) as u8)
+            .collect();
+        let expected = content.clone();
+        let store = ReceiverJournalFile::create_new_compact(
+            &journal,
+            &data,
+            &intent,
+            ReceiverCompactFileLimits {
+                max_data_bytes: content.len() as u64,
+                max_snapshots: 32,
+                max_journal_bytes: 8192,
+            },
+        )
+        .unwrap();
+        let data_inode = std::fs::metadata(&data).unwrap().ino();
+        run(workers, async move {
+            let cx = Cx::current().unwrap();
+            let scope = cx.scope();
+            let mut config = profile();
+            config.epoch_bytes = 65_536;
+            config.max_bytes = content.len() as u64;
+            let authority = sdk()
+                .live_stream_receiver(
+                    config.clone(),
+                    NativeTlsIdentity::new(vec![cert("server")], key("server")).unwrap(),
+                    NativeClientAuthorization::new(roots(), [client()]).unwrap(),
+                )
+                .unwrap();
+            let mut incoming = store
+                .bind_new(&authority, &cx, "127.0.0.1:0".parse().unwrap(), client(), 4)
+                .await
+                .unwrap();
+            let address = incoming.local_addr().unwrap();
+            let mut worker = cx
+                .spawn_in(&scope, move |child| {
+                    let future: Pin<
+                        Box<dyn Future<Output = (JournaledFileReceiver, ResumeReport)> + Send>,
+                    > = Box::pin(async move {
+                        let report = incoming.receive(&child).await;
+                        (incoming, report)
+                    });
+                    future
+                })
+                .unwrap();
+            let send = sdk()
+                .live_stream_sender(
+                    config,
+                    ServerName::try_from("localhost").unwrap(),
+                    roots(),
+                    NativeTlsIdentity::new(vec![cert("allowed")], key("allowed")).unwrap(),
+                )
+                .unwrap();
+            let mut outgoing = send
+                .resumable_reader(&cx, address, content.as_slice(), 4)
+                .unwrap();
+            let sent = outgoing.send(&cx).await;
+            let (incoming, received) = poll_fn(|ctx| worker.poll_join(ctx)).await.unwrap();
+            assert_eq!(sent.outcome.unwrap(), received.outcome.unwrap());
+            assert_eq!(received.sink_written_bytes, 524_288);
+            assert_eq!(
+                incoming.checkpoint().unwrap().phase(),
+                ReceiverCheckpointPhase::Committed
+            );
+            drop(incoming);
+            drop(outgoing);
+            assert_eq!(authority.active_streams(), 0);
+            assert_eq!(send.active_streams(), 0);
+        });
+        assert_eq!(std::fs::read(&data).unwrap(), expected);
+        assert_eq!(std::fs::metadata(&data).unwrap().ino(), data_inode);
+        // Eight full epochs plus negotiation and two finalization records.
+        assert_eq!(compact_records(&journal).len(), 19);
+        assert_eq!(std::fs::metadata(&journal).unwrap().len(), 7959);
+        assert_eq!(std::fs::metadata(&intent).unwrap().len(), 131_328);
+        assert!(
+            std::fs::metadata(&data).unwrap().len()
+                > std::fs::metadata(&journal).unwrap().len()
+                    + std::fs::metadata(&intent).unwrap().len()
+        );
+        let reopened =
+            ReceiverJournalFile::open_existing_compact(&journal, &data, &intent).unwrap();
+        let receipt = reopened.checkpoint().unwrap().committed_receipt().unwrap();
+        assert_eq!(receipt.prefix.bytes, 524_288);
+        assert_eq!(receipt.source_sha256.as_slice(), Sha256::digest(&expected).as_slice());
+        assert_eq!(reopened.checkpoint().unwrap().attempts(), 1);
     }
 }

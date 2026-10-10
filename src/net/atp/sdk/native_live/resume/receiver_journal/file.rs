@@ -4,13 +4,17 @@
 //! journal receipt, NOT an atomic rename/publication. This profile does not use
 //! LiveFileSink's destination-link semantics. Neither file is ever deleted,
 //! truncated, replaced or repaired. Protect both files and their ancestry.
+//! The separately selected compact profile also owns a fixed-size intent file;
+//! only its two pending-epoch slots are reused, after their prior work is durable.
+
+mod compact;
 
 use super::super::{
     LiveStreamCommitSink, LiveStreamError, LiveStreamReceipt, LiveStreamReceiver,
     NativeClientCertificateId,
 };
 use super::{
-    MAX_RECEIVER_CHECKPOINT_BYTES, ReceiverCheckpoint, ReceiverCheckpointPhase,
+    EPOCH_HEADER_BYTES, MAX_RECEIVER_CHECKPOINT_BYTES, ReceiverCheckpoint, ReceiverCheckpointPhase,
     ReceiverCheckpointStore, ResumableReceiver, ResumeError, ResumeReport,
 };
 use crate::cx::Cx;
@@ -57,6 +61,52 @@ impl ReceiverFileLimits {
         Ok(())
     }
 }
+/// Immutable budgets for the separately selected compact receiver file profile.
+///
+/// The WAL stores metadata and commitments. One additional private intent file
+/// has two fixed slots totaling 131,328 bytes, outside `max_journal_bytes`.
+/// Full 64 KiB epochs can carry 4 GiB with 131,075 snapshots and less than 53 MiB
+/// of WAL before retries. Smaller epochs and retries consume additional records.
+/// Reopen never resets either budget or recycles WAL history.
+#[derive(Debug, Clone, Copy)]
+pub struct ReceiverCompactFileLimits {
+    /// Maximum length of the original private data file.
+    pub max_data_bytes: u64,
+    /// Maximum distinct snapshots; 1 through 1,048,576.
+    pub max_snapshots: u32,
+    /// WAL bytes including its 128-byte header; at most 134,217,728.
+    pub max_journal_bytes: u64,
+}
+
+impl Default for ReceiverCompactFileLimits {
+    fn default() -> Self {
+        Self {
+            max_data_bytes: 4 * 1024 * 1024 * 1024,
+            max_snapshots: 262_144,
+            max_journal_bytes: MAX_WAL,
+        }
+    }
+}
+
+impl ReceiverCompactFileLimits {
+    fn validate(self) -> io::Result<()> {
+        if !(1..=compact::MAX_SNAPSHOTS).contains(&self.max_snapshots)
+            || !(compact::HEADER as u64..=MAX_WAL).contains(&self.max_journal_bytes)
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+
+    fn storage_limits(self) -> ReceiverFileLimits {
+        ReceiverFileLimits {
+            max_data_bytes: self.max_data_bytes,
+            max_snapshots: self.max_snapshots,
+            max_journal_bytes: self.max_journal_bytes,
+        }
+    }
+}
+
 fn invalid() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
@@ -123,6 +173,7 @@ struct Storage {
     data_path: PathBuf,
     data_directory: File,
     data: File,
+    intent: Option<compact::Intent>,
     limits: ReceiverFileLimits,
     state: Mutex<State>,
 }
@@ -131,13 +182,33 @@ impl Storage {
         journal_path: &Path,
         data_path: &Path,
         create: Option<ReceiverFileLimits>,
+        intent_path: Option<&Path>,
     ) -> io::Result<Self> {
+        let validate_limits = |limits: ReceiverFileLimits| {
+            if intent_path.is_some() {
+                ReceiverCompactFileLimits {
+                    max_data_bytes: limits.max_data_bytes,
+                    max_snapshots: limits.max_snapshots,
+                    max_journal_bytes: limits.max_journal_bytes,
+                }
+                .validate()
+            } else {
+                limits.validate()
+            }
+        };
         if let Some(limits) = create {
-            limits.validate()?;
+            validate_limits(limits)?;
         }
         let (journal_path, journal_directory) = private_parent(journal_path)?;
         let (data_path, data_directory) = private_parent(data_path)?;
-        if journal_path == data_path {
+        let intent_path = intent_path
+            .map(|path| private_parent(path).map(|(path, _)| path))
+            .transpose()?;
+        if journal_path == data_path
+            || intent_path
+                .as_ref()
+                .is_some_and(|path| *path == journal_path || *path == data_path)
+        {
             return Err(invalid());
         }
         // No automatic cleanup on partial creation failure. Each file is create-only.
@@ -159,11 +230,20 @@ impl Storage {
             .open(&data_path)?;
         data.try_lock().map_err(io::Error::from)?;
         identity(&data, &data_path, &data_directory, true)?;
+        let intent = intent_path
+            .as_ref()
+            .map(|path| compact::Intent::open(path, create.is_some()))
+            .transpose()?;
         let metadata = data.metadata()?;
         let parent = data_directory.metadata()?;
-        let mut header = [0; HEADER];
+        let header_length = if intent.is_some() { compact::HEADER } else { HEADER };
+        let checksum_at = header_length - 32;
+        let magic = if intent.is_some() { compact::MAGIC } else { MAGIC };
+        let journal_hash: fn(&[u8], &[u8]) -> [u8; 32] =
+            if intent.is_some() { compact::hash } else { hash };
+        let mut header = vec![0; header_length];
         if let Some(limits) = create {
-            header[..8].copy_from_slice(MAGIC);
+            header[..8].copy_from_slice(magic);
             header[8..12].copy_from_slice(&limits.max_snapshots.to_be_bytes());
             header[16..24].copy_from_slice(&limits.max_journal_bytes.to_be_bytes());
             header[24..32].copy_from_slice(&limits.max_data_bytes.to_be_bytes());
@@ -175,8 +255,11 @@ impl Storage {
             ] {
                 header[offset..offset + 8].copy_from_slice(&value.to_be_bytes());
             }
-            let checksum = hash(&[], &header[..64]);
-            header[64..].copy_from_slice(&checksum);
+            if let Some(intent) = &intent {
+                intent.write_identity(&mut header)?;
+            }
+            let checksum = journal_hash(&[], &header[..checksum_at]);
+            header[checksum_at..].copy_from_slice(&checksum);
             data.sync_all()?;
             data_directory.sync_all()?;
             file.write_all(&header)?;
@@ -197,16 +280,22 @@ impl Storage {
             max_journal_bytes: number(16),
             max_data_bytes: number(24),
         };
-        limits.validate()?;
+        validate_limits(limits)?;
+        let intent_matches = intent
+            .as_ref()
+            .map(|intent| intent.matches_identity(&header))
+            .transpose()?
+            .unwrap_or(true);
         // Reopen compares the recorded inode numbers but not the device
         // numbers: a device number is assigned at mount time and can differ
         // after a reboot (btrfs subvolumes, dynamically numbered partitions),
         // which refused exactly the crash recovery this journal exists for.
         // The same-boot identity checks still compare devices, and restore
         // re-hashes and byte-compares the data itself.
-        if &header[..8] != MAGIC
+        if &header[..8] != magic
             || header[12..16] != [0; 4]
-            || header[64..] != hash(&[], &header[..64])
+            || header[checksum_at..] != journal_hash(&[], &header[..checksum_at])
+            || !intent_matches
             || number(40) != metadata.ino()
             || number(56) != parent.ino()
             || metadata.len() > limits.max_data_bytes
@@ -214,15 +303,21 @@ impl Storage {
             return Err(invalid());
         }
         let length = file.metadata()?.len();
-        if length < HEADER as u64 || length > limits.max_journal_bytes {
+        if length < header_length as u64 || length > limits.max_journal_bytes {
             return Err(invalid());
         }
+        let slots = intent.as_ref().map(compact::Intent::slots).transpose()?;
+        let max_checkpoint = if intent.is_some() {
+            compact::MAX_CHECKPOINT
+        } else {
+            MAX_RECEIVER_CHECKPOINT_BYTES
+        };
         let mut state = State {
             file,
             latest: None,
             records: 0,
-            bytes: HEADER as u64,
-            previous: header[64..].try_into().expect("bounded checksum"),
+            bytes: header_length as u64,
+            previous: header[checksum_at..].try_into().expect("bounded checksum"),
             poisoned: false,
         };
         while state.bytes < length {
@@ -236,7 +331,7 @@ impl Storage {
             if u64::from_be_bytes(frame[..8].try_into().expect("bounded sequence"))
                 != u64::from(state.records)
                 || frame[12..] != [0; 4]
-                || !(super::FIXED + 32..=MAX_RECEIVER_CHECKPOINT_BYTES).contains(&size)
+                || !(super::FIXED + 32..=max_checkpoint).contains(&size)
                 || state.bytes + 16 + size as u64 + 32 > length
             {
                 return Err(invalid());
@@ -246,10 +341,14 @@ impl Storage {
             state.file.read_exact(&mut record[16..])?;
             let mut checksum = [0; 32];
             state.file.read_exact(&mut checksum)?;
-            if checksum != hash(&state.previous, &record) {
+            if checksum != journal_hash(&state.previous, &record) {
                 return Err(invalid());
             }
-            let checkpoint = ReceiverCheckpoint::from_canonical_bytes(&record[16..])?;
+            let checkpoint = if let Some(slots) = &slots {
+                compact::decode(&record[16..], &data, slots)?
+            } else {
+                ReceiverCheckpoint::from_canonical_bytes(&record[16..])?
+            };
             Self::check_transition(&checkpoint, state.latest.as_ref(), limits)?;
             state.latest = Some(checkpoint);
             state.previous = checksum;
@@ -261,6 +360,9 @@ impl Storage {
         }
         identity(&state.file, &journal_path, &journal_directory, true)?;
         identity(&data, &data_path, &data_directory, true)?;
+        if let Some(intent) = &intent {
+            intent.verify()?;
+        }
         state.file.sync_all()?;
         journal_directory.sync_all()?;
         Ok(Self {
@@ -269,6 +371,7 @@ impl Storage {
             data_path,
             data_directory,
             data,
+            intent,
             limits,
             state: Mutex::new(state),
         })
@@ -296,11 +399,15 @@ impl Storage {
 
     fn verify(&self, file: &File) -> io::Result<()> {
         identity(file, &self.journal_path, &self.journal_directory, true)?;
-        identity(&self.data, &self.data_path, &self.data_directory, true)
+        identity(&self.data, &self.data_path, &self.data_directory, true)?;
+        if let Some(intent) = &self.intent {
+            intent.verify()?;
+        }
+        Ok(())
     }
 
     fn append(&self, checkpoint: ReceiverCheckpoint) -> io::Result<()> {
-        let payload = checkpoint.to_canonical_bytes()?;
+        let mut payload = checkpoint.to_canonical_bytes()?;
         let mut state = self.state.lock();
         if state.poisoned {
             return Err(io::Error::other(
@@ -314,6 +421,9 @@ impl Storage {
             .map(|old| old.to_canonical_bytes())
             .transpose()?
             .is_some_and(|old| old.as_slice() == payload.as_slice());
+        if self.intent.is_some() {
+            payload = compact::encode(&payload)?;
+        }
         let additional = 16 + payload.len() as u64 + 32;
         if !duplicate
             && (state.records >= self.limits.max_snapshots
@@ -336,6 +446,17 @@ impl Storage {
         self.data.sync_all()?;
         self.data_directory.sync_all()?;
         if !duplicate {
+            if let Some(intent) = &self.intent {
+                // Never rewrite an active pending slot on a connection retry:
+                // that slot is the last durable copy after a partial write.
+                // A new epoch uses the other slot; its predecessor's completed
+                // prefix was synchronized before this transition was admitted.
+                if !checkpoint.pending.is_empty()
+                    && state.latest.as_ref().is_none_or(|old| old.pending.is_empty())
+                {
+                    intent.stage(&checkpoint)?;
+                }
+            }
             // One buffer, so the record and its checksum go out in one write:
             // a kill between two writes left a checksum-less frame that every
             // later reopen refuses.
@@ -344,7 +465,11 @@ impl Storage {
             record[..8].copy_from_slice(&u64::from(state.records).to_be_bytes());
             record[8..12].copy_from_slice(&(payload.len() as u32).to_be_bytes());
             record[16..end].copy_from_slice(&payload);
-            let checksum = hash(&state.previous, &record[..end]);
+            let checksum = if self.intent.is_some() {
+                compact::hash(&state.previous, &record[..end])
+            } else {
+                hash(&state.previous, &record[..end])
+            };
             record[end..].copy_from_slice(&checksum);
             state.file.seek(SeekFrom::End(0))?;
             state.file.write_all(&record)?;
@@ -484,7 +609,7 @@ impl ReceiverJournalFile {
     /// Create both private files without replacing either path. Partial failures retain files.
     pub fn create_new(journal: &Path, data: &Path, limits: ReceiverFileLimits) -> io::Result<Self> {
         Ok(Self {
-            storage: Arc::new(Storage::open(journal, data, Some(limits))?),
+            storage: Arc::new(Storage::open(journal, data, Some(limits), None)?),
             pending: None,
             latest: None,
             failure: None,
@@ -493,7 +618,7 @@ impl ReceiverJournalFile {
     /// Read the entire protected WAL and bind the exact original data inode. No repairs.
     /// Payload revalidation occurs in bind_restored before a socket is created.
     pub fn open_existing(journal: &Path, data: &Path) -> io::Result<Self> {
-        let storage = Arc::new(Storage::open(journal, data, None)?);
+        let storage = Arc::new(Storage::open(journal, data, None, None)?);
         let latest = storage.state.lock().latest.clone();
         Ok(Self {
             storage,
@@ -502,6 +627,58 @@ impl ReceiverJournalFile {
             failure: None,
         })
     }
+    /// Create the compact metadata profile with a third, fixed-size intent file.
+    ///
+    /// All three paths must be distinct, absent, and inside trusted private
+    /// directories. The data and WAL remain append-only; two slots in the intent
+    /// file retain the pending epoch while completed historical payloads are
+    /// recovered from their original data offsets. A slot is synchronized before
+    /// its WAL record, and the preceding slot survives preparation of the next
+    /// epoch. No file is replaced, truncated, deleted, or repaired.
+    ///
+    /// This separately versioned profile leaves `create_new` and its immutable
+    /// V1 limits unchanged. Use `open_existing_compact` with the same three
+    /// original inodes after restart. Provision before runtime startup.
+    pub fn create_new_compact(
+        journal: &Path,
+        data: &Path,
+        intent: &Path,
+        limits: ReceiverCompactFileLimits,
+    ) -> io::Result<Self> {
+        limits.validate()?;
+        Ok(Self {
+            storage: Arc::new(Storage::open(
+                journal,
+                data,
+                Some(limits.storage_limits()),
+                Some(intent),
+            )?),
+            pending: None,
+            latest: None,
+            failure: None,
+        })
+    }
+
+    /// Stream a compact WAL and reopen the original data and intent inodes.
+    ///
+    /// Replay retains two fixed pending slots and the previous/current bounded
+    /// checkpoints, rather than loading the WAL or data file. Historical epochs are
+    /// read at their exact data offsets and checked against both their payload
+    /// commitment and original canonical checkpoint checksum. The ordinary
+    /// restore path still rehashes the stable prefix and compares every actual
+    /// tail byte before binding a socket. Incomplete or corrupted history is
+    /// refused; neither snapshot nor byte budgets are reset.
+    pub fn open_existing_compact(journal: &Path, data: &Path, intent: &Path) -> io::Result<Self> {
+        let storage = Arc::new(Storage::open(journal, data, None, Some(intent))?);
+        let latest = storage.state.lock().latest.clone();
+        Ok(Self {
+            storage,
+            pending: None,
+            latest,
+            failure: None,
+        })
+    }
+
     /// Last successfully persisted local checkpoint, never a peer delivery assertion.
     pub fn checkpoint(&self) -> io::Result<ReceiverCheckpoint> {
         if let Some(error) = self.failure {
@@ -1380,5 +1557,355 @@ mod tests {
         assert_eq!(prior.pending_bytes(), 0);
         assert!(prior.committed_receipt().is_none());
         assert_eq!(std::fs::metadata(&data).unwrap().len(), 0);
+    }
+
+    fn compact_limits() -> ReceiverCompactFileLimits {
+        ReceiverCompactFileLimits {
+            max_data_bytes: 64,
+            max_snapshots: 32,
+            max_journal_bytes: 65_536,
+        }
+    }
+
+    fn compact_epoch(
+        previous: &ReceiverCheckpoint,
+        bytes: &[u8],
+        hash: &mut Sha256,
+    ) -> (ReceiverCheckpoint, ReceiverCheckpoint) {
+        let agreed = super::super::decode_offer(&previous.agreed).unwrap();
+        let mut pending = previous.clone();
+        pending.pending = Zeroizing::new(encode_epoch(&previous.prefix, bytes));
+        hash.update(bytes);
+        pending.pending_hash = digest(hash);
+        let mut stable = pending.clone();
+        stable.prefix = advance(
+            &previous.prefix,
+            &pending.pending,
+            agreed.epoch_bytes,
+            agreed.max_bytes,
+        )
+        .unwrap();
+        stable.prefix_hash = pending.pending_hash;
+        stable.pending = Zeroizing::new(Vec::new());
+        (pending, stable)
+    }
+
+    #[test]
+    fn compact_default_budgets_cover_four_gib_of_full_epochs_without_payload_history() {
+        let limits = ReceiverCompactFileLimits::default();
+        limits.validate().unwrap();
+        let hello = Hello {
+            nonce: [9; 32],
+            epoch_bytes: 65_536,
+            max_bytes: 4 * 1024 * 1024 * 1024,
+        };
+        let mut start = checkpoints().0;
+        start.offered = offer(&hello).try_into().unwrap();
+        start.agreed = start.offered;
+        start.prefix = initial(&hello);
+        let (pending, stable) = compact_epoch(&start, &vec![42; 65_536], &mut Sha256::new());
+        let start_bytes = compact::encode(&start.to_canonical_bytes().unwrap()).unwrap();
+        let pending_bytes = compact::encode(&pending.to_canonical_bytes().unwrap()).unwrap();
+        let stable_bytes = compact::encode(&stable.to_canonical_bytes().unwrap()).unwrap();
+        assert_eq!(pending.to_canonical_bytes().unwrap().len(), 65_933);
+        assert_eq!(pending_bytes.len(), 429);
+        assert_eq!(stable_bytes.len(), 317);
+        let epochs = hello.max_bytes / hello.epoch_bytes as u64;
+        let snapshots = 2 * epochs + 3;
+        let wal_bytes = compact::HEADER as u64
+            + epochs * (pending_bytes.len() + stable_bytes.len() + 96) as u64
+            + 3 * (start_bytes.len() + 48) as u64;
+        assert_eq!(snapshots, 131_075);
+        assert_eq!(wal_bytes, 55_182_535);
+        assert!(snapshots <= u64::from(limits.max_snapshots));
+        assert!(wal_bytes <= limits.max_journal_bytes);
+        assert_eq!(compact::INTENT_BYTES, 131_328);
+        // The legacy limits and V1 admission remain unchanged.
+        assert!(limits.storage_limits().validate().is_err());
+    }
+
+    #[test]
+    fn compact_history_rehydrates_after_both_slots_are_reused_and_rejects_changed_old_data() {
+        let (journal, data) = files();
+        let intent = data.with_extension("intent");
+        let store =
+            ReceiverJournalFile::create_new_compact(&journal, &data, &intent, compact_limits())
+                .unwrap();
+        let mut stable = checkpoints().0;
+        store.storage.append(stable.clone()).unwrap();
+        let mut hash = Sha256::new();
+        let mut content = Vec::new();
+        for epoch in 0..8_u8 {
+            let bytes = [epoch + 1; 8];
+            let (pending, next) = compact_epoch(&stable, &bytes, &mut hash);
+            store.storage.append(pending).unwrap();
+            append_data(&store, &bytes);
+            store.storage.append(next.clone()).unwrap();
+            content.extend_from_slice(&bytes);
+            stable = next;
+        }
+        let inodes: Vec<_> = [&journal, &data, &intent]
+            .iter()
+            .map(|path| std::fs::metadata(path).unwrap().ino())
+            .collect();
+        stable.phase = ReceiverCheckpointPhase::Finalizing;
+        store.storage.append(stable.clone()).unwrap();
+        drop(store);
+        let history = std::fs::read(&journal).unwrap();
+        let mut reopened =
+            ReceiverJournalFile::open_existing_compact(&journal, &data, &intent).unwrap();
+        assert_eq!(reopened.checkpoint().unwrap().prefix().bytes, 64);
+        assert_eq!(reopened.checkpoint().unwrap().attempts(), 1);
+        assert_eq!(reopened.resolve_finalizing().unwrap(), stable.receipt());
+        assert_eq!(std::fs::read(&data).unwrap(), content);
+        assert!(std::fs::read(&journal).unwrap().starts_with(&history));
+        for (path, inode) in [&journal, &data, &intent].iter().zip(inodes) {
+            assert_eq!(std::fs::metadata(path).unwrap().ino(), inode);
+        }
+        assert_eq!(std::fs::metadata(&intent).unwrap().len(), 131_328);
+        drop(reopened);
+        assert!(ReceiverJournalFile::open_existing(&journal, &data).is_err());
+
+        // Epoch zero's slot has been overwritten several times. Its original
+        // data bytes must still match the commitment in its historical record.
+        let history = std::fs::read(&journal).unwrap();
+        let mut corruptor = OpenOptions::new().write(true).open(&data).unwrap();
+        corruptor.write_all(b"X").unwrap();
+        corruptor.sync_all().unwrap();
+        assert_eq!(
+            ReceiverJournalFile::open_existing_compact(&journal, &data, &intent)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(std::fs::read(&journal).unwrap(), history);
+    }
+
+    #[test]
+    fn compact_pending_slots_restore_every_surviving_tail_and_keep_all_three_locks() {
+        for surviving in 0..=8 {
+            let (journal, data) = files();
+            let intent = data.with_extension("intent");
+            let (start, pending, _) = checkpoints();
+            let store =
+                ReceiverJournalFile::create_new_compact(&journal, &data, &intent, compact_limits())
+                    .unwrap();
+            store.storage.append(start).unwrap();
+            store.storage.append(pending.clone()).unwrap();
+            append_data(&store, &b"abcdefgh"[..surviving]);
+            let history = std::fs::read(&journal).unwrap();
+            drop(store);
+            let reopened =
+                ReceiverJournalFile::open_existing_compact(&journal, &data, &intent).unwrap();
+            assert_eq!(
+                reopened.checkpoint().unwrap().to_canonical_bytes().unwrap().as_slice(),
+                pending.to_canonical_bytes().unwrap().as_slice()
+            );
+            let session = reopened.service_session().unwrap();
+            for path in [&journal, &data, &intent] {
+                assert!(
+                    OpenOptions::new().read(true).write(true).open(path).unwrap().try_lock().is_err()
+                );
+            }
+            assert_eq!(std::fs::read(&data).unwrap(), b"abcdefgh"[..surviving]);
+            assert_eq!(std::fs::read(&journal).unwrap(), history);
+            drop(session);
+            for path in [&journal, &data, &intent] {
+                assert!(
+                    OpenOptions::new().read(true).write(true).open(path).unwrap().try_lock().is_ok()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compact_prepared_or_torn_next_slot_does_not_erase_the_last_checkpoint() {
+        for torn in [false, true] {
+            let (journal, data) = files();
+            let intent = data.with_extension("intent");
+            let (start, pending, stable) = checkpoints();
+            let store =
+                ReceiverJournalFile::create_new_compact(&journal, &data, &intent, compact_limits())
+                    .unwrap();
+            store.storage.append(start).unwrap();
+            store.storage.append(pending).unwrap();
+            append_data(&store, b"abcdefgh");
+            store.storage.append(stable.clone()).unwrap();
+            let history = std::fs::read(&journal).unwrap();
+            let slots = std::fs::read(&intent).unwrap();
+            let mut hash = Sha256::new();
+            hash.update(b"abcdefgh");
+            let (next, _) = compact_epoch(&stable, b"ijklmnop", &mut hash);
+            // The precise boundary is after next-slot synchronization and
+            // before its intent WAL append. A process death loses only that
+            // unrecorded preparation; the completed prefix remains authoritative.
+            store.storage.intent.as_ref().unwrap().stage(&next).unwrap();
+            if torn {
+                let mut corruptor = OpenOptions::new().write(true).open(&intent).unwrap();
+                corruptor.seek(SeekFrom::Start((compact::INTENT_BYTES / 2) as u64)).unwrap();
+                corruptor.write_all(b"torn").unwrap();
+                corruptor.sync_all().unwrap();
+            }
+            assert_eq!(
+                &std::fs::read(&intent).unwrap()[..compact::INTENT_BYTES / 2],
+                &slots[..compact::INTENT_BYTES / 2]
+            );
+            drop(store);
+            let reopened =
+                ReceiverJournalFile::open_existing_compact(&journal, &data, &intent).unwrap();
+            assert_eq!(
+                reopened.checkpoint().unwrap().to_canonical_bytes().unwrap().as_slice(),
+                stable.to_canonical_bytes().unwrap().as_slice()
+            );
+            assert_eq!(std::fs::read(&journal).unwrap(), history);
+            assert_eq!(std::fs::read(&data).unwrap(), b"abcdefgh");
+        }
+    }
+
+    #[test]
+    fn compact_retry_and_persistent_quotas_never_rewrite_the_active_pending_slot() {
+        for snapshot_limit in [false, true] {
+            let (journal, data) = files();
+            let intent = data.with_extension("intent");
+            let (start, pending, _) = checkpoints();
+            let limits = ReceiverCompactFileLimits {
+                max_snapshots: if snapshot_limit { 3 } else { 32 },
+                max_journal_bytes: if snapshot_limit { 65_536 } else { 128 + 365 + 2 * 477 },
+                ..compact_limits()
+            };
+            let store =
+                ReceiverJournalFile::create_new_compact(&journal, &data, &intent, limits).unwrap();
+            store.storage.append(start).unwrap();
+            store.storage.append(pending.clone()).unwrap();
+            append_data(&store, b"abc");
+            let slots = std::fs::read(&intent).unwrap();
+            let mut retry = pending;
+            retry.used = 2;
+            store.storage.append(retry.clone()).unwrap();
+            let history = std::fs::read(&journal).unwrap();
+            store.storage.append(retry.clone()).unwrap();
+            assert_eq!(std::fs::read(&journal).unwrap(), history);
+            assert_eq!(std::fs::read(&intent).unwrap(), slots);
+            retry.used = 3;
+            assert_eq!(store.storage.append(retry.clone()).unwrap_err().kind(), io::ErrorKind::StorageFull);
+            drop(store);
+            let reopened =
+                ReceiverJournalFile::open_existing_compact(&journal, &data, &intent).unwrap();
+            assert_eq!(reopened.checkpoint().unwrap().attempts(), 2);
+            assert_eq!(reopened.storage.append(retry).unwrap_err().kind(), io::ErrorKind::StorageFull);
+            assert_eq!(std::fs::read(&journal).unwrap(), history);
+            assert_eq!(std::fs::read(&intent).unwrap(), slots);
+            assert_eq!(std::fs::read(&data).unwrap(), b"abc");
+        }
+    }
+
+    #[test]
+    fn compact_partial_recovery_refuses_corrupt_or_replaced_intent_without_repair() {
+        for damage in ["payload", "short", "inode", "link", "permissions"] {
+            let (journal, data) = files();
+            let intent = data.with_extension("intent");
+            let (start, pending, _) = checkpoints();
+            let store =
+                ReceiverJournalFile::create_new_compact(&journal, &data, &intent, compact_limits())
+                    .unwrap();
+            store.storage.append(start).unwrap();
+            store.storage.append(pending).unwrap();
+            append_data(&store, b"abc");
+            let slots = std::fs::read(&intent).unwrap();
+            let history = std::fs::read(&journal).unwrap();
+            drop(store);
+            match damage {
+                "payload" => {
+                    let mut file = OpenOptions::new().write(true).open(&intent).unwrap();
+                    file.seek(SeekFrom::Start(48 + 80 + 4)).unwrap();
+                    file.write_all(b"X").unwrap();
+                    file.sync_all().unwrap();
+                }
+                "short" => {
+                    let file = OpenOptions::new().write(true).open(&intent).unwrap();
+                    file.set_len(131_327).unwrap();
+                    file.sync_all().unwrap();
+                }
+                "inode" => {
+                    std::fs::rename(&intent, intent.with_extension("retained-original")).unwrap();
+                    let mut replacement = OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .mode(0o600)
+                        .open(&intent)
+                        .unwrap();
+                    replacement.write_all(&slots).unwrap();
+                    replacement.sync_all().unwrap();
+                }
+                "link" => std::fs::hard_link(&intent, intent.with_extension("second-link")).unwrap(),
+                "permissions" => {
+                    std::fs::set_permissions(&intent, std::fs::Permissions::from_mode(0o640)).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                ReceiverJournalFile::open_existing_compact(&journal, &data, &intent)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidData,
+                "{damage}"
+            );
+            assert_eq!(std::fs::read(&journal).unwrap(), history, "{damage}");
+            assert_eq!(std::fs::read(&data).unwrap(), b"abc", "{damage}");
+        }
+    }
+
+    #[test]
+    fn compact_torn_reused_payload_falls_back_to_durable_history_and_continues() {
+        let (journal, data) = files();
+        let intent = data.with_extension("intent");
+        let store =
+            ReceiverJournalFile::create_new_compact(&journal, &data, &intent, compact_limits())
+                .unwrap();
+        let mut stable = checkpoints().0;
+        store.storage.append(stable.clone()).unwrap();
+        let mut hash = Sha256::new();
+        for bytes in [b"abcdefgh", b"ijklmnop"] {
+            let (pending, next) = compact_epoch(&stable, bytes, &mut hash);
+            store.storage.append(pending).unwrap();
+            append_data(&store, bytes);
+            store.storage.append(next.clone()).unwrap();
+            stable = next;
+        }
+        let history = std::fs::read(&journal).unwrap();
+        let slots = std::fs::read(&intent).unwrap();
+        let (pending, next) = compact_epoch(&stable, b"qrstuvwx", &mut hash);
+        store.storage.intent.as_ref().unwrap().stage(&pending).unwrap();
+        // Model torn sector persistence during epoch two's reuse of slot zero:
+        // retain epoch zero's matching header/checksum and epoch header, but
+        // leave the new payload underneath. No epoch-two intent record exists.
+        let mut torn = OpenOptions::new().write(true).open(&intent).unwrap();
+        torn.write_all(&slots[..48 + 80]).unwrap();
+        torn.sync_all().unwrap();
+        let mixed = std::fs::read(&intent).unwrap();
+        assert_eq!(&mixed[..48 + 80], &slots[..48 + 80]);
+        assert_ne!(&mixed[48 + 80..48 + 88], &slots[48 + 80..48 + 88]);
+        assert_eq!(std::fs::read(&journal).unwrap(), history);
+        drop(torn);
+        drop(store);
+
+        let reopened =
+            ReceiverJournalFile::open_existing_compact(&journal, &data, &intent).unwrap();
+        assert_eq!(
+            reopened.checkpoint().unwrap().to_canonical_bytes().unwrap().as_slice(),
+            stable.to_canonical_bytes().unwrap().as_slice()
+        );
+        assert_eq!(std::fs::read(&data).unwrap(), b"abcdefghijklmnop");
+        assert_eq!(std::fs::read(&journal).unwrap(), history);
+        // The next admitted epoch can reuse the unrecorded slot and continue.
+        reopened.storage.append(pending).unwrap();
+        append_data(&reopened, b"qrstuvwx");
+        reopened.storage.append(next).unwrap();
+        drop(reopened);
+        let restored =
+            ReceiverJournalFile::open_existing_compact(&journal, &data, &intent).unwrap();
+        assert_eq!(restored.checkpoint().unwrap().prefix().bytes, 24);
+        assert_eq!(std::fs::read(&data).unwrap(), b"abcdefghijklmnopqrstuvwx");
+        assert!(std::fs::read(&journal).unwrap().starts_with(&history));
     }
 }
