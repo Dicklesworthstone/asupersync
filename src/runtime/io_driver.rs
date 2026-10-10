@@ -238,6 +238,20 @@ impl IoDriver {
         interest: Interest,
         waker: Waker,
     ) -> io::Result<Token> {
+        self.register_detached(source, interest, waker)
+            .map_err(|(error, _waker)| error)
+    }
+
+    /// [`Self::register`], except that a refused registration hands its
+    /// waker back. A handle's caller holds the driver mutex here, and a waker
+    /// can own this driver's last handle, whose retirement locks the driver:
+    /// such callers drop the waker after unlocking (br-asupersync-9kb866).
+    fn register_detached(
+        &mut self,
+        source: &dyn Source,
+        interest: Interest,
+        waker: Waker,
+    ) -> Result<Token, (io::Error, Option<Waker>)> {
         // Allocate a slot in the waker slab
         let slab_key = self.wakers.insert(waker);
         let io_token = Token::new(slab_key.to_usize());
@@ -250,11 +264,8 @@ impl IoDriver {
                 self.stats.registrations += 1;
                 Ok(io_token)
             }
-            Err(e) => {
-                // Remove waker on registration failure
-                let _ = self.wakers.remove(slab_key);
-                Err(e)
-            }
+            // Remove waker on registration failure
+            Err(e) => Err((e, self.wakers.remove(slab_key))),
         }
     }
 
@@ -277,13 +288,19 @@ impl IoDriver {
     ///
     /// `true` if the waker was updated, `false` if the token was not found.
     pub fn update_waker(&mut self, token: Token, waker: Waker) -> bool {
+        self.replace_waker(token, waker).0
+    }
+
+    /// [`Self::update_waker`], returning the waker it no longer stores (the
+    /// replaced one, or the given one when it was not stored) for the caller
+    /// to drop after unlocking; see [`Self::register_detached`].
+    fn replace_waker(&mut self, token: Token, waker: Waker) -> (bool, Waker) {
         let slab_key = SlabToken::from_usize(token.0);
-        self.wakers.get_mut(slab_key).is_some_and(|slot| {
-            if !slot.will_wake(&waker) {
-                *slot = waker;
-            }
-            true
-        })
+        match self.wakers.get_mut(slab_key) {
+            Some(slot) if !slot.will_wake(&waker) => (true, std::mem::replace(slot, waker)),
+            Some(_) => (true, waker),
+            None => (false, waker),
+        }
     }
 
     /// Modifies the interest set for an existing registration.
@@ -323,6 +340,12 @@ impl IoDriver {
     /// `NotFound` error is treated as already deregistered and the
     /// local waker state is still cleaned up.
     pub fn deregister(&mut self, token: Token) -> io::Result<()> {
+        self.deregister_detached(token).0
+    }
+
+    /// [`Self::deregister`], returning the removed waker for the caller to
+    /// drop after unlocking; see [`Self::register_detached`].
+    fn deregister_detached(&mut self, token: Token) -> (io::Result<()>, Option<Waker>) {
         // Deregister from reactor first
         let result = self.reactor.deregister(token);
 
@@ -330,17 +353,19 @@ impl IoDriver {
         // even if the reactor fails (e.g. EBADF).
         // ABA is prevented by generation counters in SlabToken.
         let slab_key = SlabToken::from_usize(token.0);
-        if self.wakers.remove(slab_key).is_some() {
+        let waker = self.wakers.remove(slab_key);
+        if waker.is_some() {
             self.stats.deregistrations += 1;
         }
         self.interests.remove(&token);
         self.undispatched.remove(&token);
 
-        match result {
+        let result = match result {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(err) => Err(err),
-        }
+        };
+        (result, waker)
     }
 
     /// Deregisters a waker by its key.
@@ -679,7 +704,7 @@ impl IoDriverHandle {
         interest: Interest,
         waker: Waker,
     ) -> io::Result<IoRegistration> {
-        let token = {
+        let registered = {
             let mut driver = lock_for_mutation(&self.inner, self.reactor.as_ref());
             // The final wake must follow acquisition of the driver gate.
             // Otherwise a poller can consume it and re-enter a blocking ring
@@ -687,8 +712,10 @@ impl IoDriverHandle {
             // prevents another turn from taking its events buffer until this
             // mutation finishes. Do not sample is_polling here.
             let _ = self.reactor.wake();
-            driver.register(source, interest, waker)?
+            driver.register_detached(source, interest, waker)
         };
+        // A refused waker is dropped only now, outside the driver gate.
+        let token = registered.map_err(|(error, _waker)| error)?;
         Ok(IoRegistration::new(
             token,
             Arc::downgrade(&self.inner),
@@ -701,8 +728,10 @@ impl IoDriverHandle {
     /// Updates the waker for an existing registration.
     #[must_use]
     pub fn update_waker(&self, token: Token, waker: Waker) -> bool {
-        let mut driver = self.inner.lock();
-        driver.update_waker(token, waker)
+        // The guard is released at the end of this statement: the displaced
+        // waker drops outside the driver lock.
+        let (updated, _displaced) = self.inner.lock().replace_waker(token, waker);
+        updated
     }
 
     /// Returns true if the driver has no registered wakers.
@@ -945,8 +974,9 @@ impl IoRegistration {
     #[must_use]
     pub fn update_waker(&self, waker: Waker) -> bool {
         self.driver.upgrade().is_some_and(|driver| {
-            let mut guard = driver.lock();
-            guard.update_waker(self.token, waker)
+            // The displaced waker drops after this statement releases the lock.
+            let (updated, _displaced) = driver.lock().replace_waker(self.token, waker);
+            updated
         })
     }
 
@@ -1009,12 +1039,19 @@ impl IoRegistration {
             .is_none_or(|w| !w.will_wake(waker))
         {
             let slab_key = SlabToken::from_usize(self.token.0);
-            if let Some(slot) = guard.wakers.get_mut(slab_key) {
-                slot.clone_from(waker);
-                self.cached_waker = Some(waker.clone());
-            } else {
+            let Some(slot) = guard.wakers.get_mut(slab_key) else {
                 return Ok(false);
-            }
+            };
+            // Replaced wakers drop after the lock is released: one of them
+            // can own this driver's last handle (br-asupersync-9kb866).
+            let displaced_slot = if slot.will_wake(waker) {
+                None
+            } else {
+                Some(std::mem::replace(slot, waker.clone()))
+            };
+            let displaced_cache = self.cached_waker.replace(waker.clone());
+            drop(guard);
+            drop((displaced_slot, displaced_cache));
         }
 
         Ok(true)
@@ -1023,10 +1060,11 @@ impl IoRegistration {
     /// Explicitly deregisters without waiting for drop.
     pub fn deregister(mut self) -> io::Result<()> {
         if let Some(driver) = self.driver.upgrade() {
-            let first = {
+            // Each removed waker drops after its lock is released; see Drop.
+            let (first, _removed) = {
                 let mut guard = lock_for_mutation(&driver, self.reactor.as_ref());
                 self.wake_polling_reactor();
-                guard.deregister(self.token)
+                guard.deregister_detached(self.token)
             };
             match first {
                 Ok(()) => {
@@ -1039,10 +1077,10 @@ impl IoRegistration {
                 }
                 Err(first_err) => {
                     // Best-effort retry for transient deregistration failures.
-                    let second = {
+                    let (second, _removed) = {
                         let mut guard = lock_for_mutation(&driver, self.reactor.as_ref());
                         self.wake_polling_reactor();
-                        guard.deregister(self.token)
+                        guard.deregister_detached(self.token)
                     };
                     match second {
                         Ok(()) => {
@@ -1072,18 +1110,27 @@ impl Drop for IoRegistration {
         if let Some(driver) = self.driver.upgrade() {
             // Best-effort cleanup: retry once on non-NotFound errors to reduce
             // stale-registration risk if the first deregister attempt fails transiently.
-            let first = {
+            // The removed waker drops only after the lock is released. It can
+            // own this driver's last handle (a runtime's root waker outlives
+            // the runtime this way), and retiring that handle locks the
+            // driver: dropped under the lock, it deadlocked this thread
+            // (br-asupersync-9kb866).
+            let (first, removed) = {
                 let mut guard = lock_for_mutation(&driver, self.reactor.as_ref());
                 self.wake_polling_reactor();
-                guard.deregister(self.token)
+                guard.deregister_detached(self.token)
             };
+            drop(removed);
             if first
                 .as_ref()
                 .is_err_and(|err| err.kind() != io::ErrorKind::NotFound)
             {
-                let mut guard = lock_for_mutation(&driver, self.reactor.as_ref());
-                self.wake_polling_reactor();
-                let _ = guard.deregister(self.token);
+                let (_, removed) = {
+                    let mut guard = lock_for_mutation(&driver, self.reactor.as_ref());
+                    self.wake_polling_reactor();
+                    guard.deregister_detached(self.token)
+                };
+                drop(removed);
             }
         }
     }
@@ -3278,6 +3325,250 @@ mod tests {
                 "no reactor wake was used"
             );
             crate::test_complete!("epoll_rearm_reaches_a_poll_blocked_on_another_thread");
+        }
+
+        /// A waker that owns a driver handle, as a runtime's root waker does.
+        struct HandleOwningWaker {
+            _handle: IoDriverHandle,
+        }
+
+        // Waking does nothing; dropping the waker drops its handle, which is
+        // the point.
+        #[allow(clippy::manual_noop_waker)]
+        impl Wake for HandleOwningWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        /// A waker whose destructor drops a registration of the same driver.
+        struct RegistrationOwningWaker {
+            _registration: StdMutex<Option<IoRegistration>>,
+        }
+
+        // Waking does nothing; dropping the waker drops its registration,
+        // which is the point.
+        #[allow(clippy::manual_noop_waker)]
+        impl Wake for RegistrationOwningWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        /// Runs `release` on its own thread: a self-deadlock fails the test
+        /// instead of hanging it.
+        fn returns_within(what: &str, release: impl FnOnce() + Send + 'static) {
+            let (done_tx, done) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                release();
+                let _ = done_tx.send(());
+            });
+            let finished = done.recv_timeout(Duration::from_secs(10));
+            assert!(
+                !matches!(finished, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+                "{what} deadlocked: a waker was dropped under the driver lock (9kb866)"
+            );
+            if let Err(panic) = worker.join() {
+                std::panic::resume_unwind(panic);
+            }
+        }
+
+        /// Registers a socket whose waker owns the driver's only handle. The
+        /// returned sockets stay open until the caller drops them.
+        fn registration_owning_the_last_handle(
+            reactor: &Arc<dyn Reactor>,
+        ) -> (
+            IoRegistration,
+            (UnixStream, UnixStream),
+            std::sync::Weak<HandleOwningWaker>,
+        ) {
+            let handle = IoDriverHandle::new(Arc::clone(reactor));
+            let (sock, peer) = UnixStream::pair().expect("create socket pair");
+            let owner = Arc::new(HandleOwningWaker {
+                _handle: handle.clone(),
+            });
+            let owner_alive = Arc::downgrade(&owner);
+            let registration = handle
+                .register(&sock, Interest::READABLE, Waker::from(owner))
+                .expect("register");
+            drop(handle);
+            // The failing state: only the registered waker keeps the
+            // dispatcher alive, so dropping that waker retires it.
+            assert_eq!(owner_alive.strong_count(), 1, "the slab holds the waker");
+            assert!(registration.is_active(), "the registration is live");
+            assert_eq!(reactor.registration_count(), 1);
+            (registration, (sock, peer), owner_alive)
+        }
+
+        /// The waker is gone, the source is deregistered, and the retired
+        /// dispatcher no longer retains the reactor.
+        fn assert_retired(
+            reactor: &Arc<dyn Reactor>,
+            owner_alive: &std::sync::Weak<HandleOwningWaker>,
+        ) {
+            assert_eq!(owner_alive.strong_count(), 0, "the waker was dropped");
+            assert_eq!(
+                reactor.registration_count(),
+                0,
+                "the source was deregistered"
+            );
+            assert_eq!(Arc::strong_count(reactor), 1, "the dispatcher was retired");
+        }
+
+        /// br-asupersync-9kb866: an I/O object dropped after its runtime
+        /// removed a waker that owned the driver's last handle while holding
+        /// the driver lock, and the handle's retirement then locked the driver
+        /// again on the same thread.
+        #[test]
+        fn dropping_a_registration_whose_waker_owns_the_last_handle_retires_the_driver() {
+            super::init_test(
+                "dropping_a_registration_whose_waker_owns_the_last_handle_retires_the_driver",
+            );
+            let reactor: Arc<dyn Reactor> = Arc::new(EpollReactor::new().expect("reactor"));
+            let (registration, _sockets, owner_alive) =
+                registration_owning_the_last_handle(&reactor);
+            returns_within("dropping the registration", move || drop(registration));
+            assert_retired(&reactor, &owner_alive);
+            crate::test_complete!(
+                "dropping_a_registration_whose_waker_owns_the_last_handle_retires_the_driver"
+            );
+        }
+
+        #[test]
+        fn deregistering_a_registration_whose_waker_owns_the_last_handle_retires_the_driver() {
+            super::init_test(
+                "deregistering_a_registration_whose_waker_owns_the_last_handle_retires_the_driver",
+            );
+            let reactor: Arc<dyn Reactor> = Arc::new(EpollReactor::new().expect("reactor"));
+            let (registration, _sockets, owner_alive) =
+                registration_owning_the_last_handle(&reactor);
+            returns_within("deregistering the registration", move || {
+                registration.deregister().expect("deregister");
+            });
+            assert_retired(&reactor, &owner_alive);
+            crate::test_complete!(
+                "deregistering_a_registration_whose_waker_owns_the_last_handle_retires_the_driver"
+            );
+        }
+
+        /// A re-arm or waker update that replaces the handle-owning waker
+        /// retires the dispatcher too, and the registration stays usable.
+        #[test]
+        fn replacing_a_waker_that_owns_the_last_handle_retires_the_driver() {
+            super::init_test("replacing_a_waker_that_owns_the_last_handle_retires_the_driver");
+            for rearm in [true, false] {
+                let reactor: Arc<dyn Reactor> = Arc::new(EpollReactor::new().expect("reactor"));
+                let (registration, _sockets, owner_alive) =
+                    registration_owning_the_last_handle(&reactor);
+                returns_within("replacing the waker", move || {
+                    let mut registration = registration;
+                    let (waker, _state) = create_test_waker();
+                    let replaced = if rearm {
+                        registration
+                            .rearm(Interest::READABLE, &waker)
+                            .expect("rearm")
+                    } else {
+                        registration.update_waker(waker)
+                    };
+                    assert!(replaced, "the slab slot held the replaced waker");
+                    drop(registration);
+                });
+                assert_retired(&reactor, &owner_alive);
+            }
+            crate::test_complete!("replacing_a_waker_that_owns_the_last_handle_retires_the_driver");
+        }
+
+        /// The same lock discipline admits any waker destructor that uses the
+        /// driver, such as one that owns another registration of it.
+        #[test]
+        fn a_displaced_waker_can_drop_a_registration_of_the_same_driver() {
+            super::init_test("a_displaced_waker_can_drop_a_registration_of_the_same_driver");
+            let reactor: Arc<dyn Reactor> = Arc::new(EpollReactor::new().expect("reactor"));
+            let backend = Arc::clone(&reactor);
+            // Every handle and registration lives on the bounded thread: after
+            // a deadlock, dropping one here would block on the held driver.
+            returns_within("replacing the registration-owning waker", move || {
+                let handle = IoDriverHandle::new(Arc::clone(&backend));
+                let (inner_sock, _inner_peer) = UnixStream::pair().expect("create socket pair");
+                let (outer_sock, _outer_peer) = UnixStream::pair().expect("create socket pair");
+                let (plain, _plain_state) = create_test_waker();
+                let inner = handle
+                    .register(&inner_sock, Interest::READABLE, plain)
+                    .expect("register inner");
+                let owner = Arc::new(RegistrationOwningWaker {
+                    _registration: StdMutex::new(Some(inner)),
+                });
+                let owner_alive = Arc::downgrade(&owner);
+                let outer = handle
+                    .register(&outer_sock, Interest::READABLE, Waker::from(owner))
+                    .expect("register outer");
+                assert_eq!(backend.registration_count(), 2);
+                assert_eq!(owner_alive.strong_count(), 1, "the slab holds the waker");
+
+                let (waker, _state) = create_test_waker();
+                assert!(
+                    handle.update_waker(outer.token(), waker),
+                    "the waker was replaced"
+                );
+                assert_eq!(
+                    owner_alive.strong_count(),
+                    0,
+                    "the replaced waker was dropped"
+                );
+                assert_eq!(
+                    backend.registration_count(),
+                    1,
+                    "its destructor deregistered the inner source"
+                );
+                assert_eq!(handle.waker_count(), 1, "only the outer waker remains");
+                drop(outer);
+                assert_eq!(backend.registration_count(), 0);
+            });
+            assert_eq!(Arc::strong_count(&reactor), 1, "the dispatcher was retired");
+            crate::test_complete!("a_displaced_waker_can_drop_a_registration_of_the_same_driver");
+        }
+
+        /// The public sequence behind 9kb866: an I/O object parked by a
+        /// runtime's root future and dropped after that runtime. Default
+        /// builds construct this platform reactor.
+        #[test]
+        fn an_io_object_dropped_after_its_runtime_does_not_deadlock() {
+            use crate::io::{AsyncRead, ReadBuf};
+            use std::pin::Pin;
+            use std::task::Poll;
+            super::init_test("an_io_object_dropped_after_its_runtime_does_not_deadlock");
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            let addr = listener.local_addr().expect("local address");
+            for multi_worker in [false, true] {
+                let runtime = if multi_worker {
+                    crate::runtime::RuntimeBuilder::new().worker_threads(2)
+                } else {
+                    crate::runtime::RuntimeBuilder::current_thread()
+                }
+                .build()
+                .expect("native runtime");
+                let (stream, parked) = runtime.block_on(async {
+                    let mut stream = crate::net::TcpStream::connect(addr).await.expect("connect");
+                    // Park one read: the root's waker stays in the driver slab.
+                    let parked = std::future::poll_fn(|task_cx| {
+                        let mut byte = [0u8; 1];
+                        let mut buf = ReadBuf::new(&mut byte);
+                        Poll::Ready(
+                            Pin::new(&mut stream)
+                                .poll_read(task_cx, &mut buf)
+                                .is_pending(),
+                        )
+                    })
+                    .await;
+                    (stream, parked)
+                });
+                let (_server, _) = listener.accept().expect("accept");
+                assert!(
+                    parked,
+                    "the read parked on the reactor (multi_worker={multi_worker})"
+                );
+                drop(runtime);
+                returns_within("dropping the stream after its runtime", move || {
+                    drop(stream)
+                });
+            }
+            crate::test_complete!("an_io_object_dropped_after_its_runtime_does_not_deadlock");
         }
     }
 

@@ -12656,8 +12656,29 @@ mod tests {
     /// and its future returned Pending on an incomplete backend response. The
     /// independent listener must receive BackendKeyData's exact cancel frame;
     /// returning Cancelled after merely closing the query socket cannot pass.
+    ///
+    /// Each scenario's own waits are bounded (3 s or less), but a lost runtime
+    /// wake once parked a scenario forever, and every lane that ran this test
+    /// then hung without a summary (br-asupersync-9kb866). The scenarios run
+    /// on their own thread so that a hang fails here instead.
     #[test]
     fn parked_protocol_operations_deliver_wire_cancel() {
+        let (finished_tx, finished) = std::sync::mpsc::channel();
+        let scenarios = std::thread::spawn(move || {
+            parked_protocol_operation_scenarios();
+            let _ = finished_tx.send(());
+        });
+        let bounded = finished.recv_timeout(std::time::Duration::from_secs(120));
+        assert!(
+            !matches!(bounded, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+            "a parked wire-cancel scenario did not finish within 120 s"
+        );
+        if let Err(panic) = scenarios.join() {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    fn parked_protocol_operation_scenarios() {
         use std::future::Future;
         use std::io::{Read, Write};
         use std::time::{Duration, Instant};
