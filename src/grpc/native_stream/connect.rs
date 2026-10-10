@@ -619,7 +619,8 @@ impl Setup {
         self.check()?;
         self.cancelled = Some(self.cx.refresh_cancel_waker(self.cancelled, task.waker()));
         self.check()?;
-        if self.timer.as_mut().poll(task).is_ready() {
+        // poll_deadline: a racing cancellation is not an elapsed deadline.
+        if self.timer.as_mut().poll_deadline(task).is_ready() {
             return Err(Status::deadline_exceeded(
                 "native gRPC connection setup deadline exceeded",
             ));

@@ -943,3 +943,107 @@ fn an_upload_reports_an_early_status_at_its_next_send_boundary() {
     let error = run(stream.next_event()).unwrap_err();
     assert_eq!(error.code(), Code::PermissionDenied);
 }
+
+/// br-asupersync-5v5ezw N2: an error headers() returned ended the call, and
+/// message() then returned Ok(None), which the docs call success, so a drain
+/// loop after a failed header wait ended without an error.
+#[test]
+fn an_error_headers_returned_is_returned_once_more_by_message() {
+    let mut bytes = frame(4, 0, &[]);
+    bytes.extend(headers(&[(":status", "503")], true));
+    let (io, _) = fixture(bytes, 16384, true);
+    let mut call = call(io);
+    assert_eq!(run(call.headers()).unwrap_err().code(), Code::Unavailable);
+    assert_eq!(run(call.message()).unwrap_err().code(), Code::Unavailable);
+    assert!(run(call.message()).unwrap().is_none());
+    assert_eq!(call.status().unwrap().code(), Code::Unavailable);
+}
+
+/// br-asupersync-5v5ezw N2, duplex: the deadline passed mid-upload, so
+/// queue_message returned DEADLINE_EXCEEDED, and next_event then returned
+/// Ok(None) ("successful trailers"): a drain loop after the failed send
+/// ended in Ok.
+#[test]
+fn an_error_queue_message_returned_is_returned_once_more_by_next_event() {
+    let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(20)));
+    let cx = timed_cx(&clock);
+    let (io, _) = fixture(start(), 16384, false);
+    let mut stream = NativeDuplexStream::new(
+        &cx,
+        io,
+        "localhost",
+        "/test.Upload/Collect",
+        Request::new(()),
+        IdentityCodec,
+        NativeStreamConfig {
+            timeout: Some(Duration::from_secs(2)),
+            ..NativeStreamConfig::default()
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        run(stream.next_event()),
+        Ok(Some(NativeDuplexEvent::RequestFlushed))
+    ));
+    clock.advance_to(Time::from_secs(22));
+    assert_eq!(
+        stream
+            .queue_message(&Bytes::from_static(b"late"))
+            .unwrap_err()
+            .code(),
+        Code::DeadlineExceeded
+    );
+    assert_eq!(
+        run(stream.next_event()).unwrap_err().code(),
+        Code::DeadlineExceeded
+    );
+    assert!(run(stream.next_event()).unwrap().is_none());
+    assert!(!cx.is_cancel_requested());
+}
+
+/// br-asupersync-5v5ezw N4: the call's deadline timer was polled with the
+/// cancellation-aware Sleep::poll, which completes when the ambient context
+/// is cancelled, so a cancellation landing between the call's own check and
+/// the timer poll was reported as DEADLINE_EXCEEDED long before the deadline.
+#[test]
+fn a_cancellation_racing_the_deadline_timer_is_not_an_elapsed_deadline() {
+    let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(20)));
+    let cx = timed_cx(&clock);
+    let (io, _) = fixture(start(), 16384, false);
+    let mut call = NativeServerStream::new(
+        &cx,
+        io,
+        "localhost",
+        "/test.Service/Watch",
+        Request::new(Bytes::new()),
+        IdentityCodec,
+        NativeStreamConfig {
+            timeout: Some(Duration::from_secs(60)),
+            ..NativeStreamConfig::default()
+        },
+    )
+    .unwrap();
+    let mut task = Context::from_waker(Waker::noop());
+    assert!(call.gate_deadline(&mut task).is_ok());
+    // The cancellation the timer sees through the ambient context.
+    let other = Cx::for_testing();
+    other.cancel_with(
+        CancelKind::User,
+        Some("cancelled while the timer is polled"),
+    );
+    {
+        let _ambient = Cx::set_current(Some(other));
+        for _ in 0..2 {
+            assert!(
+                call.gate_deadline(&mut task).is_ok(),
+                "{:?}",
+                call.gate_deadline(&mut task)
+            );
+        }
+    }
+    clock.advance_to(Time::from_secs(80));
+    assert_eq!(
+        call.gate_deadline(&mut task).unwrap_err().code(),
+        Code::DeadlineExceeded
+    );
+}

@@ -64,7 +64,7 @@ use crate::time::{Sleep, TimerDriverHandle};
 use crate::types::{CancelKind, Time};
 use base64::Engine as _;
 use std::fmt;
-use std::future::{Future, poll_fn};
+use std::future::poll_fn;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -326,9 +326,11 @@ impl CallDeadline {
 /// One typed, cancellation-aware response stream over an owned native transport.
 ///
 /// Initial metadata and terminal trailers are separate. Complete messages are
-/// delivered in order, then either `Ok(None)` or one terminal error. Later
-/// `message()` calls return `Ok(None)`; inspect [`Self::status`] to retain the
-/// exact final error. EOF without terminal gRPC status is never success.
+/// delivered in order, then either `Ok(None)` or one terminal error, also when
+/// `headers()` returned that error first; after an explicit [`Self::cancel`]
+/// the stream ends with `Ok(None)`. Later `message()` calls return `Ok(None)`;
+/// inspect [`Self::status`] to retain the exact final error. EOF without
+/// terminal gRPC status is never success.
 /// Deadlines are observed when this object is polled. They do not start a
 /// background task that closes the transport while the object is unpolled.
 ///
@@ -369,6 +371,8 @@ pub struct NativeServerStream<IO, C> {
     body_limit: usize,
     stream_id: u32,
     final_status: Option<Status>,
+    // Whether a message()/next_event() wait has returned the end yet.
+    terminal_reported: bool,
     ready_messages: usize,
     unflushed_read_frames: usize,
     keepalive: Option<Keepalive>,
@@ -535,6 +539,7 @@ where
             outbound_flushed: false, write_failure: None,
             body: BytesMut::new(), response: ResponseHead::new(config.max_metadata_bytes, config.accept_gzip),
             body_limit, stream_id, final_status: None, ready_messages: 0,
+            terminal_reported: false,
             unflushed_read_frames: 0,
             keepalive: None, outbound_allows_probe: false,
         })
@@ -609,6 +614,20 @@ where
         if self.final_status.is_none() {
             self.finish(Status::cancelled("native gRPC stream cancelled by its owner"));
         }
+        // The owner ended it: later waits end with Ok(None).
+        self.terminal_reported = true;
+    }
+
+    /// Once the call ended: `Some(Some(status))` the first time a
+    /// `message()`/`next_event()` wait finds a non-OK end it has not returned
+    /// (`headers()`, `queue_message()` or `close_requests()` reported it
+    /// first), so a drain loop never ends in `Ok(None)` after a failure; then
+    /// `Some(None)`. `None` while the call is live.
+    fn take_unreported_end(&mut self) -> Option<Option<Status>> {
+        let status = self.final_status.as_ref()?;
+        let unreported = !self.terminal_reported && status.code() != Code::Ok;
+        self.terminal_reported = true;
+        Some(unreported.then(|| status.clone()))
     }
 
     /// Check cancellation and the deadline for an owner that holds the call
@@ -628,9 +647,10 @@ where
         check_cancellation(&self.cx)?;
         self.cancel_waker = Some(self.cx.refresh_cancel_waker(self.cancel_waker, task.waker()));
         check_cancellation(&self.cx)?;
+        // poll_deadline: a racing cancellation is not an elapsed deadline.
         if self.deadline.zip(self.clock.as_ref())
             .is_some_and(|(at, clock)| clock.now() >= at)
-            || self.timer.as_mut().is_some_and(|timer| timer.as_mut().poll(task).is_ready())
+            || self.timer.as_mut().is_some_and(|timer| timer.as_mut().poll_deadline(task).is_ready())
         {
             return Err(Status::deadline_exceeded("native gRPC stream deadline exceeded"));
         }
@@ -725,6 +745,18 @@ where
     }
 
     fn poll_message(&mut self, task: &mut Context<'_>) -> Poll<Option<Result<C::Decode, Status>>> {
+        if let Some(end) = self.take_unreported_end() {
+            return Poll::Ready(end.map(Err));
+        }
+        let polled = self.poll_live_message(task);
+        self.terminal_reported |= matches!(polled, Poll::Ready(None | Some(Err(_))));
+        polled
+    }
+
+    fn poll_live_message(
+        &mut self,
+        task: &mut Context<'_>,
+    ) -> Poll<Option<Result<C::Decode, Status>>> {
         let _ambient = Cx::set_current(Some(self.cx.clone()));
         if self.final_status.is_some() { return Poll::Ready(None); }
         if self.ready_messages == POLL_STEPS {

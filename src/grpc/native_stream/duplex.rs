@@ -20,7 +20,9 @@ pub enum NativeDuplexEvent<T> {
 /// [`Self::queue_message`] or half-close with [`Self::close_requests`]. Continue
 /// consuming events in either direction. The peer may respond before upload
 /// finishes. After half-close, consume through `Ok(None)` to observe successful
-/// trailers; an error is returned once and retained by [`Self::status`].
+/// trailers; an error is returned once by `next_event`, also when
+/// `queue_message` or `close_requests` returned it first, and retained by
+/// [`Self::status`].
 ///
 /// Only one encoded request is admitted at a time. A full slot refuses before
 /// invoking the codec. All writes, reads and H2 window updates are driven by
@@ -33,8 +35,9 @@ pub enum NativeDuplexEvent<T> {
 /// metadata limits, and bounded control-frame read-ahead. The encoded request
 /// slot is at most the send limit plus its five-byte prefix; one outbound H2
 /// frame is additional. Codec/transport internals and returned values have
-/// their own allocation contracts. Responses are decoded before more network
-/// reads, so uploading does not collect an unbounded response queue.
+/// their own allocation contracts. Response DATA is read only while the retained
+/// bytes leave room for another frame, so uploading does not collect an
+/// unbounded response queue.
 ///
 /// Use [`NativeStreamEndpoint::connect_duplex_tcp`] to dial a native endpoint,
 /// or, with the `tls` feature, `NativeStreamEndpoint::connect_duplex_tls` to dial
@@ -286,11 +289,20 @@ where
         &mut self,
         task: &mut Context<'_>,
     ) -> Poll<Option<Result<NativeDuplexEvent<C::Decode>, Status>>> {
+        if let Some(end) = self.inner.take_unreported_end() {
+            return Poll::Ready(end.map(Err));
+        }
+        let polled = self.poll_live_event(task);
+        self.inner.terminal_reported |= matches!(polled, Poll::Ready(None | Some(Err(_))));
+        polled
+    }
+
+    fn poll_live_event(
+        &mut self,
+        task: &mut Context<'_>,
+    ) -> Poll<Option<Result<NativeDuplexEvent<C::Decode>, Status>>> {
         let _ambient = Cx::set_current(Some(self.inner.cx.clone()));
         let inner = &mut self.inner;
-        if inner.final_status.is_some() {
-            return Poll::Ready(None);
-        }
         if inner.ready_messages == POLL_STEPS {
             inner.ready_messages = 0;
             task.waker().wake_by_ref();
