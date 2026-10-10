@@ -46,6 +46,11 @@ const STRONG_LEN: usize = 16;
 /// Bytes charged per non-literal op when estimating wire size (tag + offset +
 /// len, varint-ish). Used only by [`wire_bytes`] for benchmark accounting.
 const OP_OVERHEAD_BYTES: usize = 10;
+/// Old blocks [`diff`] keeps per weak checksum for its fallback search. A peer's
+/// signature can give every block one weak value; the contiguous and
+/// positional candidates are found by offset instead, so repeated content
+/// still extends its copy runs (br-asupersync-w6fnfy F4).
+const MAX_WEAK_CANDIDATES: usize = 32;
 
 /// One signed sub-block of the OLD buffer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -274,11 +279,20 @@ pub fn diff(new: &[u8], sig: &SubBlockSignature) -> Vec<SubDeltaOp> {
         return ops;
     }
 
-    // weak → candidate block indices (multiple old blocks can share a weak hash).
+    // weak → candidate block indices (multiple old blocks can share a weak hash),
+    // at most MAX_WEAK_CANDIDATES each.
     let mut by_weak: HashMap<u32, Vec<usize>> = HashMap::new();
     for (idx, b) in sig.blocks.iter().enumerate() {
-        by_weak.entry(b.weak).or_default().push(idx);
+        let bucket = by_weak.entry(b.weak).or_default();
+        if bucket.len() < MAX_WEAK_CANDIDATES {
+            bucket.push(idx);
+        }
     }
+    // A canonical signature keeps block i at offset i * block_size.
+    let block_at = |offset: u64| {
+        let index = usize::try_from(offset / u64::from(sig.block_size)).ok()?;
+        sig.blocks.get(index).filter(|b| b.offset == offset)
+    };
 
     let mut pos = 0usize;
     let mut literal_start = 0usize;
@@ -286,7 +300,8 @@ pub fn diff(new: &[u8], sig: &SubBlockSignature) -> Vec<SubDeltaOp> {
 
     loop {
         let mut matched: Option<&BlockSig> = None;
-        if let Some(cands) = by_weak.get(&rolling.digest()) {
+        let weak = rolling.digest();
+        if let Some(cands) = by_weak.get(&weak) {
             let window = &new[pos..pos + block_size];
             let strong = strong_checksum(window);
             let contiguous_offset = if pos == literal_start {
@@ -298,24 +313,21 @@ pub fn diff(new: &[u8], sig: &SubBlockSignature) -> Vec<SubDeltaOp> {
                 None
             };
             let positional_offset = u64::try_from(pos).ok();
-            let mut first_match = None;
-            let mut positional_match = None;
-            for &idx in cands {
-                let b = &sig.blocks[idx];
-                if b.strong == strong {
-                    first_match.get_or_insert(b);
-                    if Some(b.offset) == contiguous_offset {
-                        matched = Some(b);
-                        break;
-                    }
-                    if Some(b.offset) == positional_offset {
-                        positional_match = Some(b);
-                    }
-                }
-            }
-            if matched.is_none() {
-                matched = positional_match.or(first_match);
-            }
+            let found = |offset: Option<u64>| {
+                offset
+                    .and_then(block_at)
+                    .filter(|b| b.weak == weak && b.strong == strong)
+            };
+            // Same preference as before: the block continuing the previous
+            // copy, then the one at this position, then the first match.
+            matched = found(contiguous_offset)
+                .or_else(|| found(positional_offset))
+                .or_else(|| {
+                    cands
+                        .iter()
+                        .map(|&idx| &sig.blocks[idx])
+                        .find(|b| b.strong == strong)
+                });
         }
 
         if let Some(b) = matched {

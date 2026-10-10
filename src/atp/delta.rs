@@ -24,6 +24,8 @@ const DELTA_RESYNC_SEND_PLAN_MAGIC: &[u8] = b"ASUP_ATP_DELTA_RESYNC_SEND_PLAN_V1
 const ENCODED_CHUNK_BYTES: usize = 4 + 8 + 8 + 32;
 const SUBDELTA_OP_COPY: u8 = 0;
 const SUBDELTA_OP_LITERAL: u8 = 1;
+/// The smallest encoded op: a tag and a u64 (an empty literal).
+const SUBDELTA_OP_MIN_BYTES: usize = 1 + 8;
 const DELTA_SEND_ITEM_WHOLE_CHUNK: u8 = 0;
 const DELTA_SEND_ITEM_SUBCHUNK_OPS: u8 = 1;
 const DELTA_SEND_ITEM_REPEATED_CHUNK: u8 = 2;
@@ -1621,6 +1623,17 @@ pub fn apply_delta_resync_send_plan(
             } => {
                 let old = verified_chunk_payload(&store, base_chunk)?;
                 let ops = decode_subdelta_ops(encoded_ops)?;
+                // A few op bytes can describe gigabytes of output: require
+                // exactly the target chunk's size before building it, since
+                // `target_sha256` comes from the same peer (br-asupersync-w6fnfy F2).
+                let output_bytes = subdelta_output_bytes(&ops)?;
+                if output_bytes != target_chunk.size_bytes {
+                    return Err(DeltaError::ChunkPayloadSizeMismatch {
+                        index: target_chunk.index,
+                        expected: target_chunk.size_bytes,
+                        actual: output_bytes,
+                    });
+                }
                 let rebuilt = delta_subchunk::reconstruct_verified(old, &ops, target_sha256)
                     .map_err(|source| DeltaError::SubDeltaReconstruction {
                         index: target_chunk.index,
@@ -1761,12 +1774,30 @@ pub fn encode_subdelta_ops(ops: &[SubDeltaOp]) -> Result<Vec<u8>, DeltaError> {
     Ok(out)
 }
 
+/// Bytes `ops` produce when applied, without applying them.
+fn subdelta_output_bytes(ops: &[SubDeltaOp]) -> Result<u64, DeltaError> {
+    ops.iter().try_fold(0_u64, |total, op| {
+        let len = match op {
+            SubDeltaOp::Copy { len, .. } => u64::from(*len),
+            SubDeltaOp::Literal(bytes) => {
+                u64::try_from(bytes.len()).map_err(|_| DeltaError::ChunkSizeOverflow)?
+            }
+        };
+        total.checked_add(len).ok_or(DeltaError::ChunkSizeOverflow)
+    })
+}
+
 /// Decode the compact hot-path sub-delta op-stream representation.
 pub fn decode_subdelta_ops(bytes: &[u8]) -> Result<Vec<SubDeltaOp>, DeltaError> {
     let mut reader = ByteReader::new(bytes);
     reader.expect_magic(SUBDELTA_OPS_MAGIC)?;
     let op_count =
         usize::try_from(reader.read_u64()?).map_err(|_| DeltaError::ChunkCountOverflow)?;
+    // The count comes from the peer: refuse one the remaining bytes cannot
+    // hold before allocating for it (br-asupersync-w6fnfy F1).
+    if op_count > reader.remaining() / SUBDELTA_OP_MIN_BYTES {
+        return Err(DeltaError::TruncatedManifest);
+    }
     let mut ops = Vec::with_capacity(op_count);
     for _ in 0..op_count {
         let tag = reader.read_u8()?;
@@ -2403,6 +2434,10 @@ impl<'a> ByteReader<'a> {
     fn read_u64_prefixed_bytes(&mut self) -> Result<&'a [u8], DeltaError> {
         let len = usize::try_from(self.read_u64()?).map_err(|_| DeltaError::ChunkSizeOverflow)?;
         self.read_exact(len)
+    }
+
+    fn remaining(&self) -> usize {
+        self.bytes.len().saturating_sub(self.cursor)
     }
 
     fn ensure_remaining_chunks(&self, chunk_count: usize) -> Result<(), DeltaError> {
