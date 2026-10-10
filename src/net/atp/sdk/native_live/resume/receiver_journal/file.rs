@@ -428,9 +428,16 @@ impl Storage {
             payload = compact::encode(&payload)?;
         }
         let additional = 16 + payload.len() as u64 + 32;
-        if !duplicate
-            && (state.records >= self.limits.max_snapshots
-                || state.bytes + additional > self.limits.max_journal_bytes)
+        // Finalizing authorizes the application commit. Its same-size
+        // Committed successor must fit before that irreversible work starts.
+        // Recheck even an identical Finalizing record: an older writer may
+        // have persisted one without leaving terminal capacity. A retry that
+        // changes the attempt count must not consume the reserved record.
+        let required_records = u32::from(!duplicate)
+            + u32::from(checkpoint.phase == ReceiverCheckpointPhase::Finalizing);
+        if required_records > self.limits.max_snapshots.saturating_sub(state.records)
+            || additional * u64::from(required_records)
+                > self.limits.max_journal_bytes.saturating_sub(state.bytes)
         {
             return Err(io::Error::from(io::ErrorKind::StorageFull));
         }
@@ -1265,14 +1272,38 @@ mod tests {
     fn resolve_finalizing_cannot_claim_completion_when_the_terminal_record_does_not_fit() {
         let (journal, data, _) = finalizing_files(
             ReceiverFileLimits {
-                max_snapshots: 4,
+                max_snapshots: 5,
                 ..limits()
             },
             false,
         );
+        // Retain coverage for a Finalizing WAL produced by the old writer,
+        // which admitted this record with only four total snapshot slots.
+        // New appenders refuse that transition before the commit can start.
+        let mut legacy = std::fs::read(&journal).unwrap();
+        legacy[8..12].copy_from_slice(&4_u32.to_be_bytes());
+        let mut previous = hash(&[], &legacy[..64]);
+        legacy[64..HEADER].copy_from_slice(&previous);
+        let mut at = HEADER;
+        while at < legacy.len() {
+            let size = u32::from_be_bytes(legacy[at + 8..at + 12].try_into().unwrap()) as usize;
+            let end = at + 16 + size;
+            previous = hash(&previous, &legacy[at..end]);
+            legacy[end..end + 32].copy_from_slice(&previous);
+            at = end + 32;
+        }
+        std::fs::write(&journal, &legacy).unwrap();
         let history = std::fs::read(&journal).unwrap();
         let mut store = ReceiverJournalFile::open_existing(&journal, &data).unwrap();
         assert_eq!(store.storage.state.lock().records, 4);
+        assert_eq!(
+            store
+                .storage
+                .append(store.checkpoint().unwrap())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::StorageFull
+        );
         assert_eq!(
             store.resolve_finalizing().unwrap_err().kind(),
             io::ErrorKind::StorageFull
@@ -1298,6 +1329,116 @@ mod tests {
             io::ErrorKind::StorageFull
         );
         assert_eq!(std::fs::read(&journal).unwrap(), history);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn finalizing_reserves_terminal_capacity_across_profiles_reopen_and_retry() {
+        for compact in [false, true] {
+            for empty in [false, true] {
+                for byte_limit in [false, true] {
+                    for fits in [false, true] {
+                        let (journal, data) = files();
+                        let intent = journal.with_extension("intent");
+                        let (start, pending, stable) = checkpoints();
+                        let header = if compact { 128 } else { 96 };
+                        // The terminal records carry no pending payload. These
+                        // independent format bounds include every frame/checksum.
+                        let terminal_bytes = 365;
+                        let epoch_bytes = if compact { 477 } else { 453 };
+                        let complete_bytes = header
+                            + 3 * terminal_bytes
+                            + if empty { 0 } else { epoch_bytes + terminal_bytes };
+                        let complete_records = if empty { 3 } else { 5 };
+                        let limits = ReceiverFileLimits {
+                            max_data_bytes: 64,
+                            max_snapshots: complete_records - u32::from(!fits && !byte_limit),
+                            max_journal_bytes: complete_bytes - u64::from(!fits && byte_limit),
+                        };
+                        let store = if compact {
+                            ReceiverJournalFile::create_new_compact(
+                                &journal,
+                                &data,
+                                &intent,
+                                ReceiverCompactFileLimits {
+                                    max_data_bytes: limits.max_data_bytes,
+                                    max_snapshots: limits.max_snapshots,
+                                    max_journal_bytes: limits.max_journal_bytes,
+                                },
+                            )
+                        } else {
+                            ReceiverJournalFile::create_new(&journal, &data, limits)
+                        }
+                        .unwrap();
+                        store.storage.append(start.clone()).unwrap();
+                        let mut finalizing = if empty {
+                            start
+                        } else {
+                            store.storage.append(pending).unwrap();
+                            append_data(&store, b"abcdefgh");
+                            store.storage.append(stable.clone()).unwrap();
+                            stable
+                        };
+                        finalizing.phase = ReceiverCheckpointPhase::Finalizing;
+                        let before = std::fs::read(&journal).unwrap();
+                        let result = store.storage.append(finalizing.clone());
+                        if fits {
+                            result.unwrap();
+                            let admitted = std::fs::read(&journal).unwrap();
+                            // Identical retries reuse Finalizing; an attempt
+                            // update cannot steal its one reserved terminal slot.
+                            store.storage.append(finalizing.clone()).unwrap();
+                            let mut retry = finalizing.clone();
+                            retry.used += 1;
+                            assert_eq!(
+                                store.storage.append(retry).unwrap_err().kind(),
+                                io::ErrorKind::StorageFull
+                            );
+                            assert_eq!(std::fs::read(&journal).unwrap(), admitted);
+                        } else {
+                            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::StorageFull);
+                            assert_eq!(std::fs::read(&journal).unwrap(), before);
+                            assert!(!store.storage.state.lock().poisoned);
+                            assert_eq!(
+                                store.observer().checkpoint().unwrap().phase(),
+                                ReceiverCheckpointPhase::Receiving
+                            );
+                        }
+                        drop(store);
+                        let mut reopened = if compact {
+                            ReceiverJournalFile::open_existing_compact(&journal, &data, &intent)
+                        } else {
+                            ReceiverJournalFile::open_existing(&journal, &data)
+                        }
+                        .unwrap();
+                        if fits {
+                            assert_eq!(
+                                reopened.resolve_finalizing().unwrap(),
+                                finalizing.receipt()
+                            );
+                            let complete = std::fs::read(&journal).unwrap();
+                            assert_eq!(complete.len() as u64, complete_bytes);
+                            assert_eq!(reopened.storage.state.lock().records, complete_records);
+                            assert_eq!(
+                                reopened.resolve_finalizing().unwrap(),
+                                finalizing.receipt()
+                            );
+                            assert_eq!(std::fs::read(&journal).unwrap(), complete);
+                        } else {
+                            assert_eq!(
+                                reopened.storage.append(finalizing).unwrap_err().kind(),
+                                io::ErrorKind::StorageFull
+                            );
+                            assert_eq!(std::fs::read(&journal).unwrap(), before);
+                            assert_eq!(
+                                reopened.checkpoint().unwrap().phase(),
+                                ReceiverCheckpointPhase::Receiving
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
