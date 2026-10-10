@@ -217,7 +217,7 @@ fn discard_contained<M>(msg: M) -> bool {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(msg))) {
         Ok(()) => true,
         Err(payload) => {
-            std::mem::forget(payload);
+            forget_contained_drop_panic(payload);
             false
         }
     }
@@ -1756,6 +1756,19 @@ where
             }
         }
     }
+}
+
+/// Logs a panic contained while dropping a buffered message, then leaks its
+/// payload, because dropping the payload can panic too. An unresolved
+/// obligation left in an aborted actor's mailbox panics this way (ASUP-E101);
+/// without this the leak would show only as an abort-path trace event
+/// (br-asupersync-pk44qd S3).
+fn forget_contained_drop_panic(payload: Box<dyn std::any::Any + Send>) {
+    crate::tracing_compat::error!(
+        panic = %crate::cx::scope::payload_to_string(&payload),
+        "a buffered actor message panicked while being dropped; the panic was contained"
+    );
+    std::mem::forget(payload);
 }
 
 #[cfg(test)]
@@ -3417,6 +3430,47 @@ mod tests {
             Err(_) => panic!("a buffered message's destructor panic escaped the actor task"),
         }
         crate::test_complete!("a_panicking_buffered_message_does_not_replace_a_supervised_crash");
+    }
+
+    /// A contained destructor panic (an unresolved obligation's ASUP-E101, for
+    /// one) must still be visible: it is logged at error level with its message.
+    #[cfg(feature = "tracing-integration")]
+    #[test]
+    fn a_contained_buffered_message_drop_panic_is_logged() {
+        #[derive(Clone, Default)]
+        struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("capture lock").extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        struct PanicOnDrop;
+        impl Drop for PanicOnDrop {
+            fn drop(&mut self) {
+                panic!("buffered message destructor");
+            }
+        }
+
+        let capture = Capture::default();
+        let writer = capture.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        let dropped_cleanly =
+            tracing::subscriber::with_default(subscriber, || discard_contained(PanicOnDrop));
+        assert!(!dropped_cleanly, "the destructor panicked");
+        let log =
+            String::from_utf8(capture.0.lock().expect("capture lock").clone()).expect("utf-8 log");
+        assert!(
+            log.contains("panicked while being dropped")
+                && log.contains("buffered message destructor"),
+            "the contained panic is logged with its message: {log:?}"
+        );
     }
 
     #[test]

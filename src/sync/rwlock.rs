@@ -205,9 +205,9 @@ struct State {
 ///
 /// # Poisoning
 ///
-/// If a panic occurs while holding a **write** guard, the lock is poisoned.
-/// Subsequent acquisition attempts will return `RwLockError::Poisoned`.
-/// Read guards do not poison the lock since they cannot corrupt data.
+/// A panic while a **write** guard is held poisons the lock: later acquisitions return
+/// `RwLockError::Poisoned`. Read guards never poison. A write guard acquired while its thread was
+/// already panicking never poisons, even if it is moved to another thread or task and panics there.
 #[derive(Debug)]
 pub struct RwLock<T> {
     state: ParkingMutex<State>,
