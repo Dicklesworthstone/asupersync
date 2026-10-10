@@ -1,13 +1,12 @@
 //! Buffer service layer.
 //!
-//! The [`BufferLayer`] wraps a service with a bounded request buffer. When the
-//! inner service applies backpressure, requests are queued in the buffer up to
-//! a configurable capacity. This decouples request submission from processing,
-//! allowing callers to submit work without blocking on the inner service's
-//! readiness.
+//! The [`BufferLayer`] wraps a service with bounded concurrent in-flight capacity.
+//! When the buffer capacity is reached, `poll_ready` returns `Poll::Pending` until
+//! active requests complete and release their slots.
 //!
-//! The buffer is implemented as a bounded MPSC channel. A background worker
-//! drains the channel and dispatches requests to the inner service.
+//! Unlike Tower's MPSC-channel worker design, this layer uses a slot-counted
+//! coordinator with direct polling on the inner service, retaining slots until
+//! response completion to bound in-flight load without detached worker threads.
 //!
 //! # Example
 //!
@@ -35,8 +34,8 @@ const DEFAULT_CAPACITY: usize = 16;
 
 /// A layer that wraps a service with a bounded request buffer.
 ///
-/// Requests are queued and dispatched to the inner service by a worker.
-/// When the buffer is full, `poll_ready` returns `Poll::Pending`.
+/// Bounded slots are acquired on readiness and held until the request completes.
+/// When all slots are in use, `poll_ready` returns `Poll::Pending`.
 #[derive(Debug, Clone)]
 pub struct BufferLayer {
     capacity: usize,
