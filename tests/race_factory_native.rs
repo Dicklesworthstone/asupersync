@@ -678,6 +678,45 @@ fn timeout_waits_for_both_parked_losers_to_finish_cleanup() {
 }
 
 #[test]
+fn timeout_race_preserves_external_cancellation_cause() {
+    for workers in [1, 2] {
+        native(workers, move |cx| async move {
+            let seen = Arc::new(Witness::default());
+            let (_sender, receiver) = mpsc::channel(1);
+            let s = Arc::clone(&seen);
+            let mut owner = cx
+                .spawn(move |owner| async move {
+                    owner
+                        .race_drained_with_timeout(
+                            Duration::from_secs(3600),
+                            vec![boxed(move |child| owner_cancel_branch(child, receiver, s, false))],
+                        )
+                        .await
+                })
+                .unwrap();
+            seen.changed
+                .wait_until(|| seen.parked.load(Ordering::Acquire))
+                .await;
+            let shutdown = CancelReason::shutdown();
+            owner.abort_with_reason(shutdown.clone());
+            seen.changed
+                .wait_until(|| seen.cancelled.load(Ordering::Acquire))
+                .await;
+            seen.release();
+            let joined = Box::pin(owner.join(&cx));
+            let outcome = joined.await.expect("join owner");
+            match outcome {
+                Err(JoinError::Cancelled(reason)) => {
+                    assert_eq!(reason.kind, CancelKind::Shutdown);
+                }
+                other => panic!("expected Cancelled(Shutdown), got {other:?}"),
+            }
+            assert!(seen.retired.load(Ordering::Acquire));
+        });
+    }
+}
+
+#[test]
 fn loser_cleanup_panic_is_not_hidden_by_a_successful_winner() {
     for workers in [1, 2] {
         native(workers, move |cx| async move {

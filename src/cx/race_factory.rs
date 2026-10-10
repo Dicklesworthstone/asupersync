@@ -136,6 +136,7 @@ impl BranchRegions {
 enum Timed<T> {
     Value(T),
     Expired,
+    Cancelled(CancelReason),
     // A user branch that completed at or after the deadline. It lost to the
     // deadline even when the engine selected it, so its region is drained like
     // every other loser's (br-asupersync-inleqi M1).
@@ -557,18 +558,24 @@ impl Cx<cap::All> {
             // user branch wins, or depend on Sleep's ambient cancellation.
             let mut sleep = std::pin::pin!(Sleep::with_timer_driver(deadline, timer));
             let mut cancelled = std::pin::pin!(child.cancelled());
-            poll_fn(|task| {
-                if cancelled.as_mut().poll(task).is_ready() || sleep.as_mut().poll(task).is_ready() {
-                    Poll::Ready(())
+            let outcome = poll_fn(|task| {
+                if cancelled.as_mut().poll(task).is_ready() {
+                    let reason = child
+                        .cancel_reason()
+                        .unwrap_or_else(CancelReason::shutdown);
+                    Poll::Ready(Timed::Cancelled(reason))
+                } else if sleep.as_mut().poll(task).is_ready() {
+                    Poll::Ready(Timed::Expired)
                 } else {
                     Poll::Pending
                 }
             }).await;
-            Timed::Expired
+            outcome
         })));
         let keeps_region = |timed: &Timed<T>| !matches!(timed, Timed::Late);
         match self.race_drained_settled(timed, keeps_region).await? {
             Timed::Value(value) => Ok(value),
+            Timed::Cancelled(reason) => Err(JoinError::Cancelled(reason)),
             Timed::Expired | Timed::Late => Err(JoinError::Cancelled(CancelReason::timeout())),
         }
     }
