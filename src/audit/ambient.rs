@@ -719,6 +719,31 @@ fn ambient_raw_string_start(bytes: &[u8], idx: usize) -> Option<(usize, usize)> 
     }
 }
 
+/// Byte length of the char literal starting at the quote at `idx` (`'x'`,
+/// `'"'`, `'\''`, `'\u{1F600}'`; a byte literal's `b` is ordinary code), or
+/// `None` for a lifetime or loop label (`'a`). Without this, the quote in
+/// `'"'` opened a string that hid the rest of the file from the scan.
+fn ambient_char_literal_len(line: &str, idx: usize) -> Option<usize> {
+    let rest = line.get(idx + 1..)?;
+    let first = rest.chars().next()?;
+    let close = if first == '\\' {
+        // The escaped character comes first; the closing quote follows it
+        // (or the `\x..` / `\u{..}` digits).
+        let at = rest.get(2..)?.find('\'')?;
+        if at > 8 {
+            return None;
+        }
+        2 + at
+    } else {
+        let close = first.len_utf8();
+        if !rest.get(close..)?.starts_with('\'') {
+            return None;
+        }
+        close
+    };
+    Some(1 + close + 1)
+}
+
 #[derive(Default)]
 struct AmbientDetectionSanitizerState {
     in_block_comment: bool,
@@ -783,6 +808,12 @@ fn strip_comments_and_literals_for_detection(
         if let Some((next_idx, hash_count)) = ambient_raw_string_start(bytes, idx) {
             state.raw_hashes = Some(hash_count);
             idx = next_idx;
+            continue;
+        }
+        if bytes[idx] == b'\''
+            && let Some(len) = ambient_char_literal_len(line, idx)
+        {
+            idx += len;
             continue;
         }
         if bytes[idx] == b'"' {
@@ -1596,7 +1627,7 @@ fn test_function() {
     // dials a resolved address on a second path, through a configured
     // dns_resolver, with the same TcpStream::connect_socket_addr. No scanner
     // exemption or detection pattern changed.
-    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 827;
+    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 835;
 
     fn src_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
@@ -1723,6 +1754,12 @@ fn test_function() {
             if let Some((next_idx, hash_count)) = raw_string_start(bytes, idx) {
                 state.raw_hashes = Some(hash_count);
                 idx = next_idx;
+                continue;
+            }
+            if bytes[idx] == b'\''
+                && let Some(len) = super::ambient_char_literal_len(line, idx)
+            {
+                idx += len;
                 continue;
             }
             if bytes[idx] == b'"' {
@@ -2337,6 +2374,34 @@ mod tests {
         assert!(
             !text.iter().any(|l| l.contains("test_code")),
             "Should exclude #[cfg(test)] module code"
+        );
+    }
+
+    // br-asupersync-qw9klo: the quote in a '"' char literal opened a string,
+    // so every line up to the next double quote was skipped and its ambient
+    // authority never reported (most of messaging/nats.rs).
+    #[test]
+    fn a_double_quote_char_literal_does_not_hide_the_following_lines() {
+        let source = r#"fn build(connect: &mut String, addr: &str) {
+    connect.push('"');
+    connect.push('\'');
+    let _stream = TcpStream::connect(addr);
+}
+fn keep<'a>(s: &'a str) -> &'a str { s }
+"#;
+        let lines = non_test_lines(source);
+        let text: Vec<&str> = lines.iter().map(|(_, l)| l.as_str()).collect();
+        assert!(
+            text.iter().any(|l| l.contains("TcpStream::connect")),
+            "the line after the char literals is scanned: {text:?}"
+        );
+        assert!(
+            text.iter().any(|l| l.contains("fn keep<'a>")),
+            "lifetimes are code: {text:?}"
+        );
+        assert!(
+            !detect_ambient_violations(source).is_empty(),
+            "the detection path reports the TcpStream::connect line too"
         );
     }
 
