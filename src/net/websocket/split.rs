@@ -317,6 +317,7 @@ async fn write_owned_buf_with_permit<IO: AsyncWrite + Unpin>(
     shared: &Arc<Mutex<WebSocketShared<IO>>>,
     op_cx: Option<&Cx>,
     buf: &mut BytesMut,
+    require_open: bool,
 ) -> Result<(), WsError> {
     use std::future::poll_fn;
 
@@ -329,6 +330,16 @@ async fn write_owned_buf_with_permit<IO: AsyncWrite + Unpin>(
     check_shared_outbound_write_budget(shared, 0, buf.len())?;
 
     let is_open = shared.lock().close_handshake.is_open();
+    // The read half can receive and queue a Close while this send waits for
+    // the permit or flushes an earlier frame. Recheck admission after both
+    // waits: otherwise the flush sends our Close echo and this new DATA frame
+    // follows it on the wire (br-asupersync-fmw87f L3).
+    if require_open && !is_open {
+        return Err(WsError::Io(io::Error::new(
+            io::ErrorKind::NotConnected,
+            "connection is closing",
+        )));
+    }
     let n = poll_fn(|poll_cx| {
         if write_path_cancelled(op_cx, is_open) {
             return Poll::Ready(Err(std::io::Error::new(
@@ -704,20 +715,38 @@ where
                         self.shared.lock().heartbeat.received_pong(&frame.payload);
                     }
                     Opcode::Close => {
-                        // Handle close handshake
-                        let response =
-                            { self.shared.lock().close_handshake.receive_close(&frame)? };
+                        let flush_close = {
+                            let shared = &mut *self.shared.lock();
+                            let close_was_sent =
+                                shared.close_handshake.state() == CloseState::CloseSent;
+                            let response = shared.close_handshake.receive_close(&frame)?;
+                            if let Some(response_frame) = response {
+                                // CloseReceived must never be visible without
+                                // its retained echo: the write half may retry
+                                // close concurrently as soon as this lock drops.
+                                shared.codec.encode_with_entropy(
+                                    &response_frame,
+                                    &mut shared.write_buf,
+                                    cx.entropy(),
+                                )?;
+                                true
+                            } else {
+                                // A peer Close can cross a dropped local close
+                                // before its first byte was written. Finishing
+                                // the handshake must still flush our retained
+                                // Close, including a prior cancelled retry.
+                                close_was_sent
+                                    || (shared.close_handshake.peer_reason().is_some()
+                                        && !shared.write_buf.is_empty())
+                            }
+                        };
 
-                        if let Some(response_frame) = response {
+                        if flush_close {
                             let deadline = self.shared.lock().heartbeat.write_deadline();
                             let send_result = super::heartbeat::wait_until(
                                 cx,
                                 deadline,
-                                self.send_frame_internal_with_entropy(
-                                    Some(cx),
-                                    &response_frame,
-                                    cx.entropy(),
-                                ),
+                                flush_write_buf_with_cx(&self.shared, Some(cx)),
                             )
                             .await;
                             if send_result?.is_none() {
@@ -1043,27 +1072,45 @@ where
         reason: CloseReason,
     ) -> Result<(), WsError> {
         let close_state = {
-            let shared = self.shared.lock();
-            shared.close_handshake.state()
+            let shared = &mut *self.shared.lock();
+            let state = shared.close_handshake.state();
+            if state == CloseState::Closed
+                && (shared.write_buf.is_empty() || shared.close_handshake.peer_reason().is_none())
+            {
+                return Ok(());
+            }
+            if state == CloseState::Open {
+                let mut encoded = BytesMut::new();
+                shared.codec.encode_with_entropy(
+                    &reason.to_frame(),
+                    &mut encoded,
+                    shared.entropy.as_ref(),
+                )?;
+                if let Err(err) = shared
+                    .config
+                    .check_outbound_write_budget(shared.write_buf.len(), encoded.len())
+                {
+                    close_shared_after_outbound_backpressure(shared);
+                    return Err(err);
+                }
+
+                // Publish CloseSent and its retained bytes together, before
+                // awaiting either the writer permit or the first write. A
+                // dropped close is then retried by flushing this same frame,
+                // including after reunite (br-asupersync-fmw87f M2).
+                let _ = shared.close_handshake.initiate(reason);
+                shared.write_buf.extend_from_slice(&encoded);
+            }
+            state
         };
+
+        // The permit still serializes the wire. An active writer retains any
+        // partially committed DATA tail ahead of this queued Close. A crossing
+        // peer Close may have marked the handshake Closed before a dropped
+        // local close's bytes were flushed, so that state can still need I/O.
+        flush_write_buf_with_cx(&self.shared, op_cx).await?;
         if close_state == CloseState::CloseReceived {
-            flush_write_buf_with_cx(&self.shared, op_cx).await?;
             self.shared.lock().close_handshake.mark_response_sent();
-            return Ok(());
-        }
-
-        if close_state == CloseState::CloseSent {
-            flush_write_buf_with_cx(&self.shared, op_cx).await?;
-            return Ok(());
-        }
-
-        let frame = {
-            let mut shared = self.shared.lock();
-            shared.close_handshake.initiate(reason)
-        };
-
-        if let Some(f) = frame {
-            self.send_frame_with_cx(op_cx, &f).await?;
         }
         Ok(())
     }
@@ -1091,7 +1138,13 @@ where
                 .codec
                 .encode_with_entropy(frame, &mut encoded, entropy)?;
         }
-        write_owned_buf_with_permit(&self.shared, op_cx, &mut encoded).await
+        write_owned_buf_with_permit(
+            &self.shared,
+            op_cx,
+            &mut encoded,
+            !frame.opcode.is_control(),
+        )
+        .await
     }
 
     /// Internal: send a single frame.
@@ -1890,6 +1943,367 @@ mod tests {
                 matches!(err, WsError::Io(ref e) if e.kind() == io::ErrorKind::NotConnected),
                 "expected NotConnected after close initiation, got {err:?}"
             );
+        });
+    }
+
+    #[test]
+    fn split_close_dropped_before_first_write_retains_original_frame() {
+        future::block_on(async {
+            for server_role in [false, true] {
+                for via_send in [false, true] {
+                    let entropy: Arc<dyn EntropySource> =
+                        Arc::new(FixedEntropy([0xD2, 0x10, 0x44, 0x9A]));
+                    let ws = WebSocket::from_upgraded_with_entropy(
+                        TestIo::new(vec![]).with_pending_first_write(),
+                        WebSocketConfig::default(),
+                        Arc::clone(&entropy),
+                    );
+                    let (read, mut write) = ws.split();
+                    if server_role {
+                        read.shared.lock().codec = FrameCodec::server();
+                    }
+                    let cx = test_cx_with_entropy(Arc::clone(&entropy));
+                    let reason = CloseReason::with_text(super::super::CloseCode::GoingAway, "first");
+                    let expected = if server_role {
+                        encode_server_frame(reason.to_frame())
+                    } else {
+                        encode_client_frame_with_entropy(&reason.to_frame(), entropy.as_ref())
+                    };
+                    let mut close = Box::pin(async {
+                        if via_send {
+                            write.send(&cx, Message::Close(Some(reason))).await
+                        } else {
+                            write.close(reason).await
+                        }
+                    });
+                    let waker = Waker::noop().clone();
+                    let mut task = Context::from_waker(&waker);
+                    assert!(
+                        close.as_mut().poll(&mut task).is_pending(),
+                        "close must reach the first transport write"
+                    );
+                    {
+                        let shared = read.shared.lock();
+                        assert!(shared.writer_active);
+                        assert!(shared.io.written.is_empty());
+                        assert_eq!(shared.close_handshake.state(), CloseState::CloseSent);
+                    }
+                    drop(close);
+                    {
+                        let shared = read.shared.lock();
+                        assert_eq!(&shared.write_buf[..], expected.as_slice());
+                        assert!(!shared.writer_active);
+                        assert!(shared.writer_waiters.is_empty());
+                    }
+
+                    write
+                        .close(CloseReason::normal())
+                        .await
+                        .expect("retry must flush the retained Close");
+                    let ws = read.reunite(write).expect("split halves must reunite");
+                    assert_eq!(ws.close_state(), CloseState::CloseSent);
+                    assert!(ws.write_buf.is_empty());
+                    assert_eq!(
+                        ws.io.written, expected,
+                        "retry sends the original reason and mask exactly once"
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn split_close_dropped_waiting_for_writer_survives_reunite() {
+        future::block_on(async {
+            let entropy: Arc<dyn EntropySource> =
+                Arc::new(FixedEntropy([0x11, 0x22, 0x33, 0x44]));
+            let ws = WebSocket::from_upgraded_with_entropy(
+                TestIo::new(vec![]),
+                WebSocketConfig::default(),
+                Arc::clone(&entropy),
+            );
+            let (read, mut write) = ws.split();
+            let cx = test_cx_with_entropy(Arc::clone(&entropy));
+            let permit = acquire_write_permit(&read.shared).await;
+            let reason = CloseReason::going_away();
+            let expected = encode_client_frame_with_entropy(&reason.to_frame(), entropy.as_ref());
+            let mut close = Box::pin(write.send(&cx, Message::Close(Some(reason))));
+            let waker = Waker::noop().clone();
+            let mut task = Context::from_waker(&waker);
+            assert!(close.as_mut().poll(&mut task).is_pending());
+            {
+                let shared = read.shared.lock();
+                assert_eq!(shared.writer_waiters.len(), 1);
+                assert_eq!(shared.close_handshake.state(), CloseState::CloseSent);
+                assert!(shared.io.written.is_empty());
+            }
+            drop(close);
+            assert!(read.shared.lock().writer_waiters.is_empty());
+            drop(permit);
+
+            let mut ws = read.reunite(write).expect("no permit or waiter may leak");
+            assert_eq!(&ws.write_buf[..], expected.as_slice());
+            ws.send(&cx, Message::Close(Some(CloseReason::normal())))
+                .await
+                .expect("unsplit retry must flush the retained split Close");
+            assert!(ws.write_buf.is_empty());
+            assert_eq!(ws.io.written, expected);
+        });
+    }
+
+    #[test]
+    fn split_close_dropped_during_prior_frame_flush_preserves_wire_order() {
+        future::block_on(async {
+            let ws = WebSocket::from_upgraded(
+                TestIo::new(vec![]).with_partial_first_write(1),
+                WebSocketConfig::default(),
+            );
+            let (read, mut write) = ws.split();
+            read.shared.lock().codec = FrameCodec::server();
+            let cx = Cx::for_testing();
+            let message = Message::text("already started");
+            let data = encode_server_frame(Frame::from(message.clone()));
+            let mut send = Box::pin(write.send(&cx, message));
+            let waker = Waker::noop().clone();
+            let mut task = Context::from_waker(&waker);
+            assert!(send.as_mut().poll(&mut task).is_pending());
+            drop(send);
+            {
+                let mut shared = read.shared.lock();
+                assert_eq!(&shared.io.written[..], &data[..1]);
+                assert_eq!(&shared.write_buf[..], &data[1..]);
+                shared.io.pending_first_write = true;
+            }
+
+            let close_frame = encode_server_frame(CloseReason::going_away().to_frame());
+            let mut close = Box::pin(write.close(CloseReason::going_away()));
+            assert!(close.as_mut().poll(&mut task).is_pending());
+            drop(close);
+            let mut retained = data[1..].to_vec();
+            retained.extend_from_slice(&close_frame);
+            {
+                let shared = read.shared.lock();
+                assert_eq!(&shared.write_buf[..], retained.as_slice());
+                assert!(!shared.writer_active);
+                assert!(shared.writer_waiters.is_empty());
+            }
+
+            write.close(CloseReason::normal()).await.unwrap();
+            let ws = read.reunite(write).unwrap();
+            let mut expected = data;
+            expected.extend_from_slice(&close_frame);
+            assert_eq!(ws.io.written, expected, "DATA tail must precede Close");
+            assert!(ws.write_buf.is_empty());
+        });
+    }
+
+    #[test]
+    fn split_crossing_peer_close_flushes_a_dropped_local_close() {
+        future::block_on(async {
+            for drop_crossing_recv in [false, true] {
+                let peer_close = encode_client_frame_with_entropy(
+                    &Frame::close(Some(1000), None),
+                    &FixedEntropy([0x11, 0x22, 0x33, 0x44]),
+                );
+                let ws = WebSocket::from_upgraded(
+                    TestIo::new(peer_close).with_pending_first_write(),
+                    WebSocketConfig::default(),
+                );
+                let (mut read, mut write) = ws.split();
+                read.shared.lock().codec = FrameCodec::server();
+                let cx = Cx::for_testing();
+                let expected = encode_server_frame(CloseReason::going_away().to_frame());
+                let waker = Waker::noop().clone();
+                let mut task = Context::from_waker(&waker);
+                let mut close = Box::pin(write.close(CloseReason::going_away()));
+                assert!(close.as_mut().poll(&mut task).is_pending());
+                drop(close);
+                {
+                    let mut state = read.shared.lock();
+                    assert_eq!(state.close_handshake.state(), CloseState::CloseSent);
+                    assert!(state.io.written.is_empty());
+                    assert_eq!(&state.write_buf[..], expected.as_slice());
+                    state.io.pending_first_write = drop_crossing_recv;
+                }
+
+                if drop_crossing_recv {
+                    let mut recv = Box::pin(read.recv(&cx));
+                    assert!(
+                        recv.as_mut().poll(&mut task).is_pending(),
+                        "the crossing peer Close must flush our pending Close"
+                    );
+                    drop(recv);
+                    {
+                        let state = read.shared.lock();
+                        assert_eq!(state.close_handshake.state(), CloseState::Closed);
+                        assert!(state.io.written.is_empty());
+                        assert_eq!(&state.write_buf[..], expected.as_slice());
+                        assert!(!state.writer_active);
+                        assert!(state.writer_waiters.is_empty());
+                    }
+                    write
+                        .close(CloseReason::normal())
+                        .await
+                        .expect("Closed can still retain an unsent local Close");
+                } else {
+                    assert!(matches!(read.recv(&cx).await, Ok(Some(Message::Close(_)))));
+                }
+
+                let ws = read.reunite(write).unwrap();
+                assert!(ws.is_closed());
+                assert!(ws.write_buf.is_empty());
+                assert_eq!(
+                    ws.io.written, expected,
+                    "send the original local Close exactly once, without a second echo"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn split_data_waiting_for_writer_cannot_follow_close_echo() {
+        future::block_on(async {
+            let peer_close = encode_client_frame_with_entropy(
+                &Frame::close(Some(1000), None),
+                &FixedEntropy([0x11, 0x22, 0x33, 0x44]),
+            );
+            let ws = WebSocket::from_upgraded(TestIo::new(peer_close), WebSocketConfig::default());
+            let (mut read, mut write) = ws.split();
+            read.shared.lock().codec = FrameCodec::server();
+            let shared = Arc::clone(&read.shared);
+            let cx = Cx::for_testing();
+            let permit = acquire_write_permit(&shared).await;
+            let waker = Waker::noop().clone();
+            let mut task = Context::from_waker(&waker);
+            let mut send = Box::pin(write.send(&cx, Message::text("too late")));
+            assert!(send.as_mut().poll(&mut task).is_pending());
+            assert!(shared.lock().close_handshake.is_open());
+            let mut recv = Box::pin(read.recv(&cx));
+            assert!(recv.as_mut().poll(&mut task).is_pending());
+            {
+                let state = shared.lock();
+                assert_eq!(state.writer_waiters.len(), 2);
+                assert_eq!(state.close_handshake.state(), CloseState::CloseReceived);
+                assert!(!state.write_buf.is_empty());
+                assert!(state.io.written.is_empty());
+            }
+            drop(permit);
+
+            let (sent, received) = future::zip(send, recv).await;
+            assert!(
+                matches!(sent, Err(WsError::Io(ref err)) if err.kind() == io::ErrorKind::NotConnected),
+                "queued DATA must be refused once Close is received: {sent:?}"
+            );
+            assert!(matches!(received, Ok(Some(Message::Close(_)))));
+            {
+                let state = shared.lock();
+                assert!(!state.writer_active);
+                assert!(state.writer_waiters.is_empty());
+                assert!(state.write_buf.is_empty());
+            }
+            drop(shared);
+            let ws = read.reunite(write).unwrap();
+            assert!(ws.is_closed());
+            assert_eq!(
+                ws.io.written,
+                encode_server_frame(Frame::close(Some(1000), None)),
+                "the wire must contain only the Close echo"
+            );
+        });
+    }
+
+    #[test]
+    fn split_data_flushing_prior_tail_cannot_follow_close_echo() {
+        future::block_on(async {
+            let peer_close = encode_client_frame_with_entropy(
+                &Frame::close(Some(1000), None),
+                &FixedEntropy([0x11, 0x22, 0x33, 0x44]),
+            );
+            let ws = WebSocket::from_upgraded(
+                TestIo::new(peer_close).with_partial_first_write(1),
+                WebSocketConfig::default(),
+            );
+            let (mut read, mut write) = ws.split();
+            read.shared.lock().codec = FrameCodec::server();
+            let shared = Arc::clone(&read.shared);
+            let cx = Cx::for_testing();
+            let first = Message::text("already started");
+            let expected_first = encode_server_frame(Frame::from(first.clone()));
+            let waker = Waker::noop().clone();
+            let mut task = Context::from_waker(&waker);
+            let mut first_send = Box::pin(write.send(&cx, first));
+            assert!(first_send.as_mut().poll(&mut task).is_pending());
+            drop(first_send);
+            {
+                let mut state = shared.lock();
+                assert_eq!(&state.io.written[..], &expected_first[..1]);
+                assert_eq!(&state.write_buf[..], &expected_first[1..]);
+                state.io.pending_first_write = true;
+            }
+
+            let mut late_send = Box::pin(write.send(&cx, Message::text("too late")));
+            assert!(late_send.as_mut().poll(&mut task).is_pending());
+            assert!(shared.lock().writer_active);
+            let mut recv = Box::pin(read.recv(&cx));
+            assert!(recv.as_mut().poll(&mut task).is_pending());
+            assert_eq!(shared.lock().close_handshake.state(), CloseState::CloseReceived);
+            let (sent, received) = future::zip(late_send, recv).await;
+            assert!(
+                matches!(sent, Err(WsError::Io(ref err)) if err.kind() == io::ErrorKind::NotConnected),
+                "admission must be checked after flushing the prior tail: {sent:?}"
+            );
+            assert!(matches!(received, Ok(Some(Message::Close(_)))));
+            {
+                let state = shared.lock();
+                assert!(!state.writer_active);
+                assert!(state.writer_waiters.is_empty());
+            }
+            drop(shared);
+            let ws = read.reunite(write).unwrap();
+            let mut expected = expected_first;
+            expected.extend_from_slice(&encode_server_frame(Frame::close(Some(1000), None)));
+            assert_eq!(ws.io.written, expected);
+            assert!(ws.write_buf.is_empty());
+            assert!(ws.is_closed());
+        });
+    }
+
+    #[test]
+    fn split_close_budget_rejection_does_not_lose_a_close_in_close_sent() {
+        future::block_on(async {
+            for policy in [
+                super::super::SlowConsumerPolicy::Wait,
+                super::super::SlowConsumerPolicy::CloseWithTryAgainLater,
+            ] {
+                let config = WebSocketConfig::default()
+                    .max_pending_write_bytes(4)
+                    .slow_consumer_policy(policy);
+                let ws = WebSocket::from_upgraded(TestIo::new(vec![]), config);
+                let (read, mut write) = ws.split();
+                let err = write
+                    .close(CloseReason::normal())
+                    .await
+                    .expect_err("a masked Close cannot fit within four bytes");
+                assert!(matches!(
+                    err,
+                    WsError::OutboundBufferFull {
+                        pending: 0,
+                        attempted: 8,
+                        max: 4,
+                        ..
+                    }
+                ));
+                let expected_state = match policy {
+                    super::super::SlowConsumerPolicy::Wait => CloseState::Open,
+                    super::super::SlowConsumerPolicy::CloseWithTryAgainLater => CloseState::Closed,
+                };
+                assert_eq!(write.close_state(), expected_state);
+                let state = read.shared.lock();
+                assert!(state.write_buf.is_empty());
+                assert!(state.io.written.is_empty());
+                assert!(!state.writer_active);
+                assert!(state.writer_waiters.is_empty());
+            }
         });
     }
 
