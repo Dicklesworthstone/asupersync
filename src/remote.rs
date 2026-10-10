@@ -9064,6 +9064,7 @@ impl fmt::Display for RemoteComputationConnectionError {
 pub struct RemoteComputationServiceConfig {
     wire_limits: RemoteServiceWireLimits,
     max_connections: Option<usize>,
+    max_connections_per_ip: Option<u32>,
     initial_frame_timeout: Duration,
     drain_timeout: Duration,
     idempotency_retention: Duration,
@@ -9078,6 +9079,7 @@ impl RemoteComputationServiceConfig {
         Self {
             wire_limits: RemoteServiceWireLimits::new(DEFAULT_REMOTE_SERVICE_MAX_FRAME_BYTES),
             max_connections: Some(256),
+            max_connections_per_ip: None,
             initial_frame_timeout: DEFAULT_REMOTE_SERVICE_INITIAL_FRAME_TIMEOUT,
             drain_timeout: Duration::from_secs(30),
             idempotency_retention: DEFAULT_REMOTE_SERVICE_IDEMPOTENCY_RETENTION,
@@ -9097,6 +9099,22 @@ impl RemoteComputationServiceConfig {
     #[must_use]
     pub const fn with_max_connections(mut self, max_connections: Option<usize>) -> Self {
         self.max_connections = max_connections;
+        self
+    }
+
+    /// Sets the simultaneous connection cap for each source IP address.
+    ///
+    /// Admission happens before TLS, so unauthenticated connections stalled in
+    /// the handshake count against this cap. The slot is retained through the
+    /// connection task's cleanup and returned when its connection guard drops.
+    /// This is independent of authenticated peer and computation quotas.
+    ///
+    /// `None` (the default) imposes no per-IP cap; `Some(0)` refuses every
+    /// connection. The listener-wide cap still applies. Choose a limit that
+    /// accommodates clients sharing a NAT or proxy address.
+    #[must_use]
+    pub const fn with_max_connections_per_ip(mut self, max_connections: Option<u32>) -> Self {
+        self.max_connections_per_ip = max_connections;
         self
     }
 
@@ -9138,6 +9156,12 @@ impl RemoteComputationServiceConfig {
     #[must_use]
     pub const fn max_connections(self) -> Option<usize> {
         self.max_connections
+    }
+
+    /// Simultaneous source-IP connection cap, including TLS handshakes.
+    #[must_use]
+    pub const fn max_connections_per_ip(self) -> Option<u32> {
+        self.max_connections_per_ip
     }
 
     /// Deadline for an authenticated peer to send its first complete frame.
@@ -9240,7 +9264,7 @@ impl RemoteComputationServiceReport {
         self.accepted_connections
     }
 
-    /// Accepted sockets refused by the listener-wide capacity/drain gate.
+    /// Accepted sockets refused by the listener-wide, source-IP, or drain gate.
     #[must_use]
     pub const fn capacity_rejections(&self) -> u64 {
         self.capacity_rejections
@@ -9415,7 +9439,8 @@ impl RemoteComputationService {
             return Err(RemoteComputationListenerError::InvalidIdempotencyCapacity);
         }
         let shutdown_signal = ShutdownSignal::new();
-        let connections = ConnectionManager::new(config.max_connections, shutdown_signal.clone());
+        let connections = ConnectionManager::new(config.max_connections, shutdown_signal.clone())
+            .with_per_ip_max(config.max_connections_per_ip);
         let idempotency = Arc::new(RemoteServiceIdempotency::new(
             config.idempotency_retention,
             config.max_idempotency_records_per_peer,

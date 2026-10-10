@@ -250,3 +250,166 @@ fn mtls_byte_and_peer_limits_refuse_before_invoking_handlers() {
 fn v3_retained_terminal_replay_is_not_charged_as_a_new_execution() {
     for workers in [1, 2] { exercise(workers, Case::Cached); }
 }
+
+// Linux routes the complete 127/8 range locally, so distinct source addresses
+// exercise the IP boundary without host network configuration or external peers.
+#[cfg(target_os = "linux")]
+mod source_ip_limits {
+    use super::*;
+    use asupersync::io::AsyncReadExt;
+    use asupersync::net::{TcpSocket, TcpStream};
+    use std::io;
+    use std::net::{Ipv4Addr, SocketAddr};
+
+    async fn connect_from(cx: &Cx, address: SocketAddr, last_octet: u8) -> TcpStream {
+        let socket = TcpSocket::new_v4().unwrap();
+        socket.bind((Ipv4Addr::new(127, 0, 0, last_octet), 0).into()).unwrap();
+        asupersync::time::timeout(cx.now(), Duration::from_secs(3), socket.connect(address))
+            .await.expect("source-bound TCP connect deadline").unwrap()
+    }
+
+    async fn active(cx: &Cx, operator: &RemoteComputationServiceHandle, expected: usize) {
+        asupersync::time::timeout(cx.now(), Duration::from_secs(3), async {
+            while operator.active_connections() != expected {
+                asupersync::time::sleep(cx.now(), Duration::from_millis(1)).await;
+            }
+        }).await.expect("connection registration/retirement deadline");
+    }
+
+    async fn refused_before_tls(cx: &Cx, mut stream: TcpStream) {
+        let mut byte = [0; 1];
+        let result = asupersync::time::timeout(
+            cx.now(), Duration::from_secs(2), stream.read(&mut byte),
+        ).await.expect("capacity refusal must precede the 30-second handshake deadline");
+        assert!(matches!(result, Ok(0)) || matches!(result,
+            Err(ref error) if matches!(error.kind(),
+                io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted)),
+            "excess unauthenticated socket must be closed: {result:?}");
+    }
+
+    struct ForceClose(RemoteComputationServiceHandle);
+    impl Drop for ForceClose {
+        fn drop(&mut self) { self.0.force_close(); }
+    }
+
+    fn exercise_limit(workers: usize, per_ip_limit: Option<u32>) {
+        let runtime = if workers == 1 { RuntimeBuilder::current_thread().build().unwrap() }
+            else { RuntimeBuilder::multi_thread().worker_threads(workers).build().unwrap() };
+        runtime.block_on(async {
+            let cx = Cx::current().unwrap();
+            let factories = Arc::new(AtomicUsize::new(0));
+            let seen = Arc::clone(&factories);
+            let mut registry = RemoteComputationRegistry::new();
+            registry.register::<Bytes, Bytes, _, _>("echo", move |_, invocation| {
+                seen.fetch_add(1, Ordering::SeqCst);
+                async move { Ok(RemoteOutcome::Success(invocation.into_request().input.into_data())) }
+            }).unwrap();
+
+            let cert = Certificate::from_pem(include_bytes!("fixtures/tls/server.crt")).unwrap().remove(0);
+            let chain = CertificateChain::from_pem(include_bytes!("fixtures/tls/server.crt")).unwrap();
+            let key = PrivateKey::from_pem(include_bytes!("fixtures/tls/server.key")).unwrap();
+            let mut roots = RootCertStore::empty();
+            roots.add(&cert).unwrap();
+            let acceptor = TlsAcceptorBuilder::new(chain.clone(), key.clone())
+                .client_auth(ClientAuth::Required(roots)).build().unwrap();
+            let mut pins = CertificatePinSet::new();
+            pins.add(CertificatePin::compute_spki_sha256(&cert).unwrap());
+            let connector = TlsConnectorBuilder::new().add_root_certificate(&cert).identity(chain, key)
+                .with_certificate_pins(pins.clone()).build().unwrap();
+            let mut policy = RemotePeerAdmissionPolicy::new(
+                RemoteProtocolVersion::V3, registry.schema_registry().clone(),
+            );
+            policy.grant_tls_peer(NodeId::new("source-ip-origin"), pins, ["echo"]).unwrap();
+            let hello = policy.hello_for(NodeId::new("source-ip-origin"));
+            let defaults = RemoteComputationServiceConfig::new();
+            assert_eq!(defaults.max_connections_per_ip(), None);
+            let config = defaults.with_max_connections(Some(3))
+                .with_max_connections_per_ip(per_ip_limit)
+                .with_initial_frame_timeout(Duration::from_secs(30))
+                .with_drain_timeout(Duration::from_secs(3));
+            assert_eq!(config.max_connections_per_ip(), per_ip_limit);
+            let service = RemoteComputationService::bind("127.0.0.1:0", acceptor, policy, registry, config)
+                .await.unwrap();
+            let address = service.local_addr().unwrap();
+            let operator = service.handle();
+            let _stop = ForceClose(operator.clone());
+            let mut serving = cx.spawn(move |server| async move { service.run(&server).await }).unwrap();
+
+            let (accepted, rejected, completed) = match per_ip_limit {
+                Some(0) => {
+                    refused_before_tls(&cx, connect_from(&cx, address, 1).await).await;
+                    active(&cx, &operator, 0).await;
+                    (1, 1, 0)
+                }
+                None => {
+                    // Existing behavior is preserved: both connections from
+                    // one IP can remain in TLS while the global cap has room.
+                    let first = connect_from(&cx, address, 1).await;
+                    active(&cx, &operator, 1).await;
+                    let second = connect_from(&cx, address, 1).await;
+                    active(&cx, &operator, 2).await;
+                    drop(first);
+                    drop(second);
+                    active(&cx, &operator, 0).await;
+                    (2, 0, 0)
+                }
+                Some(1) => {
+                    let first = connect_from(&cx, address, 1).await;
+                    active(&cx, &operator, 1).await;
+                    refused_before_tls(&cx, connect_from(&cx, address, 1).await).await;
+                    assert_eq!(operator.active_connections(), 1);
+
+                    // A different IP retains access to the listener's other
+                    // slots while the first peer never sends a ClientHello.
+                    let other_ip = connect_from(&cx, address, 2).await;
+                    active(&cx, &operator, 2).await;
+                    refused_before_tls(&cx, connect_from(&cx, address, 1).await).await;
+                    assert_eq!(operator.active_connections(), 2);
+                    assert_eq!(factories.load(Ordering::SeqCst), 0);
+
+                    drop(first);
+                    active(&cx, &operator, 1).await;
+                    // The retired address can immediately do authenticated
+                    // work while the other address still holds its own slot.
+                    let client = RemoteComputationClient::new(address, "localhost", connector,
+                        RemoteComputationClientConfig::new().with_max_attempts(1)
+                            .with_connect_timeout(Duration::from_secs(2))
+                            .with_attempt_timeout(Duration::from_secs(5))).unwrap();
+                    success(call(&cx, &client, &hello, b"recovered-source-ip", 901).await,
+                        b"recovered-source-ip");
+                    active(&cx, &operator, 1).await;
+                    drop(other_ip);
+                    active(&cx, &operator, 0).await;
+                    (5, 2, 1)
+                }
+                _ => unreachable!("test cases use None, zero, or one"),
+            };
+            assert_eq!(factories.load(Ordering::SeqCst), completed as usize);
+            assert!(operator.begin_drain());
+            let report = asupersync::time::timeout(cx.now(), Duration::from_secs(3),
+                poll_fn(|task| serving.poll_join(task))).await
+                .expect("source-IP listener drains").expect("service task").expect("service result");
+            assert_eq!(report.accepted_connections(), accepted);
+            assert_eq!(report.capacity_rejections(), rejected);
+            assert_eq!(report.completed_connections(), completed);
+            assert_eq!(report.panicked_connections(), 0);
+            assert_eq!(operator.active_connections(), 0);
+            assert!(!cx.is_cancel_requested());
+        });
+        assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+        assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn pre_tls_source_ip_limit_preserves_other_peers_and_recycles_closed_slots() {
+        for workers in [1, 2] { exercise_limit(workers, Some(1)); }
+    }
+
+    #[test]
+    fn source_ip_limit_is_opt_in_and_zero_refuses_without_running_a_handler() {
+        for workers in [1, 2] {
+            exercise_limit(workers, None);
+            exercise_limit(workers, Some(0));
+        }
+    }
+}
