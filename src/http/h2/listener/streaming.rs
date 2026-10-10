@@ -49,6 +49,14 @@ pub struct Http2StreamingListenerConfig {
     /// Aggregate reservation available to admitted live bodies on one
     /// connection. Each admission reserves its queue, outstanding receive
     /// credit, and one bounded trailer block.
+    ///
+    /// By default, this accommodates 16 concurrent streaming requests (~2.3 MiB
+    /// total per connection) even though the underlying transport advertises
+    /// `MAX_CONCURRENT_STREAMS` of 256. Additional concurrent streams beyond the
+    /// reserved capacity are refused with `REFUSED_STREAM` (allowing clients to
+    /// retry on another connection or after an active stream completes) rather
+    /// than consuming unbounded memory. Operators expecting higher concurrent
+    /// streaming loads per connection can tune this setting accordingly.
     pub connection_request_body_buffer_bytes: NonZeroUsize,
     request_body_policy: Option<RequestBodyPolicy>,
 }
