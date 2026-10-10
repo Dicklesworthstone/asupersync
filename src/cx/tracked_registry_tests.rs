@@ -295,7 +295,7 @@ fn a_released_name_is_free_only_with_its_quota_returned() {
 fn lease_transfer_rebinds_name_to_child_task_without_leak_or_settlement_rejection() {
     let (mut lab, parent_cx, mut parent_handle) = fixture(2);
     let region = parent_cx.region_id();
-    let (child_task, mut child_handle) = lab
+    let (child_task, child_handle) = lab
         .state
         .create_task(region, Budget::INFINITE, async {})
         .unwrap();
