@@ -520,10 +520,7 @@ impl StagedAtomicWrite {
     /// thread, it will block the worker during those syscalls. For non-blocking
     /// async execution, use [`Self::commit_async`].
     pub fn commit(mut self) -> io::Result<()> {
-        let parent = normalized_parent(&self.target_path);
-        std::fs::rename(self.temp_path.path(), &self.target_path)?;
-        self.temp_path.disarm();
-        sync_parent_dir(parent)
+        self.commit_with_hook(OperationProbeHook::default())
     }
 
     /// Atomically installs the staged contents at the target path on the blocking pool.
@@ -539,27 +536,51 @@ impl StagedAtomicWrite {
     /// rollback, or prevent the rename from taking effect. If this future is dropped
     /// before offload begins, the temporary file is cleaned up and the target
     /// remains unchanged.
+    ///
+    /// The claimed commit is not owned by the caller's region: region close does not
+    /// wait for it, and a rename still pending after drop can overwrite a later write
+    /// to the same path. For a region-owned offloaded replacement use
+    /// [`crate::fs::ScopedFs::write_atomic`].
+    ///
+    /// An error from the parent-directory sync is reported after the replacement has
+    /// committed; it is not proof of rollback.
+    ///
+    /// When running without a blocking pool (e.g. `blocking_threads(0, 0)` or
+    /// `LabRuntime`), both staging and commit execute synchronously on the polling task.
+    /// If this future is dropped before a blocking thread claims the queued commit,
+    /// the temporary file is cleaned up when the queued job is subsequently dequeued
+    /// and discarded.
     pub async fn commit_async(self) -> io::Result<()> {
-        spawn_blocking_io(move || self.commit()).await
+        self.commit_async_with_hook(OperationProbeHook::default()).await
+    }
+
+    fn commit_with_hook(mut self, hook: OperationProbeHook) -> io::Result<()> {
+        hook.block_until_released();
+        let parent = normalized_parent(&self.target_path);
+        let rename_res = std::fs::rename(self.temp_path.path(), &self.target_path);
+        if rename_res.is_ok() {
+            self.temp_path.disarm();
+        }
+        let result = match rename_res {
+            Ok(()) => sync_parent_dir(parent),
+            Err(err) => Err(err),
+        };
+        hook.mark_completed();
+        result
+    }
+
+    async fn commit_async_with_hook(self, hook: OperationProbeHook) -> io::Result<()> {
+        spawn_blocking_io(move || self.commit_with_hook(hook)).await
     }
 
     /// Runs [`Self::commit_async`] with an explicit handshake probe before rename.
     #[cfg(feature = "test-internals")]
     #[doc(hidden)]
     pub async fn commit_async_with_probe_for_test(
-        mut self,
+        self,
         probe: Arc<FilesystemOperationProbe>,
     ) -> io::Result<()> {
-        spawn_blocking_io(move || {
-            probe.block_until_released();
-            let parent = normalized_parent(&self.target_path);
-            std::fs::rename(self.temp_path.path(), &self.target_path)?;
-            self.temp_path.disarm();
-            let result = sync_parent_dir(parent);
-            probe.mark_completed();
-            result
-        })
-        .await
+        self.commit_async_with_hook(OperationProbeHook::with_probe(probe)).await
     }
 }
 
@@ -642,6 +663,20 @@ pub async fn write_atomic(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) ->
 /// temporary file is cleaned up. Once the commit operation begins on the blocking pool,
 /// the rename completes to conclusion: dropping the returned future does not cancel or
 /// rollback the replacement.
+///
+/// The claimed commit is not owned by the caller's region: region close does not
+/// wait for it, and a rename still pending after drop can overwrite a later write
+/// to the same path. For a region-owned offloaded replacement use
+/// [`crate::fs::ScopedFs::write_atomic`].
+///
+/// An error from the parent-directory sync is reported after the replacement has
+/// committed; it is not proof of rollback.
+///
+/// When running without a blocking pool (e.g. `blocking_threads(0, 0)` or
+/// `LabRuntime`), both staging and commit execute synchronously on the polling task.
+/// If this future is dropped before a blocking thread claims the queued commit,
+/// the temporary file is cleaned up when the queued job is subsequently dequeued
+/// and discarded.
 pub async fn write_atomic_offloaded(
     path: impl AsRef<Path>,
     contents: impl AsRef<[u8]>,
@@ -1275,14 +1310,11 @@ mod tests {
             );
 
             // Verify another task on the SAME single worker can make progress while commit is parked
-            let mut other_task_ran = false;
-            let other = async {
-                other_task_ran = true;
-            };
-            other.await;
-            assert!(
-                other_task_ran,
-                "another task on the worker must make progress"
+            let other_handle = runtime.spawn(async { 42 });
+            assert_eq!(
+                other_handle.await.unwrap(),
+                42,
+                "another task spawned on the worker must make progress"
             );
 
             // Target is still "original" before probe releases rename
@@ -1319,6 +1351,267 @@ mod tests {
         });
 
         crate::test_complete!("write_atomic_offloaded_slow_commit_probe_progresses_and_drops");
+    }
+
+    #[cfg(feature = "test-internals")]
+    #[test]
+    fn write_atomic_offloaded_parks_on_pool_while_worker_progresses() {
+        init_test("write_atomic_offloaded_parks_on_pool_while_worker_progresses");
+        let dir = TempDir::new("write_atomic_offloaded_t_a").unwrap();
+        let path = dir.path().join("target.txt");
+        std::fs::write(&path, b"original").unwrap();
+
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .blocking_threads(1, 1)
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            // Stage new content over original
+            let staged = stage_write_atomic(&path, b"new").await.unwrap();
+
+            // Occupy the only blocking pool thread with a parked probe
+            let gate = Arc::new(FilesystemOperationProbe::new());
+            let blocker_path = dir.path().join("blocker.txt");
+            let mut blocker =
+                Box::pin(write_with_probe_for_test(&blocker_path, b"x", Arc::clone(&gate)));
+            assert!(
+                futures_lite::future::poll_once(blocker.as_mut())
+                    .await
+                    .is_none(),
+                "blocker must yield pending"
+            );
+            assert!(
+                gate.wait_until_blocked(Duration::from_secs(5)),
+                "blocker must reach gate"
+            );
+
+            // Now commit_async: must yield None (queued behind blocker on pool)
+            let mut commit_fut = Box::pin(staged.commit_async());
+            assert!(
+                futures_lite::future::poll_once(commit_fut.as_mut())
+                    .await
+                    .is_none(),
+                "commit_async must offload to pool and not run inline"
+            );
+
+            // Target remains original while queued on pool
+            assert_eq!(std::fs::read(&path).unwrap(), b"original");
+
+            // Release blocker and wait for both to finish
+            gate.release();
+            blocker.await.unwrap();
+            commit_fut.await.unwrap();
+
+            assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        });
+
+        crate::test_complete!("write_atomic_offloaded_parks_on_pool_while_worker_progresses");
+    }
+
+    #[cfg(feature = "test-internals")]
+    #[test]
+    fn write_atomic_offloaded_drop_before_claim_preserves_target_and_cleans_temp() {
+        init_test("write_atomic_offloaded_drop_before_claim_preserves_target_and_cleans_temp");
+        let dir = TempDir::new("write_atomic_offloaded_t_b").unwrap();
+        let path = dir.path().join("target.txt");
+        std::fs::write(&path, b"original").unwrap();
+
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .blocking_threads(1, 1)
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            // 1. Stage before blocking pool is occupied
+            let staged = stage_write_atomic(&path, b"new2").await.unwrap();
+
+            // 2. Block the only pool worker
+            let gate = Arc::new(FilesystemOperationProbe::new());
+            let blocker_path = dir.path().join("blocker.txt");
+            let mut blocker =
+                Box::pin(write_with_probe_for_test(&blocker_path, b"x", Arc::clone(&gate)));
+            assert!(
+                futures_lite::future::poll_once(blocker.as_mut())
+                    .await
+                    .is_none()
+            );
+            assert!(gate.wait_until_blocked(Duration::from_secs(5)));
+
+            // 3. Queue commit_async behind blocker
+            let mut commit_fut = Box::pin(staged.commit_async());
+            assert!(
+                futures_lite::future::poll_once(commit_fut.as_mut())
+                    .await
+                    .is_none()
+            );
+
+            // Drop commit_fut before pool worker claims it
+            drop(commit_fut);
+
+            // 4. Release blocker
+            gate.release();
+            blocker.await.unwrap();
+
+            // 5. Run one more pool job to ensure cancelled job is dequeued and discarded
+            let read_bytes = crate::fs::read(&path).await.unwrap();
+            assert_eq!(read_bytes, b"original");
+
+            // 6. Target remains original and no temp files are leaked
+            assert_eq!(std::fs::read(&path).unwrap(), b"original");
+            let leaked_tmp: Vec<_> = std::fs::read_dir(dir.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|e| e.file_name().to_string_lossy().contains(".asupersync-tmp-"))
+                .collect();
+            assert!(
+                leaked_tmp.is_empty(),
+                "no leaked temp files: {leaked_tmp:?}"
+            );
+        });
+
+        crate::test_complete!(
+            "write_atomic_offloaded_drop_before_claim_preserves_target_and_cleans_temp"
+        );
+    }
+
+    #[cfg(feature = "test-internals")]
+    #[test]
+    fn write_atomic_offloaded_restricted_cx_capability_denied() {
+        init_test("write_atomic_offloaded_restricted_cx_capability_denied");
+        let dir = TempDir::new("write_atomic_offloaded_t_c").unwrap();
+        let path = dir.path().join("target.txt");
+        std::fs::write(&path, b"original").unwrap();
+
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .blocking_threads(1, 2)
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            // Case 1: write_atomic_offloaded under restricted Cx
+            let restricted_cx = crate::cx::Cx::for_testing().restrict::<crate::cx::cap::None>();
+            let res = restricted_cx
+                .with_ambient(write_atomic_offloaded(&path, b"unauthorized"))
+                .await;
+            assert!(res.is_err());
+            assert_eq!(res.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+            assert_eq!(std::fs::read(&path).unwrap(), b"original");
+
+            // Case 2: Stage under full authority, commit_async under restricted authority
+            let staged = stage_write_atomic(&path, b"staged_auth").await.unwrap();
+            let res2 = restricted_cx.with_ambient(staged.commit_async()).await;
+            assert!(res2.is_err());
+            assert_eq!(res2.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+            assert_eq!(std::fs::read(&path).unwrap(), b"original");
+
+            // Temp file must be cleaned up
+            let leaked_tmp: Vec<_> = std::fs::read_dir(dir.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|e| e.file_name().to_string_lossy().contains(".asupersync-tmp-"))
+                .collect();
+            assert!(
+                leaked_tmp.is_empty(),
+                "temp file must be cleaned up on capability denial"
+            );
+        });
+
+        crate::test_complete!("write_atomic_offloaded_restricted_cx_capability_denied");
+    }
+
+    #[cfg(feature = "test-internals")]
+    #[test]
+    fn write_atomic_offloaded_commit_phase_error_cleanup() {
+        init_test("write_atomic_offloaded_commit_phase_error_cleanup");
+        let dir = TempDir::new("write_atomic_offloaded_t_d").unwrap();
+        let target_dir = dir.path().join("existing_dir");
+        std::fs::create_dir(&target_dir).unwrap();
+        std::fs::write(target_dir.join("file.txt"), b"keep me").unwrap();
+
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .blocking_threads(1, 2)
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            // Staging succeeds; rename over non-empty directory fails in commit phase
+            let staged = stage_write_atomic(&target_dir, b"cannot overwrite dir")
+                .await
+                .unwrap();
+            let commit_res = staged.commit_async().await;
+            assert!(commit_res.is_err(), "commit over directory must fail");
+            assert!(target_dir.is_dir());
+            assert!(target_dir.join("file.txt").exists());
+
+            // Temp file must be cleaned up
+            let leaked_tmp: Vec<_> = std::fs::read_dir(dir.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|e| e.file_name().to_string_lossy().contains(".asupersync-tmp-"))
+                .collect();
+            assert!(
+                leaked_tmp.is_empty(),
+                "temp file must be cleaned up on commit failure: {leaked_tmp:?}"
+            );
+        });
+
+        crate::test_complete!("write_atomic_offloaded_commit_phase_error_cleanup");
+    }
+
+    #[cfg(feature = "test-internals")]
+    #[test]
+    fn write_atomic_offloaded_no_pool_executes_inline() {
+        init_test("write_atomic_offloaded_no_pool_executes_inline");
+        let dir = TempDir::new("write_atomic_offloaded_t_e").unwrap();
+        let path = dir.path().join("target.txt");
+
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .blocking_threads(0, 0)
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let mut fut = Box::pin(write_atomic_offloaded(&path, b"inline_val"));
+            let poll_res = futures_lite::future::poll_once(fut.as_mut()).await;
+            assert!(
+                poll_res.is_some(),
+                "without blocking pool, executes inline on first poll"
+            );
+            assert!(poll_res.unwrap().is_ok());
+            assert_eq!(std::fs::read(&path).unwrap(), b"inline_val");
+        });
+
+        crate::test_complete!("write_atomic_offloaded_no_pool_executes_inline");
+    }
+
+    #[cfg(feature = "test-internals")]
+    #[test]
+    fn write_atomic_offloaded_with_probe_for_test_exercises_export() {
+        init_test("write_atomic_offloaded_with_probe_for_test_exercises_export");
+        let dir = TempDir::new("write_atomic_offloaded_t_f").unwrap();
+        let path = dir.path().join("target.txt");
+        let probe = Arc::new(FilesystemOperationProbe::new());
+
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .blocking_threads(1, 2)
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let mut fut = Box::pin(write_atomic_offloaded_with_probe_for_test(
+                &path,
+                b"probed_val",
+                Arc::clone(&probe),
+            ));
+            assert!(futures_lite::future::poll_once(fut.as_mut()).await.is_none());
+            assert!(probe.wait_until_blocked(Duration::from_secs(5)));
+            probe.release();
+            fut.await.unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"probed_val");
+        });
+
+        crate::test_complete!("write_atomic_offloaded_with_probe_for_test_exercises_export");
     }
 
     #[cfg(unix)]

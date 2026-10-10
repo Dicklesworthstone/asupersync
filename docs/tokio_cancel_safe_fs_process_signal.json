@@ -169,9 +169,22 @@
       "rollback_safe": false
     },
     {
+      "operations": ["StagedAtomicWrite::commit_async"],
+      "classification": "soft_cancel_may_commit",
+      "cancellation_boundary": "drop before a pool worker claims the job discards the staged file; a claimed commit renames and syncs after future drop; a parent-directory sync error is post-commit",
+      "rollback_safe": false
+    },
+    {
       "operations": ["fs::write_atomic"],
       "classification": "staged_then_synchronous_commit",
       "cancellation_boundary": "future drop can discard staging without changing the target; successful staging is followed in the same poll by synchronous commit",
+      "rollback_safe": false,
+      "target_rollback_safe_during_staging": true
+    },
+    {
+      "operations": ["fs::write_atomic_offloaded"],
+      "classification": "staged_then_soft_cancel_commit",
+      "cancellation_boundary": "future drop during staging discards the temporary file without mutating the target; a claimed commit renames and syncs after future drop; a parent-directory sync error is post-commit",
       "rollback_safe": false,
       "target_rollback_safe_during_staging": true
     },

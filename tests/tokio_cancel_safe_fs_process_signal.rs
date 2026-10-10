@@ -727,7 +727,9 @@ fn ct_03_all_invariants_proven() {
         "UnixVfs::write",
         "fs::stage_write_atomic",
         "StagedAtomicWrite::commit",
+        "StagedAtomicWrite::commit_async",
         "fs::write_atomic",
+        "fs::write_atomic_offloaded",
     ] {
         assert!(
             mutation_contracts.iter().any(|contract| {
