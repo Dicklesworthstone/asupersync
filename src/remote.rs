@@ -106,6 +106,8 @@ use std::time::Duration;
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 mod admission;
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+mod write_progress;
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 pub use admission::{
     AdmittedNativeRemoteRuntime, NativeRemoteAdmissionError, NativeRemoteAdmissionLimits,
     NativeRemoteAdmissionUsage, NativeRemoteAdmittedHandle, NativeRemotePeerAdmissionLimits,
@@ -9105,6 +9107,7 @@ pub struct RemoteComputationServiceConfig {
     wire_limits: RemoteServiceWireLimits,
     max_connections: Option<usize>,
     max_connections_per_ip: Option<u32>,
+    write_progress_timeout: Option<Duration>,
     initial_frame_timeout: Duration,
     drain_timeout: Duration,
     idempotency_retention: Duration,
@@ -9120,6 +9123,7 @@ impl RemoteComputationServiceConfig {
             wire_limits: RemoteServiceWireLimits::new(DEFAULT_REMOTE_SERVICE_MAX_FRAME_BYTES),
             max_connections: Some(256),
             max_connections_per_ip: None,
+            write_progress_timeout: None,
             initial_frame_timeout: DEFAULT_REMOTE_SERVICE_INITIAL_FRAME_TIMEOUT,
             drain_timeout: Duration::from_secs(30),
             idempotency_retention: DEFAULT_REMOTE_SERVICE_IDEMPOTENCY_RETENTION,
@@ -9155,6 +9159,25 @@ impl RemoteComputationServiceConfig {
     #[must_use]
     pub const fn with_max_connections_per_ip(mut self, max_connections: Option<u32>) -> Self {
         self.max_connections_per_ip = max_connections;
+        self
+    }
+
+    /// Bounds how long an accepted connection may make no transport write progress.
+    ///
+    /// The budget starts when a transport write, flush, or shutdown first parks,
+    /// and successful nonempty writes renew it. It runs underneath TLS, covering
+    /// handshake, control, and response bytes actually written to the socket.
+    /// Incoming traffic does not renew it, and time spent computing a result or
+    /// waiting only for input does not consume it.
+    ///
+    /// `None` (the default) preserves the existing unbounded write policy.
+    /// `Some(Duration::ZERO)` allows immediate progress but refuses the first
+    /// stalled write. Expiry closes only that connection through the service's
+    /// existing cleanup path. A V2/V3 result committed before its response stalls
+    /// remains replayable under the configured idempotency retention policy.
+    #[must_use]
+    pub const fn with_write_progress_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.write_progress_timeout = timeout;
         self
     }
 
@@ -9202,6 +9225,12 @@ impl RemoteComputationServiceConfig {
     #[must_use]
     pub const fn max_connections_per_ip(self) -> Option<u32> {
         self.max_connections_per_ip
+    }
+
+    /// Maximum continuous transport write stall, including encrypted TLS bytes.
+    #[must_use]
+    pub const fn write_progress_timeout(self) -> Option<Duration> {
+        self.write_progress_timeout
     }
 
     /// Deadline for an authenticated peer to send its first complete frame.
@@ -9602,6 +9631,7 @@ impl RemoteComputationService {
             let shutdown_signal = self.shutdown_signal.clone();
             let wire_limits = self.config.wire_limits;
             let initial_frame_timeout = self.config.initial_frame_timeout;
+            let write_progress_timeout = self.config.write_progress_timeout;
             if let Err(error) =
                 connection_tasks.spawn(&service_cx, move |connection_cx| async move {
                     let _guard = guard;
@@ -9612,6 +9642,11 @@ impl RemoteComputationService {
                         // without its own handshake timeout would otherwise let
                         // idle TCP connects pin the listener at capacity. The
                         // first-frame budget bounds the handshake as well.
+                        let stream = write_progress::RemoteWriteProgress::new(
+                            stream,
+                            write_progress_timeout,
+                            connection_cx.timer_driver(),
+                        );
                         let handshake = tls_acceptor.accept(stream);
                         let mut stream = if tls_acceptor.handshake_timeout().is_some() {
                             handshake.await
