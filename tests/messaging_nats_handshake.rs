@@ -974,8 +974,10 @@ fn nats_connect_policy_times_out_reconnects_and_exhausts_the_attempt_limit_pm29w
             .write_all(b"INFO {")
             .expect("write partial reconnect INFO");
         second.flush().expect("flush partial reconnect INFO");
+        // Pin N2: Verify the timed-out attempt's socket is shut down promptly
+        // (within 900ms, well before the 1500ms backoff sleep completes).
         let second_closed =
-            closed_by_client(&mut BufReader::new(second), Duration::from_secs(5));
+            closed_by_client(&mut BufReader::new(second), Duration::from_millis(900));
 
         let mut third =
             accept_within(&listener, Duration::from_secs(5)).expect("accept second reconnect");
@@ -997,8 +999,8 @@ fn nats_connect_policy_times_out_reconnects_and_exhausts_the_attempt_limit_pm29w
     let task = runtime.handle().spawn(async move {
         let cx = Cx::current().expect("runtime task context");
         let mut config = NatsConfig::from_url(&format!("nats://{addr}")).expect("parse URL");
-        config.reconnect_delay = Duration::from_millis(100);
-        config.max_reconnect_delay = Duration::from_millis(200);
+        config.reconnect_delay = Duration::from_millis(1500);
+        config.max_reconnect_delay = Duration::from_millis(1500);
         config.max_reconnect_attempts = 2;
         let policy = NatsConnectPolicy::new()
             .with_timeout(Duration::from_millis(500))
@@ -1011,7 +1013,10 @@ fn nats_connect_policy_times_out_reconnects_and_exhausts_the_attempt_limit_pm29w
             .subscribe(&cx, "events.kept")
             .await
             .expect("subscribe before reconnect");
-        let closed = subscription.next(&cx).await.map(|message| message.is_none());
+        let closed = subscription
+            .next(&cx)
+            .await
+            .map(|message| message.is_none());
         drop(client);
         let _ = done_tx.send(closed);
     });

@@ -2153,7 +2153,9 @@ impl NatsConnection {
                     if matches!(error, NatsError::Cancelled) {
                         return Err(NatsError::Cancelled);
                     }
-                    cx.trace(&format!("nats: connection attempt failed during reconnect: {error}"));
+                    cx.trace(&format!(
+                        "nats: connection attempt failed during reconnect: {error}"
+                    ));
                 }
             }
         }
@@ -3429,8 +3431,11 @@ impl NatsConnectPolicy {
     ///
     /// A fresh timeout starts for each reconnect attempt, after its backoff;
     /// progress within an attempt never resets it. A zero timeout refuses the
-    /// attempt before opening a socket. Expiry returns [`NatsError::Io`] with
-    /// [`io::ErrorKind::TimedOut`]; cancellation remains [`NatsError::Cancelled`].
+    /// attempt before opening a socket. During initial connection establishment,
+    /// expiry returns [`NatsError::Io`] with [`io::ErrorKind::TimedOut`];
+    /// cancellation remains [`NatsError::Cancelled`]. During reconnection,
+    /// an expired attempt fails that individual attempt and enters backoff/retry
+    /// under the reconnect policy.
     #[must_use]
     pub const fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
@@ -3438,8 +3443,11 @@ impl NatsConnectPolicy {
     }
 
     /// Wait for a PONG after CONNECT before reporting success or replaying
-    /// subscriptions. This surfaces a server's authentication refusal during
-    /// connection establishment even when [`NatsConfig::verbose`] is false.
+    /// subscriptions. During initial connection establishment, this surfaces a
+    /// server's authentication refusal directly even when [`NatsConfig::verbose`]
+    /// is false. During reconnection, an unconfirmed or refused attempt fails that
+    /// individual reconnect attempt and enters the retry/backoff loop; callers
+    /// observing the client see disconnection if reconnect attempts are exhausted.
     /// Pair this with [`Self::with_timeout`] to bound an unresponsive peer.
     #[must_use]
     pub const fn with_connect_confirmation(mut self, enabled: bool) -> Self {
@@ -7838,5 +7846,52 @@ mod tests {
         });
 
         assert_eq!(server.join().expect("server join"), 0);
+    }
+
+    #[test]
+    fn nats_connect_confirmation_counts_confirmation_ping_in_pings_sent() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .write_all(b"INFO {\"server_id\":\"confirm-pin\",\"max_payload\":1048576}\r\n")
+                .expect("send INFO");
+            let mut reader = BufReader::new(stream);
+            let connect_line = read_protocol_line(&mut reader);
+            assert!(connect_line.starts_with("CONNECT "));
+            let ping_line = read_protocol_line(&mut reader);
+            assert_eq!(ping_line, "PING");
+            reader.get_mut().write_all(b"PONG\r\n").expect("send PONG");
+            reader.get_mut().flush().expect("flush PONG");
+        });
+
+        run_test_with_cx(|cx| async move {
+            let config = NatsConfig::from_url(&format!("nats://{addr}")).expect("config");
+            let policy = NatsConnectPolicy::new()
+                .with_connect_confirmation(true)
+                .with_keepalive(NatsKeepalive::disabled());
+            let conn = NatsConnection::connect_with_policy(&cx, config, policy)
+                .await
+                .expect("connect with confirmation");
+
+            assert_eq!(
+                conn.state.pings_sent.load(Ordering::Acquire),
+                1,
+                "confirmation PING must increment pings_sent"
+            );
+            assert_eq!(
+                conn.state.pongs.load(Ordering::Acquire),
+                1,
+                "confirmation PONG must increment pongs"
+            );
+            assert_eq!(
+                conn.unanswered_pings(),
+                0,
+                "confirmed connection must have 0 unanswered pings"
+            );
+        });
+
+        server.join().expect("server join");
     }
 }
