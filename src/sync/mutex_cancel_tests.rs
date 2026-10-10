@@ -374,3 +374,143 @@ fn panicking_waker_destructor_after_acquire_does_not_poison() {
     assert!(!mutex.is_poisoned(), "no critical section ran");
     assert_eq!(*mutex.try_lock().expect("unlocked after the panic"), 5);
 }
+
+/// A custom waker that requests cancellation of a context during `RawWaker::clone`.
+///
+/// Test-only RawWaker whose clone vtable runs an injected hook.
+/// Safe `Arc<impl Wake>` construction cannot observe RawWaker clone callbacks,
+/// which is the boundary exercised by `br-asupersync-x2cqdf` L3.
+mod raw_waker_probe {
+    use super::*;
+    use std::mem::ManuallyDrop;
+    use std::task::{RawWaker, RawWakerVTable};
+
+    fn no_op(_: *const ()) {}
+
+    pub(super) struct RawWakerProbe {
+        hook: std::sync::Mutex<Option<Box<dyn FnMut() + Send + 'static>>>,
+    }
+
+    impl RawWakerProbe {
+        pub(super) fn new(hook: impl FnMut() + Send + 'static) -> Arc<Self> {
+            Arc::new(Self {
+                hook: std::sync::Mutex::new(Some(Box::new(hook))),
+            })
+        }
+
+        #[allow(unsafe_code)]
+        pub(super) fn waker(self: &Arc<Self>) -> Waker {
+            let data = Arc::into_raw(Arc::clone(self)).cast();
+            let raw = RawWaker::new(data, &VTABLE);
+            unsafe { Waker::from_raw(raw) }
+        }
+    }
+
+    #[allow(unsafe_code)]
+    fn clone_waker(data: *const ()) -> RawWaker {
+        let probe = ManuallyDrop::new(unsafe {
+            Arc::<RawWakerProbe>::from_raw(data.cast::<RawWakerProbe>())
+        });
+        if let Ok(mut guard) = probe.hook.lock() {
+            if let Some(hook) = guard.as_mut() {
+                hook();
+            }
+        }
+        let data = Arc::into_raw(Arc::clone(&probe)).cast();
+        RawWaker::new(data, &VTABLE)
+    }
+
+    #[allow(unsafe_code)]
+    fn drop_waker(data: *const ()) {
+        drop(unsafe { Arc::<RawWakerProbe>::from_raw(data.cast::<RawWakerProbe>()) });
+    }
+
+    static VTABLE: RawWakerVTable = RawWakerVTable::new(clone_waker, no_op, no_op, drop_waker);
+}
+
+/// Mutex acquisition checks cancellation before taking the mutex state lock, but
+/// on the contended path it clones the executor waker outside the state lock.
+/// If cloning the waker invokes user callbacks that cancel the context, the
+/// "recheck after waker callbacks" step at the top of the loop detects this and
+/// aborts immediately with `Err(LockError::Cancelled)` without registering a waiter
+/// in the mutex or taking lock ownership (br-asupersync-x2cqdf L3).
+#[test]
+fn cancellation_during_waker_clone_aborts_without_enqueuing_waiter() {
+    let cx = Cx::for_testing();
+    let mutex = Mutex::new(10);
+    let held = mutex.try_lock().unwrap();
+
+    let cloned = Arc::new(AtomicBool::new(false));
+    let cloned_flag = Arc::clone(&cloned);
+    let probe_cx = cx.clone();
+    let probe = raw_waker_probe::RawWakerProbe::new(move || {
+        probe_cx.cancel_fast(CancelKind::User);
+        cloned_flag.store(true, Ordering::SeqCst);
+    });
+    let waker = probe.waker();
+
+    let mut waiting = Box::pin(mutex.lock(&cx));
+    let outcome = poll(waiting.as_mut(), &waker);
+    assert!(cloned.load(Ordering::SeqCst), "waker was cloned on contended path");
+    assert!(
+        matches!(outcome, Poll::Ready(Err(LockError::Cancelled))),
+        "aborts immediately on the same poll where clone triggered cancellation"
+    );
+    assert_eq!(
+        mutex.waiters(),
+        0,
+        "no waiter was enqueued into the mutex state"
+    );
+    drop(held);
+    assert_eq!(*mutex.try_lock().unwrap(), 10);
+}
+
+/// If a held mutex is unlocked during `RawWaker::clone` while the context is also
+/// cancelled, the recheck at the loop top prevents the cancelled waiter from
+/// acquiring the now-free lock, leaving it available for subsequent callers
+/// (br-asupersync-x2cqdf L3).
+#[test]
+fn cancellation_during_waker_clone_does_not_acquire_newly_unlocked_mutex() {
+    let cx = Cx::for_testing();
+    let mutex = Arc::new(Mutex::new(20));
+
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (released_tx, released_rx) = std::sync::mpsc::channel();
+
+    let holder_mutex = Arc::clone(&mutex);
+    let holder_thread = std::thread::spawn(move || {
+        let guard = holder_mutex.try_lock().unwrap();
+        release_rx.recv().unwrap();
+        drop(guard);
+        released_tx.send(()).unwrap();
+    });
+
+    // Wait until holder has acquired the lock
+    while !mutex.is_locked() {
+        std::thread::yield_now();
+    }
+
+    let probe_cx = cx.clone();
+    let probe = raw_waker_probe::RawWakerProbe::new(move || {
+        probe_cx.cancel_fast(CancelKind::User);
+        release_tx.send(()).unwrap();
+        released_rx.recv().unwrap();
+    });
+    let waker = probe.waker();
+
+    let mut waiting = Box::pin(mutex.lock(&cx));
+    let outcome = poll(waiting.as_mut(), &waker);
+    holder_thread.join().unwrap();
+
+    assert!(
+        matches!(outcome, Poll::Ready(Err(LockError::Cancelled))),
+        "waiter aborts as cancelled despite lock becoming free during clone"
+    );
+    assert!(
+        !mutex.is_locked(),
+        "mutex remains unlocked rather than granted to cancelled task"
+    );
+    assert_eq!(*mutex.try_lock().unwrap(), 20);
+}
+
+

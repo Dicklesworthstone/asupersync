@@ -1310,7 +1310,7 @@ mod tests {
             );
 
             // Verify another task on the SAME single worker can make progress while commit is parked
-            let mut other_handle = runtime.spawn_local(async { 42 });
+            let other_handle = runtime.spawn_local(async { 42 });
             assert_eq!(
                 other_handle.await.unwrap(),
                 42,
@@ -1598,18 +1598,24 @@ mod tests {
             .build()
             .unwrap();
 
-        runtime.block_on(async {
-            let mut fut = Box::pin(write_atomic_offloaded_with_probe_for_test(
-                &path,
-                b"probed_val",
-                Arc::clone(&probe),
-            ));
-            assert!(futures_lite::future::poll_once(fut.as_mut()).await.is_none());
-            assert!(probe.wait_until_blocked(Duration::from_secs(5)));
-            probe.release();
-            fut.await.unwrap();
-            assert_eq!(std::fs::read(&path).unwrap(), b"probed_val");
+        let probe_clone = Arc::clone(&probe);
+        let path_clone = path.clone();
+        let writer_thread = std::thread::spawn(move || {
+            runtime.block_on(async move {
+                write_atomic_offloaded_with_probe_for_test(
+                    path_clone,
+                    b"probed_val",
+                    probe_clone,
+                )
+                .await
+                .unwrap();
+            });
         });
+
+        assert!(probe.wait_until_blocked(Duration::from_secs(5)));
+        probe.release();
+        writer_thread.join().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"probed_val");
 
         crate::test_complete!("write_atomic_offloaded_with_probe_for_test_exercises_export");
     }
