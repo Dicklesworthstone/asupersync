@@ -67,6 +67,30 @@ fn shed_idle_clone_cannot_keep_the_semaphore_queue_head() {
     assert_eq!(semaphore.available_permits(), 1);
 }
 
+/// A shedding handle that polls ready but is never called must not keep its
+/// queued acquire: the semaphore is FIFO, so that waiter would block every
+/// later acquirer once the permit frees (br-asupersync-wfch0u).
+#[test]
+fn an_idle_overloaded_shed_handle_does_not_keep_the_semaphore_queue_head() {
+    let semaphore = Arc::new(Semaphore::new(1));
+    let mut first = ConcurrencyLimit::new(Echo, Arc::clone(&semaphore));
+    let mut shed = LoadShed::new(first.clone());
+    let mut next = first.clone();
+    assert!(ready_now(&mut first));
+    let mut active = first.call(1);
+    assert!(ready_now(&mut shed), "an overloaded shedder stays ready");
+    assert!(shed.is_overloaded());
+    // `shed` is never called. The active request finishes and frees the permit.
+    assert!(matches!(poll(&mut active), Poll::Ready(Ok(1))));
+    assert_eq!(semaphore.available_permits(), 1);
+    assert!(
+        ready_now(&mut next),
+        "an idle shedding handle kept the FIFO head, so the free permit is unreachable"
+    );
+    assert!(matches!(poll(&mut next.call(2)), Poll::Ready(Ok(2))));
+    drop(shed);
+}
+
 #[test]
 fn wrapped_readiness_drop_releases_only_the_unused_attempt() {
     let semaphore = Arc::new(Semaphore::new(1));
