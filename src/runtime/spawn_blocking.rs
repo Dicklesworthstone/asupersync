@@ -743,6 +743,26 @@ pub(crate) fn reap_threads(handles: impl IntoIterator<Item = thread::JoinHandle<
     }
 }
 
+/// [`reap_threads`] for one thread, at a spawn site that does not wait for its
+/// short-lived thread. Dropping the handle at spawn instead would detach a
+/// thread that may already be exiting.
+pub(crate) fn reap_spawned_thread(handle: thread::JoinHandle<()>) {
+    reap_threads([handle]);
+}
+
+/// Whether a thread with this name is parked here and, if so, whether every
+/// such thread has finished.
+#[cfg(test)]
+pub(crate) fn parked_thread_named(name: &str) -> Option<bool> {
+    let parked = UNJOINED_FALLBACK_THREADS.lock();
+    let mut named = parked
+        .iter()
+        .filter(|handle| handle.thread().name() == Some(name))
+        .peekable();
+    named.peek()?;
+    Some(named.all(thread::JoinHandle::is_finished))
+}
+
 /// Whether a thread is parked here and, if so, whether it has finished.
 #[cfg(test)]
 pub(crate) fn parked_thread(id: thread::ThreadId) -> Option<bool> {

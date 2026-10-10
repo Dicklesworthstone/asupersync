@@ -558,7 +558,7 @@ impl Cx<cap::All> {
             // user branch wins, or depend on Sleep's ambient cancellation.
             let mut sleep = std::pin::pin!(Sleep::with_timer_driver(deadline, timer));
             let mut cancelled = std::pin::pin!(child.cancelled());
-            let outcome = poll_fn(|task| {
+            poll_fn(|task| {
                 if cancelled.as_mut().poll(task).is_ready() {
                     let reason = child
                         .cancel_reason()
@@ -569,8 +569,8 @@ impl Cx<cap::All> {
                 } else {
                     Poll::Pending
                 }
-            }).await;
-            outcome
+            })
+            .await
         })));
         let keeps_region = |timed: &Timed<T>| !matches!(timed, Timed::Late);
         match self.race_drained_settled(timed, keeps_region).await? {

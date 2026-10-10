@@ -468,7 +468,7 @@ impl UnixStream {
         ancillary: &mut crate::net::unix::SocketAncillary,
     ) -> io::Result<usize> {
         use std::os::unix::io::AsRawFd;
-
+        let waiter = SharedWaiterEntry::new(self);
         std::future::poll_fn(|cx| {
             if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return cancelled_poll();
@@ -477,7 +477,7 @@ impl UnixStream {
             match send_with_ancillary_impl(self.inner.as_raw_fd(), buf, ancillary) {
                 Ok(n) => Poll::Ready(Ok(n)),
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    self.pending_on_shared_interest(cx, Interest::WRITABLE)
+                    waiter.pending(cx, Interest::WRITABLE)
                 }
                 Err(e) => Poll::Ready(Err(e)),
             }
@@ -537,7 +537,7 @@ impl UnixStream {
         ancillary: &mut crate::net::unix::SocketAncillary,
     ) -> io::Result<usize> {
         use std::os::unix::io::AsRawFd;
-
+        let waiter = SharedWaiterEntry::new(self);
         std::future::poll_fn(|cx| {
             if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return cancelled_poll();
@@ -546,7 +546,7 @@ impl UnixStream {
             match recv_with_ancillary_impl(self.inner.as_raw_fd(), buf, ancillary) {
                 Ok(n) => Poll::Ready(Ok(n)),
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    self.pending_on_shared_interest(cx, Interest::READABLE)
+                    waiter.pending(cx, Interest::READABLE)
                 }
                 Err(e) => Poll::Ready(Err(e)),
             }
@@ -944,11 +944,12 @@ impl UnixStream {
         &self,
         cx: &Context<'_>,
         interest: Interest,
+        owner: u64,
     ) -> Poll<io::Result<T>> {
         let (armed, stranded) =
             self.registration
                 .lock()
-                .arm_shared(&*self.inner, interest, cx.waker());
+                .arm_shared(&*self.inner, interest, owner, cx.waker());
         for waiter in stranded {
             waiter.wake();
         }
@@ -960,6 +961,39 @@ impl UnixStream {
             }
             Err(err) => Poll::Ready(Err(err)),
         }
+    }
+}
+
+/// One `&self` ancillary call's entry in the stream's shared waiter list.
+/// The call future owns it: a re-poll updates the entry in place, and
+/// dropping the future removes it. So any number of calls can wait at once,
+/// and none is evicted to make room for another, which with 33 or more
+/// waiting calls had them wake each other forever
+/// (br-asupersync-reactor-audit-dofi11).
+struct SharedWaiterEntry<'a> {
+    stream: &'a UnixStream,
+    owner: u64,
+}
+
+impl<'a> SharedWaiterEntry<'a> {
+    fn new(stream: &'a UnixStream) -> Self {
+        Self {
+            stream,
+            owner: crate::net::udp::next_shared_waiter_owner(),
+        }
+    }
+
+    fn pending<T>(&self, cx: &Context<'_>, interest: Interest) -> Poll<io::Result<T>> {
+        self.stream
+            .pending_on_shared_interest(cx, interest, self.owner)
+    }
+}
+
+impl Drop for SharedWaiterEntry<'_> {
+    fn drop(&mut self) {
+        // The removed waker drops after the registration lock is released.
+        let removed = self.stream.registration.lock().forget_shared(self.owner);
+        drop(removed);
     }
 }
 
@@ -1231,6 +1265,59 @@ mod tests {
             drop(second);
             assert_eq!(&first_buf[..first_len], b"wake");
             assert_eq!(&second_buf[..second_len], b"more");
+        }
+
+        /// br-asupersync-reactor-audit-dofi11: past 32 entries the list
+        /// evicted its oldest waiter and woke it, so with 33 or more waiting
+        /// calls each re-poll evicted the next, and the calls woke each other
+        /// forever on an idle socket. Each call now owns one entry, which its
+        /// future removes when dropped.
+        #[test]
+        fn forty_ancillary_waiters_park_without_waking_each_other() {
+            const WAITERS: usize = 40;
+            assert!(
+                Cx::current().is_none(),
+                "test must run without an ambient Cx"
+            );
+            let (stream, _peer) = UnixStream::pair().expect("socket pair");
+            let signals: Vec<_> = (0..WAITERS).map(|_| signal_waker()).collect();
+            let mut bufs = vec![[0u8; 16]; WAITERS];
+            let mut ancillaries: Vec<SocketAncillary> =
+                (0..WAITERS).map(|_| SocketAncillary::new(64)).collect();
+            let mut calls: Vec<_> = bufs
+                .iter_mut()
+                .zip(ancillaries.iter_mut())
+                .map(|(buf, ancillary)| Box::pin(stream.recv_with_ancillary(buf, ancillary)))
+                .collect();
+
+            for round in 0..2 {
+                for (index, (call, (_, waker, _))) in calls.iter_mut().zip(&signals).enumerate() {
+                    assert!(
+                        call.as_mut()
+                            .poll(&mut Context::from_waker(waker))
+                            .is_pending(),
+                        "call {index} parks in round {round}: no data was sent"
+                    );
+                }
+            }
+            for (index, (_, _, rx)) in signals.iter().enumerate() {
+                assert!(
+                    rx.try_recv().is_err(),
+                    "call {index} was woken although the socket stayed idle"
+                );
+            }
+            assert_eq!(
+                stream.registration.lock().shared_waiter_count(),
+                WAITERS,
+                "each waiting call keeps exactly one entry"
+            );
+
+            drop(calls);
+            assert_eq!(
+                stream.registration.lock().shared_waiter_count(),
+                0,
+                "a dropped call leaves no entry behind"
+            );
         }
     }
 

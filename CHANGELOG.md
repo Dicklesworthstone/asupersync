@@ -1203,6 +1203,34 @@ Security:
     available, memory is not measured, so one burst can no longer hold
     admission at Emergency for the life of the process.
 
+### Fixed by the 2026-10-10 follow-ups
+
+- PostgreSQL: a prepared statement refuses a binary `i64`/`f64` where the
+  server typed the parameter `timestamp`, `timestamptz` or `time`, and an
+  `i32`/`f32` where it typed `date`. The server read the number as a raw date
+  or time: `1_791_445_550i64`, meant as epoch seconds, stored
+  2000-01-01 00:29:51. `execute_params` already refused the same bind
+  (`qml5yb`).
+- MySQL: `MySqlExecResult`'s docs say what `execute_trusted_sql_result` and
+  `execute_prepared_result` do with a statement that returns rows, such as
+  MariaDB's `INSERT ... RETURNING` (`qml5yb`).
+- Protobuf derive: a oneof's message member that appears again while it is
+  the current member is merged into it, as protobuf and prost do. Before, it
+  was replaced and its fields were lost. A hand-written `ProtoOneof` still
+  replaces (`q6jo59`).
+- I/O driver: `IoRegistration::rearm` compares its waker with the one stored
+  for the registration. After `update_waker`, the re-armed task is woken, and
+  a slot removed through `IoDriverHandle::lock()` is reported as `Ok(false)`
+  (`8ynh18`).
+- Unix sockets: any number of tasks can wait in one `UnixStream`'s
+  `send_with_ancillary` and `recv_with_ancillary`. With 33 or more, they used
+  to evict and wake each other forever (`dofi11`).
+- The process-global fallback I/O driver (GH #67) retries a failed start with
+  backoff. Before, one failure left every driverless socket on the self-wake
+  path for the life of the process (`dofi11`).
+- `ObligationLedger::try_commit` and `try_abort` return `NotFound`,
+  `NotPending` or `TokenMismatch` where they panicked (`rrtgoy`).
+
 ### UDP launch-time sends and the socket error queue (Linux, GH #73)
 
 - `UdpSocket::set_txtime` turns on `SO_TXTIME` (`UdpTxTimeConfig`: clock,

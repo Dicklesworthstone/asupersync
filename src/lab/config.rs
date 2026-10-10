@@ -436,7 +436,7 @@ impl LabConfig {
     ///
     /// # Determinism and Seed Stability
     ///
-    /// Uses [`DetRng::new(self.seed)`] directly without additional scrambling.
+    /// Seeds [`DetRng::new`] with `self.seed` directly, without additional scrambling.
     /// This preserves schedule stability, trace certificates, and golden
     /// hashes established across test suites and lab replays (br-asupersync-dw3yqs).
     /// For chaos injection where unbiased first draws across small seeds (0..255)

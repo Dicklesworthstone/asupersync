@@ -1011,21 +1011,18 @@ fn decode_field(spec: &FieldSpec) -> Result<TokenStream2> {
         Kind::Oneof => {
             let oneof_ty = single_type_argument(&spec.ty, "Option", span)?;
             let tags = &spec.oneof_tags;
+            // A derived oneof with a message variant has an inherent
+            // `__asupersync_proto_merge_oneof`, which takes priority over the
+            // `merge_field`-local fallback trait (`oneof_replace_fallback`),
+            // so a repeated message member merges into the one already
+            // present. Any other `ProtoOneof` decodes and replaces, as before.
             let arms = tags.iter().map(|tag| {
                 quote_spanned!(span=>
-                    #tag => {
-                        if let ::core::option::Option::Some(value) =
-                            <#oneof_ty as ::asupersync::grpc::protobuf::ProtoOneof>::decode_oneof(
-                                field,
-                                decoder,
-                            )?
-                        {
-                            self.#ident = ::core::option::Option::Some(value);
-                            Ok(true)
-                        } else {
-                            Ok(false)
-                        }
-                    },
+                    #tag => <#oneof_ty>::__asupersync_proto_merge_oneof(
+                        &mut self.#ident,
+                        field,
+                        decoder,
+                    ),
                 )
             });
             Ok(quote!(#(#arms)*))
@@ -1174,6 +1171,12 @@ pub fn derive_proto_message(input: &DeriveInput) -> Result<TokenStream2> {
             },
         );
 
+    let oneof_fallback = if specs.iter().any(|spec| matches!(spec.kind, Kind::Oneof)) {
+        oneof_replace_fallback()
+    } else {
+        TokenStream2::new()
+    };
+
     let generics = &input.generics;
     let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
     Ok(quote! {
@@ -1201,6 +1204,7 @@ pub fn derive_proto_message(input: &DeriveInput) -> Result<TokenStream2> {
                 bool,
                 ::asupersync::grpc::protobuf::ProtobufWireError,
             > {
+                #oneof_fallback
                 match field.field_number() {
                     #(#decode_arms)*
                     _ => #unknown,
@@ -1208,6 +1212,39 @@ pub fn derive_proto_message(input: &DeriveInput) -> Result<TokenStream2> {
             }
         }
     })
+}
+
+/// The `merge_field`-local trait that gives every `ProtoOneof` an associated
+/// `__asupersync_proto_merge_oneof`: decode the member and replace the
+/// field's value, which is all a hand-written `ProtoOneof` can do. A derived
+/// oneof with a message variant shadows it with an inherent function of the
+/// same name that merges a repeated message member instead.
+fn oneof_replace_fallback() -> TokenStream2 {
+    quote! {
+        #[allow(dead_code)]
+        trait __AsupersyncProtoOneofReplace: ::asupersync::grpc::protobuf::ProtoOneof {
+            fn __asupersync_proto_merge_oneof<'wire>(
+                slot: &mut ::core::option::Option<Self>,
+                field: &::asupersync::grpc::protobuf::ProtobufWireField<'wire>,
+                decoder: &mut ::asupersync::grpc::protobuf::ProtobufWireDecoder<'wire, '_>,
+            ) -> ::core::result::Result<
+                bool,
+                ::asupersync::grpc::protobuf::ProtobufWireError,
+            > {
+                match <Self as ::asupersync::grpc::protobuf::ProtoOneof>::decode_oneof(
+                    field,
+                    decoder,
+                )? {
+                    ::core::option::Option::Some(value) => {
+                        *slot = ::core::option::Option::Some(value);
+                        Ok(true)
+                    }
+                    ::core::option::Option::None => Ok(false),
+                }
+            }
+        }
+        impl<T: ::asupersync::grpc::protobuf::ProtoOneof> __AsupersyncProtoOneofReplace for T {}
+    }
 }
 
 fn parse_oneof_variant(variant: &Variant) -> Result<(Ident, Type, Kind, u32)> {
@@ -1245,10 +1282,14 @@ fn parse_oneof_variant(variant: &Variant) -> Result<(Ident, Type, Kind, u32)> {
     Ok((variant.ident.clone(), ty, kind, tag))
 }
 
-fn derive_oneof_data(
-    name: &Ident,
-    data: &DataEnum,
-) -> Result<(Vec<TokenStream2>, Vec<TokenStream2>, Vec<u32>)> {
+struct OneofParts {
+    encode: Vec<TokenStream2>,
+    decode: Vec<TokenStream2>,
+    merge: Vec<TokenStream2>,
+    tags: Vec<u32>,
+}
+
+fn derive_oneof_data(name: &Ident, data: &DataEnum) -> Result<OneofParts> {
     let mut variants = Vec::with_capacity(data.variants.len());
     let mut tags = BTreeMap::<u32, Span>::new();
     for variant in &data.variants {
@@ -1289,9 +1330,70 @@ fn derive_oneof_data(
             quote!(#tag => Ok(::core::option::Option::Some(Self::#variant({ #body }))))
         })
         .collect();
-    let tag_values = variants.iter().map(|variant| variant.3).collect();
+    let merge = variants
+        .iter()
+        .filter(|(_, _, kind, _)| matches!(kind, Kind::Message))
+        .map(|(variant, _, _, tag)| {
+            quote! {
+                (#tag, ::core::option::Option::Some(Self::#variant(present))) => {
+                    ::asupersync::grpc::protobuf::merge_nested_message(present, field, decoder)?;
+                    Ok(true)
+                }
+            }
+        })
+        .collect();
+    let tags = variants.iter().map(|variant| variant.3).collect();
     let _ = name;
-    Ok((encode, decode, tag_values))
+    Ok(OneofParts {
+        encode,
+        decode,
+        merge,
+        tags,
+    })
+}
+
+/// The inherent `__asupersync_proto_merge_oneof` of a derived oneof with
+/// message variants. Protobuf merges a message member that appears again
+/// while it is the oneof's current member, as prost does; any other member
+/// replaces the current one. It shadows the replace-only fallback that a
+/// derived message declares in `merge_field` (`oneof_replace_fallback`).
+fn oneof_merge_fn(merge_arms: &[TokenStream2]) -> TokenStream2 {
+    if merge_arms.is_empty() {
+        return TokenStream2::new();
+    }
+    quote! {
+        /// Merges `field` into `slot`: a message member that repeats while
+        /// it is the current member is merged into it, and any other member
+        /// replaces the current one. Called by a derived `ProtoMessage`.
+        ///
+        /// # Errors
+        ///
+        /// Returns the decoder's error for a malformed member.
+        #[doc(hidden)]
+        #[allow(dead_code)]
+        pub fn __asupersync_proto_merge_oneof<'wire>(
+            slot: &mut ::core::option::Option<Self>,
+            field: &::asupersync::grpc::protobuf::ProtobufWireField<'wire>,
+            decoder: &mut ::asupersync::grpc::protobuf::ProtobufWireDecoder<'wire, '_>,
+        ) -> ::core::result::Result<
+            bool,
+            ::asupersync::grpc::protobuf::ProtobufWireError,
+        > {
+            match (field.field_number(), slot) {
+                #(#merge_arms)*
+                (_, slot) => match <Self as ::asupersync::grpc::protobuf::ProtoOneof>::decode_oneof(
+                    field,
+                    decoder,
+                )? {
+                    ::core::option::Option::Some(value) => {
+                        *slot = ::core::option::Option::Some(value);
+                        Ok(true)
+                    }
+                    ::core::option::Option::None => Ok(false),
+                },
+            }
+        }
+    }
 }
 
 pub fn derive_proto_oneof(input: &DeriveInput) -> Result<TokenStream2> {
@@ -1302,7 +1404,12 @@ pub fn derive_proto_oneof(input: &DeriveInput) -> Result<TokenStream2> {
             "ProtoOneof can be derived only for an enum",
         ));
     };
-    let (encode_arms, decode_arms, tags) = derive_oneof_data(name, data)?;
+    let OneofParts {
+        encode: encode_arms,
+        decode: decode_arms,
+        merge: merge_arms,
+        tags,
+    } = derive_oneof_data(name, data)?;
     if tags.is_empty() {
         return Err(Error::new(
             input.span(),
@@ -1312,6 +1419,16 @@ pub fn derive_proto_oneof(input: &DeriveInput) -> Result<TokenStream2> {
 
     let generics = &input.generics;
     let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
+    let merge_fn = oneof_merge_fn(&merge_arms);
+    let merge_impl = if merge_fn.is_empty() {
+        TokenStream2::new()
+    } else {
+        quote! {
+            impl #impl_generics #name #type_generics #where_clause {
+                #merge_fn
+            }
+        }
+    };
     Ok(quote! {
         impl #impl_generics ::asupersync::grpc::protobuf::ProtoOneof
             for #name #type_generics #where_clause
@@ -1344,6 +1461,8 @@ pub fn derive_proto_oneof(input: &DeriveInput) -> Result<TokenStream2> {
                 }
             }
         }
+
+        #merge_impl
     })
 }
 

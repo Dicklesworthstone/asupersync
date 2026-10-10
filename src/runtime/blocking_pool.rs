@@ -1460,6 +1460,16 @@ fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
     }
 }
 
+impl Drop for BlockingPoolInner {
+    fn drop(&mut self) {
+        // Handles still here when the last reference goes (a shutdown that
+        // timed out) belong to workers that may be exiting right now, often
+        // this thread among them. Dropping them would detach those threads
+        // (GitHub #80), so finished ones are joined and running ones parked.
+        crate::runtime::spawn_blocking::reap_threads(std::mem::take(self.thread_handles.get_mut()));
+    }
+}
+
 /// Check if we should spawn a new thread and do so if needed.
 fn maybe_spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
     // Enqueue half of the Dekker pattern with idle retirement (see the matching
@@ -4226,6 +4236,44 @@ mod tests {
                 "one of the APIs failed to prepay completion",
             );
         }
+    }
+
+    /// GitHub #80 census: thread handles still in the pool when its last
+    /// reference goes (after a shutdown that timed out) were dropped with it,
+    /// detaching threads that may be exiting at that moment. A running one is
+    /// parked instead, and joined once it has finished.
+    #[test]
+    fn leftover_thread_handles_are_parked_not_detached_when_the_pool_drops() {
+        let inner = test_blocking_inner_with_affinity(BlockingPoolAffinityProfile::Disabled, None);
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let worker = thread::Builder::new()
+            .name("blocking-pool-leftover".to_string())
+            .spawn(move || {
+                let _ = release_rx.recv_timeout(Duration::from_secs(60));
+            })
+            .expect("spawn the stand-in worker");
+        let worker_id = worker.thread().id();
+        inner.thread_handles.lock().push(worker);
+
+        drop(inner);
+        assert_eq!(
+            crate::runtime::spawn_blocking::parked_thread(worker_id),
+            Some(false),
+            "the running worker must be parked, not detached"
+        );
+
+        release_tx.send(()).expect("the worker still waits");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while crate::runtime::spawn_blocking::parked_thread(worker_id) == Some(false) {
+            assert!(Instant::now() < deadline, "the worker did not finish");
+            thread::sleep(Duration::from_millis(5));
+        }
+        crate::runtime::spawn_blocking::reap_threads(Vec::new());
+        assert_eq!(
+            crate::runtime::spawn_blocking::parked_thread(worker_id),
+            None,
+            "a finished parked worker is joined"
+        );
     }
 }
 

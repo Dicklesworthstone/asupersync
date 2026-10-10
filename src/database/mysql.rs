@@ -1759,6 +1759,15 @@ struct Handshake {
 /// stored. Returned by
 /// [`MySqlConnection::execute_prepared_result`] and
 /// [`MySqlConnection::execute_trusted_sql_result`].
+///
+/// A statement that returns rows, such as MariaDB's `INSERT ... RETURNING`,
+/// has no such report although it stored rows.
+/// `execute_trusted_sql_result` reads past its rows and reports 0 for both
+/// fields. `execute_prepared_result` fails with an unexpected-response
+/// error after the server ran the statement, and closes the connection.
+/// Run such a statement with
+/// [`MySqlConnection::query_trusted_sql`] or
+/// [`MySqlConnection::query_prepared`], and read the keys from its rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct MySqlExecResult {
@@ -2147,10 +2156,10 @@ impl Drop for MySqlConnection {
                     )
                     .await;
                 });
-                // The task bounds the complete exchange, including the final
-                // OK, and cannot recursively spawn another cleanup connection.
+                // The task bounds the exchange, final OK included, and starts no nested cleanup.
                 runtime.block_on(join);
-            });
+            })
+            .map(crate::runtime::spawn_blocking::reap_spawned_thread);
     }
 }
 

@@ -1544,7 +1544,53 @@ struct GlobalFallbackIoDriver {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-static GLOBAL_FALLBACK_IO: OnceLock<Option<GlobalFallbackIoDriver>> = OnceLock::new();
+static GLOBAL_FALLBACK_IO: OnceLock<GlobalFallbackIoDriver> = OnceLock::new();
+
+/// Failed attempts to start the fallback driver. A failure is retried rather
+/// than remembered for the life of the process: a transient one at the first
+/// driverless poll (`EMFILE` creating the reactor, `EAGAIN` spawning the
+/// pump) left every driverless socket on the self-wake hot loop for good
+/// (br-asupersync-reactor-audit-dofi11 LOW 4). Retries are spaced by calls,
+/// doubling up to [`FALLBACK_IO_MAX_RETRY_SPACING`], so a target without a
+/// reactor backend pays one attempt per that many polls.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Default)]
+struct FallbackIoStart {
+    failures: u32,
+    calls_since_failure: u64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+const FALLBACK_IO_MAX_RETRY_SPACING: u64 = 4096;
+
+#[cfg(not(target_arch = "wasm32"))]
+impl FallbackIoStart {
+    /// Whether this call may try to start the driver again.
+    fn attempt_due(&mut self) -> bool {
+        if self.failures == 0 {
+            return true;
+        }
+        self.calls_since_failure = self.calls_since_failure.saturating_add(1);
+        let spacing = 1_u64
+            .checked_shl(self.failures)
+            .map_or(FALLBACK_IO_MAX_RETRY_SPACING, |spacing| {
+                spacing.min(FALLBACK_IO_MAX_RETRY_SPACING)
+            });
+        self.calls_since_failure >= spacing
+    }
+
+    fn record_failure(&mut self) {
+        self.failures = self.failures.saturating_add(1);
+        self.calls_since_failure = 0;
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+static FALLBACK_IO_START: parking_lot::Mutex<FallbackIoStart> =
+    parking_lot::Mutex::new(FallbackIoStart {
+        failures: 0,
+        calls_since_failure: 0,
+    });
 
 /// Park applied by the fallback pump after a reactor error other than `EINTR`
 /// so a persistently failing backend cannot turn the pump into a hot loop.
@@ -1554,44 +1600,71 @@ const FALLBACK_IO_PUMP_ERROR_BACKOFF: std::time::Duration = std::time::Duration:
 /// Returns the process-global fallback I/O driver, starting its pump thread on
 /// first use. `None` when no reactor backend could be created on this target
 /// (or the pump thread could not be spawned); callers then keep the legacy
-/// self-wake path so progress is still made.
+/// self-wake path so progress is still made, and a later call tries to start
+/// the driver again ([`FallbackIoStart`]).
 #[cfg(not(target_arch = "wasm32"))]
 fn global_fallback_io_driver() -> Option<&'static IoDriverHandle> {
-    GLOBAL_FALLBACK_IO
-        .get_or_init(|| {
-            let reactor = match create_reactor() {
-                Ok(reactor) => reactor,
-                Err(_err) => {
-                    crate::tracing_compat::warn!(
-                        target: "asupersync::net::udp",
-                        error = %_err,
-                        "GH#67: no reactor backend for the process-global fallback I/O driver; \
-                         driverless UDP polls keep the immediate self-wake path"
-                    );
-                    return None;
-                }
-            };
-            let driver = IoDriverHandle::new(reactor);
-            let pump_driver = driver.clone();
-            // ubs:ignore - intentional process-lifetime daemon reactor pump shared by all driverless UDP polls
-            match std::thread::Builder::new()
-                .name("asupersync-fallback-io".to_string())
-                .spawn(move || fallback_io_pump_loop(&pump_driver))
-            {
-                Ok(_handle) => Some(GlobalFallbackIoDriver { driver }),
-                Err(_err) => {
-                    crate::tracing_compat::warn!(
-                        target: "asupersync::net::udp",
-                        error = %_err,
-                        "GH#67: could not spawn the process-global fallback I/O pump; \
-                         driverless UDP polls keep the immediate self-wake path"
-                    );
-                    None
-                }
+    fallback_io_driver_from(
+        &GLOBAL_FALLBACK_IO,
+        &FALLBACK_IO_START,
+        start_global_fallback_io,
+    )
+}
+
+/// [`global_fallback_io_driver`] over the given cell, start state and
+/// starter, which a test can replace.
+#[cfg(not(target_arch = "wasm32"))]
+fn fallback_io_driver_from(
+    cell: &'static OnceLock<GlobalFallbackIoDriver>,
+    start: &parking_lot::Mutex<FallbackIoStart>,
+    starter: impl FnOnce() -> io::Result<GlobalFallbackIoDriver>,
+) -> Option<&'static IoDriverHandle> {
+    if let Some(global) = cell.get() {
+        return Some(&global.driver);
+    }
+    let mut start = start.lock();
+    // Another caller may have started it while this one waited for the lock.
+    if let Some(global) = cell.get() {
+        return Some(&global.driver);
+    }
+    if !start.attempt_due() {
+        return None;
+    }
+    match starter() {
+        Ok(global) => Some(&cell.get_or_init(|| global).driver),
+        Err(_err) => {
+            if start.failures == 0 {
+                crate::tracing_compat::warn!(
+                    target: "asupersync::net::udp",
+                    error = %_err,
+                    "GH#67: the process-global fallback I/O driver did not start (no reactor \
+                     backend, or no pump thread); driverless UDP polls keep the immediate \
+                     self-wake path, and the start is retried"
+                );
             }
-        })
-        .as_ref()
-        .map(|global| &global.driver)
+            start.record_failure();
+            None
+        }
+    }
+}
+
+/// Creates the fallback driver's reactor and spawns its pump thread.
+#[cfg(not(target_arch = "wasm32"))]
+fn start_global_fallback_io() -> io::Result<GlobalFallbackIoDriver> {
+    let reactor = create_reactor()?;
+    let driver = IoDriverHandle::new(reactor);
+    let pump_driver = driver.clone();
+    // ubs:ignore - intentional process-lifetime daemon reactor pump shared by all driverless UDP polls
+    match std::thread::Builder::new()
+        .name("asupersync-fallback-io".to_string())
+        .spawn(move || fallback_io_pump_loop(&pump_driver))
+    {
+        Ok(_handle) => Ok(GlobalFallbackIoDriver { driver }),
+        Err(err) => Err(io::Error::new(
+            err.kind(),
+            format!("spawning the fallback I/O pump thread: {err}"),
+        )),
+    }
 }
 
 /// The shared fallback pump loop: block in the reactor until at least one
@@ -1693,7 +1766,7 @@ pub struct FallbackIoDriverProbe {
 #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-internals")))]
 #[must_use]
 pub fn fallback_io_driver_probe() -> Option<FallbackIoDriverProbe> {
-    let driver = &GLOBAL_FALLBACK_IO.get()?.as_ref()?.driver;
+    let driver = &GLOBAL_FALLBACK_IO.get()?.driver;
     let stats = driver.stats();
     Some(FallbackIoDriverProbe {
         polls: stats.polls,
@@ -1751,40 +1824,69 @@ pub struct ReactorRegistration {
 #[cfg(unix)]
 #[derive(Debug, Default)]
 struct SharedWaiters {
-    waiters: parking_lot::Mutex<Vec<std::task::Waker>>,
+    /// One entry per waiting call future, keyed by its owner id
+    /// ([`next_shared_waiter_owner`]).
+    waiters: parking_lot::Mutex<Vec<(u64, std::task::Waker)>>,
+}
+
+/// A fresh owner id for one call future's entry in a socket's shared waiter
+/// list ([`ReactorRegistration::arm_shared`]).
+#[cfg(unix)]
+pub fn next_shared_waiter_owner() -> u64 {
+    static NEXT_OWNER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT_OWNER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 #[cfg(unix)]
 impl SharedWaiters {
-    /// Adds `waker` unless it is already listed. A waiter whose future was
-    /// dropped stays listed until the next event; past 32 entries the oldest
-    /// is woken and evicted, so a live one re-registers and a stale one goes.
-    fn register(&self, waker: &std::task::Waker) {
-        let mut waiters = self.waiters.lock();
-        if waiters.iter().any(|existing| existing.will_wake(waker)) {
-            return;
-        }
-        if waiters.len() >= 32 {
-            let evicted = waiters.remove(0);
-            drop(waiters);
-            evicted.wake();
-            waiters = self.waiters.lock();
-        }
-        waiters.push(waker.clone());
+    /// Stores `waker` as `owner`'s entry, replacing the waker it held. The
+    /// call future that owns the entry removes it when dropped
+    /// ([`Self::forget`]), so the list holds one entry per waiting call and
+    /// nothing is evicted. A 32-entry cap that woke the evicted waiter made
+    /// 33 or more waiting tasks wake each other forever
+    /// (br-asupersync-reactor-audit-dofi11).
+    fn register(&self, owner: u64, waker: &std::task::Waker) {
+        let displaced = {
+            let mut waiters = self.waiters.lock();
+            if let Some((_, existing)) = waiters.iter_mut().find(|(id, _)| *id == owner) {
+                (!existing.will_wake(waker)).then(|| std::mem::replace(existing, waker.clone()))
+            } else {
+                waiters.push((owner, waker.clone()));
+                None
+            }
+        };
+        // A waker drops outside the list's lock.
+        drop(displaced);
     }
 
-    /// Removes every waiter and returns all but `current`.
-    fn take_others(&self, current: &std::task::Waker) -> Vec<std::task::Waker> {
-        let mut waiters = std::mem::take(&mut *self.waiters.lock());
-        waiters.retain(|waiter| !waiter.will_wake(current));
+    /// Removes `owner`'s entry, returning its waker for the caller to drop
+    /// after releasing its own locks.
+    fn forget(&self, owner: u64) -> Option<std::task::Waker> {
+        let mut waiters = self.waiters.lock();
+        let position = waiters.iter().position(|(id, _)| *id == owner)?;
+        Some(waiters.swap_remove(position).1)
+    }
+
+    /// Removes every waiter and returns all but `current`'s.
+    fn take_others(&self, current: u64) -> Vec<std::task::Waker> {
+        let waiters = std::mem::take(&mut *self.waiters.lock());
         waiters
+            .into_iter()
+            .filter(|(id, _)| *id != current)
+            .map(|(_, waker)| waker)
+            .collect()
     }
 
     fn wake_all(&self) {
         let waiters = std::mem::take(&mut *self.waiters.lock());
-        for waiter in waiters {
+        for (_, waiter) in waiters {
             waiter.wake();
         }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.waiters.lock().len()
     }
 }
 
@@ -1942,23 +2044,43 @@ impl ReactorRegistration {
     /// wakeup. When no reactor will deliver a wake (`SelfWake` or an error),
     /// the other listed waiters are returned: the caller wakes them after
     /// releasing the lock that guards `self`, so each re-polls on its own.
+    ///
+    /// `owner` ([`next_shared_waiter_owner`]) names the calling future's one
+    /// entry in the list; the future removes it with
+    /// [`forget_shared`](Self::forget_shared) when dropped.
     #[cfg(unix)]
     pub(crate) fn arm_shared(
         &mut self,
         source: &dyn crate::runtime::reactor::Source,
         interest: Interest,
+        owner: u64,
         waker: &std::task::Waker,
     ) -> (io::Result<Armed>, Vec<std::task::Waker>) {
         let waiters = Arc::clone(self.shared_waiters.get_or_insert_with(Default::default));
-        waiters.register(waker);
+        waiters.register(owner, waker);
         let dispatch = std::task::Waker::from(Arc::clone(&waiters));
         let armed = self.arm(source, interest, &dispatch);
         let stranded = if matches!(armed, Ok(Armed::Parked)) {
             Vec::new()
         } else {
-            waiters.take_others(waker)
+            waiters.take_others(owner)
         };
         (armed, stranded)
+    }
+
+    /// Removes `owner`'s entry from the shared waiter list, returning its
+    /// waker for the caller to drop after releasing the lock guarding `self`.
+    #[cfg(unix)]
+    pub(crate) fn forget_shared(&self, owner: u64) -> Option<std::task::Waker> {
+        self.shared_waiters
+            .as_ref()
+            .and_then(|waiters| waiters.forget(owner))
+    }
+
+    /// How many call futures are listed as shared waiters.
+    #[cfg(all(unix, test))]
+    pub(crate) fn shared_waiter_count(&self) -> usize {
+        self.shared_waiters.as_deref().map_or(0, SharedWaiters::len)
     }
 
     /// Hands the live registration and its fallback flag to another owner of
@@ -5839,6 +5961,68 @@ mod tests {
             let first = global_fallback_io_driver().expect("fallback I/O driver on this target");
             let second = global_fallback_io_driver().expect("fallback I/O driver on this target");
             assert!(std::ptr::eq(first, second));
+        }
+
+        /// dofi11 LOW 4: a failed start of the fallback driver was cached as
+        /// `None` for the life of the process, so one transient `EMFILE` left
+        /// every driverless socket on the self-wake hot loop. It is retried
+        /// now, with the calls between attempts doubling, and a started
+        /// driver is never started again.
+        #[test]
+        fn a_failed_fallback_driver_start_is_retried_with_backoff() {
+            let cell: &'static OnceLock<GlobalFallbackIoDriver> =
+                Box::leak(Box::new(OnceLock::new()));
+            let start = parking_lot::Mutex::new(FallbackIoStart::default());
+            let attempts = std::cell::Cell::new(0_u32);
+            let failing = || {
+                attempts.set(attempts.get() + 1);
+                Err(io::Error::other("no reactor backend"))
+            };
+            let mut attempted_at = Vec::new();
+            for call in 1..=30 {
+                let before = attempts.get();
+                assert!(fallback_io_driver_from(cell, &start, failing).is_none());
+                if attempts.get() > before {
+                    attempted_at.push(call);
+                }
+            }
+            assert_eq!(
+                attempted_at,
+                vec![1, 3, 7, 15],
+                "attempts 2, 4 and 8 calls apart"
+            );
+
+            let succeeding = || {
+                Ok(GlobalFallbackIoDriver {
+                    driver: IoDriverHandle::new(Arc::new(LabReactor::new())),
+                })
+            };
+            let mut call = 30;
+            let started = loop {
+                call += 1;
+                if let Some(driver) = fallback_io_driver_from(cell, &start, succeeding) {
+                    break driver;
+                }
+            };
+            assert_eq!(
+                call, 31,
+                "the attempt 16 calls after the last failure starts it"
+            );
+            let again = fallback_io_driver_from(cell, &start, || {
+                panic!("a started driver is not started again")
+            })
+            .expect("the started driver");
+            assert!(std::ptr::eq(started, again));
+
+            let mut capped = FallbackIoStart {
+                failures: 64,
+                calls_since_failure: 0,
+            };
+            assert!((1..FALLBACK_IO_MAX_RETRY_SPACING).all(|_| !capped.attempt_due()));
+            assert!(
+                capped.attempt_due(),
+                "attempts stay at most 4096 calls apart"
+            );
         }
 
         /// The GH#67 follow-up probe reports what the fallback driver did for

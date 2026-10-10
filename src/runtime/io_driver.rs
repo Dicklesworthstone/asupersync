@@ -889,10 +889,6 @@ pub struct IoRegistration {
     interest: Interest,
     driver: Weak<Mutex<IoDriver>>,
     reactor: Arc<dyn Reactor>,
-    /// Cached copy of the last waker stored in the driver slab.
-    /// Used for `Waker::will_wake` comparison to avoid unnecessary
-    /// atomic ref-count bumps and mutex acquisitions on the hot path.
-    cached_waker: Option<Waker>,
     /// Tracks whether this registration has already been successfully deregistered.
     ///
     /// Persistent explicit deregistration failures leave Drop armed for one
@@ -922,7 +918,6 @@ impl IoRegistration {
             interest,
             driver,
             reactor,
-            cached_waker: None,
             deregistered: false,
             interest_change_wakes_reactor,
         }
@@ -997,7 +992,7 @@ impl IoRegistration {
     ///
     /// This replaces separate `set_interest` + `update_waker` calls on the
     /// I/O poll hot path.  The waker update is skipped when
-    /// `Waker::will_wake` indicates the cached waker is still current,
+    /// `Waker::will_wake` shows the stored waker is still the task's,
     /// avoiding an atomic ref-count bump (clone) and a slab write.
     ///
     /// Returns `Ok(true)` if the registration remains valid, `Ok(false)`
@@ -1044,27 +1039,23 @@ impl IoRegistration {
             interest
         };
 
-        // Skip the waker clone when the task's waker hasn't changed.
-        if self
-            .cached_waker
-            .as_ref()
-            .is_none_or(|w| !w.will_wake(waker))
-        {
-            let slab_key = SlabToken::from_usize(self.token.0);
-            let Some(slot) = guard.wakers.get_mut(slab_key) else {
-                return Ok(false);
-            };
-            // Replaced wakers drop after the lock is released: one of them
-            // can own this driver's last handle (br-asupersync-9kb866).
-            let displaced_slot = if slot.will_wake(waker) {
-                None
-            } else {
-                Some(std::mem::replace(slot, waker.clone()))
-            };
-            let displaced_cache = self.cached_waker.replace(waker.clone());
-            drop(guard);
-            drop((displaced_slot, displaced_cache));
-        }
+        // Compare with the slab slot itself, under the lock already held:
+        // `update_waker` and `IoDriver::deregister_waker` change the slot
+        // without this registration seeing it (r13 E2 #7). Nothing is cloned
+        // when the slot already holds the task's waker.
+        let slab_key = SlabToken::from_usize(self.token.0);
+        let Some(slot) = guard.wakers.get_mut(slab_key) else {
+            return Ok(false);
+        };
+        // A replaced waker drops after the lock is released: it can own this
+        // driver's last handle (br-asupersync-9kb866).
+        let displaced = if slot.will_wake(waker) {
+            None
+        } else {
+            Some(std::mem::replace(slot, waker.clone()))
+        };
+        drop(guard);
+        drop(displaced);
 
         Ok(true)
     }
@@ -3800,6 +3791,56 @@ mod tests {
             );
         }
         crate::test_complete!("a_panicking_event_callback_does_not_strand_a_handle_turn");
+    }
+
+    /// r13 E2 #7: `rearm` compared its waker with the one it had stored
+    /// last, not with the slab slot. A waker that `update_waker` put in the
+    /// slot in between went unseen, so the next event woke that waker and the
+    /// task that had just re-armed was never woken. A slot removed through
+    /// the public driver lock was likewise reported as still valid.
+    #[test]
+    fn io_registration_rearm_compares_its_waker_with_the_slab_slot() {
+        init_test("io_registration_rearm_compares_its_waker_with_the_slab_slot");
+        let reactor = Arc::new(LabReactor::new());
+        let driver = IoDriverHandle::new(reactor.clone());
+        let source = TestFdSource;
+        let (waker_a, state_a) = create_test_waker();
+        let (waker_b, state_b) = create_test_waker();
+        let mut reg = driver
+            .register(&source, Interest::READABLE, waker_a.clone())
+            .expect("register should succeed");
+        let token = reg.token();
+
+        let valid = reg
+            .rearm(Interest::READABLE, &waker_a)
+            .expect("first rearm should succeed");
+        crate::assert_with_log!(valid, "first rearm keeps the slot", true, valid);
+        let updated = reg.update_waker(waker_b);
+        crate::assert_with_log!(updated, "update_waker stores waker b", true, updated);
+        let valid = reg
+            .rearm(Interest::READABLE, &waker_a)
+            .expect("rearm after update_waker should succeed");
+        crate::assert_with_log!(valid, "second rearm keeps the slot", true, valid);
+
+        reactor.inject_event(token, Event::readable(token), Duration::ZERO);
+        let dispatched = driver
+            .lock()
+            .turn(Some(Duration::from_millis(10)))
+            .expect("turn should succeed");
+        crate::assert_with_log!(dispatched == 1, "one event", 1usize, dispatched);
+        let woken_a = state_a.count.load(Ordering::SeqCst);
+        crate::assert_with_log!(woken_a == 1, "the re-armed waker is woken", 1usize, woken_a);
+        let woken_b = state_b.count.load(Ordering::SeqCst);
+        crate::assert_with_log!(woken_b == 0, "the replaced waker is not", 0usize, woken_b);
+
+        driver.lock().deregister_waker(token);
+        let valid = reg
+            .rearm(Interest::READABLE, &waker_a)
+            .expect("rearm of a removed slot should succeed");
+        crate::assert_with_log!(!valid, "a removed slot is reported", false, valid);
+
+        drop(reg);
+        crate::test_complete!("io_registration_rearm_compares_its_waker_with_the_slab_slot");
     }
 }
 

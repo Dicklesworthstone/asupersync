@@ -255,6 +255,7 @@ fn serve_loop(
                             handle_connection(stream, &snapshot_fn, &memory_residency_snapshot_fn);
                         }));
                     })
+                    .map(crate::runtime::spawn_blocking::reap_spawned_thread)
                     .map_err(|_| active_connections.fetch_sub(1, Ordering::Relaxed));
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -1108,5 +1109,43 @@ mod tests {
         assert_eq!(c2.max_connections, 16);
         assert_eq!(c2.refresh_interval_secs, 2);
         assert!(c2.print_url);
+    }
+
+    /// GitHub #80 census: the connection thread's handle used to be dropped at
+    /// spawn, detaching a thread that may already be exiting. It is parked
+    /// instead, and joined once the thread has finished.
+    #[test]
+    fn a_running_connection_thread_is_parked_not_detached() {
+        let snapshot_fn: SnapshotFn = Arc::new(test_snapshot);
+        let mut server = DebugServer::with_config(
+            0,
+            snapshot_fn,
+            DebugServerConfig {
+                print_url: false,
+                ..Default::default()
+            },
+        );
+        server.start().unwrap();
+
+        // A connection that sends nothing keeps its handler in the request
+        // read (5 s timeout), so that thread is still running.
+        let silent = TcpStream::connect(server.local_addr.unwrap()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+        let parked = loop {
+            let parked =
+                crate::runtime::spawn_blocking::parked_thread_named("asupersync-debug-connection");
+            if parked == Some(false) || std::time::Instant::now() >= deadline {
+                break parked;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(
+            parked,
+            Some(false),
+            "the running connection thread must be parked, not detached"
+        );
+
+        drop(silent);
+        server.stop();
     }
 }

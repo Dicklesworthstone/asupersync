@@ -27,19 +27,19 @@ impl<T: AsyncRead + AsyncWrite + Send + Unpin> HandoffIo for T {}
 /// Wraps an underlying I/O stream (such as a [`TcpStream`]) and counts the
 /// bytes written to it beneath TLS or other layered wrappers.
 #[allow(dead_code)]
-pub(crate) struct SocketByteCounter<S> {
+pub struct SocketByteCounter<S> {
     stream: S,
     written: Arc<AtomicU64>,
 }
 
 impl<S> SocketByteCounter<S> {
     #[allow(dead_code)]
-    pub(crate) fn new(stream: S, written: Arc<AtomicU64>) -> Self {
+    pub fn new(stream: S, written: Arc<AtomicU64>) -> Self {
         Self { stream, written }
     }
 
     #[allow(dead_code)]
-    pub(crate) fn into_inner(self) -> S {
+    pub fn into_inner(self) -> S {
         self.stream
     }
 
