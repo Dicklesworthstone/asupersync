@@ -3232,7 +3232,7 @@ impl ChildStdin {
         })
     }
 
-    /// Returns the raw file descriptor.
+    /// Returns the raw file descriptor. Panics after `shutdown`: see `try_as_raw_fd`.
     #[cfg(unix)]
     #[must_use]
     pub fn as_raw_fd(&self) -> RawFd {
@@ -3242,7 +3242,7 @@ impl ChildStdin {
             .as_raw_fd()
     }
 
-    /// Returns the raw handle on Windows.
+    /// Returns the raw handle on Windows. Panics after `shutdown`: see `try_as_raw_handle`.
     #[cfg(windows)]
     #[must_use]
     pub fn as_raw_handle(&self) -> RawHandle {
@@ -5527,6 +5527,34 @@ mod tests {
         assert_eq!(child.wait().expect("second wait"), status);
         crate::test_complete!("exact_image_wait_reaps_after_the_group_kill");
     }
+
+    /// br-asupersync-7tg3di 5: after `shutdown` closed the pipe,
+    /// `as_raw_fd` panics with "child stdin already closed".
+    /// `try_as_raw_fd` reports that instead.
+    #[cfg(unix)]
+    #[test]
+    fn child_stdin_try_as_raw_fd_reports_a_closed_pipe_without_panicking() {
+        init_test("child_stdin_try_as_raw_fd_reports_a_closed_pipe_without_panicking");
+        let mut child = Command::new("cat")
+            .stdin(Stdio::Pipe)
+            .stdout(Stdio::Null)
+            .spawn()
+            .expect("spawn cat");
+        let mut stdin = child.stdin().expect("missing stdin pipe");
+        let open = stdin.try_as_raw_fd();
+        assert_eq!(open, Some(stdin.as_raw_fd()), "an open pipe has its fd");
+
+        futures_lite::future::block_on(crate::io::AsyncWriteExt::shutdown(&mut stdin))
+            .expect("shutdown");
+        assert_eq!(stdin.try_as_raw_fd(), None, "the pipe is closed");
+        let panicked =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stdin.as_raw_fd())).is_err();
+        assert!(panicked, "as_raw_fd keeps its documented panic");
+
+        let _ = child.kill();
+        let _ = child.wait();
+        crate::test_complete!("child_stdin_try_as_raw_fd_reports_a_closed_pipe_without_panicking");
+    }
 }
 
 #[cfg(all(test, windows))]
@@ -5829,5 +5857,24 @@ impl ExactImagePlatformChild {
 
     fn try_reap(&mut self) -> io::Result<Option<ExitStatus>> {
         self.try_wait()
+    }
+}
+
+// At the end of the file: the unsafe-ledger line locators above stay put.
+impl ChildStdin {
+    /// The raw file descriptor, or `None` once `shutdown` closed the pipe
+    /// (where [`Self::as_raw_fd`] panics) (br-asupersync-7tg3di).
+    #[cfg(unix)]
+    #[must_use]
+    pub fn try_as_raw_fd(&self) -> Option<RawFd> {
+        self.inner.as_ref().map(AsRawFd::as_raw_fd)
+    }
+
+    /// The raw handle, or `None` once `shutdown` closed the pipe (where
+    /// [`Self::as_raw_handle`] panics).
+    #[cfg(windows)]
+    #[must_use]
+    pub fn try_as_raw_handle(&self) -> Option<RawHandle> {
+        self.inner.as_ref().map(AsRawHandle::as_raw_handle)
     }
 }
