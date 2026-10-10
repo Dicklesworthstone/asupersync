@@ -158,12 +158,12 @@ fn terminal_validate(value: &Value) -> Result<(), String> {
         (
             "artifacts/regex_ir_lowering_contract_v1.json",
             "6293e939cf7a8c21176325503f8709e50a69b3f9643b5e28383953bdddee6dc6",
-            "ca4b6827d3775261ba100546de7ff8f183365b8ec47f5fe085d2887c8398b38c",
+            "32d94219bdfea4eae977e83120f8f7b6c4465d6d01961b09808bbb8c144e4c79",
         ),
         (
             "artifacts/regex_priority_capture_lowering_contract_v1.json",
             "27334fd193274b52ccf1952b212dd7d07237fdd96240e4e61587ee3b2d41257a",
-            "fff4b34e537a16b72077cb9289b3f6fcff439238212c7b4471e44410af6c2086",
+            "a80cae0504cac450a443d2d349578cf7f26b2cada8bdc2029d9b275fac311414",
         ),
     ];
     if predecessors.len() != expected_predecessors.len() {

@@ -29,9 +29,9 @@
     },
     {
       "path": "src/observability/regex_vm.rs",
-      "sha256": "eb26edc914e1c2c4683d53132524446a2a84052072202d070581ca9917d27947",
-      "bytes": 251797,
-      "revision": "asupersync-5z2scg.8.3.6"
+      "sha256": "abd07a7aed11731eeedd0f79965d75e78fb2e15bd3a6e3e968ff35711095d06b",
+      "bytes": 252716,
+      "revision": "e80034f774be4cbce0b9e66c79203e333a8c3620"
     },
     {
       "path": "src/observability/mod.rs",

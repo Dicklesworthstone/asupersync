@@ -203,16 +203,16 @@
     "production wiring or dependency removal"
   ],
   "current_source_review": {
-    "reviewed_at_utc": "2026-09-09",
-    "release_bead": "asupersync-ghxhvm",
+    "reviewed_at_utc": "2026-10-10",
+    "release_bead": "asupersync-ae4jmn",
     "claim_scope": "CURRENT_SOURCE_STATIC_REVIEW_ONLY",
     "execution_receipts_rebound": false,
-    "review": "Against the exact 4455cb7756 source pin, b12cc7ad adds PrivateCompileOutput, compile_private_with_captures and bounded capture-name extraction through shared analyze_and_lower. The existing lower and compile_private results remain Program and retain validation. da992970 adds deny_unknown_fields Serde support to the six limit structures. Save/Split emission, capture numbering, repetition and resource accounting are unchanged. Original execution receipts are retained for their original source only; this review grants no replacement-template, configured-pattern, matcher or production acceptance.",
+    "review": "Against the exact 4455cb7756 source pin, b12cc7ad adds PrivateCompileOutput, compile_private_with_captures and bounded capture-name extraction through shared analyze_and_lower. The existing lower and compile_private results remain Program and retain validation. da992970 adds deny_unknown_fields Serde support to the six limit structures. e80034f77 replaces the dense per-copy state remap in clone_fragment with an indexed RemapTable and the linear semantic-class, fold and boundary span searches with a span-keyed SpanIndex; static review r21-d0 B3 (asupersync-ae4jmn) found both equivalent to the structures they replace. Save/Split emission, greedy and lazy priority, capture numbering, repetition and resource accounting are unchanged. Original execution receipts are retained for their original source only and none is rebound to e80034f77; this review grants no replacement-template, configured-pattern, matcher or production acceptance.",
     "sources": [
       {
         "path": "src/observability/regex_lowering.rs",
-        "sha256": "c6eb65265b080aa234359b83ff50a7ddaf05b733c411dc7f55abbbe9f652a25f",
-        "bytes": 72080
+        "sha256": "dcf35e7f080dc6cb0b9323d3227fcf952ff1b9c1fa1c5bd3ef96761895ff7036",
+        "bytes": 74958
       },
       {
         "path": "src/observability/regex_ir.rs",
