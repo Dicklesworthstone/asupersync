@@ -316,6 +316,13 @@ pub trait RemoteRuntime: Send + Sync + fmt::Debug {
     /// Implementations that keep a pending-results map must remove the
     /// entry for `task_id` to prevent resource leaks.
     fn unregister_task(&self, task_id: RemoteTaskId);
+
+    /// Called when a handle is dropped without consuming its result, after it
+    /// released its result receiver. A runtime that keeps a task's entry once
+    /// it delivered the result can remove the entry here when the task is
+    /// terminal and its result sender has settled, since nothing can consume
+    /// that result any more. The default does nothing (br-asupersync-96btkn).
+    fn handle_dropped(&self, _task_id: RemoteTaskId) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -707,6 +714,15 @@ impl Drop for RemoteHandle {
             self.request_cancel(CancelReason::user("remote handle dropped"));
         } else if self.receiver.is_ready() || self.receiver.is_closed() || self.runtime.is_none() {
             self.clear_runtime_state();
+        }
+        // The driver can complete while this drop runs. A runtime may keep the
+        // task's entry when it delivered the result, and this receiver lives
+        // until the drop returns. So release the receiver now, then let the
+        // runtime retire an entry whose result can no longer be consumed;
+        // otherwise it would outlive the handle (br-asupersync-96btkn).
+        drop(std::mem::replace(&mut self.receiver, oneshot::channel().1));
+        if let Some(runtime) = &self.runtime {
+            runtime.handle_dropped(self.remote_task_id);
         }
     }
 }
@@ -7321,6 +7337,26 @@ impl NativeRemoteShared {
         }
     }
 
+    // A handle was dropped without consuming its result and has released its
+    // receiver. complete() keeps the entry when it delivered the result, so
+    // once the task is terminal and its sender was taken, nobody can consume
+    // that result: remove the entry (br-asupersync-96btkn). A live task stays
+    // tracked; if its sender is still here, complete() cannot deliver into
+    // the released receiver and removes the entry itself.
+    fn release_dropped_handle(&self, task_id: RemoteTaskId) {
+        let mut state = self.state.lock();
+        let settled = state.tasks.get(&task_id).is_some_and(|entry| {
+            entry.result.is_none()
+                && !matches!(
+                    entry.state,
+                    RemoteTaskState::Pending | RemoteTaskState::Running
+                )
+        });
+        if settled {
+            state.tasks.remove(&task_id);
+        }
+    }
+
     fn set_running(&self, task_id: RemoteTaskId) {
         if let Some(entry) = self.state.lock().tasks.get_mut(&task_id) {
             entry.state = RemoteTaskState::Running;
@@ -8298,6 +8334,10 @@ impl RemoteRuntime for NativeRemoteRuntime {
 
     fn unregister_task(&self, task_id: RemoteTaskId) {
         self.shared.roll_back_admission(task_id);
+    }
+
+    fn handle_dropped(&self, task_id: RemoteTaskId) {
+        self.shared.release_dropped_handle(task_id);
     }
 }
 

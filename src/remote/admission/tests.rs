@@ -169,3 +169,99 @@ fn discarded_factory_and_unpolled_driver_retire_native_admission() {
         }
     });
 }
+
+/// br-asupersync-96btkn: a handle dropped as its driver completes leaves no
+/// task entry behind. Here the driver completes inside the drop's own cancel
+/// request, while the handle's result receiver is still alive: the result is
+/// delivered, so the driver keeps the entry, and the runtime retires it when
+/// the handle reports its drop.
+#[test]
+fn a_handle_dropped_as_its_driver_completes_leaves_no_task_entry() {
+    struct CompletesOnCancel(Arc<NativeRemoteShared>);
+
+    impl fmt::Debug for CompletesOnCancel {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("CompletesOnCancel")
+        }
+    }
+
+    impl RemoteRuntime for CompletesOnCancel {
+        fn send_message(
+            &self,
+            _destination: &NodeId,
+            envelope: MessageEnvelope<RemoteMessage>,
+        ) -> Result<(), RemoteError> {
+            if let RemoteMessage::CancelRequest(request) = envelope.payload {
+                let task = request.remote_task_id;
+                self.0
+                    .complete(task, Ok(RemoteOutcome::Success(Vec::new())));
+                let _ = self.0.request_cancel(task, request.reason);
+            }
+            Ok(())
+        }
+
+        fn register_task(
+            &self,
+            task_id: RemoteTaskId,
+            tx: oneshot::Sender<Result<RemoteOutcome, RemoteError>>,
+        ) {
+            self.0.register(task_id, tx);
+        }
+
+        fn observe_task_state(&self, task_id: RemoteTaskId) -> Option<RemoteTaskState> {
+            self.0
+                .state
+                .lock()
+                .tasks
+                .get(&task_id)
+                .map(|entry| entry.state)
+        }
+
+        fn clear_task_state(&self, task_id: RemoteTaskId) {
+            self.0.state.lock().tasks.remove(&task_id);
+        }
+
+        fn unregister_task(&self, task_id: RemoteTaskId) {
+            self.0.roll_back_admission(task_id);
+        }
+
+        fn handle_dropped(&self, task_id: RemoteTaskId) {
+            self.0.release_dropped_handle(task_id);
+        }
+    }
+
+    let cx = Cx::for_testing();
+    let shared = Arc::new(NativeRemoteShared {
+        max_in_flight: 1,
+        drain_timeout: Duration::from_secs(1),
+        automatic_lease_renewal: true,
+        state: Mutex::new(NativeRemoteState::new()),
+        retirement_notify: None,
+    });
+    let runtime: Arc<dyn RemoteRuntime> = Arc::new(CompletesOnCancel(Arc::clone(&shared)));
+    let task = RemoteTaskId::next();
+    let (sender, receiver) = oneshot::channel();
+    runtime.register_task(task, sender);
+    let _control = shared.admit(task).unwrap();
+    shared.set_running(task);
+    drop(RemoteHandle {
+        remote_task_id: task,
+        local_task_id: None,
+        origin_node: NodeId::new("origin"),
+        node: NodeId::new("peer"),
+        computation: ComputationName::new("echo"),
+        owner_region: cx.region_id(),
+        runtime: Some(runtime),
+        receiver,
+        sender_clock: cx.logical_clock_handle(),
+        lease: Duration::from_secs(1),
+        state: RemoteTaskState::Running,
+        completed: false,
+    });
+    let state = shared.state.lock();
+    assert!(state.active.is_empty());
+    assert!(
+        state.tasks.is_empty(),
+        "the dropped handle's task entry was left behind"
+    );
+}
