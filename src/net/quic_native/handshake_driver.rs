@@ -1085,8 +1085,8 @@ impl QuicHandshakeDriver {
     /// Trailing datagram padding and a coalesced 1-RTT short-header packet end
     /// processing (the latter belongs to the data plane). A packet for a space
     /// without live keys is skipped with a stale classification
-    /// ([`is_stale_handshake_packet_error`]); an authentication failure under
-    /// live keys fails the call with [`PACKET_UNPROTECT_CODE`]. The result is
+    /// (`is_stale_handshake_packet_error`); an authentication failure under
+    /// live keys fails the call with `PACKET_UNPROTECT_CODE`. The result is
     /// `Ok` when at least one packet authenticated, otherwise the first
     /// packet's error.
     pub fn recv_handshake_packet(&mut self, datagram: &[u8]) -> Result<ConnectionId, QuicTlsError> {

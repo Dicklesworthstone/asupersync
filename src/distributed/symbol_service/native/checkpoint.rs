@@ -164,10 +164,10 @@ impl RecoveryManifest {
 
     /// Authenticate the complete V1 encoding with an explicitly supplied author key.
     /// No keys or transport addresses are serialized. All integers are little-endian.
-    /// Header: magic[8], version:u32, region:u64 (generation high, slot low),
+    /// Header: `magic[8]`, version:u32, region:u64 (generation high, slot low),
     /// origin/epoch/sequence:u64 each, object:u128, object-size:u64, symbol-size/
     /// source-blocks/symbols-per-block:u16 each, minimum/count:u32, origin-len:u8,
-    /// origin UTF-8; then replica-len:u8, replica UTF-8, digest[32] for each entry;
+    /// origin UTF-8; then replica-len:u8, replica UTF-8, `digest[32]` for each entry;
     /// finally an AuthenticationTag over the domain-framed complete preceding bytes.
     pub fn to_canonical_bytes(&self, key: &AuthKey, max_bytes: usize) -> Result<ManifestBytes, ManifestError> {
         let mut length = add(HEADER + TAG, self.peer.as_str().len())?;
@@ -287,5 +287,5 @@ mod workflow;
 pub use workflow::{CheckpointAuthority, CheckpointConfig, CheckpointError, ReplicatedCheckpoint};
 
 
-/// Explicit application-state continuation capture, validation and execution.
+// Explicit application-state continuation capture, validation and execution.
 pub mod continuation;

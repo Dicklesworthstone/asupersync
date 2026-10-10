@@ -31,7 +31,7 @@ pub struct DynamicWorkerConfig {
     /// region; it does not cancel sibling child trees or the dynamic supervisor's owner context.
     /// The escalation outcome is preserved in the child's completion report when reaped.
     /// If cross-child restart containment across dynamic children is required,
-    /// configure a [`SharedRestartDomain`](crate::cx::dynamic_supervisor::SharedRestartDomain) via
+    /// configure a [`SharedRestartConfig`](crate::cx::SharedRestartConfig) via
     /// [`Cx::open_dynamic_supervisor_with_shared_restarts`](crate::cx::Cx::open_dynamic_supervisor_with_shared_restarts).
     pub supervision: SupervisionConfig,
     /// Optional worker-controller region envelope, met with parent authority.

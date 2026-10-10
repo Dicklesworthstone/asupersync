@@ -484,7 +484,7 @@ impl<E> Child<E> {
 /// The escalation outcome is preserved in the child's completion report when reaped (via
 /// [`wait_child`](DynamicSupervisor::wait_child) or [`next_completed`](DynamicSupervisor::next_completed)).
 /// If cross-child restart containment or storm limiting across dynamic children is required,
-/// configure a [`SharedRestartDomain`](crate::supervision::SharedRestartDomain) via [`Scope::open_dynamic_supervisor_with_restarts`](crate::cx::Scope::open_dynamic_supervisor_with_restarts).
+/// configure a [`SharedRestartConfig`] via [`Cx::open_dynamic_supervisor_with_shared_restarts`](crate::cx::Cx::open_dynamic_supervisor_with_shared_restarts).
 #[must_use = "explicitly shut down or let the enclosing region drain this owner"]
 pub struct DynamicSupervisor<E> {
     owner: Cx,
