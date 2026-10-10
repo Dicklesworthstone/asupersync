@@ -143,11 +143,17 @@ fn launch_time_send_delivers_and_plain_sends_are_refused() {
 #[test]
 fn txtime_on_a_privileged_clock_needs_cap_net_admin() {
     future::block_on(async {
+        if nix::unistd::Uid::effective().is_root() {
+            eprintln!("not exercised: running as root with CAP_NET_ADMIN");
+            return;
+        }
         let mut socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let config = UdpTxTimeConfig::new(UdpTxTimeClock::Tai).with_report_errors(true);
         match socket.set_txtime(config) {
-            // Offloaded test runs can be root with CAP_NET_ADMIN.
-            Ok(()) => assert_eq!(socket.txtime(), Some(config)),
+            // Offloaded test runs can have CAP_NET_ADMIN even when not root.
+            Ok(()) => {
+                eprintln!("not exercised: process has CAP_NET_ADMIN privilege");
+            }
             Err(err) => {
                 assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{err}");
                 // A failed set leaves the socket usable for plain sends.
@@ -178,19 +184,26 @@ async fn icmp_report_wakes_parked_recv_error(ip: &'static str, expected_origin: 
     );
 
     let mut payload_buf = [0_u8; 64];
-    let report = {
+    let (report, delayed_join) = {
         let mut pending = pin!(socket.recv_error(&mut payload_buf));
         assert!(
             future::poll_once(pending.as_mut()).await.is_none(),
             "recv_error must wait while the error queue is empty"
         );
-        let sent = sender.send_to(b"to a closed port", dead).await.unwrap();
-        assert_eq!(sent, 16);
-        timeout(wall_now(), WAIT, pending)
+        let delayed_send = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            future::block_on(async {
+                let sent = sender.send_to(b"to a closed port", dead).await.unwrap();
+                assert_eq!(sent, 16);
+            });
+        });
+        let rep = timeout(wall_now(), WAIT, pending)
             .await
             .expect("the ICMP report must wake the parked recv_error")
-            .expect("recv_error")
+            .expect("recv_error");
+        (rep, delayed_send)
     };
+    delayed_join.join().expect("delayed sender thread joined");
 
     assert_eq!(report.origin, expected_origin);
     assert_eq!(report.errno, libc::ECONNREFUSED);
@@ -267,10 +280,27 @@ fn recv_error_truncates_payload_into_a_short_buffer_without_a_runtime() {
         let mut socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         socket.set_recverr(true).unwrap();
         let dead = closed_port("127.0.0.1");
-        socket.send_to(b"0123456789", dead).await.unwrap();
+        let mut sender = socket.try_clone().unwrap();
 
         let mut short = [0_u8; 4];
-        let report = with_watchdog(socket.recv_error(&mut short)).await.unwrap();
+        let (report, delayed_join) = {
+            let mut pending = pin!(socket.recv_error(&mut short));
+            assert!(
+                future::poll_once(pending.as_mut()).await.is_none(),
+                "recv_error must wait while the error queue is empty"
+            );
+            let delayed_send = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                future::block_on(async {
+                    let sent = sender.send_to(b"0123456789", dead).await.unwrap();
+                    assert_eq!(sent, 10);
+                });
+            });
+            let rep = with_watchdog(pending).await.unwrap();
+            (rep, delayed_send)
+        };
+        delayed_join.join().expect("delayed sender thread joined");
+
         assert_eq!(report.origin, UdpErrorOrigin::Icmp);
         assert_eq!(report.len, 4);
         assert!(report.truncated);

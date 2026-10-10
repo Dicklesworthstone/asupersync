@@ -255,8 +255,15 @@ pub struct UdpErrorReport {
     /// The destination of the datagram that caused the error, when the
     /// kernel reports it (network-originated errors).
     pub destination: Option<SocketAddr>,
-    /// Bytes of the offending datagram's payload copied into the caller's
-    /// buffer.
+    /// Bytes of the offending datagram copied into the caller's buffer.
+    ///
+    /// For network error origins ([`UdpErrorOrigin::Icmp`] and
+    /// [`UdpErrorOrigin::Icmp6`]), this is the payload (or prefix preserved by
+    /// the ICMP error) of the datagram that triggered the error.
+    ///
+    /// For launch-time reports ([`UdpErrorOrigin::TxTime`]), the ETF queueing
+    /// discipline queues the packet as it sits at the qdisc, which on Ethernet
+    /// includes the link-layer header.
     pub len: usize,
     /// Whether that payload was longer than the buffer (`MSG_TRUNC`).
     pub truncated: bool,
@@ -377,13 +384,17 @@ fn sendmsg_with_txtime(
 /// One non-blocking `recvmsg(MSG_ERRQUEUE)`; `WouldBlock` when the queue is
 /// empty.
 fn recv_error_once(fd: std::os::fd::RawFd, buf: &mut [u8]) -> io::Result<UdpErrorReport> {
-    // Room for the extended error with an IPv6 offender plus the usual extra
-    // control messages (IP_PKTINFO, a timestamping triple) so the report is
-    // not lost to MSG_CTRUNC. A Vec keeps the buffer cmsghdr-aligned.
+    // Room for the extended error with an IPv6 offender plus any ancillary
+    // control messages the socket may have enabled (IP_PKTINFO / in6_pktinfo,
+    // HOPLIMIT, TCLASS, ORIGDSTADDR, and a timestamping triple) so the
+    // report is not lost to MSG_CTRUNC. A Vec keeps the buffer cmsghdr-aligned.
     let mut cmsg_buf = nix::cmsg_space!(
         libc::sock_extended_err,
         libc::sockaddr_in6,
         libc::in6_pktinfo,
+        libc::c_int,
+        libc::c_int,
+        libc::sockaddr_storage,
         [libc::timespec; 3]
     );
     let mut iov = [IoSliceMut::new(buf)];
