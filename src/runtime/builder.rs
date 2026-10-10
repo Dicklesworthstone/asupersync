@@ -4411,9 +4411,8 @@ impl Runtime {
     /// `timeout` for that teardown to complete.
     ///
     /// Returns `true` when teardown fully completed within the bound.
-    ///
     /// Returns `false` when the bound elapsed first or the reaper thread could
-    /// not be created. After a timeout, teardown continues on the detached
+    /// not be created. After a timeout, teardown continues on the background
     /// reaper thread, which retains a strong runtime reference while any cloned
     /// `Runtime` or strong [`RuntimeHandle`] remains. This ensures the final,
     /// potentially unbounded destructor also runs on the reaper rather than on
@@ -4456,6 +4455,7 @@ impl Runtime {
             std::thread::Builder::new()
                 .name("asupersync-shutdown".into())
                 .spawn(job)
+                .map(crate::runtime::spawn_blocking::reap_spawned_thread)
                 .is_ok()
         })
     }
@@ -4573,7 +4573,7 @@ impl Runtime {
     ///
     /// Equivalent to [`shutdown_timeout`](Self::shutdown_timeout) with a zero
     /// bound: new spawn admission closes synchronously, teardown proceeds on a
-    /// detached background thread, and this call returns immediately. See
+    /// background thread, and this call returns immediately. See
     /// [`shutdown_timeout`](Self::shutdown_timeout) for the ownership rules
     /// that keep a still-blocked worker's state alive.
     pub fn shutdown_background(self) {
@@ -13781,6 +13781,30 @@ worker_threads = 16
             ended.load(Ordering::SeqCst),
             "teardown completed before the blocking job ended"
         );
+    }
+
+    /// GitHub #80 census: the shutdown reaper's handle used to be dropped at
+    /// spawn, detaching a thread that may already be exiting. While the
+    /// reaper still runs, its handle is parked instead, and it is joined once
+    /// the thread has finished.
+    #[test]
+    fn a_running_shutdown_reaper_is_parked_not_detached() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build runtime");
+        let shutdown_complete = Arc::clone(&runtime.inner.shutdown_completion);
+        let retained = runtime.clone();
+
+        // The clone keeps the reaper waiting for sole ownership of the runtime.
+        assert!(!runtime.shutdown_timeout(Duration::ZERO));
+        assert_eq!(
+            crate::runtime::spawn_blocking::parked_thread_named("asupersync-shutdown"),
+            Some(false),
+            "the running reaper must be parked, not detached"
+        );
+
+        drop(retained);
+        assert!(shutdown_complete.wait_timeout(Duration::from_secs(10)));
     }
 
     /// br-asupersync-01oghn M1: a `spawn_local` request still queued on a
