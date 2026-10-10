@@ -154,7 +154,7 @@ This document provides:
 | Capability | Tokio Equivalent | Status | Rationale | Evidence |
 |-----------|-----------------|--------|-----------|----------|
 | Service trait | tower::Service | F | Equivalent trait with Cx parameter | tests/service/ |
-| ServiceBuilder | tower::ServiceBuilder | F | Composable service construction | tests/service/ |
+| ServiceBuilder | tower::ServiceBuilder | F | Composable service construction (layer order is reversed: last-added layer is outermost) | tests/service/ |
 | Load balancing | tower::balance | F | Round-robin, random, P2C | tests/service/ |
 | Rate limiting | tower::limit | F | Token bucket with sliding window | tests/service/ |
 | Circuit breaker | tower hedge/circuit | F | Half-open/closed/open states | tests/combinator/ |

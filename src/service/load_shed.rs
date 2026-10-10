@@ -270,7 +270,6 @@ where
                 // so the caller can call us immediately (and we'll shed)
                 self.overloaded = true;
                 self.ready_observed = true;
-                drop(self.inner.release_readiness());
                 Poll::Ready(Ok(()))
             }
         }
@@ -283,6 +282,9 @@ where
 
         if self.overloaded {
             // Stay overloaded until `poll_ready` observes the inner service as ready.
+            // Release inner readiness (e.g. semaphore acquire in ConcurrencyLimit)
+            // so an idle shed handle does not hold the queue head.
+            drop(self.inner.release_readiness());
             LoadShedFuture::overloaded()
         } else {
             LoadShedFuture::inner(self.inner.call(req))
