@@ -56,6 +56,39 @@ impl RemoteSymbolTransport {
         Ok(transport)
     }
 
+    /// Send or reconcile a chunked upload using a caller-owned attempt identity.
+    ///
+    /// The caller must persist `attempt` before first dispatch and reserve it for
+    /// this exact canonical signed batch in the authenticated origin's namespace.
+    /// Do not reuse it for an unrelated upload, including work submitted through
+    /// a different transport or the compatibility `send_symbols` entry point.
+    /// After a publisher restart, supplying the same attempt and exact batch
+    /// continues the receiver's retained prefix; an already retained batch yields
+    /// a newly verified commit receipt. An attempt with different batch metadata
+    /// is refused while its original stage is present.
+    ///
+    /// This is explicit caller-driven reconciliation, not automatic retry.
+    /// Receiver expiry, abort, or restart can remove an incomplete stage, in which
+    /// case the exact upload starts again. A lost commit reply can follow a
+    /// successful publication. This API does not persist caller intent, add
+    /// receiver durability, guarantee remote rollback, or establish exactly-once
+    /// execution. Cancellation/drop retains the existing remote staging policy.
+    ///
+    /// Only transports constructed with `new_chunked_bounded` support this
+    /// operation; whole-batch transports return `Configuration` before dispatch.
+    /// The clone-shared credit, complete owner deadline, frame bounds and
+    /// authenticated receipt checks are the same as ordinary chunked sends.
+    pub async fn send_symbols_with_attempt(
+        &self, replica: &str, symbols: Vec<AuthenticatedSymbol>, attempt: u64,
+    ) -> Result<ReplicaAck, RemoteSymbolError> {
+        if self.cx.is_cancel_requested() { return Err(RemoteSymbolError::Cancelled); }
+        let maximum = self.chunk_bytes.ok_or(RemoteSymbolError::Configuration)?;
+        if !self.routes.contains_key(replica) { return Err(RemoteSymbolError::UnknownReplica); }
+        self.admission.run(|| {
+            self.with_owner_deadline(self.send_chunked_attempt(replica, symbols, maximum, Some(attempt)))
+        }).await
+    }
+
     fn check_chunk_frame_budget(
         &self, replica: &str, client: &RemoteComputationClient, maximum: usize,
     ) -> Result<(), RemoteSymbolError> {
@@ -122,11 +155,17 @@ impl RemoteSymbolTransport {
     pub(super) async fn send_chunked(
         &self, replica: &str, symbols: Vec<AuthenticatedSymbol>, maximum: usize,
     ) -> Result<ReplicaAck, RemoteSymbolError> {
+        self.send_chunked_attempt(replica, symbols, maximum, None).await
+    }
+
+    async fn send_chunked_attempt(
+        &self, replica: &str, symbols: Vec<AuthenticatedSymbol>, maximum: usize, attempt: Option<u64>,
+    ) -> Result<ReplicaAck, RemoteSymbolError> {
         self.check_chunk_context()?;
         let batch = encode_symbol_batch(&symbols, self.limits)?;
         drop(symbols);
         self.check_chunk_context()?;
-        let upload = Upload { key: batch.key(), attempt: RemoteTaskId::next().raw(),
+        let upload = Upload { key: batch.key(), attempt: attempt.unwrap_or_else(|| RemoteTaskId::next().raw()),
             total: batch.as_ref().len(), count: batch.symbol_count() };
         let response = self.call_named(replica, SYMBOL_CHUNKED_SERVICE_COMPUTATION,
             request(BEGIN, replica, &upload_body(upload))?).await?;
@@ -235,6 +274,17 @@ mod tests {
     struct WakeCount(AtomicUsize);
     impl Wake for WakeCount {
         fn wake(self: Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
+    }
+
+
+    #[test]
+    fn explicit_attempt_refuses_whole_batch_transport_before_route_or_admission() {
+        let mut transport = transport(Cx::for_testing());
+        transport.chunk_bytes = None;
+        let mut sending = Box::pin(transport.send_symbols_with_attempt("missing", Vec::new(), 17));
+        let result = sending.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+        assert!(matches!(result, Poll::Ready(Err(RemoteSymbolError::Configuration))));
+        assert_eq!(transport.in_flight(), 0);
     }
 
     #[test]

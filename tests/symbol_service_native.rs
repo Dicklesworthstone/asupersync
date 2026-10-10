@@ -427,3 +427,393 @@ fn chunked_symbol_commit_rejects_wrong_key_and_corrupt_tags_without_storage_cred
 fn dropped_native_chunked_upload_expires_partial_stage_then_reuses_transport_capacity() {
     for workers in [1, 2] { exercise_chunked(ChunkedCase::DropAfterAcceptedChunk, workers); }
 }
+
+
+// Publisher-process restart against retained receiver state. This does not claim
+// receiver restart durability, recovery of Rust tasks, or 4 MiB snapshot decoding.
+#[cfg(unix)]
+mod attempt_restart {
+    use super::*;
+    use asupersync::distributed::symbol_service::RemoteSymbolError;
+    use asupersync::sync::Notify;
+    use asupersync::remote::{
+        ComputationName, IdempotencyKey, RemoteInput, RemotePeerHello, RemoteServiceWireOutcome,
+        RemoteServiceWireRequest, RemoteServiceWireResponse, RemoteTaskId, SpawnRequest,
+    };
+    use std::fs::{File, OpenOptions};
+    use std::io::{self, BufRead, Read, Write};
+    use std::net::SocketAddr;
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::mpsc;
+    use std::thread::{self, JoinHandle};
+    use std::time::Instant;
+
+    const PREFIX: &str = "ASUP_SYMBOL_ATTEMPT_";
+    const PERSISTED_ATTEMPT: u64 = 0xa173_b820_c591_d604;
+    const ATTEMPT_CHUNK_BYTES: usize = 512;
+
+    fn store() -> Arc<SymbolReplicaStore> {
+        Arc::new(SymbolReplicaStore::new(
+            "replica-a", AuthKey::from_seed(42), chunked_batch_limits(),
+            SymbolStoreLimits { max_batches: 1, max_bytes: 128 * 1024,
+                max_batches_per_peer: 1, max_bytes_per_peer: 128 * 1024 },
+        ).unwrap())
+    }
+
+    fn staging(store: Arc<SymbolReplicaStore>) -> Arc<ChunkedSymbolService> {
+        Arc::new(ChunkedSymbolService::new(store, SymbolChunkedLimits::new(
+            CHUNK_BYTES, 1, 128 * 1024, 1, 128 * 1024, Duration::from_secs(180),
+        ).unwrap()))
+    }
+
+    fn intent_path() -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let directory = std::env::temp_dir();
+        loop {
+            let path = directory.join(format!("asupersync-symbol-attempt-{}-{}",
+                std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+            match OpenOptions::new().create_new(true).write(true).open(&path) {
+                Ok(mut file) => {
+                    file.write_all(&PERSISTED_ATTEMPT.to_le_bytes()).unwrap();
+                    file.sync_all().unwrap();
+                    File::open(&directory).unwrap().sync_all().unwrap();
+                    return path; // Retain the fixture; no deletion on failure or success.
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => panic!("persist publisher intent: {error}"),
+            }
+        }
+    }
+
+    // Independent wire fixture: a real authenticated publisher stops between
+    // acknowledged frames. It cannot send the rest while the parent kills it.
+    async fn save_first_chunk(
+        cx: &Cx,
+        client: &RemoteComputationClient,
+        hello: &RemotePeerHello,
+        signed: &[AuthenticatedSymbol],
+        attempt: u64,
+    ) {
+        let batch = encode_symbol_batch(signed, chunked_batch_limits()).unwrap();
+        let key = batch.key();
+        let mut metadata = Vec::with_capacity(68);
+        metadata.extend_from_slice(&key.object_id.as_u128().to_le_bytes());
+        metadata.extend_from_slice(&key.digest);
+        metadata.extend_from_slice(&attempt.to_le_bytes());
+        metadata.extend_from_slice(&(batch.as_ref().len() as u64).to_le_bytes());
+        metadata.extend_from_slice(&batch.symbol_count().to_le_bytes());
+        assert_eq!(metadata.len(), 68);
+        for (operation, received) in [(1_u8, 0_usize), (2, ATTEMPT_CHUNK_BYTES)] {
+            let mut input = b"ASUPCHN\0".to_vec();
+            input.extend_from_slice(&1_u32.to_le_bytes());
+            input.push(operation);
+            input.push(9);
+            input.extend_from_slice(b"replica-a");
+            input.extend_from_slice(&metadata);
+            if operation == 2 {
+                input.extend_from_slice(&0_u64.to_le_bytes());
+                input.extend_from_slice(&batch.as_ref()[..ATTEMPT_CHUNK_BYTES]);
+            }
+            let task = RemoteTaskId::next();
+            let spawn = SpawnRequest {
+                remote_task_id: task,
+                computation: ComputationName::new(SYMBOL_CHUNKED_SERVICE_COMPUTATION),
+                input: RemoteInput::new(input),
+                lease: client.config().attempt_timeout(),
+                idempotency_key: IdempotencyKey::from_raw(u128::from(task.raw())),
+                budget: None,
+                origin_node: hello.peer_node().clone(),
+                origin_region: cx.region_id(),
+                origin_task: cx.task_id(),
+            };
+            let wire = RemoteServiceWireRequest::from_spawn_request(hello.clone(), &spawn).unwrap();
+            let response = client.call(cx, &wire).await.unwrap();
+            let RemoteServiceWireResponse::Outcome {
+                remote_task_id,
+                outcome: RemoteServiceWireOutcome::Success(progress),
+            } = response else {
+                panic!("chunked BEGIN/CHUNK did not return authenticated progress");
+            };
+            assert_eq!(remote_task_id, task.raw());
+            assert_eq!(progress.len(), 92);
+            assert_eq!(&progress[..8], b"ASUPPRG\0");
+            assert_eq!(&progress[8..12], &1_u32.to_le_bytes());
+            assert_eq!(&progress[12..80], metadata.as_slice());
+            assert_eq!(u64::from_le_bytes(progress[80..88].try_into().unwrap()), received as u64);
+            assert_eq!(u32::from_le_bytes(progress[88..92].try_into().unwrap()), CHUNK_BYTES as u32);
+        }
+    }
+
+    #[test]
+    #[ignore = "worker invoked explicitly by the publisher restart acceptance test"]
+    fn chunked_upload_client_process() {
+        // Each independent publisher has the same process-local counter start;
+        // the externally persisted upload identity must be what survives.
+        assert_eq!(asupersync::remote::RemoteTaskId::next().raw(), 1);
+        let endpoint: SocketAddr = std::env::var("ASUP_SYMBOL_ATTEMPT_ENDPOINT").unwrap().parse().unwrap();
+        let mode = std::env::var("ASUP_SYMBOL_ATTEMPT_MODE").unwrap();
+        let workers: usize = std::env::var("ASUP_SYMBOL_ATTEMPT_WORKERS").unwrap().parse().unwrap();
+        let mut intent = [0_u8; 8];
+        File::open(std::env::var_os("ASUP_SYMBOL_ATTEMPT_INTENT").unwrap())
+            .unwrap().read_exact(&mut intent).unwrap();
+        let attempt = u64::from_le_bytes(intent);
+        assert_eq!(attempt, PERSISTED_ATTEMPT);
+        let mut registry = RemoteComputationRegistry::new();
+        register_chunked_symbol_service(&mut registry, staging(store())).unwrap();
+        let policy = RemotePeerAdmissionPolicy::new(RemoteProtocolVersion::V1, registry.schema_registry().clone());
+        let hello = policy.hello_for(NodeId::new("origin-a"));
+        let (_, connector, _) = tls(true);
+        let resume = Arc::new(Notify::new());
+        let input = if mode == "finish" {
+            let resume = Arc::clone(&resume);
+            Some(thread::spawn(move || {
+                let mut byte = [0];
+                io::stdin().read_exact(&mut byte).expect("parent releases exact retry");
+                resume.notify_one();
+            }))
+        } else { None };
+        let runtime = if workers == 1 { RuntimeBuilder::current_thread().build().unwrap() }
+            else { RuntimeBuilder::multi_thread().worker_threads(workers).build().unwrap() };
+        println!("{PREFIX}READY");
+        io::stdout().flush().unwrap();
+        runtime.block_on(async {
+            let cx = Cx::current().expect("fresh publisher owner");
+            asupersync::time::timeout(cx.now(), Duration::from_secs(75), async {
+                let client = RemoteComputationClient::new(
+                    endpoint, "localhost", connector,
+                    RemoteComputationClientConfig::new()
+                        .with_wire_limits(RemoteServiceWireLimits::new(CHUNKED_FRAME_BYTES))
+                        .with_max_attempts(1).with_connect_timeout(Duration::from_secs(3))
+                        .with_attempt_timeout(Duration::from_secs(5)),
+                ).unwrap();
+                let transport = RemoteSymbolTransport::new_chunked_bounded(
+                    cx.clone(), hello.clone(), [("replica-a".to_owned(), client.clone())],
+                    Arc::new(AuthKey::from_seed(42)), chunked_batch_limits(), 1, ATTEMPT_CHUNK_BYTES,
+                ).unwrap();
+                let signed = chunked_symbols(42);
+                if mode == "partial" {
+                    save_first_chunk(&cx, &client, &hello, &signed, attempt).await;
+                    println!("{PREFIX}PARTIAL_SAVED");
+                    io::stdout().flush().unwrap();
+                    std::future::pending::<()>().await;
+                    unreachable!("the first publisher is parked between acknowledged frames");
+                }
+                assert_eq!(mode, "finish");
+                let whole = RemoteSymbolTransport::new_bounded(
+                    cx.clone(), hello, [("replica-a".to_owned(), client)],
+                    Arc::new(AuthKey::from_seed(42)), chunked_batch_limits(), 1,
+                ).unwrap();
+                assert!(matches!(
+                    whole.send_symbols_with_attempt("replica-a", signed.clone(), attempt).await,
+                    Err(RemoteSymbolError::Configuration),
+                ));
+                assert_eq!(whole.in_flight(), 0);
+                let mut different = signed.clone();
+                different[0] = SecurityContext::new(AuthKey::from_seed(42))
+                    .sign_symbol(&Symbol::new_for_test(71, 0, 0, &[255; 2048]));
+                assert!(matches!(
+                    transport.send_symbols_with_attempt("replica-a", different, attempt).await,
+                    Err(RemoteSymbolError::Refused),
+                ));
+                assert_eq!(transport.in_flight(), 0);
+                println!("{PREFIX}MISMATCH_REFUSED");
+                io::stdout().flush().unwrap();
+                // The parent checks the retained prefix while this second
+                // publisher is parked, then permits the exact retry.
+                resume.notified().await;
+                let encoded = encode_symbol_batch(&signed, chunked_batch_limits()).unwrap();
+                let ack = transport.send_symbols_with_attempt("replica-a", signed.clone(), attempt).await.unwrap();
+                assert_eq!(ack.replica_id, "replica-a");
+                assert_eq!(ack.symbols_received, signed.len() as u32);
+                assert_eq!(transport.in_flight(), 0);
+                let fetched = transport.fetch_symbols("replica-a", encoded.key()).await.unwrap();
+                assert_eq!(fetched.len(), signed.len());
+                for (actual, expected) in fetched.iter().zip(&signed) {
+                    assert!(actual.is_verified());
+                    assert_eq!(actual.symbol(), expected.symbol());
+                    assert_eq!(actual.tag(), expected.tag());
+                }
+                let repeated = transport.send_symbols_with_attempt("replica-a", signed, attempt).await.unwrap();
+                assert_eq!(repeated.replica_id, "replica-a");
+                assert_eq!(repeated.symbols_received, ack.symbols_received);
+                assert_eq!(transport.in_flight(), 0);
+            }).await.expect("publisher workflow deadline");
+        });
+        if let Some(input) = input { input.join().expect("publisher control thread"); }
+        assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+        assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+        println!("{PREFIX}DONE");
+        io::stdout().flush().unwrap();
+    }
+
+    struct Publisher {
+        child: Child,
+        input: Option<ChildStdin>,
+        pump: Option<JoinHandle<()>>,
+        messages: mpsc::Receiver<String>,
+        reaped: bool,
+    }
+
+    impl Publisher {
+        fn start(endpoint: SocketAddr, path: &Path, mode: &str, workers: usize) -> Self {
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "attempt_restart::chunked_upload_client_process",
+                    "--ignored", "--nocapture", "--test-threads=1"])
+                .env("ASUP_SYMBOL_ATTEMPT_ENDPOINT", endpoint.to_string())
+                .env("ASUP_SYMBOL_ATTEMPT_INTENT", path)
+                .env("ASUP_SYMBOL_ATTEMPT_MODE", mode)
+                .env("ASUP_SYMBOL_ATTEMPT_WORKERS", workers.to_string())
+                .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit())
+                .spawn().expect("start independent publisher");
+            let stdout = child.stdout.take().unwrap();
+            let input = child.stdin.take();
+            let (tx, messages) = mpsc::sync_channel(8);
+            let mut process = Self { child, input, pump: None, messages, reaped: false };
+            process.pump = Some(thread::spawn(move || {
+                for line in io::BufReader::new(stdout).lines() {
+                    let Ok(line) = line else { break; };
+                    if let Some((_, message)) = line.split_once(PREFIX) {
+                        let _ = tx.try_send(message.to_owned());
+                    }
+                }
+            }));
+            process.message("READY", Duration::from_secs(10));
+            process
+        }
+
+        fn message(&self, expected: &str, timeout: Duration) {
+            assert_eq!(self.messages.recv_timeout(timeout).expect("publisher phase receipt"), expected);
+        }
+
+        fn resume(&mut self) {
+            let input = self.input.as_mut().expect("publisher control");
+            input.write_all(&[1]).unwrap();
+            input.flush().unwrap();
+        }
+
+        fn reap(&mut self, crash: bool) -> (ExitStatus, bool) {
+            assert!(!self.reaped);
+            if crash { self.child.kill().expect("terminate publisher after partial-stage witness"); }
+            drop(self.input.take());
+            let deadline = Instant::now() + Duration::from_secs(8);
+            let mut forced = false;
+            let status = loop {
+                if let Some(status) = self.child.try_wait().expect("poll publisher") { break status; }
+                if Instant::now() >= deadline {
+                    forced = true;
+                    let _ = self.child.kill();
+                    break self.child.wait().expect("reap watchdog publisher");
+                }
+                thread::sleep(Duration::from_millis(5));
+            };
+            self.reaped = true;
+            if let Some(pump) = self.pump.take() { pump.join().expect("publisher stdout"); }
+            (status, forced)
+        }
+
+        fn crash(mut self) {
+            let (status, forced) = self.reap(true);
+            assert!(!forced && !status.success(), "the first publisher must be killed and reaped");
+        }
+
+        fn finish(mut self) {
+            self.message("DONE", Duration::from_secs(75));
+            let (status, forced) = self.reap(false);
+            assert!(!forced && status.success(), "fresh publisher must exit successfully");
+        }
+    }
+
+    impl Drop for Publisher {
+        fn drop(&mut self) {
+            if self.reaped { return; }
+            let _ = self.child.kill();
+            drop(self.input.take());
+            let _ = self.child.wait();
+            self.reaped = true;
+            if let Some(pump) = self.pump.take() { let _ = pump.join(); }
+        }
+    }
+
+    fn exercise(workers: usize) {
+        let path = intent_path();
+        let store = store();
+        let staged = staging(Arc::clone(&store));
+        let encoded_len = encode_symbol_batch(&chunked_symbols(42), chunked_batch_limits()).unwrap().as_ref().len();
+        let mut registry = RemoteComputationRegistry::new();
+        register_chunked_symbol_service(&mut registry, Arc::clone(&staged)).unwrap();
+        let (acceptor, _, pins) = tls(true);
+        let mut policy = RemotePeerAdmissionPolicy::new(RemoteProtocolVersion::V1, registry.schema_registry().clone());
+        policy.grant_tls_peer(NodeId::new("origin-a"), pins, [SYMBOL_CHUNKED_SERVICE_COMPUTATION]).unwrap();
+        let server = RuntimeBuilder::current_thread().build().unwrap();
+        let service = server.block_on(RemoteComputationService::bind(
+            "127.0.0.1:0", acceptor, policy, registry,
+            RemoteComputationServiceConfig::new()
+                .with_wire_limits(RemoteServiceWireLimits::new(CHUNKED_FRAME_BYTES))
+                .with_max_connections(Some(4)).with_drain_timeout(Duration::from_secs(3)),
+        )).unwrap();
+        let endpoint = service.local_addr().unwrap();
+        let operator = service.handle();
+        let client_operator = operator.clone();
+        let retained = Arc::clone(&store);
+        let partial = Arc::clone(&staged);
+        let mut controller = ClientJoin(Some(thread::spawn(move || {
+            let _drain = DrainOnDrop(client_operator.clone());
+            let first = Publisher::start(endpoint, &path, "partial", workers);
+            first.message("PARTIAL_SAVED", Duration::from_secs(15));
+            let observed = partial.stats();
+            assert_eq!(observed.uploads, 1);
+            assert_eq!(observed.reserved_bytes, encoded_len);
+            assert_eq!(observed.received_bytes, ATTEMPT_CHUNK_BYTES);
+            assert!(observed.received_bytes < encoded_len);
+            assert_eq!(retained.stats().batches, 0);
+            first.crash();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while client_operator.active_connections() != 0 {
+                assert!(Instant::now() < deadline, "killed publisher connection did not retire");
+                thread::yield_now();
+            }
+            let persisted = partial.stats();
+            assert_eq!(persisted.uploads, 1);
+            assert_eq!(persisted.reserved_bytes, encoded_len);
+            assert_eq!(persisted.received_bytes, ATTEMPT_CHUNK_BYTES);
+            assert!(persisted.received_bytes < encoded_len);
+            assert_eq!(retained.stats().batches, 0);
+            let mut second = Publisher::start(endpoint, &path, "finish", workers);
+            second.message("MISMATCH_REFUSED", Duration::from_secs(15));
+            assert_eq!(partial.stats(), persisted,
+                "wrong bytes under the persisted attempt must preserve its exact prefix and charge");
+            assert_eq!(retained.stats().batches, 0);
+            second.resume();
+            second.finish();
+            assert_eq!(retained.stats().batches, 1);
+            assert_eq!(retained.stats().bytes, encoded_len);
+            assert_eq!(partial.stats().uploads, 0);
+            assert_eq!(partial.stats().reserved_bytes, 0);
+            assert_eq!(partial.stats().received_bytes, 0);
+        })));
+        let report = server.block_on(async {
+            let cx = Cx::current().expect("receiver owner");
+            asupersync::time::timeout(cx.now(), Duration::from_secs(100), service.run(&cx)).await
+        });
+        let _ = operator.begin_drain();
+        let result = controller.0.take().unwrap().join();
+        let active = operator.active_connections();
+        let no_leaks = server.diagnostics().find_leaked_obligations().is_empty();
+        let shutdown = server.shutdown_timeout(Duration::from_secs(3));
+        result.expect("publisher restart controller");
+        let report = report.expect("receiver workflow deadline").expect("receiver drain");
+        assert!(report.accepted_connections() > 8);
+        assert_eq!(report.panicked_connections(), 0);
+        assert_eq!(active, 0);
+        assert!(no_leaks && shutdown);
+        assert_eq!(store.stats().batches, 1);
+        assert_eq!(staged.stats().reserved_bytes, 0);
+    }
+
+    #[test]
+    fn persisted_attempt_resumes_after_publisher_process_crash_and_reconciles_completed_upload() {
+        for workers in [1, 2] { exercise(workers); }
+    }
+}
