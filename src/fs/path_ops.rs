@@ -519,7 +519,7 @@ impl StagedAtomicWrite {
     /// `rename` and parent directory fsync). If called directly on an async worker
     /// thread, it will block the worker during those syscalls. For non-blocking
     /// async execution, use [`Self::commit_async`].
-    pub fn commit(mut self) -> io::Result<()> {
+    pub fn commit(self) -> io::Result<()> {
         self.commit_with_hook(OperationProbeHook::default())
     }
 
