@@ -11,6 +11,7 @@ use crate::http::h1::stream::{Http1ProducedResponse, StreamingServerRequest};
 use crate::http::h1::types::{Request, Response};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::http::handoff::{HandoffQueue, HandoffStream};
+use crate::http::listener_cancel::ListenerCancellation;
 #[cfg(feature = "tls")]
 use crate::io::AsyncWriteExt;
 use crate::net::tcp::listener::TcpListener;
@@ -786,6 +787,7 @@ where
     ///
     /// Accepts connections, dispatches to handler, and on shutdown signal
     /// drains active connections within the configured timeout.
+    /// Cancellation of the task polling this future also starts that drain.
     ///
     /// Returns shutdown statistics upon completion.
     pub async fn run(self, runtime: &RuntimeHandle) -> io::Result<ShutdownStats> {
@@ -947,16 +949,21 @@ impl<F> Http1Listener<F> {
             ) -> Result<ConnectionTask, SpawnError>
             + Send,
     {
-        // run_in's owner: its cancellation (for example its region closing)
-        // ends accepting and starts the drain, like a shutdown signal.
-        let owner_cancel = owner.clone();
+        // The connection owner and the task polling this listener may differ.
+        // Either cancellation ends accepting; each needs its own enrollment
+        // before a quiet socket can park the coordinator.
+        let mut owner_cancel = ListenerCancellation::new(owner.clone());
+        let mut coordinator_cancel = ListenerCancellation::new(Cx::current());
         let mut tasks = ConnectionTasks::new(owner);
         let mut shutdown_rx = self.shutdown_signal.subscribe();
         let mut transient_accept_streak: u32 = 0;
         // Accept loop: keep accepting until shutdown
         loop {
+            let owner_cancelled = owner_cancel.is_requested();
+            let coordinator_cancelled = coordinator_cancel.is_requested();
             if self.shutdown_signal.is_shutting_down()
-                || owner_cancel.as_ref().is_some_and(Cx::is_cancel_requested)
+                || owner_cancelled
+                || coordinator_cancelled
             {
                 break;
             }
@@ -970,9 +977,12 @@ impl<F> Http1Listener<F> {
                 let mut shutdown_fut = core::pin::pin!(shutdown_fut);
 
                 std::future::poll_fn(|cx| {
-                    // Check shutdown synchronously first
+                    // Enroll both authorities before checking either result.
+                    let owner_cancelled = owner_cancel.poll_cancelled(cx);
+                    let coordinator_cancelled = coordinator_cancel.poll_cancelled(cx);
                     if self.shutdown_signal.is_shutting_down()
-                        || owner_cancel.as_ref().is_some_and(Cx::is_cancel_requested)
+                        || owner_cancelled
+                        || coordinator_cancelled
                     {
                         return Poll::Ready(AcceptOrShutdown::Shutdown);
                     }
@@ -1055,6 +1065,9 @@ impl<F> Http1Listener<F> {
             };
             tasks.push(handle);
         }
+
+        owner_cancel.stop_observing();
+        coordinator_cancel.stop_observing();
 
         // Drain phase: socket lifetime is explicit
         // (br-asupersync-server-stack-hardening-eeexl1.2, D2.4 AC5). By
@@ -1178,6 +1191,10 @@ impl<F> Http1Listener<F> {
         // lb_compat: the parked socket stays bound for the whole drain and
         // closes only now, after quiescence (D2.4 AC5).
         drop(parked_socket);
+        // Cancellation may have arrived while the existing drain was running.
+        // Its terminal statistics must survive the task's acknowledgement gate.
+        let _ = owner_cancel.is_requested();
+        let _ = coordinator_cancel.is_requested();
         Ok(stats)
     }
 }

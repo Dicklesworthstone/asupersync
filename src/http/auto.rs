@@ -22,7 +22,7 @@
 //! ```
 
 use super::handoff::{HandoffQueue, Prefixed};
-use crate::cx::Cx;
+use crate::cx::{CancelWakerToken, Cx};
 use crate::http::h1::listener::{Http1Listener, Http1ListenerConfig};
 use crate::http::h1::server::IntoHttp1Response;
 use crate::http::h1::types::Request;
@@ -31,7 +31,7 @@ use crate::http::h2::listener::{Http2Listener, Http2ListenerConfig, IntoHttp2Res
 use crate::io::AsyncReadExt;
 use crate::net::tcp::listener::TcpListener;
 use crate::net::tcp::stream::TcpStream;
-use crate::runtime::RuntimeHandle;
+use crate::runtime::{JoinError, JoinHandle, RuntimeHandle, SpawnError, TaskHandle};
 use crate::server::connection::ConnectionManager;
 use crate::server::shutdown::{ShutdownPhase, ShutdownSignal, ShutdownStats};
 use crate::sync::Notify;
@@ -42,10 +42,10 @@ use std::future::Future;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::num::NonZeroUsize;
-use std::pin::pin;
+use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::task::Poll;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 /// Configuration of an [`HttpAutoListener`]: one configuration per protocol,
@@ -318,6 +318,36 @@ where
     /// A non-transient accept error (after draining the connections already
     /// handed over), or either listener's error.
     pub async fn run(self, runtime: &RuntimeHandle) -> io::Result<HttpAutoShutdownStats> {
+        let result = self.run_with(TaskSpawner::Root(runtime.clone())).await;
+        acknowledge_coordinator_cancellation();
+        result
+    }
+
+    /// Serve both protocols with all listener and detection tasks in `cx`'s region.
+    ///
+    /// Each protocol listener uses its own `run_in`, so established connections
+    /// and request tasks also belong to that region or its descendants. Closing
+    /// the owning region stops acceptance and drains this entire service, with
+    /// no runtime-root tasks left behind. Run this future inside the region that
+    /// owns the service, for example a [`ChildRegion`](crate::cx::ChildRegion).
+    ///
+    /// Graceful and forced shutdown use the same signal and statistics as
+    /// [`Self::run`]. Either protocol task ending early also stops acceptance and
+    /// drains its sibling. This method observes every retained task's retirement
+    /// before reporting completion. Dropping the future requests immediate
+    /// cleanup; the region remains responsible for awaiting that cleanup.
+    ///
+    /// # Errors
+    /// The accept/listener errors of [`Self::run`], or a task-admission, task
+    /// cancellation or panic error. A context without runtime spawn wiring is
+    /// refused before accepting connections.
+    pub async fn run_in(self, cx: &Cx) -> io::Result<HttpAutoShutdownStats> {
+        let result = self.run_with(TaskSpawner::Owned(cx.clone())).await;
+        acknowledge_coordinator_cancellation();
+        result
+    }
+
+    async fn run_with(self, spawner: TaskSpawner) -> io::Result<HttpAutoShutdownStats> {
         let http1_queue = Arc::new(HandoffQueue::default());
         let http2_queue = Arc::new(HandoffQueue::default());
         let handler = Arc::clone(&self.handler);
@@ -340,24 +370,32 @@ where
             http2: http2.connection_manager().clone(),
             completed: false,
         };
-        let http1_runtime = runtime.clone();
-        let http1_run = match runtime.try_spawn(async move { http1.run(&http1_runtime).await }) {
-            Ok(run) => run,
+        let mut http1_run = match spawner.spawn(move |child| async move {
+            match child {
+                TaskSpawner::Root(runtime) => http1.run(&runtime).await,
+                TaskSpawner::Owned(cx) => http1.run_in(&cx).await,
+            }
+        }) {
+            Ok(run) => ProtocolRun::new(run),
             Err(error) => {
                 drop(self.listener);
                 shutdown.finish();
                 return Err(io::Error::other(format!("spawn HTTP/1.1 listener: {error}")));
             }
         };
-        let http2_runtime = runtime.clone();
-        let http2_run = match runtime.try_spawn(async move { http2.run(&http2_runtime).await }) {
-            Ok(run) => run,
+        let http2_run = match spawner.spawn(move |child| async move {
+            match child {
+                TaskSpawner::Root(runtime) => http2.run(&runtime).await,
+                TaskSpawner::Owned(cx) => http2.run_in(&cx).await,
+            }
+        }) {
+            Ok(run) => ProtocolRun::new(run),
             Err(error) => {
                 // The first spawn already owns a live accept loop. Stop and
                 // join it before reporting that the second spawn was refused.
                 shutdown.signal.trigger_immediate();
                 shutdown.force_protocols();
-                let _ = http1_run.await;
+                let _ = http1_run.join().await;
                 http1_queue.close();
                 http2_queue.close();
                 drop(self.listener);
@@ -366,9 +404,15 @@ where
             }
         };
 
-        let detecting = Arc::new(DetectionTasks::default());
+        let mut protocols = ProtocolListeners {
+            http1: http1_run,
+            http2: http2_run,
+            http1_queue,
+            http2_queue,
+        };
+        let mut detecting = DetectionRuns::default();
         let accept_result = self
-            .accept_loop(runtime, &http1_queue, &http2_queue, &detecting)
+            .accept_loop(&spawner, &mut protocols, &mut detecting)
             .await;
         // Accepting is over: close the listening socket now, as the HTTP/1.1
         // and HTTP/2 listeners do when their drain starts, so a new client is
@@ -384,12 +428,14 @@ where
             .begin_drain(http1_drain.max(http2_drain));
         let _ = shutdown.http1.begin_drain(http1_drain);
         let _ = shutdown.http2.begin_drain(http2_drain);
-        let (http1_stats, http2_stats) = drain_protocols(&shutdown, http1_run, http2_run).await;
+        let (http1_stats, http2_stats) =
+            drain_protocols(&shutdown, protocols.http1.join(), protocols.http2.join()).await;
         // Wait until neither accept loop can observe a closed queue as an
         // accept error. Close then fences pushes that raced the stop check.
-        http1_queue.close();
-        http2_queue.close();
-        detecting.wait_idle().await;
+        protocols.http1_queue.close();
+        protocols.http2_queue.close();
+        detecting.slots.wait_idle().await;
+        detecting.join_all().await;
         // A failed listener can return before its root-owned connections do.
         // drain_protocols has requested force-close on that error path.
         shutdown.http1.wait_all_closed().await;
@@ -405,10 +451,9 @@ where
 
     async fn accept_loop(
         &self,
-        runtime: &RuntimeHandle,
-        http1_queue: &Arc<HandoffQueue>,
-        http2_queue: &Arc<HandoffQueue>,
-        detecting: &Arc<DetectionTasks>,
+        spawner: &TaskSpawner,
+        protocols: &mut ProtocolListeners,
+        detecting: &mut DetectionRuns,
     ) -> io::Result<()> {
         let mut shutdown = self.shutdown_signal.subscribe();
         let mut transient_streak: u32 = 0;
@@ -416,20 +461,42 @@ where
         // `Interrupted` on every poll and the backoff sleep completes at once:
         // treated as transient, the loop would spin and never drain. The
         // cancellation ends accepting instead, like the shutdown signal.
-        let owner = Cx::current();
-        let cancelled = || owner.as_ref().is_some_and(Cx::is_cancel_requested);
+        let mut owner = OwnerCancellation {
+            cx: spawner.owner(),
+            token: None,
+        };
+        let mut coordinator = OwnerCancellation {
+            cx: Cx::current(),
+            token: None,
+        };
         loop {
-            if self.shutdown_signal.is_shutting_down() || cancelled() {
+            // The explicit region owner and the task polling run_in can have
+            // different cancellation contexts. Observe both: native accept
+            // and backoff also observe the ambient coordinator's cancellation.
+            let owner_cancelled = owner.is_requested();
+            let coordinator_cancelled = coordinator.is_requested();
+            if self.shutdown_signal.is_shutting_down() || owner_cancelled || coordinator_cancelled {
                 return Ok(());
             }
             let accepted = {
                 let mut accept = pin!(self.listener.accept());
                 let mut stop = pin!(shutdown.wait());
                 std::future::poll_fn(|cx| {
+                    let owner_cancelled = owner.poll_cancelled(cx);
+                    let coordinator_cancelled = coordinator.poll_cancelled(cx);
                     if self.shutdown_signal.is_shutting_down()
-                        || cancelled()
+                        || owner_cancelled
+                        || coordinator_cancelled
                         || stop.as_mut().poll(cx).is_ready()
                     {
+                        return Poll::Ready(None);
+                    }
+                    // Keep both terminal observers registered while accept is
+                    // parked. Cache results for the drain: never repoll a
+                    // consumed terminal or drop a temporary abort-on-drop join.
+                    let http1_done = protocols.http1.poll_completion(cx);
+                    let http2_done = protocols.http2.poll_completion(cx);
+                    if http1_done || http2_done {
                         return Poll::Ready(None);
                     }
                     accept.as_mut().poll(cx).map(Some)
@@ -457,15 +524,15 @@ where
                 }
                 Err(error) => return Err(error),
             };
-            let Some(slot) = detecting.acquire(self.config.max_detecting) else {
+            let Some(slot) = detecting.slots.acquire(self.config.max_detecting) else {
                 drop(stream);
                 continue;
             };
             // Owned by the detection future, so the slot is released even if
             // the future is dropped without running.
             let detection = Detection {
-                http1: Arc::clone(http1_queue),
-                http2: Arc::clone(http2_queue),
+                http1: Arc::clone(&protocols.http1_queue),
+                http2: Arc::clone(&protocols.http2_queue),
                 #[cfg(feature = "tls")]
                 tls: self.tls_acceptor.clone(),
                 timeout: self.config.detect_timeout,
@@ -474,8 +541,198 @@ where
             // A spawn failure drops the future, and with it the connection and
             // its detection slot.
             let connection = DetectingConnection { stream, peer, slot };
-            let _ = runtime.try_spawn(detection.hand_off(connection));
+            if let Ok(task) = spawner.spawn(move |_| detection.hand_off(connection)) {
+                detecting.push(task);
+            }
         }
+    }
+}
+
+/// Every spawn in an owned listener stays in the supplied context's region.
+#[derive(Clone)]
+enum TaskSpawner {
+    Root(RuntimeHandle),
+    Owned(Cx),
+}
+
+impl TaskSpawner {
+    fn owner(&self) -> Option<Cx> {
+        match self {
+            Self::Root(_) => None,
+            Self::Owned(cx) => Some(cx.clone()),
+        }
+    }
+
+    fn spawn<F, Fut, T>(&self, factory: F) -> Result<ListenerTask<T>, SpawnError>
+    where
+        F: FnOnce(Self) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        match self {
+            Self::Root(runtime) => runtime
+                .try_spawn(factory(Self::Root(runtime.clone())))
+                .map(ListenerTask::Root),
+            Self::Owned(owner) => owner
+                .spawn(move |cx| async move {
+                    let result = factory(Self::Owned(cx.clone())).await;
+                    // These tasks deliberately finish protocol cleanup after
+                    // cancellation. Preserve the resulting drain statistics.
+                    if cx.is_cancel_requested() {
+                        let _ = cx.checkpoint();
+                    }
+                    result
+                })
+                .map(ListenerTask::Owned),
+        }
+    }
+}
+
+enum ListenerTask<T> {
+    Root(JoinHandle<T>),
+    Owned(TaskHandle<T>),
+}
+
+impl<T> ListenerTask<T> {
+    fn is_finished(&self) -> bool {
+        match self {
+            Self::Root(task) => task.is_finished(),
+            Self::Owned(task) => task.is_finished(),
+        }
+    }
+
+    /// Passive terminal observation: Pending retains the handle's wake source
+    /// and never requests cancellation just because a competing branch wins.
+    fn poll_result(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<T>> {
+        match self {
+            Self::Root(task) => {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    Pin::new(task).poll(cx)
+                })) {
+                    Ok(result) => result.map(Ok),
+                    Err(payload) => Poll::Ready(Err(io::Error::other(format!(
+                        "HTTP task failed: {}",
+                        crate::cx::scope::payload_to_string(&payload)
+                    )))),
+                }
+            }
+            Self::Owned(task) => task.poll_join(cx).map(|result| {
+                result.map_err(|error| {
+                    let kind = if matches!(error, JoinError::Cancelled(_)) {
+                        io::ErrorKind::Interrupted
+                    } else {
+                        io::ErrorKind::Other
+                    };
+                    io::Error::new(kind, error.to_string())
+                })
+            }),
+        }
+    }
+}
+
+struct ProtocolRun {
+    task: ListenerTask<io::Result<ShutdownStats>>,
+    result: Option<io::Result<ShutdownStats>>,
+}
+
+impl ProtocolRun {
+    fn new(task: ListenerTask<io::Result<ShutdownStats>>) -> Self {
+        Self { task, result: None }
+    }
+
+    fn poll_completion(&mut self, cx: &mut Context<'_>) -> bool {
+        if self.result.is_none()
+            && let Poll::Ready(result) = self.task.poll_result(cx)
+        {
+            self.result = Some(result.and_then(std::convert::identity));
+        }
+        self.result.is_some()
+    }
+
+    async fn join(&mut self) -> io::Result<ShutdownStats> {
+        std::future::poll_fn(|cx| {
+            if self.poll_completion(cx) {
+                Poll::Ready(self.result.take().expect("protocol terminal observed"))
+            } else {
+                Poll::Pending
+            }
+        })
+        .await
+    }
+}
+
+struct ProtocolListeners {
+    http1: ProtocolRun,
+    http2: ProtocolRun,
+    http1_queue: Arc<HandoffQueue>,
+    http2_queue: Arc<HandoffQueue>,
+}
+
+#[derive(Default)]
+struct DetectionRuns {
+    slots: Arc<DetectionTasks>,
+    tasks: Vec<ListenerTask<()>>,
+    spawned: u64,
+}
+
+impl DetectionRuns {
+    fn push(&mut self, task: ListenerTask<()>) {
+        self.tasks.push(task);
+        self.spawned = self.spawned.wrapping_add(1);
+        if self.spawned.is_multiple_of(64) {
+            self.tasks.retain(|task| !task.is_finished());
+        }
+    }
+
+    async fn join_all(&mut self) {
+        for mut task in self.tasks.drain(..) {
+            let _ = std::future::poll_fn(|cx| task.poll_result(cx)).await;
+        }
+    }
+}
+
+struct OwnerCancellation {
+    cx: Option<Cx>,
+    token: Option<CancelWakerToken>,
+}
+
+impl OwnerCancellation {
+    fn is_requested(&self) -> bool {
+        self.cx.as_ref().is_some_and(|cx| {
+            if cx.is_cancel_requested() {
+                let _ = cx.checkpoint();
+                true
+            } else {
+                false
+            }
+        })
+    }
+
+    fn poll_cancelled(&mut self, task: &Context<'_>) -> bool {
+        if let Some(cx) = &self.cx {
+            self.token = Some(cx.refresh_cancel_waker(self.token.take(), task.waker()));
+        }
+        self.is_requested()
+    }
+}
+
+impl Drop for OwnerCancellation {
+    fn drop(&mut self) {
+        if let Some(cx) = &self.cx
+            && let Some(token) = self.token.take()
+        {
+            cx.clear_cancel_waker(token);
+        }
+    }
+}
+
+fn acknowledge_coordinator_cancellation() {
+    // Cancellation can arrive after accepting ended, while the retained
+    // children drain. Preserve their actual result after that cleanup too.
+    if let Some(cx) = Cx::current()
+        && cx.is_cancel_requested()
+    {
+        let _ = cx.checkpoint();
     }
 }
 

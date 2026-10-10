@@ -33,6 +33,7 @@ use crate::http::h2::settings::Settings;
 use crate::http::h2::stream::StreamState;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::http::handoff::{HandoffQueue, HandoffStream};
+use crate::http::listener_cancel::ListenerCancellation;
 use crate::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, ReadBuf};
 use crate::net::tcp::listener::TcpListener;
 use crate::net::tcp::stream::TcpStream;
@@ -5058,6 +5059,7 @@ where
     /// Run the accept loop until shutdown, then drain with request-aware
     /// supervision and return the shutdown statistics (including the
     /// graceful-drain report).
+    /// Cancellation of the task polling this future also starts that drain.
     pub async fn run(self, runtime: &RuntimeHandle) -> io::Result<ShutdownStats> {
         self.run_mapped(
             runtime,
@@ -5581,7 +5583,10 @@ impl<F> Http2Listener<F> {
         M: Fn(Arc<F>, Request) -> MFut + Clone + Send + Sync + 'static,
         MFut: Future<Output = H2DispatchResponse> + Send + 'static,
     {
-        let owner_cancel = owner.clone();
+        // The explicit connection owner and the polling task are independent
+        // cancellation authorities. Observe both before parking on accept.
+        let mut owner_cancel = ListenerCancellation::new(owner.clone());
+        let mut coordinator_cancel = ListenerCancellation::new(Cx::current());
         // TLS is applied to TCP connections only; refuse rather than serve a
         // Unix-domain socket in cleartext that was configured for TLS.
         #[cfg(feature = "tls")]
@@ -5621,8 +5626,11 @@ impl<F> Http2Listener<F> {
         }
 
         loop {
+            let owner_cancelled = owner_cancel.is_requested();
+            let coordinator_cancelled = coordinator_cancel.is_requested();
             if self.shutdown_signal.is_shutting_down()
-                || owner_cancel.as_ref().is_some_and(Cx::is_cancel_requested)
+                || owner_cancelled
+                || coordinator_cancelled
             {
                 break;
             }
@@ -5633,8 +5641,11 @@ impl<F> Http2Listener<F> {
                 let mut accept_fut = core::pin::pin!(accept_fut);
                 let mut shutdown_fut = core::pin::pin!(shutdown_fut);
                 std::future::poll_fn(|cx| {
+                    let owner_cancelled = owner_cancel.poll_cancelled(cx);
+                    let coordinator_cancelled = coordinator_cancel.poll_cancelled(cx);
                     if self.shutdown_signal.is_shutting_down()
-                        || owner_cancel.as_ref().is_some_and(Cx::is_cancel_requested)
+                        || owner_cancelled
+                        || coordinator_cancelled
                     {
                         return Poll::Ready(AcceptOrShutdown::Shutdown);
                     }
@@ -5773,6 +5784,9 @@ impl<F> Http2Listener<F> {
             }
         }
 
+        owner_cancel.stop_observing();
+        coordinator_cancel.stop_observing();
+
         // Drain phase: socket lifetime is explicit (h1 D2.4 AC5 parity).
         let parked_socket = self.config.lb_compat_keep_socket.then_some(self.listener);
 
@@ -5895,6 +5909,10 @@ impl<F> Http2Listener<F> {
         }
 
         drop(parked_socket);
+        // Retain the terminal statistics when cancellation arrived during
+        // the existing connection drain, after the accept observers retired.
+        let _ = owner_cancel.is_requested();
+        let _ = coordinator_cancel.is_requested();
         Ok(stats)
     }
 }
