@@ -7861,7 +7861,7 @@ mod tests {
             let connect_line = read_protocol_line(&mut reader);
             assert!(connect_line.starts_with("CONNECT "));
             let ping_line = read_protocol_line(&mut reader);
-            assert_eq!(ping_line, "PING");
+            assert_eq!(ping_line.trim_end(), "PING");
             reader.get_mut().write_all(b"PONG\r\n").expect("send PONG");
             reader.get_mut().flush().expect("flush PONG");
         });
