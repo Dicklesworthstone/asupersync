@@ -1627,7 +1627,12 @@ fn test_function() {
     // dials a resolved address on a second path, through a configured
     // dns_resolver, with the same TcpStream::connect_socket_addr. No scanner
     // exemption or detection pattern changed.
-    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 835;
+    // 835 -> 837 (re-blessed 2026-10-10 after 49ec999e6 landed without the
+    // inventory): remote/write_progress/tests.rs (a plain tests.rs, scanned as
+    // production) dials a loopback std::net::TcpStream with connect_timeout
+    // and wraps it with TcpStream::from_std for its stalled-write harness.
+    // No scanner exemption or detection pattern changed.
+    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 837;
 
     fn src_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src")

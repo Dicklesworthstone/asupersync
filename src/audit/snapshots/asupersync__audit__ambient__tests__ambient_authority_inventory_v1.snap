@@ -137,6 +137,8 @@ expression: inventory
 1	Io	net/websocket/client.rs	TcpStream::
 1	Io	process.rs	std::fs::OpenOptions
 1	Io	remote.rs	TcpListener::
+1	Io	remote/write_progress/tests.rs	TcpStream::
+1	Io	remote/write_progress/tests.rs	std::net::TcpStream
 1	Io	runtime/reactor/io_uring.rs	TcpListener::
 1	Io	runtime/reactor/io_uring.rs	TcpStream::
 1	Io	security/keys/mod.rs	File::open(
@@ -516,6 +518,8 @@ expression: inventory
 1	Io	net/websocket/client.rs	TcpStream::	TcpStream::connect(std::net::SocketAddr::new(ip, parsed.port)).await
 1	Io	process.rs	std::fs::OpenOptions	let file = std::fs::OpenOptions::new()
 1	Io	remote.rs	TcpListener::	let tcp_listener = TcpListener::bind(addr)
+1	Io	remote/write_progress/tests.rs	TcpStream::	let socket = TcpStream::from_std(socket).unwrap();
+1	Io	remote/write_progress/tests.rs	std::net::TcpStream	let socket = std::net::TcpStream::connect_timeout(&address, Duration::from_secs(2)).unwrap();
 1	Io	runtime/reactor/io_uring.rs	TcpListener::	let listener = match TcpListener::bind((Ipv4Addr::LOCALHOST, 0)) {
 1	Io	runtime/reactor/io_uring.rs	TcpStream::	let client = match TcpStream::connect_timeout(&address, Duration::from_secs(1)) {
 1	Io	security/keys/mod.rs	File::open(	if let Ok(dir) = fs::File::open(parent) {
