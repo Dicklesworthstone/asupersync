@@ -5,7 +5,7 @@ use crate::distributed::symbol_service::{SymbolBatchKey, SymbolReplicaStore, Sym
 use crate::distributed::{ComputationSchemaRegistryError, HasSchema, SchemaDescriptor};
 use crate::remote::{NodeId, RemoteComputationRegistry, RemoteOutcome};
 use crate::types::Time;
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -81,6 +81,31 @@ struct Stage {
     upload: Upload,
     expires: Time,
     bytes: Zeroizing<Vec<u8>>,
+    commit: Option<Arc<CommitCompletion>>,
+}
+
+impl Stage {
+    fn received_bytes(&self) -> usize {
+        if self.commit.is_some() { self.upload.total } else { self.bytes.len() }
+    }
+}
+
+#[derive(Default)]
+struct CommitCompletion {
+    done: Mutex<bool>,
+    changed: Condvar,
+}
+
+impl CommitCompletion {
+    fn wait(&self) {
+        let mut done = self.done.lock();
+        while !*done { self.changed.wait(&mut done); }
+    }
+
+    fn finish(&self) {
+        *self.done.lock() = true;
+        self.changed.notify_all();
+    }
 }
 
 #[derive(Default)]
@@ -92,13 +117,46 @@ struct Staging {
 impl Staging {
     fn reap(&mut self, now: Time) -> usize {
         let before = self.entries.len();
-        self.entries.retain(|_, stage| now < stage.expires);
+        self.entries.retain(|_, stage| stage.commit.is_some() || now < stage.expires);
         self.reserved = self.entries.values().map(|stage| stage.upload.total).sum();
         before - self.entries.len()
     }
 
     fn remove(&mut self, id: &(NodeId, u64)) {
         if let Some(stage) = self.entries.remove(id) { self.reserved -= stage.upload.total; }
+    }
+}
+
+// The map retains the full count/byte charge, but hashing and authentication own
+// their payload outside its mutex. The completion identity protects removal even
+// during unwind; another request cannot reap, abort, or replace this marker.
+struct StagedCommit<'a> {
+    staging: &'a Mutex<Staging>,
+    id: (NodeId, u64),
+    completion: Arc<CommitCompletion>,
+    bytes: Option<Zeroizing<Vec<u8>>>,
+}
+
+impl StagedCommit<'_> {
+    fn bytes(&self) -> &[u8] {
+        self.bytes.as_ref().expect("commit owns its staged bytes").as_slice()
+    }
+}
+
+impl Drop for StagedCommit<'_> {
+    fn drop(&mut self) {
+        // Zeroization can touch a complete large batch. Do it outside the shared
+        // mutex and before any request can spend the reservation again.
+        drop(self.bytes.take());
+        {
+            let mut state = self.staging.lock();
+            if state.entries.get(&self.id).is_some_and(|stage| {
+                stage.commit.as_ref().is_some_and(|commit| Arc::ptr_eq(commit, &self.completion))
+            }) {
+                state.remove(&self.id);
+            }
+        }
+        self.completion.finish();
     }
 }
 
@@ -109,6 +167,9 @@ impl Staging {
 /// `reap_expired` from their own clock-driven task. There is no hidden background
 /// task: idle expired allocations persist until a request, explicit reap, or
 /// final service drop. All are still charged against the configured hard quota.
+/// An admitted COMMIT keeps its full charge until verification and publication
+/// retire, even if the upload expires meanwhile. Other attempts can progress
+/// during verification; requests for that same attempt wait for its completion.
 ///
 /// A completed receipt means the backing IN-MEMORY store retained the exact
 /// authenticated batch. Cancellation/disconnection can leave an incomplete
@@ -118,6 +179,8 @@ pub struct ChunkedSymbolService {
     store: Arc<SymbolReplicaStore>,
     limits: SymbolChunkedLimits,
     staging: Mutex<Staging>,
+    #[cfg(test)]
+    commit_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl std::fmt::Debug for ChunkedSymbolService {
@@ -130,7 +193,10 @@ impl ChunkedSymbolService {
     /// Wrap existing immutable storage without I/O or spawning tasks.
     #[must_use]
     pub fn new(store: Arc<SymbolReplicaStore>, limits: SymbolChunkedLimits) -> Self {
-        Self { store, limits, staging: Mutex::new(Staging::default()) }
+        Self { store, limits, staging: Mutex::new(Staging::default()),
+            #[cfg(test)]
+            commit_hook: Mutex::new(None),
+        }
     }
 
     /// Current charged staging, including expired uploads not yet reaped.
@@ -138,7 +204,7 @@ impl ChunkedSymbolService {
     pub fn stats(&self) -> SymbolStagingStats {
         let state = self.staging.lock();
         SymbolStagingStats { uploads: state.entries.len(), reserved_bytes: state.reserved,
-            received_bytes: state.entries.values().map(|stage| stage.bytes.len()).sum() }
+            received_bytes: state.entries.values().map(Stage::received_bytes).sum() }
     }
 
     /// Retire expired allocations using the same clock as the registered handler.
@@ -157,96 +223,120 @@ impl ChunkedSymbolService {
         if body.len() < 68 { return Err(SymbolStoreError::Truncated); }
         let upload = read_upload(&body[..68])?;
         let id = (peer.clone(), upload.attempt);
-        match operation {
-            BEGIN => {
-                if body.len() != 68 { return Err(SymbolStoreError::TrailingData); }
-                self.validate_upload(upload)?;
-                if let Some(stage) = state.entries.get(&id) {
-                    if stage.upload != upload { return Err(SymbolStoreError::Conflict); }
-                    return progress(upload, stage.bytes.len(), self.limits.max_chunk_bytes);
-                }
-                if let Ok(batch) = self.store.get(peer, upload.key) {
-                    if batch.as_ref().as_ref().len() != upload.total || batch.symbol_count() != upload.count {
-                        return Err(SymbolStoreError::Identity);
-                    }
-                    return progress(upload, upload.total, self.limits.max_chunk_bytes);
-                }
-                if state.entries.len() >= self.limits.max_uploads { return Err(SymbolStoreError::Limit("staged uploads")); }
-                let reserved = state.reserved.checked_add(upload.total).ok_or(SymbolStoreError::Overflow)?;
-                if reserved > self.limits.max_reserved_bytes { return Err(SymbolStoreError::Limit("staged bytes")); }
-                let (count, bytes) = state.entries.iter().filter(|((origin, _), _)| origin == peer)
-                    .fold((0usize, 0usize), |(count, bytes), (_, stage)| (count + 1, bytes + stage.upload.total));
-                if count >= self.limits.max_uploads_per_peer { return Err(SymbolStoreError::Limit("peer staged uploads")); }
-                if bytes.checked_add(upload.total).ok_or(SymbolStoreError::Overflow)? > self.limits.max_reserved_bytes_per_peer {
-                    return Err(SymbolStoreError::Limit("peer staged bytes"));
-                }
-                let expires = now.as_nanos().checked_add(self.limits.ttl_nanos).ok_or(SymbolStoreError::Overflow)?;
-                state.entries.insert(id, Stage { upload, expires: Time::from_nanos(expires), bytes: Zeroizing::new(Vec::new()) });
-                state.reserved = reserved;
-                progress(upload, 0, self.limits.max_chunk_bytes)
+        loop {
+            if let Some(completion) = state.entries.get(&id).and_then(|stage| stage.commit.clone()) {
+                // Preserve the original per-attempt ordering without holding up
+                // every origin. The owner is bounded synchronous in-memory work,
+                // not a task that can suspend on I/O; unwind also wakes us.
+                drop(state);
+                completion.wait();
+                state = self.staging.lock();
+                state.reap(now);
+                continue;
             }
-            CHUNK => {
-                if body.len() < 77 { return Err(SymbolStoreError::Truncated); }
-                let offset = read_usize(&body[68..76])?;
-                let bytes = &body[76..];
-                if bytes.len() > self.limits.max_chunk_bytes { return Err(SymbolStoreError::Limit("chunk bytes")); }
-                let stage = state.entries.get_mut(&id).ok_or(SymbolStoreError::NotFound)?;
-                if stage.upload != upload { return Err(SymbolStoreError::Identity); }
-                let end = offset.checked_add(bytes.len()).ok_or(SymbolStoreError::Overflow)?;
-                if end > upload.total { return Err(SymbolStoreError::Limit("declared upload bytes")); }
-                if offset == stage.bytes.len() {
-                    // Allocate the whole declared upload once (BEGIN already charged it to the
-                    // staging quota). Growing by each chunk let small chunks copy everything
-                    // staged so far under the shared lock, and left unzeroed copies behind.
-                    let missing = upload.total - stage.bytes.len();
-                    if stage.bytes.capacity() < upload.total {
-                        let reserved = stage.bytes.try_reserve_exact(missing);
-                        reserved.map_err(|_| SymbolStoreError::Allocation)?;
+            return match operation {
+                BEGIN => {
+                    if body.len() != 68 { return Err(SymbolStoreError::TrailingData); }
+                    self.validate_upload(upload)?;
+                    if let Some(stage) = state.entries.get(&id) {
+                        if stage.upload != upload { return Err(SymbolStoreError::Conflict); }
+                        return progress(upload, stage.bytes.len(), self.limits.max_chunk_bytes);
                     }
-                    stage.bytes.extend_from_slice(bytes);
-                } else if stage.bytes.get(offset..end) != Some(bytes) {
-                    return Err(SymbolStoreError::Conflict);
-                }
-                progress(upload, stage.bytes.len(), self.limits.max_chunk_bytes)
-            }
-            COMMIT => {
-                if body.len() != 68 { return Err(SymbolStoreError::TrailingData); }
-                let result = if let Some(stage) = state.entries.get(&id) {
-                    if stage.upload != upload { return Err(SymbolStoreError::Identity); }
-                    if stage.bytes.len() != upload.total { return Err(SymbolStoreError::Truncated); }
-                    // The staging lock holds its full reservation through hashing,
-                    // authentication and atomic publication; no concurrent expiry
-                    // or repeated BEGIN can spend that same quota again.
-                    if stage.bytes.get(12..28) != Some(upload.key.object_id.as_u128().to_le_bytes().as_slice())
-                        || stage.bytes.get(28..32) != Some(upload.count.to_le_bytes().as_slice())
-                        || super::super::batch::key(upload.key.object_id, &stage.bytes) != upload.key
-                    {
-                        Err(SymbolStoreError::Identity)
-                    } else {
-                        self.store.put(peer, &stage.bytes)
-                    }
-                } else {
-                    self.store.get(peer, upload.key).and_then(|batch| {
+                    if let Ok(batch) = self.store.get(peer, upload.key) {
                         if batch.as_ref().as_ref().len() != upload.total || batch.symbol_count() != upload.count {
                             return Err(SymbolStoreError::Identity);
                         }
-                        Ok(batch)
-                    })
-                };
-                state.remove(&id);
-                drop(state);
-                let batch = result?;
-                let mut bytes = upload.attempt.to_le_bytes().to_vec();
-                bytes.extend_from_slice(&receipt(self.store.replica_id(), &batch, now));
-                Ok(bytes)
-            }
-            ABORT => {
-                if body.len() != 68 { return Err(SymbolStoreError::TrailingData); }
-                if state.entries.get(&id).is_some_and(|stage| stage.upload != upload) { return Err(SymbolStoreError::Identity); }
-                state.remove(&id);
-                progress(upload, 0, self.limits.max_chunk_bytes)
-            }
-            _ => Err(SymbolStoreError::Format),
+                        return progress(upload, upload.total, self.limits.max_chunk_bytes);
+                    }
+                    if state.entries.len() >= self.limits.max_uploads { return Err(SymbolStoreError::Limit("staged uploads")); }
+                    let reserved = state.reserved.checked_add(upload.total).ok_or(SymbolStoreError::Overflow)?;
+                    if reserved > self.limits.max_reserved_bytes { return Err(SymbolStoreError::Limit("staged bytes")); }
+                    let (count, bytes) = state.entries.iter().filter(|((origin, _), _)| origin == peer)
+                        .fold((0usize, 0usize), |(count, bytes), (_, stage)| (count + 1, bytes + stage.upload.total));
+                    if count >= self.limits.max_uploads_per_peer { return Err(SymbolStoreError::Limit("peer staged uploads")); }
+                    if bytes.checked_add(upload.total).ok_or(SymbolStoreError::Overflow)? > self.limits.max_reserved_bytes_per_peer {
+                        return Err(SymbolStoreError::Limit("peer staged bytes"));
+                    }
+                    let expires = now.as_nanos().checked_add(self.limits.ttl_nanos).ok_or(SymbolStoreError::Overflow)?;
+                    state.entries.insert(id, Stage { upload, expires: Time::from_nanos(expires),
+                        bytes: Zeroizing::new(Vec::new()), commit: None });
+                    state.reserved = reserved;
+                    progress(upload, 0, self.limits.max_chunk_bytes)
+                }
+                CHUNK => {
+                    if body.len() < 77 { return Err(SymbolStoreError::Truncated); }
+                    let offset = read_usize(&body[68..76])?;
+                    let bytes = &body[76..];
+                    if bytes.len() > self.limits.max_chunk_bytes { return Err(SymbolStoreError::Limit("chunk bytes")); }
+                    let stage = state.entries.get_mut(&id).ok_or(SymbolStoreError::NotFound)?;
+                    if stage.upload != upload { return Err(SymbolStoreError::Identity); }
+                    let end = offset.checked_add(bytes.len()).ok_or(SymbolStoreError::Overflow)?;
+                    if end > upload.total { return Err(SymbolStoreError::Limit("declared upload bytes")); }
+                    if offset == stage.bytes.len() {
+                        // Allocate the whole declared upload once (BEGIN already charged it to the
+                        // staging quota). Growing by each chunk let small chunks copy everything
+                        // staged so far under the shared lock, and left unzeroed copies behind.
+                        let missing = upload.total - stage.bytes.len();
+                        if stage.bytes.capacity() < upload.total {
+                            let reserved = stage.bytes.try_reserve_exact(missing);
+                            reserved.map_err(|_| SymbolStoreError::Allocation)?;
+                        }
+                        stage.bytes.extend_from_slice(bytes);
+                    } else if stage.bytes.get(offset..end) != Some(bytes) {
+                        return Err(SymbolStoreError::Conflict);
+                    }
+                    progress(upload, stage.bytes.len(), self.limits.max_chunk_bytes)
+                }
+                COMMIT => {
+                    if body.len() != 68 { return Err(SymbolStoreError::TrailingData); }
+                    let result = if let Some(stage) = state.entries.get_mut(&id) {
+                        if stage.upload != upload { return Err(SymbolStoreError::Identity); }
+                        if stage.bytes.len() != upload.total { return Err(SymbolStoreError::Truncated); }
+                        let completion = Arc::new(CommitCompletion::default());
+                        let staged = StagedCommit {
+                            staging: &self.staging, id, completion: Arc::clone(&completion),
+                            bytes: Some(std::mem::take(&mut stage.bytes)),
+                        };
+                        stage.commit = Some(completion);
+                        drop(state);
+                        #[cfg(test)]
+                        {
+                            let hook = self.commit_hook.lock().clone();
+                            if let Some(hook) = hook { hook(); }
+                        }
+                        let bytes = staged.bytes();
+                        if bytes.get(12..28) != Some(upload.key.object_id.as_u128().to_le_bytes().as_slice())
+                            || bytes.get(28..32) != Some(upload.count.to_le_bytes().as_slice())
+                            || super::super::batch::key(upload.key.object_id, bytes) != upload.key
+                        {
+                            Err(SymbolStoreError::Identity)
+                        } else {
+                            self.store.put(peer, bytes)
+                        }
+                        // StagedCommit destroys its payload and retires its exact
+                        // charge before receipt publication, including on error.
+                    } else {
+                        drop(state);
+                        self.store.get(peer, upload.key).and_then(|batch| {
+                            if batch.as_ref().as_ref().len() != upload.total || batch.symbol_count() != upload.count {
+                                return Err(SymbolStoreError::Identity);
+                            }
+                            Ok(batch)
+                        })
+                    };
+                    let batch = result?;
+                    let mut bytes = upload.attempt.to_le_bytes().to_vec();
+                    bytes.extend_from_slice(&receipt(self.store.replica_id(), &batch, now));
+                    Ok(bytes)
+                }
+                ABORT => {
+                    if body.len() != 68 { return Err(SymbolStoreError::TrailingData); }
+                    if state.entries.get(&id).is_some_and(|stage| stage.upload != upload) { return Err(SymbolStoreError::Identity); }
+                    state.remove(&id);
+                    progress(upload, 0, self.limits.max_chunk_bytes)
+                }
+                _ => Err(SymbolStoreError::Format),
+            };
         }
     }
 
@@ -455,6 +545,167 @@ mod tests {
         command(service, peer, 0, BEGIN, upload).unwrap();
         for (index, chunk) in batch.as_ref().chunks(128).enumerate() {
             piece(service, peer, 1, upload, index * 128, chunk).unwrap();
+        }
+    }
+
+
+    struct CommitRelease(Option<std::sync::mpsc::Sender<()>>);
+
+    impl CommitRelease {
+        fn release(&mut self) {
+            if let Some(sender) = self.0.take() { let _ = sender.send(()); }
+        }
+    }
+
+    impl Drop for CommitRelease {
+        fn drop(&mut self) { self.release(); }
+    }
+
+    fn pause_commit(
+        service: &ChunkedSymbolService, panic_after_release: bool,
+    ) -> (std::sync::mpsc::Receiver<()>, CommitRelease) {
+        let (entered, reached) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let released = Mutex::new(released);
+        *service.commit_hook.lock() = Some(Arc::new(move || {
+            entered.send(()).expect("commit pause observer");
+            released.lock().recv_timeout(Duration::from_secs(5)).expect("commit pause release");
+            assert!(!panic_after_release, "injected commit verification panic");
+        }));
+        (reached, CommitRelease(Some(release)))
+    }
+
+    #[test]
+    fn committing_upload_keeps_credit_without_blocking_other_peers() {
+        let batch = fixture(42);
+        let upload = make_upload(&batch, 1);
+        let service = make_service(3, 3 * upload.total, 1);
+        let alice = NodeId::new("alice");
+        let bob = NodeId::new("bob");
+        let expired = NodeId::new("expired");
+        let reader = NodeId::new("reader");
+        service.store.put(&reader, batch.as_ref()).unwrap();
+        stage(&service, &alice, &batch, upload);
+        command(&service, &expired, 0, BEGIN, upload).unwrap();
+        command(&service, &bob, 50, BEGIN, upload).unwrap();
+
+        std::thread::scope(|scope| {
+            // This release guard lives inside the scope: a failed progress
+            // assertion releases the owner before scoped threads are joined.
+            let (reached, mut release) = pause_commit(&service, false);
+            let service = &service;
+            let alice = &alice;
+            let bob = &bob;
+            let reader = &reader;
+            let batch = &batch;
+            let commit = scope.spawn(move || command(service, alice, 2, COMMIT, upload));
+            reached.recv_timeout(Duration::from_secs(5)).expect("commit reached verification");
+            let (progressed, progress) = std::sync::mpsc::channel();
+            let other = scope.spawn(move || {
+                assert_eq!(service.stats(), SymbolStagingStats {
+                    uploads: 3, reserved_bytes: 3 * upload.total, received_bytes: upload.total,
+                });
+                // Expiry must remove only the abandoned upload. The committing
+                // allocation is still owned even after its original deadline.
+                assert_eq!(service.reap_expired(Time::from_nanos(120)), 1);
+                assert_eq!(service.stats().uploads, 2);
+                assert_eq!(service.stats().reserved_bytes, 2 * upload.total);
+                let reply = piece(service, bob, 120, upload, 0, &batch.as_ref()[..128]).unwrap();
+                assert_eq!(read_progress(&reply, upload).unwrap(), (128, 128));
+                let replay = command(service, bob, 121, BEGIN, upload).unwrap();
+                assert_eq!(read_progress(&replay, upload).unwrap(), (128, 128));
+                let read = service.handle(reader, Time::from_nanos(121),
+                    &range_request("replica", upload.key, 0, 128).unwrap()).unwrap();
+                let (total, count, bytes) = read_range(&read, upload.key, 0, 128).unwrap();
+                assert_eq!((total, count), (upload.total, upload.count));
+                assert_eq!(bytes, &batch.as_ref()[..128]);
+                assert_eq!(command(service, alice, 122, BEGIN, Upload { attempt: 2, ..upload }),
+                    Err(SymbolStoreError::Limit("peer staged uploads")));
+                command(service, &NodeId::new("charlie"), 122, BEGIN, upload).unwrap();
+                assert_eq!(command(service, &NodeId::new("david"), 122, BEGIN, upload),
+                    Err(SymbolStoreError::Limit("staged uploads")));
+                assert_eq!(service.stats(), SymbolStagingStats {
+                    uploads: 3, reserved_bytes: 3 * upload.total, received_bytes: upload.total + 128,
+                });
+                assert!(matches!(service.store.get(alice, upload.key), Err(SymbolStoreError::NotFound)));
+                progressed.send(()).expect("peer progress observer");
+            });
+            progress.recv_timeout(Duration::from_secs(5))
+                .expect("other peers must progress while commit verification is held");
+            release.release();
+            let receipt = commit.join().expect("committing thread").expect("verified commit");
+            super::super::validate_receipt(&receipt[8..], "replica", upload.key, upload.count).unwrap();
+            other.join().expect("independent peer requests");
+        });
+        assert_eq!(service.stats(), SymbolStagingStats {
+            uploads: 2, reserved_bytes: 2 * upload.total, received_bytes: 128,
+        });
+        assert_eq!(service.store.stats().batches, 2);
+        assert_eq!(service.reap_expired(Time::from_nanos(222)), 2);
+        assert_eq!(service.stats(), SymbolStagingStats { uploads: 0, reserved_bytes: 0, received_bytes: 0 });
+    }
+
+    #[test]
+    fn duplicate_commit_and_abort_wait_for_exact_owner_and_wake_on_failure_or_panic() {
+        for case in 0..3 {
+            let batch = fixture(if case == 1 { 43 } else { 42 });
+            let upload = make_upload(&batch, 1);
+            let service = make_service(1, upload.total, 1);
+            let peer = NodeId::new("origin");
+            stage(&service, &peer, &batch, upload);
+            std::thread::scope(|scope| {
+                let (reached, mut release) = pause_commit(&service, case == 2);
+                let service = &service;
+                let peer = &peer;
+                let owner = scope.spawn(move || std::panic::catch_unwind(
+                    std::panic::AssertUnwindSafe(|| command(service, peer, 2, COMMIT, upload)),
+                ));
+                reached.recv_timeout(Duration::from_secs(5)).expect("owner reached verification");
+                let completion = {
+                    let state = service.staging.lock();
+                    Arc::clone(state.entries[&(peer.clone(), upload.attempt)].commit.as_ref().unwrap())
+                };
+                let duplicate = scope.spawn(move || command(service, peer, 3, COMMIT, upload));
+                let abort = scope.spawn(move || command(service, peer, 3, ABORT, upload));
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                // Map + owner + this witness + both requests prove that the
+                // duplicate and abort have reached the real per-attempt wait.
+                while Arc::strong_count(&completion) < 5 {
+                    assert!(std::time::Instant::now() < deadline, "same-attempt requests did not park");
+                    std::thread::yield_now();
+                }
+                assert!(!*completion.done.lock());
+                assert_eq!(service.reap_expired(Time::from_nanos(200)), 0);
+                assert_eq!(service.stats(), SymbolStagingStats {
+                    uploads: 1, reserved_bytes: upload.total, received_bytes: upload.total,
+                });
+                release.release();
+                let result = owner.join().expect("owner thread catch-unwind");
+                match case {
+                    0 => { result.expect("successful owner").expect("verified publication"); }
+                    1 => { assert_eq!(result.expect("authentication refusal"), Err(SymbolStoreError::Authentication)); }
+                    _ => { assert!(result.is_err(), "injected owner panic must be observed"); }
+                }
+                let replay = duplicate.join().expect("duplicate commit thread");
+                if case == 0 {
+                    let receipt = replay.expect("duplicate committed receipt");
+                    super::super::validate_receipt(&receipt[8..], "replica", upload.key, upload.count).unwrap();
+                } else {
+                    assert_eq!(replay, Err(SymbolStoreError::NotFound));
+                }
+                let aborted = abort.join().expect("abort thread").expect("idempotent abort");
+                assert_eq!(read_progress(&aborted, upload).unwrap(), (0, 128));
+                assert!(*completion.done.lock());
+            });
+            assert_eq!(service.stats(), SymbolStagingStats { uploads: 0, reserved_bytes: 0, received_bytes: 0 });
+            assert_eq!(service.store.stats().batches, usize::from(case == 0));
+            *service.commit_hook.lock() = None;
+            let healthy = fixture(42);
+            let next = make_upload(&healthy, 2);
+            let healthy_peer = NodeId::new("healthy");
+            stage(&service, &healthy_peer, &healthy, next);
+            command(&service, &healthy_peer, 3, COMMIT, next).expect("retired credit is reusable");
+            assert_eq!(service.stats().reserved_bytes, 0);
         }
     }
 
