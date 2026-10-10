@@ -12423,12 +12423,16 @@ worker_threads = 16
             // The budget is published before its deadline timer is armed, and
             // this thread reads both without the runtime lock. Wait for the arm
             // (bounded) instead of racing it on a loaded worker (asupersync-f5fadj).
+            // A re-poll the activation scheduled re-arms the timer (cancel, then
+            // register, under separate wheel locks), so the count and the
+            // deadline are only meaningful read together: wait until both hold.
             wait_native_shutdown_condition(
-                || driver.pending_count() == 1,
+                || {
+                    driver.pending_count() == 1
+                        && driver.next_deadline() == Some(activated_deadline)
+                },
                 "activation must arm exactly one shutdown-budget deadline timer",
             );
-            assert_eq!(driver.pending_count(), 1);
-            assert_eq!(driver.next_deadline(), Some(activated_deadline));
             assert_eq!(drops.load(Ordering::SeqCst), 0);
             assert!(receipt.lock().is_none());
             let tightened_deadline = driver.now();
