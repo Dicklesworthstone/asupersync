@@ -1902,6 +1902,21 @@ pub trait AsyncConnectionManager: Send + Sync + 'static {
         true
     }
 
+    /// Asynchronous cleanup of a returned connection, awaited by
+    /// [`AsyncPooledConnection::reset_and_return`] after
+    /// [`Self::release_check`] accepted the connection and before it
+    /// re-enters the idle queue. Return `false` to discard the connection
+    /// instead. Dropping the guard does not run this hook.
+    ///
+    /// The default does nothing and keeps the connection.
+    fn reset_on_return(
+        &self,
+        _cx: &Cx,
+        _conn: &mut Self::Connection,
+    ) -> impl std::future::Future<Output = bool> + Send {
+        std::future::ready(true)
+    }
+
     /// Called when a connection is permanently removed from the pool.
     fn disconnect(&self, _conn: Self::Connection) {}
 
@@ -3108,6 +3123,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
             pool: self,
             created_at,
             client_id: quota_guard.client_id.take(),
+            release_verdict: None,
         })
     }
 
@@ -3274,6 +3290,10 @@ pub struct AsyncPooledConnection<'a, M: AsyncConnectionManager> {
     created_at: Time,
     // br-asupersync-80525g: Validation bypass fix - track client for quota enforcement
     client_id: Option<String>,
+    // Set by reset_and_return: whether Drop keeps the connection, in place of
+    // calling release_check again. Some(false) while the reset is in flight,
+    // so a cancelled reset discards the connection.
+    release_verdict: Option<bool>,
 }
 
 impl<M: AsyncConnectionManager> AsyncPooledConnection<'_, M> {
@@ -3297,6 +3317,30 @@ impl<M: AsyncConnectionManager> AsyncPooledConnection<'_, M> {
         // both, leaking the client quota slot and re-pooling poisoned
         // connections.
         drop(self);
+    }
+
+    /// Returns the connection to the pool after awaiting the manager's
+    /// [`AsyncConnectionManager::reset_on_return`], so that cleanup finishes
+    /// before the connection goes idle. For PostgreSQL with
+    /// `reset_session_on_return`, `DISCARD ALL` then releases the session's
+    /// advisory locks and `LISTEN` registrations now. Dropping the guard, or
+    /// [`Self::return_to_pool`], defers that reset to the connection's next
+    /// use.
+    ///
+    /// The manager's `release_check` runs first, as on drop. A connection it
+    /// refuses, one whose reset fails, and one whose reset is cancelled (this
+    /// future dropped before it completes) are discarded instead.
+    pub async fn reset_and_return(mut self, cx: &Cx) {
+        let Some(conn) = self.conn.as_mut() else {
+            return;
+        };
+        // Discard unless the check passes and the reset completes.
+        self.release_verdict = Some(false);
+        if !self.pool.manager.release_check(conn) {
+            return;
+        }
+        let reset = self.pool.manager.reset_on_return(cx, conn).await;
+        self.release_verdict = Some(reset);
     }
 
     /// Discard this connection instead of returning it.
@@ -3346,8 +3390,12 @@ impl<M: AsyncConnectionManager> Drop for AsyncPooledConnection<'_, M> {
             // health check; discard rather than return-to-pool when the
             // backend reports the connection is in a state that would
             // poison the next caller (open transaction, half-drained
-            // result set, protocol desync).
-            if self.pool.manager.release_check(&mut conn) {
+            // result set, protocol desync). reset_and_return already ran it.
+            let keep = match self.release_verdict {
+                Some(keep) => keep,
+                None => self.pool.manager.release_check(&mut conn),
+            };
+            if keep {
                 self.pool
                     .return_connection(conn, self.created_at, self.client_id.clone());
             } else {
@@ -3891,6 +3939,145 @@ mod tests {
         .with_task(TaskId::new_for_test(23, 3))
         .with_message("pool caller stopped")
         .with_cause(CancelReason::shutdown().with_message("service shutdown"))
+    }
+
+    /// Counts the release-time hooks; its reset can fail or never finish.
+    struct ResettingAsyncManager {
+        keep_on_check: bool,
+        reset_succeeds: bool,
+        reset_parks: bool,
+        release_checks: AtomicUsize,
+        resets: AtomicUsize,
+        disconnects: AtomicUsize,
+    }
+
+    impl ResettingAsyncManager {
+        fn new(keep_on_check: bool, reset_succeeds: bool, reset_parks: bool) -> Self {
+            Self {
+                keep_on_check,
+                reset_succeeds,
+                reset_parks,
+                release_checks: AtomicUsize::new(0),
+                resets: AtomicUsize::new(0),
+                disconnects: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl AsyncConnectionManager for ResettingAsyncManager {
+        type Connection = TestConnection;
+        type Error = TestError;
+
+        async fn connect(&self, _cx: &Cx) -> Outcome<Self::Connection, Self::Error> {
+            Outcome::Ok(TestConnection {
+                id: 1,
+                valid: Arc::new(AtomicBool::new(true)),
+            })
+        }
+
+        async fn is_valid(&self, _cx: &Cx, _conn: &mut Self::Connection) -> bool {
+            true
+        }
+
+        fn release_check(&self, _conn: &mut Self::Connection) -> bool {
+            self.release_checks.fetch_add(1, Ordering::SeqCst);
+            self.keep_on_check
+        }
+
+        fn reset_on_return(
+            &self,
+            _cx: &Cx,
+            _conn: &mut Self::Connection,
+        ) -> impl std::future::Future<Output = bool> + Send {
+            self.resets.fetch_add(1, Ordering::SeqCst);
+            let (parks, succeeds) = (self.reset_parks, self.reset_succeeds);
+            std::future::poll_fn(move |_| {
+                if parks {
+                    std::task::Poll::Pending
+                } else {
+                    std::task::Poll::Ready(succeeds)
+                }
+            })
+        }
+
+        fn disconnect(&self, _conn: Self::Connection) {
+            self.disconnects.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// br-asupersync-qml5yb MEDIUM 4: reset_and_return awaits the manager's
+    /// reset before the connection is idle. A refused release check, a
+    /// failed reset and a cancelled reset discard it instead, and the
+    /// release check runs once. Dropping the guard still defers the reset.
+    #[test]
+    fn reset_and_return_resets_before_the_connection_goes_idle() {
+        init_test("reset_and_return_resets_before_the_connection_goes_idle");
+        let cx = Cx::for_testing();
+        for (keep_on_check, reset_succeeds) in [(true, true), (true, false), (false, true)] {
+            let pool = AsyncDbPool::new(
+                ResettingAsyncManager::new(keep_on_check, reset_succeeds, false),
+                DbPoolConfig::with_max_size(1),
+            );
+            let conn = block_on(pool.get(&cx)).expect("checkout");
+            block_on(conn.reset_and_return(&cx));
+            let pooled = keep_on_check && reset_succeeds;
+            let case = format!("check={keep_on_check} reset={reset_succeeds}");
+            let manager = &pool.manager;
+            assert_eq!(manager.release_checks.load(Ordering::SeqCst), 1, "{case}");
+            assert_eq!(
+                manager.resets.load(Ordering::SeqCst),
+                usize::from(keep_on_check),
+                "{case}: only a connection the check keeps is reset"
+            );
+            assert_eq!(pool.stats().idle, usize::from(pooled), "{case}");
+            assert_eq!(pool.stats().total, usize::from(pooled), "{case}");
+            assert_eq!(
+                manager.disconnects.load(Ordering::SeqCst),
+                usize::from(!pooled),
+                "{case}"
+            );
+        }
+
+        // Dropping the guard keeps the deferred behavior: no reset runs.
+        let pool = AsyncDbPool::new(
+            ResettingAsyncManager::new(true, true, false),
+            DbPoolConfig::with_max_size(1),
+        );
+        drop(block_on(pool.get(&cx)).expect("checkout"));
+        assert_eq!(pool.manager.resets.load(Ordering::SeqCst), 0);
+        assert_eq!(pool.manager.release_checks.load(Ordering::SeqCst), 1);
+        assert_eq!(pool.stats().idle, 1);
+        crate::test_complete!("reset_and_return_resets_before_the_connection_goes_idle");
+    }
+
+    /// A reset dropped before it completes leaves the session state
+    /// unknown: the connection is discarded, never pooled.
+    #[test]
+    fn a_cancelled_reset_and_return_discards_the_connection() {
+        use std::future::Future;
+        init_test("a_cancelled_reset_and_return_discards_the_connection");
+        let cx = Cx::for_testing();
+        let pool = AsyncDbPool::new(
+            ResettingAsyncManager::new(true, true, true),
+            DbPoolConfig::with_max_size(1),
+        );
+        let conn = block_on(pool.get(&cx)).expect("checkout");
+        {
+            let mut returning = std::pin::pin!(conn.reset_and_return(&cx));
+            let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+            assert!(returning.as_mut().poll(&mut task_cx).is_pending());
+            assert_eq!(
+                pool.manager.resets.load(Ordering::SeqCst),
+                1,
+                "reset in flight"
+            );
+            assert_eq!(pool.stats().active, 1, "still borrowed while it resets");
+        }
+        assert_eq!(pool.stats().idle, 0, "a cancelled reset never pools it");
+        assert_eq!(pool.stats().total, 0);
+        assert_eq!(pool.manager.disconnects.load(Ordering::SeqCst), 1);
+        assert_eq!(pool.manager.release_checks.load(Ordering::SeqCst), 1);
+        crate::test_complete!("a_cancelled_reset_and_return_discards_the_connection");
     }
 
     #[test]

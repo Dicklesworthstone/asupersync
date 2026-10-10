@@ -9775,6 +9775,50 @@ mod tests {
         assert!(conn.inner.pending_session_reset);
     }
 
+    /// br-asupersync-qml5yb MEDIUM 4: the pool's reset hooks run the
+    /// DISCARD ALL that release_check scheduled now: reset_on_return before
+    /// the connection goes idle, and checkout validation for a connection
+    /// dropped back without it. A completed reset keeps the connection; a
+    /// failed one discards it. Nothing scheduled sends nothing.
+    #[test]
+    fn session_reset_hooks_run_the_scheduled_discard_now() {
+        use crate::database::pool::AsyncConnectionManager;
+        let options = PgConnectOptions::parse("postgres://localhost/testdb").unwrap();
+        let mgr = PgConnectionManager::new(options).reset_session_on_return(true);
+        let cx = Cx::for_testing();
+        for (validate, server_ok) in [(false, true), (false, false), (true, true), (true, false)] {
+            let case = format!("validate={validate} server_ok={server_ok}");
+            let (mut conn, mut peer) = make_test_connection_with_peer();
+            assert!(mgr.release_check(&mut conn), "{case}");
+            assert!(conn.inner.pending_session_reset, "{case}: reset scheduled");
+            let responder = std::thread::spawn(move || {
+                let request = read_until_contains(&mut peer, b"DISCARD ALL\0");
+                let reply = if server_ok {
+                    backend_message(b'C', b"DISCARD ALL\0")
+                } else {
+                    error_response_message("XX000", "reset failed")
+                };
+                std::io::Write::write_all(&mut peer, &reply).expect("write reply");
+                std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).expect("write ready");
+                (request, peer)
+            });
+            let kept = if validate {
+                run(mgr.is_valid(&cx, &mut conn))
+            } else {
+                run(mgr.reset_on_return(&cx, &mut conn))
+            };
+            let (request, _peer) = responder.join().expect("the client sent DISCARD ALL");
+            assert_eq!(request.first(), Some(&b'Q'), "{case}: one simple Query");
+            assert_eq!(kept, server_ok, "{case}");
+            assert_eq!(conn.inner.pending_session_reset, !server_ok, "{case}");
+        }
+
+        let mut conn = make_test_connection();
+        assert!(!conn.inner.pending_session_reset);
+        assert!(run(mgr.reset_on_return(&cx, &mut conn)), "nothing to reset");
+        assert!(run(mgr.is_valid(&cx, &mut conn)), "nothing to reset");
+    }
+
     /// br-asupersync-t4wfzb: PgConnectionManager::release_check must
     /// return false when the connection is flagged unhealthy (via
     /// br-asupersync-7v80ju consecutive DEALLOCATE failures).

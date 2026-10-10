@@ -10957,10 +10957,24 @@ impl PgConnectionManager {
     /// must not observe one another's session. A reset also clears the
     /// returning borrower's
     /// [`PgConnection::set_statement_timeout_override`].
+    ///
+    /// A connection dropped back into the pool keeps that session state,
+    /// including its advisory locks and `LISTEN` registrations, while it sits
+    /// idle. Return it with
+    /// [`AsyncPooledConnection::reset_and_return`](crate::database::pool::AsyncPooledConnection::reset_and_return)
+    /// to run the reset before it goes idle. A checkout that validates
+    /// connections runs a reset still pending, and discards a connection
+    /// whose reset fails.
     #[must_use]
     pub fn reset_session_on_return(mut self, enabled: bool) -> Self {
         self.reset_session_on_return = enabled;
         self
+    }
+
+    /// A pooled connection's pending session reset, run now: `true` once it
+    /// completed.
+    async fn reset_now(cx: &Cx, conn: &mut PgConnection) -> bool {
+        matches!(conn.reset_pooled_session(cx).await, Outcome::Ok(()))
     }
 
     /// Configure the trust policy retained by every pooled connection and reconnect.
@@ -10998,18 +11012,28 @@ impl crate::database::pool::AsyncConnectionManager for PgConnectionManager {
             .await
     }
 
-    async fn is_valid(&self, _cx: &Cx, conn: &mut Self::Connection) -> bool {
+    async fn is_valid(&self, cx: &Cx, conn: &mut Self::Connection) -> bool {
         // A connection is valid for reuse iff it is open, not in a
         // transaction, not flagged for discard, and not unhealthy. The
         // is_valid hook may run async queries (e.g. SELECT 1) but for
         // the cheap check here we use the locally-tracked flags; the
         // pool's separate health-check path is responsible for
         // periodic SELECT 1 probes.
-        !conn.inner.closed
+        let usable = !conn.inner.closed
             && !conn.in_transaction()
             && !conn.needs_discard()
             && !conn.is_unhealthy()
-            && conn.transport_matches_ssl_mode(self.options.ssl_mode)
+            && conn.transport_matches_ssl_mode(self.options.ssl_mode);
+        // A connection returned without reset_and_return still owes its
+        // session reset. Run it at checkout, so a failed reset discards the
+        // connection instead of failing the borrower's first request.
+        usable && (!conn.inner.pending_session_reset || Self::reset_now(cx, conn).await)
+    }
+
+    /// Runs the `DISCARD ALL` that `release_check` scheduled, before the
+    /// connection goes idle (`AsyncPooledConnection::reset_and_return`).
+    async fn reset_on_return(&self, cx: &Cx, conn: &mut Self::Connection) -> bool {
+        !conn.inner.pending_session_reset || Self::reset_now(cx, conn).await
     }
 
     /// br-asupersync-a1x452 + br-asupersync-t4wfzb: refuse to recycle
