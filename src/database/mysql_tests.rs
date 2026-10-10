@@ -3189,12 +3189,30 @@ mod tests {
 
     #[test]
     fn read_only_transaction_write_rejection_surfaces_server_error() {
-        let (mut conn, server) =
-            make_command_connection_with_single_response(error_packet_payload(
-                1792,
-                "25006",
-                "Cannot execute statement in a READ ONLY transaction",
-            ));
+        let (mut conn, listener) = make_server_backed_connection(41);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+            assert_eq!(
+                command_sql(&read_client_command(&mut stream)),
+                "UPDATE widgets SET id = 2"
+            );
+            write_response_packet(
+                &mut stream,
+                1,
+                error_packet_payload(
+                    1792,
+                    "25006",
+                    "Cannot execute statement in a READ ONLY transaction",
+                ),
+            );
+            // After a server error the transaction asks whether it is still
+            // open (br-asupersync-i5e6x9 F6). It is.
+            assert_eq!(read_client_command(&mut stream)[0], command::COM_PING);
+            write_response_packet(&mut stream, 1, ok_packet_payload(0, 0x0001));
+        });
         // As after START TRANSACTION READ ONLY: SERVER_STATUS_IN_TRANS.
         conn.inner.status_flags = 0x0001;
         let cx = Cx::for_testing();
@@ -3212,8 +3230,11 @@ mod tests {
             // heuristics (INSERT INTO trips the " into " pattern and never
             // reaches the wire — br-asupersync-uvqpga); the fake server
             // replies with the READ ONLY rejection regardless of query text.
-            tx.execute_static_sql(&cx, "UPDATE widgets SET id = 2")
-                .await
+            let outcome = tx
+                .execute_static_sql(&cx, "UPDATE widgets SET id = 2")
+                .await;
+            assert!(!tx.finished, "the rejection leaves the transaction open");
+            outcome
         });
 
         match outcome {
@@ -6126,6 +6147,88 @@ mod tests {
         assert_eq!(second.statement_id, 102);
     }
 
+    /// i5e6x9: a SET of sql_mode run as a prepared statement re-binds the
+    /// other prepared statements, as the text SET does, but it kept the
+    /// cache. Once it ran, every other cached statement is closed and its SQL
+    /// is prepared again. The SET statement itself stays cached and open, so
+    /// it can run again.
+    #[test]
+    fn a_prepared_sql_mode_set_closes_the_other_cached_statements() {
+        init_test("mysql_a_prepared_sql_mode_set_closes_the_other_cached_statements");
+        let (mut conn, listener) = make_server_backed_connection(41);
+        let select = "SELECT v FROM t";
+        let set = "SET SESSION sql_mode = 'ANSI_QUOTES'";
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+            for statement_id in [101_u32, 102] {
+                let prepare = read_client_command(&mut stream);
+                assert_eq!(prepare[0], command::COM_STMT_PREPARE);
+                write_response_packet(&mut stream, 1, prepare_ok_payload(statement_id));
+            }
+            let execute = read_client_command(&mut stream);
+            assert_eq!(execute[0], command::COM_STMT_EXECUTE);
+            assert_eq!(execute[1..5], 102_u32.to_le_bytes());
+            write_response_packet(&mut stream, 1, ok_packet_payload(0, 0));
+
+            let close = read_client_command(&mut stream);
+            assert_eq!(
+                close[0],
+                command::COM_STMT_CLOSE,
+                "the statement parsed under the old sql_mode is closed"
+            );
+            assert_eq!(close[1..5], 101_u32.to_le_bytes());
+
+            let prepare = read_client_command(&mut stream);
+            assert_eq!(
+                prepare[0],
+                command::COM_STMT_PREPARE,
+                "the SELECT is prepared again under the new sql_mode"
+            );
+            write_response_packet(&mut stream, 1, prepare_ok_payload(103));
+
+            let execute = read_client_command(&mut stream);
+            assert_eq!(execute[0], command::COM_STMT_EXECUTE);
+            assert_eq!(
+                execute[1..5],
+                102_u32.to_le_bytes(),
+                "the SET statement is still open"
+            );
+            write_response_packet(&mut stream, 1, ok_packet_payload(0, 0));
+            let close = read_client_command(&mut stream);
+            assert_eq!(close[0], command::COM_STMT_CLOSE);
+            assert_eq!(close[1..5], 103_u32.to_le_bytes());
+        });
+
+        let cx = Cx::for_testing();
+        let first = match run(conn.prepare(&cx, select)) {
+            Outcome::Ok(stmt) => stmt,
+            other => panic!("prepare SELECT: {other:?}"),
+        };
+        assert_eq!(first.statement_id, 101);
+        let set_stmt = match run(conn.prepare(&cx, set)) {
+            Outcome::Ok(stmt) => stmt,
+            other => panic!("prepare SET: {other:?}"),
+        };
+        match run(conn.execute_prepared(&cx, &set_stmt, &[])) {
+            Outcome::Ok(_) => {}
+            other => panic!("execute SET: {other:?}"),
+        }
+        let second = match run(conn.prepare(&cx, select)) {
+            Outcome::Ok(stmt) => stmt,
+            other => panic!("prepare SELECT again: {other:?}"),
+        };
+        assert_eq!(second.statement_id, 103);
+        match run(conn.execute_prepared(&cx, &set_stmt, &[])) {
+            Outcome::Ok(_) => {}
+            other => panic!("execute SET again: {other:?}"),
+        }
+        server.join().expect("server thread");
+    }
+
     /// M1: `None` meant both "server default" and "unknown". A SET cancelled
     /// before it was written left the old 500 ms limit on the server while
     /// the cache read as the default, so a later query with no deadline sent
@@ -6290,6 +6393,169 @@ mod tests {
                     assert!(message.contains("ended this transaction"), "{message}");
                 }
                 other => panic!("expected the commit to be refused, got {other:?}"),
+            }
+        });
+        server.join().expect("server thread");
+    }
+
+    /// Accepts a connection and answers `START TRANSACTION`, then
+    /// `statement` with `reply`, then the COM_PING the transaction sends
+    /// after a server error, with `ping_status`. Checks that nothing else
+    /// arrives.
+    fn serve_begin_statement_then_ping(
+        listener: std::net::TcpListener,
+        statement: &'static str,
+        reply: Vec<u8>,
+        ping_status: u16,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+            assert_eq!(
+                command_sql(&read_client_command(&mut stream)),
+                "START TRANSACTION"
+            );
+            // SERVER_STATUS_IN_TRANS | SERVER_STATUS_AUTOCOMMIT
+            write_response_packet(&mut stream, 1, ok_packet_payload(0, 0x0003));
+            assert_eq!(command_sql(&read_client_command(&mut stream)), statement);
+            write_response_packet(&mut stream, 1, reply);
+            assert_eq!(
+                read_client_command(&mut stream)[0],
+                command::COM_PING,
+                "the transaction refreshes its status after a server error"
+            );
+            write_response_packet(&mut stream, 1, ok_packet_payload(0, ping_status));
+
+            stream
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .expect("set short read timeout");
+            let mut header = [0_u8; 4];
+            let err = std::io::Read::read_exact(&mut stream, &mut header)
+                .expect_err("nothing may follow once the server ended the transaction");
+            assert!(
+                matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ),
+                "expected a read timeout, got {err:?}"
+            );
+        })
+    }
+
+    /// i5e6x9 F6: a statement that commits implicitly (DDL) commits the open
+    /// transaction before it fails, and its ERR packet carries no status
+    /// flags. Its next statement ran in autocommit mode, and rollback()
+    /// returned Ok after the work was committed. The transaction now asks
+    /// the server after a server error. Once the server has ended it, its
+    /// statements and commit are refused and its rollback reports that it
+    /// finished, all without sending anything.
+    #[test]
+    fn a_failed_implicit_commit_finishes_the_transaction() {
+        init_test("mysql_a_failed_implicit_commit_finishes_the_transaction");
+        for ends_with_rollback in [false, true] {
+            let (mut conn, listener) = make_server_backed_connection(41);
+            // SERVER_STATUS_AUTOCOMMIT only: the server ended the transaction.
+            let server = serve_begin_statement_then_ping(
+                listener,
+                "CREATE TABLE x (id INT)",
+                error_packet_payload(1050, "42S01", "Table 'x' already exists"),
+                0x0002,
+            );
+            let cx = Cx::for_testing();
+            run(async {
+                let mut tx = match conn.begin(&cx).await {
+                    Outcome::Ok(tx) => tx,
+                    other => panic!("begin: {:?}", other.is_ok()),
+                };
+                match tx.execute_static_sql(&cx, "CREATE TABLE x (id INT)").await {
+                    Outcome::Err(MySqlError::Server { code: 1050, .. }) => {}
+                    other => panic!("expected the DDL error, got {other:?}"),
+                }
+                if ends_with_rollback {
+                    match tx.rollback(&cx).await {
+                        Outcome::Err(MySqlError::TransactionFinished) => {}
+                        other => panic!("rollback must report the ended transaction: {other:?}"),
+                    }
+                } else {
+                    match tx
+                        .execute_static_sql(&cx, "UPDATE t SET v = 2 WHERE id = 2")
+                        .await
+                    {
+                        Outcome::Err(MySqlError::TransactionFinished) => {}
+                        other => panic!("expected the statement to be refused, got {other:?}"),
+                    }
+                    match tx.commit(&cx).await {
+                        Outcome::Err(MySqlError::TransactionFinished) => {}
+                        other => panic!("expected the commit to be refused, got {other:?}"),
+                    }
+                }
+            });
+            server.join().expect("server thread");
+            assert!(!conn.inner.needs_rollback, "nothing is left to roll back");
+        }
+    }
+
+    /// The status refresh keeps a transaction that the error did not end: a
+    /// duplicate key leaves it open, and its next statement and commit run.
+    #[test]
+    fn a_server_error_that_keeps_the_transaction_open_leaves_it_usable() {
+        init_test("mysql_a_server_error_that_keeps_the_transaction_open_leaves_it_usable");
+        let (mut conn, listener) = make_server_backed_connection(41);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+            assert_eq!(
+                command_sql(&read_client_command(&mut stream)),
+                "START TRANSACTION"
+            );
+            write_response_packet(&mut stream, 1, ok_packet_payload(0, 0x0003));
+            assert_eq!(
+                command_sql(&read_client_command(&mut stream)),
+                "UPDATE t SET v = 1 WHERE id = 1"
+            );
+            write_response_packet(
+                &mut stream,
+                1,
+                error_packet_payload(1062, "23000", "Duplicate entry '1' for key 'PRIMARY'"),
+            );
+            assert_eq!(read_client_command(&mut stream)[0], command::COM_PING);
+            write_response_packet(&mut stream, 1, ok_packet_payload(0, 0x0003));
+            assert_eq!(
+                command_sql(&read_client_command(&mut stream)),
+                "UPDATE t SET v = 2 WHERE id = 2"
+            );
+            write_response_packet(&mut stream, 1, ok_packet_payload(1, 0x0003));
+            assert_eq!(command_sql(&read_client_command(&mut stream)), "COMMIT");
+            write_response_packet(&mut stream, 1, ok_packet_payload(0, 0x0002));
+        });
+
+        let cx = Cx::for_testing();
+        run(async {
+            let mut tx = match conn.begin(&cx).await {
+                Outcome::Ok(tx) => tx,
+                other => panic!("begin: {:?}", other.is_ok()),
+            };
+            match tx
+                .execute_static_sql(&cx, "UPDATE t SET v = 1 WHERE id = 1")
+                .await
+            {
+                Outcome::Err(MySqlError::Server { code: 1062, .. }) => {}
+                other => panic!("expected the duplicate key, got {other:?}"),
+            }
+            match tx
+                .execute_static_sql(&cx, "UPDATE t SET v = 2 WHERE id = 2")
+                .await
+            {
+                Outcome::Ok(1) => {}
+                other => panic!("the transaction is still open: {other:?}"),
+            }
+            match tx.commit(&cx).await {
+                Outcome::Ok(()) => {}
+                other => panic!("commit: {other:?}"),
             }
         });
         server.join().expect("server thread");

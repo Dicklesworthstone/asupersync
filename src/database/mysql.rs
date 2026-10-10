@@ -5293,6 +5293,28 @@ impl MySqlConnection {
         Ok(())
     }
 
+    /// After a prepared statement that re-binds the others ran (a prepared
+    /// `SET sql_mode`), close every other cached statement, as
+    /// [`Self::forget_prepared_statements_before`] does for the text paths.
+    /// The statement that ran stays cached and open (br-asupersync-i5e6x9).
+    async fn forget_prepared_statements_after(
+        &mut self,
+        cx: &Cx,
+        statement_id: u32,
+    ) -> Result<(), MySqlError> {
+        if !self.inner.prepared_cache.rebinds(statement_id) {
+            return Ok(());
+        }
+        for other in self
+            .inner
+            .prepared_cache
+            .clear_except_returning_ids(statement_id)
+        {
+            self.close_prepared_statement_id(cx, other).await?;
+        }
+        Ok(())
+    }
+
     /// Returns prepared-statement cache effectiveness counters for this
     /// connection (br-asupersync-server-stack-hardening-eeexl1.5).
     #[must_use]
@@ -5657,7 +5679,13 @@ impl MySqlConnection {
                 Ok(ok_packet) => {
                     self.inner.status_flags = ok_packet.status_flags;
                     self.inner.closed = false;
-                    Outcome::Ok(Vec::new())
+                    match self
+                        .forget_prepared_statements_after(cx, stmt.statement_id)
+                        .await
+                    {
+                        Ok(()) => Outcome::Ok(Vec::new()),
+                        Err(e) => outcome_from_error(e),
+                    }
                 }
                 Err(e) => {
                     self.inner.closed = false;
@@ -5826,6 +5854,12 @@ impl MySqlConnection {
             };
             self.inner.status_flags = ok_packet.status_flags;
             self.inner.closed = false;
+            if let Err(e) = self
+                .forget_prepared_statements_after(cx, stmt.statement_id)
+                .await
+            {
+                return outcome_from_error(e);
+            }
             return Outcome::Ok(MySqlExecResult {
                 affected_rows: ok_packet.affected_rows,
                 last_insert_id: ok_packet.last_insert_id,
@@ -6682,6 +6716,9 @@ struct MySqlPreparedStatementCache {
     lru: VecDeque<String>,
     cap: usize,
     stats: MySqlPreparedCacheStats,
+    /// Cached statements that re-bind the others when they run, such as a
+    /// prepared `SET sql_mode` (br-asupersync-i5e6x9).
+    rebinding_ids: Vec<u32>,
 }
 
 impl MySqlPreparedStatementCache {
@@ -6691,7 +6728,13 @@ impl MySqlPreparedStatementCache {
             lru: VecDeque::with_capacity(cap.min(64)),
             cap,
             stats: MySqlPreparedCacheStats::default(),
+            rebinding_ids: Vec::new(),
         }
+    }
+
+    /// Whether running this cached statement re-binds the other statements.
+    fn rebinds(&self, statement_id: u32) -> bool {
+        self.rebinding_ids.contains(&statement_id)
     }
 
     fn stats(&self) -> MySqlPreparedCacheStats {
@@ -6739,8 +6782,12 @@ impl MySqlPreparedStatementCache {
             evicted = Some(victim_stmt.statement_id);
         }
 
-        if evicted.is_some() {
+        if let Some(evicted) = evicted {
             self.stats.evictions += 1;
+            self.rebinding_ids.retain(|&id| id != evicted);
+        }
+        if mysql_statement_rebinds_prepared_statements(&sql) {
+            self.rebinding_ids.push(stmt.statement_id);
         }
         self.lru.push_back(sql.clone());
         self.entries.insert(sql, stmt);
@@ -6750,10 +6797,28 @@ impl MySqlPreparedStatementCache {
     /// Empty the cache, returning the statement ids to close.
     fn clear_returning_ids(&mut self) -> Vec<u32> {
         self.lru.clear();
+        self.rebinding_ids.clear();
         self.entries
             .drain()
             .map(|(_, stmt)| stmt.statement_id)
             .collect()
+    }
+
+    /// Empty the cache except for `keep`, returning the statement ids to
+    /// close.
+    fn clear_except_returning_ids(&mut self, keep: u32) -> Vec<u32> {
+        let mut closed = Vec::new();
+        self.entries.retain(|_, stmt| {
+            let kept = stmt.statement_id == keep;
+            if !kept {
+                closed.push(stmt.statement_id);
+            }
+            kept
+        });
+        let entries = &self.entries;
+        self.lru.retain(|sql| entries.contains_key(sql));
+        self.rebinding_ids.retain(|&id| id == keep);
+        closed
     }
 
     #[cfg(test)]
@@ -7011,12 +7076,32 @@ impl MySqlTransaction<'_> {
     /// and ended it. An ERR packet carries no status flags, so the cached
     /// IN_TRANS bit still reads open; clear it so `check_open` refuses the
     /// statements and the commit that would otherwise run outside it.
-    fn note_server_rollback<T>(
+    ///
+    /// Another server error can end the transaction too: a statement that
+    /// commits implicitly (DDL, for one) commits it before it fails. Ask the
+    /// server: a COM_PING's OK packet carries the current status flags. A
+    /// transaction the server ended is finished, so its statements, commit and
+    /// rollback report that instead of running in autocommit or claiming to
+    /// undo committed work. When the ping fails the state is unknown, and
+    /// the transaction can only roll back (br-asupersync-i5e6x9 F6).
+    async fn note_server_rollback<T>(
         &mut self,
+        cx: &Cx,
         outcome: Outcome<T, MySqlError>,
     ) -> Outcome<T, MySqlError> {
-        if matches!(outcome, Outcome::Err(MySqlError::Server { code: 1213, .. })) {
-            self.conn.inner.status_flags &= !0x0001; // SERVER_STATUS_IN_TRANS
+        match &outcome {
+            Outcome::Err(MySqlError::Server { code: 1213, .. }) => {
+                self.conn.inner.status_flags &= !0x0001; // SERVER_STATUS_IN_TRANS
+            }
+            Outcome::Err(MySqlError::Server { .. }) => {
+                if !matches!(self.conn.ping(cx).await, Outcome::Ok(())) {
+                    self.poison_for_rollback();
+                } else if !self.conn.in_transaction() {
+                    self.finished = true;
+                    self.conn.restore_session_isolation(cx).await;
+                }
+            }
+            _ => {}
         }
         outcome
     }
@@ -7117,7 +7202,7 @@ impl MySqlTransaction<'_> {
             return Outcome::Err(error);
         }
         let outcome = self.conn.query_unchecked_internal(cx, sql).await;
-        self.note_server_rollback(outcome)
+        self.note_server_rollback(cx, outcome).await
     }
 
     /// Execute a simple command within this transaction (DEPRECATED — see
@@ -7139,7 +7224,7 @@ impl MySqlTransaction<'_> {
             return Outcome::Err(error);
         }
         let outcome = self.conn.execute_unchecked_internal(cx, sql).await;
-        self.note_server_rollback(outcome)
+        self.note_server_rollback(cx, outcome).await
     }
 
     /// Execute static SQL within transaction (safe wrapper).
@@ -7179,7 +7264,7 @@ impl MySqlTransaction<'_> {
             return Outcome::Err(error);
         }
         let outcome = self.conn.execute_sql_exchange(cx, sql).await;
-        self.note_server_rollback(outcome)
+        self.note_server_rollback(cx, outcome).await
     }
 
     /// Run one query within this transaction exactly as given, without the
@@ -7193,7 +7278,7 @@ impl MySqlTransaction<'_> {
             return Outcome::Err(error);
         }
         let outcome = self.conn.query_sql_exchange(cx, sql).await;
-        self.note_server_rollback(outcome)
+        self.note_server_rollback(cx, outcome).await
     }
 
     /// Prepare a statement within this transaction.
@@ -7228,7 +7313,7 @@ impl MySqlTransaction<'_> {
             return Outcome::Err(error);
         }
         let outcome = self.conn.execute_prepared_result(cx, stmt, params).await;
-        self.note_server_rollback(outcome)
+        self.note_server_rollback(cx, outcome).await
     }
 
     /// Query a prepared statement within this transaction.
@@ -7242,7 +7327,7 @@ impl MySqlTransaction<'_> {
             return Outcome::Err(error);
         }
         let outcome = self.conn.query_prepared(cx, stmt, params).await;
-        self.note_server_rollback(outcome)
+        self.note_server_rollback(cx, outcome).await
     }
 }
 
