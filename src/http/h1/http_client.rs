@@ -1648,12 +1648,26 @@ impl HttpClient {
                                 body
                             };
 
+                            // When routing through a forward proxy, the proxy is the same
+                            // intermediate hop for the redirected request, so retain the
+                            // caller's Proxy-Authorization credentials (RFC 9110 §15.4 / asupersync-4ebib5).
+                            let proxy_auth = if self.config.proxy_url.is_some() {
+                                get_header(&extra_headers, "proxy-authorization")
+                            } else {
+                                None
+                            };
+
                             // Strip sensitive headers on cross-origin redirect
-                            let next_headers = strip_sensitive_headers_on_redirect(
+                            let mut next_headers = strip_sensitive_headers_on_redirect(
                                 &parsed,
                                 &next_parsed,
                                 extra_headers,
                             );
+                            if let Some(auth) = proxy_auth {
+                                if !has_header(&next_headers, "proxy-authorization") {
+                                    next_headers.push(("Proxy-Authorization".to_owned(), auth));
+                                }
+                            }
                             // A redirect that changes the method drops the body,
                             // and the headers that described it (RFC 9110 §15.4).
                             let next_headers = if next_method == method {
@@ -1768,12 +1782,26 @@ impl HttpClient {
                                 body
                             };
 
+                            // When routing through a forward proxy, the proxy is the same
+                            // intermediate hop for the redirected request, so retain the
+                            // caller's Proxy-Authorization credentials (RFC 9110 §15.4 / asupersync-4ebib5).
+                            let proxy_auth = if self.config.proxy_url.is_some() {
+                                get_header(&extra_headers, "proxy-authorization")
+                            } else {
+                                None
+                            };
+
                             // Strip sensitive headers on cross-origin redirect
-                            let next_headers = strip_sensitive_headers_on_redirect(
+                            let mut next_headers = strip_sensitive_headers_on_redirect(
                                 &parsed,
                                 &next_parsed,
                                 extra_headers,
                             );
+                            if let Some(auth) = proxy_auth {
+                                if !has_header(&next_headers, "proxy-authorization") {
+                                    next_headers.push(("Proxy-Authorization".to_owned(), auth));
+                                }
+                            }
                             // A redirect that changes the method drops the body,
                             // and the headers that described it (RFC 9110 §15.4).
                             let next_headers = if next_method == method {
@@ -2101,8 +2129,8 @@ impl HttpClient {
                     return Ok(ProxyConnection {
                         io: proxy_io,
                         use_absolute_form: true,
-                        proxy_authorization: proxy
-                            .http_proxy_authorization()
+                        proxy_authorization: caller_proxy_authorization
+                            .or_else(|| proxy.http_proxy_authorization())
                             .map(std::borrow::ToOwned::to_owned),
                     });
                 }
@@ -5941,6 +5969,176 @@ mod tests {
         assert!(
             connect.contains("\r\nProxy-Authorization: Basic cHJveHk=\r\n"),
             "the tunnel request must carry the caller's proxy credentials: {connect}"
+        );
+    }
+
+    #[test]
+    fn forward_proxy_http_cross_origin_redirect_preserves_default_proxy_authorization() {
+        use std::io::Write;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind proxy listener");
+        let proxy_addr = listener.local_addr().expect("proxy address");
+
+        let proxy = std::thread::spawn(move || {
+            let mut heads = Vec::new();
+            for response in [
+                "HTTP/1.1 302 Found\r\nLocation: http://other.example/next\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+            ] {
+                let (mut stream, _) = listener.accept().expect("accept client");
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .expect("set read timeout");
+                heads.push(read_http_head(&mut stream));
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write proxy response");
+            }
+            heads
+        });
+
+        let client = HttpClient::builder()
+            .proxy(format!("http://{proxy_addr}"))
+            .default_header("Proxy-Authorization", "Basic cHJveHktZGVmYXVsdA==")
+            .build();
+        let cx = Cx::for_testing();
+        let response = block_on(client.request(
+            &cx,
+            Method::Get,
+            "http://start.example/init",
+            Vec::new(),
+            Vec::new(),
+        ))
+        .expect("request through forward proxy succeeds");
+
+        assert_eq!(response.status, 200);
+        let heads = proxy.join().expect("proxy thread");
+        assert_eq!(heads.len(), 2);
+        assert!(heads[0].starts_with("GET http://start.example/init HTTP/1.1\r\n"));
+        assert!(
+            heads[0].contains("\r\nProxy-Authorization: Basic cHJveHktZGVmYXVsdA==\r\n"),
+            "first hop must carry Proxy-Authorization: {}",
+            heads[0]
+        );
+        assert!(heads[1].starts_with("GET http://other.example/next HTTP/1.1\r\n"));
+        assert!(
+            heads[1].contains("\r\nProxy-Authorization: Basic cHJveHktZGVmYXVsdA==\r\n"),
+            "cross-origin redirected hop through forward proxy must retain Proxy-Authorization: {}",
+            heads[1]
+        );
+    }
+
+    #[test]
+    fn forward_proxy_http_cross_origin_redirect_preserves_per_request_proxy_authorization() {
+        use std::io::Write;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind proxy listener");
+        let proxy_addr = listener.local_addr().expect("proxy address");
+
+        let proxy = std::thread::spawn(move || {
+            let mut heads = Vec::new();
+            for response in [
+                "HTTP/1.1 302 Found\r\nLocation: http://other.example/next\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+            ] {
+                let (mut stream, _) = listener.accept().expect("accept client");
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .expect("set read timeout");
+                heads.push(read_http_head(&mut stream));
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write proxy response");
+            }
+            heads
+        });
+
+        let client = HttpClient::builder()
+            .proxy(format!("http://{proxy_addr}"))
+            .build();
+        let cx = Cx::for_testing();
+        let response = block_on(client.request(
+            &cx,
+            Method::Get,
+            "http://start.example/init",
+            vec![(
+                "Proxy-Authorization".to_owned(),
+                "Basic cHJveHktcmVxdWVzdA==".to_owned(),
+            )],
+            Vec::new(),
+        ))
+        .expect("request through forward proxy succeeds");
+
+        assert_eq!(response.status, 200);
+        let heads = proxy.join().expect("proxy thread");
+        assert_eq!(heads.len(), 2);
+        assert!(heads[0].starts_with("GET http://start.example/init HTTP/1.1\r\n"));
+        assert!(
+            heads[0].contains("\r\nProxy-Authorization: Basic cHJveHktcmVxdWVzdA==\r\n"),
+            "first hop must carry Proxy-Authorization: {}",
+            heads[0]
+        );
+        assert!(heads[1].starts_with("GET http://other.example/next HTTP/1.1\r\n"));
+        assert!(
+            heads[1].contains("\r\nProxy-Authorization: Basic cHJveHktcmVxdWVzdA==\r\n"),
+            "cross-origin redirected hop through forward proxy must retain per-request Proxy-Authorization: {}",
+            heads[1]
+        );
+    }
+
+    #[test]
+    fn direct_http_cross_origin_redirect_strips_proxy_authorization() {
+        use std::io::Write;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener address");
+
+        let second_listener = TcpListener::bind("127.0.0.1:0").expect("bind second listener");
+        let second_addr = second_listener.local_addr().expect("second listener address");
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept first");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .expect("set read timeout");
+            let head1 = read_http_head(&mut stream);
+            let resp = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://{second_addr}/next\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(resp.as_bytes()).expect("write redirect");
+            head1
+        });
+
+        let second_server = std::thread::spawn(move || {
+            let (mut stream, _) = second_listener.accept().expect("accept second");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .expect("set read timeout");
+            let head2 = read_http_head(&mut stream);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .expect("write ok");
+            head2
+        });
+
+        let client = HttpClient::builder().build();
+        let cx = Cx::for_testing();
+        let response = block_on(client.request(
+            &cx,
+            Method::Get,
+            &format!("http://{addr}/start"),
+            vec![("Proxy-Authorization".to_owned(), "Basic c2VjcmV0".to_owned())],
+            Vec::new(),
+        ))
+        .expect("redirect succeeds");
+
+        assert_eq!(response.status, 200);
+        let head1 = server.join().expect("server 1 thread");
+        let head2 = second_server.join().expect("server 2 thread");
+        assert!(head1.contains("\r\nProxy-Authorization: Basic c2VjcmV0\r\n"));
+        assert!(
+            !head2.to_ascii_lowercase().contains("proxy-authorization"),
+            "cross-origin redirect without proxy must strip Proxy-Authorization: {head2}"
         );
     }
 
