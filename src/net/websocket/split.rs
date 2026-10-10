@@ -431,13 +431,10 @@ async fn write_owned_buf_with_permit<IO: AsyncWrite + Unpin>(
     if !buf.is_empty() {
         {
             let mut guard = shared.lock();
-            let budget = guard
-                .config
-                .check_outbound_write_budget(guard.write_buf.len(), buf.len());
-            if let Err(err) = budget {
-                close_shared_after_outbound_backpressure(&mut guard);
-                return Err(err);
-            }
+            // Part of this frame is on the wire, so its tail is retained
+            // whatever the budget says: the frame was admitted whole above,
+            // and dropping the tail would leave the peer a truncated frame
+            // that the next queued bytes complete (br-asupersync-4en1sw W3).
             // The read half queues its Close echo without the permit, so whole
             // frames may have arrived in write_buf while this one was being
             // written. Its unsent tail goes ahead of them; appended after,
@@ -859,6 +856,38 @@ where
                     }
                 }
             } else {
+                // A retained Close (our echo, or our own Close after a
+                // crossing peer Close) whose flush an earlier recv dropped is
+                // resumed before this recv reports the end or waits for input;
+                // a retried recv used to return without ever writing it
+                // (br-asupersync-4en1sw W1). Only once the peer's Close is in:
+                // in CloseSent the peer's Close is read first, as before.
+                let resume_close_flush = {
+                    let shared = self.shared.lock();
+                    shared.close_flush_pending
+                        && shared.close_handshake.state() != CloseState::CloseSent
+                };
+                if resume_close_flush {
+                    let deadline = self.shared.lock().heartbeat.write_deadline();
+                    let send_result = super::heartbeat::wait_until(
+                        cx,
+                        deadline,
+                        flush_write_buf_with_cx(&self.shared, Some(cx)),
+                    )
+                    .await;
+                    if send_result?.is_none() {
+                        self.fail_heartbeat();
+                        return Err(super::heartbeat::timeout_error());
+                    }
+                    let shared = &mut *self.shared.lock();
+                    if !shared.close_flush_pending
+                        && shared.close_handshake.state() == CloseState::CloseReceived
+                    {
+                        shared.close_handshake.mark_response_sent();
+                    }
+                    continue;
+                }
+
                 // Check if closed
                 if self.shared.lock().close_handshake.is_closed() {
                     return Ok(None);
@@ -1157,10 +1186,10 @@ where
                     &mut encoded,
                     shared.entropy.as_ref(),
                 )?;
-                if let Err(err) = shared
-                    .config
-                    .check_outbound_write_budget(shared.write_buf.len(), encoded.len())
-                {
+                // The Close is admitted on its own size: bytes already
+                // retained (a partly written frame's tail) go out first
+                // and are not this frame's to account (br-asupersync-4en1sw W2).
+                if let Err(err) = shared.config.check_outbound_write_budget(0, encoded.len()) {
                     close_shared_after_outbound_backpressure(shared);
                     return Err(err);
                 }
@@ -1589,6 +1618,148 @@ mod tests {
             assert_eq!(
                 ws.io.written, expected,
                 "the whole frame, then the Close echo"
+            );
+        });
+    }
+
+    // br-asupersync-4en1sw W3: after a partial write, the frame's tail was
+    // checked against the budget again, now counting the Close echo the read
+    // half had queued meanwhile. Over budget, the send failed and the tail was
+    // dropped although the frame's first bytes were already on the wire.
+    #[test]
+    fn a_partly_written_frame_keeps_its_tail_when_an_echo_fills_the_budget() {
+        future::block_on(async {
+            let peer_close = encode_client_frame_with_entropy(
+                &Frame::close(Some(1000), None),
+                &FixedEntropy([0x11, 0x22, 0x33, 0x44]),
+            );
+            let frame = Frame::binary(Bytes::from(vec![0xAB; 1000]));
+            let frame_len = encode_server_frame(frame.clone()).len();
+            let ws = WebSocket::from_upgraded(
+                TestIo::new(peer_close)
+                    .with_pending_first_write()
+                    .with_partial_first_write(2),
+                WebSocketConfig::default().max_pending_write_bytes(frame_len),
+            );
+            let (mut read, write) = ws.split();
+            read.shared.lock().codec = FrameCodec::server();
+            let cx = Cx::for_testing();
+
+            let waker = std::task::Waker::noop().clone();
+            let mut poll_cx = Context::from_waker(&waker);
+            let mut send = Box::pin(write.send_frame(&frame));
+            assert!(send.as_mut().poll(&mut poll_cx).is_pending());
+            let mut recv = Box::pin(read.recv(&cx));
+            assert!(recv.as_mut().poll(&mut poll_cx).is_pending());
+
+            let (sent, received) = future::zip(send, recv).await;
+            sent.expect("a frame whose first bytes went out is finished");
+            assert!(
+                matches!(received, Ok(Some(Message::Close(_)))),
+                "{received:?}"
+            );
+            let ws = read.reunite(write).expect("split halves must reunite");
+            let mut expected = encode_server_frame(frame);
+            expected.extend_from_slice(&encode_server_frame(Frame::close(Some(1000), None)));
+            assert_eq!(ws.io.written, expected, "the whole frame, then the echo");
+        });
+    }
+
+    // br-asupersync-4en1sw W2: close() counted the retained tail of a partly
+    // written frame against the budget, so a frame near the budget left the
+    // write half unable to close (OutboundBufferFull under Wait). v0.4.3
+    // flushed the tail and then sent the Close.
+    #[test]
+    fn close_after_a_dropped_partial_send_flushes_the_tail_then_closes() {
+        future::block_on(async {
+            let frame = Frame::binary(Bytes::from(vec![0xCD; 1000]));
+            let frame_len =
+                encode_client_frame_with_entropy(&frame, &FixedEntropy([0x46, 0xD0, 0x1B, 0x0A]))
+                    .len();
+            let ws = WebSocket::from_upgraded(
+                TestIo::new(vec![]).with_partial_first_write(2),
+                WebSocketConfig::default().max_pending_write_bytes(frame_len),
+            );
+            let (read, mut write) = ws.split();
+            let waker = std::task::Waker::noop().clone();
+            let mut poll_cx = Context::from_waker(&waker);
+            {
+                let mut send = Box::pin(write.send_frame(&frame));
+                assert!(send.as_mut().poll(&mut poll_cx).is_pending());
+            }
+            assert_eq!(read.shared.lock().write_buf.len(), frame_len - 2);
+
+            write
+                .close(CloseReason::normal())
+                .await
+                .expect("the retained tail does not count against the Close");
+            assert_eq!(write.close_state(), CloseState::CloseSent);
+            let state = read.shared.lock();
+            assert!(state.write_buf.is_empty());
+            assert_eq!(state.io.written.len(), frame_len + 8);
+        });
+    }
+
+    // br-asupersync-4en1sw W1: a recv dropped while flushing a retained Close
+    // (our echo, or our own Close after a crossing peer Close) left it
+    // retained, and a retried recv returned without writing it.
+    #[test]
+    fn a_retried_recv_flushes_the_close_its_dropped_predecessor_retained() {
+        future::block_on(async {
+            // Echo: the peer closed first.
+            let peer_close = encode_server_frame(Frame::close(Some(1000), None));
+            let ws = WebSocket::from_upgraded(
+                TestIo::new(peer_close).with_pending_first_write(),
+                WebSocketConfig::default(),
+            );
+            let (mut read, write) = ws.split();
+            let entropy: Arc<dyn EntropySource> = Arc::new(FixedEntropy([0x46, 0xD0, 0x1B, 0x0A]));
+            let cx = test_cx_with_entropy(Arc::clone(&entropy));
+            let waker = std::task::Waker::noop().clone();
+            let mut poll_cx = Context::from_waker(&waker);
+            {
+                let mut first = Box::pin(read.recv(&cx));
+                assert!(first.as_mut().poll(&mut poll_cx).is_pending());
+            }
+            assert_eq!(write.close_state(), CloseState::CloseReceived);
+            assert!(read.recv(&cx).await.expect("retried recv").is_none());
+            assert_eq!(write.close_state(), CloseState::Closed);
+            let ws = read.reunite(write).expect("split halves must reunite");
+            assert_eq!(
+                ws.io.written,
+                encode_client_frame_with_entropy(&Frame::close(Some(1000), None), entropy.as_ref()),
+                "the retried recv wrote the echo once"
+            );
+
+            // Crossing: our close() was dropped before its first byte, then the
+            // peer's Close arrived.
+            let peer_close = encode_client_frame_with_entropy(
+                &Frame::close(Some(1000), None),
+                &FixedEntropy([0x11, 0x22, 0x33, 0x44]),
+            );
+            let ws = WebSocket::from_upgraded(
+                TestIo::new(peer_close).with_pending_first_write(),
+                WebSocketConfig::default(),
+            );
+            let (mut read, mut write) = ws.split();
+            read.shared.lock().codec = FrameCodec::server();
+            let cx = Cx::for_testing();
+            let expected = encode_server_frame(CloseReason::going_away().to_frame());
+            {
+                let mut close = Box::pin(write.close(CloseReason::going_away()));
+                assert!(close.as_mut().poll(&mut poll_cx).is_pending());
+            }
+            read.shared.lock().io.pending_first_write = true;
+            {
+                let mut recv = Box::pin(read.recv(&cx));
+                assert!(recv.as_mut().poll(&mut poll_cx).is_pending());
+            }
+            assert!(read.recv(&cx).await.expect("retried recv").is_none());
+            let state = read.shared.lock();
+            assert_eq!(state.close_handshake.state(), CloseState::Closed);
+            assert_eq!(
+                state.io.written, expected,
+                "the retried recv wrote our Close"
             );
         });
     }
