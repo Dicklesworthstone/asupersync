@@ -3089,7 +3089,6 @@ fn spawn_detached_kill_on_drop_reaper(child: std_process::Child) -> Result<(), s
     let shared_child = std::sync::Arc::new(parking_lot::Mutex::new(Some(child)));
     let thread_child = std::sync::Arc::clone(&shared_child);
 
-    // ubs:ignore - intentional detach by dropping JoinHandle in Drop to avoid blocking runtime
     if std::thread::Builder::new()
         .name("asupersync-process-reaper".to_owned())
         .spawn(move || {
@@ -3098,6 +3097,7 @@ fn spawn_detached_kill_on_drop_reaper(child: std_process::Child) -> Result<(), s
                 let _ = child.wait();
             }
         })
+        .map(crate::runtime::spawn_blocking::reap_spawned_thread) // not detached: GitHub #80
         .is_ok()
     {
         return Ok(());

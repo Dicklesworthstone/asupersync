@@ -51,8 +51,7 @@ use std::time::{Duration, Instant};
 
 use asupersync::combinator::RetryPolicy;
 use asupersync::cx::Cx;
-use asupersync::database::pool::{AsyncConnectionManager, AsyncDbPool, DbPoolConfig, DbPoolError};
-use asupersync::types::Outcome;
+use asupersync::database::pool::{AsyncDbPool, DbPoolConfig, DbPoolError};
 use futures_lite::future::block_on;
 
 // ─── Structured JSON-line logging (one event per println) ───────────────────────
@@ -326,7 +325,9 @@ impl Drop for IptablesBlock {
 #[cfg(feature = "postgres")]
 mod pg {
     use super::*;
+    use asupersync::database::pool::AsyncConnectionManager;
     use asupersync::database::postgres::{PgConnection, PgError};
+    use asupersync::types::Outcome;
 
     struct PgRealManager {
         url: String,

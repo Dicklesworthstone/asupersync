@@ -2156,10 +2156,10 @@ impl Drop for MySqlConnection {
                     )
                     .await;
                 });
-                // The task bounds the complete exchange, including the final
-                // OK, and cannot recursively spawn another cleanup connection.
+                // The task bounds the exchange, final OK included, and starts no nested cleanup.
                 runtime.block_on(join);
-            });
+            })
+            .map(crate::runtime::spawn_blocking::reap_spawned_thread);
     }
 }
 

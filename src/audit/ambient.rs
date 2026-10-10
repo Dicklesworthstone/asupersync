@@ -1627,7 +1627,12 @@ fn test_function() {
     // dials a resolved address on a second path, through a configured
     // dns_resolver, with the same TcpStream::connect_socket_addr. No scanner
     // exemption or detection pattern changed.
-    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 835;
+    // 835 -> 837 (re-blessed 2026-10-10 after 49ec999e6 landed without the
+    // inventory): remote/write_progress/tests.rs (a plain tests.rs, scanned as
+    // production) dials a loopback std::net::TcpStream with connect_timeout
+    // and wraps it with TcpStream::from_std for its stalled-write harness.
+    // No scanner exemption or detection pattern changed.
+    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 837;
 
     fn src_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
@@ -2689,5 +2694,154 @@ fn production_path() {
         let copied = s;
         let cloned = s;
         assert_eq!(copied, cloned);
+    }
+
+    // =========================================================================
+    // GitHub #80: what happens to every thread's JoinHandle
+    // =========================================================================
+
+    /// Every production `std::thread` spawn site under `src/`, per file, with
+    /// what happens to its `JoinHandle` (GitHub #80, br-asupersync-umruvn).
+    ///
+    /// Dropping a handle detaches its thread, and detaching a thread that is
+    /// exiting at that moment can fault inside `pthread_detach` on glibc
+    /// before 2.43 (BZ19951). A thread must be joined, held and joined later,
+    /// reaped through `runtime::spawn_blocking::reap_spawned_thread` or
+    /// `reap_threads` (joined once finished, never detached), or detached only
+    /// while it provably keeps running. A spawn site added to or removed from
+    /// a file changes its count and fails the census until it is classified.
+    const THREAD_SPAWN_CENSUS: &[(&str, usize, &str)] = &[
+        (
+            "bin/asupersync.rs",
+            2,
+            "signal threads held, closed and joined",
+        ),
+        (
+            "bin/atp.rs",
+            5,
+            "pipe readers, bond-pull receiver, delta-state sidecar, atp-serve signals joined; \
+             the ssh stderr reader runs until EOF",
+        ),
+        (
+            "bin/atpd.rs",
+            3,
+            "signal loops run for the process; the diagnostics endpoint is joined by stop()",
+        ),
+        (
+            "bin/dependency_marginal_ledger.rs",
+            1,
+            "thread::scope joins",
+        ),
+        ("bin/io_cap_budget_profile.rs", 1, "joined"),
+        ("cx/scoped_cpu.rs", 1, "thread::scope joins"),
+        ("database/mysql.rs", 1, "KILL-on-drop thread reaped"),
+        (
+            "net/quic_native/handshake_driver.rs",
+            1,
+            "test peer thread, joined: its `pub(crate) mod tests` reads as non-test here",
+        ),
+        ("net/udp.rs", 1, "fallback I/O pump runs for the process"),
+        (
+            "observability/debt_runtime_integration.rs",
+            1,
+            "held, joined by stop/Drop",
+        ),
+        (
+            "process.rs",
+            2,
+            "Windows output reader joined; kill-on-drop reaper reaped",
+        ),
+        ("process/reaper.rs", 1, "child reaper runs for the process"),
+        (
+            "runtime/blocking_pool.rs",
+            1,
+            "workers held and joined; leftovers reaped when the pool drops",
+        ),
+        (
+            "runtime/builder.rs",
+            4,
+            "workers and deadline monitor joined; shutdown reaper reaped; worker teardown \
+             detached while it must still join the worker that spawned it",
+        ),
+        (
+            "runtime/resource_monitor.rs",
+            1,
+            "sampler held, joined by Drop",
+        ),
+        (
+            "runtime/spawn_blocking.rs",
+            1,
+            "fallback thread joined or reaped",
+        ),
+        (
+            "signal/shutdown.rs",
+            2,
+            "signal listeners block until a signal arrives, long after the detach",
+        ),
+        (
+            "signal/signal.rs",
+            2,
+            "unix dispatcher runs for the process; Windows poller held and joined",
+        ),
+        (
+            "time/sleep.rs",
+            2,
+            "fallback timer pump runs for the process; per-Sleep fallback thread reaped",
+        ),
+        (
+            "web/debug.rs",
+            2,
+            "server loop runs until stop(), callable only after start returns; connection \
+             threads reaped",
+        ),
+    ];
+
+    const THREAD_SPAWN_TOKENS: &[&str] =
+        &["thread::Builder::new(", "thread::spawn(", "thread::scope("];
+
+    #[test]
+    fn every_thread_spawn_site_has_a_classified_join_handle() {
+        let root = src_root();
+        let files = collect_rs_files_strict(&root)
+            .unwrap_or_else(|error| panic!("strict source scan failed: {error}"));
+        let mut observed = std::collections::BTreeMap::new();
+        for file_path in files {
+            let rel = file_path
+                .strip_prefix(&root)
+                .expect("collected files are under the source root")
+                .to_string_lossy()
+                .replace('\\', "/");
+            // Test code may detach its threads; `tests.rs` modules and
+            // `tests/` directories are compiled only under cfg(test).
+            if is_test_surface(&rel)
+                || rel == "tests.rs"
+                || rel.ends_with("/tests.rs")
+                || rel.contains("/tests/")
+            {
+                continue;
+            }
+            let content = std::fs::read_to_string(&file_path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", file_path.display()));
+            let sites = non_test_lines(&content)
+                .iter()
+                .filter(|(_, line)| {
+                    THREAD_SPAWN_TOKENS
+                        .iter()
+                        .any(|token| line_contains_literal(line, token))
+                })
+                .count();
+            if sites > 0 {
+                observed.insert(rel, sites);
+            }
+        }
+        let classified = THREAD_SPAWN_CENSUS
+            .iter()
+            .map(|(file, sites, _)| ((*file).to_string(), *sites))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            observed, classified,
+            "thread spawn sites changed: classify what happens to each JoinHandle in \
+             THREAD_SPAWN_CENSUS (GitHub #80: never drop one while its thread may be exiting)"
+        );
     }
 }
