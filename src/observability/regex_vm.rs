@@ -1634,9 +1634,12 @@ fn find_private_pattern_key_entry(
 /// Caller-owned bounded LRU cache for configured private patterns.
 ///
 /// The cache has no global instance and starts no tasks or obligations.
-/// Compilation and cancellation callbacks always run outside its mutex. A
-/// concurrent miss may compile redundantly; admission rechecks exact key
-/// equality and retains one deterministic winner.
+/// Compilation and cancellation callbacks always run outside its mutex.
+/// When in-flight compile permits allow concurrency (`max_inflight_compiles > 1`),
+/// concurrent misses may compile redundantly; admission rechecks exact key
+/// equality and retains one deterministic winner. If in-flight compile capacity
+/// is reached (e.g. `max_inflight_compiles = 1`), additional concurrent misses
+/// fail closed with `CompileCapacity`.
 pub struct PrivatePatternCache {
     limits: PrivatePatternCacheLimits,
     state: Mutex<PrivatePatternCacheState>,
@@ -3541,6 +3544,22 @@ fn execute_search_from(
     )
 }
 
+fn execute_search_from_prevalidated(
+    program: &Program,
+    haystack: &str,
+    limits: CaptureVmLimits,
+    start_offset: usize,
+    control: Option<&mut VmCancellationControl<'_>>,
+) -> Result<CaptureVmOutcome, VmError> {
+    execute_capture_mode_prevalidated(
+        program,
+        haystack,
+        limits,
+        CaptureMode::Search { start_offset },
+        control,
+    )
+}
+
 /// Repeatedly select matches under an explicit overlap policy.
 ///
 /// The result retains captures for every match. `replacement_spans()` exposes
@@ -3658,10 +3677,9 @@ fn execute_find_iter_with_optional_control(
         let mut search_limits = limits.capture;
         search_limits.vm.max_memory_bytes = remaining_memory;
         search_limits.vm.max_work_units = remaining_work;
-        let search = execute_search_from(
+        let search = execute_search_from_prevalidated(
             program,
             haystack,
-            compile_limits,
             search_limits,
             search_start,
             control.as_deref_mut(),
@@ -3780,10 +3798,20 @@ fn execute_capture_mode(
     mode: CaptureMode,
     control: Option<&mut VmCancellationControl<'_>>,
 ) -> Result<CaptureVmOutcome, VmError> {
+    program.validate(compile_limits).map_err(VmError::compile)?;
+    execute_capture_mode_prevalidated(program, haystack, limits, mode, control)
+}
+
+fn execute_capture_mode_prevalidated(
+    program: &Program,
+    haystack: &str,
+    limits: CaptureVmLimits,
+    mode: CaptureMode,
+    control: Option<&mut VmCancellationControl<'_>>,
+) -> Result<CaptureVmOutcome, VmError> {
     if !limits.invariants_hold() {
         return Err(VmError::new(VmErrorKind::InvalidLimits));
     }
-    program.validate(compile_limits).map_err(VmError::compile)?;
     if haystack.len() > limits.vm.max_input_bytes {
         return Err(VmError::new(VmErrorKind::InputLimit)
             .with_actual_limit(haystack.len(), limits.vm.max_input_bytes));

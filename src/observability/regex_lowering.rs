@@ -539,6 +539,113 @@ struct Fragment {
     outs: Vec<Patch>,
 }
 
+struct RemapTable {
+    base: usize,
+    entries: Vec<Option<StateId>>,
+}
+
+impl RemapTable {
+    fn new(state_ids: &[StateId]) -> Self {
+        if state_ids.is_empty() {
+            return Self {
+                base: 0,
+                entries: Vec::new(),
+            };
+        }
+        let min = state_ids.iter().map(|id| id.index()).min().unwrap_or(0);
+        let max = state_ids.iter().map(|id| id.index()).max().unwrap_or(0);
+        Self {
+            base: min,
+            entries: vec![None; max - min + 1],
+        }
+    }
+
+    fn insert(&mut self, state: StateId, clone: StateId) {
+        if let Some(idx) = state.index().checked_sub(self.base) {
+            if let Some(entry) = self.entries.get_mut(idx) {
+                *entry = Some(clone);
+            }
+        }
+    }
+
+    fn get(&self, state: StateId) -> Option<StateId> {
+        let idx = state.index().checked_sub(self.base)?;
+        self.entries.get(idx).copied().flatten()
+    }
+}
+
+trait StateRemapper {
+    fn map_state(&self, state: StateId) -> Option<StateId>;
+}
+
+impl StateRemapper for RemapTable {
+    fn map_state(&self, state: StateId) -> Option<StateId> {
+        self.get(state)
+    }
+}
+
+impl StateRemapper for [Option<StateId>] {
+    fn map_state(&self, state: StateId) -> Option<StateId> {
+        self.get(state.index()).copied().flatten()
+    }
+}
+
+impl StateRemapper for Vec<Option<StateId>> {
+    fn map_state(&self, state: StateId) -> Option<StateId> {
+        self.as_slice().map_state(state)
+    }
+}
+
+type SpanKey = (usize, usize, usize, usize);
+
+#[inline]
+fn span_key(span: SourceSpan) -> SpanKey {
+    (
+        span.byte_start,
+        span.byte_end,
+        span.scalar_start,
+        span.scalar_end,
+    )
+}
+
+struct SpanIndex {
+    map: std::collections::HashMap<SpanKey, Vec<usize>>,
+}
+
+impl SpanIndex {
+    fn new<T, F>(values: &[T], span_of: F) -> Self
+    where
+        F: Fn(&T) -> SourceSpan,
+    {
+        let mut map: std::collections::HashMap<SpanKey, Vec<usize>> =
+            std::collections::HashMap::with_capacity(values.len());
+        for (index, value) in values.iter().enumerate() {
+            let key = span_key(span_of(value));
+            map.entry(key).or_default().push(index);
+        }
+        Self { map }
+    }
+
+    fn find_unique_unused(
+        &self,
+        used: &[bool],
+        span: SourceSpan,
+    ) -> Option<Result<usize, LowerError>> {
+        let key = span_key(span);
+        let candidates = self.map.get(&key)?;
+        let mut found = None;
+        for &index in candidates {
+            if !used.get(index).copied().unwrap_or(true) {
+                if found.is_some() {
+                    return Some(Err(LowerError::new(LowerErrorKind::InvalidAnalysis, span)));
+                }
+                found = Some(index);
+            }
+        }
+        found.map(Ok)
+    }
+}
+
 struct LoweringBuilder<'analysis> {
     analysis: &'analysis FoldBoundaryAnalysis,
     limits: CompileLimits,
@@ -548,6 +655,9 @@ struct LoweringBuilder<'analysis> {
     semantic_classes_used: Vec<bool>,
     folds_used: Vec<bool>,
     boundaries_used: Vec<bool>,
+    semantic_classes_index: SpanIndex,
+    folds_index: SpanIndex,
+    boundaries_index: SpanIndex,
     total_class_ranges: usize,
     capture_slots: usize,
     repetition_expansion: u64,
@@ -564,6 +674,12 @@ impl<'analysis> LoweringBuilder<'analysis> {
             semantic_classes_used: vec![false; analysis.character_semantics.classes.len()],
             folds_used: vec![false; analysis.folds.len()],
             boundaries_used: vec![false; analysis.boundaries.len()],
+            semantic_classes_index: SpanIndex::new(
+                &analysis.character_semantics.classes,
+                |class| class.span,
+            ),
+            folds_index: SpanIndex::new(&analysis.folds, |fold| fold.span),
+            boundaries_index: SpanIndex::new(&analysis.boundaries, |boundary| boundary.span),
             total_class_ranges: 0,
             capture_slots: 0,
             repetition_expansion: 0,
@@ -1195,8 +1311,7 @@ impl<'analysis> LoweringBuilder<'analysis> {
         state_ids: &[StateId],
         span: SourceSpan,
     ) -> Result<Fragment, LowerError> {
-        let original_count = self.states.len();
-        let mut remap = vec![None; original_count];
+        let mut remap = RemapTable::new(state_ids);
         for state_id in state_ids {
             let source = self
                 .states
@@ -1204,7 +1319,7 @@ impl<'analysis> LoweringBuilder<'analysis> {
                 .map(|state| state.source)
                 .ok_or_else(|| LowerError::new(LowerErrorKind::MissingFragment, span))?;
             let clone_id = self.push_state(PendingInstruction::Accept, source)?;
-            remap[state_id.index()] = Some(clone_id);
+            remap.insert(*state_id, clone_id);
         }
 
         for state_id in state_ids {
@@ -1214,7 +1329,8 @@ impl<'analysis> LoweringBuilder<'analysis> {
                 .map(|state| state.instruction.clone())
                 .ok_or_else(|| LowerError::new(LowerErrorKind::MissingFragment, span))?;
             let translated = translate_pending(instruction, &remap, span)?;
-            let clone_id = remap[state_id.index()]
+            let clone_id = remap
+                .get(*state_id)
                 .ok_or_else(|| LowerError::new(LowerErrorKind::MissingFragment, span))?;
             let clone_state = self
                 .states
@@ -1224,14 +1340,12 @@ impl<'analysis> LoweringBuilder<'analysis> {
         }
 
         let start = remap
-            .get(fragment.start.index())
-            .and_then(|entry| *entry)
+            .get(fragment.start)
             .ok_or_else(|| LowerError::new(LowerErrorKind::MissingFragment, span))?;
         let mut outs = Vec::with_capacity(fragment.outs.len());
         for patch in &fragment.outs {
             let state = remap
-                .get(patch.state.index())
-                .and_then(|entry| *entry)
+                .get(patch.state)
                 .ok_or_else(|| LowerError::new(LowerErrorKind::MissingFragment, span))?;
             outs.push(Patch { state });
         }
@@ -1394,23 +1508,16 @@ impl<'analysis> LoweringBuilder<'analysis> {
     }
 
     fn take_semantic_class(&mut self, span: SourceSpan) -> Result<CanonicalClass, LowerError> {
-        let index = unique_unused_span(
-            &self.analysis.character_semantics.classes,
-            &self.semantic_classes_used,
-            span,
-            |class| class.span,
-        )
-        .ok_or_else(|| LowerError::new(LowerErrorKind::MissingSemanticClass, span))??;
+        let index = self
+            .semantic_classes_index
+            .find_unique_unused(&self.semantic_classes_used, span)
+            .ok_or_else(|| LowerError::new(LowerErrorKind::MissingSemanticClass, span))??;
         self.semantic_classes_used[index] = true;
         Ok(self.analysis.character_semantics.classes[index].clone())
     }
 
     fn take_fold_output(&mut self, span: SourceSpan) -> Result<Option<FoldOutput>, LowerError> {
-        let Some(index) =
-            unique_unused_span(&self.analysis.folds, &self.folds_used, span, |fold| {
-                fold.span
-            })
-        else {
+        let Some(index) = self.folds_index.find_unique_unused(&self.folds_used, span) else {
             return Ok(None);
         };
         let index = index?;
@@ -1419,13 +1526,10 @@ impl<'analysis> LoweringBuilder<'analysis> {
     }
 
     fn take_boundary(&mut self, span: SourceSpan) -> Result<BoundaryAssertion, LowerError> {
-        let index = unique_unused_span(
-            &self.analysis.boundaries,
-            &self.boundaries_used,
-            span,
-            |boundary| boundary.span,
-        )
-        .ok_or_else(|| LowerError::new(LowerErrorKind::MissingBoundary, span))??;
+        let index = self
+            .boundaries_index
+            .find_unique_unused(&self.boundaries_used, span)
+            .ok_or_else(|| LowerError::new(LowerErrorKind::MissingBoundary, span))??;
         self.boundaries_used[index] = true;
         Ok(self.analysis.boundaries[index])
     }
@@ -1633,13 +1737,12 @@ fn pending_targets(instruction: &PendingInstruction) -> Vec<StateId> {
 
 fn translate_pending(
     instruction: PendingInstruction,
-    remap: &[Option<StateId>],
+    remap: &impl StateRemapper,
     span: SourceSpan,
 ) -> Result<PendingInstruction, LowerError> {
     let map = |target: StateId| {
         remap
-            .get(target.index())
-            .and_then(|entry| *entry)
+            .map_state(target)
             .ok_or_else(|| LowerError::new(LowerErrorKind::MissingFragment, span))
     };
     let map_optional = |target: Option<StateId>| target.map(&map).transpose();
