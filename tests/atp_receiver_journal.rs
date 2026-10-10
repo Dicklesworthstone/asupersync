@@ -1003,6 +1003,109 @@ fn public_native_sender_and_journaled_receiver_finish_nonempty_and_empty_files()
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
+fn native_finalization_requires_capacity_for_the_durable_terminal_record() {
+    for workers in [1, 2] {
+        for compact in [false, true] {
+            for snapshots in [4, 5] {
+                let root = directory();
+                let journal = root.join("receiver.wal");
+                let data = root.join("receiver.data");
+                let intent = root.join("receiver.intent");
+                let store = if compact {
+                    ReceiverJournalFile::create_new_compact(
+                        &journal,
+                        &data,
+                        &intent,
+                        ReceiverCompactFileLimits {
+                            max_data_bytes: 64,
+                            max_snapshots: snapshots,
+                            max_journal_bytes: 2065,
+                        },
+                    )
+                } else {
+                    ReceiverJournalFile::create_new(&journal, &data, limits(snapshots))
+                }
+                .unwrap();
+                let observer = store.observer();
+                run(workers, async move {
+                    let cx = Cx::current().unwrap();
+                    let scope = cx.scope();
+                    let authority = receiver();
+                    let mut incoming = store
+                        .bind_new(&authority, &cx, "127.0.0.1:0".parse().unwrap(), client(), 4)
+                        .await
+                        .unwrap();
+                    let address = incoming.local_addr().unwrap();
+                    let mut task = cx
+                        .spawn_in(&scope, move |child| {
+                            let future: Pin<
+                                Box<dyn Future<Output = (JournaledFileReceiver, ResumeReport)> + Send>,
+                            > = Box::pin(async move {
+                                let report = incoming.receive(&child).await;
+                                (incoming, report)
+                            });
+                            future
+                        })
+                        .unwrap();
+                    let send = sender();
+                    let mut outgoing = send
+                        .resumable_reader(&cx, address, &DATA[..8], 4)
+                        .unwrap();
+                    let sent = outgoing.send(&cx).await;
+                    let (incoming, received) = poll_fn(|ctx| task.poll_join(ctx)).await.unwrap();
+                    assert_eq!(received.sink_written_bytes, 8);
+                    assert_eq!(received.prefix.as_ref().unwrap().bytes, 8);
+                    if snapshots == 4 {
+                        assert!(sent.outcome.is_err());
+                        let Err(ResumeError::ReceiverJournal(error)) = received.outcome else {
+                            panic!("terminal admission must refuse before commit");
+                        };
+                        assert_eq!(error.source.unwrap().kind(), io::ErrorKind::StorageFull);
+                        assert!(!error.stored);
+                        assert!(error.interruption.is_none());
+                        assert!(received.completed.is_none());
+                        assert_eq!(
+                            observer.checkpoint().unwrap().phase(),
+                            ReceiverCheckpointPhase::Receiving
+                        );
+                    } else {
+                        assert_eq!(sent.outcome.unwrap(), received.outcome.unwrap());
+                        assert!(received.completed.is_some());
+                        assert_eq!(
+                            observer.checkpoint().unwrap().phase(),
+                            ReceiverCheckpointPhase::Committed
+                        );
+                    }
+                    drop(incoming);
+                    drop(outgoing);
+                    assert_eq!(authority.active_streams(), 0);
+                    assert_eq!(send.active_streams(), 0);
+                });
+                assert_eq!(std::fs::read(&data).unwrap(), DATA[..8]);
+                let saved = if compact {
+                    compact_records(&journal)
+                } else {
+                    records(&journal)
+                };
+                assert_eq!(saved.len(), if snapshots == 4 { 3 } else { 5 });
+                assert_eq!(saved.last().unwrap()[280], if snapshots == 4 { 0 } else { 2 });
+                let reopened = if compact {
+                    ReceiverJournalFile::open_existing_compact(&journal, &data, &intent)
+                } else {
+                    ReceiverJournalFile::open_existing(&journal, &data)
+                }
+                .unwrap();
+                assert_eq!(
+                    reopened.checkpoint().unwrap().committed_receipt().is_some(),
+                    snapshots == 5
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn compact_journal_reuses_slots_across_native_partial_kill_and_proof_only_restart() {
     const CONTENT: &[u8] = b"abcdefghijklmnopqrstuvwxyz012345";
     for workers in [1, 2] {

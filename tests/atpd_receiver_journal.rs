@@ -112,6 +112,35 @@ impl Fixture {
         create: Option<u32>,
         delay: u64,
     ) -> Process {
+        self.launch(self.receiver_command(
+            config,
+            wal,
+            data,
+            create.map(|snapshots| (snapshots, 1_048_576)),
+            delay,
+        ))
+    }
+    fn compact_receiver(
+        &self,
+        config: &Value,
+        wal: &Path,
+        data: &Path,
+        intent: &Path,
+        create: Option<(u32, u64)>,
+        delay: u64,
+    ) -> Process {
+        let mut command = self.receiver_command(config, wal, data, create, delay);
+        command.arg("--intent").arg(intent);
+        self.launch(command)
+    }
+    fn receiver_command(
+        &self,
+        config: &Value,
+        wal: &Path,
+        data: &Path,
+        create: Option<(u32, u64)>,
+        delay: u64,
+    ) -> Command {
         let mut command = Command::new(BINARY);
         command
             .arg(if create.is_some() {
@@ -128,13 +157,14 @@ impl Fixture {
             .arg("--retry-delay-ms")
             .arg(delay.to_string())
             .args(["--proof-recovery-secs", "60"]);
-        if let Some(snapshots) = create {
+        if let Some((snapshots, journal_bytes)) = create {
             command
                 .args(["--attempts", "8", "--max-snapshots"])
                 .arg(snapshots.to_string())
-                .args(["--max-journal-bytes", "1048576"]);
+                .arg("--max-journal-bytes")
+                .arg(journal_bytes.to_string());
         }
-        self.launch(command)
+        command
     }
     fn sender(
         &self,
@@ -540,6 +570,172 @@ fn both_executables_restart_before_eof_and_complete_the_original_receiver_inode(
         assert_eq!(ended["sender_receipt_observed"], false);
         assert_eq!(ended["atomic_publication"], false);
         assert_eq!(state.relay.connections.load(Ordering::SeqCst), 2);
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn compact_receiver_executable_resumes_a_large_file_with_a_small_wal() {
+    const WAL_LIMIT: u64 = 16_384;
+    for workers in [1, 2] {
+        let fixture = Fixture::new();
+        let bytes: Vec<_> = (0_usize..524_288)
+            .map(|n| ((n * 29) ^ (n / 251)).to_le_bytes()[0])
+            .collect();
+        let source = fixture.source(&bytes);
+        let data = fixture.inbox.join("large.data");
+        let wal = fixture.unique("receiver-wal");
+        let intent = fixture.unique("receiver-intent");
+        let sender_wal = fixture.unique("sender-wal");
+        let mut config = fixture.receiver_config(workers, bytes.len());
+        config["epoch_bytes"] = json!(65_536);
+        config["operation_timeout_secs"] = json!(8);
+        let mut original = fixture.compact_receiver(
+            &config,
+            &wal,
+            &data,
+            &intent,
+            Some((262_144, WAL_LIMIT)),
+            60_000,
+        );
+        let ready = original.until("ready");
+        assert_eq!(ready["mode"], "journaled_single");
+        assert_eq!(std::fs::metadata(&wal).unwrap().len(), 128);
+        assert_eq!(std::fs::metadata(&intent).unwrap().len(), 131_328);
+        let address = ready["address"].as_str().unwrap().parse().unwrap();
+        config["bind"] = json!(address);
+        let relay = Relay::new(address, data.clone());
+        let mut send_config = fixture.sender_config(relay.address, workers, bytes.len());
+        send_config["epoch_bytes"] = json!(65_536);
+        send_config["operation_timeout_secs"] = json!(8);
+        let mut sender = fixture.sender(&send_config, &sender_wal, &source, true, 60_000);
+        let sent = sender.until("journal_attempt");
+        let received = original.until("receiver_journal_attempt");
+        // The opaque relay drops the first ACK after the data exists. Both
+        // real processes then park in their explicitly long retry delay; the
+        // kill cannot race a subsequent epoch or completed publication.
+        assert!(relay.cut.load(Ordering::SeqCst));
+        assert_eq!(sent["retry_eligible"], true);
+        assert_eq!(sent["journal"]["saved_pending_bytes"], 65_536);
+        assert_eq!(sent["journal"]["source_eof"], false);
+        assert_eq!(received["transfer"]["flushed_prefix_bytes"], 65_536);
+        assert_eq!(received["checkpoint"]["phase"], "receiving");
+        assert_eq!(std::fs::read(&data).unwrap(), bytes[..65_536]);
+        assert!(ReceiverJournalFile::open_existing_compact(&wal, &data, &intent).is_err());
+        sender.crash();
+        original.crash();
+        let before = std::fs::read(&wal).unwrap();
+        let intent_before = std::fs::read(&intent).unwrap();
+        assert_eq!(&before[..8], b"ATPRFL02");
+        assert_eq!(u32::from_be_bytes(before[8..12].try_into().unwrap()), 262_144);
+        assert_eq!(
+            u64::from_be_bytes(before[16..24].try_into().unwrap()),
+            WAL_LIMIT
+        );
+        let saved = ReceiverJournalFile::open_existing_compact(&wal, &data, &intent)
+            .unwrap()
+            .checkpoint()
+            .unwrap();
+        assert_eq!(saved.prefix().bytes, 65_536);
+        assert_eq!(saved.attempts(), 1);
+        let data_inode = std::fs::metadata(&data).unwrap().ino();
+        let wal_inode = std::fs::metadata(&wal).unwrap().ino();
+        let intent_inode = std::fs::metadata(&intent).unwrap().ino();
+
+        // Reopen is explicit: neither omission nor a byte-identical foreign
+        // intent inode silently selects another profile or repairs history.
+        let foreign = fixture.unique("foreign-intent");
+        std::fs::copy(&intent, &foreign).unwrap();
+        for use_foreign in [false, true] {
+            let mut refused = if use_foreign {
+                fixture.compact_receiver(&config, &wal, &data, &foreign, None, 25)
+            } else {
+                fixture.receiver(&config, &wal, &data, None, 25)
+            };
+            assert!(!refused.exit().success());
+            assert!(
+                refused
+                    .events
+                    .try_iter()
+                    .all(|event| event.unwrap()["event"] != "ready")
+            );
+            assert_eq!(std::fs::read(&wal).unwrap(), before);
+            assert_eq!(std::fs::read(&intent).unwrap(), intent_before);
+            assert_eq!(std::fs::read(&data).unwrap(), bytes[..65_536]);
+        }
+
+        let mut restored = fixture.compact_receiver(&config, &wal, &data, &intent, None, 60_000);
+        let ready = restored.until("ready");
+        assert_eq!(ready["restored"], true);
+        assert_eq!(ready["address"], json!(address));
+        assert_eq!(ready["checkpoint"]["prefix_bytes"], 65_536);
+        let mut sender = fixture.sender(&send_config, &sender_wal, &source, false, 25);
+        let sent = sender.until("send_result");
+        assert!(
+            sender.exit().success(),
+            "resumed sender failed: {}",
+            std::fs::read_to_string(&sender.log).unwrap()
+        );
+        let received = restored.until("receiver_journal_attempt");
+        assert_eq!(sent["transfer"]["status"], "complete");
+        assert_eq!(received["transfer"]["status"], "complete");
+        assert_eq!(sent["transfer"]["receipt"], received["transfer"]["receipt"]);
+        assert_eq!(received["transfer"]["attempts"], 2);
+        assert_eq!(received["checkpoint"]["phase"], "committed");
+        let ended = restored.stop(true);
+        assert_eq!(ended["durable_receipt"], sent["transfer"]["receipt"]);
+        assert_eq!(std::fs::read(&data).unwrap(), bytes);
+        assert_eq!(std::fs::metadata(&data).unwrap().ino(), data_inode);
+        assert_eq!(std::fs::metadata(&wal).unwrap().ino(), wal_inode);
+        assert_eq!(std::fs::metadata(&intent).unwrap().ino(), intent_inode);
+        assert_eq!(std::fs::metadata(&intent).unwrap().len(), 131_328);
+        assert_eq!(std::fs::read_dir(&fixture.inbox).unwrap().count(), 2);
+        let complete = std::fs::read(&wal).unwrap();
+        assert!(complete.starts_with(&before));
+        assert!(complete.len() as u64 <= WAL_LIMIT);
+        assert!(bytes.len() as u64 > WAL_LIMIT);
+        let reopened = ReceiverJournalFile::open_existing_compact(&wal, &data, &intent).unwrap();
+        let receipt = reopened.checkpoint().unwrap().committed_receipt().unwrap();
+        assert_eq!(receipt.prefix.bytes, bytes.len() as u64);
+        assert_eq!(
+            receipt.source_sha256.as_slice(),
+            Sha256::digest(&bytes).as_slice()
+        );
+        assert_eq!(relay.connections.load(Ordering::SeqCst), 2);
+    }
+}
+
+#[test]
+fn compact_receiver_intent_preflight_refuses_aliases_and_inbox_paths_before_creation() {
+    for location in ["journal", "data", "inbox", "relative"] {
+        let fixture = Fixture::new();
+        let wal = fixture.unique("receiver-wal");
+        let data = fixture.inbox.join("transfer.data");
+        let intent = match location {
+            "journal" => wal.clone(),
+            "data" => data.clone(),
+            "inbox" => fixture.inbox.join("receiver.intent"),
+            "relative" => PathBuf::from("receiver.intent"),
+            _ => unreachable!(),
+        };
+        let mut refused = fixture.compact_receiver(
+            &fixture.receiver_config(1, 8),
+            &wal,
+            &data,
+            &intent,
+            Some((32, 16_384)),
+            25,
+        );
+        assert!(!refused.exit().success());
+        assert!(
+            refused
+                .events
+                .try_iter()
+                .all(|event| event.unwrap()["event"] != "ready")
+        );
+        assert!(!wal.exists());
+        assert!(!data.exists());
+        assert_eq!(std::fs::read_dir(&fixture.inbox).unwrap().count(), 0);
     }
 }
 

@@ -1,9 +1,10 @@
 # Executable partial-receiver restart
 
 `atpd-live receive-journaled` and `atpd-live resume-receiver` expose the existing
-paired-file receiver WAL through the executable. They compose with
-`send-journaled` / `resume-journaled`, so both endpoint processes can exit before
-source EOF and continue using their original journals and stable source.
+paired-file and compact receiver WAL profiles through the executable. They
+compose with `send-journaled` / `resume-journaled`, so both endpoint processes can
+exit before source EOF and continue using their original journals and stable
+source.
 
 This is an opt-in **single-client, single-transfer** command. It uses the existing
 `atp-live-resume/1` protocol, mandatory mutual TLS, byte revalidation, persistence
@@ -15,7 +16,7 @@ are committed, but were not compiled or executed in the authoring environment.
 
 Use the existing strict receiver JSON settings with exactly one `clients` entry,
 `max_connections: 1`, explicit identities/roots, and bounded runtime settings.
-Both parent directories must already be private Unix directories. The data path
+Every parent directory must already be a private Unix directory. The data path
 must be immediately inside that client's configured inbox; the WAL must be outside
 it because its growth is accounted against its own independent budget.
 
@@ -56,6 +57,49 @@ renegotiate an old integrity chain. The original client must still authenticate,
 and the sender retains its verified server-certificate pin. These commands do not
 accept the shared service's `--revocations` reload option.
 
+## Compact journals for large files
+
+Pass `--intent` at creation to select the existing SDK compact profile. This
+keeps pending payloads in two reusable slots in a fixed **131,328-byte** private
+intent file; the WAL records metadata and cryptographic commitments. Completed
+historical payloads are revalidated against their original data offsets on
+reopen. This avoids accumulating a second payload copy throughout WAL history.
+
+```sh
+atpd-live receive-journaled \
+  --config /srv/atp/receiver.json \
+  --journal /srv/atp/state/receiver.wal \
+  --intent /srv/atp/state/receiver.intent \
+  --data /srv/atp/inbox/transfer.data \
+  --attempts 16 --max-snapshots 262144 --max-journal-bytes 67108864 \
+  --retry-delay-ms 250 --proof-recovery-secs 30
+
+atpd-live resume-receiver \
+  --config /srv/atp/receiver.json \
+  --journal /srv/atp/state/receiver.wal \
+  --intent /srv/atp/state/receiver.intent \
+  --data /srv/atp/inbox/transfer.data \
+  --retry-delay-ms 250 --proof-recovery-secs 30
+```
+
+With full 64 KiB epochs, the compact format needs 131,075 snapshots and
+55,182,535 WAL bytes for a 4 GiB file before extra retries. Configure
+`epoch_bytes`, `max_transfer_bytes`, and the client's retained-data limits to
+cover the intended transfer. These are format bounds, not an executed 4 GiB
+transfer measurement. Smaller epochs and reconnects consume more records.
+
+The intent path must be distinct from the WAL and data paths, outside the inbox,
+and inside an already private directory. All three files are create-only and
+remain pinned to their original inodes. The intent file's fixed allocation is
+additional to the WAL limit and the inbox data reservation. Its slots contain
+plaintext and require the same protection as the data and WAL.
+
+Supply the same original `--intent` file on every restart. Omitting it, supplying
+a copied file with a different inode, or mixing profiles refuses recovery. No
+format is selected by guessing, no existing journal is migrated, and no WAL
+history or persistent budget is reset. Commands without `--intent` retain the
+original V1 profile and its original limits.
+
 ## Both endpoint processes can restart
 
 The sender must retain its own in-memory session or protected sender journal and
@@ -94,8 +138,11 @@ reserve conservatively; the original file-store limit remains enforced.
 Connection retries reuse the same reservation. No space is refunded for an
 interrupted operation. Restart rescans actual files but cannot discard existing
 usage or override the journal's immutable limits. The WAL has independent byte
-and snapshot ceilings, including plaintext pending-epoch payloads. Files and
-history are retained on every success/failure path.
+and snapshot ceilings. V1 includes plaintext pending-epoch payloads; the compact
+profile uses the separately budgeted intent file. Both profiles reserve room for
+the durable `Committed` record before admitting `Finalizing`, so exhausted
+journal capacity cannot newly authorize a commit whose receipt will not fit.
+Files and history are retained on every success/failure path.
 
 ## Ownership, stopping, and observations
 
@@ -143,12 +190,18 @@ behavior for every filesystem/device.
 
 ## Validation scope
 
-Six unit tests cover CLI budgets, non-renewing Proof retention, persistence-result
-projection, original two-alias accounting, single-file reservation, and remaining
-growth in the presence of unrelated retained data. Five executable tests cover
+Unit tests cover CLI budgets, explicit profile selection, non-renewing Proof
+retention, persistence-result projection, original two-alias accounting,
+single-file reservation, and remaining growth in the presence of unrelated
+retained data. Executable tests cover
 both peers restarting before EOF, unchanged original data inode and exact hash,
 changed-data and quota refusal before readiness, ordinary/empty completion,
 persistent snapshot exhaustion, missing history, and mandatory client TLS refusal.
+The compact command case transfers a 512 KiB file under a 16 KiB WAL ceiling,
+kills both processes at a durable receiver prefix after discarding its ACK,
+resumes from the original files, and verifies exact content and all three
+inode identities. Omitted/foreign intent files and invalid path placement must
+refuse without rewriting retained history or creating replacement data.
 
 The crash test uses an opaque relay, witnessed WAL/data progress, exclusive file
 locks, and independently checked WAL checksums before killing its own processes.

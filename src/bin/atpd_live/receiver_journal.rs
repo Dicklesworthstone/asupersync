@@ -10,7 +10,7 @@ use asupersync::Cx;
 use asupersync::net::atp::sdk::NativeClientAuthorization;
 use asupersync::net::atp::sdk::native_auth::live::commit::LiveStreamCommitError;
 use asupersync::net::atp::sdk::native_auth::live::commit::resume::receiver_journal::file::{
-    JournaledFileReceiver, ReceiverFileLimits, ReceiverJournalFile,
+    JournaledFileReceiver, ReceiverCompactFileLimits, ReceiverFileLimits, ReceiverJournalFile,
 };
 use asupersync::net::atp::sdk::native_auth::live::commit::resume::receiver_journal::{
     ReceiverCheckpoint, ReceiverCheckpointPhase,
@@ -64,24 +64,40 @@ pub(super) struct CreateOptions {
     /// Immutable maximum number of persisted receiver snapshots.
     #[arg(long)]
     max_snapshots: u32,
-    /// Immutable total WAL byte ceiling, including plaintext pending epochs.
+    /// Immutable WAL byte ceiling; --intent keeps pending payloads in a separate fixed file.
     #[arg(long)]
     max_journal_bytes: u64,
     #[command(flatten)]
     wait: WaitOptions,
 }
 impl CreateOptions {
-    fn limits(self, max_data_bytes: u64) -> io::Result<ReceiverFileLimits> {
+    fn validate(self, compact: bool) -> io::Result<()> {
         self.wait.validate()?;
+        let snapshots = if compact { 1_048_576 } else { 65_536 };
+        let header = if compact { 128 } else { 96 };
         if !(1..=1024).contains(&self.attempts)
-            || !(1..=65_536).contains(&self.max_snapshots)
-            || !(96..=134_217_728).contains(&self.max_journal_bytes)
+            || !(1..=snapshots).contains(&self.max_snapshots)
+            || !(header..=134_217_728).contains(&self.max_journal_bytes)
         {
             return Err(invalid(
                 "invalid journaled receiver attempt or storage budgets",
             ));
         }
+        Ok(())
+    }
+
+    fn limits(self, max_data_bytes: u64) -> io::Result<ReceiverFileLimits> {
+        self.validate(false)?;
         Ok(ReceiverFileLimits {
+            max_data_bytes,
+            max_snapshots: self.max_snapshots,
+            max_journal_bytes: self.max_journal_bytes,
+        })
+    }
+
+    fn compact_limits(self, max_data_bytes: u64) -> io::Result<ReceiverCompactFileLimits> {
+        self.validate(true)?;
+        Ok(ReceiverCompactFileLimits {
             max_data_bytes,
             max_snapshots: self.max_snapshots,
             max_journal_bytes: self.max_journal_bytes,
@@ -93,27 +109,30 @@ pub(super) fn receive(
     config: ServeConfig,
     journal: PathBuf,
     data: PathBuf,
+    intent: Option<PathBuf>,
     options: CreateOptions,
 ) -> io::Result<()> {
-    options.limits(config.max_transfer_bytes)?;
-    execute(config, journal, data, Some(options), options.wait)
+    options.validate(intent.is_some())?;
+    execute(config, journal, data, intent, Some(options), options.wait)
 }
 
 pub(super) fn resume(
     config: ServeConfig,
     journal: PathBuf,
     data: PathBuf,
+    intent: Option<PathBuf>,
     wait: WaitOptions,
 ) -> io::Result<()> {
     wait.validate()?;
-    execute(config, journal, data, None, wait)
+    execute(config, journal, data, intent, None, wait)
 }
 
 fn checked_paths(
     config: &ServeConfig,
     journal: &Path,
     data: &Path,
-) -> io::Result<(PathBuf, PathBuf)> {
+    intent: Option<&Path>,
+) -> io::Result<(PathBuf, PathBuf, Option<PathBuf>)> {
     if config.clients.len() != 1 || config.max_connections != 1 {
         return Err(invalid(
             "journaled receiving requires exactly one client and max_connections=1",
@@ -139,6 +158,7 @@ fn checked_paths(
     };
     let journal = normalize(journal)?;
     let data = normalize(data)?;
+    let intent = intent.map(normalize).transpose()?;
     let inbox = std::fs::canonicalize(&config.clients[0].directory)?;
     if data.parent() != Some(inbox.as_path())
         || journal.parent() == Some(inbox.as_path())
@@ -150,18 +170,28 @@ fn checked_paths(
             "data must be in the selected inbox and journal outside it",
         ));
     }
-    Ok((journal, data))
+    if intent
+        .as_ref()
+        .is_some_and(|path| path.starts_with(&inbox) || *path == journal || *path == data)
+    {
+        return Err(invalid(
+            "compact intent must be distinct from journal and data and outside the inbox",
+        ));
+    }
+    Ok((journal, data, intent))
 }
 
 fn execute(
     config: ServeConfig,
     journal: PathBuf,
     data: PathBuf,
+    intent: Option<PathBuf>,
     create: Option<CreateOptions>,
     wait: WaitOptions,
 ) -> io::Result<()> {
     wait.validate()?;
-    let (journal_path, data_path) = checked_paths(&config, &journal, &data)?;
+    let (journal_path, data_path, intent_path) =
+        checked_paths(&config, &journal, &data, intent.as_deref())?;
     if !(1..=86_400).contains(&config.shutdown_grace_secs)
         || (create.is_none() && config.bind.port() == 0)
     {
@@ -198,19 +228,30 @@ fn execute(
     let (journal, attempts) = match create {
         Some(options) => {
             // One data entry, not the two aliases used by LiveFileSink. Charge
-            // before either file can be created; never refund an uncertain write.
+            // before any file can be created; never refund an uncertain write.
             inbox.reserve_private_file(config.max_transfer_bytes, None)?;
-            (
+            let journal = if let Some(intent) = &intent_path {
+                ReceiverJournalFile::create_new_compact(
+                    &journal_path,
+                    &data_path,
+                    intent,
+                    options.compact_limits(config.max_transfer_bytes)?,
+                )?
+            } else {
                 ReceiverJournalFile::create_new(
                     &journal_path,
                     &data_path,
                     options.limits(config.max_transfer_bytes)?,
-                )?,
-                options.attempts,
-            )
+                )?
+            };
+            (journal, options.attempts)
         }
         None => {
-            let journal = ReceiverJournalFile::open_existing(&journal_path, &data_path)?;
+            let journal = if let Some(intent) = &intent_path {
+                ReceiverJournalFile::open_existing_compact(&journal_path, &data_path, intent)?
+            } else {
+                ReceiverJournalFile::open_existing(&journal_path, &data_path)?
+            };
             let saved = journal.checkpoint()?;
             if saved.client() != client
                 || saved.phase() == ReceiverCheckpointPhase::Finalizing
@@ -653,6 +694,75 @@ mod tests {
             .limits(1024)
             .is_err()
         );
+    }
+
+    #[test]
+    fn compact_receiver_cli_selects_its_own_limits_without_changing_legacy_defaults() {
+        let Command::ReceiveJournaled {
+            intent, options, ..
+        } = Cli::try_parse_from([
+            "atpd-live",
+            "receive-journaled",
+            "--config",
+            "receiver.json",
+            "--journal",
+            "/private/receiver.wal",
+            "--data",
+            "/inbox/receiver.data",
+            "--intent",
+            "/private/receiver.intent",
+            "--attempts",
+            "16",
+            "--max-snapshots",
+            "262144",
+            "--max-journal-bytes",
+            "67108864",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("wrong command");
+        };
+        assert_eq!(intent, Some(PathBuf::from("/private/receiver.intent")));
+        let limits = options.compact_limits(4 * 1024 * 1024 * 1024).unwrap();
+        assert_eq!(limits.max_snapshots, 262_144);
+        assert_eq!(limits.max_journal_bytes, 67_108_864);
+        assert_eq!(limits.max_data_bytes, 4 * 1024 * 1024 * 1024);
+        assert!(options.limits(1024).is_err());
+        for invalid in [
+            CreateOptions {
+                max_snapshots: 1_048_577,
+                ..options
+            },
+            CreateOptions {
+                max_journal_bytes: 127,
+                ..options
+            },
+            CreateOptions {
+                max_journal_bytes: 134_217_729,
+                ..options
+            },
+        ] {
+            assert!(invalid.compact_limits(1024).is_err());
+        }
+        let Command::ResumeReceiver { intent, .. } = Cli::try_parse_from([
+            "atpd-live",
+            "resume-receiver",
+            "--config",
+            "receiver.json",
+            "--journal",
+            "/private/receiver.wal",
+            "--data",
+            "/inbox/receiver.data",
+            "--intent",
+            "/private/receiver.intent",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("wrong command");
+        };
+        assert_eq!(intent, Some(PathBuf::from("/private/receiver.intent")));
     }
 
     #[test]
