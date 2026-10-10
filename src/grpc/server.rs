@@ -1587,6 +1587,24 @@ impl Server {
     /// returns the transport's shutdown statistics. Run it inside a structured
     /// runtime task or region so cancellation of the owning task also drops the
     /// listener and its request subtree.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::sync::Arc;
+    /// use asupersync::grpc::{Server, ServerConfig};
+    /// use asupersync::http::h1::server::HostPolicy;
+    /// use asupersync::runtime::RuntimeBuilder;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let runtime = RuntimeBuilder::new().build()?;
+    /// let handle = runtime.handle();
+    /// let server = Arc::new(Server::builder().build());
+    /// // Register services on server before running...
+    /// server.serve_http2(&handle, "127.0.0.1:50051", HostPolicy::allow_all()).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn serve_http2<A>(
         self: &Arc<Self>,

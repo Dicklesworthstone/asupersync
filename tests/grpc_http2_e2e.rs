@@ -1202,6 +1202,102 @@ fn public_grpc_client_native_round_trip(bind_address: &str, uri_host: &str) {
     });
 }
 
+/// br-asupersync-bi2462.106: exercise Server::serve_http2 directly as the
+/// public serving counterpart to the legacy Server::serve bind probe.
+#[test]
+fn serve_http2_binds_runs_and_serves_unary_request() {
+    init_test("serve_http2_binds_runs_and_serves_unary_request");
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed_transport = Arc::new(Mutex::new(None));
+        let server = Arc::new(
+            Server::builder()
+                .max_recv_message_size(1024)
+                .max_send_message_size(1024)
+                .stream_idle_timeout(Some(Duration::from_secs(2)))
+                .add_service(PublicClientEchoService {
+                    calls: Arc::clone(&calls),
+                    observed_transport: Arc::clone(&observed_transport),
+                })
+                .build(),
+        );
+
+        let port = find_available_port();
+        let bind_addr = format!("127.0.0.1:{port}");
+        let server_clone = Arc::clone(&server);
+        let serve_runtime = handle.clone();
+        let bind_addr_clone = bind_addr.clone();
+
+        let server_fut = async move {
+            match server_clone
+                .serve_http2(
+                    &serve_runtime,
+                    bind_addr_clone,
+                    HostPolicy::allow_all(),
+                )
+                .await
+            {
+                Ok(stats) => Ok(()),
+                Err(e) => {
+                    eprintln!("serve_http2 error: {e:?}");
+                    Err(e)
+                }
+            }
+        };
+
+        let client_fut = async move {
+            let channel = Channel::builder(format!("http://127.0.0.1:{port}"))
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(10))
+                .max_send_message_size(1024)
+                .max_recv_message_size(1024)
+                .connect()
+                .await
+                .expect("construct channel");
+            let mut client = GrpcClient::new(channel);
+
+            let mut response = None;
+            for _ in 0..100 {
+                let mut request = Request::new(Bytes::from_static(b"public-client-ping"));
+                assert!(
+                    request
+                        .metadata_mut()
+                        .insert("x-client-id", "native-client")
+                );
+                assert!(
+                    request
+                        .metadata_mut()
+                        .insert_bin("x-client-token-bin", Bytes::from_static(b"\x01\x02"))
+                );
+                match client
+                    .unary::<Bytes, Bytes>("/test.PublicClient/Unary", request)
+                    .await
+                {
+                    Ok(resp) => {
+                        response = Some(resp);
+                        break;
+                    }
+                    Err(_) => {
+                        asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(20)).await;
+                    }
+                }
+            }
+            let response = response.expect("native H2 unary response via serve_http2");
+            assert_eq!(response.get_ref().as_ref(), b"public-client-pong");
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            Ok(())
+        };
+
+        let _ = futures_lite::future::race(server_fut, client_fut).await;
+    });
+}
+
 // br-asupersync-bi2462.105: exercise the additive owned-stream entry points
 // through the public client. These peers use this crate's H2 framing and do
 // not establish independent-stack gRPC interoperability.
