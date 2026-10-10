@@ -692,6 +692,13 @@ impl ObligationLedger {
     /// owning region was already marked finalized via
     /// [`Self::mark_region_finalized`]. Use this from Drop impls or
     /// detached handlers that may race with region close.
+    ///
+    /// Where [`Self::commit`] panics, this returns the error instead,
+    /// leaving the ledger unchanged: [`LedgerError::NotFound`],
+    /// [`LedgerError::NotPending`] (already committed, aborted or leaked,
+    /// e.g. by a region drain that won the race) or
+    /// [`LedgerError::TokenMismatch`] (br-asupersync-rrtgoy L1).
+    #[allow(clippy::needless_pass_by_value)] // Token consumed intentionally to prevent reuse
     pub fn try_commit(&mut self, token: ObligationToken, now: Time) -> Result<u64, LedgerError> {
         if self.finalized_regions.contains(&token.region) {
             return Err(LedgerError::RegionFinalized {
@@ -699,11 +706,13 @@ impl ObligationLedger {
                 obligation: token.id,
             });
         }
-        Ok(self.commit(token, now))
+        self.resolve_token(&token, "try_commit", ObligationResolution::Commit, now)
     }
 
     /// br-asupersync-qyf37e: fallible variant of [`Self::abort`].
-    /// See [`Self::try_commit`] for the contract.
+    /// See [`Self::try_commit`] for the contract and the errors it
+    /// returns where [`Self::abort`] panics.
+    #[allow(clippy::needless_pass_by_value)] // Token consumed intentionally to prevent reuse
     pub fn try_abort(
         &mut self,
         token: ObligationToken,
@@ -716,7 +725,12 @@ impl ObligationLedger {
                 obligation: token.id,
             });
         }
-        Ok(self.abort(token, now, reason))
+        self.resolve_token(
+            &token,
+            "try_abort",
+            ObligationResolution::Abort(reason),
+            now,
+        )
     }
 
     /// Acquires a new obligation, returning a linear token.
@@ -4429,6 +4443,97 @@ mod tests {
         ));
         crate::test_complete!(
             "bounded_ledger_moves_to_the_next_generation_when_its_index_space_runs_out"
+        );
+    }
+
+    /// rrtgoy L1: `try_commit` and `try_abort` returned `Ok(commit(..))` and
+    /// `Ok(abort(..))`, so the fallible API panicked where those do: a commit
+    /// after a region drain aborted the obligation, a duplicate token, a token
+    /// that does not match its record. They return the error now, and the
+    /// ledger is left as it was.
+    #[test]
+    fn try_commit_and_try_abort_return_resolution_errors_instead_of_panicking() {
+        init_test("try_commit_and_try_abort_return_resolution_errors_instead_of_panicking");
+        let task = make_task();
+        let region = make_region();
+        let mut ledger = ObligationLedger::new();
+
+        // A drain aborts the obligation while its holder still has the token.
+        let drained = ledger.acquire(ObligationKind::SendPermit, task, region, Time::ZERO);
+        let drained_id = drained.id();
+        ledger.abort_by_id(
+            drained_id,
+            Time::from_nanos(1),
+            ObligationAbortReason::Cancel,
+        );
+        let stats = ledger.stats();
+        match ledger.try_commit(drained, Time::from_nanos(2)) {
+            Err(LedgerError::NotPending { obligation, state }) => {
+                assert_eq!(obligation, drained_id);
+                assert_eq!(state, ObligationState::Aborted);
+            }
+            other => panic!("a commit after the drain must be refused, got {other:?}"),
+        }
+        assert_eq!(ledger.stats(), stats, "a refused commit changes nothing");
+
+        // A duplicate of a committed token.
+        let committed = ledger.acquire(ObligationKind::Ack, task, region, Time::ZERO);
+        let duplicate = ObligationToken {
+            id: committed.id(),
+            kind: committed.kind,
+            holder: committed.holder,
+            region: committed.region,
+        };
+        ledger.commit(committed, Time::from_nanos(3));
+        let stats = ledger.stats();
+        match ledger.try_abort(
+            duplicate,
+            Time::from_nanos(4),
+            ObligationAbortReason::Cancel,
+        ) {
+            Err(LedgerError::NotPending { state, .. }) => {
+                assert_eq!(state, ObligationState::Committed);
+            }
+            other => panic!("an abort of a committed obligation must be refused, got {other:?}"),
+        }
+        assert_eq!(ledger.stats(), stats, "a refused abort changes nothing");
+
+        // A token whose holder does not match its record, and an unknown id.
+        let pending = ledger.acquire(ObligationKind::Ack, task, region, Time::ZERO);
+        let pending_id = pending.id();
+        let forged = ObligationToken {
+            id: pending_id,
+            kind: pending.kind,
+            holder: TaskId::from_arena(ArenaIndex::new(9, 0)),
+            region: pending.region,
+        };
+        let unknown = ObligationToken {
+            id: ObligationId::from_arena(ArenaIndex::new(77, 0)),
+            kind: pending.kind,
+            holder: pending.holder,
+            region: pending.region,
+        };
+        let stats = ledger.stats();
+        assert!(matches!(
+            ledger.try_commit(forged, Time::from_nanos(5)),
+            Err(LedgerError::TokenMismatch {
+                field: "holder",
+                ..
+            })
+        ));
+        assert!(matches!(
+            ledger.try_abort(unknown, Time::from_nanos(5), ObligationAbortReason::Cancel),
+            Err(LedgerError::NotFound { .. })
+        ));
+        assert_eq!(ledger.stats(), stats, "refused calls change nothing");
+        assert_eq!(
+            ledger.obligation_state(pending_id),
+            Some(ObligationState::Reserved)
+        );
+        assert!(ledger.try_commit(pending, Time::from_nanos(6)).is_ok());
+        assert!(ledger.stats().is_clean());
+        crate::test_complete!(
+            "try_commit_and_try_abort_return_resolution_errors_instead_of_panicking"
         );
     }
 }
