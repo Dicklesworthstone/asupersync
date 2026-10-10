@@ -17,9 +17,10 @@
 //! with one fan-out waker that wakes every handle parked on it: a sink and a
 //! response stream, or clones of one response stream, may live in different
 //! tasks without losing a wakeup.
-//! Responses read while uploading are buffered up to `MAX_STREAM_BUFFERED`;
-//! a sink then waits for the response side to drain them, or for the call's
-//! deadline or cancellation, which end it there too.
+//! Responses read while uploading are buffered up to `MAX_STREAM_BUFFERED`
+//! messages or about one receive limit of encoded bytes, whichever comes
+//! first; a sink then waits for the response side to drain them, or for the
+//! call's deadline or cancellation, which end it there too.
 //!
 //! Dropping an open sink, an unfinished response future, or the last clone of
 //! a response stream cancels the call. Dropping every handle closes its
@@ -64,6 +65,10 @@ pub(super) trait LegacyCall: Send {
     /// registering `task` for both. `Err` carries the status the call ended
     /// with (now or earlier).
     fn poll_gate(&mut self, task: &mut Context<'_>) -> Result<(), Status>;
+    /// Encoded bytes of the message the last `poll_event` returned.
+    fn message_bytes(&self) -> usize;
+    /// Encoded response bytes a sink may hold unread before it waits.
+    fn window_bytes(&self) -> usize;
 }
 
 impl<IO, C> LegacyCall for NativeDuplexStream<IO, C>
@@ -110,6 +115,14 @@ where
     fn poll_gate(&mut self, task: &mut Context<'_>) -> Result<(), Status> {
         NativeDuplexStream::gate_without_io(self, task)
     }
+
+    fn message_bytes(&self) -> usize {
+        NativeDuplexStream::last_message_bytes(self)
+    }
+
+    fn window_bytes(&self) -> usize {
+        NativeDuplexStream::response_window_bytes(self)
+    }
 }
 
 impl<IO, C> LegacyCall for NativeServerStream<IO, C>
@@ -151,6 +164,15 @@ where
 
     fn poll_gate(&mut self, task: &mut Context<'_>) -> Result<(), Status> {
         NativeServerStream::gate_without_io(self, task)
+    }
+
+    // A server-streaming call has no sink, so nothing waits on the window.
+    fn message_bytes(&self) -> usize {
+        0
+    }
+
+    fn window_bytes(&self) -> usize {
+        usize::MAX
     }
 }
 
@@ -279,7 +301,10 @@ struct CallState {
     shape: LegacyShape,
     request_ready: bool,
     request_closed: bool,
-    responses: VecDeque<Box<dyn Any + Send>>,
+    /// Unread responses with their encoded sizes.
+    responses: VecDeque<(Box<dyn Any + Send>, usize)>,
+    /// The sum of those sizes.
+    buffered_bytes: usize,
     /// Terminal status once the call ended; `Code::Ok` for success.
     finished: Option<Status>,
 }
@@ -318,6 +343,7 @@ impl LegacyNativeCall {
                 request_ready: false,
                 request_closed: shape == LegacyShape::ServerStreaming,
                 responses: VecDeque::new(),
+                buffered_bytes: 0,
                 finished: None,
             }),
             fanout: Arc::new(Fanout::default()),
@@ -370,7 +396,10 @@ impl LegacyNativeCall {
             // response side drains it (it wakes the sink when it pops). The
             // sink does not poll the call there, so it checks the call's
             // cancellation and deadline itself: either ends the call.
-            if role == Role::Sink && state.responses.len() >= MAX_STREAM_BUFFERED {
+            if role == Role::Sink
+                && (state.responses.len() >= MAX_STREAM_BUFFERED
+                    || state.buffered_bytes >= state.call.window_bytes())
+            {
                 let Err(status) = state.call.poll_gate(&mut call_task) else {
                     return Poll::Pending;
                 };
@@ -391,7 +420,9 @@ impl LegacyNativeCall {
                             "gRPC client-streaming response contained more than one message",
                         ));
                     } else {
-                        state.responses.push_back(message);
+                        let bytes = state.call.message_bytes();
+                        state.buffered_bytes = state.buffered_bytes.saturating_add(bytes);
+                        state.responses.push_back((message, bytes));
                     }
                     if role == Role::Sink {
                         self.fanout.wake_responses();
@@ -510,7 +541,8 @@ impl LegacyNativeCall {
         {
             return Poll::Pending;
         }
-        if let Some(message) = state.responses.pop_front() {
+        if let Some((message, bytes)) = state.responses.pop_front() {
+            state.buffered_bytes = state.buffered_bytes.saturating_sub(bytes);
             // A response slot freed: a sink held at the window may continue.
             self.fanout.wake_sink();
             return Poll::Ready(Some(Ok(message)));
@@ -540,7 +572,7 @@ impl LegacyNativeCall {
             return Poll::Ready(Err(status));
         }
         let message = match (state.responses.pop_front(), state.responses.is_empty()) {
-            (Some(message), true) => message,
+            (Some((message, _)), true) => message,
             (None, _) => {
                 return Poll::Ready(Err(Status::internal(
                     "gRPC client-streaming response contained no message",

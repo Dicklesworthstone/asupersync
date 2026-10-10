@@ -47,6 +47,8 @@ pub struct NativeDuplexStream<IO, C> {
     inner: NativeServerStream<IO, C>,
     request_pending: bool,
     request_closed: bool,
+    /// Encoded bytes (frame prefix included) of the last decoded message.
+    last_message_bytes: usize,
 }
 
 impl<IO, C> fmt::Debug for NativeDuplexStream<IO, C> {
@@ -128,6 +130,7 @@ where
             inner,
             request_pending: true,
             request_closed: false,
+            last_message_bytes: 0,
         })
     }
 
@@ -268,6 +271,17 @@ where
         self.inner.gate_without_io(task)
     }
 
+    /// Encoded bytes of the message the last `poll_event` returned.
+    pub(crate) const fn last_message_bytes(&self) -> usize {
+        self.last_message_bytes
+    }
+
+    /// The owner's own bound on retained response bytes (one receive limit
+    /// plus a frame), which a holder of unread responses also keeps to.
+    pub(crate) const fn response_window_bytes(&self) -> usize {
+        self.inner.body_limit
+    }
+
     pub(crate) fn poll_event(
         &mut self,
         task: &mut Context<'_>,
@@ -287,11 +301,13 @@ where
                 return Poll::Ready(Some(Err(inner.finish(error))));
             }
             if inner.response.initial.is_some() {
+                let buffered = inner.body.len();
                 match inner.codec.decode_message_with_encoding(
                     &mut inner.body,
                     inner.response.encoding.as_deref(),
                 ) {
                     Ok(Some(message)) => {
+                        self.last_message_bytes = buffered.saturating_sub(inner.body.len());
                         if let Err(error) = inner.gate(task) {
                             return Poll::Ready(Some(Err(inner.finish(error))));
                         }

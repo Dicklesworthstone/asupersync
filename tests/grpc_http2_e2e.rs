@@ -3047,6 +3047,7 @@ mod legacy_streaming {
         MethodDescriptor::bidi_streaming("Echo", "/legacy.Streams/Echo"),
         MethodDescriptor::server_streaming("Repeat", "/legacy.Streams/Repeat"),
         MethodDescriptor::bidi_streaming("Flood", "/legacy.Streams/Flood"),
+        MethodDescriptor::bidi_streaming("FloodLarge", "/legacy.Streams/FloodLarge"),
     ];
     static DESCRIPTOR: ServiceDescriptor = ServiceDescriptor::new("Streams", "legacy", METHODS);
 
@@ -3096,6 +3097,7 @@ mod legacy_streaming {
     struct Flood {
         requests: RegisteredRequestStream,
         left: usize,
+        message: Bytes,
     }
 
     /// Set once a Flood stream has yielded its last response; the window
@@ -3115,7 +3117,7 @@ mod legacy_streaming {
                 if self.left == 0 {
                     FLOOD_DONE.store(true, Ordering::SeqCst);
                 }
-                return Poll::Ready(Some(Ok(Bytes::from_static(b"flood"))));
+                return Poll::Ready(Some(Ok(self.message.clone())));
             }
             loop {
                 match Pin::new(&mut self.requests).poll_next(task) {
@@ -3169,6 +3171,14 @@ mod legacy_streaming {
                     return Ok(RegisteredServerStream::new(Flood {
                         requests: request.into_inner(),
                         left: MAX_STREAM_BUFFERED + 8,
+                        message: Bytes::from_static(b"flood"),
+                    }));
+                }
+                if path == "/legacy.Streams/FloodLarge" {
+                    return Ok(RegisteredServerStream::new(Flood {
+                        requests: request.into_inner(),
+                        left: 64,
+                        message: Bytes::from(vec![7_u8; LARGE_RESPONSE]),
                     }));
                 }
                 let mut trailers = Metadata::new();
@@ -3567,6 +3577,103 @@ mod legacy_streaming {
         }));
         drop(handle);
         assert!(runtime.shutdown_timeout(LIMIT));
+    }
+
+    const LARGE_RESPONSE: usize = 64 * 1024;
+    const SMALL_RECEIVE_LIMIT: usize = 256 * 1024;
+
+    /// The sink's response window also closes at about one receive limit of
+    /// encoded bytes, not only at MAX_STREAM_BUFFERED messages, so a server
+    /// cannot make an uploading client hold 1024 receive limits of responses
+    /// (br-asupersync-46olky M2). With a 256 KiB receive limit the window is
+    /// 256 KiB + 5 + one 16 KiB frame; 64 KiB responses (65,541 encoded bytes)
+    /// fill it at the fifth. A count-only window held all 64.
+    fn run_byte_window_case(workers: usize) {
+        let runtime = if workers == 1 {
+            RuntimeBuilder::current_thread()
+        } else {
+            RuntimeBuilder::new().worker_threads(workers)
+        }
+        .build()
+        .expect("legacy byte window runtime");
+        let handle = runtime.handle();
+        let task_handle = handle.clone();
+        runtime.block_on(handle.spawn(async move {
+            let cx = Cx::current().expect("runtime task installs an ambient Cx");
+            let server = Arc::new(Server::builder().add_service(Streams).build());
+            let listener = server
+                .bind_registered_duplex_http2(
+                    "127.0.0.1:0",
+                    HostPolicy::allow_all(),
+                    ServerDuplexConfig::default(),
+                )
+                .await
+                .expect("bind legacy byte window listener");
+            let address = listener.local_addr().unwrap();
+            let manager = listener.connection_manager().clone();
+            let listener_runtime = task_handle.clone();
+            let serving = task_handle
+                .spawn(async move { listener.run_streaming_produced(&listener_runtime).await });
+
+            let channel = Channel::builder(format!("http://127.0.0.1:{}", address.port()))
+                .connect_timeout(LIMIT)
+                .timeout(Duration::from_secs(2))
+                .max_recv_message_size(SMALL_RECEIVE_LIMIT)
+                .connect()
+                .await
+                .expect("legacy byte window channel");
+            let mut call = cx
+                .spawn(move |_call_cx| async move {
+                    let mut client = GrpcClient::new(channel);
+                    let (mut sink, mut responses) = client
+                        .bidi_streaming::<Bytes, Bytes>("/legacy.Streams/FloodLarge")
+                        .await
+                        .expect("bidi dials the server");
+                    let send_status = loop {
+                        if let Err(status) = sink.send(Bytes::from_static(b"upload")).await {
+                            break status;
+                        }
+                    };
+                    let mut drained = 0_usize;
+                    while let Some(Ok(message)) = next_response(&mut responses).await {
+                        assert_eq!(message.len(), LARGE_RESPONSE);
+                        drained += 1;
+                    }
+                    (send_status, drained)
+                })
+                .expect("spawn the uploading call");
+            let (send_status, drained) = call
+                .join(&cx)
+                .await
+                .expect("the uploading call returns its typed result");
+            assert_eq!(
+                send_status.code(),
+                Code::DeadlineExceeded,
+                "{send_status:?}"
+            );
+            assert_eq!(
+                drained, 5,
+                "the sink held about one receive limit of responses"
+            );
+
+            assert!(manager.begin_drain(Duration::from_secs(5)));
+            serving.await.expect("legacy byte window listener drain");
+            log_test_event(
+                "legacy_sink_byte_window",
+                json!({ "bead": "asupersync-46olky", "workers": workers, "drained": drained }),
+            );
+        }));
+        drop(handle);
+        assert!(runtime.shutdown_timeout(LIMIT));
+    }
+
+    #[test]
+    fn legacy_sink_window_also_closes_at_about_one_receive_limit_of_bytes() {
+        init_test("legacy_sink_window_also_closes_at_about_one_receive_limit_of_bytes");
+        for workers in [1, 2] {
+            owned_stream_watchdog(move || run_byte_window_case(workers));
+        }
+        test_complete!("legacy_sink_window_also_closes_at_about_one_receive_limit_of_bytes");
     }
 
     #[test]
