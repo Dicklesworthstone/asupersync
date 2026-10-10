@@ -3,7 +3,7 @@
 //! This module extends the base Outcome type with ATP-specific error classification,
 //! stable error codes, and idempotency semantics for transfer operations.
 
-use crate::types::cancel::CancelReason;
+use crate::types::cancel::{CancelKind, CancelReason};
 use crate::types::outcome::Outcome;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -1097,10 +1097,8 @@ impl TransferTranscript {
 
         if let Outcome::Cancelled(reason) = outcome {
             // Try to extract ATP-specific cancel reason
-            if let Some(message) = reason.message() {
-                if let Some(atp_reason) = Self::parse_atp_cancel_reason(message) {
-                    self.cancellation_source = Some(atp_reason);
-                }
+            if let Some(atp_reason) = Self::parse_atp_cancel_reason(reason) {
+                self.cancellation_source = Some(atp_reason);
             }
         }
     }
@@ -1160,30 +1158,49 @@ impl TransferTranscript {
         )
     }
 
-    // Helper to parse ATP cancel reasons from message strings
-    fn parse_atp_cancel_reason(message: &str) -> Option<AtpCancelReason> {
-        if message.contains("timeout") {
-            Some(AtpCancelReason::Timeout)
-        } else if message.contains("shutdown") {
-            Some(AtpCancelReason::Shutdown)
-        } else if message.contains("user") {
-            Some(AtpCancelReason::UserCancel(message.to_string()))
-        } else if message.contains("path race") {
-            Some(AtpCancelReason::PathRaceLost)
+    // Helper to derive ATP cancel reasons from a CancelReason
+    fn parse_atp_cancel_reason(reason: &CancelReason) -> Option<AtpCancelReason> {
+        let message = reason.message().unwrap_or("");
+
+        // Check for ATP-specific custom conditions in the message that have no native CancelKind equivalent
+        if message.contains("path race") {
+            return Some(AtpCancelReason::PathRaceLost);
         } else if message.contains("repair decode") {
-            Some(AtpCancelReason::RepairDecodeAbandoned)
+            return Some(AtpCancelReason::RepairDecodeAbandoned);
         } else if message.contains("daemon restart") {
-            Some(AtpCancelReason::DaemonRestart)
-        } else if message.contains("fail-fast") {
-            Some(AtpCancelReason::FailFast(message.to_string()))
-        } else if message.contains("parent") {
-            Some(AtpCancelReason::ParentCancel)
+            return Some(AtpCancelReason::DaemonRestart);
         } else if message.contains("resource budget") {
-            Some(AtpCancelReason::ResourceBudgetExhausted(
+            return Some(AtpCancelReason::ResourceBudgetExhausted(
                 message.to_string(),
-            ))
-        } else {
-            None
+            ));
+        }
+
+        // Map based on typed CancelKind
+        match reason.kind() {
+            CancelKind::Timeout | CancelKind::Deadline => Some(AtpCancelReason::Timeout),
+            CancelKind::Shutdown => Some(AtpCancelReason::Shutdown),
+            CancelKind::User => Some(AtpCancelReason::UserCancel(if message.is_empty() {
+                "user cancelled".to_string()
+            } else {
+                message.to_string()
+            })),
+            CancelKind::FailFast => Some(AtpCancelReason::FailFast(if message.is_empty() {
+                "fail-fast".to_string()
+            } else {
+                message.to_string()
+            })),
+            CancelKind::ParentCancelled => Some(AtpCancelReason::ParentCancel),
+            CancelKind::RaceLost => Some(AtpCancelReason::PathRaceLost),
+            CancelKind::PollQuota | CancelKind::CostBudget | CancelKind::ResourceUnavailable => {
+                Some(AtpCancelReason::ResourceBudgetExhausted(
+                    if message.is_empty() {
+                        format!("{:?}", reason.kind())
+                    } else {
+                        message.to_string()
+                    },
+                ))
+            }
+            CancelKind::LinkedExit => None,
         }
     }
 }
@@ -1530,6 +1547,69 @@ mod tests {
         assert_eq!(
             transcript.error_code,
             Some("transport_connection_timeout".to_string())
+        );
+    }
+
+    #[test]
+    fn transfer_transcript_cancellation_mapping() {
+        let key = IdempotencyKey::new("cancel_test");
+
+        // 1. User cancellation with message containing "timeout": typed CancelKind::User wins
+        let mut transcript = TransferTranscript::new(
+            "transfer_user".to_string(),
+            key.clone(),
+            vec![],
+            "peer".to_string(),
+            0,
+            100,
+            1,
+        );
+        let user_cancel = Outcome::Cancelled(CancelReason::user("timeout elapsed on slow path"));
+        transcript.complete(&user_cancel, 1000);
+        assert_eq!(transcript.outcome_class, OutcomeClass::Cancelled);
+        assert_eq!(
+            transcript.cancellation_source,
+            Some(AtpCancelReason::UserCancel(
+                "timeout elapsed on slow path".to_string()
+            ))
+        );
+
+        // 2. Timeout cancellation with message containing "user": typed CancelKind::Timeout wins
+        let mut transcript = TransferTranscript::new(
+            "transfer_timeout".to_string(),
+            key.clone(),
+            vec![],
+            "peer".to_string(),
+            0,
+            100,
+            1,
+        );
+        let timeout_cancel = Outcome::Cancelled(
+            CancelReason::timeout().with_message("user-requested bound expired"),
+        );
+        transcript.complete(&timeout_cancel, 1000);
+        assert_eq!(transcript.outcome_class, OutcomeClass::Cancelled);
+        assert_eq!(
+            transcript.cancellation_source,
+            Some(AtpCancelReason::Timeout)
+        );
+
+        // 3. ATP-specific custom condition without native CancelKind: message substring matches
+        let mut transcript = TransferTranscript::new(
+            "transfer_race".to_string(),
+            key,
+            vec![],
+            "peer".to_string(),
+            0,
+            100,
+            1,
+        );
+        let race_cancel =
+            Outcome::Cancelled(CancelReason::user("path race lost to secondary donor"));
+        transcript.complete(&race_cancel, 1000);
+        assert_eq!(
+            transcript.cancellation_source,
+            Some(AtpCancelReason::PathRaceLost)
         );
     }
 

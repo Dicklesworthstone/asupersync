@@ -426,29 +426,53 @@ fn record_metadata_from_message(message: &BorrowedMessage<'_>) -> RecordMetadata
 }
 
 #[cfg(feature = "kafka")]
+fn rdkafka_error_code(err: &RdKafkaError) -> Option<RDKafkaErrorCode> {
+    match err {
+        RdKafkaError::AdminOp(code)
+        | RdKafkaError::ConsumerCommit(code)
+        | RdKafkaError::ConsumerQueueClose(code)
+        | RdKafkaError::Flush(code)
+        | RdKafkaError::Global(code)
+        | RdKafkaError::GroupListFetch(code)
+        | RdKafkaError::MessageConsumption(code)
+        | RdKafkaError::MessageConsumptionFatal(code)
+        | RdKafkaError::MessageProduction(code)
+        | RdKafkaError::MetadataFetch(code)
+        | RdKafkaError::OffsetFetch(code)
+        | RdKafkaError::Rebalance(code)
+        | RdKafkaError::SetPartitionOffset(code)
+        | RdKafkaError::StoreOffset(code)
+        | RdKafkaError::MockCluster(code) => Some(*code),
+        RdKafkaError::Transaction(native) => Some(native.code()),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "kafka")]
 fn map_rdkafka_error(err: &RdKafkaError, message: Option<&BorrowedMessage<'_>>) -> KafkaError {
     match err {
         RdKafkaError::ClientConfig(result, _, key, _) => {
             KafkaError::Config(redacted_config_message(*result, key))
         }
-        RdKafkaError::MessageProduction(code) => {
-            map_error_code(*code, message.map(rdkafka::Message::topic))
-        }
         RdKafkaError::Canceled => KafkaError::Cancelled,
-        // Check for authentication-related errors in the error message
         _ => {
-            let err_str = err.to_string();
-            if err_str.contains("Authentication")
-                || err_str.contains("SASL")
-                || err_str.contains("authentication")
-                || err_str.contains("Invalid credentials")
-                || err_str.contains("Broker: Authentication failed")
-                || err_str.contains("SASL_PLAINTEXT")
-                || err_str.contains("SASL_SSL")
-            {
-                KafkaError::Authentication(err_str)
+            if let Some(code) = rdkafka_error_code(err) {
+                map_error_code(code, message.map(rdkafka::Message::topic))
             } else {
-                KafkaError::Broker(err_str)
+                // String-only variants (ClientCreation, Subscription, etc.) fall back to message text.
+                let err_str = err.to_string();
+                if err_str.contains("Authentication")
+                    || err_str.contains("SASL")
+                    || err_str.contains("authentication")
+                    || err_str.contains("Invalid credentials")
+                    || err_str.contains("Broker: Authentication failed")
+                    || err_str.contains("SASL_PLAINTEXT")
+                    || err_str.contains("SASL_SSL")
+                {
+                    KafkaError::Authentication(err_str)
+                } else {
+                    KafkaError::Broker(err_str)
+                }
             }
         }
     }
@@ -3638,6 +3662,39 @@ mod tests {
             );
         }
         assert!(map_error_code(RDKafkaErrorCode::BrokerNotAvailable, None).is_retryable());
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn map_rdkafka_error_prefers_error_codes_over_message_substrings() {
+        // 1. RdKafkaError::Global carrying an auth error code maps to Authentication,
+        // even if its display string does not contain "Authentication" or "SASL".
+        let auth_err = RdKafkaError::Global(RDKafkaErrorCode::TopicAuthorizationFailed);
+        assert!(matches!(
+            map_rdkafka_error(&auth_err, None),
+            KafkaError::Authentication(_)
+        ));
+
+        // 2. RdKafkaError::Global carrying a broker error code (e.g. BrokerNotAvailable)
+        // is classified as Broker, NOT Authentication.
+        let broker_err = RdKafkaError::Global(RDKafkaErrorCode::BrokerNotAvailable);
+        assert!(matches!(
+            map_rdkafka_error(&broker_err, None),
+            KafkaError::Broker(_)
+        ));
+
+        // 3. String-only error without an RDKafkaErrorCode falls back to substring inspection.
+        let client_create_err = RdKafkaError::ClientCreation("SASL authentication failed".into());
+        assert!(matches!(
+            map_rdkafka_error(&client_create_err, None),
+            KafkaError::Authentication(_)
+        ));
+
+        let client_other_err = RdKafkaError::ClientCreation("failed to allocate memory".into());
+        assert!(matches!(
+            map_rdkafka_error(&client_other_err, None),
+            KafkaError::Broker(_)
+        ));
     }
 
     #[test]
