@@ -59,6 +59,37 @@ impl CancelWaker {
     }
 }
 
+/// A detached cancellation wake target whose retirement delivers its wake.
+///
+/// Task completion closes the registry and hands every target to its caller,
+/// which retires them after releasing its locks. A cancellation published
+/// while the task ran, whose wakes were still deferred to a dispatch that
+/// completion now pre-empts, wraps each target in this, so retiring it wakes
+/// the waiter instead of dropping it unwoken (br-asupersync-v8yh9s T4).
+struct WakeOnRetire(Arc<CancelWaker>);
+
+impl std::task::Wake for WakeOnRetire {
+    fn wake(self: Arc<Self>) {
+        self.0.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.wake_by_ref();
+    }
+}
+
+impl Drop for WakeOnRetire {
+    fn drop(&mut self) {
+        // The inner target is still dropped if its wake panics; leak only the
+        // panic payload, whose own drop could panic again.
+        if let Err(payload) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.0.wake_by_ref()))
+        {
+            std::mem::forget(payload);
+        }
+    }
+}
+
 /// One exactly-owned auxiliary cancellation wake registration.
 #[derive(Debug)]
 pub(crate) struct CancelWakerRegistration {
@@ -1116,7 +1147,11 @@ impl CxInner {
 
     /// Atomically detach every cancellation wake target for task completion.
     /// The returned targets must be dropped after all relevant locks are gone.
+    /// If a published cancellation's wakes are still owed (deferred to a lane
+    /// publication or checkpoint reconciliation this completion pre-empts),
+    /// dropping an observer's target delivers its wake.
     pub(crate) fn take_cancel_wakers(&mut self) -> smallvec::SmallVec<[Arc<CancelWaker>; 4]> {
+        let deliver_owed_wakes = self.cancel_requested && self.cancel_wakers_pending;
         self.cancel_waker_registry_closed = true;
         self.cancel_wakers_pending = false;
         // A finished task's deadline cancels nothing: take its timer out of the
@@ -1137,12 +1172,22 @@ impl CxInner {
             + self.cancel_waker_registrations.len();
         let mut retired = smallvec::SmallVec::with_capacity(target_count);
         retired.extend(self.cancel_waker.take());
-        retired.extend(self.untracked_cancel_waker.take());
-        retired.extend(
+        // The task's own lane waker has nothing left to wake; the observers
+        // other code registered on this context are still owed the request.
+        let observers = self.untracked_cancel_waker.take().into_iter().chain(
             self.cancel_waker_registrations
                 .drain(..)
                 .map(|registration| registration.target),
         );
+        if deliver_owed_wakes {
+            retired.extend(observers.map(|target| {
+                Arc::new(CancelWaker::new(Waker::from(Arc::new(WakeOnRetire(
+                    target,
+                )))))
+            }));
+        } else {
+            retired.extend(observers);
+        }
         retired
     }
 
