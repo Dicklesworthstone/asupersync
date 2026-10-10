@@ -86,12 +86,13 @@ pub use open_options::OpenOptions;
 #[cfg(feature = "test-internals")]
 #[doc(hidden)]
 pub use path_ops::{
-    FilesystemOperationProbe, stage_write_atomic_with_probe_for_test, write_with_probe_for_test,
+    FilesystemOperationProbe, stage_write_atomic_with_probe_for_test,
+    write_atomic_offloaded_with_probe_for_test, write_with_probe_for_test,
 };
 pub use path_ops::{
     StagedAtomicWrite, SymlinkKind, canonicalize, copy, hard_link, metadata, read, read_link,
     read_to_string, remove_file, rename, set_permissions, stage_write_atomic, symlink_metadata,
-    symlink_typed, write, write_atomic,
+    symlink_typed, write, write_atomic, write_atomic_offloaded,
 };
 pub use platform::{
     CapabilityProbe, CapabilityStatus, FilesystemCapabilityProfile,

@@ -514,11 +514,52 @@ impl StagedAtomicWrite {
     /// The rename is synchronous: once this method begins, async cancellation
     /// cannot interleave with the target mutation. If the subsequent parent
     /// directory sync fails, the replacement has already committed.
+    ///
+    /// Note: This method runs synchronously on the caller's thread (performing
+    /// `rename` and parent directory fsync). If called directly on an async worker
+    /// thread, it will block the worker during those syscalls. For non-blocking
+    /// async execution, use [`Self::commit_async`].
     pub fn commit(mut self) -> io::Result<()> {
         let parent = normalized_parent(&self.target_path);
         std::fs::rename(self.temp_path.path(), &self.target_path)?;
         self.temp_path.disarm();
         sync_parent_dir(parent)
+    }
+
+    /// Atomically installs the staged contents at the target path on the blocking pool.
+    ///
+    /// Unlike [`Self::commit`], which performs the rename and parent directory sync
+    /// synchronously on the calling async worker thread, `commit_async` offloads both
+    /// operations to the runtime's blocking thread pool so slow filesystem metadata
+    /// operations do not stall async worker threads.
+    ///
+    /// # Cancellation Semantics
+    /// Once the blocking commit task begins execution on the blocking thread pool,
+    /// it completes to conclusion: dropping the returned future does not cancel,
+    /// rollback, or prevent the rename from taking effect. If this future is dropped
+    /// before offload begins, the temporary file is cleaned up and the target
+    /// remains unchanged.
+    pub async fn commit_async(self) -> io::Result<()> {
+        spawn_blocking_io(move || self.commit()).await
+    }
+
+    /// Runs [`Self::commit_async`] with an explicit handshake probe before rename.
+    #[cfg(feature = "test-internals")]
+    #[doc(hidden)]
+    pub async fn commit_async_with_probe_for_test(
+        mut self,
+        probe: Arc<FilesystemOperationProbe>,
+    ) -> io::Result<()> {
+        spawn_blocking_io(move || {
+            probe.block_until_released();
+            let parent = normalized_parent(&self.target_path);
+            std::fs::rename(self.temp_path.path(), &self.target_path)?;
+            self.temp_path.disarm();
+            let result = sync_parent_dir(parent);
+            probe.mark_completed();
+            result
+        })
+        .await
     }
 }
 
@@ -579,8 +620,50 @@ pub async fn stage_write_atomic_with_probe_for_test(
 /// If the operation fails before rename, the temporary file is cleaned up.
 /// If this future is dropped during staging, the target path remains unchanged;
 /// the target rename occurs synchronously only after staging returns.
+///
+/// Note: While staging is offloaded to the blocking pool, [`StagedAtomicWrite::commit`]
+/// runs synchronously on the calling async worker thread (performing `rename` and
+/// parent directory fsync). For workloads on slow filesystems where worker threads must
+/// not be blocked during commit, use [`write_atomic_offloaded`] or [`stage_write_atomic`]
+/// followed by [`StagedAtomicWrite::commit_async`].
 pub async fn write_atomic(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<()> {
     stage_write_atomic(path, contents).await?.commit()
+}
+
+/// Atomically replace file contents via temp-file + rename with offloaded commit.
+///
+/// Unlike [`write_atomic`], which executes [`StagedAtomicWrite::commit`] synchronously
+/// on the calling async worker thread, `write_atomic_offloaded` stages the file on the
+/// blocking pool and offloads the target rename and directory sync to the blocking pool
+/// via [`StagedAtomicWrite::commit_async`].
+///
+/// # Cancellation Semantics
+/// If this future is dropped during staging, the target path remains unchanged and the
+/// temporary file is cleaned up. Once the commit operation begins on the blocking pool,
+/// the rename completes to conclusion: dropping the returned future does not cancel or
+/// rollback the replacement.
+pub async fn write_atomic_offloaded(
+    path: impl AsRef<Path>,
+    contents: impl AsRef<[u8]>,
+) -> io::Result<()> {
+    stage_write_atomic(path, contents)
+        .await?
+        .commit_async()
+        .await
+}
+
+/// Runs [`write_atomic_offloaded`] with an explicit handshake probe during commit.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub async fn write_atomic_offloaded_with_probe_for_test(
+    path: impl AsRef<Path>,
+    contents: impl AsRef<[u8]>,
+    probe: Arc<FilesystemOperationProbe>,
+) -> io::Result<()> {
+    stage_write_atomic(path, contents)
+        .await?
+        .commit_async_with_probe_for_test(probe)
+        .await
 }
 
 static ATOMIC_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1070,6 +1153,172 @@ mod tests {
             crate::assert_with_log!(mode == 0o700, "existing permissions preserved", 0o700, mode);
         });
         crate::test_complete!("write_atomic_preserves_existing_unix_permissions");
+    }
+
+    #[test]
+    fn write_atomic_offloaded_creates_and_replaces_without_temp_leaks() {
+        init_test("write_atomic_offloaded_creates_and_replaces_without_temp_leaks");
+        let dir = TempDir::new("write_atomic_offloaded").unwrap();
+        let path = dir.path().join("target.txt");
+
+        future::block_on(async {
+            write_atomic_offloaded(&path, b"offloaded_v1")
+                .await
+                .unwrap();
+            let first = read(&path).await.unwrap();
+            crate::assert_with_log!(
+                first == b"offloaded_v1",
+                "initial write",
+                b"offloaded_v1",
+                first
+            );
+
+            write_atomic_offloaded(&path, b"offloaded_v2")
+                .await
+                .unwrap();
+            let second = read(&path).await.unwrap();
+            crate::assert_with_log!(
+                second == b"offloaded_v2",
+                "replacement write",
+                b"offloaded_v2",
+                second
+            );
+
+            let mut leaked_tmp = Vec::new();
+            for entry in std::fs::read_dir(dir.path()).unwrap() {
+                let entry = entry.unwrap();
+                let name = entry.file_name();
+                if name.to_string_lossy().contains(".asupersync-tmp-") {
+                    leaked_tmp.push(name.to_string_lossy().to_string());
+                }
+            }
+            crate::assert_with_log!(
+                leaked_tmp.is_empty(),
+                "no leaked temporary files",
+                "[]",
+                format!("{leaked_tmp:?}")
+            );
+        });
+        crate::test_complete!("write_atomic_offloaded_creates_and_replaces_without_temp_leaks");
+    }
+
+    #[test]
+    fn write_atomic_offloaded_missing_parent_fails_cleanly() {
+        init_test("write_atomic_offloaded_missing_parent_fails_cleanly");
+        let dir = TempDir::new("write_atomic_offloaded_missing_parent").unwrap();
+        let missing_parent = dir.path().join("missing");
+        let target = missing_parent.join("target.txt");
+
+        future::block_on(async {
+            let err = write_atomic_offloaded(&target, b"data")
+                .await
+                .expect_err("missing parent should fail");
+            crate::assert_with_log!(
+                err.kind() == io::ErrorKind::NotFound,
+                "missing parent returns NotFound",
+                io::ErrorKind::NotFound,
+                err.kind()
+            );
+            let target_exists = target.exists();
+            crate::assert_with_log!(
+                !target_exists,
+                "target should not be created on failure",
+                false,
+                target_exists
+            );
+        });
+        crate::test_complete!("write_atomic_offloaded_missing_parent_fails_cleanly");
+    }
+
+    #[cfg(feature = "test-internals")]
+    #[test]
+    fn write_atomic_offloaded_slow_commit_probe_progresses_and_drops() {
+        init_test("write_atomic_offloaded_slow_commit_probe_progresses_and_drops");
+        let dir = TempDir::new("write_atomic_offloaded_probe").unwrap();
+        let path = dir.path().join("target.txt");
+        std::fs::write(&path, b"original").unwrap();
+
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .blocking_threads(1, 2)
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            // Case 1: Drop staged write BEFORE commit begins -> leaves target unchanged
+            let staged = stage_write_atomic(&path, b"staged_only").await.unwrap();
+            drop(staged);
+            assert_eq!(std::fs::read(&path).unwrap(), b"original");
+
+            // Case 2: While commit_async is parked in rename, another task on the single worker makes progress.
+            // When the future is dropped after rename starts on the blocking pool,
+            // the target is still replaced cleanly without temp file leaks.
+            let probe = Arc::new(FilesystemOperationProbe::new());
+            let staged2 = stage_write_atomic(&path, b"replaced_content")
+                .await
+                .unwrap();
+
+            let mut commit_fut =
+                Box::pin(staged2.commit_async_with_probe_for_test(Arc::clone(&probe)));
+
+            // Poll once to launch the blocking task
+            assert!(
+                futures_lite::future::poll_once(commit_fut.as_mut())
+                    .await
+                    .is_none(),
+                "commit_async must yield while waiting on the blocking task"
+            );
+
+            // Wait until the blocking task has started and is parked at the probe
+            assert!(
+                probe.wait_until_blocked(Duration::from_secs(5)),
+                "blocking commit task must reach the probe gate"
+            );
+
+            // Verify another task on the SAME single worker can make progress while commit is parked
+            let mut other_task_ran = false;
+            let other = async {
+                other_task_ran = true;
+            };
+            other.await;
+            assert!(
+                other_task_ran,
+                "another task on the worker must make progress"
+            );
+
+            // Target is still "original" before probe releases rename
+            assert_eq!(std::fs::read(&path).unwrap(), b"original");
+
+            // Drop the commit future while the blocking task is parked
+            drop(commit_fut);
+
+            // Now release the probe so the blocking task completes its rename and fsync
+            probe.release();
+            assert!(
+                probe.wait_until_completed(Duration::from_secs(5)),
+                "offloaded commit must finish"
+            );
+
+            // The target should now be replaced because the offloaded rename ran to completion
+            assert_eq!(std::fs::read(&path).unwrap(), b"replaced_content");
+
+            // Verify no leaked temporary files
+            let leaked_tmp: Vec<_> = std::fs::read_dir(dir.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .contains(".asupersync-tmp-")
+                })
+                .collect();
+            assert!(
+                leaked_tmp.is_empty(),
+                "no leaked temporary files: {leaked_tmp:?}"
+            );
+        });
+
+        crate::test_complete!("write_atomic_offloaded_slow_commit_probe_progresses_and_drops");
     }
 
     #[cfg(unix)]
