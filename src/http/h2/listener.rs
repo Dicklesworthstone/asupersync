@@ -5325,10 +5325,12 @@ impl<F> Http2Listener<F> {
     /// streaming runs, as for the matching TCP constructor.
     ///
     /// Clients connect with HTTP/2 prior knowledge, as on a cleartext TCP
-    /// listener. Requests carry no `peer_addr`, and every peer shares one
-    /// entry in the connection manager's per-address accounting. TLS is not
-    /// applied: a listener given `with_tls` refuses to run. Access
-    /// control is the socket file's permissions.
+    /// listener. Requests carry no `peer_addr` and no peer credentials, and
+    /// every peer shares one entry in the connection manager's per-address
+    /// accounting. TLS is not applied: a listener given `with_tls` refuses to
+    /// run. Access control is the socket file's permissions, so bind a
+    /// filesystem path: a listener from `UnixListener::bind_abstract` (Linux)
+    /// has no file, and any process in its network namespace can connect.
     #[cfg(unix)]
     #[must_use]
     pub fn from_unix_listener(

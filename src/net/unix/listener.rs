@@ -419,6 +419,10 @@ impl UnixListener {
     /// Abstract namespace sockets are not bound to the filesystem and are
     /// automatically cleaned up by the kernel when all references are closed.
     ///
+    /// No file permissions guard one: any process in the same network
+    /// namespace can connect. Bind a filesystem path when access control
+    /// matters, or check each accepted stream's [`UnixStream::peer_cred`].
+    ///
     /// # Arguments
     ///
     /// * `name` - The abstract socket name (without leading null byte)

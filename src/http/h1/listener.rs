@@ -724,9 +724,13 @@ impl<F> Http1Listener<F> {
     /// `run_sse`). A reverse proxy in front of the application (nginx's
     /// `proxy_pass http://unix:/run/app.sock`) is the usual client.
     ///
-    /// Requests carry no `peer_addr`, and every peer shares one entry in the
-    /// connection manager's per-address accounting; access control is the
-    /// socket file's permissions. Upgrade actions made with
+    /// Requests carry no `peer_addr` and no peer credentials, and every peer
+    /// shares one entry in the connection manager's per-address accounting.
+    /// Access control is the socket file's permissions, so bind a filesystem
+    /// path: a listener from `UnixListener::bind_abstract` (Linux) has no
+    /// file, and any process in its network namespace can connect to it.
+    ///
+    /// Upgrade actions made with
     /// `Http1Upgrade::new_any` (`WebSocketUpgrade::on_upgrade_any`) run on
     /// these connections; TCP-typed ones (`Http1Upgrade::new`, `on_upgrade`)
     /// are refused before the `101`. Router applications serve through this
