@@ -2978,6 +2978,8 @@ mod tests {
             armed: AtomicBool,
             drops: Arc<AtomicUsize>,
         }
+        // Waking does nothing; the waker's panicking Drop is the point.
+        #[allow(clippy::manual_noop_waker)]
         impl std::task::Wake for PanicOnDropWaker {
             fn wake(self: Arc<Self>) {}
             fn wake_by_ref(self: &Arc<Self>) {}
