@@ -195,6 +195,34 @@ struct ActorCell<M> {
     state: Arc<ActorStateCell>,
 }
 
+impl<M> Drop for ActorCell<M> {
+    // The normal exits drain the mailbox. Messages still buffered when the
+    // actor's task ends some other way (an abort during a restart backoff, a
+    // crash the supervisor stops on, a handler panic in an unsupervised actor)
+    // used to drop with the receiver: a panicking message destructor became
+    // the task's panic, replacing its real outcome, and a second one aborted
+    // the process. Drop them here one at a time, each panic contained.
+    fn drop(&mut self) {
+        self.mailbox.close();
+        while let Ok(msg) = self.mailbox.try_recv() {
+            discard_contained(msg);
+        }
+    }
+}
+
+/// Drops one buffered message, containing a panicking destructor; returns
+/// whether it dropped cleanly. A caught payload is leaked, because dropping
+/// it can panic too.
+fn discard_contained<M>(msg: M) -> bool {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(msg))) {
+        Ok(()) => true,
+        Err(payload) => {
+            std::mem::forget(payload);
+            false
+        }
+    }
+}
+
 /// A message-driven actor that processes messages from a bounded mailbox.
 ///
 /// Actors are the unit of stateful, message-driven concurrency. Each actor:
@@ -1014,9 +1042,7 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
     cell.mailbox.close();
 
     let discard_buffered_message = |msg| {
-        if let Err(_payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            drop(msg);
-        })) {
+        if !discard_contained(msg) {
             cx.trace("actor::message_drop_panicked_on_abort");
         }
     };
@@ -3320,6 +3346,75 @@ mod tests {
         }
 
         crate::test_complete!("spawn_supervised_actor_panic_surfaces_as_task_outcome");
+    }
+
+    // br-asupersync-pk44qd S2: a supervised actor that crashed left its other
+    // buffered messages in the mailbox, and they dropped with the receiver when
+    // the task ended. A message whose destructor panics replaced the task's
+    // outcome with that panic (and two of them aborted the process).
+    #[test]
+    fn a_panicking_buffered_message_does_not_replace_a_supervised_crash() {
+        init_test("a_panicking_buffered_message_does_not_replace_a_supervised_crash");
+
+        #[derive(Debug)]
+        struct PanicsWhenDropped;
+        impl Drop for PanicsWhenDropped {
+            fn drop(&mut self) {
+                panic!("buffered message destructor");
+            }
+        }
+        #[derive(Debug)]
+        enum Msg {
+            Crash,
+            Leftover(#[allow(dead_code)] PanicsWhenDropped),
+        }
+        struct CrashActor;
+        impl Actor for CrashActor {
+            type Message = Msg;
+
+            fn handle(
+                &mut self,
+                _cx: &Cx,
+                msg: Msg,
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                if matches!(msg, Msg::Crash) {
+                    panic!("supervised actor boom");
+                }
+                Box::pin(async {})
+            }
+        }
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx: Cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(root, Budget::INFINITE);
+        let (handle, mut stored) = scope
+            .spawn_supervised_actor(
+                &mut state,
+                &cx,
+                || CrashActor,
+                crate::supervision::SupervisionStrategy::Stop,
+                8,
+            )
+            .expect("spawn supervised actor");
+        handle.try_send(Msg::Crash).expect("queue the crash");
+        handle
+            .try_send(Msg::Leftover(PanicsWhenDropped))
+            .expect("queue a message the crash leaves behind");
+
+        let mut poll_cx = Context::from_waker(Waker::noop());
+        let polled =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stored.poll(&mut poll_cx)));
+        match polled {
+            Ok(Poll::Ready(Outcome::Panicked(payload))) => assert_eq!(
+                payload.message(),
+                "supervised actor boom",
+                "the crash stays the task's outcome"
+            ),
+            Ok(other) => panic!("expected the crash as the outcome: {other:?}"),
+            Err(_) => panic!("a buffered message's destructor panic escaped the actor task"),
+        }
+        crate::test_complete!("a_panicking_buffered_message_does_not_replace_a_supervised_crash");
     }
 
     #[test]
