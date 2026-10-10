@@ -248,7 +248,13 @@ impl H2Transport {
             #[cfg(unix)]
             Self::Unix(socket) => socket.bytes_written,
             #[cfg(not(target_arch = "wasm32"))]
-            Self::Handoff(socket) => socket.bytes_written,
+            Self::Handoff(socket) => {
+                if let Some(counter) = socket.stream.socket_bytes_written_counter() {
+                    counter.load(std::sync::atomic::Ordering::Relaxed)
+                } else {
+                    socket.bytes_written
+                }
+            }
             #[cfg(feature = "tls")]
             Self::Tls(stream) => stream.get_ref().bytes_written,
         }
@@ -9279,7 +9285,7 @@ mod tests {
             let mut client = TcpStream::connect(address).await.expect("connect request");
             if let Some(ingress) = handoff_ingress.take() {
                 let (accepted, peer) = ingress.accept().await.expect("accept handoff");
-                queue.push(Box::new(accepted), Some(peer));
+                queue.push(HandoffStream::new(Box::new(accepted)), Some(peer));
             }
             let mut outbound = BytesMut::new();
             outbound.extend_from_slice(CLIENT_PREFACE);

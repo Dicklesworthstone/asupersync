@@ -8388,6 +8388,8 @@ struct RemoteComputationServiceFileConfig {
     client_ca_bundle: PathBuf,
     max_frame_bytes: usize,
     max_connections: usize,
+    #[serde(default)]
+    max_connections_per_ip: Option<u32>,
     tls_handshake_timeout_ms: u64,
     initial_frame_timeout_ms: u64,
     drain_timeout_ms: u64,
@@ -8807,13 +8809,16 @@ impl RemoteComputationServiceBootstrap {
                 })?;
         }
 
-        let service_config = RemoteComputationServiceConfig::new()
+        let mut service_config = RemoteComputationServiceConfig::new()
             .with_wire_limits(RemoteServiceWireLimits::new(config.max_frame_bytes))
             .with_max_connections(Some(config.max_connections))
             .with_initial_frame_timeout(Duration::from_millis(config.initial_frame_timeout_ms))
             .with_drain_timeout(Duration::from_millis(config.drain_timeout_ms))
             .with_idempotency_retention(Duration::from_millis(config.idempotency_retention_ms))
             .with_max_idempotency_records_per_peer(config.max_idempotency_records_per_peer);
+        if let Some(per_ip) = config.max_connections_per_ip {
+            service_config = service_config.with_max_connections_per_ip(Some(per_ip));
+        }
         let identity = RemoteComputationServiceIdentity {
             listen_scope: config.listen_scope,
             registry_fingerprint,
@@ -10618,6 +10623,53 @@ mod tests {
         assert!(remote_service_transient_accept_error(&io::Error::from(
             io::ErrorKind::OutOfMemory
         )));
+    }
+
+    #[cfg(all(feature = "remote-service", unix))]
+    #[test]
+    fn remote_computation_service_file_config_decodes_max_connections_per_ip() {
+        let toml_str = r#"
+schema_version = 2
+protocol = "3.0"
+listen = "127.0.0.1:9099"
+listen_scope = "loopback_only"
+server_certificate_chain = "server.crt"
+server_private_key = "server.key"
+client_ca_bundle = "ca.crt"
+max_frame_bytes = 1048576
+max_connections = 128
+max_connections_per_ip = 16
+tls_handshake_timeout_ms = 5000
+initial_frame_timeout_ms = 5000
+drain_timeout_ms = 10000
+idempotency_retention_ms = 60000
+max_idempotency_records_per_peer = 1024
+peers = []
+"#;
+        let config: RemoteComputationServiceFileConfig =
+            toml::from_str(toml_str).expect("decode toml with max_connections_per_ip");
+        assert_eq!(config.max_connections_per_ip, Some(16));
+
+        let toml_str_default = r#"
+schema_version = 2
+protocol = "3.0"
+listen = "127.0.0.1:9099"
+listen_scope = "loopback_only"
+server_certificate_chain = "server.crt"
+server_private_key = "server.key"
+client_ca_bundle = "ca.crt"
+max_frame_bytes = 1048576
+max_connections = 128
+tls_handshake_timeout_ms = 5000
+initial_frame_timeout_ms = 5000
+drain_timeout_ms = 10000
+idempotency_retention_ms = 60000
+max_idempotency_records_per_peer = 1024
+peers = []
+"#;
+        let config_default: RemoteComputationServiceFileConfig =
+            toml::from_str(toml_str_default).expect("decode toml without max_connections_per_ip");
+        assert_eq!(config_default.max_connections_per_ip, None);
     }
 
     #[cfg(all(feature = "tls", not(target_arch = "wasm32"), any(unix, windows)))]

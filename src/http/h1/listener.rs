@@ -2664,7 +2664,7 @@ mod tests {
             let mut client = TcpStream::connect(address).await.expect("connect request");
             if let Some(ingress) = handoff_ingress.take() {
                 let (accepted, peer) = ingress.accept().await.expect("accept handoff");
-                queue.push(Box::new(accepted), Some(peer));
+                queue.push(HandoffStream::new(Box::new(accepted)), Some(peer));
             }
             client
                 .write_all(b"GET /drain HTTP/1.1\r\nHost: localhost\r\n\r\n")

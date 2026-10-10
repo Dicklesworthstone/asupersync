@@ -15,14 +15,169 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
 /// A transport a listener can serve: TCP, TLS over TCP, or a stream that
 /// replays bytes read during protocol detection.
 pub trait HandoffIo: AsyncRead + AsyncWrite + Send + Unpin {}
 
 impl<T: AsyncRead + AsyncWrite + Send + Unpin> HandoffIo for T {}
 
+/// Wraps an underlying I/O stream (such as a [`TcpStream`]) and counts the
+/// bytes written to it beneath TLS or other layered wrappers.
+#[allow(dead_code)]
+pub(crate) struct SocketByteCounter<S> {
+    stream: S,
+    written: Arc<AtomicU64>,
+}
+
+impl<S> SocketByteCounter<S> {
+    #[allow(dead_code)]
+    pub(crate) fn new(stream: S, written: Arc<AtomicU64>) -> Self {
+        Self { stream, written }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn into_inner(self) -> S {
+        self.stream
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn counter(&self) -> &Arc<AtomicU64> {
+        &self.written
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for SocketByteCounter<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for SocketByteCounter<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let result = Pin::new(&mut self.stream).poll_write(cx, buf);
+        if let Poll::Ready(Ok(n)) = &result {
+            self.written.fetch_add(*n as u64, Ordering::Relaxed);
+        }
+        result
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let result = Pin::new(&mut self.stream).poll_write_vectored(cx, bufs);
+        if let Poll::Ready(Ok(n)) = &result {
+            self.written.fetch_add(*n as u64, Ordering::Relaxed);
+        }
+        result
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.stream.is_write_vectored()
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
+}
+
 /// A handed-off connection.
-pub type HandoffStream = Box<dyn HandoffIo>;
+pub struct HandoffStream {
+    stream: Box<dyn HandoffIo>,
+    socket_bytes_written: Option<Arc<AtomicU64>>,
+}
+
+impl HandoffStream {
+    /// Creates a new handed-off connection without underlying socket tracking.
+    #[must_use]
+    pub fn new(stream: Box<dyn HandoffIo>) -> Self {
+        Self {
+            stream,
+            socket_bytes_written: None,
+        }
+    }
+
+    /// Creates a new handed-off connection with an underlying socket byte counter.
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn with_socket_counter(
+        stream: Box<dyn HandoffIo>,
+        socket_bytes_written: Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            stream,
+            socket_bytes_written: Some(socket_bytes_written),
+        }
+    }
+
+    /// Returns the underlying socket write progress counter, if tracked.
+    #[must_use]
+    pub fn socket_bytes_written_counter(&self) -> Option<&Arc<AtomicU64>> {
+        self.socket_bytes_written.as_ref()
+    }
+}
+
+impl From<Box<dyn HandoffIo>> for HandoffStream {
+    fn from(stream: Box<dyn HandoffIo>) -> Self {
+        Self::new(stream)
+    }
+}
+
+impl AsyncRead for HandoffStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for HandoffStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write(cx, buf)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.stream.is_write_vectored()
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
+}
 
 /// Connections waiting for a listener's accept loop.
 #[derive(Default)]
@@ -268,10 +423,10 @@ mod tests {
         let queue = Arc::new(HandoffQueue::default());
         let drops = Arc::new(AtomicUsize::new(0));
         let stream = || {
-            Box::new(DropProbe {
+            HandoffStream::new(Box::new(DropProbe {
                 queue: Arc::downgrade(&queue),
                 drops: Arc::clone(&drops),
-            })
+            }))
         };
         queue.push(stream(), None);
         queue.push(stream(), None);
@@ -293,7 +448,7 @@ mod tests {
             let (stream, peer) = crate::io::duplex(8);
             peers.push(peer);
             queue.push(
-                Box::new(stream),
+                HandoffStream::new(Box::new(stream)),
                 Some(SocketAddr::from(([127, 0, 0, 1], port))),
             );
         }
@@ -309,5 +464,42 @@ mod tests {
         }
         let mut accept = std::pin::pin!(queue.accept());
         assert!(accept.as_mut().poll(&mut cx).is_pending());
+    }
+
+    #[test]
+    fn socket_byte_counter_tracks_bytes_written() {
+        let (client, _server) = crate::io::duplex(64);
+        let counter = Arc::new(AtomicU64::new(0));
+        let mut counted = SocketByteCounter::new(client, Arc::clone(&counter));
+
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+        let mut cx = Context::from_waker(Waker::noop());
+        let res = Pin::new(&mut counted).poll_write(&mut cx, b"hello world");
+        assert!(matches!(res, Poll::Ready(Ok(11))));
+        assert_eq!(counter.load(Ordering::Relaxed), 11);
+
+        let slices = [io::IoSlice::new(b"foo"), io::IoSlice::new(b"bar")];
+        let res2 = Pin::new(&mut counted).poll_write_vectored(&mut cx, &slices);
+        assert!(matches!(res2, Poll::Ready(Ok(3))));
+        assert_eq!(counter.load(Ordering::Relaxed), 14);
+    }
+
+    #[test]
+    fn handoff_stream_preserves_socket_byte_counter() {
+        let (client, _server) = crate::io::duplex(64);
+        let counter = Arc::new(AtomicU64::new(42));
+        let handoff = HandoffStream::with_socket_counter(Box::new(client), Arc::clone(&counter));
+        assert!(handoff.socket_bytes_written_counter().is_some());
+        assert_eq!(
+            handoff
+                .socket_bytes_written_counter()
+                .unwrap()
+                .load(Ordering::Relaxed),
+            42
+        );
+
+        let (client2, _server2) = crate::io::duplex(64);
+        let handoff_plain = HandoffStream::new(Box::new(client2));
+        assert!(handoff_plain.socket_bytes_written_counter().is_none());
     }
 }
