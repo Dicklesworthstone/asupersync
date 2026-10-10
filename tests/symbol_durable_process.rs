@@ -9,8 +9,10 @@
 
 use asupersync::distributed::distribution::{DistributionConfig, DistributorTransport, SymbolDistributor};
 use asupersync::distributed::symbol_service::{
-    RemoteSymbolTransport, SYMBOL_SERVICE_COMPUTATION, SymbolBatchLimits, SymbolReplicaStore,
-    SymbolStoreLimits, encode_symbol_batch, register_durable_symbol_service, register_symbol_service,
+    DurableChunkedSymbolService, RemoteSymbolTransport, SYMBOL_CHUNKED_SERVICE_COMPUTATION,
+    SYMBOL_SERVICE_COMPUTATION, SymbolBatchLimits, SymbolReplicaStore, SymbolStoreLimits,
+    encode_symbol_batch, register_durable_chunked_symbol_service, register_durable_symbol_service,
+    register_symbol_service,
 };
 use asupersync::distributed::symbol_service::durable::{DurableSymbolLimits, DurableSymbolReplicaStore};
 use asupersync::distributed::symbol_service::recovery::{
@@ -21,6 +23,7 @@ use asupersync::record::distributed_region::{ConsistencyLevel, ReplicaInfo};
 use asupersync::remote::{
     NodeId, RemoteComputationClient, RemoteComputationClientConfig, RemoteComputationRegistry,
     RemoteComputationService, RemoteComputationServiceConfig, RemotePeerAdmissionPolicy, RemoteProtocolVersion,
+    RemoteServiceWireLimits,
 };
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::security::{AuthKey, SecurityContext};
@@ -68,23 +71,40 @@ fn tls() -> (TlsAcceptor, TlsConnector, CertificatePinSet) {
 fn durable_replica_process() {
     let path = std::env::var_os("ASUP_DURABLE_PATH").expect("worker journal");
     let mode = std::env::var("ASUP_DURABLE_MODE").expect("worker mode");
+    let chunked = mode.starts_with("chunked-");
+    let bounds = if chunked { chunked::limits() } else { limits() };
     let file = OpenOptions::new().read(true).write(true).open(path).unwrap();
-    let store = Arc::new(if mode == "reopen" {
-        DurableSymbolReplicaStore::open(file, "replica", AuthKey::from_seed(42), AuthKey::from_seed(99), limits())
+    let store = Arc::new(if mode == "reopen" || mode == "chunked-reopen" {
+        DurableSymbolReplicaStore::open(file, "replica", AuthKey::from_seed(42), AuthKey::from_seed(99), bounds)
     } else {
-        DurableSymbolReplicaStore::create(file, "replica", AuthKey::from_seed(42), AuthKey::from_seed(99), limits())
+        DurableSymbolReplicaStore::create(file, "replica", AuthKey::from_seed(42), AuthKey::from_seed(99), bounds)
     }.unwrap());
     let mut registry = RemoteComputationRegistry::new();
-    let admission = register_durable_symbol_service(&mut registry, Arc::clone(&store)).unwrap();
+    let chunked_service = chunked.then(|| Arc::new(DurableChunkedSymbolService::new(
+        Arc::clone(&store), chunked::staging_limits(),
+    )));
+    let admission = if let Some(service) = &chunked_service {
+        register_durable_chunked_symbol_service(&mut registry, Arc::clone(service)).unwrap();
+        None
+    } else {
+        Some(register_durable_symbol_service(&mut registry, Arc::clone(&store)).unwrap())
+    };
     let (acceptor, _, pins) = tls();
     let mut policy = RemotePeerAdmissionPolicy::new(RemoteProtocolVersion::V1, registry.schema_registry().clone());
-    policy.grant_tls_peer(NodeId::new("origin"), pins, [SYMBOL_SERVICE_COMPUTATION]).unwrap();
-    let runtime = RuntimeBuilder::current_thread()
-        .blocking_threads(0, if mode == "no-pool" { 0 } else { 2 }).build().unwrap();
+    policy.grant_tls_peer(NodeId::new("origin"), pins,
+        [if chunked { SYMBOL_CHUNKED_SERVICE_COMPUTATION } else { SYMBOL_SERVICE_COMPUTATION }]).unwrap();
+    let workers = std::env::var("ASUP_DURABLE_WORKERS").map_or(1, |value| value.parse().unwrap());
+    let builder = if workers == 1 { RuntimeBuilder::current_thread() }
+        else { RuntimeBuilder::multi_thread().worker_threads(workers) };
+    let runtime = builder.blocking_threads(0,
+        if mode == "no-pool" || mode == "chunked-no-pool" { 0 } else { 2 }).build().unwrap();
+    let mut config = RemoteComputationServiceConfig::new().with_max_connections(Some(4))
+        .with_drain_timeout(Duration::from_secs(5));
+    if chunked {
+        config = config.with_wire_limits(RemoteServiceWireLimits::new(chunked::FRAME_BYTES));
+    }
     let service = runtime.block_on(RemoteComputationService::bind(
-        "127.0.0.1:0", acceptor, policy, registry,
-        RemoteComputationServiceConfig::new().with_max_connections(Some(4))
-            .with_drain_timeout(Duration::from_secs(5)),
+        "127.0.0.1:0", acceptor, policy, registry, config,
     )).unwrap();
     let operator = service.handle();
     println!("{PREFIX}READY {}", service.local_addr().unwrap()); io::stdout().flush().unwrap();
@@ -94,12 +114,18 @@ fn durable_replica_process() {
     });
     let result = runtime.block_on(async {
         let cx = Cx::current().unwrap();
-        asupersync::time::timeout(cx.now(), Duration::from_secs(60), service.run(&cx)).await
+        asupersync::time::timeout(cx.now(), Duration::from_secs(if chunked { 180 } else { 60 }), service.run(&cx)).await
     });
     stdin.join().unwrap();
     result.expect("worker deadline").expect("worker drain");
     assert_eq!(operator.active_connections(), 0);
-    assert!(!admission.in_flight(), "blocking request owners must retire before shutdown");
+    if let Some(admission) = admission {
+        assert!(!admission.in_flight(), "blocking request owners must retire before shutdown");
+    }
+    if let Some(service) = chunked_service {
+        assert!(!service.in_flight(), "chunked worker owners must retire before shutdown");
+        assert_eq!(service.stats().uploads, 0, "completed chunked jobs release staging");
+    }
     assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
     assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
     println!("{PREFIX}DONE {}", store.stats().batches);
@@ -115,9 +141,13 @@ struct Process {
 }
 impl Process {
     fn start(path: &Path, mode: &str) -> Self {
+        Self::start_with_workers(path, mode, 1)
+    }
+    fn start_with_workers(path: &Path, mode: &str, workers: usize) -> Self {
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "durable_replica_process", "--ignored", "--nocapture", "--test-threads=1"])
             .env("ASUP_DURABLE_PATH", path).env("ASUP_DURABLE_MODE", mode)
+            .env("ASUP_DURABLE_WORKERS", workers.to_string())
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit())
             .spawn().expect("start isolated durable replica");
         let stdout = child.stdout.take().unwrap();
@@ -392,3 +422,6 @@ fn invalid_snapshot_key_never_publishes_a_checkpoint_to_a_live_replica() {
 
 #[path = "symbol_durable_process/continuation.rs"]
 mod continuation;
+
+#[path = "symbol_durable_process/chunked.rs"]
+mod chunked;
