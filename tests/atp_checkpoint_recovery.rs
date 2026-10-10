@@ -35,6 +35,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // Same public test CA/leaf/key as atp_quic_real_udp_transfer_e2e.rs. No verifier bypass.
@@ -134,6 +135,15 @@ fn fixture() -> PathBuf {
     root
 }
 
+// The checkpoint lock is flock(2), which belongs to the open file description.
+// A sibling test's Command::spawn copies every open lock fd into its child until
+// the child executes, so a lock this test just released could still look Busy.
+// Tests run one at a time so each exact ownership oracle sees only its own owners.
+fn exclusive() -> MutexGuard<'static, ()> {
+    static SERIAL: Mutex<()> = Mutex::new(());
+    SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 fn run<T: Send + 'static>(future: impl Future<Output = T> + Send + 'static) -> T {
     let runtime = RuntimeBuilder::current_thread().build().unwrap();
     let future: Pin<Box<dyn Future<Output = T> + Send>> = Box::pin(future);
@@ -220,6 +230,7 @@ fn no_packet(socket: &UdpSocket) {
 
 #[test]
 fn checkpoint_survives_process_exit_and_reuses_the_durable_peer_receipt() {
+    let _exclusive = exclusive();
     if let Some((root, remote)) = child_context("prepare") {
         run(async move {
             let cx = Cx::current().unwrap();
@@ -325,6 +336,7 @@ fn checkpoint_survives_process_exit_and_reuses_the_durable_peer_receipt() {
 
 #[test]
 fn checkpoint_crashed_sender_requires_exact_acknowledgement_before_retry() {
+    let _exclusive = exclusive();
     if let Some((root, remote)) = child_context("crash-send") {
         run(async move {
             let cx = Cx::current().unwrap();
@@ -450,6 +462,7 @@ fn checkpoint_crashed_sender_requires_exact_acknowledgement_before_retry() {
 
 #[test]
 fn checkpoint_os_lock_fences_another_process_and_releases_on_exit_without_drop() {
+    let _exclusive = exclusive();
     if let Some((directory, _)) = child_context("lock") {
         let file = OpenOptions::new()
             .read(true)
@@ -509,6 +522,7 @@ fn checkpoint_os_lock_fences_another_process_and_releases_on_exit_without_drop()
 
 #[test]
 fn checkpoint_rehash_rejects_same_size_mutation_truncation_and_growth_before_networking() {
+    let _exclusive = exclusive();
     run(async move {
         let cx = Cx::current().unwrap();
         let sender = sender();
@@ -555,6 +569,7 @@ fn checkpoint_rehash_rejects_same_size_mutation_truncation_and_growth_before_net
 
 #[test]
 fn checkpoint_binding_and_stricter_limits_are_checked_before_any_new_effect() {
+    let _exclusive = exclusive();
     run(async move {
         let cx = Cx::current().unwrap();
         let sender = sender();
@@ -622,6 +637,7 @@ fn checkpoint_binding_and_stricter_limits_are_checked_before_any_new_effect() {
 
 #[test]
 fn checkpoint_malformed_journals_and_symlink_payloads_fail_closed() {
+    let _exclusive = exclusive();
     run(async move {
         let cx = Cx::current().unwrap();
         let sender = sender();
@@ -674,6 +690,7 @@ fn checkpoint_malformed_journals_and_symlink_payloads_fail_closed() {
 
 #[test]
 fn checkpoint_queued_cancellation_preserves_source_without_recording_an_attempt() {
+    let _exclusive = exclusive();
     run(async move {
         let cx = Cx::current().unwrap();
         let scope = cx.scope();
@@ -737,6 +754,7 @@ fn checkpoint_queued_cancellation_preserves_source_without_recording_an_attempt(
 
 #[test]
 fn checkpoint_empty_input_is_valid_and_oversize_input_creates_no_checkpoint() {
+    let _exclusive = exclusive();
     let root = fixture();
     let inspect = root.clone();
     run(async move {
