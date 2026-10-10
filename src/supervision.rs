@@ -1623,11 +1623,10 @@ impl CompiledSupervisor {
     /// skipped during boot, its eager dependents are skipped as well, and any required dependent
     /// turns the whole boot into a deterministic supervisor spawn failure.
     /// Restart semantics are specified by [`RestartPolicy`] and computed by
-    /// [`CompiledSupervisor::restart_plan_for`]; wiring it into a live restart loop is layered
-    /// on top by follow-up work (asupersync-8y37kz.2; the earlier bd-1yv7a / bd-35iz1 ids are
-    /// stale and no longer tracked). Today only per-actor supervision (`src/actor.rs`) drives
-    /// live restart-on-failure — a child crash under a `CompiledSupervisor` tree is NOT restarted
-    /// at runtime (asupersync-u2vgjg).
+    /// [`CompiledSupervisor::restart_plan_for`]. To run a live restart loop for a compiled
+    /// supervisor tree, use [`CompiledSupervisor::bind_managed`], which binds the compiled
+    /// topology to runtime child factories and a [`ManagedSupervisor`] controller. Calling
+    /// `spawn` directly establishes the initial tree without an active restart supervisor loop.
     ///
     /// # Why this keeps `&mut RuntimeState` (br-asupersync-c6uw5y)
     ///
@@ -7173,6 +7172,12 @@ impl EvidenceLedger {
     pub fn clear(&mut self) {
         self.entries.clear();
     }
+
+    /// Drains the oldest `count` entries from the ledger.
+    pub fn drain_oldest(&mut self, count: usize) {
+        let count = count.min(self.entries.len());
+        self.entries.drain(..count);
+    }
 }
 
 /// Supervisor for managing actor restarts.
@@ -7189,9 +7194,13 @@ pub struct Supervisor {
     history: Option<RestartHistory>,
     evidence: EvidenceLedger,
     generalized_evidence: crate::evidence::GeneralizedLedger,
+    max_evidence_entries: Option<usize>,
 }
 
 impl Supervisor {
+    /// Default maximum number of evidence entries retained by supervised actors.
+    pub const DEFAULT_ACTOR_EVIDENCE_CAPACITY: usize = 128;
+
     /// Create a new supervisor with the given strategy.
     #[must_use]
     pub fn new(strategy: SupervisionStrategy) -> Self {
@@ -7204,7 +7213,39 @@ impl Supervisor {
             history,
             evidence: EvidenceLedger::new(),
             generalized_evidence: crate::evidence::GeneralizedLedger::new(),
+            max_evidence_entries: None,
         }
+    }
+
+    /// Configures the maximum number of evidence entries retained in the ledger.
+    ///
+    /// When the ledger reaches capacity, oldest entries are evicted as new decisions
+    /// are recorded.
+    #[must_use]
+    pub fn with_max_evidence_entries(mut self, max: usize) -> Self {
+        self.max_evidence_entries = Some(max);
+        self
+    }
+
+    /// Sets the maximum number of evidence entries retained in the ledger.
+    pub fn set_max_evidence_entries(&mut self, max: Option<usize>) {
+        self.max_evidence_entries = max;
+        if let Some(limit) = max {
+            if self.evidence.len() > limit {
+                let excess = self.evidence.len() - limit;
+                self.evidence.drain_oldest(excess);
+            }
+            if self.generalized_evidence.len() > limit {
+                let excess = self.generalized_evidence.len() - limit;
+                self.generalized_evidence.drain_oldest(excess);
+            }
+        }
+    }
+
+    /// Returns the maximum number of evidence entries retained in the ledger, if configured.
+    #[must_use]
+    pub fn max_evidence_entries(&self) -> Option<usize> {
+        self.max_evidence_entries
     }
 
     /// Get the supervision strategy.
@@ -7215,6 +7256,19 @@ impl Supervisor {
 
     fn record_evidence(&mut self, entry: EvidenceEntry) {
         let generalized_record = entry.to_evidence_record();
+        if let Some(max) = self.max_evidence_entries {
+            if max == 0 {
+                return;
+            }
+            if self.evidence.len() >= max {
+                let excess = (self.evidence.len() + 1).saturating_sub(max);
+                self.evidence.drain_oldest(excess);
+            }
+            if self.generalized_evidence.len() >= max {
+                let excess = (self.generalized_evidence.len() + 1).saturating_sub(max);
+                self.generalized_evidence.drain_oldest(excess);
+            }
+        }
         self.evidence.push(entry);
         self.generalized_evidence.push(generalized_record);
     }

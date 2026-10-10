@@ -1439,7 +1439,8 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
                         &mut factory,
                         child_cx,
                         &mut cell,
-                        Supervisor::new(strategy),
+                        Supervisor::new(strategy)
+                            .with_max_evidence_entries(Supervisor::DEFAULT_ACTOR_EVIDENCE_CAPACITY),
                         task_id,
                         region_id,
                     )
@@ -1558,7 +1559,8 @@ impl Cx {
                         &mut factory,
                         child_cx,
                         &mut cell,
-                        crate::supervision::Supervisor::new(strategy),
+                        crate::supervision::Supervisor::new(strategy)
+                            .with_max_evidence_entries(crate::supervision::Supervisor::DEFAULT_ACTOR_EVIDENCE_CAPACITY),
                         task_id,
                         region_id,
                     )

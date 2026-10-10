@@ -5198,6 +5198,119 @@ mod tests {
         crate::test_complete!("emission_wiring_render_is_deterministic");
     }
 
+    #[test]
+    fn bounded_evidence_capacity_evicts_oldest_entries() {
+        init_test("bounded_evidence_capacity_evicts_oldest_entries");
+
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(RestartConfig {
+            max_restarts: 10,
+            window: Duration::from_mins(1),
+            ..Default::default()
+        }))
+        .with_max_evidence_entries(2);
+
+        assert_eq!(supervisor.max_evidence_entries(), Some(2));
+
+        let task1 = TaskId::from_arena(ArenaIndex::new(0, 1));
+        let task2 = TaskId::from_arena(ArenaIndex::new(0, 2));
+        let task3 = TaskId::from_arena(ArenaIndex::new(0, 3));
+        let region = test_region_id();
+
+        supervisor.on_failure(task1, region, None, &Outcome::Err(()), 1_000);
+        assert_eq!(supervisor.evidence().len(), 1);
+        assert_eq!(supervisor.generalized_evidence().len(), 1);
+
+        supervisor.on_failure(task2, region, None, &Outcome::Err(()), 2_000);
+        assert_eq!(supervisor.evidence().len(), 2);
+        assert_eq!(supervisor.generalized_evidence().len(), 2);
+
+        // Third failure should evict task1 and keep task2 and task3.
+        supervisor.on_failure(task3, region, None, &Outcome::Err(()), 3_000);
+        assert_eq!(supervisor.evidence().len(), 2);
+        assert_eq!(supervisor.generalized_evidence().len(), 2);
+
+        let tasks: Vec<_> = supervisor.evidence().entries().iter().map(|e| e.task_id).collect();
+        assert_eq!(tasks, vec![task2, task3]);
+
+        let gen_tasks: Vec<_> = supervisor
+            .generalized_evidence()
+            .entries()
+            .iter()
+            .map(|e| e.task_id)
+            .collect();
+        assert_eq!(gen_tasks, vec![task2, task3]);
+
+        crate::test_complete!("bounded_evidence_capacity_evicts_oldest_entries");
+    }
+
+    #[test]
+    fn drain_oldest_on_evidence_ledgers() {
+        init_test("drain_oldest_on_evidence_ledgers");
+
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Stop);
+        let task = TaskId::from_arena(ArenaIndex::new(0, 1));
+        let region = test_region_id();
+
+        supervisor.on_failure(task, region, None, &Outcome::Err(()), 1_000);
+        supervisor.on_failure(task, region, None, &Outcome::Err(()), 2_000);
+        supervisor.on_failure(task, region, None, &Outcome::Err(()), 3_000);
+
+        let mut ledger = supervisor.take_evidence();
+        let mut gen_ledger = supervisor.take_generalized_evidence();
+
+        assert_eq!(ledger.len(), 3);
+        assert_eq!(gen_ledger.len(), 3);
+
+        ledger.drain_oldest(1);
+        gen_ledger.drain_oldest(1);
+        assert_eq!(ledger.len(), 2);
+        assert_eq!(gen_ledger.len(), 2);
+
+        ledger.drain_oldest(10); // Saturates at len
+        gen_ledger.drain_oldest(10);
+        assert_eq!(ledger.len(), 0);
+        assert_eq!(gen_ledger.len(), 0);
+
+        // Also verify no-op on empty
+        ledger.drain_oldest(5);
+        gen_ledger.drain_oldest(5);
+        assert_eq!(ledger.len(), 0);
+        assert_eq!(gen_ledger.len(), 0);
+
+        crate::test_complete!("drain_oldest_on_evidence_ledgers");
+    }
+
+    #[test]
+    fn set_max_evidence_entries_dynamically_shrinks_ledger() {
+        init_test("set_max_evidence_entries_dynamically_shrinks_ledger");
+
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(RestartConfig {
+            max_restarts: 10,
+            window: Duration::from_mins(1),
+            ..Default::default()
+        }));
+
+        let task1 = TaskId::from_arena(ArenaIndex::new(0, 1));
+        let task2 = TaskId::from_arena(ArenaIndex::new(0, 2));
+        let task3 = TaskId::from_arena(ArenaIndex::new(0, 3));
+        let region = test_region_id();
+
+        supervisor.on_failure(task1, region, None, &Outcome::Err(()), 1_000);
+        supervisor.on_failure(task2, region, None, &Outcome::Err(()), 2_000);
+        supervisor.on_failure(task3, region, None, &Outcome::Err(()), 3_000);
+
+        assert_eq!(supervisor.evidence().len(), 3);
+        assert_eq!(supervisor.generalized_evidence().len(), 3);
+
+        // Shrink to 1 entry
+        supervisor.set_max_evidence_entries(Some(1));
+        assert_eq!(supervisor.evidence().len(), 1);
+        assert_eq!(supervisor.generalized_evidence().len(), 1);
+        assert_eq!(supervisor.evidence().entries()[0].task_id, task3);
+
+        crate::test_complete!("set_max_evidence_entries_dynamically_shrinks_ledger");
+    }
+
     // ========================================================================
     // RestartStormMonitor tests (e-process)
     // ========================================================================

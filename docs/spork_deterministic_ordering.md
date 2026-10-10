@@ -307,15 +307,17 @@ processes failures in task-completion order: (vt, tid).
 
 ### 4.3 OneForAll / RestForOne Shutdown Ordering
 
-When a restart policy requires stopping siblings, they are stopped in
-*reverse* start order. This mirrors OTP's behavior and ensures that
-dependencies are unwound correctly.
+When a restart policy requires stopping siblings, they are concurrently
+cancelled first (to prevent deadlocks when child cleanup waits on a sibling),
+and then their regions are drained in *reverse* start order. This mirrors OTP's
+dependency unwinding while avoiding deadlocks.
 
 **Contract (SUP-STOP)**:
 ```
 ∀ one_for_all or rest_for_one restart affecting children [ci, ..., cn]:
-  children are stopped in order cn, c_{n-1}, ..., ci (reverse start order).
-  stop(ck) completes before stop(c_{k-1}) begins.
+  children are concurrently cancelled first, and then their regions are
+  drained in order cn, c_{n-1}, ..., ci (reverse start order).
+  drain(ck) completes before drain(c_{k-1}) begins.
 ```
 
 ### 4.4 App/GenServer Shutdown System-Message Ordering

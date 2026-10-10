@@ -742,6 +742,12 @@ impl GeneralizedLedger {
         self.entries.clear();
     }
 
+    /// Drains the oldest `count` entries from the ledger.
+    pub fn drain_oldest(&mut self, count: usize) {
+        let count = count.min(self.entries.len());
+        self.entries.drain(..count);
+    }
+
     /// Render the entire ledger to a deterministic, multi-line string.
     ///
     /// Each entry is rendered on its own line using [`EvidenceRecord::render`].
