@@ -29,12 +29,12 @@ use std::os::unix::fs::MetadataExt;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub(super) const FRAME_BYTES: usize = 384 * 1024;
+pub const FRAME_BYTES: usize = 384 * 1024;
 const CHUNK_BYTES: usize = 64 * 1024;
 const SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
 const ATTEMPT: u64 = 0x7139_cdf1_9042_0017;
 
-pub(super) fn limits() -> DurableSymbolLimits {
+pub fn limits() -> DurableSymbolLimits {
     DurableSymbolLimits {
         batch: SymbolBatchLimits {
             max_encoded_bytes: 8 * 1024 * 1024, max_symbols: 256,
@@ -47,7 +47,7 @@ pub(super) fn limits() -> DurableSymbolLimits {
     }
 }
 
-pub(super) fn staging_limits() -> SymbolChunkedLimits {
+pub fn staging_limits() -> SymbolChunkedLimits {
     SymbolChunkedLimits::new(CHUNK_BYTES, 1, limits().batch.max_encoded_bytes,
         1, limits().batch.max_encoded_bytes, Duration::from_secs(120)).unwrap()
 }
@@ -61,9 +61,12 @@ fn client(endpoint: SocketAddr) -> (RemoteComputationClient, RemotePeerHello) {
         Arc::new(ChunkedSymbolService::new(store, staging_limits()))).unwrap();
     let policy = RemotePeerAdmissionPolicy::new(RemoteProtocolVersion::V1, registry.schema_registry().clone());
     let (_, connector, _) = tls();
+    // One attempt carries the whole verified, journal-synced 4 MiB commit: a debug
+    // build measured 6.2 s with one receiver worker and 13.4 s with two on a shared
+    // RCH host, so 10 s failed every two-worker run. This bounds liveness only.
     let client = RemoteComputationClient::new(endpoint, "localhost", connector,
         RemoteComputationClientConfig::new().with_max_attempts(1)
-            .with_connect_timeout(Duration::from_secs(2)).with_attempt_timeout(Duration::from_secs(10))
+            .with_connect_timeout(Duration::from_secs(2)).with_attempt_timeout(Duration::from_secs(60))
             .with_wire_limits(RemoteServiceWireLimits::new(FRAME_BYTES))).unwrap();
     (client, policy.hello_for(NodeId::new("origin")))
 }
