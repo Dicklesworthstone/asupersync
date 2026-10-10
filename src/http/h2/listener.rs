@@ -5060,6 +5060,8 @@ where
     /// supervision and return the shutdown statistics (including the
     /// graceful-drain report).
     /// Cancellation of the task polling this future also starts that drain.
+    /// A fatal accept or connection-spawn error drains existing connections
+    /// through the same path before returning the original error.
     pub async fn run(self, runtime: &RuntimeHandle) -> io::Result<ShutdownStats> {
         self.run_mapped(
             runtime,
@@ -5625,14 +5627,17 @@ impl<F> Http2Listener<F> {
             Shutdown,
         }
 
-        loop {
+        // An accept or spawn failure ends admission, but cannot release the
+        // listener's ownership of already accepted connection work. Preserve
+        // the original error until the authoritative drain and joins finish.
+        let accept_result = loop {
             let owner_cancelled = owner_cancel.is_requested();
             let coordinator_cancelled = coordinator_cancel.is_requested();
             if self.shutdown_signal.is_shutting_down()
                 || owner_cancelled
                 || coordinator_cancelled
             {
-                break;
+                break Ok(());
             }
 
             let result = {
@@ -5661,7 +5666,7 @@ impl<F> Http2Listener<F> {
             };
 
             let (stream, addr) = match result {
-                AcceptOrShutdown::Shutdown => break,
+                AcceptOrShutdown::Shutdown => break Ok(()),
                 AcceptOrShutdown::Accept(Ok(conn)) => {
                     self.stats.record_accepted();
                     transient_accept_streak = 0;
@@ -5681,7 +5686,7 @@ impl<F> Http2Listener<F> {
                     .await;
                     continue;
                 }
-                AcceptOrShutdown::Accept(Err(e)) => return Err(e),
+                AcceptOrShutdown::Accept(Err(e)) => break Err(e),
             };
 
             #[cfg(unix)]
@@ -5777,12 +5782,12 @@ impl<F> Http2Listener<F> {
                         // future is collected) and keep accepting (h1 parity).
                         continue;
                     }
-                    return Err(io::Error::other(format!(
+                    break Err(io::Error::other(format!(
                         "failed to spawn h2 connection task: {err}"
                     )));
                 }
             }
-        }
+        };
 
         owner_cancel.stop_observing();
         coordinator_cancel.stop_observing();
@@ -5913,7 +5918,7 @@ impl<F> Http2Listener<F> {
         // the existing connection drain, after the accept observers retired.
         let _ = owner_cancel.is_requested();
         let _ = coordinator_cancel.is_requested();
-        Ok(stats)
+        accept_result.map(|()| stats)
     }
 }
 
@@ -9130,5 +9135,324 @@ mod tests {
         virtual_clock.advance_to(Time::from_secs(10) + DRAIN_SUPERVISION_TICK);
         let _ = timer_driver.process_timers();
         assert!(tick.as_mut().poll(&mut task_cx).is_ready());
+    }
+
+    /// Exercise the listener failure boundary with a real HTTP/2 request,
+    /// including its request region and the two-stage GOAWAY drain.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::too_many_lines)]
+    fn fatal_listener_failure_drains_request(fail_spawn: bool, owned: bool, workers: usize) {
+        use crate::bytes::BytesMut;
+        use crate::codec::Decoder as _;
+        use crate::http::h2::connection::FrameCodec;
+        use crate::http::h2::frame::{HeadersFrame, SettingsFrame};
+        use crate::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use crate::runtime::{RuntimeBuilder, yield_now};
+        use crate::sync::Notify;
+        use std::sync::atomic::AtomicBool;
+
+        const WATCHDOG: Duration = Duration::from_secs(10);
+
+        struct Cleanup {
+            release: Arc<Notify>,
+            signal: ShutdownSignal,
+        }
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                self.release.notify_one();
+                self.signal.trigger_immediate();
+            }
+        }
+
+        let runtime = if workers == 1 {
+            RuntimeBuilder::current_thread().build().expect("current-thread runtime")
+        } else {
+            RuntimeBuilder::multi_thread()
+                .worker_threads(workers)
+                .build()
+                .expect("multi-worker runtime")
+        };
+        let runtime_handle = runtime.handle();
+        runtime.block_on(async move {
+            let cx = Cx::current().expect("runtime context");
+            let owner_region = if owned {
+                Some(
+                    cx.open_child_region(ChildRegionSpec::inherit())
+                        .await
+                        .expect("open listener owner"),
+                )
+            } else {
+                None
+            };
+            let owner = owner_region.as_ref().map(|region| region.cx().clone());
+            let started = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let completed = Arc::new(AtomicBool::new(false));
+            let started_for_handler = Arc::clone(&started);
+            let release_for_handler = Arc::clone(&release);
+            let completed_for_handler = Arc::clone(&completed);
+            let handler = move |_request: Request| {
+                let started = Arc::clone(&started_for_handler);
+                let release = Arc::clone(&release_for_handler);
+                let completed = Arc::clone(&completed_for_handler);
+                async move {
+                    let mut released = core::pin::pin!(release.notified());
+                    let mut witnessed_pending = false;
+                    std::future::poll_fn(|task| {
+                        let result = released.as_mut().poll(task);
+                        if result.is_pending() && !witnessed_pending {
+                            witnessed_pending = true;
+                            started.notify_one();
+                        }
+                        result
+                    })
+                    .await;
+                    completed.store(true, Ordering::Release);
+                    Response::new(200, "OK", b"request-completed-before-error".to_vec())
+                }
+            };
+            let tcp = TcpListener::bind("127.0.0.1:0").await.expect("bind ingress");
+            let address = tcp.local_addr().expect("ingress address");
+            let queue = Arc::new(HandoffQueue::default());
+            let config = Http2ListenerConfig::default()
+                .host_policy(HostPolicy::allow_list(vec!["localhost".to_owned()]))
+                .drain_timeout(Duration::from_secs(5))
+                .hard_drain_timeout(WATCHDOG);
+            let mut handoff_ingress = None;
+            let listener = if fail_spawn {
+                Http2Listener::from_listener(tcp, handler, config)
+            } else {
+                handoff_ingress = Some(tcp);
+                Http2Listener::from_handoff(Arc::clone(&queue), handler, config)
+            };
+            let manager = listener.connection_manager().clone();
+            let signal = listener.shutdown_signal();
+            let requests = listener.in_flight_requests();
+            let stats = listener.stats_handle();
+            let _cleanup = Cleanup {
+                release: Arc::clone(&release),
+                signal: signal.clone(),
+            };
+            let spawn_attempts = Arc::new(AtomicUsize::new(0));
+            let attempts_for_run = Arc::clone(&spawn_attempts);
+            let mut serving = cx
+                .spawn(move |_coordinator| async move {
+                    if fail_spawn {
+                        let spawner = owner.clone();
+                        let runtime_for_spawn = runtime_handle.clone();
+                        listener
+                            .run_mapped_with(
+                                owner,
+                                runtime_handle,
+                                move |connection| {
+                                    if attempts_for_run.fetch_add(1, Ordering::AcqRel) == 1 {
+                                        return Err(SpawnError::RuntimeUnavailable);
+                                    }
+                                    if let Some(spawner) = &spawner {
+                                        spawner
+                                            .spawn(move |_connection_cx| connection)
+                                            .map(H2ConnectionTask::Owned)
+                                    } else {
+                                        runtime_for_spawn
+                                            .try_spawn(connection)
+                                            .map(H2ConnectionTask::Root)
+                                    }
+                                },
+                                true,
+                                #[cfg(feature = "http2-streaming")]
+                                None,
+                                |handler, request| async move {
+                                    H2DispatchResponse::Buffered(
+                                        handler(request).await.into_h2_response(),
+                                    )
+                                },
+                            )
+                            .await
+                    } else if let Some(owner) = owner {
+                        listener.run_in(&owner).await
+                    } else {
+                        listener.run(&runtime_handle).await
+                    }
+                })
+                .expect("spawn listener coordinator");
+
+            let mut client = TcpStream::connect(address).await.expect("connect request");
+            if let Some(ingress) = handoff_ingress.take() {
+                let (accepted, peer) = ingress.accept().await.expect("accept handoff");
+                queue.push(Box::new(accepted), Some(peer));
+            }
+            let mut outbound = BytesMut::new();
+            outbound.extend_from_slice(CLIENT_PREFACE);
+            Frame::Settings(SettingsFrame::new(Vec::new()))
+                .encode(&mut outbound)
+                .expect("encode peer settings");
+            Frame::Headers(HeadersFrame::new(
+                1,
+                encode_hpack_test_headers(&[
+                    (":method", "GET"),
+                    (":scheme", "http"),
+                    (":path", "/drain"),
+                    (":authority", "localhost"),
+                ]),
+                true,
+                true,
+            ))
+            .encode(&mut outbound)
+            .expect("encode request headers");
+            client.write_all(&outbound).await.expect("write request");
+            crate::time::timeout(cx.now(), WATCHDOG, started.notified())
+                .await
+                .expect("handler reaches a registered Pending");
+            assert_eq!(manager.active_count(), 1);
+            assert_eq!(requests.load(Ordering::Acquire), 1);
+            assert!(!completed.load(Ordering::Acquire));
+
+            let mut rejected = if fail_spawn {
+                Some(TcpStream::connect(address).await.expect("second connection"))
+            } else {
+                queue.close();
+                None
+            };
+            crate::time::timeout(cx.now(), WATCHDOG, async {
+                while stats.snapshot().drains_started_total == 0 {
+                    assert!(
+                        !serving.is_finished(),
+                        "fatal error was published before existing work entered drain"
+                    );
+                    yield_now().await;
+                }
+            })
+            .await
+            .expect("fatal accept or spawn failure starts the drain");
+            assert_eq!(signal.phase(), ShutdownPhase::Draining);
+            assert!(!serving.is_finished(), "the held handler still belongs to run");
+            assert_eq!(manager.active_count(), 1, "rejected spawn released its guard");
+            assert_eq!(requests.load(Ordering::Acquire), 1);
+            if let Some(rejected) = rejected.as_mut() {
+                let mut byte = [0_u8; 1];
+                assert_eq!(
+                    crate::time::timeout(cx.now(), WATCHDOG, rejected.read(&mut byte))
+                        .await
+                        .expect("rejected connection closes")
+                        .expect("read rejected connection"),
+                    0
+                );
+            }
+
+            release.notify_one();
+            let mut response = Vec::new();
+            crate::time::timeout(cx.now(), WATCHDOG, client.read_to_end(&mut response))
+                .await
+                .expect("in-flight response and GOAWAY drain")
+                .expect("read drained response");
+            let mut response = {
+                let mut bytes = BytesMut::new();
+                bytes.extend_from_slice(&response);
+                bytes
+            };
+            let mut codec = FrameCodec::new();
+            let mut hpack = crate::http::h2::HpackDecoder::new();
+            let mut status_ok = false;
+            let mut end_stream = false;
+            let mut definitive_goaway = false;
+            let mut body = Vec::new();
+            while let Some(frame) = codec.decode(&mut response).expect("decode drained frames") {
+                match frame {
+                    Frame::Headers(mut headers) => {
+                        assert_eq!(headers.stream_id, 1);
+                        assert!(headers.end_headers);
+                        status_ok |= hpack
+                            .decode(&mut headers.header_block)
+                            .expect("decode response headers")
+                            .contains(&Header::new(":status", "200"));
+                        end_stream |= headers.end_stream;
+                    }
+                    Frame::Data(data) => {
+                        assert_eq!(data.stream_id, 1);
+                        body.extend_from_slice(&data.data);
+                        end_stream |= data.end_stream;
+                    }
+                    Frame::GoAway(goaway) => {
+                        assert_eq!(goaway.error_code, ErrorCode::NoError);
+                        definitive_goaway |= goaway.last_stream_id == 1;
+                    }
+                    Frame::Settings(_) | Frame::WindowUpdate(_) => {}
+                    other => panic!("unexpected frame during graceful drain: {other:?}"),
+                }
+            }
+            assert!(response.is_empty(), "drain must not truncate a frame");
+            assert!(status_ok);
+            assert!(end_stream, "the response reaches END_STREAM");
+            assert!(definitive_goaway, "the connection reaches definitive GOAWAY");
+            assert_eq!(body, b"request-completed-before-error");
+
+            let error = crate::time::timeout(cx.now(), WATCHDOG, serving.join(&cx))
+                .await
+                .expect("listener joins every connection")
+                .expect("listener retains its typed result")
+                .expect_err("original fatal error survives cleanup");
+            if fail_spawn {
+                assert_eq!(error.kind(), io::ErrorKind::Other);
+                assert_eq!(
+                    error.to_string(),
+                    format!(
+                        "failed to spawn h2 connection task: {}",
+                        SpawnError::RuntimeUnavailable
+                    )
+                );
+                assert_eq!(spawn_attempts.load(Ordering::Acquire), 2);
+            } else {
+                assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+                assert_eq!(error.to_string(), "HTTP handoff queue is closed");
+            }
+            assert_eq!(error.raw_os_error(), None);
+            assert!(completed.load(Ordering::Acquire));
+            assert_eq!(signal.phase(), ShutdownPhase::Stopped);
+            assert!(manager.is_empty());
+            assert_eq!(requests.load(Ordering::Acquire), 0);
+            let snapshot = stats.snapshot();
+            assert_eq!(snapshot.accepted_total, if fail_spawn { 2 } else { 1 });
+            assert_eq!(snapshot.spawn_failures_total, u64::from(fail_spawn));
+            assert_eq!(snapshot.transient_accept_errors_total, 0);
+            assert_eq!(snapshot.drains_started_total, 1);
+            assert_eq!(snapshot.drains_quiescent_total, 1);
+            assert_eq!(snapshot.drain_escalations_total, 0);
+            assert_eq!(snapshot.drain_hard_deadline_hits_total, 0);
+            assert_eq!(snapshot.last_drain_requests_at_start, 1);
+            assert_eq!(snapshot.last_drain_requests_stranded, 0);
+            if let Some(region) = owner_region {
+                crate::time::timeout(cx.now(), WATCHDOG, region.close())
+                    .await
+                    .expect("owner closes within bound")
+                    .expect("owner reaches quiescence");
+            }
+        });
+        let retired_at = std::time::Instant::now();
+        while !runtime.is_quiescent() {
+            assert!(retired_at.elapsed() < WATCHDOG, "listener work must retire");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+        assert!(runtime.shutdown_timeout(WATCHDOG));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn fatal_handoff_accept_error_drains_native_http2_requests() {
+        for owned in [false, true] {
+            for workers in [1, 2] {
+                fatal_listener_failure_drains_request(false, owned, workers);
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn fatal_connection_spawn_error_drains_native_http2_requests() {
+        for owned in [false, true] {
+            for workers in [1, 2] {
+                fatal_listener_failure_drains_request(true, owned, workers);
+            }
+        }
     }
 }
