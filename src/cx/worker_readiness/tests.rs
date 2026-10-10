@@ -31,6 +31,59 @@ fn held() -> (impl ManagedChildFactory<&'static str>, WorkerReadiness) {
 }
 
 #[test]
+fn permanent_retirement_closes_both_waits_while_factory_is_retained() {
+    let cx = Cx::for_testing();
+    let (factory, readiness) = held();
+    let mut body = factory.start(cx.clone(), generation(&cx, 1));
+    let (wakes, waker) = counter();
+    let mut task = Context::from_waker(&waker);
+    assert!(body.as_mut().poll(&mut task).is_pending());
+    let mut first = Box::pin(readiness.wait_ready(&cx));
+    let Poll::Ready(Ok(ready)) = first.as_mut().poll(&mut task) else {
+        panic!("first generation must be ready");
+    };
+    drop(first);
+    drop(body);
+    assert_eq!(readiness.state().phase, WorkerReadinessPhase::Retired);
+
+    let mut any = Box::pin(readiness.wait_ready(&cx));
+    let mut next = Box::pin(readiness.wait_ready_after(&cx, &ready));
+    assert!(any.as_mut().poll(&mut task).is_pending());
+    assert!(next.as_mut().poll(&mut task).is_pending());
+    wakes.0.store(0, Ordering::SeqCst);
+    factory.retired();
+    assert!(wakes.0.load(Ordering::SeqCst) > 0);
+    assert_eq!(readiness.state().phase, WorkerReadinessPhase::Closed);
+    assert!(matches!(any.as_mut().poll(&mut task), Poll::Ready(Err(WorkerReadinessError::Closed))));
+    assert!(matches!(next.as_mut().poll(&mut task), Poll::Ready(Err(WorkerReadinessError::Closed))));
+    // An allocation retained by another binding cannot keep observers parked.
+    assert_eq!(readiness.state().generation, Some(ready.generation()));
+    drop(factory);
+}
+
+#[test]
+fn retirement_before_start_closes_without_invoking_the_initializer() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let initialized = Arc::clone(&calls);
+    let (factory, readiness) = initialized_worker(
+        move |_, _| {
+            initialized.fetch_add(1, Ordering::SeqCst);
+            async { Outcome::<(), ()>::Ok(()) }
+        },
+        |_, _, ()| async { Outcome::<(), ()>::Ok(()) },
+    );
+    let cx = Cx::for_testing();
+    let mut waiting = Box::pin(readiness.wait_ready(&cx));
+    let (wakes, waker) = counter();
+    let mut task = Context::from_waker(&waker);
+    assert!(waiting.as_mut().poll(&mut task).is_pending());
+    factory.retired();
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(wakes.0.load(Ordering::SeqCst) > 0);
+    assert!(matches!(waiting.as_mut().poll(&mut task), Poll::Ready(Err(WorkerReadinessError::Closed))));
+}
+
+#[test]
 fn readiness_requires_completed_initialization_and_run_construction() {
     let cx = Cx::for_testing();
     let (release, receiving) = oneshot::channel::<()>();

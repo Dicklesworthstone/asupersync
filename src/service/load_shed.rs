@@ -246,6 +246,11 @@ where
     type Error = LoadShedError<S::Error>;
     type Future = LoadShedFuture<S::Future>;
 
+    fn release_readiness(&mut self) -> super::ReadinessRelease {
+        self.ready_observed = false;
+        self.inner.release_readiness()
+    }
+
     #[inline]
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         match poll_ready_preserving_self_wake::<S, Request>(&mut self.inner, &mut self.probe, cx) {
@@ -257,6 +262,7 @@ where
             Poll::Ready(Err(e)) => {
                 self.overloaded = false;
                 self.ready_observed = false;
+                drop(self.inner.release_readiness());
                 Poll::Ready(Err(LoadShedError::Inner(e)))
             }
             Poll::Pending => {
@@ -264,6 +270,7 @@ where
                 // so the caller can call us immediately (and we'll shed)
                 self.overloaded = true;
                 self.ready_observed = true;
+                drop(self.inner.release_readiness());
                 Poll::Ready(Ok(()))
             }
         }

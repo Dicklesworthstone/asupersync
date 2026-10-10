@@ -25,6 +25,7 @@ use std::task::{Context, Poll, Waker};
 struct ReadinessWaiters {
     next_id: u64,
     wakers: Vec<(u64, Waker)>,
+    owners: usize,
 }
 
 impl ReadinessWaiters {
@@ -42,17 +43,16 @@ impl ReadinessWaiters {
     }
 
     fn release(waiters: &Mutex<Self>, id: Option<u64>) {
-        let others: Vec<Waker> = {
+        let retired = {
             let mut guard = waiters.lock();
-            guard
-                .wakers
-                .drain(..)
-                .filter(|(entry, _)| Some(*entry) != id)
-                .map(|(_, waker)| waker)
-                .collect()
+            std::mem::take(&mut guard.wakers)
         };
-        for waker in others {
-            waker.wake();
+        // The excluded caller's Waker may run user code when dropped too.
+        // Move every entry out before filtering or dispatching any callback.
+        for (entry, waker) in retired {
+            if Some(entry) != id {
+                waker.wake();
+            }
         }
     }
 }
@@ -169,8 +169,7 @@ where
     PollReady {
         service: Arc<Mutex<S>>,
         waiters: Arc<Mutex<ReadinessWaiters>>,
-        /// This future's entry in `waiters`, once it has waited.
-        waiter: Option<u64>,
+        readiness: SteerReadiness<S, Request>,
         request: Option<Request>,
     },
     Calling {
@@ -197,31 +196,71 @@ where
         waiters: Arc<Mutex<ReadinessWaiters>>,
         request: Request,
     ) -> Self {
+        waiters.lock().owners += 1;
+        let readiness = SteerReadiness {
+            service: Arc::clone(&service),
+            waiters: Arc::clone(&waiters),
+            waiter: None,
+            waiting: true,
+            marker: std::marker::PhantomData,
+        };
         Self {
             state: SteerState::PollReady {
                 service,
                 waiters,
-                waiter: None,
+                readiness,
                 request: Some(request),
             },
         }
     }
 }
 
-impl<S, Request> Drop for SteerFuture<S, Request>
+struct SteerReadiness<S, Request>
+where
+    S: Service<Request>,
+{
+    service: Arc<Mutex<S>>,
+    waiters: Arc<Mutex<ReadinessWaiters>>,
+    waiter: Option<u64>,
+    waiting: bool,
+    marker: std::marker::PhantomData<fn(Request)>,
+}
+
+impl<S, Request> SteerReadiness<S, Request>
+where
+    S: Service<Request>,
+{
+    fn dispatched(&mut self) {
+        self.waiting = false;
+        self.waiters.lock().owners -= 1;
+    }
+}
+
+impl<S, Request> Drop for SteerReadiness<S, Request>
 where
     S: Service<Request>,
 {
     fn drop(&mut self) {
-        // The backend may hold this future's waker as its only one.
-        if let SteerState::PollReady {
-            waiters,
-            waiter: Some(id),
-            ..
-        } = &self.state
-        {
-            ReadinessWaiters::release(waiters, Some(*id));
-        }
+        let _release_scope = super::service::ReadinessReleaseScope::new();
+        let waiters = Arc::clone(&self.waiters);
+        let waiter = self.waiter;
+        let retire_waiter = super::ReadinessRelease::new(move || {
+            ReadinessWaiters::release(&waiters, waiter);
+        });
+        let release = if self.waiting {
+            let mut service = self.service.lock();
+            let last = {
+                let mut waiters = self.waiters.lock();
+                waiters.owners -= 1;
+                waiters.owners == 0
+            };
+            last.then(|| service.release_readiness())
+        } else {
+            None
+        };
+        drop(release);
+        // Never wake peers while holding either coordinator lock.
+        drop(retire_waiter);
     }
 }
 
@@ -260,36 +299,38 @@ where
                 SteerState::PollReady {
                     service,
                     waiters,
-                    mut waiter,
+                    mut readiness,
                     mut request,
                 } => {
+                    let _release_scope = super::service::ReadinessReleaseScope::new();
                     let mut inner = service.lock();
                     match inner.poll_ready(cx) {
                         Poll::Pending => {
                             drop(inner);
-                            ReadinessWaiters::register(&waiters, &mut waiter, cx.waker());
+                            ReadinessWaiters::register(&waiters, &mut readiness.waiter, cx.waker());
                             this.state = SteerState::PollReady {
                                 service,
                                 waiters,
-                                waiter,
+                                readiness,
                                 request,
                             };
                             return Poll::Pending;
                         }
                         Poll::Ready(Err(err)) => {
                             drop(inner);
-                            ReadinessWaiters::release(&waiters, waiter);
+                            drop(readiness);
                             return Poll::Ready(Err(SteerError::Inner(err)));
                         }
                         Poll::Ready(Ok(())) => {
                             let Some(req) = request.take() else {
                                 drop(inner);
-                                ReadinessWaiters::release(&waiters, waiter);
+                                drop(readiness);
                                 return Poll::Ready(Err(SteerError::PolledAfterCompletion));
                             };
                             let future = inner.call(req);
+                            readiness.dispatched();
                             drop(inner);
-                            ReadinessWaiters::release(&waiters, waiter);
+                            drop(readiness);
                             this.state = SteerState::Calling { future };
                         }
                     }
@@ -413,6 +454,132 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    #[test]
+    fn abandoned_readiness_cleanup_can_reenter_both_steer_locks() {
+        use super::super::readiness_tests::{ReleaseCallback, ReleaseProbe};
+
+        let callback: ReleaseCallback = Arc::new(Mutex::new(None));
+        let mut steer = Steer::new(vec![ReleaseProbe(Arc::clone(&callback))], |_: &u8| 0);
+        let service = Arc::downgrade(&steer.services[0]);
+        let waiters = Arc::downgrade(&steer.waiters[0]);
+        let released = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&released);
+        *callback.lock() = Some(Box::new(move || {
+            assert!(service.upgrade().unwrap().try_lock().is_some());
+            assert!(waiters.upgrade().unwrap().try_lock().is_some());
+            observed.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        let mut pending = steer.call(1);
+        let waker = noop_waker();
+        assert!(Pin::new(&mut pending)
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending());
+        drop(pending);
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn nested_filter_cleanup_runs_after_the_steer_service_unlocks() {
+        use super::super::Filter;
+        use super::super::readiness_tests::{ReadyReleaseProbe, ReleaseCallback};
+
+        let callback: ReleaseCallback = Arc::new(Mutex::new(None));
+        let filter = Filter::new(ReadyReleaseProbe(Arc::clone(&callback)), |_: &u8| false);
+        let mut steer = Steer::new(vec![filter], |_: &u8| 0);
+        let service = Arc::downgrade(&steer.services[0]);
+        let waiters = Arc::downgrade(&steer.waiters[0]);
+        let released = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&released);
+        *callback.lock() = Some(Box::new(move || {
+            assert!(service.upgrade().unwrap().try_lock().is_some());
+            assert!(waiters.upgrade().unwrap().try_lock().is_some());
+            observed.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        let mut response = steer.call(1);
+        let waker = noop_waker();
+        assert!(matches!(
+            Pin::new(&mut response).poll(&mut Context::from_waker(&waker)),
+            Poll::Ready(Err(SteerError::Inner(super::super::FilterError::Rejected)))
+        ));
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn panicking_inner_detacher_still_unregisters_the_steer_waiter_after_unlocking() {
+        use super::super::ConcurrencyLimit;
+        use super::super::readiness_tests::ReleaseCallback;
+        use crate::sync::{OwnedSemaphorePermit, Semaphore};
+
+        struct PanickingDetacher;
+
+        impl Service<u8> for PanickingDetacher {
+            type Response = u8;
+            type Error = &'static str;
+            type Future = Ready<Result<u8, Self::Error>>;
+
+            fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn call(&mut self, request: u8) -> Self::Future {
+                ready(Ok(request))
+            }
+
+            fn release_readiness(&mut self) -> super::super::ReadinessRelease {
+                panic!("inner detachment panic");
+            }
+        }
+
+        struct DropWake(ReleaseCallback);
+
+        #[allow(clippy::manual_noop_waker)]
+        impl std::task::Wake for DropWake {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        impl Drop for DropWake {
+            fn drop(&mut self) {
+                let callback = self.0.lock().take();
+                if let Some(callback) = callback {
+                    callback();
+                }
+            }
+        }
+
+        let semaphore = Arc::new(Semaphore::new(1));
+        let held = OwnedSemaphorePermit::try_acquire_arc(&semaphore, 1).unwrap();
+        let mut steer = Steer::new(
+            vec![ConcurrencyLimit::new(PanickingDetacher, Arc::clone(&semaphore))],
+            |_: &u8| 0,
+        );
+        let service = Arc::downgrade(&steer.services[0]);
+        let waiters = Arc::downgrade(&steer.waiters[0]);
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&dropped);
+        let callback: ReleaseCallback = Arc::new(Mutex::new(Some(Box::new(move || {
+            assert!(service.upgrade().unwrap().try_lock().is_some());
+            assert!(waiters.upgrade().unwrap().try_lock().is_some());
+            observed.fetch_add(1, Ordering::SeqCst);
+        }))));
+        let waker = Waker::from(Arc::new(DropWake(callback)));
+        let mut pending = steer.call(1);
+        assert!(Pin::new(&mut pending)
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending());
+        assert_eq!(steer.waiters[0].lock().wakers.len(), 1);
+        drop(waker);
+        let panic = catch_unwind(AssertUnwindSafe(|| drop(pending)))
+            .expect_err("inner detachment panic must propagate");
+        assert_eq!(panic.downcast_ref::<&str>(), Some(&"inner detachment panic"));
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert!(steer.waiters[0].lock().wakers.is_empty());
+        assert_eq!(steer.waiters[0].lock().owners, 0);
+        drop(held);
+        assert!(OwnedSemaphorePermit::try_acquire_arc(&semaphore, 1).is_ok());
     }
 
     // Deterministic test services.
@@ -824,14 +991,14 @@ mod tests {
 
     #[test]
     fn steer_future_missing_request_fails_closed() {
-        let mut future = SteerFuture {
-            state: SteerState::PollReady {
-                service: Arc::new(Mutex::new(IdService { id: 7 })),
-                waiters: Arc::default(),
-                waiter: None,
-                request: None,
-            },
-        };
+        let mut future = SteerFuture::new(
+            Arc::new(Mutex::new(IdService { id: 7 })),
+            Arc::default(),
+            0usize,
+        );
+        if let SteerState::PollReady { request, .. } = &mut future.state {
+            *request = None;
+        }
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 

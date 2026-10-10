@@ -202,6 +202,13 @@ where
     type Error = ConcurrencyLimitError<S::Error>;
     type Future = ConcurrencyLimitFuture<S::Future, S::Error>;
 
+    fn release_readiness(&mut self) -> super::ReadinessRelease {
+        let state = std::mem::replace(&mut self.state, State::Idle);
+        let outer = super::ReadinessRelease::new(move || drop(state));
+        let inner = self.inner.release_readiness();
+        super::ReadinessRelease::new(move || drop((inner, outer)))
+    }
+
     #[inline]
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         let mut restarted_acquisition = false;

@@ -282,6 +282,14 @@ where
         M::Error,
     >;
 
+    fn release_readiness(&mut self) -> super::ReadinessRelease {
+        self.ready_observed = false;
+        self.inner.as_mut().map_or_else(
+            super::ReadinessRelease::default,
+            <M::Service as Service<Request>>::release_readiness,
+        )
+    }
+
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         if self.refresh_pending.swap(false, Ordering::AcqRel) {
             self.invalidate_inner();

@@ -7,7 +7,7 @@
 
 use super::{DependencyError, DependencyScopeConfig, DependencyScopeError, DependencyScopeReport};
 use super::WorkerDependencies;
-use super::super::{initialized_worker, notify, WorkerReadiness, WorkerReadinessPhase};
+use super::super::{initialized_worker, notify, ReadinessFactory, WorkerReadiness, WorkerReadinessPhase};
 use crate::cx::{Cx, Scope};
 use crate::runtime::{RuntimeState, SpawnError};
 use crate::supervision::{
@@ -95,7 +95,8 @@ impl ChildStart for InitializedOnly {
 // readiness even on classifier panic or abandoned driving future. Never infer
 // finality for Transient from its returned outcome: a concurrent controller
 // shutdown can select a collateral restart under OneForAll/RestForOne. Only the
-// managed controller owns that decision; factory Drop closes reusable views.
+// managed controller owns that decision and closes reusable views through the
+// permanent-retirement hook; factory Drop also closes abandoned ownership.
 struct TerminalReadiness {
     readiness: WorkerReadiness,
     close: bool,
@@ -160,6 +161,7 @@ impl<E: Send + 'static> InitializedChildBinding<E> {
         let terminal = readiness.clone();
         let classify = Arc::new(classify);
         let bind: BindFactory<E> = Box::new(move |dependencies, shutdown_budget| {
+            let readiness = terminal.clone();
             let factory = move |cx: Cx, generation: ManagedGeneration| {
                 let dependencies = dependencies.clone();
                 let worker = Arc::clone(&worker);
@@ -187,7 +189,7 @@ impl<E: Send + 'static> InitializedChildBinding<E> {
                     classify(result)
                 }
             };
-            ManagedChildBinding::new(binding_name, mode, factory)
+            ManagedChildBinding::new(binding_name, mode, ReadinessFactory { inner: factory, readiness })
         });
         Self { name, readiness, bind }
     }

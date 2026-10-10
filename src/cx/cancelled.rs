@@ -30,8 +30,9 @@ struct Registration {
 ///
 /// While the context's task is live, cancellation requests wake registered
 /// observers. When a task completes, its cancellation-waker registry is closed
-/// (`cancel_waker_registry_closed`) and any registered observers are retired
-/// without a wakeup. A cancellation request published to a context after its
+/// (`cancel_waker_registry_closed`) and any registered observers are retired.
+/// They are woken only if a request published before completion had not
+/// reached them yet. A cancellation request published to a context after its
 /// task has already completed does not wake observers (since no active
 /// registrations remain, and new registrations are rejected with a token of 0).
 /// However, if cancellation is requested post-completion, any subsequent poll
@@ -66,8 +67,9 @@ impl<Caps> Cx<Caps> {
     ///
     /// When a task completes and its record reaches terminal retirement, the
     /// runtime detaches its cancellation-waker registry
-    /// (`cancel_waker_registry_closed`). Parked observers are retired without
-    /// wakeups, and subsequent calls to [`Self::cancel_fast`] or [`Self::cancel_with`]
+    /// (`cancel_waker_registry_closed`). Parked observers are retired; a
+    /// request published before completion whose wakes were still deferred is
+    /// delivered to them first. Subsequent calls to [`Self::cancel_fast`] or [`Self::cancel_with`]
     /// on the finished task's context do not wake observers (since no active
     /// waker registrations remain). Additionally, completed contexts reject new
     /// waker registrations (returning a zero token).
@@ -471,6 +473,38 @@ mod tests {
         assert_eq!(count.0.load(Ordering::SeqCst), 0);
 
         // Repolling observes the cancellation and completes.
+        assert!(wait.as_mut().poll(&mut task).is_ready());
+        assert_eq!(registrations(&cx), 0);
+    }
+
+    /// A checkpoint that observes its own budget cancellation defers the
+    /// observers' wakes to the scheduler's reconciliation. A task that finishes
+    /// first must still deliver them when completion retires its targets.
+    #[test]
+    fn completion_delivers_a_cancellation_its_observers_were_still_owed() {
+        let cx = Cx::for_testing_with_budget(crate::types::Budget::new().with_poll_quota(0));
+        let (count, waker) = counter();
+        let mut task = Context::from_waker(&waker);
+        let mut wait = Box::pin(cx.cancelled());
+        assert!(wait.as_mut().poll(&mut task).is_pending());
+        assert_eq!(registrations(&cx), 1);
+
+        assert!(cx.checkpoint().is_err(), "an exhausted poll quota cancels");
+        assert!(cx.inner.read().cancel_wakers_pending);
+        assert_eq!(count.0.load(Ordering::SeqCst), 0, "the wake is deferred");
+
+        let retired = cx.inner.write().take_cancel_wakers();
+        assert_eq!(
+            count.0.load(Ordering::SeqCst),
+            0,
+            "nothing wakes under the lock"
+        );
+        drop(retired);
+        assert_eq!(
+            count.0.load(Ordering::SeqCst),
+            1,
+            "retiring the observer delivers the cancellation it was owed"
+        );
         assert!(wait.as_mut().poll(&mut task).is_ready());
         assert_eq!(registrations(&cx), 0);
     }

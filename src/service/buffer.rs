@@ -25,6 +25,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
 /// Default buffer capacity.
@@ -83,6 +84,8 @@ impl<S> Layer<S> for BufferLayer {
 pub struct Buffer<S> {
     shared: Arc<SharedBuffer<S>>,
     ready_reserved: bool,
+    ready_waiting: bool,
+    readiness_owner: Arc<()>,
 }
 
 struct SharedBuffer<S> {
@@ -96,15 +99,58 @@ struct SharedBuffer<S> {
     /// Whether the buffer has been closed.
     closed: Mutex<bool>,
     /// Wakers waiting for capacity to become available.
-    ready_wakers: Mutex<Vec<std::task::Waker>>,
+    ready_wakers: Mutex<Vec<CapacityWaiter>>,
     /// Wakers waiting for the inner service to become ready.
     inner_wakers: Mutex<Vec<std::task::Waker>>,
+    /// Admitted futures that have not dispatched to the shared inner service.
+    waiting_for_ready: AtomicUsize,
 }
 
 #[derive(Default)]
 struct SlotCounts {
     pending: usize,
     reserved: usize,
+}
+
+struct CapacityWaiter {
+    waker: Waker,
+    owners: Vec<Arc<()>>,
+}
+
+fn register_capacity_waiter(waiters: &mut Vec<CapacityWaiter>, owner: &Arc<()>, waker: &Waker) {
+    if let Some(waiter) = waiters
+        .iter_mut()
+        .find(|waiter| waiter.waker.will_wake(waker))
+    {
+        if !waiter
+            .owners
+            .iter()
+            .any(|existing| Arc::ptr_eq(existing, owner))
+        {
+            waiter.owners.push(Arc::clone(owner));
+        }
+    } else {
+        waiters.push(CapacityWaiter {
+            waker: waker.clone(),
+            owners: vec![Arc::clone(owner)],
+        });
+    }
+}
+
+fn remove_capacity_waiter(waiters: &mut Vec<CapacityWaiter>, owner: &Arc<()>) -> Vec<Waker> {
+    let mut retired = Vec::new();
+    let mut index = 0;
+    while index < waiters.len() {
+        waiters[index]
+            .owners
+            .retain(|existing| !Arc::ptr_eq(existing, owner));
+        if waiters[index].owners.is_empty() {
+            retired.push(waiters.swap_remove(index).waker);
+        } else {
+            index += 1;
+        }
+    }
+    retired
 }
 
 impl SlotCounts {
@@ -125,20 +171,10 @@ fn release_pending_capacity<S>(shared: &SharedBuffer<S>) {
     let ready_wakers = std::mem::take(&mut *shared.ready_wakers.lock());
     let inner_wakers = std::mem::take(&mut *shared.inner_wakers.lock());
     drop(slots);
-    for waker in ready_wakers {
-        waker.wake();
+    for waiter in ready_wakers {
+        waiter.waker.wake();
     }
     for waker in inner_wakers {
-        waker.wake();
-    }
-}
-
-fn release_reserved_capacity<S>(shared: &SharedBuffer<S>) {
-    let mut slots = shared.slots.lock();
-    slots.reserved = slots.reserved.saturating_sub(1);
-    let ready_wakers = std::mem::take(&mut *shared.ready_wakers.lock());
-    drop(slots);
-    for waker in ready_wakers {
         waker.wake();
     }
 }
@@ -160,9 +196,44 @@ impl<S> Buffer<S> {
                 closed: Mutex::new(false),
                 ready_wakers: Mutex::new(Vec::new()),
                 inner_wakers: Mutex::new(Vec::new()),
+                waiting_for_ready: AtomicUsize::new(0),
             }),
             ready_reserved: false,
+            ready_waiting: false,
+            readiness_owner: Arc::new(()),
         }
+    }
+
+    fn detach_readiness(&mut self) -> super::ReadinessRelease {
+        let reserved = std::mem::replace(&mut self.ready_reserved, false);
+        let waiting = std::mem::replace(&mut self.ready_waiting, false);
+        if !reserved && !waiting {
+            return super::ReadinessRelease::default();
+        }
+        let wakers = {
+            let mut slots = self.shared.slots.lock();
+            let mut waiters = self.shared.ready_wakers.lock();
+            if reserved {
+                slots.reserved = slots.reserved.saturating_sub(1);
+                std::mem::take(&mut *waiters)
+                    .into_iter()
+                    .map(|waiter| waiter.waker)
+                    .collect()
+            } else {
+                remove_capacity_waiter(&mut waiters, &self.readiness_owner)
+            }
+        };
+        // An unused slot wakes peers; an abandoned wait only drops its own
+        // detached wakers. Neither callback runs under a coordinator lock.
+        super::ReadinessRelease::new(move || {
+            if reserved {
+                for waker in wakers {
+                    waker.wake();
+                }
+            } else {
+                drop(wakers);
+            }
+        })
     }
 
     /// Returns the buffer capacity.
@@ -196,9 +267,9 @@ impl<S> Buffer<S> {
     /// closed state and return `BufferError::Closed`.
     pub fn close(&self) {
         *self.shared.closed.lock() = true;
-        let wakers: Vec<Waker> = self.shared.ready_wakers.lock().drain(..).collect();
-        for waker in wakers {
-            waker.wake();
+        let waiters = std::mem::take(&mut *self.shared.ready_wakers.lock());
+        for waiter in waiters {
+            waiter.waker.wake();
         }
     }
 
@@ -214,16 +285,15 @@ impl<S> Clone for Buffer<S> {
         Self {
             shared: self.shared.clone(),
             ready_reserved: false,
+            ready_waiting: false,
+            readiness_owner: Arc::new(()),
         }
     }
 }
 
 impl<S> Drop for Buffer<S> {
     fn drop(&mut self) {
-        if self.ready_reserved {
-            self.ready_reserved = false;
-            release_reserved_capacity(self.shared.as_ref());
-        }
+        drop(self.detach_readiness());
     }
 }
 
@@ -286,6 +356,7 @@ enum BufferFutureState<F, E, S, R> {
     WaitingForReady {
         request: Option<R>,
         shared: Arc<SharedBuffer<S>>,
+        readiness: InnerReadiness<S>,
     },
     /// Waiting for the inner future.
     Active {
@@ -299,11 +370,21 @@ enum BufferFutureState<F, E, S, R> {
 }
 
 impl<F, E, S, R> BufferFuture<F, E, S, R> {
-    fn waiting(request: R, shared: Arc<SharedBuffer<S>>) -> Self {
+    fn waiting(request: R, shared: Arc<SharedBuffer<S>>) -> Self
+    where
+        S: Service<R>,
+    {
+        shared.waiting_for_ready.fetch_add(1, Ordering::AcqRel);
+        let readiness = InnerReadiness {
+            shared: Arc::clone(&shared),
+            release: <S as Service<R>>::release_readiness,
+            waiting: true,
+        };
         Self {
             state: BufferFutureState::WaitingForReady {
                 request: Some(request),
                 shared,
+                readiness,
             },
         }
     }
@@ -316,6 +397,37 @@ impl<F, E, S, R> BufferFuture<F, E, S, R> {
 
     fn release_pending_slot(shared: &SharedBuffer<S>) {
         release_pending_capacity(shared);
+    }
+}
+
+/// The shared service's readiness belongs to its waiting requests collectively.
+/// Retiring one caller must not revoke a surviving caller's FIFO place.
+struct InnerReadiness<S> {
+    shared: Arc<SharedBuffer<S>>,
+    release: fn(&mut S) -> super::ReadinessRelease,
+    waiting: bool,
+}
+
+impl<S> InnerReadiness<S> {
+    fn dispatched(&mut self) {
+        self.waiting = false;
+        self.shared.waiting_for_ready.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl<S> Drop for InnerReadiness<S> {
+    fn drop(&mut self) {
+        if self.waiting {
+            let _release_scope = super::service::ReadinessReleaseScope::new();
+            // Serialize the final-owner decision with poll_ready/call. The
+            // detached action is deliberately dropped AFTER the service lock.
+            let release = {
+                let mut inner = self.shared.inner.lock();
+                (self.shared.waiting_for_ready.fetch_sub(1, Ordering::AcqRel) == 1)
+                    .then(|| (self.release)(&mut inner))
+            };
+            drop(release);
+        }
     }
 }
 
@@ -345,7 +457,9 @@ where
         cx: &mut Context<'_>,
         mut request: Option<R>,
         shared: Arc<SharedBuffer<S>>,
+        mut readiness: InnerReadiness<S>,
     ) -> Option<Poll<Result<Response, BufferError<Error>>>> {
+        let _release_scope = super::service::ReadinessReleaseScope::new();
         let mut transition_guard: BufferTransitionGuard<'_, F, Error, S, R> =
             BufferTransitionGuard {
                 marker: std::marker::PhantomData,
@@ -357,6 +471,7 @@ where
             Poll::Ready(Ok(())) => {
                 let req = request.take().expect("request missing");
                 let future = inner.call(req);
+                readiness.dispatched();
                 drop(inner);
 
                 let wakers = std::mem::take(&mut *shared.inner_wakers.lock());
@@ -370,6 +485,7 @@ where
             }
             Poll::Ready(Err(e)) => {
                 drop(inner);
+                drop(readiness);
                 transition_guard.armed = false;
                 self.state = BufferFutureState::Error(Some(BufferError::Inner(e)));
                 Self::release_pending_slot(shared.as_ref());
@@ -381,7 +497,11 @@ where
                     let mut wakers = shared.inner_wakers.lock();
                     push_waker_if_new(&mut wakers, cx.waker());
                 }
-                self.state = BufferFutureState::WaitingForReady { request, shared };
+                self.state = BufferFutureState::WaitingForReady {
+                    request,
+                    shared,
+                    readiness,
+                };
                 transition_guard.armed = false;
                 Some(Poll::Pending)
             }
@@ -433,9 +553,11 @@ where
             let this = self.as_mut().get_mut();
             let state = std::mem::replace(&mut this.state, BufferFutureState::Done);
             let poll = match state {
-                BufferFutureState::WaitingForReady { request, shared } => {
-                    this.poll_waiting_for_ready(cx, request, shared)
-                }
+                BufferFutureState::WaitingForReady {
+                    request,
+                    shared,
+                    readiness,
+                } => this.poll_waiting_for_ready(cx, request, shared, readiness),
                 BufferFutureState::Active { future, shared } => {
                     Some(this.poll_active(cx, future, shared))
                 }
@@ -497,6 +619,12 @@ where
     type Error = BufferError<S::Error>;
     type Future = BufferFuture<S::Future, S::Error, S, Request>;
 
+    fn release_readiness(&mut self) -> super::ReadinessRelease {
+        // Requests already passed to call own the shared inner readiness; a
+        // handle's unused outer slot must not cancel those requests.
+        self.detach_readiness()
+    }
+
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         if self.ready_reserved {
             return Poll::Ready(Ok(()));
@@ -509,11 +637,21 @@ where
         let mut slots = self.shared.slots.lock();
         if slots.occupied() >= self.shared.capacity {
             let mut wakers = self.shared.ready_wakers.lock();
-            push_waker_if_new(&mut wakers, cx.waker());
+            register_capacity_waiter(&mut wakers, &self.readiness_owner, cx.waker());
+            self.ready_waiting = true;
             Poll::Pending
         } else {
             slots.reserved += 1;
             self.ready_reserved = true;
+            self.ready_waiting = false;
+            let retired = remove_capacity_waiter(
+                &mut self.shared.ready_wakers.lock(),
+                &self.readiness_owner,
+            );
+            drop(slots);
+            if !retired.is_empty() {
+                drop(super::ReadinessRelease::new(move || drop(retired)));
+            }
             Poll::Ready(Ok(()))
         }
     }
@@ -526,6 +664,8 @@ where
             slots.pending += 1;
             return BufferFuture::waiting(req, self.shared.clone());
         }
+
+        drop(self.detach_readiness());
 
         if *self.shared.closed.lock() {
             return BufferFuture::error(BufferError::Closed);
@@ -563,6 +703,206 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    #[test]
+    fn abandoned_readiness_cleanup_can_reenter_all_buffer_locks() {
+        use super::super::readiness_tests::{ReleaseCallback, ReleaseProbe};
+
+        let callback: ReleaseCallback = Arc::new(Mutex::new(None));
+        let mut buffer = Buffer::new(ReleaseProbe(Arc::clone(&callback)), 1);
+        let shared = Arc::downgrade(&buffer.shared);
+        let released = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&released);
+        *callback.lock() = Some(Box::new(move || {
+            let shared = shared.upgrade().unwrap();
+            assert!(shared.inner.try_lock().is_some());
+            assert!(shared.slots.try_lock().is_some());
+            assert!(shared.ready_wakers.try_lock().is_some());
+            assert!(shared.inner_wakers.try_lock().is_some());
+            observed.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        let mut pending = buffer.call(1);
+        let waker = noop_waker();
+        assert!(Pin::new(&mut pending)
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending());
+        drop(pending);
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn nested_load_shed_cleanup_runs_after_the_buffer_service_unlocks() {
+        use super::super::LoadShed;
+        use super::super::readiness_tests::{ReleaseCallback, ReleaseProbe};
+
+        let callback: ReleaseCallback = Arc::new(Mutex::new(None));
+        let mut buffer = Buffer::new(LoadShed::new(ReleaseProbe(Arc::clone(&callback))), 1);
+        let shared = Arc::downgrade(&buffer.shared);
+        let released = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&released);
+        *callback.lock() = Some(Box::new(move || {
+            let shared = shared.upgrade().unwrap();
+            assert!(shared.inner.try_lock().is_some());
+            assert!(shared.slots.try_lock().is_some());
+            assert!(shared.ready_wakers.try_lock().is_some());
+            observed.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        let mut response = buffer.call(1);
+        let waker = noop_waker();
+        assert!(matches!(
+            Pin::new(&mut response).poll(&mut Context::from_waker(&waker)),
+            Poll::Ready(Err(BufferError::Inner(super::super::LoadShedError::Overloaded)))
+        ));
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn cancelled_outer_ready_preserves_a_clone_with_the_same_waker() {
+        use super::super::ServiceExt;
+
+        let mut holder = Buffer::new(EchoService, 1);
+        let mut first = holder.clone();
+        let mut surviving = holder.clone();
+        let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(TestWake(Arc::clone(&woken))));
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(holder.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+
+        let mut first_wait = first.ready();
+        let mut surviving_wait = surviving.ready();
+        assert!(Pin::new(&mut first_wait).poll(&mut cx).is_pending());
+        assert!(Pin::new(&mut surviving_wait).poll(&mut cx).is_pending());
+        assert_eq!(holder.shared.ready_wakers.lock().len(), 1);
+        assert_eq!(holder.shared.ready_wakers.lock()[0].owners.len(), 2);
+        drop(first_wait);
+        assert_eq!(holder.shared.ready_wakers.lock()[0].owners.len(), 1);
+        assert!(!woken.load(Ordering::Relaxed));
+
+        drop(holder.release_readiness());
+        assert!(woken.load(Ordering::Relaxed));
+        assert!(matches!(
+            Pin::new(&mut surviving_wait).poll(&mut cx),
+            Poll::Ready(Ok(()))
+        ));
+        drop(surviving_wait);
+
+        let mut last_wait = first.ready();
+        assert!(Pin::new(&mut last_wait).poll(&mut cx).is_pending());
+        drop(last_wait);
+        assert!(holder.shared.ready_wakers.lock().is_empty());
+        assert!(!holder.is_empty(), "the surviving reservation remains live");
+        drop(surviving);
+        assert!(holder.is_empty());
+    }
+
+    struct ReadinessDropWake(super::super::readiness_tests::ReleaseCallback);
+
+    #[allow(clippy::manual_noop_waker)]
+    impl std::task::Wake for ReadinessDropWake {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for ReadinessDropWake {
+        fn drop(&mut self) {
+            let callback = self.0.lock().take();
+            if let Some(callback) = callback {
+                callback();
+            }
+        }
+    }
+
+    #[test]
+    fn cancelled_outer_ready_drops_its_waker_after_unlocking() {
+        use super::super::ServiceExt;
+        use super::super::readiness_tests::ReleaseCallback;
+
+        let mut holder = Buffer::new(EchoService, 1);
+        let mut abandoned = holder.clone();
+        assert!(matches!(
+            holder.poll_ready(&mut Context::from_waker(&noop_waker())),
+            Poll::Ready(Ok(()))
+        ));
+        let shared = Arc::downgrade(&holder.shared);
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&dropped);
+        let callback: ReleaseCallback = Arc::new(Mutex::new(Some(Box::new(move || {
+            let shared = shared.upgrade().unwrap();
+            assert!(shared.slots.try_lock().is_some());
+            assert!(shared.ready_wakers.try_lock().is_some());
+            observed.fetch_add(1, Ordering::SeqCst);
+        }))));
+        let waker = Waker::from(Arc::new(ReadinessDropWake(callback)));
+        let mut pending = abandoned.ready();
+        assert!(Pin::new(&mut pending)
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending());
+        drop(waker);
+        assert_eq!(dropped.load(Ordering::SeqCst), 0);
+        drop(pending);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert!(holder.shared.ready_wakers.lock().is_empty());
+        assert!(!holder.is_empty());
+    }
+
+    #[test]
+    fn panicking_inner_detacher_still_retires_a_queued_semaphore_after_unlocking() {
+        use super::super::ConcurrencyLimit;
+        use super::super::readiness_tests::ReleaseCallback;
+        use crate::sync::{OwnedSemaphorePermit, Semaphore};
+
+        struct PanickingDetacher;
+
+        impl Service<u8> for PanickingDetacher {
+            type Response = u8;
+            type Error = &'static str;
+            type Future = std::future::Ready<Result<u8, Self::Error>>;
+
+            fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn call(&mut self, request: u8) -> Self::Future {
+                std::future::ready(Ok(request))
+            }
+
+            fn release_readiness(&mut self) -> super::super::ReadinessRelease {
+                panic!("inner detachment panic");
+            }
+        }
+
+        let semaphore = Arc::new(Semaphore::new(1));
+        let held = OwnedSemaphorePermit::try_acquire_arc(&semaphore, 1).unwrap();
+        let mut buffer = Buffer::new(
+            ConcurrencyLimit::new(PanickingDetacher, Arc::clone(&semaphore)),
+            1,
+        );
+        let shared = Arc::downgrade(&buffer.shared);
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&dropped);
+        let callback: ReleaseCallback = Arc::new(Mutex::new(Some(Box::new(move || {
+            let shared = shared.upgrade().unwrap();
+            assert!(shared.inner.try_lock().is_some());
+            assert!(shared.slots.try_lock().is_some());
+            observed.fetch_add(1, Ordering::SeqCst);
+        }))));
+        let waker = Waker::from(Arc::new(ReadinessDropWake(callback)));
+        let mut pending = buffer.call(1);
+        assert!(Pin::new(&mut pending)
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending());
+        drop(waker);
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(pending)))
+            .expect_err("inner detachment panic must propagate");
+        assert_eq!(panic.downcast_ref::<&str>(), Some(&"inner detachment panic"));
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert!(buffer.is_empty());
+        drop(held);
+        assert!(OwnedSemaphorePermit::try_acquire_arc(&semaphore, 1).is_ok());
     }
 
     fn noop_waker() -> Waker {

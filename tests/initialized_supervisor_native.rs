@@ -301,14 +301,16 @@ async fn restart_preserves_old_drain_and_policy(cx: Cx, policy: RestartPolicy) {
     assert!(owner.shutdown().await.close.is_ok());
 }
 
-async fn temporary_failure_unblocks_dependents_while_sibling_keeps_owner_alive(cx: Cx) {
+async fn startup_failure_unblocks_dependents_while_sibling_keeps_owner_alive(
+    cx: Cx, mode: ManagedRestartMode,
+) {
     let (release, gate) = oneshot::channel();
     let gate = Arc::new(Mutex::new(Some(gate)));
     let (parked, mut witness) = oneshot::channel();
     let parked = Arc::new(Mutex::new(Some(parked)));
     let front_calls = Arc::new(AtomicUsize::new(0));
     let metrics_calls = Arc::new(AtomicUsize::new(0));
-    let storage = InitializedChildBinding::new("storage", ManagedRestartMode::Temporary,
+    let storage = InitializedChildBinding::new("storage", mode,
         move |_, _| {
             let mut gate = gate.lock().unwrap().take().unwrap();
             let parked = parked.lock().unwrap().take().unwrap();
@@ -324,10 +326,12 @@ async fn temporary_failure_unblocks_dependents_while_sibling_keeps_owner_alive(c
         .child(ChildSpec::new("front", Legacy).depends_on("storage"))
         .child(ChildSpec::new("storage", Legacy))
         .child(ChildSpec::new("metrics", Legacy)).compile().unwrap();
+    let mut policy = config(RestartPolicy::OneForOne);
+    policy.max_restarts = 0;
     let (managed, readiness) = topology.bind_initialized(vec![storage,
         passive("front", ManagedRestartMode::Temporary, Arc::clone(&front_calls)),
         passive("metrics", ManagedRestartMode::Temporary, Arc::clone(&metrics_calls)),
-    ], config(RestartPolicy::OneForOne), limits()).unwrap();
+    ], policy, limits()).unwrap();
     let mut owner = cx.open_dynamic_supervisor::<Fault>(DynamicSupervisorConfig::new(1)).await.unwrap();
     let id = owner.start_child("application", managed).await.unwrap();
     witness.recv(&cx).await.unwrap();
@@ -340,10 +344,71 @@ async fn temporary_failure_unblocks_dependents_while_sibling_keeps_owner_alive(c
     let completion = owner.terminate_child(&id).await.unwrap();
     assert!(completion.close.is_ok());
     let report = completion.supervisor.unwrap();
+    assert_eq!((report.started, report.joined), (3, 3));
+    assert_eq!(report.restart_batches, 0);
     let storage = report.children.iter().find(|child| child.name.as_str() == "storage").unwrap();
     let Outcome::Err(error) = &storage.outcome else { panic!("typed initialization failure retained") };
     let result = error.as_ref().as_ref().unwrap();
     assert!(matches!(&result.work, Some(Ok(Outcome::Err("storage initialization failed")))));
+    assert!(owner.shutdown().await.close.is_ok());
+}
+
+async fn normal_transient_completion_closes_next_generation_wait(cx: Cx) {
+    let (finish, command) = oneshot::channel();
+    let command = Arc::new(Mutex::new(Some(command)));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let initialized = Arc::clone(&calls);
+    let storage = InitializedChildBinding::new("storage", ManagedRestartMode::Transient,
+        move |_, generation| {
+            initialized.fetch_add(1, Ordering::SeqCst);
+            async move { Outcome::Ok(Resource(Cell::new(generation.number))) }
+        },
+        move |cx, _, state: Resource| {
+            let mut command = command.lock().unwrap().take().unwrap();
+            async move {
+                command.recv(&cx).await.unwrap();
+                drop(state);
+                Outcome::<(), &'static str>::Ok(())
+            }
+        },
+        classify,
+    );
+    let front_calls = Arc::new(AtomicUsize::new(0));
+    let metrics_calls = Arc::new(AtomicUsize::new(0));
+    let front = passive("front", ManagedRestartMode::Temporary, Arc::clone(&front_calls));
+    let metrics = passive("metrics", ManagedRestartMode::Temporary, metrics_calls);
+    let topology = SupervisorBuilder::new("completed-prerequisite")
+        .child(front.spec().depends_on("storage"))
+        .child(storage.spec())
+        .child(metrics.spec()).compile().unwrap();
+    let (managed, readiness) = topology.bind_initialized(vec![front, storage, metrics],
+        config(RestartPolicy::OneForOne), limits()).unwrap();
+    let mut owner = cx.open_dynamic_supervisor::<Fault>(DynamicSupervisorConfig::new(1)).await.unwrap();
+    let id = owner.start_child("application", managed).await.unwrap();
+    readiness.all().wait_ready(&cx).await.unwrap();
+    let observed = readiness.child("storage").unwrap().clone();
+    let ready = observed.wait_ready(&cx).await.unwrap();
+    let front = readiness.child("front").unwrap().wait_ready(&cx).await.unwrap();
+    let metrics = readiness.child("metrics").unwrap().wait_ready(&cx).await.unwrap();
+    let (parked, mut witness) = oneshot::channel();
+    let mut waiter = cx.spawn(move |waiter| async move {
+        witnessed(observed.wait_ready_after(&waiter, &ready), parked).await
+    }).unwrap();
+    witness.recv(&cx).await.unwrap();
+    finish.send_blocking(()).unwrap();
+    assert_eq!(waiter.join(&cx).await.unwrap().unwrap_err(), WorkerReadinessError::Closed);
+    assert_eq!(readiness.child("front").unwrap().wait_ready_after(&cx, &front).await.unwrap_err(),
+        WorkerReadinessError::Closed);
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "normal Transient completion cannot restart");
+    assert_eq!(front_calls.load(Ordering::SeqCst), 1);
+    assert!(readiness.child("metrics").unwrap().is_current(&metrics),
+        "a live sibling keeps the controller's retired factories allocated");
+    let completion = owner.terminate_child(&id).await.unwrap();
+    assert!(completion.close.is_ok());
+    let report = completion.supervisor.unwrap();
+    assert_eq!((report.started, report.joined, report.restart_batches), (3, 3, 0));
+    assert!(report.children.iter().find(|child| child.name.as_str() == "storage")
+        .unwrap().outcome.is_ok());
     assert!(owner.shutdown().await.close.is_ok());
 }
 
@@ -359,7 +424,10 @@ fn journey(multithread: bool, scenario: u8) {
                 0 => startup_waits_for_tcp_and_all_named_edges(cx).await,
                 1 => restart_preserves_old_drain_and_policy(cx, RestartPolicy::OneForOne).await,
                 2 => restart_preserves_old_drain_and_policy(cx, RestartPolicy::OneForAll).await,
-                3 => temporary_failure_unblocks_dependents_while_sibling_keeps_owner_alive(cx).await,
+                3 => startup_failure_unblocks_dependents_while_sibling_keeps_owner_alive(cx, ManagedRestartMode::Temporary).await,
+                4 => startup_failure_unblocks_dependents_while_sibling_keeps_owner_alive(cx, ManagedRestartMode::Transient).await,
+                5 => startup_failure_unblocks_dependents_while_sibling_keeps_owner_alive(cx, ManagedRestartMode::Permanent).await,
+                6 => normal_transient_completion_closes_next_generation_wait(cx).await,
                 _ => unreachable!(),
             }
         }).unwrap();
@@ -395,3 +463,15 @@ fn collateral_restart_keeps_transient_factories_reusable_two_workers() { bounded
 fn temporary_startup_failure_is_not_an_infinite_readiness_wait_current_thread() { bounded(false, 3); }
 #[test]
 fn temporary_startup_failure_is_not_an_infinite_readiness_wait_two_workers() { bounded(true, 3); }
+#[test]
+fn exhausted_transient_startup_closes_dependents_current_thread() { bounded(false, 4); }
+#[test]
+fn exhausted_transient_startup_closes_dependents_two_workers() { bounded(true, 4); }
+#[test]
+fn exhausted_permanent_startup_closes_dependents_current_thread() { bounded(false, 5); }
+#[test]
+fn exhausted_permanent_startup_closes_dependents_two_workers() { bounded(true, 5); }
+#[test]
+fn completed_transient_closes_next_generation_wait_current_thread() { bounded(false, 6); }
+#[test]
+fn completed_transient_closes_next_generation_wait_two_workers() { bounded(true, 6); }
