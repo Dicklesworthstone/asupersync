@@ -582,8 +582,8 @@ impl Sleep {
             )
         };
 
-        // Intentionally detach threads to avoid blocking the executor
-        drop(fallback_handles);
+        // Join finished threads, park the rest: never block, never detach (GH #80).
+        crate::runtime::spawn_blocking::reap_threads(fallback_handles);
 
         // Cancel any existing timer - will be re-registered on next poll
         if let (Some(handle), Some(driver)) = (handle, driver) {
@@ -660,9 +660,9 @@ impl Sleep {
     fn cancel_active_registration(&self) {
         let (handle, driver, fallback_handles) = self.take_active_registration();
 
-        // Joining an arbitrary fallback thread would block the executor. The
-        // stop request above wakes it, and dropping these handles detaches it.
-        drop(fallback_handles);
+        // Joining a running fallback thread would block the executor, and dropping
+        // its handle would detach a thread that is exiting (GitHub #80): reap it.
+        crate::runtime::spawn_blocking::reap_threads(fallback_handles);
 
         if let (Some(handle), Some(driver)) = (handle, driver) {
             let trace = Cx::current().and_then(|current| current.trace_buffer());
@@ -679,7 +679,7 @@ impl Sleep {
 
         // See `cancel_active_registration`: terminal completion must release
         // task references promptly without synchronously joining OS threads.
-        drop(fallback_handles);
+        crate::runtime::spawn_blocking::reap_threads(fallback_handles);
 
         if let Some(handle) = handle {
             let trace = Cx::current().and_then(|current| current.trace_buffer());
@@ -1026,9 +1026,9 @@ impl Sleep {
                     if state.fallback.is_none() {
                         // Fallback: spawn background thread for timing.
                         //
-                        // IMPORTANT: We intentionally drop the JoinHandle (detaching the thread)
-                        // rather than joining it, so we don't block the executor. OS threads
-                        // naturally clean themselves up upon exit.
+                        // The JoinHandle is kept, never joined while the thread runs (poll must
+                        // not block) and never detached: detaching an exiting thread can fault
+                        // on glibc < 2.43 (GitHub #80). spawn_blocking::reap_threads reaps it.
                         let deadline = self.deadline;
                         let getter = self.time_getter.unwrap_or(wall_now);
                         let polls_custom_time_getter = self.time_getter.is_some();
@@ -1040,7 +1040,7 @@ impl Sleep {
                         let completed_for_thread = Arc::clone(&completed);
                         let ready_for_thread = Arc::clone(&self.ready);
                         crate::runtime::metrics::record_timer_thread_spawned();
-                        // ubs:ignore - intentional detach by dropping JoinHandle in Drop to avoid blocking executor
+                        // ubs:ignore - the JoinHandle is kept and reaped (reap_threads), not joined in poll
                         let handle = std::thread::spawn(move || {
                             // Allow prompt cancellation via `unpark()`.
                             while !stop_for_thread.load(Ordering::Acquire) {
@@ -3046,5 +3046,73 @@ mod tests {
         warn_missing_timer_driver_once();
         warn_missing_timer_driver_once();
         crate::test_complete!("missing_timer_driver_warns_exactly_once");
+    }
+
+    /// Closed while a test holds the fallback thread inside its clock.
+    static GATE_CLOSED: AtomicBool = AtomicBool::new(false);
+    /// Set once the fallback thread is blocked inside the closed clock.
+    static INSIDE_GATED_CLOCK: AtomicBool = AtomicBool::new(false);
+
+    /// A logical clock that never reaches the deadline and blocks its caller
+    /// while the gate is closed.
+    fn gated_clock() -> Time {
+        while GATE_CLOSED.load(Ordering::Acquire) {
+            INSIDE_GATED_CLOCK.store(true, Ordering::Release);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        Time::ZERO
+    }
+
+    /// GitHub #80 (BZ19951), the timer sibling of spawn_blocking's fallback: a
+    /// Sleep with a custom clock and no timer driver runs on its own fallback
+    /// thread. Dropping the Sleep stopped that thread and dropped its JoinHandle,
+    /// detaching a thread that was exiting at that moment (pthread_detach can
+    /// fault on glibc before 2.43). Here the thread is held inside the clock when
+    /// the Sleep is dropped, so it is provably still running: its handle must be
+    /// parked, not dropped, and joined once the thread has finished.
+    #[test]
+    fn a_dropped_custom_clock_sleep_parks_its_running_fallback_thread() {
+        init_test("a_dropped_custom_clock_sleep_parks_its_running_fallback_thread");
+        let mut sleep = Sleep::with_time_getter(Time::from_secs(1_000_000), gated_clock);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(Pin::new(&mut sleep).poll(&mut cx).is_pending());
+        let worker = sleep
+            .state
+            .lock()
+            .fallback
+            .as_ref()
+            .map(|fallback| fallback.thread.id())
+            .expect("a custom clock without a timer driver runs on a fallback thread");
+        GATE_CLOSED.store(true, Ordering::Release);
+        let start = Instant::now();
+        while !INSIDE_GATED_CLOCK.load(Ordering::Acquire) {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "fallback thread never polled its clock"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        drop(sleep);
+        assert_eq!(
+            crate::runtime::spawn_blocking::parked_thread(worker),
+            Some(false),
+            "the running fallback thread's handle was dropped (detached) instead of parked"
+        );
+        GATE_CLOSED.store(false, Ordering::Release);
+        while crate::runtime::spawn_blocking::parked_thread(worker) == Some(false) {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "fallback thread never exited"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        crate::runtime::spawn_blocking::reap_threads(Vec::new());
+        assert_eq!(
+            crate::runtime::spawn_blocking::parked_thread(worker),
+            None,
+            "a finished parked fallback thread was not joined"
+        );
+        crate::test_complete!("a_dropped_custom_clock_sleep_parks_its_running_fallback_thread");
     }
 }
