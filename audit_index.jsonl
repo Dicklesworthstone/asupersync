@@ -5154,3 +5154,4 @@
 {"file":"src/bytes/buf/chain.rs","lines":475,"batch":"vs1vdk","date":"2026-10-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"r20 review: copy_to_bytes correct; LOW U7 three allocations across the boundary"}
 {"file":"src/net/websocket/split.rs","lines":3546,"batch":"4en1sw","date":"2026-10-10","agent":"SapphireHill","verdict":"FIXED","bugs":3,"notes":"retried recv never flushed a retained Close; close budget counted retained bytes; discarded tail corrupted framing (f63a13c61)"}
 {"file":"src/bytes/buf/take.rs","lines":475,"batch":"vs1vdk","date":"2026-10-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"r20 review: copy_to_bytes respects the limit"}
+{"file":"src/types/task_context.rs","lines":2102,"batch":"v8yh9s","date":"2026-10-10","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"task completion retired an undelivered cancellation's observer wakers unwoken (c7d646a6f)"}
